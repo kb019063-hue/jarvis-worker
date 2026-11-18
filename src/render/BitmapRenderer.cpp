@@ -292,7 +292,8 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
                     Color c = arg.color;
                     c.a = static_cast<uint8_t>((static_cast<uint32_t>(c.a) * coverage + 127u) / 255u);
                     set_pixel(px, py, c);
-                }
+                },
+                arg.font_family
             );
         } else if constexpr (std::is_same_v<T, DrawImageCommand>) {
             if (arg.image && arg.image->is_valid()) {

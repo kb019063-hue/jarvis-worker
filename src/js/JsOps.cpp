@@ -898,8 +898,11 @@ size_t js_string_length(std::string_view s) {
 namespace {
 std::mutex g_symbol_mutex;
 std::unordered_map<std::string, std::string>& symbol_registry() {
-    static std::unordered_map<std::string, std::string> registry;
-    return registry;
+    // Workers can still be unwinding at process exit. Keep the registry alive
+    // like Heap::default_heap() rather than relying on static-destruction order
+    // between an atexit worker join and an unordered_map destructor.
+    static auto* registry = new std::unordered_map<std::string, std::string>();
+    return *registry;
 }
 std::atomic<uint64_t> g_symbol_counter{0};
 }
@@ -924,6 +927,206 @@ bool js_symbol_from_key(const std::string& key, JsValue& out) {
     if (it == symbol_registry().end()) return false;
     out = JsValue::make_symbol(key, it->second);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Structured clone packets
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// A message should fail rather than turn an accidental graph into unbounded
+// native memory. This counts every primitive and object node in the neutral
+// packet, not just the objects a script allocated.
+constexpr std::size_t kMaxStructuredCloneNodes = 1'000'000;
+
+bool array_element_key(std::string_view key, std::size_t length) {
+    if (key.empty() || key.size() > 20) return false;
+    if (key.size() > 1 && key.front() == '0') return false;
+    std::size_t index = 0;
+    for (char c : key) {
+        if (c < '0' || c > '9') return false;
+        const std::size_t digit = static_cast<std::size_t>(c - '0');
+        if (index > (std::numeric_limits<std::size_t>::max() - digit) / 10) return false;
+        index = index * 10 + digit;
+    }
+    return index < length;
+}
+
+const char* unsupported_clone_kind(const JsValue& value) {
+    if (value.is_function()) return "function";
+    if (value.is_symbol()) return "symbol";
+    if (value.dom_node_value()) return "DOM node";
+    if (value.type != JsType::Object || !value.object_val) return "value";
+    const JsObject* cell = value.object_val;
+    if (cell->exotic) return "host object";
+    switch (cell->klass) {
+        case ObjectClass::Date: return "Date";
+        case ObjectClass::RegExp: return "RegExp";
+        case ObjectClass::Map: return "Map";
+        case ObjectClass::Set: return "Set";
+        case ObjectClass::WeakMap: return "WeakMap";
+        case ObjectClass::WeakSet: return "WeakSet";
+        case ObjectClass::Error: return "Error";
+        case ObjectClass::Promise: return "Promise";
+        case ObjectClass::Generator: return "Generator";
+        case ObjectClass::Iterator: return "iterator";
+        default: return "object";
+    }
+}
+
+class StructuredCloneWriter {
+public:
+    StructuredCloneWriter(JsStructuredClone& out, std::string& error)
+        : m_out(out), m_error(error) {}
+
+    bool write(const JsValue& value, std::size_t& index) {
+        js_check_stack();
+        switch (value.type) {
+            case JsType::Undefined: return append_primitive(JsStructuredClone::Kind::Undefined, value, index);
+            case JsType::Null: return append_primitive(JsStructuredClone::Kind::Null, value, index);
+            case JsType::Boolean: return append_primitive(JsStructuredClone::Kind::Boolean, value, index);
+            case JsType::Number: return append_primitive(JsStructuredClone::Kind::Number, value, index);
+            case JsType::String: return append_primitive(JsStructuredClone::Kind::String, value, index);
+            case JsType::Symbol:
+            case JsType::Function:
+            case JsType::NativeFunction:
+                return unsupported(value);
+            case JsType::Object:
+                return write_object(value, index);
+        }
+        return unsupported(value);
+    }
+
+private:
+    bool reserve_node(std::size_t& index) {
+        if (m_out.nodes.size() >= kMaxStructuredCloneNodes) {
+            m_error = "The message graph exceeds the 1000000-node structured-clone limit.";
+            return false;
+        }
+        index = m_out.nodes.size();
+        m_out.nodes.emplace_back();
+        return true;
+    }
+
+    bool append_primitive(JsStructuredClone::Kind kind, const JsValue& value, std::size_t& index) {
+        if (!reserve_node(index)) return false;
+        auto& node = m_out.nodes[index];
+        node.kind = kind;
+        if (kind == JsStructuredClone::Kind::Boolean) node.boolean = value.bool_val;
+        if (kind == JsStructuredClone::Kind::Number) node.number = value.number_val;
+        if (kind == JsStructuredClone::Kind::String) node.string = value.string_val.str();
+        return true;
+    }
+
+    bool unsupported(const JsValue& value) {
+        m_error = std::string("A ") + unsupported_clone_kind(value) + " could not be cloned.";
+        return false;
+    }
+
+    bool write_object(const JsValue& value, std::size_t& index) {
+        JsObject* cell = value.object_val;
+        if (!cell) return unsupported(value);
+        if (const auto found = m_seen.find(value.identity()); found != m_seen.end()) {
+            index = found->second;
+            return true;
+        }
+
+        // Only ordinary data objects and arrays are safe to materialize in a
+        // different agent. A DOM wrapper, an exotic, or a native internal
+        // payload would otherwise retain source-agent state behind the packet.
+        const bool array = cell->is_array;
+        if ((!array && cell->klass != ObjectClass::Plain) || cell->exotic || cell->dom_node ||
+            cell->internal || cell->trace_extra || cell->lookup_fallback || cell->assign_hook) {
+            return unsupported(value);
+        }
+
+        if (!reserve_node(index)) return false;
+        m_seen.emplace(value.identity(), index);
+        m_out.nodes[index].kind = array ? JsStructuredClone::Kind::Array : JsStructuredClone::Kind::Object;
+
+        if (array) {
+            m_out.nodes[index].elements.reserve(cell->array_elements.size());
+            for (const JsValue& element : cell->array_elements) {
+                std::size_t child = 0;
+                if (!write(element, child)) return false;
+                m_out.nodes[index].elements.push_back(child);
+            }
+        }
+
+        // Structured cloning observes enumerable own string properties. It
+        // does not carry descriptors or a custom prototype; getters run while
+        // the sender is serializing, as they do for the web algorithm.
+        for (const std::string& key : value.own_keys(/*include_non_enumerable=*/false)) {
+            if (array && array_element_key(key, cell->array_elements.size())) continue;
+            const JsValue property = value.get_property(key);
+            std::size_t child = 0;
+            if (!write(property, child)) return false;
+            m_out.nodes[index].properties.emplace_back(key, child);
+        }
+        return true;
+    }
+
+    JsStructuredClone& m_out;
+    std::string& m_error;
+    std::unordered_map<const void*, std::size_t> m_seen;
+};
+
+bool clone_index_valid(const JsStructuredClone& clone, std::size_t index) {
+    return index < clone.nodes.size();
+}
+
+} // namespace
+
+bool js_write_structured_clone(const JsValue& value, JsStructuredClone& out, std::string& error) {
+    out.nodes.clear();
+    out.root = 0;
+    error.clear();
+    StructuredCloneWriter writer(out, error);
+    if (!writer.write(value, out.root)) {
+        out.nodes.clear();
+        out.root = 0;
+        return false;
+    }
+    return true;
+}
+
+JsValue js_read_structured_clone(const JsStructuredClone& clone) {
+    if (clone.nodes.empty() || !clone_index_valid(clone, clone.root)) return JsValue::make_undefined();
+
+    std::vector<JsValue> values(clone.nodes.size());
+    for (std::size_t i = 0; i < clone.nodes.size(); ++i) {
+        const auto& node = clone.nodes[i];
+        switch (node.kind) {
+            case JsStructuredClone::Kind::Undefined: values[i] = JsValue::make_undefined(); break;
+            case JsStructuredClone::Kind::Null: values[i] = JsValue::make_null(); break;
+            case JsStructuredClone::Kind::Boolean: values[i] = JsValue::make_boolean(node.boolean); break;
+            case JsStructuredClone::Kind::Number: values[i] = JsValue::make_number(node.number); break;
+            case JsStructuredClone::Kind::String: values[i] = JsValue::make_string(node.string); break;
+            case JsStructuredClone::Kind::Object: values[i] = JsValue::make_object(); break;
+            case JsStructuredClone::Kind::Array: values[i] = JsValue::make_array(); break;
+        }
+    }
+
+    for (std::size_t i = 0; i < clone.nodes.size(); ++i) {
+        const auto& node = clone.nodes[i];
+        if (node.kind != JsStructuredClone::Kind::Object && node.kind != JsStructuredClone::Kind::Array) continue;
+        JsObject* destination = values[i].object_val;
+        if (!destination) return JsValue::make_undefined();
+        if (node.kind == JsStructuredClone::Kind::Array) {
+            for (std::size_t child : node.elements) {
+                if (!clone_index_valid(clone, child)) return JsValue::make_undefined();
+                destination->array_elements.push_back(values[child]);
+            }
+        }
+        for (const auto& [key, child] : node.properties) {
+            if (!clone_index_valid(clone, child)) return JsValue::make_undefined();
+            // Defining, rather than assigning, prevents a cloned "__proto__"
+            // key or an inherited setter from changing the new object's shape.
+            values[i].define_property(key, values[child], PropertyMap::Default);
+        }
+    }
+    return values[clone.root];
 }
 
 // ---------------------------------------------------------------------------

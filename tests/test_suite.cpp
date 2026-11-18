@@ -674,6 +674,196 @@ TEST(per_glyph_font_fallback) {
     fr.set_fallbacks(saved_paths);   // leave the renderer as the next suite expects it
 }
 
+TEST(font_family_selects_a_face) {
+    using namespace litebird;
+
+    // `font-family` was parsed, kept, and never read. Every element on the
+    // page was drawn in the one face the renderer happened to have loaded, so
+    // `pre { font-family: monospace }` was a fact about the stylesheet and not
+    // about what came out.
+    //
+    // The oracle is Ahem, vendored under tests/wpt/fonts for the WPT corpus.
+    // Every glyph in it is exactly 1em wide -- its advance is 1000 of its 1000
+    // units per em, for all 278 of its codepoints -- so a run of n characters
+    // measures n * font_size in Ahem and in essentially nothing else. That
+    // makes this an absolute test rather than a comparison: four characters at
+    // 16 px is 64.0 px, or the family was not selected.
+    FontRenderer& fr = FontRenderer::instance();
+
+    // The returned id, and not a lookup by name afterwards: looking "Ahem" up
+    // returns 0 on a host with no other font, and 0 used to read as "no
+    // family", which left such a family unselectable by name.
+    const int ahem = fr.register_font_file("tests/wpt/fonts/Ahem.ttf");
+    if (ahem == FontRenderer::kNoFamily) return;   // the vendored font is absent
+
+    // What this host actually has. Printed because the assertions below turn on
+    // it, and a test that passes for a reason nobody can see is not much of a
+    // test: the shared runner may hold different faces than a laptop does.
+    std::printf("      [font-family] truetype=%s families=%zu",
+                fr.has_truetype_font() ? "yes" : "no", fr.family_names().size());
+    for (std::size_t i = 0; i < fr.family_names().size() && i < 6; ++i)
+        std::printf(" [%d]%s", static_cast<int>(i), fr.family_names()[i].c_str());
+    std::printf("\n      [font-family] generic serif=%d sans=%d mono=%d default=%d\n",
+                fr.generic_family_id("serif"), fr.generic_family_id("sans-serif"),
+                fr.generic_family_id("monospace"), fr.default_family_id());
+    // Flushed because the whole point of printing this is to be there when an
+    // assertion below fails: stdout is block-buffered when it is not a
+    // terminal, and abort() does not flush it. Without this the diagnostics
+    // vanish into the same void as the failing run they explain.
+    std::fflush(stdout);
+
+    // Every family the registry knows is reachable by its own name -- family 0
+    // included. It did not used to be: `kDefaultFamily` was 0, so the first
+    // family found resolved to the value that means "nothing was named" and
+    // `family_face` refused it, and on a host with no system fonts that is the
+    // one a test registers by hand. `font-family: Ahem` drew the default.
+    for (std::size_t i = 0; i < fr.family_names().size(); ++i) {
+        assert(fr.family_id_for(fr.family_names()[i]) == static_cast<int>(i));
+        assert(fr.family_id_for(fr.family_names()[i]) != FontRenderer::kDefaultFamily);
+    }
+
+    // --- the oracle -------------------------------------------------------
+    const float four_in_ahem = fr.measure_text("XXXX", 16.0f, 400, "Ahem");
+    std::printf("      [font-family] 'XXXX' at 16px: ahem=%.2f default=%.2f\n",
+                four_in_ahem, fr.measure_text("XXXX", 16.0f, 400));
+    assert(std::fabs(four_in_ahem - 64.0f) < 0.5f);
+    assert(fr.measure_text("iiii", 16.0f, 400, "Ahem") > 63.5f);   // every glyph, not just 'X'
+    // The family was selected because it was named: unnamed, the same string
+    // measures differently.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400) - four_in_ahem) > 1.0f);
+
+    // --- matching ---------------------------------------------------------
+    // Case, quoting and repeated spaces are all irrelevant, as CSS says.
+    assert(fr.family_id_for("AHEM") == ahem);
+    assert(fr.family_id_for("  ahem  ") == ahem);
+    assert(fr.family_id_for("\"Ahem\"") == ahem);
+
+    // A list is tried left to right, and a family nobody has is skipped rather
+    // than ending the search.
+    assert(fr.family_id_for("No Such Font At All, Ahem") == ahem);
+    // A comma inside quotes separates words and not entries.
+    assert(fr.family_id_for("'Font, Inc', Ahem") == ahem);
+
+    // --- the first entry that can be had wins -----------------------------
+    // This is the bug the test is really here for. `kDefaultFamily` was 0,
+    // which is also the id of the first family found; used as the "not chosen
+    // yet" marker it meant a generic could never be assigned, and the list
+    // fell through to the next entry. Both regimes are asserted, because
+    // which one applies is a fact about the host:
+    for (const char* generic : {"sans-serif", "serif", "monospace"}) {
+        if (fr.generic_family_id(generic) != FontRenderer::kNoFamily) {
+            // This host has such a face, so the list stops there.
+            assert(fr.family_id_for(std::string(generic) + ", Ahem") != ahem);
+            assert(fr.family_id_for(std::string(generic) + ", Ahem") ==
+                   fr.family_id_for(generic));
+        } else {
+            // It has none, so CSS's own rule is to keep looking, and Ahem is
+            // what is left. Falling through is correct here and wrong above.
+            assert(fr.family_id_for(std::string(generic) + ", Ahem") == ahem);
+        }
+    }
+
+    // --- the glyph cache is keyed by family -------------------------------
+    // Without that, a line drawn in one family hands its rasterized glyphs to
+    // the next line drawn in another, which is a bug that appears as the first
+    // line of a paragraph being right and the rest wrong.
+    if (fr.has_truetype_font()) {
+        const GlyphBitmap& from_ahem = fr.get_glyph('X', 16, false, ahem);
+        const GlyphBitmap& from_default = fr.get_glyph('X', 16, false, FontRenderer::kDefaultFamily);
+        assert(from_ahem.width != from_default.width);
+    }
+
+    // --- generic families, when the host has them -------------------------
+    const int mono = fr.generic_family_id("monospace");
+    if (mono != FontRenderer::kNoFamily) {
+        // A monospace face advances every glyph the same amount; 'i' and 'W'
+        // are the pair that differ most in a proportional face.
+        const float narrow = fr.measure_text("iiii", 16.0f, 400, "monospace");
+        const float wide = fr.measure_text("WWWW", 16.0f, 400, "monospace");
+        assert(std::fabs(narrow - wide) < 0.5f);
+        // ...and the default is only asserted proportional when it is a
+        // different family. "The default" is not a claim about a font, it is a
+        // claim about whichever file this host had: where the only face is
+        // monospace the default *is* monospace, and 'i' and 'W' advance the
+        // same. Asserting otherwise would be a fact about the machine rather
+        // than about the code, and it is exactly what failed on a host whose
+        // primary face was a mono one.
+        if (fr.has_truetype_font() && mono != fr.default_family_id()) {
+            assert(std::fabs(fr.measure_text("iiii", 16.0f, 400) -
+                             fr.measure_text("WWWW", 16.0f, 400)) > 1.0f);
+        }
+    }
+    const int serif = fr.generic_family_id("serif");
+    const int sans = fr.generic_family_id("sans-serif");
+    if (serif != FontRenderer::kNoFamily && sans != FontRenderer::kNoFamily &&
+        serif != sans) {
+        // Two generics that resolve to two different faces must not measure
+        // the same. Asked of several strings and not one, because
+        // metric-compatible families exist by design -- Liberation Serif and
+        // Liberation Sans are cut to Times and Arial's widths -- and a single
+        // string is a claim about a typeface rather than about the code.
+        bool differs = false;
+        for (const char* s : {"WWWW", "iiii", "ll1i", "Hello, world"}) {
+            const float a = fr.measure_text(s, 16.0f, 400, "serif");
+            const float b = fr.measure_text(s, 16.0f, 400, "sans-serif");
+            std::printf("      [font-family] %-14s serif=%8.2f sans=%8.2f\n", s, a, b);
+            if (std::fabs(a - b) > 0.5f) differs = true;
+        }
+        std::fflush(stdout);
+        assert(differs);
+    }
+
+    // Nothing that cannot be named is served: an unresolvable family falls
+    // back rather than failing, which is what CSS asks for.
+    assert(fr.family_id_for("cursive") == FontRenderer::kDefaultFamily ||
+           fr.family_id_for("cursive") != ahem);
+    assert(fr.family_id_for("") == FontRenderer::kDefaultFamily);
+}
+
+TEST(font_family_reaches_layout_from_css) {
+    using namespace litebird;
+
+    // The whole path, and not only the renderer: `font-family` has to survive
+    // the cascade, inherit, and reach the thing that measures a word. The
+    // renderer half is proved by measurement above; this proves the CSS half.
+    auto doc = HtmlParser::parse(R"(
+        <div id="outer" style="font-family: Ahem">
+            <span id="inner">XXXX</span>
+            <span id="overridden" style="font-family: sans-serif">XXXX</span>
+        </div>
+    )");
+
+    StyleResolver resolver;
+
+    auto outer = doc->get_element_by_id("outer");
+    auto inner = doc->get_element_by_id("inner");
+    auto overridden = doc->get_element_by_id("overridden");
+    assert(outer && inner && overridden);
+
+    const ComputedStyle outer_style = resolver.resolve_style(outer, nullptr);
+
+    // It is the property, kept as written: resolution is the font layer's
+    // business and this layer has no business guessing at file names.
+    assert(outer_style.font_family == "Ahem");
+
+    // It inherits, like font-size does.
+    const ComputedStyle inner_style = resolver.resolve_style(inner, &outer_style);
+    assert(inner_style.font_family == "Ahem");
+
+    // ...and a declaration on the element itself beats the inherited one.
+    const ComputedStyle overridden_style = resolver.resolve_style(overridden, &outer_style);
+    assert(overridden_style.font_family == "sans-serif");
+
+    // An element with no `font-family` anywhere inherits an empty list, which
+    // the renderer reads as "the default family" rather than as a family
+    // called "".
+    const ComputedStyle bare = resolver.resolve_style(outer, nullptr);
+    assert(FontRenderer::instance().family_id_for(bare.font_family) ==
+           FontRenderer::instance().family_id_for("Ahem"));
+    assert(FontRenderer::instance().family_id_for(std::string_view{}) ==
+           FontRenderer::kDefaultFamily);
+}
+
 TEST(inline_formatting_context) {
     using namespace litebird;
     std::string html = R"(
@@ -12687,7 +12877,8 @@ static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
 }
 
 // ============================================================================
-// Phase 40: Worker MIME/module policy, EventTarget dispatch, lifecycle safety
+// Phase 40: Worker MIME/event policy and lifecycle safety; Phase 66 extends
+// module execution and structured-clone delivery below.
 // ============================================================================
 
 TEST(worker_mime_policy_enforces_javascript_content_types) {
@@ -12940,20 +13131,24 @@ TEST(worker_options_module_policy_and_global_scope) {
     assert(js.eval("ctorErrs.badOpts").to_string() == "TypeError");
     assert(js.eval("ctorErrs.badType").to_string() == "TypeError");
 
-    // 2. Module worker policy: { type: 'module' } must NOT silently run as classic JS;
-    //    it queues an error event to both onerror and addEventListener('error').
+    // 2. A module worker is a strict module wrapper, not a classic fallback.
+    //    It runs a data: entry module, keeps its configured name, and does not
+    //    expose classic importScripts(). The static import graph itself is
+    //    covered by the Phase 66 clone/module test below.
     js.eval(
-        "var modRan = false, modOnErr = '', modEvErr = '', modFilename = '';"
-        "var wm = new Worker('data:text/javascript,postMessage(\"SHOULD_NOT_RUN\")', { type: 'module', name: 'mod1' });"
-        "wm.onmessage = function() { modRan = true; };"
-        "wm.onerror = function(e) { modOnErr = e.message; modFilename = e.filename; };"
+        "var modInfo = null, modOnErr = '', modEvErr = '';"
+        "var wm = new Worker('data:text/javascript,postMessage({ name:self.name, globalName:name, topThis:this === undefined, importScriptsType:typeof importScripts })', { type: 'module', name: 'mod1' });"
+        "wm.onmessage = function(e) { modInfo = e.data; };"
+        "wm.onerror = function(e) { modOnErr = e.message; };"
         "wm.addEventListener('error', function(e) { modEvErr = e.message; });"
     );
-    assert(wait_for(js, "!!(modOnErr && modEvErr)"));
-    assert(!js.eval("modRan").is_truthy());
-    assert(js.eval("modOnErr").to_string().find("Module workers") != std::string::npos);
-    assert(js.eval("modEvErr").to_string() == js.eval("modOnErr").to_string());
-    assert(js.eval("modFilename").to_string().rfind("data:text/javascript", 0) == 0);
+    assert(wait_for(js, "modInfo !== null"));
+    assert(js.eval("modInfo.name").to_string() == "mod1");
+    assert(js.eval("modInfo.globalName").to_string() == "mod1");
+    assert(js.eval("modInfo.topThis").is_truthy());
+    assert(js.eval("modInfo.importScriptsType").to_string() == "undefined");
+    assert(js.eval("modOnErr").to_string().empty());
+    assert(js.eval("modEvErr").to_string().empty());
     js.eval("wm.terminate();");
 
     // 3. Classic options (name, self.location, null/undefined options) and importScripts().
@@ -13114,6 +13309,171 @@ TEST(worker_concurrent_startup_nested_and_clean_shutdown) {
     );
     WorkerObject::shutdown_all_workers();
     EventLoop::default_loop().tick();
+}
+
+// ---------------------------------------------------------------------------
+// Phase 66: structured-clone delivery across Worker, Window and MessagePort.
+// ---------------------------------------------------------------------------
+
+TEST(structured_clone_message_delivery_and_refusal) {
+    using namespace litebird;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://clone.example.test/index.html");
+    JsInterpreter js(doc);
+    js.load_page("<!doctype html><body></body>", true);
+    js.notify_document_loaded();
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
+
+    js.eval(R"js(
+        var workerReply, workerCloneReport, pageCloneError = '', transferCloneError = '';
+        var worker = new Worker('data:text/javascript,self.onmessage = function(e) { e.data.shared.leaf = 22; postMessage(e.data); };');
+        worker.onmessage = function(e) { workerReply = e.data; };
+        var shared = { leaf: 7 };
+        var workerSent = { shared: shared, alias: shared, missing: undefined,
+                           nan: 0 / 0, inf: 1 / 0, neg: -0, items: [1, undefined] };
+        workerSent.self = workerSent;
+        worker.postMessage(workerSent);
+        shared.leaf = 99;
+        try { worker.postMessage(function() {}); } catch (e) { pageCloneError = e.name + ':' + e.code; }
+        try { worker.postMessage({x: 1}, [{}]); } catch (e) { transferCloneError = e.name + ':' + e.code; }
+
+        var errorWorker = new Worker('data:text/javascript,try { postMessage(function() {}); } catch (e) { postMessage({name: e.name, code: e.code}); }');
+        errorWorker.onmessage = function(e) { workerCloneReport = e.data; };
+
+        var channelReply, channelSent = { child: { n: 2 } };
+        channelSent.self = channelSent;
+        var channel = new MessageChannel();
+        channel.port2.onmessage = function(e) { channelReply = e.data; };
+        channel.port1.postMessage(channelSent, []);
+        channelSent.child.n = 9;
+
+        var windowReply, windowSent = { kind: 'window-copy', child: { n: 3 } };
+        windowSent.self = windowSent;
+        window.addEventListener('message', function(e) {
+          if (e.data && e.data.kind === 'window-copy') windowReply = e.data;
+        });
+        window.postMessage(windowSent, '*');
+        windowSent.child.n = 11;
+    )js");
+
+    assert(wait_for(js, "workerReply !== undefined && workerCloneReport !== undefined && channelReply !== undefined && windowReply !== undefined"));
+
+    // Page -> worker -> page: nested data is copied at send time, special
+    // numeric values survive, and graph aliases/cycles remain aliases/cycles
+    // inside the receiving agent rather than pointing back at sender objects.
+    assert(js.eval(
+        "workerReply !== workerSent && workerReply.self === workerReply && "
+        "workerReply.shared === workerReply.alias && workerReply.shared !== shared && "
+        "workerReply.shared.leaf === 22 && shared.leaf === 99 && "
+        "('missing' in workerReply) && workerReply.missing === undefined && "
+        "workerReply.nan !== workerReply.nan && workerReply.inf === 1 / 0 && "
+        "workerReply.neg === 0 && 1 / workerReply.neg < 0 && workerReply.items[1] === undefined"
+    ).is_truthy());
+
+    // The same packet model applies to same-agent ports and windows: their
+    // asynchronous deliveries are copies too, not retained source identities.
+    assert(js.eval("channelReply !== channelSent && channelReply.self === channelReply && channelReply.child.n === 2 && channelSent.child.n === 9").is_truthy());
+    assert(js.eval("windowReply !== windowSent && windowReply.self === windowReply && windowReply.child.n === 3 && windowSent.child.n === 11").is_truthy());
+
+    // Functions and non-empty transfer lists are refused synchronously at the
+    // sender; the worker reports the same DOMException when it is the sender.
+    assert(js.eval("pageCloneError").to_string() == "DataCloneError:25");
+    assert(js.eval("transferCloneError").to_string() == "DataCloneError:25");
+    assert(js.eval("workerCloneReport.name + ':' + workerCloneReport.code").to_string() == "DataCloneError:25");
+
+    js.eval("worker.terminate(); errorWorker.terminate(); channel.port1.close(); channel.port2.close();");
+}
+
+TEST(module_worker_static_graph_loading_and_refusal) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    const fs::path root = fs::temp_directory_path() /
+                          ("litebird_module_worker_" + std::to_string(static_cast<long>(::getpid())));
+    fs::remove_all(root);
+    fs::create_directories(root);
+    {
+        std::ofstream math(root / "math.js");
+        math << "export const base = 40;\n"
+                "export const label = 'module';\n"
+                "export function add(a, b) { return a + b; }\n";
+    }
+    {
+        std::ofstream tools(root / "tools.js");
+        tools << "import { base, add as plus } from './math.js';\n"
+                 "export const answer = plus(base, 2);\n"
+                 "export default function decorate(value) { return 'answer:' + value; }\n";
+    }
+    {
+        std::ofstream reexport(root / "reexport.js");
+        reexport << "export { answer as finalAnswer } from './tools.js';\n";
+    }
+    {
+        std::ofstream entry(root / "entry.js");
+        entry << "import decorate from './tools.js';\n"
+                 "import { finalAnswer } from './reexport.js';\n"
+                 "import * as math from './math.js';\n"
+                 "postMessage({ text: decorate(finalAnswer), label: math.label, sum: math.add(1, 2), "
+                 "topThis: this === undefined, classicImport: typeof importScripts });\n";
+    }
+    {
+        std::ofstream unsupported(root / "unsupported.js");
+        unsupported << "export * from './math.js';\npostMessage('MUST_NOT_RUN');\n";
+    }
+
+    ResourceLoader::set_origin_root_for_testing("https://module.example.test", root.string());
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://module.example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!doctype html><body></body>", true);
+
+    js.eval(R"js(
+        var moduleReply = null, moduleError = '', unsupportedReply = '', unsupportedError = '';
+        var moduleWorker = new Worker('/entry.js', { type: 'module', name: 'graph-worker' });
+        moduleWorker.onmessage = function(e) { moduleReply = e.data; };
+        moduleWorker.onerror = function(e) { moduleError = e.message; };
+        var unsupportedWorker = new Worker('/unsupported.js', { type: 'module' });
+        unsupportedWorker.onmessage = function(e) { unsupportedReply = e.data; };
+        unsupportedWorker.onerror = function(e) { unsupportedError = e.message; };
+    )js");
+
+    assert(wait_for(js, "moduleReply !== null && unsupportedError !== ''"));
+    assert(js.eval("moduleError").to_string().empty());
+    assert(js.eval("moduleReply.text").to_string() == "answer:42");
+    assert(js.eval("moduleReply.label").to_string() == "module");
+    assert(js.eval("moduleReply.sum").to_number() == 3.0);
+    assert(js.eval("moduleReply.topThis").is_truthy());
+    assert(js.eval("moduleReply.classicImport").to_string() == "undefined");
+    assert(js.eval("unsupportedReply").to_string().empty());
+    assert(js.eval("unsupportedError").to_string().find("export *") != std::string::npos);
+
+    js.eval("moduleWorker.terminate(); unsupportedWorker.terminate();");
+    WorkerObject::shutdown_all_workers();
+    ResourceLoader::clear_origin_roots_for_testing();
+    fs::remove_all(root);
 }
 
 // ---------------------------------------------------------------------------
@@ -15721,6 +16081,99 @@ TEST(js_derived_this_temporal_dead_zone) {
            "25 ret:ReferenceError 3 99 alt:ReferenceError true true");
 }
 
+TEST(js_direct_eval_runs_in_the_callers_scope) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"js(
+        var log = [];
+
+        // The caller's bindings are visible to a direct eval, and its own
+        // lexical ones stay inside it.
+        function visible() { var local = 5; let outer = 'o'; { let inner = 'i'; return eval('local + outer + inner'); } }
+        log.push(visible());
+        function hides() { var x = 1; eval('let x = 2'); return x; }
+        log.push(hides());
+        function leaks() { eval('let y = 1'); return typeof y; }
+        log.push(leaks());
+
+        // A sloppy eval's `var` belongs to the function that called it; a
+        // strict one's stays inside the eval. Function declarations follow
+        // the same split.
+        function sloppyVar() { eval('var made = 42'); return made; }
+        log.push(sloppyVar(), typeof made);
+        function strictVar() { 'use strict'; eval('var other = 42'); return typeof other; }
+        log.push(strictVar());
+        function strictText() { eval('"use strict"; var third = 1'); return typeof third; }
+        log.push(strictText());
+        function sloppyFn() { eval('function inner() { return 7; }'); return inner(); }
+        log.push(sloppyFn(), typeof inner);
+        function strictFn() { 'use strict'; eval('function hidden() { return 1; }'); return typeof hidden; }
+        log.push(strictFn());
+
+        // this, arguments, new.target and super come from the function the
+        // text is written in.
+        var holder = { tag: 'holder', run: function () { return eval('this.tag'); } };
+        log.push(holder.run());
+        function strictThis() { 'use strict'; return eval('this') === undefined; }
+        log.push(strictThis());
+        function args(a, b) { return eval('arguments.length + ":" + arguments[1]'); }
+        log.push(args(7, 8));
+        function arrowArgs() { var g = () => eval('arguments.length'); return g(); }
+        log.push(arrowArgs(1, 2, 3));
+        function NewTarget() { this.made = eval('new.target === NewTarget'); }
+        log.push(new NewTarget().made, NewTarget() === undefined);
+
+        class Base { constructor() { this.a = 1; } m() { return 'Base'; } }
+        class Derived extends Base {
+            constructor() { eval('super()'); this.b = this.a + 1; }
+            m() { return eval('super.m()') + '!'; }
+        }
+        var derived = new Derived();
+        log.push(derived.a, derived.b, derived instanceof Base, derived.m());
+        function noSuper() { return eval('super.m()'); }
+        try { noSuper(); log.push('no super error'); } catch (e) { log.push(e.name); }
+
+        // Indirect eval is global code, whichever way it is reached.
+        function indirect() { var local = 5; return (0, eval)('typeof local'); }
+        log.push(indirect());
+        function alias() { var local = 5; var e = eval; return e('typeof local'); }
+        log.push(alias());
+        function shadowed() { var local = 5; function eval() { return typeof local; } return eval('x'); }
+        log.push(shadowed());
+        function strictIndirect() { 'use strict'; return (0, eval)('this === undefined'); }
+        log.push(strictIndirect(), (0, eval)('this === globalThis'));
+
+        // The rest of what eval does to its caller.
+        function completion() { return eval('1; 2; 3'); }
+        log.push(completion(), eval('var x = 9;'), eval(42));
+        function twice() { return [eval('var n = 1; n'), eval('n + 1')].join(','); }
+        log.push(twice());
+        function syntaxError() { try { eval('var = ;'); return 'no throw'; } catch (e) { return e.name; } }
+        log.push(syntaxError());
+        function nested() { return eval('let a = 1; eval("a + 1")'); }
+        log.push(nested());
+        function strictAssign() { 'use strict'; try { eval('undeclaredName = 1'); return 'no throw'; } catch (e) { return e.name; } }
+        log.push(strictAssign());
+        function loopBindings() { var out = []; for (let i = 0; i < 3; i++) out.push(eval('i')); return out.join(','); }
+        log.push(loopBindings());
+        function closure() { var captured = 'c'; function inner() { return eval('captured'); } return inner(); }
+        log.push(closure());
+        log.push(typeof eval, eval.length, eval.name);
+
+        var summary = log.join(' ');
+    )js");
+    // Every value here is what Node prints for this same script; the corpus in
+    // tests/js-conformance/eval.dat covers the same ground case by case, and
+    // `--reference "node -e"` re-runs it. Note `sloppyFn`'s second value: the
+    // function declaration went into the calling function's scope, so it is
+    // there inside it and gone once it returns.
+    assert(js.global_env()->get("summary").to_string() ==
+           "5oi 1 undefined 42 undefined undefined undefined 7 undefined undefined "
+           "holder true 2:8 3 true true 1 2 true Base! SyntaxError undefined undefined "
+           "number false true 3  42 1,2 SyntaxError 2 ReferenceError "
+           "0,1,2 c function 1 eval");
+}
+
 TEST(js_lexical_temporal_dead_zone_blocks_and_classes) {
     using namespace litebird;
     JsInterpreter js;
@@ -16119,6 +16572,8 @@ int main() {
     RUN_TEST(text_wrapping);
     RUN_TEST(anti_aliased_rasterizer_and_shadows);
     RUN_TEST(inline_formatting_context);
+    RUN_TEST(font_family_selects_a_face);
+    RUN_TEST(font_family_reaches_layout_from_css);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);
@@ -16304,6 +16759,10 @@ int main() {
     RUN_TEST(worker_event_target_error_and_message_dispatch);
     RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
 
+    // Phase 66: module-worker graph loading and structured-clone message packets.
+    RUN_TEST(structured_clone_message_delivery_and_refusal);
+    RUN_TEST(module_worker_static_graph_loading_and_refusal);
+
     // Phase 42: Nested <iframe> browsing contexts, sandbox/origin isolation, and XHTML execution.
     RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);
     RUN_TEST(iframe_sandbox_origin_isolation_and_postmessage);
@@ -16351,6 +16810,9 @@ int main() {
     RUN_TEST(string_unicode17_normalization_tables_and_api);
     RUN_TEST(string_unicode17_full_and_locale_case_mapping);
     RUN_TEST(string_cldr48_uca_collation_and_ecma402_validation);
+
+    // Phase 65: a direct eval runs in the caller's scope.
+    RUN_TEST(js_direct_eval_runs_in_the_callers_scope);
 
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);

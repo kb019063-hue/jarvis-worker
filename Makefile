@@ -130,9 +130,10 @@ URL_FLOOR ?= 1188
 # case that the normal build passes. With Phases 37, 43, 44, 45, 55, 59, and 60
 # together, 1019 of 1034 pass under ASan and 1020 in Release (which is what
 # the CI floor requires). Leave one case of runner headroom. Phase 63 added
-# iteration.dat: 65 of its 78 cases pass, under ASan as in Release, so 1084
-# of 1112 pass under ASan and 1085 in Release.
-JS_ASAN_FLOOR ?= 1083
+# iteration.dat: 65 of its 78 cases pass, under ASan as in Release. Phase 65
+# added eval.dat (37 cases, all passing) and fixed two cases construct.dat
+# recorded as failing, so 1122 of 1149 pass under ASan and 1123 in Release.
+JS_ASAN_FLOOR ?= 1121
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
 DOM_ASAN_FLOOR ?= 669
@@ -414,8 +415,8 @@ bench-surrogates: $(TARGET)
 security-fetch: $(TARGET)
 	@python3 tools/security/check_fetch_origin.py
 
-## Worker script MIME/module policy, EventTarget error/message dispatch,
-## importScripts boundary checks, and 60x concurrent startup/exit stress runs.
+## Worker script MIME/static-module policy, EventTarget error/message dispatch,
+## classic importScripts boundary checks, and 60x concurrent startup/exit stress runs.
 security-worker: $(TARGET)
 	@python3 tools/security/verify_worker_policy.py --binary $(TARGET) --stress-runs 60
 

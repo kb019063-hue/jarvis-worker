@@ -5,7 +5,6 @@
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/JsLexer.hpp"
 #include "litebird/js/JsOps.hpp"
-#include "litebird/js/Json.hpp"
 #include "litebird/net/Fetch.hpp"
 #include "litebird/net/ResourceLoader.hpp"
 #include "litebird/net/UrlParser.hpp"
@@ -16,6 +15,7 @@
 #include <cstdlib>
 #include <iostream>
 #include <optional>
+#include <stdexcept>
 #include <unordered_map>
 #include <utility>
 
@@ -176,8 +176,8 @@ std::optional<std::string> load_worker_script(
     std::string& loaded_url
 ) {
     // A worker script is a page-initiated load (Phase 33 local-file boundary
-    // plus Phase 36 RequestMode: same-origin for top-level classic workers,
-    // no-cors for importScripts).
+    // plus Phase 36 request modes: same-origin for a top-level classic worker,
+    // CORS for module graph fetches, and no-cors for classic importScripts).
     ResourceRequestContext req_ctx = context;
     req_ctx.mode = mode;
     auto resp = ResourceLoader::load_for_page(std::string(url_or_path), req_ctx);
@@ -191,8 +191,8 @@ std::optional<std::string> load_worker_script(
         return std::nullopt;
     }
 
-    // HTML Living Standard §10.2.5 ("fetch a classic worker script"):
-    // the response must have a JavaScript MIME type (no MIME sniffing).
+    // HTML's worker-script fetches require a JavaScript MIME type (no MIME
+    // sniffing), for both the classic path and this engine's module graph.
     const std::string ct = response_content_type(resp);
     if (ct.empty()) {
         error = "Refused to execute worker script: missing Content-Type header (expected a JavaScript MIME type)";
@@ -207,6 +207,611 @@ std::optional<std::string> load_worker_script(
 
     return resp.body;
 }
+
+// ---------------------------------------------------------------------------
+// Small static ES-module graph loader for module workers
+// ---------------------------------------------------------------------------
+//
+// The tree-walking parser deliberately parses classic programs only.  Module
+// workers still need a module map and module-local top level, so this loader
+// recognizes a conservative static-import/export subset before passing the
+// ordinary statements through that parser inside a strict wrapper.  It is not
+// an attempt to quietly treat a module as a classic script: unsupported forms
+// fail before that module body executes, dependencies run before their
+// importers, and each module has a private lexical wrapper.
+//
+// Supported forms are side-effect imports, default/named/namespace imports,
+// `export` declarations, `export default`, local named export lists, and named
+// re-exports. The engine does not yet have module-record/live-binding
+// machinery, so bindings/re-exports are snapshots; `export *`, dynamic
+// import(), import.meta, cycles, and top-level await are rejected explicitly
+// rather than receiving subtly wrong semantics.
+
+struct ModuleImportBinding {
+    /// The exported name for an ordinary import. Empty for a namespace import.
+    std::string imported_name;
+    /// A valid local binding name (or a generated private one for a re-export).
+    std::string local_name;
+    /// Private key in the native-created import bag passed to the wrapper.
+    std::string slot;
+    bool namespace_import{false};
+};
+
+struct ModuleDependency {
+    std::string specifier;
+    std::vector<ModuleImportBinding> bindings;
+};
+
+struct ModuleExportBinding {
+    std::string exported_name;
+    std::string local_name;
+};
+
+struct ModuleSourceEdit {
+    std::size_t begin{0};
+    std::size_t end{0};
+    std::string replacement;
+};
+
+struct ModuleTransform {
+    std::string body;
+    std::vector<ModuleDependency> dependencies;
+    std::vector<ModuleExportBinding> exports;
+};
+
+bool module_contextual(const JsToken& token, std::string_view word) {
+    return token.type == JsTokenType::Identifier && !token.has_escape && token.text == word;
+}
+
+bool module_binding_token(const JsToken& token) {
+    // The wrapper is always strict. The parser will apply the remaining strict
+    // binding checks (for example `eval`) to a normal Identifier token.
+    return token.type == JsTokenType::Identifier;
+}
+
+bool module_export_name_token(const JsToken& token) {
+    // This static subset accepts IdentifierName (including keywords such as
+    // `default`) but deliberately leaves string-named imports/exports to a
+    // future complete module grammar.
+    return token.type == JsTokenType::Identifier || token.is_keyword;
+}
+
+[[noreturn]] void module_syntax_error(const JsToken& token, std::string_view detail) {
+    throw JsSyntaxError("Unsupported ES module worker syntax: " + std::string(detail), token.line);
+}
+
+std::string module_token_name(const JsToken& token) {
+    return token.text;
+}
+
+std::string module_fresh_identifier(const std::string& source,
+                                    std::size_t& serial,
+                                    std::string_view purpose) {
+    // Avoid a collision even with a module that intentionally uses the usual
+    // internal-looking prefix. A source-text check is conservative (comments
+    // and strings also reserve a candidate) but keeps the wrapper unobservable.
+    while (true) {
+        std::string candidate = "__litebird_module_" + std::string(purpose) + "_" +
+                                std::to_string(serial++);
+        if (source.find(candidate) == std::string::npos) return candidate;
+    }
+}
+
+std::string module_quote(std::string_view value) {
+    std::string quoted;
+    quoted.reserve(value.size() + 2);
+    quoted.push_back('\'');
+    static constexpr char hex[] = "0123456789abcdef";
+    for (unsigned char ch : value) {
+        switch (ch) {
+            case '\\': quoted += "\\\\"; break;
+            case '\'': quoted += "\\'"; break;
+            case '\n': quoted += "\\n"; break;
+            case '\r': quoted += "\\r"; break;
+            case '\t': quoted += "\\t"; break;
+            default:
+                if (ch < 0x20) {
+                    quoted += "\\x";
+                    quoted.push_back(hex[(ch >> 4) & 0xf]);
+                    quoted.push_back(hex[ch & 0xf]);
+                } else {
+                    quoted.push_back(static_cast<char>(ch));
+                }
+                break;
+        }
+    }
+    quoted.push_back('\'');
+    return quoted;
+}
+
+std::size_t module_statement_end(const std::vector<JsToken>& tokens, std::size_t next) {
+    if (next >= tokens.size()) return next;
+    if (tokens[next].type == JsTokenType::Semicolon) return next + 1;
+    if (tokens[next].type == JsTokenType::Eof || tokens[next].newline_before) return next;
+    module_syntax_error(tokens[next], "expected a semicolon or line break after module declaration");
+}
+
+void module_add_export(ModuleTransform& transform,
+                       const JsToken& where,
+                       std::string exported_name,
+                       std::string local_name) {
+    for (const auto& existing : transform.exports) {
+        if (existing.exported_name == exported_name) {
+            module_syntax_error(where, "duplicate export '" + exported_name + "'");
+        }
+    }
+    transform.exports.push_back(ModuleExportBinding{std::move(exported_name), std::move(local_name)});
+}
+
+void module_add_import(ModuleTransform& transform,
+                       const JsToken& where,
+                       ModuleDependency& dependency,
+                       std::string imported_name,
+                       std::string local_name,
+                       bool namespace_import,
+                       std::size_t& slot_serial) {
+    for (const auto& prior_dependency : transform.dependencies) {
+        for (const auto& prior : prior_dependency.bindings) {
+            if (prior.local_name == local_name) {
+                module_syntax_error(where, "duplicate imported binding '" + local_name + "'");
+            }
+        }
+    }
+    for (const auto& prior : dependency.bindings) {
+        if (prior.local_name == local_name) {
+            module_syntax_error(where, "duplicate imported binding '" + local_name + "'");
+        }
+    }
+    ModuleImportBinding binding;
+    binding.imported_name = std::move(imported_name);
+    binding.local_name = std::move(local_name);
+    binding.slot = "i" + std::to_string(slot_serial++);
+    binding.namespace_import = namespace_import;
+    dependency.bindings.push_back(std::move(binding));
+}
+
+std::size_t parse_module_import(const std::vector<JsToken>& tokens,
+                                std::size_t begin,
+                                ModuleTransform& transform,
+                                std::size_t& slot_serial) {
+    const JsToken& import_token = tokens[begin];
+    std::size_t pos = begin + 1;
+    if (pos >= tokens.size()) module_syntax_error(import_token, "incomplete import declaration");
+
+    ModuleDependency dependency;
+    if (tokens[pos].type == JsTokenType::String) {
+        dependency.specifier = tokens[pos++].text;
+    } else {
+        auto add_default = [&] {
+            const JsToken& local = tokens[pos];
+            if (!module_binding_token(local)) {
+                module_syntax_error(local, "expected an identifier after import");
+            }
+            module_add_import(transform, local, dependency, "default", module_token_name(local), false, slot_serial);
+            ++pos;
+        };
+        auto add_namespace = [&] {
+            const JsToken& star = tokens[pos++];
+            (void)star;
+            if (pos >= tokens.size() || !module_contextual(tokens[pos], "as")) {
+                module_syntax_error(tokens[std::min(pos, tokens.size() - 1)], "expected 'as' after import *");
+            }
+            ++pos;
+            if (pos >= tokens.size() || !module_binding_token(tokens[pos])) {
+                module_syntax_error(tokens[std::min(pos, tokens.size() - 1)], "expected namespace binding after import * as");
+            }
+            const JsToken& local = tokens[pos++];
+            module_add_import(transform, local, dependency, {}, module_token_name(local), true, slot_serial);
+        };
+        auto add_named = [&] {
+            ++pos; // {
+            while (pos < tokens.size() && tokens[pos].type != JsTokenType::CloseBrace) {
+                const JsToken& imported = tokens[pos];
+                if (!module_export_name_token(imported)) {
+                    module_syntax_error(imported, "expected imported name inside import list");
+                }
+                const std::string imported_name = module_token_name(imported);
+                ++pos;
+                std::string local_name = imported_name;
+                const JsToken* local_where = &imported;
+                if (pos < tokens.size() && module_contextual(tokens[pos], "as")) {
+                    ++pos;
+                    if (pos >= tokens.size() || !module_binding_token(tokens[pos])) {
+                        module_syntax_error(tokens[std::min(pos, tokens.size() - 1)], "expected local binding after as");
+                    }
+                    local_where = &tokens[pos];
+                    local_name = module_token_name(tokens[pos++]);
+                }
+                if (!module_binding_token(*local_where)) {
+                    module_syntax_error(*local_where, "an imported binding must be an identifier");
+                }
+                module_add_import(transform, *local_where, dependency, imported_name, local_name, false, slot_serial);
+                if (pos < tokens.size() && tokens[pos].type == JsTokenType::Comma) {
+                    ++pos;
+                    continue;
+                }
+                if (pos >= tokens.size() || tokens[pos].type != JsTokenType::CloseBrace) {
+                    module_syntax_error(tokens[std::min(pos, tokens.size() - 1)], "expected ',' or '}' in import list");
+                }
+            }
+            if (pos >= tokens.size() || tokens[pos].type != JsTokenType::CloseBrace) {
+                module_syntax_error(tokens.back(), "unterminated import list");
+            }
+            ++pos;
+        };
+
+        if (module_binding_token(tokens[pos])) {
+            add_default();
+            if (pos < tokens.size() && tokens[pos].type == JsTokenType::Comma) ++pos;
+        }
+        if (pos < tokens.size() && tokens[pos].type == JsTokenType::Star) {
+            add_namespace();
+        } else if (pos < tokens.size() && tokens[pos].type == JsTokenType::OpenBrace) {
+            add_named();
+        }
+        if (pos >= tokens.size() || !module_contextual(tokens[pos], "from")) {
+            module_syntax_error(tokens[std::min(pos, tokens.size() - 1)], "expected 'from' and a module specifier");
+        }
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos].type != JsTokenType::String) {
+            module_syntax_error(tokens[std::min(pos, tokens.size() - 1)], "expected a string module specifier");
+        }
+        dependency.specifier = tokens[pos++].text;
+    }
+
+    const std::size_t end = module_statement_end(tokens, pos);
+    transform.dependencies.push_back(std::move(dependency));
+    return end;
+}
+
+void collect_simple_exported_declarations(const std::vector<JsToken>& tokens,
+                                          std::size_t first,
+                                          ModuleTransform& transform) {
+    // The normal parser handles the declarations themselves. We only need the
+    // names to copy into the export namespace after the wrapper has evaluated.
+    // Binding patterns are deliberately refused here instead of silently
+    // omitting one of their exported bindings.
+    std::size_t pos = first;
+    bool need_binding = true;
+    int paren = 0;
+    int bracket = 0;
+    int brace = 0;
+    while (pos < tokens.size()) {
+        const JsToken& token = tokens[pos];
+        if (paren == 0 && bracket == 0 && brace == 0) {
+            if (token.type == JsTokenType::Semicolon || token.type == JsTokenType::Eof ||
+                token.type == JsTokenType::Export || token.type == JsTokenType::Import) {
+                return;
+            }
+            if (need_binding) {
+                if (!module_binding_token(token)) {
+                    module_syntax_error(token, "exported var/let/const declarations require simple identifier bindings");
+                }
+                module_add_export(transform, token, module_token_name(token), module_token_name(token));
+                need_binding = false;
+            }
+            if (token.type == JsTokenType::Comma) {
+                need_binding = true;
+                ++pos;
+                continue;
+            }
+        }
+        switch (token.type) {
+            case JsTokenType::OpenParen: ++paren; break;
+            case JsTokenType::CloseParen: if (paren > 0) --paren; break;
+            case JsTokenType::OpenBracket: ++bracket; break;
+            case JsTokenType::CloseBracket: if (bracket > 0) --bracket; break;
+            case JsTokenType::OpenBrace: ++brace; break;
+            case JsTokenType::CloseBrace: if (brace > 0) --brace; break;
+            default: break;
+        }
+        ++pos;
+    }
+}
+
+std::size_t parse_module_export(const std::vector<JsToken>& tokens,
+                                const std::string& source,
+                                std::size_t begin,
+                                ModuleTransform& transform,
+                                std::vector<ModuleSourceEdit>& edits,
+                                std::size_t& name_serial,
+                                std::size_t& slot_serial) {
+    const JsToken& export_token = tokens[begin];
+    std::size_t pos = begin + 1;
+    if (pos >= tokens.size()) module_syntax_error(export_token, "incomplete export declaration");
+
+    if (tokens[pos].type == JsTokenType::Default) {
+        const JsToken& default_token = tokens[pos++];
+        const std::string local_name = module_fresh_identifier(source, name_serial, "default");
+        module_add_export(transform, default_token, "default", local_name);
+        edits.push_back({export_token.start, default_token.end, "const " + local_name + " ="});
+        // Resume at the token after `export`, not after `default`: a default
+        // object/class/function can begin with a delimiter that the outer
+        // depth tracker must still see.
+        return begin + 1;
+    }
+
+    if (tokens[pos].type == JsTokenType::Var || tokens[pos].type == JsTokenType::Let ||
+        tokens[pos].type == JsTokenType::Const) {
+        collect_simple_exported_declarations(tokens, pos + 1, transform);
+        edits.push_back({export_token.start, export_token.end, {}});
+        return begin + 1;
+    }
+
+    std::size_t name_pos = pos;
+    if (module_contextual(tokens[pos], "async") && pos + 1 < tokens.size() &&
+        tokens[pos + 1].type == JsTokenType::Function) {
+        name_pos = pos + 2;
+    } else if (tokens[pos].type == JsTokenType::Function) {
+        name_pos = pos + 1;
+    } else if (tokens[pos].type == JsTokenType::Class) {
+        name_pos = pos + 1;
+    }
+    if (name_pos != pos) {
+        if (name_pos < tokens.size() && tokens[name_pos].type == JsTokenType::Star) ++name_pos;
+        if (name_pos >= tokens.size() || !module_binding_token(tokens[name_pos])) {
+            module_syntax_error(tokens[std::min(name_pos, tokens.size() - 1)],
+                                "exported function and class declarations require a name");
+        }
+        module_add_export(transform, tokens[name_pos], module_token_name(tokens[name_pos]), module_token_name(tokens[name_pos]));
+        edits.push_back({export_token.start, export_token.end, {}});
+        return begin + 1;
+    }
+
+    if (tokens[pos].type == JsTokenType::OpenBrace) {
+        struct NamedExport {
+            std::string local;
+            std::string exported;
+            const JsToken* local_where;
+            const JsToken* export_where;
+        };
+        std::vector<NamedExport> names;
+        ++pos;
+        while (pos < tokens.size() && tokens[pos].type != JsTokenType::CloseBrace) {
+            const JsToken& local = tokens[pos];
+            if (!module_export_name_token(local)) {
+                module_syntax_error(local, "expected local name inside export list");
+            }
+            const std::string local_name = module_token_name(local);
+            ++pos;
+            std::string exported_name = local_name;
+            const JsToken* export_where = &local;
+            if (pos < tokens.size() && module_contextual(tokens[pos], "as")) {
+                ++pos;
+                if (pos >= tokens.size() || !module_export_name_token(tokens[pos])) {
+                    module_syntax_error(tokens[std::min(pos, tokens.size() - 1)], "expected exported name after as");
+                }
+                export_where = &tokens[pos];
+                exported_name = module_token_name(tokens[pos++]);
+            }
+            names.push_back({local_name, exported_name, &local, export_where});
+            if (pos < tokens.size() && tokens[pos].type == JsTokenType::Comma) {
+                ++pos;
+                continue;
+            }
+            if (pos >= tokens.size() || tokens[pos].type != JsTokenType::CloseBrace) {
+                module_syntax_error(tokens[std::min(pos, tokens.size() - 1)], "expected ',' or '}' in export list");
+            }
+        }
+        if (pos >= tokens.size() || tokens[pos].type != JsTokenType::CloseBrace) {
+            module_syntax_error(tokens.back(), "unterminated export list");
+        }
+        ++pos;
+
+        if (pos < tokens.size() && module_contextual(tokens[pos], "from")) {
+            ++pos;
+            if (pos >= tokens.size() || tokens[pos].type != JsTokenType::String) {
+                module_syntax_error(tokens[std::min(pos, tokens.size() - 1)], "expected a string module specifier after from");
+            }
+            ModuleDependency dependency;
+            dependency.specifier = tokens[pos++].text;
+            for (const auto& name : names) {
+                const std::string generated = module_fresh_identifier(source, name_serial, "reexport");
+                module_add_import(transform, *name.export_where, dependency, name.local, generated, false, slot_serial);
+                module_add_export(transform, *name.export_where, name.exported, generated);
+            }
+            transform.dependencies.push_back(std::move(dependency));
+        } else {
+            for (const auto& name : names) {
+                if (!module_binding_token(*name.local_where)) {
+                    module_syntax_error(*name.local_where, "local export bindings must be identifiers");
+                }
+                module_add_export(transform, *name.export_where, name.exported, name.local);
+            }
+        }
+
+        const std::size_t end = module_statement_end(tokens, pos);
+        const std::size_t end_byte = end > begin ? tokens[end - 1].end : export_token.end;
+        edits.push_back({export_token.start, end_byte, {}});
+        return end;
+    }
+
+    if (tokens[pos].type == JsTokenType::Star) {
+        module_syntax_error(tokens[pos], "export * is not supported without live module bindings");
+    }
+    module_syntax_error(tokens[pos], "unsupported export form");
+}
+
+ModuleTransform transform_module_source(const std::string& source, std::size_t& name_serial) {
+    JsLexer lexer(source);
+    const std::vector<JsToken> tokens = lexer.tokenize_all();
+    ModuleTransform transform;
+    std::vector<ModuleSourceEdit> edits;
+    std::size_t slot_serial = 0;
+    int paren = 0;
+    int bracket = 0;
+    int brace = 0;
+
+    for (std::size_t i = 0; i < tokens.size() && tokens[i].type != JsTokenType::Eof; ++i) {
+        const JsToken& token = tokens[i];
+        // `obj.import` / `obj.export` are ordinary keyword-named properties,
+        // not module declarations. The classic parser accepts them after .
+        const bool keyword_property = i > 0 &&
+            (tokens[i - 1].type == JsTokenType::Dot || tokens[i - 1].type == JsTokenType::QuestionDot);
+        if (paren == 0 && bracket == 0 && brace == 0 && !keyword_property && token.type == JsTokenType::Import &&
+            (i + 1 >= tokens.size() || tokens[i + 1].type == JsTokenType::OpenParen ||
+             tokens[i + 1].type == JsTokenType::Dot)) {
+            module_syntax_error(token, "dynamic import() and import.meta are not supported");
+        }
+        if (paren == 0 && bracket == 0 && brace == 0 && !keyword_property && token.type == JsTokenType::Import) {
+            const std::size_t end = parse_module_import(tokens, i, transform, slot_serial);
+            const std::size_t end_byte = end > i ? tokens[end - 1].end : token.end;
+            edits.push_back({token.start, end_byte, {}});
+            i = end == 0 ? i : end - 1;
+            continue;
+        }
+        if (paren == 0 && bracket == 0 && brace == 0 && !keyword_property && token.type == JsTokenType::Export) {
+            const std::size_t next = parse_module_export(tokens, source, i, transform, edits, name_serial, slot_serial);
+            i = next == 0 ? i : next - 1;
+            continue;
+        }
+        switch (token.type) {
+            case JsTokenType::OpenParen: ++paren; break;
+            case JsTokenType::CloseParen: if (paren > 0) --paren; break;
+            case JsTokenType::OpenBracket: ++bracket; break;
+            case JsTokenType::CloseBracket: if (bracket > 0) --bracket; break;
+            case JsTokenType::OpenBrace: ++brace; break;
+            case JsTokenType::CloseBrace: if (brace > 0) --brace; break;
+            default: break;
+        }
+    }
+
+    std::sort(edits.begin(), edits.end(), [](const ModuleSourceEdit& a, const ModuleSourceEdit& b) {
+        return a.begin < b.begin;
+    });
+    std::size_t cursor = 0;
+    for (const auto& edit : edits) {
+        if (edit.begin < cursor || edit.begin > source.size() || edit.end < edit.begin || edit.end > source.size()) {
+            throw std::runtime_error("Invalid internal module-source rewrite range");
+        }
+        transform.body.append(source, cursor, edit.begin - cursor);
+        transform.body += edit.replacement;
+        cursor = edit.end;
+    }
+    transform.body.append(source, cursor, std::string::npos);
+    return transform;
+}
+
+class WorkerModuleLoader {
+public:
+    WorkerModuleLoader(JsInterpreter& interpreter, ResourceRequestContext context)
+        : m_interpreter(interpreter), m_context(std::move(context)) {}
+
+    void evaluate_entry(const std::string& source, const std::string& resolved_url) {
+        const std::string key = resolved_url.empty() ? std::string("<module-worker-entry>") : resolved_url;
+        (void)evaluate_source(key, source);
+    }
+
+private:
+    struct ModuleRecord {
+        enum class State { Evaluating, Evaluated, Failed };
+        State state{State::Evaluating};
+        JsValue exports{JsValue::make_undefined()};
+    };
+
+    JsValue evaluate_dependency(const std::string& specifier, const std::string& referrer_url) {
+        ResourceRequestContext context = m_context;
+        context.base_url = referrer_url;
+        context.mode = RequestMode::Cors;
+
+        const std::string requested = ResourceLoader::resolve_url(context.base_url, specifier);
+        if (auto alias = m_aliases.find(requested); alias != m_aliases.end()) {
+            if (auto existing = m_records.find(alias->second); existing != m_records.end()) {
+                return evaluate_existing(alias->second, existing->second);
+            }
+        }
+
+        std::string error;
+        std::string loaded_url;
+        auto source = load_worker_script(specifier, context, RequestMode::Cors, error, loaded_url);
+        if (!source) {
+            js_throw_error(JsErrorKind::Error,
+                           "NetworkError: Failed to load module '" + specifier + "': " + error);
+        }
+        if (loaded_url.empty()) loaded_url = requested.empty() ? specifier : requested;
+        m_aliases[requested] = loaded_url;
+        return evaluate_source(loaded_url, *source);
+    }
+
+    JsValue evaluate_existing(const std::string& key, const std::shared_ptr<ModuleRecord>& record) {
+        if (record->state == ModuleRecord::State::Evaluated) return record->exports;
+        if (record->state == ModuleRecord::State::Evaluating) {
+            js_throw_error(JsErrorKind::Error,
+                           "Unsupported ES module worker graph: cyclic dependency involving '" + key + "'.");
+        }
+        js_throw_error(JsErrorKind::Error, "Module '" + key + "' previously failed to evaluate.");
+    }
+
+    JsValue evaluate_source(const std::string& key, const std::string& source) {
+        if (auto existing = m_records.find(key); existing != m_records.end()) {
+            return evaluate_existing(key, existing->second);
+        }
+        if (m_records.size() >= kMaxModuleRecords) {
+            js_throw_error(JsErrorKind::RangeError,
+                           "Module worker dependency graph exceeds the 256-module limit.");
+        }
+
+        auto record = std::make_shared<ModuleRecord>();
+        m_records.emplace(key, record);
+        try {
+            ModuleTransform module = transform_module_source(source, m_name_serial);
+            JsValue imports = JsValue::make_object(Heap::default_heap().allocate_object());
+            for (const ModuleDependency& dependency : module.dependencies) {
+                const JsValue dependency_exports = evaluate_dependency(dependency.specifier, key);
+                for (const ModuleImportBinding& binding : dependency.bindings) {
+                    if (binding.namespace_import) {
+                        imports.set_property(binding.slot, dependency_exports);
+                    } else {
+                        if (!dependency_exports.has_own_property(binding.imported_name)) {
+                            js_throw_error(JsErrorKind::SyntaxError,
+                                           "Module '" + dependency.specifier + "' does not export '" +
+                                               binding.imported_name + "'.");
+                        }
+                        imports.set_property(binding.slot, dependency_exports.get_property(binding.imported_name));
+                    }
+                }
+            }
+
+            JsValue exports = JsValue::make_object(Heap::default_heap().allocate_object());
+            const std::string imports_name = module_fresh_identifier(source, m_name_serial, "imports");
+            const std::string exports_name = module_fresh_identifier(source, m_name_serial, "exports");
+            m_interpreter.global_env()->define(imports_name, imports);
+            m_interpreter.global_env()->define(exports_name, exports);
+
+            std::string wrapper;
+            wrapper.reserve(module.body.size() + module.exports.size() * 56 + 256);
+            wrapper += "(function(" + imports_name + ", " + exports_name + "){\n\"use strict\";\n";
+            for (const ModuleDependency& dependency : module.dependencies) {
+                for (const ModuleImportBinding& binding : dependency.bindings) {
+                    wrapper += "const " + binding.local_name + " = " + imports_name + "[" +
+                               module_quote(binding.slot) + "];\n";
+                }
+            }
+            wrapper += module.body;
+            wrapper += "\n";
+            for (const ModuleExportBinding& binding : module.exports) {
+                wrapper += exports_name + "[" + module_quote(binding.exported_name) + "] = " +
+                           binding.local_name + ";\n";
+            }
+            wrapper += "})(" + imports_name + ", " + exports_name + ");";
+            m_interpreter.run(wrapper);
+
+            record->exports = exports;
+            record->state = ModuleRecord::State::Evaluated;
+            return exports;
+        } catch (...) {
+            record->state = ModuleRecord::State::Failed;
+            throw;
+        }
+    }
+
+    static constexpr std::size_t kMaxModuleRecords = 256;
+    JsInterpreter& m_interpreter;
+    ResourceRequestContext m_context;
+    std::unordered_map<std::string, std::shared_ptr<ModuleRecord>> m_records;
+    std::unordered_map<std::string, std::string> m_aliases;
+    std::size_t m_name_serial{0};
+};
 
 WorkerOptions parse_worker_options(const std::vector<JsValue>& args) {
     WorkerOptions options;
@@ -233,6 +838,34 @@ WorkerOptions parse_worker_options(const std::vector<JsValue>& args) {
         options.name = name_val.to_string();
     }
     return options;
+}
+
+[[noreturn]] void throw_data_clone_error(std::string_view receiver, const std::string& reason) {
+    dom::throw_dom(dom::current_realm(), "DataCloneError",
+                   "Failed to execute 'postMessage' on '" + std::string(receiver) + "': " + reason);
+    std::abort(); // throw_dom always throws; keeps the noreturn contract explicit.
+}
+
+void reject_nonempty_transfer_list(const std::vector<JsValue>& args, std::size_t index,
+                                   std::string_view receiver) {
+    if (args.size() <= index || args[index].is_undefined()) return;
+    // The Web IDL argument is a sequence. Asking the iteration protocol also
+    // makes a non-iterable value fail as TypeError rather than being silently
+    // accepted. No transferable type exists in this engine yet, but an empty
+    // list remains a valid no-op for compatible callers.
+    if (!js_iterable_to_vector(args[index]).empty()) {
+        throw_data_clone_error(receiver, "transfer lists are not supported.");
+    }
+}
+
+std::shared_ptr<JsStructuredClone> clone_message_or_throw(const JsValue& value,
+                                                           std::string_view receiver) {
+    auto packet = std::make_shared<JsStructuredClone>();
+    std::string error;
+    if (!js_write_structured_clone(value, *packet, error)) {
+        throw_data_clone_error(receiver, error.empty() ? "The value could not be cloned." : error);
+    }
+    return packet;
 }
 
 JsValue make_worker_location(const std::string& resolved_url) {
@@ -529,18 +1162,15 @@ void WorkerObject::start() {
         return;
     }
 
-    // Explicit module-worker policy: do not silently execute as classic JS.
-    if (m_options.type == WorkerType::Module) {
-        m_running.store(false, std::memory_order_release);
-        m_terminated.store(false, std::memory_order_release);
-        post_error("Module workers ({ type: 'module' }) are not supported",
-                   m_script_url, 0, 0, /*release_after=*/true);
-        return;
-    }
-
+    // Classic workers keep their historical same-origin top-level fetch. A
+    // module worker follows the module-script CORS path; dependency fetches
+    // use the same mode in WorkerModuleLoader below.
+    const RequestMode top_level_mode = m_options.type == WorkerType::Module
+                                           ? RequestMode::Cors
+                                           : RequestMode::SameOrigin;
     std::string load_error;
     std::string loaded_url;
-    auto script_source = load_worker_script(m_script_url, m_context, RequestMode::SameOrigin,
+    auto script_source = load_worker_script(m_script_url, m_context, top_level_mode,
                                             load_error, loaded_url);
     if (!loaded_url.empty()) m_resolved_url = loaded_url;
 
@@ -639,15 +1269,13 @@ void WorkerObject::dispatch_page_error(const std::string& message,
     }
 }
 
-void WorkerObject::dispatch_page_message(const std::string& serialized_json) {
+void WorkerObject::dispatch_page_message(const std::shared_ptr<JsStructuredClone>& message) {
     if (!m_owner_js || m_terminated.load(std::memory_order_acquire)) return;
 
-    JsValue data;
-    try {
-        data = Json::parse(serialized_json);
-    } catch (...) {
-        data = JsValue::make_string(serialized_json);
-    }
+    // Materialize only on the owner agent. The packet itself contains no
+    // JsValues, so a worker never races the page heap by retaining a source
+    // object in an asynchronous callback.
+    const JsValue data = message ? js_read_structured_clone(*message) : JsValue::make_undefined();
 
     JsValue inst = m_owner_js->js_instance;
     JsValue target = inst.is_object_like() ? inst : JsValue::make_null();
@@ -755,14 +1383,14 @@ void WorkerObject::terminate() {
     release_owner_js();
 }
 
-void WorkerObject::post_message(const std::string& serialized_json) {
+void WorkerObject::post_message(std::shared_ptr<JsStructuredClone> message) {
     if (m_terminated.load(std::memory_order_acquire) ||
         !m_running.load(std::memory_order_acquire)) {
         return;
     }
     {
         std::lock_guard<std::mutex> lock(m_queue_mutex);
-        m_incoming_messages.push(serialized_json);
+        m_incoming_messages.push(std::move(message));
     }
     m_cv.notify_one();
 }
@@ -938,22 +1566,19 @@ void WorkerObject::worker_thread_main(std::string script_source) {
         return ok;
     };
 
-    // postMessage(data) inside worker
+    // postMessage(data, transfer) inside a worker. Encode synchronously while
+    // this agent owns `data`; the owner page later decodes an inert packet.
     auto post_msg_fn = JsValue::make_native_function([this](const std::vector<JsValue>& args) {
         if (args.empty() || m_terminated.load(std::memory_order_acquire)) {
             return JsValue::make_undefined();
         }
-        std::string json_str;
-        try {
-            json_str = Json::stringify(args[0]);
-        } catch (...) {
-            json_str = args[0].to_string();
-        }
+        reject_nonempty_transfer_list(args, 1, "WorkerGlobalScope");
+        auto message = clone_message_or_throw(args[0], "WorkerGlobalScope");
 
-        post_to_owner([weak_self = weak_from_this(), json = std::move(json_str)]() {
+        post_to_owner([weak_self = weak_from_this(), message = std::move(message)]() {
             auto worker = weak_self.lock();
             if (!worker || worker->m_terminated.load(std::memory_order_acquire)) return;
-            worker->dispatch_page_message(json);
+            worker->dispatch_page_message(message);
         });
 
         return JsValue::make_undefined();
@@ -989,34 +1614,46 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     env->define("removeEventListener", rem_el_fn);
     self_obj.set_property("removeEventListener", rem_el_fn);
 
-    // importScripts(...urls) — HTML §10.2.5.4 (subject to the same local-file
-    // boundary, HTTP 2xx check, and WHATWG JavaScript MIME policy).
-    auto import_scripts_fn = JsValue::make_native_function(
-        [this, &worker_js, worker_context](const std::vector<JsValue>& args) {
-            for (const auto& arg : args) {
-                if (m_terminated.load(std::memory_order_acquire) ||
-                    g_process_shutting_down.load(std::memory_order_acquire)) {
-                    return JsValue::make_undefined();
+    // importScripts() belongs only to a classic worker global. Module workers
+    // must use their static import graph, and deliberately do not expose this
+    // classic-script escape hatch.
+    if (m_options.type == WorkerType::Classic) {
+        // HTML §10.2.5.4, subject to the local-file boundary, HTTP 2xx check,
+        // and WHATWG JavaScript MIME policy.
+        auto import_scripts_fn = JsValue::make_native_function(
+            [this, &worker_js, worker_context](const std::vector<JsValue>& args) {
+                for (const auto& arg : args) {
+                    if (m_terminated.load(std::memory_order_acquire) ||
+                        g_process_shutting_down.load(std::memory_order_acquire)) {
+                        return JsValue::make_undefined();
+                    }
+                    const std::string url = arg.to_string();
+                    std::string err;
+                    std::string loaded_url;
+                    auto imported = load_worker_script(url, worker_context, RequestMode::NoCors,
+                                                       err, loaded_url);
+                    if (!imported) {
+                        js_throw_error(JsErrorKind::Error,
+                                       "NetworkError: Failed to execute 'importScripts' on 'WorkerGlobalScope': " + err);
+                    }
+                    worker_js.run(*imported);
                 }
-                const std::string url = arg.to_string();
-                std::string err;
-                std::string loaded_url;
-                auto imported = load_worker_script(url, worker_context, RequestMode::NoCors,
-                                                   err, loaded_url);
-                if (!imported) {
-                    js_throw_error(JsErrorKind::Error,
-                                   "NetworkError: Failed to execute 'importScripts' on 'WorkerGlobalScope': " + err);
-                }
-                worker_js.run(*imported);
-            }
-            return JsValue::make_undefined();
-        });
-    env->define("importScripts", import_scripts_fn);
-    self_obj.set_property("importScripts", import_scripts_fn);
+                return JsValue::make_undefined();
+            });
+        env->define("importScripts", import_scripts_fn);
+        self_obj.set_property("importScripts", import_scripts_fn);
+    }
 
-    // Initial evaluation of the worker script. A worker whose script fails to
-    // load or throws at the top level never enters the message loop.
-    if (!run_script([&] { worker_js.run(script_source); })) {
+    // Initial evaluation of the worker script. A worker whose script or
+    // module graph fails to load/evaluate never enters the message loop.
+    if (!run_script([&] {
+            if (m_options.type == WorkerType::Module) {
+                WorkerModuleLoader modules(worker_js, worker_context);
+                modules.evaluate_entry(script_source, m_resolved_url);
+            } else {
+                worker_js.run(script_source);
+            }
+        })) {
         return;
     }
     worker_loop.tick();
@@ -1026,7 +1663,7 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     while (m_running.load(std::memory_order_acquire) &&
            !m_terminated.load(std::memory_order_acquire) &&
            !g_process_shutting_down.load(std::memory_order_acquire)) {
-        std::string incoming_json;
+        std::shared_ptr<JsStructuredClone> incoming_message;
         bool have_message = false;
         {
             std::unique_lock<std::mutex> lock(m_queue_mutex);
@@ -1050,19 +1687,16 @@ void WorkerObject::worker_thread_main(std::string script_source) {
             }
             m_owner_task_pending = false;
             if (!m_incoming_messages.empty()) {
-                incoming_json = std::move(m_incoming_messages.front());
+                incoming_message = std::move(m_incoming_messages.front());
                 m_incoming_messages.pop();
                 have_message = true;
             }
         }
 
         if (have_message) {
-            JsValue data;
-            try {
-                data = Json::parse(incoming_json);
-            } catch (...) {
-                data = JsValue::make_string(incoming_json);
-            }
+            // Decode after the queue lock is released, in the worker's agent.
+            const JsValue data = incoming_message ? js_read_structured_clone(*incoming_message)
+                                                  : JsValue::make_undefined();
 
             auto control = std::make_shared<EventControl>();
             JsValue event = JsValue::make_object(Heap::default_heap().allocate_object());
@@ -1103,13 +1737,8 @@ JsValue WorkerObject::attach_js_instance(const std::shared_ptr<WorkerObject>& wo
 
     inst.set_property("postMessage", JsValue::make_native_function([worker](const std::vector<JsValue>& msg_args) {
         if (msg_args.empty()) return JsValue::make_undefined();
-        std::string json;
-        try {
-            json = Json::stringify(msg_args[0]);
-        } catch (...) {
-            json = msg_args[0].to_string();
-        }
-        worker->post_message(json);
+        reject_nonempty_transfer_list(msg_args, 1, "Worker");
+        worker->post_message(clone_message_or_throw(msg_args[0], "Worker"));
         return JsValue::make_undefined();
     }));
 

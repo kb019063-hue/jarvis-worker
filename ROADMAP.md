@@ -54,7 +54,7 @@ with. This does. **Tier 1 is the difference between an engine and a browser.**
 
 | # | What | Row | Why it is here |
 | :--- | :--- | :--- | :--- |
-| 1 | **Font fallback, `font-family` selection, `@font-face`** | 1 | **Fallback done (Phase 64):** a codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily. Still open: `font-family` is parsed and never read, no `@font-face`, no italic face, no shaping, no bidi. |
+| 1 | **Font fallback, `font-family` selection, `@font-face`** | 1 | **Fallback done (Phase 64)** and **`font-family` selection done (Phase 67):** a family list is resolved against the faces the host declares, per element, and a face is chosen and loaded for it — `pre { font-family: monospace }` measures differently from a heading in the default face, which it did not before. Still open: no `@font-face`, no italic face, no shaping, no bidi. |
 | 2 | **Shaping** — kerning (`kern`/`GPOS`), ligatures (`GSUB`), complex scripts | 1 | Every non-Latin script is wrong, and Latin text is spaced wrong. |
 | 3 | **Bidi** (UAX #9) | 1 | Arabic and Hebrew come out reversed. |
 | 4 | **A windowed shell** | 3 | `BrowserShell` renders to a terminal. No window, no mouse, no scrolling. |
@@ -140,7 +140,7 @@ because the last third of it has no oracle to converge on.
 | 23 | **Fetch/XHR/WebSocket policy** — same-origin + CORS incl. preflight and credentials; mixed-content blocking; unlocks `https:` (two open tasks land here). | M |
 | 24 | **Encoding Standard complete** — all WHATWG encodings (`Shift_JIS`, `EUC-*`, …), `TextEncoder`/`TextDecoder`. **Decoding done (Phase 47)**: 40 encodings and 228 labels from `whatwg/encoding`, `<meta charset>` prescan, `document.characterSet`, XML `[81] EncName`, `@charset`, `data:` URLs, XHR and subresources (WPT 7,968/8,009 across 103 files, the XML suite 1,718/1,718). Open: `TextDecoder`/`TextEncoder` in script, encoders, and streaming. | M |
 | 25 | **Frames/iframes with documents** — `iframe.contentDocument`, `srcdoc`/`sandbox`, XML/SVG-as-a-page (`litebird feed.xml` / `.xhtml` script execution). **Done (Phase 42)**: nested browsing contexts (`HTMLIFrameElement`, per-frame `JsInterpreter`/`Realm`/`WindowProxy`, `src`/`srcdoc`/`sandbox`, cross-origin `WindowProxy` access checks, `postMessage`, subdocument layout/rasterization, and `.xhtml` WPT execution; all 495 `frames` WPT failures resolved, raising WPT to 5,421/5,463 across 87 files). | M–L |
-| 25a | **Cross-origin `Window`/`Location` reflection** — `[[OwnPropertyKeys]]` (indices + table + `then`) for keys/descriptors, spread, rest, `for…in`, `JSON`; `Location` as a security exotic; define/delete/integrity/prototype refusal. **Done (Phase 56)**. | M |
+| 25a | **Cross-origin `Window`/`Location` reflection, child navigation and message ports** — `[[OwnPropertyKeys]]` (indices + table + `then`) for keys/descriptors, spread, rest, `for…in`, `JSON`; `Location` as a security exotic; define/delete/integrity/prototype refusal; permitted non-fragment child navigation; same-agent `MessageChannel`/`MessagePort`. **Done (Phases 56 & 61)**. Transfer lists, structured cloning, cross-agent ports and process isolation remain open. | M |
 | 26 | **External scripts/stylesheets + module fetching** over the real network. | M |
 | 27 | **Form submission** — GET/POST navigation, file upload, `multipart/form-data`, downloads. | M |
 

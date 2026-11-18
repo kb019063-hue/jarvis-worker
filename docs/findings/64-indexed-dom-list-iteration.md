@@ -15,7 +15,7 @@ passed **9550/9744** WPT subtests but left the minimum floor at **9538**.
 identity, DOM list mutation, ordinary sparse/large array-likes, and getter
 order. The WPT floor rises to 9550, without adding any expected failure.
 
-**Verification.** `make test` **210/210** plus 80 cross-origin checks; `make
+**Verification.** `make test` **215/215** plus 114 cross-origin/channel checks; `make
 wpt` **9550/9744**, 194 listed, 0 unlisted (unchanged WPT score, stronger
 floor). Out-of-corpus `compare_with_jsdom.py`: **12/12** lines match jsdom
 31.0.0. The `Infinity`/getter regression is in `tests/test_suite.cpp`.

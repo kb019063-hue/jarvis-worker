@@ -121,26 +121,67 @@ def scan_text(text: str) -> tuple[list[int], list[int]]:
     return _dedupe(phases), _dedupe(findings)
 
 
-def scan_files() -> dict[str, tuple[list[int], list[int]]]:
+def git_show(ref: str, path: str) -> str | None:
+    """The content of `path` as of `ref`, or None when it is not there."""
+    result = subprocess.run(("git", "show", f"{ref}:{path}"), cwd=ROOT,
+                            capture_output=True, text=True)
+    return result.stdout if result.returncode == 0 else None
+
+
+def git_ls(ref: str, directory: str) -> list[str]:
+    """The markdown files under `directory` as of `ref`."""
+    result = subprocess.run(("git", "ls-tree", "-r", "--name-only", ref, "--", directory),
+                            cwd=ROOT, capture_output=True, text=True)
+    if result.returncode != 0:
+        return []
+    return [line for line in result.stdout.splitlines() if line.endswith(".md")]
+
+
+def scan_files(ref: str | None = None) -> dict[str, tuple[list[int], list[int]]]:
+    """What the repository says, either as it lies on disk or as of a ref.
+
+    With no ref the working tree is read, which is what an agent about to
+    write needs: it includes the file it has just added and not committed.
+    `tools/ci/check_pr.py` passes `main`, because the question it answers is
+    whether a number is taken on `main`, and a sandbox's clone can be behind
+    it. The two used to be answered by two parsers — one here and one in
+    that file — which agreed until they did not.
+    """
     found: dict[str, tuple[list[int], list[int]]] = {}
+    read = (lambda path: git_show(ref, path)) if ref else (
+        lambda path: (ROOT / path).read_text(encoding="utf-8", errors="replace")
+        if (ROOT / path).is_file() else None
+    )
     for name in PROSE_DOCS:
-        path = ROOT / name
-        if path.is_file():
-            found[name] = scan_text(path.read_text(encoding="utf-8", errors="replace"))
+        text = read(name)
+        if text is not None:
+            found[name] = scan_text(text)
     docs_dir = ROOT / "docs"
-    if docs_dir.is_dir():
+    listed = git_ls(ref, "docs/") if ref else (
+        sorted(str(p.relative_to(ROOT)) for p in docs_dir.rglob("*.md"))
+        if docs_dir.is_dir() else []
+    )
+    if listed:
         phases: list[int] = []
         findings: list[int] = []
-        for p in sorted(docs_dir.rglob("*.md")):
-            # "docs/phases/56-cross-origin-window-reflection.md" names a phase;
-            # the same two digits in a findings file do not.
-            if p.parent.name == "phases":
-                m = PHASE_FILE_RE.match(p.name)
-                if m:
+        for rel in listed:
+            name = rel.rsplit("/", 1)[-1]
+            parent = rel.rsplit("/", 2)[-2] if "/" in rel else ""
+            # "docs/phases/56-cross-origin-window-reflection.md" names a phase
+            # and "docs/findings/69-....md" names a finding. The number is in
+            # the name and not only in the prose, because the write-up is an
+            # "# NN. ..." heading after the move and nothing else in it has to
+            # say its own number.
+            m = PHASE_FILE_RE.match(name)
+            if m:
+                if parent == "phases":
                     phases.append(int(m.group(1)))
-            file_phases, file_findings = scan_text(
-                p.read_text(encoding="utf-8", errors="replace")
-            )
+                elif parent == "findings":
+                    findings.append(int(m.group(1)))
+            text = read(rel)
+            if text is None:
+                continue
+            file_phases, file_findings = scan_text(text)
             phases.extend(file_phases)
             findings.extend(file_findings)
         if phases or findings:
@@ -148,15 +189,17 @@ def scan_files() -> dict[str, tuple[list[int], list[int]]]:
     return found
 
 
-def scan_state() -> tuple[int, int, str]:
+def scan_state(ref: str | None = None) -> tuple[int, int, str]:
     """The durable floors. Missing or broken state is a floor of zero, not an error."""
-    if not STATE.is_file():
+    raw_text = git_show(ref, "docs/state.json") if ref else (
+        STATE.read_text(encoding="utf-8") if STATE.is_file() else None
+    )
+    if raw_text is None:
         return 0, 0, "docs/state.json (absent — floor 0)"
     try:
-        raw = json.loads(STATE.read_text(encoding="utf-8"))
-    except (ValueError, OSError) as e:
-        print(f"warning: {STATE.relative_to(ROOT)} unreadable ({e}); floor 0",
-              file=sys.stderr)
+        raw = json.loads(raw_text)
+    except ValueError as e:
+        print(f"warning: docs/state.json unreadable ({e}); floor 0", file=sys.stderr)
         return 0, 0, "docs/state.json (unreadable — floor 0)"
     return (
         int(raw.get("phase_floor", 0)),
@@ -191,23 +234,51 @@ def scan_open_prs() -> tuple[dict[str, tuple[list[int], list[int]]], str | None]
     return found, None
 
 
-def collect() -> tuple[int, int, dict[str, tuple[int, int]], str | None]:
-    """Returns (next_phase, next_finding, per-source maxima, gh warning)."""
+def collect_sets(ref: str | None = None, with_prs: bool = True) -> tuple[set[int], set[int], dict[str, tuple[int, int]], str | None]:
+    """Every phase and finding number taken, and where the highest of each came from.
+
+    Returns (phases, findings, per-source maxima, gh warning). `tools/ci/check_pr.py`
+    asks this for the *set*, not only the next free number, because it has to say
+    whether a number a pull request has claimed is already somebody else's — and
+    that is the same question, so it is answered here rather than a second time
+    in that file.
+
+    `ref` is a git ref to read instead of the working tree: that caller passes
+    `main`. With a ref the open pull requests are still counted, since a claim
+    is a claim whether or not it has landed — unless `with_prs` is false, which
+    `tools/ci/check_pr.py` asks for when it wants what `main` alone has, so
+    that it does not tell a pull request that its own number is taken.
+    """
     sources: dict[str, tuple[int, int]] = {}
+    phases: set[int] = set()
+    findings: set[int] = set()
 
-    for name, (phases, findings) in scan_files().items():
-        sources[name] = (max(phases, default=0), max(findings, default=0))
+    for name, (file_phases, file_findings) in scan_files(ref).items():
+        phases.update(file_phases)
+        findings.update(file_findings)
+        sources[name] = (max(file_phases, default=0), max(file_findings, default=0))
 
-    floor_phase, floor_finding, floor_name = scan_state()
+    floor_phase, floor_finding, floor_name = scan_state(ref)
     sources[floor_name] = (floor_phase, floor_finding)
+    # Everything up to a floor counts as taken: that is what a floor means.
+    phases.update(range(1, floor_phase + 1))
+    findings.update(range(1, floor_finding + 1))
 
-    pr_sources, warning = scan_open_prs()
-    for name, (phases, findings) in pr_sources.items():
-        sources[name] = (max(phases, default=0), max(findings, default=0))
+    warning = None
+    if with_prs:
+        pr_sources, warning = scan_open_prs()
+        for name, (pr_phases, pr_findings) in pr_sources.items():
+            phases.update(pr_phases)
+            findings.update(pr_findings)
+            sources[name] = (max(pr_phases, default=0), max(pr_findings, default=0))
 
-    phase = max((p for p, _ in sources.values()), default=0)
-    finding = max((f for _, f in sources.values()), default=0)
-    return phase + 1, finding + 1, sources, warning
+    return phases, findings, sources, warning
+
+
+def collect(ref: str | None = None) -> tuple[int, int, dict[str, tuple[int, int]], str | None]:
+    """Returns (next_phase, next_finding, per-source maxima, gh warning)."""
+    phases, findings, sources, warning = collect_sets(ref)
+    return max(phases, default=0) + 1, max(findings, default=0) + 1, sources, warning
 
 
 # (text, expected phases, expected findings, why this case is here)
@@ -234,9 +305,64 @@ SELF_TEST_CASES: list[tuple[str, list[int], list[int], str]] = [
 ]
 
 
+def ref_cases() -> list[tuple[bool, str, str]]:
+    """Does reading a ref work, and does it find the numbers in it.
+
+    The bug these are here for: `tools/ci/check_pr.py` read `main` for
+    `^## Phase (\\d+)` headings in ARCHITECTURE.md and `^## (\\d+)\\.` in
+    AUDIT.md. When the write-ups moved to `docs/phases/` and `docs/findings/`
+    those headings left the two documents, the reading found nothing, and the
+    check went on reporting an empty set as "what main has taken". It was not
+    an error — it was a silent wrong answer, which is worse. The numbers are
+    in the filenames now; this asks whether the filenames are read.
+    """
+    cases: list[tuple[bool, str, str]] = []
+
+    listed = git_ls("HEAD", "docs/")
+    if not listed:
+        cases.append((True, "HEAD has no docs/*.md", "nothing to compare against"))
+        return cases
+
+    cases.append((git_show("HEAD", "README.md") is not None,
+                  "a ref is read out of git and not off the disk",
+                  "" if git_show("HEAD", "README.md") is not None
+                  else "git show HEAD:README.md returned nothing"))
+
+    want_phases, want_findings = set(), set()
+    for rel in listed:
+        name = rel.rsplit("/", 1)[-1]
+        parent = rel.rsplit("/", 2)[-2] if "/" in rel else ""
+        m = PHASE_FILE_RE.match(name)
+        if not m:
+            continue
+        if parent == "phases":
+            want_phases.add(int(m.group(1)))
+        elif parent == "findings":
+            want_findings.add(int(m.group(1)))
+
+    got_phases, got_findings = scan_files("HEAD").get("docs/", ([], []))
+    got_phases, got_findings = set(got_phases), set(got_findings)
+    missing_p = sorted(want_phases - got_phases)
+    missing_f = sorted(want_findings - got_findings)
+    cases.append((not missing_p,
+                  f"every phase write-up on HEAD is counted ({len(want_phases)} of them)",
+                  f"missing: {missing_p}" if missing_p else ""))
+    cases.append((not missing_f,
+                  f"every finding write-up on HEAD is counted ({len(want_findings)} of them)",
+                  f"missing: {missing_f}" if missing_f else ""))
+
+    no_prs = collect_sets("HEAD", with_prs=False)
+    with_prs = collect_sets("HEAD", with_prs=True)
+    cases.append((set(no_prs[0]) <= set(with_prs[0]) and set(no_prs[1]) <= set(with_prs[1]),
+                  "--no-prs only ever takes numbers away",
+                  "the open pull requests added nothing, which is fine, or took some away"))
+    return cases
+
+
 def self_test() -> int:
-    print(f"next_ids self-test: {len(SELF_TEST_CASES)} cases")
     failed = 0
+
+    print(f"parsing: {len(SELF_TEST_CASES)} cases")
     for text, want_phases, want_findings, why in SELF_TEST_CASES:
         got_phases, got_findings = scan_text(text)
         ok = got_phases == want_phases and got_findings == want_findings
@@ -247,7 +373,18 @@ def self_test() -> int:
             print(f"         wanted phases={want_phases} findings={want_findings}")
             print(f"         got    phases={got_phases} findings={got_findings}")
         print(f"         {why}")
-    print(f"\n{len(SELF_TEST_CASES) - failed}/{len(SELF_TEST_CASES)} pass")
+
+    ref_results = ref_cases()
+    print(f"\nreading a ref: {len(ref_results)} cases")
+    for ok, name, detail in ref_results:
+        if not ok:
+            failed += 1
+        print(f"  [{'ok  ' if ok else 'FAIL'}] {name}")
+        if detail:
+            print(f"         {detail}")
+
+    total = len(SELF_TEST_CASES) + len(ref_results)
+    print(f"\n{total - failed}/{total} pass")
     return 1 if failed else 0
 
 
@@ -262,12 +399,36 @@ def main() -> int:
                     help="emit the block a WIP pull request opens with")
     ap.add_argument("--self-test", action="store_true",
                     help="check the parsing against the cases it is trusted for")
+    ap.add_argument("--taken", action="store_true",
+                    help="every number taken, not only the next free one "
+                         "(what tools/ci/check_pr.py asks for)")
+    ap.add_argument("--ref", metavar="REF",
+                    help="read the repository as of REF (git show / ls-tree) "
+                         "instead of the working tree; the open pull requests "
+                         "are counted either way")
+    ap.add_argument("--no-prs", action="store_true",
+                    help="leave the open pull requests out: what the "
+                         "repository has landed, and nothing claimed")
     args = ap.parse_args()
 
     if args.self_test:
         return self_test()
 
-    phase, finding, sources, warning = collect()
+    if args.taken:
+        phases, findings, sources, warning = collect_sets(args.ref, not args.no_prs)
+        print(json.dumps({
+            "phases": sorted(phases),
+            "findings": sorted(findings),
+            "next_phase": max(phases, default=0) + 1,
+            "next_finding": max(findings, default=0) + 1,
+            "warning": warning,
+        }, indent=2))
+        if warning:
+            print(f"warning: {warning}", file=sys.stderr)
+            return 1
+        return 0
+
+    phase, finding, sources, warning = collect(args.ref)
 
     if args.json:
         print(json.dumps({

@@ -262,6 +262,16 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   read the note and handed it over; #98 in the next. It is the only way
   known to land several engine changes for the price of one run. Say in #N
   what you did and what you resolved by hand, before and after.
+- **A merge that compiles is not a merge that is right.** #97 added a
+  member to `ComputedStyle`, and #86, which it was written without, had
+  made every box share the style of any box whose style compares equal,
+  with a comparison that listed the members by hand. Merged, the two
+  compiled, and the text inside an `<em>` took the upright style of the
+  text beside it. git showed 11 conflicts, all of them names, and not
+  this. #97's own suite showed it, which is what a suite is for; the
+  comparison is written by the compiler now. When you carry a change
+  across another, read what the other one made every member of a type
+  take part in.
 
 **`main`**
 

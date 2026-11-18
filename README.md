@@ -41,7 +41,7 @@ standard now makes, which is 1,967 of the 1,973.
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 234 suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 235 suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
@@ -66,7 +66,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 234 engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 235 engine suites + 114 cross-origin Window/Location/channel checks
 make check-numbers   # the numbers above still divide and still count (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
@@ -677,7 +677,7 @@ twice.
   fire once the document's scripts have run.
 - **Web APIs:** `fetch`, `Response`, `Headers`, `URL`, `URLSearchParams`,
   `localStorage`/`sessionStorage`, `document.cookie`, `AbortController`,
-  `WebSocket` (RFC 6455), `Worker` (each worker is a thread with its own
+  `WebSocket` (limited `ws://` support; `wss://` fails closed, no TLS), `Worker` (each worker is a thread with its own
   interpreter and event loop; `Worker`, `Window`, and same-agent
   `MessagePort` messages use a neutral structured-clone packet for primitives,
   ordinary objects, and arrays), `canvas.getContext("2d")`, and the DOM:
@@ -740,7 +740,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 234 engine test suites
+# Run the 235 engine test suites
 make test
 ```
 
@@ -808,14 +808,14 @@ make test
 make test
 ```
 
-Output (234 suites; the first and last lines shown):
+Output (235 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 234 engine test suites passed successfully!
+All 235 engine test suites passed successfully!
 ```
 
 ```bash
@@ -1492,3 +1492,15 @@ seven cases; the pinned test262 delegation/yield differential gains 178 passing
 cases with no newly failing cases. Async request queuing and promise-job timing
 remain incomplete; see [Phase 77](docs/phases/77-async-generator-yield-star.md)
 and [finding 83](docs/findings/83-async-generator-delegation.md).
+
+### WebSocket handshake security (Phase 83)
+
+`wss://` no longer sends a plaintext handshake: this implementation has no
+WebSocket TLS transport and fails the connection instead. For `ws://`, URL
+and protocol input cannot inject HTTP headers; the response must be an HTTP
+101 upgrade with the correct named accept header, and selected subprotocols
+must have been offered. The RFC-based loopback tests run in `make test`.
+The client still lacks browser Origin/mixed-content policy, TLS, full API
+validation and frame compliance; do not use it as a secure browser boundary.
+See [Phase 83](docs/phases/83-websocket-handshake-security.md) and
+[finding 89](docs/findings/89-websocket-handshake-security.md).

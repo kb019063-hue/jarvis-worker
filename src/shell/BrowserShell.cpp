@@ -393,8 +393,8 @@ std::shared_ptr<Element> BrowserShell::element_at(float x, float y) const {
         if (stack_is_exhausted()) return;
         Rect b_rect = box->dimensions.border_box();
         Point local_p(adjusted_x, adjusted_y);
-        if (box->style.has_transform && !box->style.transform_matrix.is_identity()) {
-            local_p = box->style.transform_matrix.inverse().map_point(adjusted_x, adjusted_y);
+        if (box->style->has_transform && !box->style->transform_matrix.is_identity()) {
+            local_p = box->style->transform_matrix.inverse().map_point(adjusted_x, adjusted_y);
         }
         const bool inside = b_rect.contains(local_p.x, local_p.y);
 
@@ -429,7 +429,7 @@ std::shared_ptr<Element> BrowserShell::element_at(float x, float y) const {
         } else {
             // Out-of-flow positioned descendants can sit outside their parent's box.
             for (const auto& ch : box->children) {
-                if (ch && ch->style.is_out_of_flow()) {
+                if (ch && ch->style->is_out_of_flow()) {
                     search(ch);
                 }
             }
@@ -626,8 +626,8 @@ std::vector<uint8_t> BrowserShell::render_png_frame() {
 
     BitmapRenderer renderer(w, h);
     Color canvas_bg = Color::white();
-    if (m_layout_root && !m_layout_root->style.background_color.is_transparent()) {
-        canvas_bg = m_layout_root->style.background_color;
+    if (m_layout_root && !m_layout_root->style->background_color.is_transparent()) {
+        canvas_bg = m_layout_root->style->background_color;
     }
     renderer.clear(canvas_bg);
 

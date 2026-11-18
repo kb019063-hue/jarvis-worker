@@ -41,6 +41,11 @@ jobs:
         # may take at most 2.25 times the earlier one plus 40 ms; a cursor
         # registry that rescans every old iterator grows far beyond that.
         run: make bench-collections
+      - name: Style-heavy inline pages share ComputedStyle
+        # 100k repetitions of `word <b>bold</b>`, links, and styled spans.
+        # Copying ComputedStyle inline per box/fragment took 602-1382 MiB RSS;
+        # deduplicated SharedComputedStyle keeps peak RSS well under 500 MiB.
+        run: make bench-styles
       - name: Smoke-test the CLI
         run: ./build/litebird examples/hello.html --dump-dom-webplatform
       - name: CSS whitespace stays linear and keeps the same paint

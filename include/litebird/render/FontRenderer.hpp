@@ -36,6 +36,20 @@ public:
 
     uint16_t glyph_index(uint32_t codepoint) const;
     float glyph_advance(uint32_t codepoint, float font_size_px) const;
+
+    /// The `kern` table's adjustment between two codepoints, in font units:
+    /// negative when the pair wants to be drawn closer.
+    ///
+    /// Read from the format-0 subtable of a version-0 `kern` table, which is
+    /// what every TrueType font shipped before `GPOS` has and most still carry.
+    /// Zero for every pair the table does not name — including every pair in a
+    /// font with no `kern` table at all, which is the honest answer and not a
+    /// failure.
+    int16_t kerning_units(uint32_t left, uint32_t right) const;
+
+    /// True when this face has a `kern` table this can read, so that a caller
+    /// can skip the question for the thousands of pairs it will not find.
+    bool has_kerning() const { return m_kern_pairs > 0; }
     GlyphBitmap rasterize_glyph(uint32_t codepoint, int pixel_size) const;
 
     /// True when this face has a glyph for `codepoint` that is not `.notdef`.
@@ -120,6 +134,13 @@ private:
 
     std::vector<uint16_t> m_advance_widths;
     uint16_t m_ascii_glyphs[128]{};
+
+    /// Where the pairs of the `kern` subtable start, and how many there are.
+    /// They are sorted by `(left << 16) | right`, so a pair is found by binary
+    /// search over the file's own bytes rather than by building a hash of
+    /// thousands of entries the page will mostly not use.
+    uint32_t m_kern_pairs_offset{0};
+    uint16_t m_kern_pairs{0};
 };
 
 class FontRenderer {
@@ -338,9 +359,28 @@ public:
                                               bool italic = false) const;
 
     /// Horizontal advance of one codepoint at `font_size` px (exact size, not
-    /// rounded to a whole pixel size). Sums to `measure_text` for a string.
+    /// rounded to a whole pixel size). Sums to `measure_text` for a string of
+    /// one codepoint; for longer ones `measure_text` adds the kerning between
+    /// neighbours, which this cannot know about.
     float glyph_advance_px(uint32_t codepoint, float font_size, int font_weight = 400,
                            std::string_view css_family = {}, bool italic = false) const;
+
+    /// The `kern` adjustment between two codepoints, in px at `font_size`.
+    /// Negative when the pair is drawn closer — `AV` and `To` are the ones
+    /// everybody checks.
+    ///
+    /// Zero when the face has no `kern` table, when the table does not name the
+    /// pair, and when the two codepoints are not drawn by the same face: a
+    /// glyph from a fallback and a glyph from the family are not a pair the
+    /// font ever had an opinion about.
+    float kerning_px(uint32_t left, uint32_t right, float font_size, int font_weight = 400,
+                     std::string_view css_family = {}, bool italic = false) const;
+
+    /// True when the face that would draw this text has a `kern` table this can
+    /// read, so that a caller laying out thousands of pairs knows whether there
+    /// is anything to ask about.
+    bool font_kerning(std::string_view css_family = {}, int font_weight = 400,
+                      bool italic = false) const;
 
     /// Draws anti-aliased UTF-8 text whose line-box top is `(top_x, top_y)`.
     /// Calls `emit_pixel(px, py, coverage)` for every covered pixel (`coverage` in 1..255).
@@ -458,6 +498,12 @@ private:
     /// weight and not a bool for the reason `face_for` does.
     float advance_in_family(uint32_t codepoint, float font_size, int font_weight,
                             int family_id, bool italic = false) const;
+
+    /// `kerning_px` for a family already resolved, next to `advance_in_family`
+    /// and for the same reason: `measure_text` resolves once for a whole string
+    /// and must not do it again for every pair in it.
+    float kerning_in_family(uint32_t left, uint32_t right, float font_size, int font_weight,
+                            int family_id, bool italic) const;
 
     std::vector<FaceEntry> m_face_entries;
     std::vector<Family> m_families;

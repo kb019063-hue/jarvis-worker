@@ -477,6 +477,45 @@ bool TrueTypeFont::load_memory(std::vector<uint8_t> data) {
     if (!find_table("loca", m_loca_offset, m_loca_length)) return false;
     if (!find_table("glyf", m_glyf_offset, m_glyf_length)) return false;
 
+    // `kern` is optional and its absence is not a failure: a font that does not
+    // say how its pairs close up is a font whose pairs do not close up, and
+    // that is a normal state of affairs. Version 0 is the Windows table; the
+    // Apple version-1 table starts with 0x00010000 as a 32-bit number, is a
+    // different format inside, and is left out rather than guessed at.
+    m_kern_pairs_offset = 0;
+    m_kern_pairs = 0;
+    uint32_t kern_off = 0, kern_len = 0;
+    // header: version u16, nTables u16; each subtable: version, length,
+    // coverage, then the format-0 pair list's own search header.
+    if (find_table("kern", kern_off, kern_len) && kern_len >= 18 && read_u16_be(m_data, kern_off) == 0) {
+        const uint16_t subtables = read_u16_be(m_data, kern_off + 2);
+        uint32_t pos = kern_off + 4;
+        for (uint16_t i = 0; i < subtables; ++i) {
+            if (pos + 14 > kern_off + kern_len) break;
+            const uint16_t sub_length = read_u16_be(m_data, pos + 2);
+            const uint16_t coverage = read_u16_be(m_data, pos + 4);
+            // Format 0 is the pair list; bit 0 is "this affects the
+            // horizontal advance", which is the only direction the pen has
+            // here, and bit 2 would mean a cross-stream table whose values are
+            // not advances at all.
+            const bool format0 = (coverage >> 8) == 0;
+            const bool horizontal = (coverage & 0x1u) != 0;
+            const bool crosses = (coverage & 0x4u) != 0;
+            if (format0 && horizontal && !crosses && sub_length >= 14) {
+                const uint16_t pairs = read_u16_be(m_data, pos + 6);
+                const std::size_t pairs_end = pos + 14u + static_cast<std::size_t>(pairs) * 6u;
+                if (pairs > 0 && pairs_end <= static_cast<std::size_t>(kern_off) + kern_len &&
+                    pairs_end <= m_data.size()) {
+                    m_kern_pairs_offset = pos + 14;
+                    m_kern_pairs = pairs;
+                }
+                break;
+            }
+            if (sub_length < 6) break;
+            pos += sub_length;
+        }
+    }
+
     m_units_per_em = read_u16_be(m_data, head_off + 18);
     if (m_units_per_em == 0) return false;
     m_loc_format = read_i16_be(m_data, head_off + 50);
@@ -596,6 +635,32 @@ uint16_t TrueTypeFont::glyph_index(uint32_t codepoint) const {
         if (gid == 0) return 0;
         gid = static_cast<uint16_t>((static_cast<int32_t>(gid) + id_delta) & 0xFFFF);
         return (gid < m_num_glyphs) ? gid : 0;
+    }
+    return 0;
+}
+
+int16_t TrueTypeFont::kerning_units(uint32_t left, uint32_t right) const {
+    if (m_kern_pairs == 0) return 0;
+    const uint16_t left_glyph = glyph_index(left);
+    const uint16_t right_glyph = glyph_index(right);
+    // A `.notdef` box does not kern against anything: the font has no opinion
+    // about a glyph it does not have.
+    if (left_glyph == 0 || right_glyph == 0) return 0;
+
+    const uint32_t wanted = (static_cast<uint32_t>(left_glyph) << 16) | right_glyph;
+    // The pairs are sorted by that key, so this is a binary search over the
+    // file rather than a table of thousands of entries built at load time.
+    int low = 0;
+    int high = static_cast<int>(m_kern_pairs) - 1;
+    while (low <= high) {
+        const int mid = low + (high - low) / 2;
+        const std::size_t record = m_kern_pairs_offset + static_cast<std::size_t>(mid) * 6u;
+        if (record + 6u > m_data.size()) return 0;
+        const uint32_t key = (static_cast<uint32_t>(read_u16_be(m_data, record)) << 16) |
+                             read_u16_be(m_data, record + 2);
+        if (key == wanted) return read_i16_be(m_data, record + 4);
+        if (key < wanted) low = mid + 1;
+        else high = mid - 1;
     }
     return 0;
 }
@@ -1589,6 +1654,33 @@ float FontRenderer::glyph_advance_px(uint32_t codepoint, float font_size, int fo
     return advance_in_family(codepoint, font_size, font_weight, family_id, italic);
 }
 
+float FontRenderer::kerning_px(uint32_t left, uint32_t right, float font_size, int font_weight,
+                               std::string_view css_family, bool italic) const {
+    const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
+    return kerning_in_family(left, right, font_size, font_weight, family_id, italic);
+}
+
+float FontRenderer::kerning_in_family(uint32_t left, uint32_t right, float font_size, int font_weight,
+                                      int family_id, bool italic) const {
+    if (!(font_size > 0.0f)) return 0.0f;
+    // Both glyphs have to come from the same face: a pair split across a
+    // family and a fallback was never a pair the font had an opinion about.
+    const TrueTypeFont* left_face = face_for(left, font_weight, family_id, italic);
+    if (!left_face || !left_face->has_kerning()) return 0.0f;
+    if (!left_face->has_glyph(right)) return 0.0f;
+    const float units = static_cast<float>(left_face->kerning_units(left, right));
+    if (units == 0.0f) return 0.0f;
+    return units * font_size / static_cast<float>(left_face->units_per_em());
+}
+
+bool FontRenderer::font_kerning(std::string_view css_family, int font_weight, bool italic) const {
+    const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
+    // `'M'` stands for "some codepoint this face covers": the question is
+    // whether the face has a table, not what it says about one pair.
+    const TrueTypeFont* face = face_for('M', font_weight, family_id, italic);
+    return face && face->has_kerning();
+}
+
 float FontRenderer::advance_in_family(uint32_t codepoint, float font_size, int font_weight,
                                       int family_id, bool italic) const {
     // The slant reaches `face_for` because it can change which face answers,
@@ -1605,9 +1697,18 @@ float FontRenderer::measure_text(std::string_view utf8_text, float font_size, in
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
     float total = 0.0f;
     std::size_t pos = 0;
+    uint32_t previous = 0;
     while (pos < utf8_text.size()) {
         const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
         total += advance_in_family(cp, font_size, font_weight, family_id, italic);
+        // Kerning is a property of a pair, so the first glyph has nothing to
+        // kern against. It is added here and not in `advance_in_family` for the
+        // same reason: that function answers for one codepoint at a time, which
+        // is the only thing a per-glyph loop can ask.
+        if (previous != 0) {
+            total += kerning_in_family(previous, cp, font_size, font_weight, family_id, italic);
+        }
+        previous = cp;
     }
     return total;
 }
@@ -1694,8 +1795,16 @@ void FontRenderer::draw_text(
     const int baseline_y = static_cast<int>(std::lround(top_y + baseline_offset));
 
     std::size_t pos = 0;
+    uint32_t previous = 0;
     while (pos < utf8_text.size()) {
         const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
+        // The pair closes up *before* its second glyph is placed: kerning is
+        // the gap between two glyphs, so adding it after drawing the second one
+        // would move the gap and leave the glyph where it was.
+        if (previous != 0) {
+            pen_x += kerning_in_family(previous, cp, font_size, font_weight, family_id, italic);
+        }
+        previous = cp;
         const GlyphBitmap& g = get_glyph(cp, px_size, font_weight, family_id, italic);
         if (g.width > 0 && g.height > 0) {
             const int gx0 = static_cast<int>(std::lround(pen_x)) + g.bearing_x;

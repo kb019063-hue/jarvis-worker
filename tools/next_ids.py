@@ -49,6 +49,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -275,6 +276,25 @@ def collect_sets(ref: str | None = None, with_prs: bool = True) -> tuple[set[int
     return phases, findings, sources, warning
 
 
+def written(ref: str | None = None) -> tuple[set[int], set[int]]:
+    """The phase and finding numbers some file says: no floor, no pull request.
+
+    "Taken" and "written" are two questions. A floor makes every number up to
+    it taken, so that none of them is handed out again; it does not put a
+    write-up of that number on `main`. `tools/ci/check_pr.py` asked the first
+    question and reported the answer as the second: after the floors rose to
+    66 and 72 it told #63 (Phase 62, finding 68) and #73 (Phase 58, finding
+    64), both open and both holding numbers no file has, that their numbers
+    were "on main already", and that they were not ready to merge.
+    """
+    phases: set[int] = set()
+    findings: set[int] = set()
+    for file_phases, file_findings in scan_files(ref).values():
+        phases.update(file_phases)
+        findings.update(file_findings)
+    return phases, findings
+
+
 def collect(ref: str | None = None) -> tuple[int, int, dict[str, tuple[int, int]], str | None]:
     """Returns (next_phase, next_finding, per-source maxima, gh warning)."""
     phases, findings, sources, warning = collect_sets(ref)
@@ -356,7 +376,47 @@ def ref_cases() -> list[tuple[bool, str, str]]:
     cases.append((set(no_prs[0]) <= set(with_prs[0]) and set(no_prs[1]) <= set(with_prs[1]),
                   "--no-prs only ever takes numbers away",
                   "the open pull requests added nothing, which is fine, or took some away"))
+
+    written_phases, written_findings = written("HEAD")
+    floor_phase, floor_finding, _ = scan_state("HEAD")
+    beyond_p = sorted(n for n in set(no_prs[0]) - written_phases if n > floor_phase)
+    beyond_f = sorted(n for n in set(no_prs[1]) - written_findings if n > floor_finding)
+    cases.append((written_phases <= set(no_prs[0]) and written_findings <= set(no_prs[1])
+                  and not beyond_p and not beyond_f,
+                  "what a file says is taken, and what is taken beyond that is at or below a floor",
+                  f"taken, in no file and above the floor: phases {beyond_p}, findings {beyond_f}"
+                  if beyond_p or beyond_f else ""))
     return cases
+
+
+def floor_cases() -> list[tuple[bool, str, str]]:
+    """A floor makes a number taken. It does not make it written.
+
+    Asked of a tree made for the question: a floor of 10 and 12, one phase
+    write-up numbered 3 that cites finding 4, and nothing else.
+    """
+    global ROOT, STATE
+    kept = ROOT, STATE
+    with tempfile.TemporaryDirectory() as made:
+        ROOT = Path(made)
+        STATE = ROOT / "docs" / "state.json"
+        (ROOT / "docs" / "phases").mkdir(parents=True)
+        STATE.write_text('{"phase_floor": 10, "finding_floor": 12}', encoding="utf-8")
+        (ROOT / "docs" / "phases" / "03-a-write-up.md").write_text(
+            "# 3. A write-up\n\nIt closes finding 4.\n", encoding="utf-8")
+        try:
+            taken_phases, taken_findings, _sources, _warning = collect_sets(None, with_prs=False)
+            written_phases, written_findings = written(None)
+        finally:
+            ROOT, STATE = kept
+    return [
+        (taken_phases == set(range(1, 11)) and taken_findings == set(range(1, 13)),
+         "every number up to a floor is taken",
+         f"taken: phases {sorted(taken_phases)}, findings {sorted(taken_findings)}"),
+        (written_phases == {3} and written_findings == {4},
+         "only what a file says is written",
+         f"written: phases {sorted(written_phases)}, findings {sorted(written_findings)}"),
+    ]
 
 
 def self_test() -> int:
@@ -383,7 +443,15 @@ def self_test() -> int:
         if detail:
             print(f"         {detail}")
 
-    total = len(SELF_TEST_CASES) + len(ref_results)
+    floor_results = floor_cases()
+    print(f"\na floor: {len(floor_results)} cases")
+    for ok, name, detail in floor_results:
+        if not ok:
+            failed += 1
+        print(f"  [{'ok  ' if ok else 'FAIL'}] {name}")
+        print(f"         {detail}")
+
+    total = len(SELF_TEST_CASES) + len(ref_results) + len(floor_results)
     print(f"\n{total - failed}/{total} pass")
     return 1 if failed else 0
 
@@ -416,9 +484,17 @@ def main() -> int:
 
     if args.taken:
         phases, findings, sources, warning = collect_sets(args.ref, not args.no_prs)
+        written_phases, written_findings = written(args.ref)
+        phase_floor, finding_floor, _ = scan_state(args.ref)
         print(json.dumps({
             "phases": sorted(phases),
             "findings": sorted(findings),
+            # What a file says, apart from what a floor or a pull request
+            # adds: "is this number on main" is asked of these two.
+            "written_phases": sorted(written_phases),
+            "written_findings": sorted(written_findings),
+            "phase_floor": phase_floor,
+            "finding_floor": finding_floor,
             "next_phase": max(phases, default=0) + 1,
             "next_finding": max(findings, default=0) + 1,
             "warning": warning,

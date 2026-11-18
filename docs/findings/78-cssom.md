@@ -42,7 +42,7 @@ their top level, so the harness reported one `(harness)` row for each and ran
 
 ## 3. How it is verified
 
-- `make test` → **220 / 220** suites (`cssom_sheets_rules_insert_amounts_and_fonts`
+- `make test` → **224 / 224** suites (`cssom_sheets_rules_insert_amounts_and_fonts`
   asserts 60 facts, all of them compared in the page).
 - `make wpt` → **9567 / 9824** in 190 files, 0 unlisted failures (was
   9550 / 9744).

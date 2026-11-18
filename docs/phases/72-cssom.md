@@ -104,7 +104,7 @@ was found on the host already, so there is never anything to wait for and
 
 ## 3. How it is verified
 
-- **`make test`** → **220 / 220** suites. The new one,
+- **`make test`** → **224 / 224** suites. The new one,
   `cssom_sheets_rules_insert_amounts_and_fonts`, drives a page and asserts
   **60** facts, every one of them a comparison made in the page: the objects
   and their brands, that `insertRule` styles the page, which rule wins by

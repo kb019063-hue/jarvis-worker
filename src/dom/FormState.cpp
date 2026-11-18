@@ -18,8 +18,14 @@ FormControlState& Element::ensure_form_state() {
 }
 
 bool Element::is_defined() const {
-    if (m_custom_state == CustomElementState::Custom) return true;
     if (is_foreign()) return true;
+    if (m_custom_state == CustomElementState::Custom) return true;
+    // A built-in element that no definition was to customize is defined by
+    // being one. An element that answers to a custom element name, or that a
+    // definition was to customize (`<button is="x-y">`), is defined only once
+    // its upgrade has returned the element: one whose constructor failed is
+    // not `:defined`, whatever it is called.
+    if (!is_value().empty()) return false;
     return !CustomElementRegistry::is_valid_custom_element_name(m_tag_name);
 }
 

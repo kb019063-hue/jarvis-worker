@@ -1,6 +1,7 @@
 #include "litebird/net/ResourceLoader.hpp"
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/Storage.hpp"
+#include "litebird/net/Brotli.hpp"
 #include "litebird/net/DataUrl.hpp"
 #include "litebird/net/Deflate.hpp"
 #include "litebird/net/UrlParser.hpp"
@@ -11,6 +12,7 @@
 #include <charconv>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -122,6 +124,8 @@ struct OpenSslApi {
     int (*SSL_set1_host_fn)(SSL*, const char*) = nullptr;
     int (*SSL_connect_fn)(SSL*) = nullptr;
     int (*SSL_read_fn)(SSL*, void*, int) = nullptr;
+    int (*SSL_peek_fn)(SSL*, void*, int) = nullptr;
+    int (*SSL_pending_fn)(const SSL*) = nullptr;
     int (*SSL_write_fn)(SSL*, const void*, int) = nullptr;
     int (*SSL_shutdown_fn)(SSL*) = nullptr;
     int (*SSL_get_error_fn)(const SSL*, int) = nullptr;
@@ -170,12 +174,31 @@ struct OpenSslApi {
                 load(out.SSL_get_error_fn, "SSL_get_error") &&
                 load(out.SSL_get_verify_result_fn, "SSL_get_verify_result");
 
+            (void)load(out.SSL_peek_fn, "SSL_peek");
+            (void)load(out.SSL_pending_fn, "SSL_pending");
+
             out.available = ok;
             return out;
         }();
         return api;
     }
 };
+
+void ensure_sigpipe_ignored() {
+#ifdef SIGPIPE
+    static const bool installed = []() {
+        struct sigaction old_sa{};
+        if (::sigaction(SIGPIPE, nullptr, &old_sa) == 0 && old_sa.sa_handler == SIG_DFL) {
+            struct sigaction sa{};
+            sa.sa_handler = SIG_IGN;
+            sigemptyset(&sa.sa_mask);
+            (void)::sigaction(SIGPIPE, &sa, nullptr);
+        }
+        return true;
+    }();
+    (void)installed;
+#endif
+}
 
 bool is_safe_header_value(std::string_view value) {
     for (unsigned char c : value) {
@@ -342,45 +365,314 @@ int connect_with_timeout(const std::string& host, int port, int timeout_ms, std:
     return connected_fd;
 }
 
-bool decode_chunked_body(std::string_view raw, std::string& out, std::size_t max_bytes) {
-    out.clear();
-    std::size_t pos = 0;
-    while (true) {
-        const auto line_end = raw.find("\r\n", pos);
-        if (line_end == std::string_view::npos) return false;
-        std::string_view size_line = raw.substr(pos, line_end - pos);
-        if (const auto semi = size_line.find(';'); semi != std::string_view::npos) {
-            size_line = size_line.substr(0, semi);
-        }
-        while (!size_line.empty() && (size_line.front() == ' ' || size_line.front() == '\t')) size_line.remove_prefix(1);
-        while (!size_line.empty() && (size_line.back() == ' ' || size_line.back() == '\t')) size_line.remove_suffix(1);
-        if (size_line.empty()) return false;
+constexpr std::size_t kMaxIdleConnectionsPerKey = 4;
+constexpr std::size_t kMaxTotalIdleConnections = 32;
+constexpr int kDefaultKeepAliveTimeoutSeconds = 30;
+constexpr int kMaxKeepAliveTimeoutSeconds = 60;
 
-        std::size_t chunk_size = 0;
-        for (char c : size_line) {
-            const int d = hex_digit(c);
-            if (d < 0) return false;
-            if (chunk_size > (max_bytes - static_cast<std::size_t>(d)) / 16u) return false;
-            chunk_size = chunk_size * 16u + static_cast<std::size_t>(d);
-        }
-        pos = line_end + 2;
+struct HttpConnection {
+    bool is_tls{false};
+    int sockfd{-1};
+    OpenSslApi::SSL_CTX* ssl_ctx{nullptr};
+    OpenSslApi::SSL* ssl{nullptr};
+    std::chrono::steady_clock::time_point expires_at{};
+    int max_remaining{-1};
+    std::size_t requests_served{0};
+};
 
-        if (chunk_size == 0) {
-            // Optional trailer fields terminated by an empty CRLF line.
-            if (pos + 2 <= raw.size() && raw.substr(pos, 2) == "\r\n") {
-                return true;
+void close_http_connection(HttpConnection& conn, bool graceful_tls_shutdown = true) {
+    if (conn.ssl) {
+        const OpenSslApi& ssl_api = OpenSslApi::instance();
+        if (ssl_api.available) {
+            if (graceful_tls_shutdown && conn.sockfd >= 0) {
+                (void)ssl_api.SSL_shutdown_fn(conn.ssl);
             }
-            const auto trailer_end = raw.find("\r\n\r\n", pos);
-            return trailer_end != std::string_view::npos;
+            ssl_api.SSL_free_fn(conn.ssl);
         }
-
-        if (chunk_size > max_bytes - out.size()) return false;
-        if (chunk_size + 2 > raw.size() - pos) return false;
-        if (raw[pos + chunk_size] != '\r' || raw[pos + chunk_size + 1] != '\n') return false;
-
-        out.append(raw.data() + pos, chunk_size);
-        pos += chunk_size + 2;
+        conn.ssl = nullptr;
     }
+    if (conn.ssl_ctx) {
+        const OpenSslApi& ssl_api = OpenSslApi::instance();
+        if (ssl_api.available) {
+            ssl_api.SSL_CTX_free_fn(conn.ssl_ctx);
+        }
+        conn.ssl_ctx = nullptr;
+    }
+    if (conn.sockfd >= 0) {
+        ::close(conn.sockfd);
+        conn.sockfd = -1;
+    }
+}
+
+bool is_http_connection_healthy(HttpConnection& conn) {
+    if (conn.sockfd < 0) return false;
+    if (conn.max_remaining == 0) return false;
+    if (std::chrono::steady_clock::now() >= conn.expires_at) return false;
+
+    pollfd pfd{};
+    pfd.fd = conn.sockfd;
+    pfd.events = POLLIN | POLLERR | POLLHUP;
+    int pr = 0;
+    do {
+        pr = ::poll(&pfd, 1, 0);
+    } while (pr < 0 && errno == EINTR);
+    if (pr < 0) return false;
+
+    if (!conn.is_tls) {
+        if (pr == 0) return true;
+        if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return false;
+        // Any readable event on an idle plaintext HTTP/1.1 connection is either
+        // a peer EOF or unsolicited trailing bytes (desync); discard either way.
+        return false;
+    }
+
+    const OpenSslApi& ssl_api = OpenSslApi::instance();
+    if (!ssl_api.available || !conn.ssl) return false;
+    if (ssl_api.SSL_pending_fn && ssl_api.SSL_pending_fn(conn.ssl) > 0) {
+        return false;
+    }
+    if (pr == 0) return true;
+    if (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)) return false;
+
+    if (pfd.revents & POLLIN) {
+        char dummy = 0;
+        ssize_t peek_rc = 0;
+        do {
+            peek_rc = ::recv(conn.sockfd, &dummy, 1, MSG_PEEK | MSG_DONTWAIT);
+        } while (peek_rc < 0 && errno == EINTR);
+        if (peek_rc <= 0) return false;
+
+        if (!ssl_api.SSL_peek_fn) return false;
+        const int orig_flags = ::fcntl(conn.sockfd, F_GETFL, 0);
+        if (orig_flags < 0) return false;
+        if (::fcntl(conn.sockfd, F_SETFL, orig_flags | O_NONBLOCK) < 0) return false;
+        const int ssl_rc = ssl_api.SSL_peek_fn(conn.ssl, &dummy, 1);
+        const int ssl_err = (ssl_rc <= 0) ? ssl_api.SSL_get_error_fn(conn.ssl, ssl_rc) : 0;
+        (void)::fcntl(conn.sockfd, F_SETFL, orig_flags);
+
+        // Consumed post-handshake TLS 1.3 NewSessionTicket without app data.
+        return ssl_rc < 0 && ssl_err == 2; // SSL_ERROR_WANT_READ
+    }
+    return true;
+}
+
+class HttpConnectionPool {
+public:
+    ~HttpConnectionPool() {
+        clear();
+    }
+
+    bool acquire(const std::string& key, HttpConnection& out) {
+        std::vector<HttpConnection> to_close;
+        bool found = false;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            prune_expired_locked(to_close);
+            // Walk MRU (back to front) to pick the freshest idle connection for `key`.
+            auto it = m_entries.end();
+            while (it != m_entries.begin()) {
+                --it;
+                if (it->key != key) continue;
+                HttpConnection candidate = std::move(it->conn);
+                it = m_entries.erase(it);
+                if (is_http_connection_healthy(candidate)) {
+                    out = std::move(candidate);
+                    found = true;
+                    break;
+                }
+                to_close.push_back(std::move(candidate));
+            }
+        }
+        for (auto& dead : to_close) {
+            close_http_connection(dead, /*graceful_tls_shutdown=*/false);
+        }
+        return found;
+    }
+
+    void release(const std::string& key, HttpConnection conn) {
+        if (conn.sockfd < 0 || conn.max_remaining == 0 ||
+            std::chrono::steady_clock::now() >= conn.expires_at) {
+            close_http_connection(conn, /*graceful_tls_shutdown=*/true);
+            return;
+        }
+        std::vector<HttpConnection> to_close;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            prune_expired_locked(to_close);
+            std::size_t key_count = 0;
+            for (const auto& entry : m_entries) {
+                if (entry.key == key) ++key_count;
+            }
+            for (auto it = m_entries.begin(); it != m_entries.end() && key_count >= kMaxIdleConnectionsPerKey; ) {
+                if (it->key == key) {
+                    to_close.push_back(std::move(it->conn));
+                    it = m_entries.erase(it);
+                    --key_count;
+                } else {
+                    ++it;
+                }
+            }
+            while (m_entries.size() >= kMaxTotalIdleConnections) {
+                to_close.push_back(std::move(m_entries.front().conn));
+                m_entries.pop_front();
+            }
+            m_entries.push_back(PoolEntry{key, std::move(conn)});
+        }
+        for (auto& evicted : to_close) {
+            close_http_connection(evicted, /*graceful_tls_shutdown=*/true);
+        }
+    }
+
+    void clear() {
+        std::vector<HttpConnection> to_close;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            for (auto& entry : m_entries) {
+                to_close.push_back(std::move(entry.conn));
+            }
+            m_entries.clear();
+        }
+        for (auto& c : to_close) {
+            close_http_connection(c, /*graceful_tls_shutdown=*/true);
+        }
+    }
+
+    std::size_t size() {
+        std::vector<HttpConnection> to_close;
+        std::size_t count = 0;
+        {
+            std::lock_guard<std::mutex> lock(m_mutex);
+            prune_expired_locked(to_close);
+            count = m_entries.size();
+        }
+        for (auto& dead : to_close) {
+            close_http_connection(dead, /*graceful_tls_shutdown=*/false);
+        }
+        return count;
+    }
+
+private:
+    struct PoolEntry {
+        std::string key;
+        HttpConnection conn;
+    };
+
+    void prune_expired_locked(std::vector<HttpConnection>& out_dead) {
+        const auto now = std::chrono::steady_clock::now();
+        for (auto it = m_entries.begin(); it != m_entries.end(); ) {
+            if (it->conn.max_remaining == 0 || now >= it->conn.expires_at) {
+                out_dead.push_back(std::move(it->conn));
+                it = m_entries.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    std::mutex m_mutex;
+    std::list<PoolEntry> m_entries;
+};
+
+HttpConnectionPool& http_connection_pool() {
+    static HttpConnectionPool pool;
+    return pool;
+}
+
+struct IncrementalChunkDecoder {
+    enum class State { SizeLine, Data, DataCrlf, Trailers, Done };
+    State state{State::SizeLine};
+    std::size_t remaining{0};
+    std::size_t trailer_bytes{0};
+    std::string decoded;
+
+    bool feed(std::string_view buf, std::size_t& pos, std::size_t max_body_bytes, std::size_t max_trailer_bytes) {
+        while (pos < buf.size() && state != State::Done) {
+            if (state == State::SizeLine) {
+                const auto line_end = buf.find("\r\n", pos);
+                if (line_end == std::string_view::npos) {
+                    return (buf.size() - pos) <= 1024u;
+                }
+                std::string_view size_line = buf.substr(pos, line_end - pos);
+                if (const auto semi = size_line.find(';'); semi != std::string_view::npos) {
+                    size_line = size_line.substr(0, semi);
+                }
+                while (!size_line.empty() && (size_line.front() == ' ' || size_line.front() == '\t')) size_line.remove_prefix(1);
+                while (!size_line.empty() && (size_line.back() == ' ' || size_line.back() == '\t')) size_line.remove_suffix(1);
+                if (size_line.empty()) return false;
+
+                std::size_t chunk_size = 0;
+                for (char c : size_line) {
+                    const int d = hex_digit(c);
+                    if (d < 0) return false;
+                    if (chunk_size > (max_body_bytes - static_cast<std::size_t>(d)) / 16u) return false;
+                    chunk_size = chunk_size * 16u + static_cast<std::size_t>(d);
+                }
+                pos = line_end + 2;
+                if (chunk_size == 0) {
+                    state = State::Trailers;
+                    trailer_bytes = 0;
+                } else {
+                    if (chunk_size > max_body_bytes - decoded.size()) return false;
+                    remaining = chunk_size;
+                    state = State::Data;
+                }
+            } else if (state == State::Data) {
+                const std::size_t avail = buf.size() - pos;
+                const std::size_t take = std::min(avail, remaining);
+                decoded.append(buf.data() + pos, take);
+                pos += take;
+                remaining -= take;
+                if (remaining == 0) {
+                    state = State::DataCrlf;
+                }
+            } else if (state == State::DataCrlf) {
+                if (buf.size() - pos < 2) return true;
+                if (buf[pos] != '\r' || buf[pos + 1] != '\n') return false;
+                pos += 2;
+                state = State::SizeLine;
+            } else if (state == State::Trailers) {
+                const auto line_end = buf.find("\r\n", pos);
+                if (line_end == std::string_view::npos) {
+                    return (buf.size() - pos) <= (max_trailer_bytes - trailer_bytes);
+                }
+                const std::size_t line_len = line_end - pos;
+                if (line_len == 0) {
+                    pos = line_end + 2;
+                    state = State::Done;
+                    return true;
+                }
+                if (line_len + 2 > max_trailer_bytes - trailer_bytes) return false;
+                trailer_bytes += line_len + 2;
+                pos = line_end + 2;
+            }
+        }
+        return true;
+    }
+};
+
+bool is_idempotent_http_method(std::string_view method) {
+    const std::string lower = ascii_lower(method);
+    return lower == "get" || lower == "head" || lower == "options" ||
+           lower == "put" || lower == "delete" || lower == "trace";
+}
+
+bool parse_http_version(std::string_view ver, int& major_out, int& minor_out) {
+    if (ver.rfind("HTTP/", 0) != 0) return false;
+    ver.remove_prefix(5);
+    const auto dot = ver.find('.');
+    if (dot == std::string_view::npos) {
+        const auto r = std::from_chars(ver.data(), ver.data() + ver.size(), major_out);
+        if (ver.empty() || r.ec != std::errc{} || r.ptr != ver.data() + ver.size()) return false;
+        minor_out = 0;
+        return true;
+    }
+    const auto mj_sv = ver.substr(0, dot);
+    const auto mn_sv = ver.substr(dot + 1);
+    const auto r1 = std::from_chars(mj_sv.data(), mj_sv.data() + mj_sv.size(), major_out);
+    const auto r2 = std::from_chars(mn_sv.data(), mn_sv.data() + mn_sv.size(), minor_out);
+    return !mj_sv.empty() && !mn_sv.empty() &&
+           r1.ec == std::errc{} && r1.ptr == mj_sv.data() + mj_sv.size() &&
+           r2.ec == std::errc{} && r2.ptr == mn_sv.data() + mn_sv.size();
 }
 
 bool is_redirect_status(int status) {
@@ -1119,9 +1411,20 @@ std::size_t ResourceLoader::cors_preflight_cache_size() {
     return g_preflight_cache.size();
 }
 
+void ResourceLoader::clear_http_connection_pool() {
+    http_connection_pool().clear();
+}
+
+std::size_t ResourceLoader::http_connection_pool_size() {
+    return http_connection_pool().size();
+}
+
 void ResourceLoader::set_ca_bundle_for_testing(std::string ca_file_path) {
-    std::lock_guard<std::mutex> lock(g_ca_mutex);
-    g_test_ca_bundle = std::move(ca_file_path);
+    {
+        std::lock_guard<std::mutex> lock(g_ca_mutex);
+        g_test_ca_bundle = std::move(ca_file_path);
+    }
+    clear_http_connection_pool();
 }
 
 std::string ResourceLoader::detect_mime_type(std::string_view path_or_url) {
@@ -1845,7 +2148,7 @@ ResourceResponse ResourceLoader::load_http_single_hop(
         request += "Accept: text/html,application/xhtml+xml,application/xml,application/json;q=0.9,*/*;q=0.8\r\n";
     }
     if (!has_accept_encoding) {
-        request += "Accept-Encoding: gzip, deflate\r\n";
+        request += "Accept-Encoding: gzip, deflate, br\r\n";
     }
     for (const auto& [hk, hv] : headers) {
         request += hk + ": " + hv + "\r\n";
@@ -1853,7 +2156,7 @@ ResourceResponse ResourceLoader::load_http_single_hop(
     if (!has_content_length && !body.empty()) {
         request += "Content-Length: " + std::to_string(body.size()) + "\r\n";
     }
-    request += "Connection: close\r\n";
+    request += "Connection: keep-alive\r\n";
     if (request.size() + 2 > MaxHttpHeaderBytes) {
         resp.error_message = "HTTP request headers exceed 64 KiB limit";
         return resp;
@@ -1861,296 +2164,516 @@ ResourceResponse ResourceLoader::load_http_single_hop(
     request += "\r\n";
     if (!body.empty()) request += body;
 
-    const int sockfd = connect_with_timeout(connect_host, port, 1500, resp.error_message);
-    if (sockfd < 0) {
-        return resp;
-    }
+    ensure_sigpipe_ignored();
 
-    std::string raw_response;
+    const std::string custom_ca = use_tls ? get_test_ca_bundle() : std::string();
+    const std::string pool_key =
+        std::string(use_tls ? "https|" : "http|") +
+        ascii_lower(connect_host) + ":" + std::to_string(port) +
+        (use_tls ? ("|" + custom_ca) : "");
+    const std::string proto_label = use_tls ? "HTTPS" : "HTTP";
 
-    if (use_tls) {
+    auto dial_connection = [&](HttpConnection& out, std::string& err_out) -> bool {
+        const int sockfd = connect_with_timeout(connect_host, port, 1500, err_out);
+        if (sockfd < 0) return false;
+
+        out = HttpConnection{};
+        out.is_tls = use_tls;
+        out.sockfd = sockfd;
+        if (!use_tls) return true;
+
         const OpenSslApi& ssl_api = OpenSslApi::instance();
         if (!ssl_api.available) {
-            ::close(sockfd);
-            resp.error_message = "TLS library (libssl.so.3) is unavailable on this host";
-            return resp;
+            close_http_connection(out, false);
+            err_out = "TLS library (libssl.so.3) is unavailable on this host";
+            return false;
         }
 
-        OpenSslApi::SSL_CTX* ctx = ssl_api.SSL_CTX_new_fn(ssl_api.TLS_client_method_fn());
-        if (!ctx) {
-            ::close(sockfd);
-            resp.error_message = "Failed to initialize TLS context";
-            return resp;
+        out.ssl_ctx = ssl_api.SSL_CTX_new_fn(ssl_api.TLS_client_method_fn());
+        if (!out.ssl_ctx) {
+            close_http_connection(out, false);
+            err_out = "Failed to initialize TLS context";
+            return false;
         }
 
-        const std::string custom_ca = get_test_ca_bundle();
         if (!custom_ca.empty()) {
-            if (ssl_api.SSL_CTX_load_verify_locations_fn(ctx, custom_ca.c_str(), nullptr) != 1) {
-                ssl_api.SSL_CTX_free_fn(ctx);
-                ::close(sockfd);
-                resp.error_message = "Failed to load custom TLS CA bundle";
-                return resp;
+            if (ssl_api.SSL_CTX_load_verify_locations_fn(out.ssl_ctx, custom_ca.c_str(), nullptr) != 1) {
+                close_http_connection(out, false);
+                err_out = "Failed to load custom TLS CA bundle";
+                return false;
             }
         } else {
-            (void)ssl_api.SSL_CTX_set_default_verify_paths_fn(ctx);
+            (void)ssl_api.SSL_CTX_set_default_verify_paths_fn(out.ssl_ctx);
         }
         // SSL_VERIFY_PEER = 0x01
-        ssl_api.SSL_CTX_set_verify_fn(ctx, 0x01, nullptr);
+        ssl_api.SSL_CTX_set_verify_fn(out.ssl_ctx, 0x01, nullptr);
 
-        OpenSslApi::SSL* ssl = ssl_api.SSL_new_fn(ctx);
-        if (!ssl) {
-            ssl_api.SSL_CTX_free_fn(ctx);
-            ::close(sockfd);
-            resp.error_message = "Failed to allocate TLS session";
-            return resp;
+        out.ssl = ssl_api.SSL_new_fn(out.ssl_ctx);
+        if (!out.ssl) {
+            close_http_connection(out, false);
+            err_out = "Failed to allocate TLS session";
+            return false;
         }
 
-        auto cleanup_tls = [&]() {
-            ssl_api.SSL_free_fn(ssl);
-            ssl_api.SSL_CTX_free_fn(ctx);
-            ::close(sockfd);
-        };
-
-        (void)ssl_api.SSL_set_fd_fn(ssl, sockfd);
+        (void)ssl_api.SSL_set_fd_fn(out.ssl, out.sockfd);
         if (!is_ip_literal(connect_host)) {
             // SSL_CTRL_SET_TLSEXT_HOSTNAME = 55, TLSEXT_NAMETYPE_host_name = 0
-            (void)ssl_api.SSL_ctrl_fn(ssl, 55, 0, const_cast<char*>(connect_host.c_str()));
-            (void)ssl_api.SSL_set1_host_fn(ssl, connect_host.c_str());
+            (void)ssl_api.SSL_ctrl_fn(out.ssl, 55, 0, const_cast<char*>(connect_host.c_str()));
+            (void)ssl_api.SSL_set1_host_fn(out.ssl, connect_host.c_str());
         }
 
-        if (ssl_api.SSL_connect_fn(ssl) != 1 || ssl_api.SSL_get_verify_result_fn(ssl) != 0) {
-            cleanup_tls();
-            resp.error_message = "TLS handshake or certificate verification failed for " + connect_host;
-            return resp;
+        if (ssl_api.SSL_connect_fn(out.ssl) != 1 || ssl_api.SSL_get_verify_result_fn(out.ssl) != 0) {
+            close_http_connection(out, false);
+            err_out = "TLS handshake or certificate verification failed for " + connect_host;
+            return false;
         }
+        return true;
+    };
 
+    auto send_all = [&](HttpConnection& conn) -> bool {
+        if (conn.is_tls) {
+            const OpenSslApi& ssl_api = OpenSslApi::instance();
+            std::size_t sent = 0;
+            while (sent < request.size()) {
+                const int chunk = static_cast<int>(std::min<std::size_t>(request.size() - sent, 65536u));
+                const int written = ssl_api.SSL_write_fn(conn.ssl, request.data() + sent, chunk);
+                if (written <= 0) return false;
+                sent += static_cast<std::size_t>(written);
+            }
+            return true;
+        }
         std::size_t sent = 0;
         while (sent < request.size()) {
-            const int chunk = static_cast<int>(std::min<std::size_t>(request.size() - sent, 65536u));
-            const int written = ssl_api.SSL_write_fn(ssl, request.data() + sent, chunk);
-            if (written <= 0) {
-                cleanup_tls();
-                resp.error_message = "Failed to write HTTPS request";
-                return resp;
-            }
-            sent += static_cast<std::size_t>(written);
-        }
-
-        char buffer[8192];
-        while (true) {
-            const int n = ssl_api.SSL_read_fn(ssl, buffer, sizeof(buffer));
-            if (n == 0) break;
-            if (n < 0) {
-                // SSL_ERROR_ZERO_RETURN = 6
-                const int err = ssl_api.SSL_get_error_fn(ssl, n);
-                if (err == 6) break;
-                cleanup_tls();
-                resp.error_message = "Failed while reading HTTPS response";
-                return resp;
-            }
-
-            const auto received = static_cast<std::size_t>(n);
-            if (received > MaxHttpResponseBytes - raw_response.size()) {
-                cleanup_tls();
-                resp.error_message = "HTTPS response exceeds 16 MiB size limit";
-                return resp;
-            }
-            raw_response.append(buffer, received);
-
-            std::size_t header_end = raw_response.find("\r\n\r\n");
-            std::size_t sep_len = 4;
-            if (header_end == std::string::npos) {
-                header_end = raw_response.find("\n\n");
-                sep_len = 2;
-            }
-            if ((header_end == std::string::npos && raw_response.size() > MaxHttpHeaderBytes) ||
-                (header_end != std::string::npos && header_end + sep_len > MaxHttpHeaderBytes)) {
-                cleanup_tls();
-                resp.error_message = "HTTPS response headers exceed 64 KiB size limit";
-                return resp;
-            }
-        }
-
-        (void)ssl_api.SSL_shutdown_fn(ssl);
-        cleanup_tls();
-    } else {
-        std::size_t sent = 0;
-        while (sent < request.size()) {
-            const ssize_t count = ::send(sockfd, request.data() + sent, request.size() - sent, MSG_NOSIGNAL);
+            const ssize_t count = ::send(conn.sockfd, request.data() + sent, request.size() - sent, MSG_NOSIGNAL);
             if (count < 0 && errno == EINTR) continue;
-            if (count <= 0) {
-                ::close(sockfd);
-                resp.error_message = "Failed to send HTTP request";
-                return resp;
-            }
+            if (count <= 0) return false;
             sent += static_cast<std::size_t>(count);
         }
+        return true;
+    };
 
+    enum class ReadStatus { Ok, Eof, Error, Oversized };
+    auto read_some = [&](HttpConnection& conn, std::string& dst, std::size_t& total_wire_bytes) -> ReadStatus {
         char buffer[8192];
-        while (true) {
-            const ssize_t bytes_read = ::recv(sockfd, buffer, sizeof(buffer), 0);
-            if (bytes_read == 0) break;
-            if (bytes_read < 0) {
-                if (errno == EINTR) continue;
-                ::close(sockfd);
-                resp.error_message = "Failed while reading HTTP response";
-                return resp;
+        std::size_t received = 0;
+        if (conn.is_tls) {
+            const OpenSslApi& ssl_api = OpenSslApi::instance();
+            const int n = ssl_api.SSL_read_fn(conn.ssl, buffer, sizeof(buffer));
+            if (n == 0) return ReadStatus::Eof;
+            if (n < 0) {
+                const int err = ssl_api.SSL_get_error_fn(conn.ssl, n);
+                if (err == 6) return ReadStatus::Eof; // SSL_ERROR_ZERO_RETURN
+                return ReadStatus::Error;
             }
-
-            const auto received = static_cast<std::size_t>(bytes_read);
-            if (received > MaxHttpResponseBytes - raw_response.size()) {
-                ::close(sockfd);
-                resp.error_message = "HTTP response exceeds 16 MiB size limit";
-                return resp;
-            }
-            raw_response.append(buffer, received);
-
-            std::size_t header_end = raw_response.find("\r\n\r\n");
-            std::size_t sep_len = 4;
-            if (header_end == std::string::npos) {
-                header_end = raw_response.find("\n\n");
-                sep_len = 2;
-            }
-            if ((header_end == std::string::npos && raw_response.size() > MaxHttpHeaderBytes) ||
-                (header_end != std::string::npos && header_end + sep_len > MaxHttpHeaderBytes)) {
-                ::close(sockfd);
-                resp.error_message = "HTTP response headers exceed 64 KiB size limit";
-                return resp;
-            }
-        }
-        ::close(sockfd);
-    }
-
-    if (raw_response.empty()) {
-        resp.error_message = "Empty HTTP response";
-        return resp;
-    }
-
-    std::size_t header_end = raw_response.find("\r\n\r\n");
-    std::size_t header_separator_size = 4;
-    if (header_end == std::string::npos) {
-        header_end = raw_response.find("\n\n");
-        header_separator_size = 2;
-    }
-    if (header_end == std::string::npos) {
-        resp.error_message = "Malformed HTTP response: missing header terminator";
-        return resp;
-    }
-
-    const std::string header_part = raw_response.substr(0, header_end);
-    std::string body_part = raw_response.substr(header_end + header_separator_size);
-
-    std::stringstream hss(header_part);
-    std::string status_line;
-    if (std::getline(hss, status_line)) {
-        if (!status_line.empty() && status_line.back() == '\r') status_line.pop_back();
-        std::stringstream sl(status_line);
-        std::string http_ver;
-        int code = 0;
-        if (sl >> http_ver >> code && http_ver.rfind("HTTP/", 0) == 0 && code >= 100 && code <= 999) {
-            resp.status_code = code;
-            std::string rest;
-            std::getline(sl, rest);
-            resp.status_text = trim_http_ws(rest);
+            received = static_cast<std::size_t>(n);
         } else {
-            resp.error_message = "Malformed HTTP status line";
-            return resp;
-        }
-    } else {
-        resp.error_message = "Missing HTTP status line";
-        return resp;
-    }
-
-    std::string line;
-    while (std::getline(hss, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
-        const auto colon = line.find(':');
-        if (colon != std::string::npos) {
-            const std::string header_name = ascii_lower(trim_http_ws(std::string_view(line).substr(0, colon)));
-            const std::string header_val = trim_http_ws(std::string_view(line).substr(colon + 1));
-            if (header_name.empty()) continue;
-            resp.header_list.emplace_back(header_name, header_val);
-            auto existing = resp.headers.find(header_name);
-            if (existing != resp.headers.end()) {
-                existing->second += ", " + header_val;
-            } else {
-                resp.headers[header_name] = header_val;
-            }
-            if (header_name == "content-type") {
-                resp.content_type = header_val;
+            while (true) {
+                const ssize_t n = ::recv(conn.sockfd, buffer, sizeof(buffer), 0);
+                if (n == 0) return ReadStatus::Eof;
+                if (n < 0) {
+                    if (errno == EINTR) continue;
+                    return ReadStatus::Error;
+                }
+                received = static_cast<std::size_t>(n);
+                break;
             }
         }
-    }
-
-    bool is_chunked = false;
-    if (const auto te = resp.headers.find("transfer-encoding"); te != resp.headers.end()) {
-        if (ascii_lower(te->second).find("chunked") != std::string::npos) {
-            is_chunked = true;
+        if (received > MaxHttpResponseBytes - total_wire_bytes) {
+            return ReadStatus::Oversized;
         }
-    }
+        total_wire_bytes += received;
+        dst.append(buffer, received);
+        return ReadStatus::Ok;
+    };
 
-    const bool bodyless_status =
-        (resp.status_code >= 100 && resp.status_code < 200) ||
-        resp.status_code == 204 ||
-        resp.status_code == 304 ||
-        ascii_lower(req_method) == "head";
+    std::string body_part;
+    bool bodyless_status = false;
+    const bool allow_stale_retry = is_idempotent_http_method(req_method);
 
-    if (bodyless_status) {
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        resp.status_code = 0;
+        resp.status_text.clear();
+        resp.content_type.clear();
+        resp.headers.clear();
+        resp.header_list.clear();
+        resp.error_message.clear();
         body_part.clear();
-    } else if (is_chunked) {
-        std::string unchunked;
-        if (!decode_chunked_body(body_part, unchunked, MaxHttpResponseBytes)) {
-            resp.error_message = "Malformed or oversized HTTP chunked response body";
+
+        HttpConnection conn;
+        const bool from_pool = (attempt == 0) && http_connection_pool().acquire(pool_key, conn);
+        if (!from_pool) {
+            if (!dial_connection(conn, resp.error_message)) {
+                return resp;
+            }
+        }
+
+        if (!send_all(conn)) {
+            close_http_connection(conn, false);
+            if (from_pool && allow_stale_retry) continue;
+            resp.error_message = use_tls ? "Failed to write HTTPS request" : "Failed to send HTTP request";
             return resp;
         }
-        body_part = std::move(unchunked);
-    } else if (const auto content_length = resp.headers.find("content-length"); content_length != resp.headers.end()) {
-        std::string_view value = content_length->second;
-        while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.remove_prefix(1);
-        while (!value.empty() && (value.back() == ' ' || value.back() == '\t')) value.remove_suffix(1);
+
+        std::string raw_head;
+        std::size_t total_wire_bytes = 0;
+        std::size_t header_end = std::string::npos;
+        std::size_t header_separator_size = 4;
+        bool retry_stale = false;
+
+        while (true) {
+            const ReadStatus st = read_some(conn, raw_head, total_wire_bytes);
+            if (st == ReadStatus::Oversized) {
+                close_http_connection(conn, false);
+                resp.error_message = proto_label + " response exceeds 16 MiB size limit";
+                return resp;
+            }
+            if (st == ReadStatus::Error) {
+                close_http_connection(conn, false);
+                if (from_pool && allow_stale_retry && total_wire_bytes == 0) {
+                    retry_stale = true;
+                    break;
+                }
+                resp.error_message = use_tls ? "Failed while reading HTTPS response" : "Failed while reading HTTP response";
+                return resp;
+            }
+            if (st == ReadStatus::Eof) {
+                close_http_connection(conn, false);
+                if (raw_head.empty()) {
+                    if (from_pool && allow_stale_retry) {
+                        retry_stale = true;
+                        break;
+                    }
+                    resp.error_message = "Empty HTTP response";
+                    return resp;
+                }
+                resp.error_message = "Malformed HTTP response: missing header terminator";
+                return resp;
+            }
+
+            header_end = raw_head.find("\r\n\r\n");
+            header_separator_size = 4;
+            if (header_end == std::string::npos) {
+                header_end = raw_head.find("\n\n");
+                header_separator_size = 2;
+            }
+            if ((header_end == std::string::npos && raw_head.size() > MaxHttpHeaderBytes) ||
+                (header_end != std::string::npos && header_end + header_separator_size > MaxHttpHeaderBytes)) {
+                close_http_connection(conn, false);
+                resp.error_message = proto_label + " response headers exceed 64 KiB size limit";
+                return resp;
+            }
+            if (header_end != std::string::npos) break;
+        }
+
+        if (retry_stale) continue;
+
+        const std::size_t header_total_bytes = header_end + header_separator_size;
+        const std::string header_part = raw_head.substr(0, header_end);
+        std::string wire_body = raw_head.substr(header_total_bytes);
+
+        int http_major = 1;
+        int http_minor = 1;
+        std::stringstream hss(header_part);
+        std::string status_line;
+        if (std::getline(hss, status_line)) {
+            if (!status_line.empty() && status_line.back() == '\r') status_line.pop_back();
+            std::stringstream sl(status_line);
+            std::string http_ver;
+            int code = 0;
+            if (sl >> http_ver >> code &&
+                parse_http_version(http_ver, http_major, http_minor) &&
+                code >= 100 && code <= 999) {
+                resp.status_code = code;
+                std::string rest;
+                std::getline(sl, rest);
+                resp.status_text = trim_http_ws(rest);
+            } else {
+                close_http_connection(conn, false);
+                resp.error_message = "Malformed HTTP status line";
+                return resp;
+            }
+        } else {
+            close_http_connection(conn, false);
+            resp.error_message = "Missing HTTP status line";
+            return resp;
+        }
+        const bool http_1_1_or_higher = (http_major > 1) || (http_major == 1 && http_minor >= 1);
+
+        std::string line;
+        while (std::getline(hss, line)) {
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            const auto colon = line.find(':');
+            if (colon != std::string::npos) {
+                const std::string header_name = ascii_lower(trim_http_ws(std::string_view(line).substr(0, colon)));
+                const std::string header_val = trim_http_ws(std::string_view(line).substr(colon + 1));
+                if (header_name.empty()) continue;
+                resp.header_list.emplace_back(header_name, header_val);
+                auto existing = resp.headers.find(header_name);
+                if (existing != resp.headers.end()) {
+                    existing->second += ", " + header_val;
+                } else {
+                    resp.headers[header_name] = header_val;
+                }
+                if (header_name == "content-type") {
+                    resp.content_type = header_val;
+                }
+            }
+        }
+
+        bodyless_status =
+            (resp.status_code >= 100 && resp.status_code < 200) ||
+            resp.status_code == 204 ||
+            resp.status_code == 304 ||
+            ascii_lower(req_method) == "head";
+
+        bool is_chunked = false;
+        bool framing_clean_for_reuse = true;
+        if (const auto te = resp.headers.find("transfer-encoding"); te != resp.headers.end()) {
+            const std::vector<std::string> codings = split_http_comma_tokens(te->second, true);
+            if (codings.empty()) {
+                close_http_connection(conn, false);
+                resp.error_message = "Malformed HTTP Transfer-Encoding";
+                return resp;
+            }
+            for (std::size_t i = 0; i + 1 < codings.size(); ++i) {
+                if (codings[i] != "identity") {
+                    close_http_connection(conn, false);
+                    resp.error_message = "Unsupported HTTP Transfer-Encoding: " + codings[i];
+                    return resp;
+                }
+            }
+            if (codings.back() != "chunked") {
+                close_http_connection(conn, false);
+                resp.error_message = "Unsupported HTTP Transfer-Encoding: " + codings.back();
+                return resp;
+            }
+            is_chunked = true;
+            if (resp.headers.find("content-length") != resp.headers.end()) {
+                framing_clean_for_reuse = false;
+            }
+        }
+
+        bool has_content_length = false;
         std::size_t declared_size = 0;
-        const auto parsed = std::from_chars(value.data(), value.data() + value.size(), declared_size);
-        if (value.empty() || parsed.ec != std::errc{} || parsed.ptr != value.data() + value.size()) {
-            resp.error_message = "Malformed HTTP Content-Length";
-            return resp;
+        if (!is_chunked) {
+            if (const auto cl = resp.headers.find("content-length"); cl != resp.headers.end()) {
+                const std::vector<std::string> cl_vals = split_http_comma_tokens(cl->second, false);
+                if (cl_vals.empty()) {
+                    close_http_connection(conn, false);
+                    resp.error_message = "Malformed HTTP Content-Length";
+                    return resp;
+                }
+                for (std::size_t i = 0; i < cl_vals.size(); ++i) {
+                    std::size_t val = 0;
+                    const std::string& sv = cl_vals[i];
+                    const auto parsed = std::from_chars(sv.data(), sv.data() + sv.size(), val);
+                    if (sv.empty() || parsed.ec != std::errc{} || parsed.ptr != sv.data() + sv.size()) {
+                        close_http_connection(conn, false);
+                        resp.error_message = "Malformed HTTP Content-Length";
+                        return resp;
+                    }
+                    if (i == 0) {
+                        declared_size = val;
+                    } else if (val != declared_size) {
+                        close_http_connection(conn, false);
+                        resp.error_message = "Conflicting HTTP Content-Length headers";
+                        return resp;
+                    }
+                }
+                if (!bodyless_status &&
+                    (declared_size > MaxHttpResponseBytes ||
+                     declared_size > MaxHttpResponseBytes - header_total_bytes)) {
+                    close_http_connection(conn, false);
+                    resp.error_message = proto_label + " response exceeds 16 MiB size limit";
+                    return resp;
+                }
+                has_content_length = true;
+            }
         }
-        if (declared_size > MaxHttpResponseBytes) {
-            resp.error_message = "HTTP response exceeds 16 MiB size limit";
-            return resp;
+
+        if (bodyless_status) {
+            if (!wire_body.empty()) {
+                framing_clean_for_reuse = false;
+                wire_body.clear();
+            }
+            body_part.clear();
+        } else if (is_chunked) {
+            IncrementalChunkDecoder chunk_decoder;
+            std::size_t parse_pos = 0;
+            while (true) {
+                if (!chunk_decoder.feed(wire_body, parse_pos, MaxHttpResponseBytes, MaxHttpHeaderBytes)) {
+                    close_http_connection(conn, false);
+                    resp.error_message = "Malformed or oversized HTTP chunked response body";
+                    return resp;
+                }
+                if (chunk_decoder.state == IncrementalChunkDecoder::State::Done) {
+                    if (parse_pos != wire_body.size()) {
+                        framing_clean_for_reuse = false;
+                    }
+                    break;
+                }
+                if (parse_pos >= 4096) {
+                    wire_body.erase(0, parse_pos);
+                    parse_pos = 0;
+                }
+                const ReadStatus st = read_some(conn, wire_body, total_wire_bytes);
+                if (st == ReadStatus::Oversized) {
+                    close_http_connection(conn, false);
+                    resp.error_message = proto_label + " response exceeds 16 MiB size limit";
+                    return resp;
+                }
+                if (st == ReadStatus::Eof || st == ReadStatus::Error) {
+                    close_http_connection(conn, false);
+                    resp.error_message = "Malformed or oversized HTTP chunked response body";
+                    return resp;
+                }
+            }
+            body_part = std::move(chunk_decoder.decoded);
+        } else if (has_content_length) {
+            while (wire_body.size() < declared_size) {
+                const ReadStatus st = read_some(conn, wire_body, total_wire_bytes);
+                if (st == ReadStatus::Oversized) {
+                    close_http_connection(conn, false);
+                    resp.error_message = proto_label + " response exceeds 16 MiB size limit";
+                    return resp;
+                }
+                if (st == ReadStatus::Eof || st == ReadStatus::Error) {
+                    close_http_connection(conn, false);
+                    resp.error_message = (st == ReadStatus::Eof)
+                        ? "Truncated HTTP response body"
+                        : (use_tls ? "Failed while reading HTTPS response" : "Failed while reading HTTP response");
+                    return resp;
+                }
+            }
+            if (wire_body.size() > declared_size) {
+                wire_body.resize(declared_size);
+                framing_clean_for_reuse = false;
+            }
+            body_part = std::move(wire_body);
+        } else {
+            // Close-delimited HTTP response: drain until peer closes socket.
+            framing_clean_for_reuse = false;
+            while (true) {
+                const ReadStatus st = read_some(conn, wire_body, total_wire_bytes);
+                if (st == ReadStatus::Oversized) {
+                    close_http_connection(conn, false);
+                    resp.error_message = proto_label + " response exceeds 16 MiB size limit";
+                    return resp;
+                }
+                if (st == ReadStatus::Error) {
+                    close_http_connection(conn, false);
+                    resp.error_message = use_tls ? "Failed while reading HTTPS response" : "Failed while reading HTTP response";
+                    return resp;
+                }
+                if (st == ReadStatus::Eof) break;
+            }
+            body_part = std::move(wire_body);
         }
-        if (body_part.size() > declared_size) {
-            body_part.resize(declared_size);
+
+        // Persist or close socket according to RFC 9112 §9.3 & Keep-Alive directives.
+        bool server_close = false;
+        bool server_keep_alive = false;
+        if (const auto ch = resp.headers.find("connection"); ch != resp.headers.end()) {
+            for (const std::string& tok : split_http_comma_tokens(ch->second, true)) {
+                if (tok == "close") server_close = true;
+                else if (tok == "keep-alive") server_keep_alive = true;
+            }
         }
+
+        bool keep_alive = framing_clean_for_reuse && !server_close &&
+                          (http_1_1_or_higher || server_keep_alive);
+        int timeout_sec = kDefaultKeepAliveTimeoutSeconds;
+        bool has_max = false;
+        int parsed_max = -1;
+        if (keep_alive) {
+            if (const auto ka = resp.headers.find("keep-alive"); ka != resp.headers.end()) {
+                for (const std::string& param : split_http_comma_tokens(ka->second, true)) {
+                    const auto eq = param.find('=');
+                    if (eq == std::string::npos) continue;
+                    const std::string k = trim_http_ws(std::string_view(param).substr(0, eq));
+                    std::string v = trim_http_ws(std::string_view(param).substr(eq + 1));
+                    if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+                        v = v.substr(1, v.size() - 2);
+                    }
+                    int num = 0;
+                    const auto pr = std::from_chars(v.data(), v.data() + v.size(), num);
+                    if (v.empty() || pr.ec != std::errc{} || pr.ptr != v.data() + v.size()) continue;
+                    if (k == "timeout") {
+                        if (num <= 0) keep_alive = false;
+                        else timeout_sec = std::min(num, kMaxKeepAliveTimeoutSeconds);
+                    } else if (k == "max") {
+                        has_max = true;
+                        parsed_max = num;
+                    }
+                }
+            }
+        }
+
+        ++conn.requests_served;
+        if (has_max) {
+            if (parsed_max <= 1) {
+                keep_alive = false;
+            } else {
+                const int cap_after = parsed_max - 1;
+                conn.max_remaining = (conn.max_remaining < 0)
+                    ? cap_after
+                    : std::min(conn.max_remaining - 1, cap_after);
+                if (conn.max_remaining <= 0) keep_alive = false;
+            }
+        } else if (conn.max_remaining > 0) {
+            --conn.max_remaining;
+            if (conn.max_remaining == 0) keep_alive = false;
+        }
+
+        if (keep_alive) {
+            conn.expires_at = std::chrono::steady_clock::now() + std::chrono::seconds(timeout_sec);
+            http_connection_pool().release(pool_key, std::move(conn));
+        } else {
+            close_http_connection(conn, /*graceful_tls_shutdown=*/true);
+        }
+        break;
     }
 
     if (!bodyless_status && !body_part.empty()) {
         if (const auto ce = resp.headers.find("content-encoding"); ce != resp.headers.end()) {
-            const std::string encoding = ascii_lower(trim_http_ws(ce->second));
-            if (encoding == "gzip" || encoding == "x-gzip") {
-                std::vector<uint8_t> decoded;
-                if (!Deflate::inflate_gzip(reinterpret_cast<const uint8_t*>(body_part.data()),
-                                           body_part.size(), decoded, MaxHttpResponseBytes)) {
-                    resp.error_message = "Malformed or oversized gzip HTTP response body";
+            const std::vector<std::string> codings = split_http_comma_tokens(ce->second, true);
+            for (auto it = codings.rbegin(); it != codings.rend(); ++it) {
+                const std::string& encoding = *it;
+                if (encoding.empty() || encoding == "identity") continue;
+                if (encoding == "br") {
+                    std::vector<uint8_t> decoded;
+                    if (!Brotli::decompress(reinterpret_cast<const uint8_t*>(body_part.data()),
+                                            body_part.size(), decoded, MaxHttpResponseBytes)) {
+                        resp.error_message = "Malformed or oversized Brotli HTTP response body";
+                        return resp;
+                    }
+                    body_part.assign(reinterpret_cast<const char*>(decoded.data()), decoded.size());
+                } else if (encoding == "gzip" || encoding == "x-gzip") {
+                    std::vector<uint8_t> decoded;
+                    if (!Deflate::inflate_gzip(reinterpret_cast<const uint8_t*>(body_part.data()),
+                                               body_part.size(), decoded, MaxHttpResponseBytes)) {
+                        resp.error_message = "Malformed or oversized gzip HTTP response body";
+                        return resp;
+                    }
+                    body_part.assign(reinterpret_cast<const char*>(decoded.data()), decoded.size());
+                } else if (encoding == "deflate") {
+                    std::vector<uint8_t> decoded;
+                    bool ok = Deflate::inflate_zlib(reinterpret_cast<const uint8_t*>(body_part.data()),
+                                                    body_part.size(), decoded, MaxHttpResponseBytes);
+                    if (!ok) {
+                        decoded.clear();
+                        ok = Deflate::inflate_raw(reinterpret_cast<const uint8_t*>(body_part.data()),
+                                                  body_part.size(), decoded, MaxHttpResponseBytes);
+                    }
+                    if (!ok) {
+                        resp.error_message = "Malformed or oversized deflate HTTP response body";
+                        return resp;
+                    }
+                    body_part.assign(reinterpret_cast<const char*>(decoded.data()), decoded.size());
+                } else {
+                    resp.error_message = "Unsupported HTTP Content-Encoding: " + encoding;
                     return resp;
                 }
-                body_part.assign(reinterpret_cast<const char*>(decoded.data()), decoded.size());
-            } else if (encoding == "deflate") {
-                std::vector<uint8_t> decoded;
-                bool ok = Deflate::inflate_zlib(reinterpret_cast<const uint8_t*>(body_part.data()),
-                                                body_part.size(), decoded, MaxHttpResponseBytes);
-                if (!ok) {
-                    decoded.clear();
-                    ok = Deflate::inflate_raw(reinterpret_cast<const uint8_t*>(body_part.data()),
-                                              body_part.size(), decoded, MaxHttpResponseBytes);
-                }
-                if (!ok) {
-                    resp.error_message = "Malformed or oversized deflate HTTP response body";
-                    return resp;
-                }
-                body_part.assign(reinterpret_cast<const char*>(decoded.data()), decoded.size());
-            } else if (!encoding.empty() && encoding != "identity") {
-                resp.error_message = "Unsupported HTTP Content-Encoding: " + encoding;
-                return resp;
             }
         }
     }

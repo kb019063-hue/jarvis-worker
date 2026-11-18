@@ -66,12 +66,10 @@ scoreboard — is not a phase and takes no phase or finding number.
    `P` and `F` come from `python3 tools/next_ids.py`, which reads the
    documents, `docs/`, `docs/state.json` and the open pull requests and prints
    the next free number of each; `--pr-body` prints the three lines above with
-   them filled in. Ask it of today's `main`, also when you renumber (the
-   last row of the table below says why):
-   `git fetch origin main && python3 tools/next_ids.py --ref FETCH_HEAD`.
-   (They used to be read out of ARCHITECTURE.md and AUDIT.md — see the notice
-   at the top.) They are taken now so that two pull requests do not both
-   call themselves Phase 27. A change that is not engine work —
+   them filled in. It asks GitHub for `main` as well, so a tree that is hours
+   old gets the same answer as a new one. (They used to be read out of
+   ARCHITECTURE.md and AUDIT.md — see the notice at the top.) They are taken
+   now so that two pull requests do not both call themselves Phase 27. A change that is not engine work —
    documents, tooling, CI — takes neither: write `No phase, no finding` and
    say why instead.
 3. **One task at a time, inside its files.** If the work turns out to need a
@@ -148,10 +146,16 @@ the same time will both have changed them. So:
   It asks what is easy to believe and was wrong more than once: that `main`
   is in the head commit, that CI passed on that commit, that the numbers are
   still free.
+- **When `main` has moved, ask it before you merge `main` again.** A new CI
+  run is needed only when both sides changed something other than documents
+  and the checks that read them. When `main` moved by a line of README.md,
+  or your pull request is documents alone, it runs those checks itself on
+  the tree that would be merged, in seconds, and says "ready" ("A line of
+  README.md cost 28 minutes", below).
 
 ## What has gone wrong, and what to do about it
 
-Everything here happened between 15 and 17 November 2026, to agents that had
+Everything here happened between 15 and 18 November 2026, to agents that had
 read this file. Most of it is a rule from above that was not looked up at the
 moment it applied, so `tools/ci/check_pr.py` looks it up (it reads GitHub and
 changes nothing there):
@@ -208,7 +212,19 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   `main` answered that no number was taken, without an error. That is the
   answer from before a number landed, to the question whether it has
   landed. `check_pr.py` now asks GitHub which commit `main` is, fetches it
-  when the clone does not have it, and reads that.
+  when the clone does not have it, and reads that. `tools/next_ids.py`
+  itself had the other half of the error: it read the tree it was run in
+  and the open pull requests, and a number merged since that tree was made
+  is in neither. Asked from the tree a session had begun with, it handed out
+  Phase 74 and finding 80 ten minutes after #90 had merged them. It asks
+  GitHub for `main` now, too.
+- **The work first, the claim afterwards.** #97 and #98 were opened on 18
+  November (07:09 and 07:14) with the work already in them. #98 came as
+  Phase 76 and finding 82, which #94 had claimed 16 minutes before, and was
+  renumbered four minutes later. #97 changes five files that #86 had held
+  for four hours, so one of the two has to be merged through the other. The
+  claim comes before the work so that the other agents can stay out of the
+  way while it is done; a claim made when it is finished protects nothing.
 - **A claim nobody can read.** #65 and #71 had no `Task:`, `Files:` and
   `Phase P, finding F` lines. So nothing said that #71 changed
   `src/js/JsEval.cpp`, which #68 named, and `src/js/JsOps.cpp`, which #70
@@ -242,6 +258,30 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   `git fetch` and merge `main` *last*, build and run the checks on that tree,
   push, let CI pass on that commit, and merge at once. If `main` moves in
   between, do it again; `check_pr.py merge N` says whether it has.
+- **Merged with `WIP:` in the title, on a head without `main`.** #91 was
+  merged on 18 November at 06:06, 19 seconds after its CI passed. Its head
+  did not have #92, merged 25 minutes before, which had made
+  `make check-numbers` the first step of CI; `tests/test_suite.cpp`
+  registered 219 suites and README.md said 218. `main` failed for 25
+  minutes, until #93, and every agent that merged `main` in between merged a
+  tree that fails CI. `check_pr.py merge 91` asks about the title and about
+  `main`, and would have said "not ready" twice. #76, #77 and #84 were
+  merged behind `main` as well, and were lucky.
+- **A line of README.md cost 28 minutes.** Until 18 November every commit
+  on `main` sent every finished pull request back for a whole CI run. That
+  morning `main` moved eight times in three hours and twenty minutes, with
+  up to eleven pull requests open: #86 merged `main` six times after its
+  work was done, #73 thirteen times in all. That is why agents stop asking
+  whether `main` has moved. But nothing in CI reads a document except four
+  quick steps (`make check-numbers`, and the three of "Documentation
+  shape"), so `check_pr.py merge N` now runs those on the tree that would be
+  merged, and asks for a new CI run only when both sides changed something
+  else. A document is `*.md` at the top of the tree, anything under `docs/`
+  and the `README.md` of a test directory; the checks that read them are
+  `tools/ci/` and `tools/next_ids.py`. Not every `.md`: `run_wpt.py` fails
+  for a file under `tests/wpt/` that its manifest does not list. Two engine
+  changes still need a run together; nothing is known to make that cheaper
+  but merging them in one branch and running CI once.
 - **Watch CI on `main` after your merge until it ends.** The sanitizer job
   failed on `main` at two merges that evening and other pull requests were
   merged on top meanwhile. A red `main` is the next task of whoever merged
@@ -267,7 +307,9 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
 - **A run is seven jobs, about 28 minutes.** `[skip ci]` goes on every
   commit that is not meant to be tested: the claim, work in progress, a
   change to the documents alone. The commit that is merged has a green run,
-  or differs from one that has only in `*.md`, and the pull request says so.
+  or differs from one that has only in documents, and the pull request says
+  so; a pull request of documents alone needs no run at all
+  (`check_pr.py merge N` says which it is).
 
 **The sandbox**
 
@@ -301,7 +343,13 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   fewer, in the directories on classes and async generators: other code had
   been leaning on what was fixed.
   `python3 tools/conformance/run_test262.py --binary before=MAIN --binary now=build/litebird built-ins language annexB`,
-  about twelve minutes.
+  about twelve minutes. CI does not run it, so nothing else will say. #77
+  and #79 changed the language and did not run it: five tests of
+  `Array.prototype.forEach` stopped passing with the first and ten about
+  `eval` with the second, beside the 96 and the 69 that began to pass, and
+  nobody knew for a day. Both were found by running it on `main` before and
+  after the merge, which anyone can do for a pull request that is already
+  merged.
 - **Measure what a change costs against `main`'s binary before calling it
   done**, with a second copy of `main`'s binary beside it to see how far a
   binary is from itself (3 to 5% here). The first version of Phase 43 was up
@@ -338,16 +386,15 @@ Rows that share files should not be in work at the same time.
 | **General ES-module semantics and transferable messaging remain open.** Phase 66 gives module workers a MIME-checked static graph subset (default/named/namespace imports; simple declaration/default/named exports; named re-exports) and gives Worker/Window/same-agent `MessagePort` neutral graph packets for primitives, ordinary objects and arrays. It deliberately has no live bindings, cycles, `export *`, dynamic `import()`, `import.meta`, top-level `await`, module `<script>` support, typed arrays/`ArrayBuffer`, transferable ownership handoff, transferred/cross-agent ports, or `messageerror`; functions, symbols, DOM/host/exotic values and non-empty transfer lists reject with `DataCloneError` | `src/js/Worker.cpp`, `src/js/JsOps.cpp`, `src/js/DomWindowBindings.cpp`, `src/js/DomBindings.cpp` | Phase 66 / finding 72 (`docs/phases/66-es-module-workers-and-structured-clone.md`, `docs/findings/72-es-module-workers-and-structured-clone.md`) | Phase 66 also makes the process-wide symbol/interface registries process-lifetime allocations, retaining Phase 40’s exit-order safety while removing their static-destructor race |
 | **`TextDecoder` and `TextEncoder` are not exposed to script**, and there is no encoder: the WHATWG Encoding Standard's 40 decoders and 228 labels landed in Phase 47 (`<meta charset>` prescan, `document.characterSet`, XML `[81] EncName`, `@charset`, `data:` URLs, XHR, subresources, and 2,543 `encoding/` WPT subtests), but a page that constructs `new TextDecoder('shift_jis')` gets a `ReferenceError`, `XMLSerializer` does not consult `document.characterSet` for an output declaration, and the prescan is one pass over the first 1,024 bytes with no streaming | `src/net/TextEncoding.cpp`, `include/litebird/net/TextEncoding.hpp`, `src/js/DomWindowBindings.cpp`, `src/js/DomBindings.cpp` | ARCHITECTURE.md, Phase 47, section 5; AUDIT.md, finding 53 | The decoder side is done and the `encoding/` pages that need no globals are vendored; what is left is the script API and the encoders (Big5's `U+00CA`/`U+00EA`, `gb18030`'s ranges in the other direction) |
 | **A private name is a property whose name begins with `#`.** `obj['#p']` reads and writes a private field from outside its class, and `'#p' in obj` is `true`; `o.#p` for an object without the field is `undefined` and assigning to it adds one, where both are a `TypeError`; one class reads another's `#p`; `#p in o` is a `SyntaxError` | `src/js/JsParser.cpp`, `src/js/JsEval.cpp`, `src/js/JsValue.cpp` (`is_hidden_key`) | ARCHITECTURE.md, Phase 43, section 8 | A private name is an identity made when the class is evaluated, not a string: two classes that each have a `#p` have two names. The same question as the row on the engine's `%` slots, and the same files: not beside it |
+| **A direct `eval` is wrong in four places that test262 has**, and ten of its tests that passed before Phase 65 do not pass since. (1) `eval?.('a')` is an indirect eval and is run as a direct one: `function fn() { var a = 'local'; return eval?.('a'); }` gives `local`. (2) `eval('super()')` in a method of an object literal is a `SyntaxError` before anything runs, and is a `TypeError` here. (3) A `var` that a direct eval declares inside a block stays in the block: in a function whose `x` is 1, after `for (let [_ = 0] of [[eval('var x = 2')]]) {}` or `try { throw 0 } catch (e) { eval('var x = 2') }`, `x` is still 1. (4) The name of a function expression can be assigned to in its body: `var r = function F() { F = 1; return typeof F; }` gives `number`, with eval or without; the tests that reach it through eval passed while an eval was global code | `src/js/JsEval.cpp`, `src/js/JsParser.cpp`, `src/js/JsInterpreter.cpp` | [`docs/phases/65-direct-eval-scope.md`](docs/phases/65-direct-eval-scope.md) | Found on 18 November by running test262 on `main` before and after #79: `language/eval-code/direct/super-call-method.js`, `language/expressions/optional-chaining/eval-optional-call.js`, the four `named-…reassign-fn-name-in-body-in-eval.js` (function, generator, async function, async generator), `scope-head-var-none.js` under `for-in` and `for-of`, `switch/scope-var-none-case.js`, `try/scope-catch-param-var-none.js` |
 | **Several built-ins still do not make the subclass they were called on.** With `class List extends Array {}`, `List.from([1])`, `List.of(1)` and `new List().map(f)` are plain arrays; `P.resolve(1)` for a subclass of `Promise` is a plain promise. There is no `Symbol.species`, and `instanceof` does not ask `Symbol.hasInstance` | `src/js/BuiltinsArray.cpp`, `src/js/Promise.cpp`, `src/js/JsOps.cpp` (`js_instance_of`) | ARCHITECTURE.md, Phase 34, section 9; three failing cases of `prototypes.dat` | The Map/Set constructor slice landed in Phase 75 / finding 81 (`docs/phases/75-map-set-constructor-dispatch.md`, `docs/findings/81-map-set-constructor-dispatch.md`): it now makes the new.target object first, gets `set`/`add` once, calls it for every input and closes an iterator if it throws. The remaining Array/Promise/species/`Symbol.hasInstance` work is separate |
 | **What a function is, in small**: nothing tells a built-in that is a constructor from one that is not (`new Math.max()` makes an object; `class X extends f.bind(null)` and `Reflect.construct(F, [], Date.now)` are accepted; `x instanceof` a function with no `prototype` answers `false` where it should throw, and a bound function is not asked for its target); `Object.getOwnPropertyNames(f)` lacks `length` and `name`, and `f.name = 'x'` takes effect; async and generator functions have `Function.prototype` itself as their prototype, where the language has an object for each kind between the two (three test262 tests, `AsyncFunctionPrototype-is-not-callable.js` and its relatives, passed while `Function.prototype` was not callable and fail since Phase 34); a property of a prototype that cannot be written does not stop an assignment to the object that inherits it | `src/js/JsOps.cpp`, `src/js/JsValue.cpp`, `src/js/BuiltinsObject.cpp` (`bind`), `include/litebird/js/Heap.hpp` (`JsObject::not_constructor` is the bit to set) | ARCHITECTURE.md, Phase 34, section 9; four failing cases of `prototypes.dat` | Six host constructors have no `prototype` (`Response`, `Headers`, `Worker`, `WebSocket`, `IntersectionObserver`, `ResizeObserver`): give them one before `instanceof` throws for a missing one |
 | **A script can read and write the engine's own slots**: they are properties whose names begin with `%`, hidden from enumeration and from nothing else. After `el.classList` was read, `el['%classList'] = 5` makes `el.classList` a number; `method['%home']` is the object `super` is looked up from, and assigning to it changes what `super` finds. The other side of it: a property of the script's own whose name begins with `%`, `#` or `@@`, or has the shape `__x__`, is left out of `Object.keys`, `JSON.stringify`, `for…in`, `Object.assign` and spread, so `var m = {}; m['#/route'] = 'home'; JSON.stringify(m)` is `{}` | `src/js/DomBindings.cpp` (`slot`, `set_slot`, `clear_slot`), `src/js/JsEval.cpp` (`%home`, `%fn`, `%new.target`), `src/js/JsValue.cpp` (`is_hidden_key`) | AUDIT.md, finding 41 | Move the slots off the property table (Phase 34 moved one: `JsObject::not_constructor`), so that no name is special; refusing such a key from a script would only trade one fault for the other. Not beside a row that changes `src/js/Dom*Bindings.cpp` |
 | **Array destructuring reads an array's elements without asking for its iterator.** `var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; }; var [x] = a` gives 1 where the language gives 9. With the iterator deleted from `Array.prototype`, `var [x] = [1]` still works where it is a `TypeError`. `var [x] = { next() { … } }` takes an object that only has `next` for an iterator. A parameter (`function f([p, q])`) and an assignment pattern go the same way | `src/js/JsEval.cpp` (`IterationCursor`) | ARCHITECTURE.md, Phase 63, section 6; two failing cases of `tests/js-conformance/iteration.dat` | `IterationCursor` has an array mode of its own, chosen by `is_array()`. `js_iterates_as_builtin(value)` (`JsOps.hpp`) is the question to ask in its place: true exactly when reading the elements is what the iterator would give. For the rest, `js_iterator_method(value, method)` and the protocol; a string already goes through `js_iterable_to_vector`. Not done in Phase 63 because `JsEval.cpp` belonged to open pull requests then (#68, #71) |
 | **`Array.from` decides for itself what is iterable.** Whatever `is_array()` or is a string it takes for iterable without asking. So with the iterator deleted from `Array.prototype`, `Array.from([1, 2])` is a `TypeError` where the language reads the array as array-like and gives `[1, 2]` (`main` before Phase 63 gave that, by never asking anything), and the same for a string. A number whose prototype was given an iterator is not asked (`Array.from(3)` is `[]`). And it collects every value before it maps the first: a mapper that throws does not close the iterator, and an iterator without an end hangs it where the mapper would have stopped it | `src/js/BuiltinsArray.cpp` (`Array.from`) | ARCHITECTURE.md, Phase 63, section 6; three failing cases of `iteration.dat` | `js_iterator_method(source, method)` is the language's GetMethod: no method means array-like, for an array as for anything else. With a method, map inside the visitor of `js_iterate`, which closes the iterator when the visitor throws. Not done in Phase 63 because `BuiltinsArray.cpp` belonged to an open pull request then (#63) |
 | **The default constructor of a subclass spreads its arguments.** For a class that has no constructor the parser writes `constructor(...args) { super(...args); }`, and since Phase 63 a spread asks the array for its iterator. So a script that replaced `Array.prototype[Symbol.iterator]` is called by `new Derived(1, 2)`, once for each default constructor on the way up, where the language hands the arguments on without iterating ("does not use argument evaluation", in the words of the test); a replacement that throws makes every such `new` throw. test262's `language/statements/class/subclass/default-constructor-spread-override.js` passed before Phase 63, when nothing asked an array, and fails now | `src/js/JsParser.cpp` (where the default constructor is made), `src/js/JsEval.cpp` (`eval_arguments`) | ARCHITECTURE.md, Phase 63, section 6; one failing case of `iteration.dat` | Mark the spread the parser makes (a flag on its `SpreadExpr`) and, for a marked one, copy the rest array's elements in `eval_arguments` without `js_iterate`. A constructor that a script writes with the same text has to keep asking. Not done in Phase 63 because both files belonged to an open pull request then (#68) |
-| **`yield*` in an async generator does not ask for `Symbol.asyncIterator`.** It runs the sync protocol (`js_iterate`) whatever kind of generator it is in. `yield* inner()` over another async generator is a `TypeError` (`… is not iterable`); on `main` before Phase 63 it never returned, because an object with `next` and no `Symbol.iterator` was taken for an iterator and a promise has no `done`. Three test262 tests of async delegation passed only through that and fail since Phase 63 (`yield-star-getiter-async-return-method-is-null.js`, `yield-star-normal-notdone-iter-value-throws.js`, `yield-star-promise-not-unwrapped.js`), and one that failed passes, for no better reason | `src/js/JsEval.cpp` (`eval_yield`) | ARCHITECTURE.md, Phase 63, section 6; one failing case of `iteration.dat` | In an async generator: the method under `kAsyncIteratorKey`, or without one the sync method with each result awaited; `next`, `throw` and `return` handed on, each result awaited, the value yielded without a second await. `for await`, in the same file, already finds the async iterator. Not done in Phase 63 because `JsEval.cpp` belonged to open pull requests then (#68, #71) |
 | **What an iterator is, in small**: `Map.prototype[Symbol.iterator]` is not `Map.prototype.entries` and `Set.prototype[Symbol.iterator]` is not `Set.prototype.values` (two functions each, and the one under `Symbol.iterator` is named `@@iterator`), and `Set`'s `values` and `keys` are not one function. (For `Array` the two have been one function, named `values`, since #77; the case of `iteration.dat` asks for `Map` and `Set` too, and still fails.) An array iterator has `next` as a property of its own, where the language has one `next` on a prototype that a script can replace, and every kind of iterator has the same prototype (`Object.prototype.toString` gives `[object Object]`). Every built-in iterable also has a property whose name is the text `Symbol.iterator`, which `Object.getOwnPropertyNames` lists; and the symbol itself is a property named `@@iterator`, so `'@@iterator' in []` is true and an object with a property of that name is iterable. `arguments` has no `Symbol.iterator` of its own. An object whose prototype is an array has no `length` and no elements | `src/js/BuiltinsArray.cpp`, `src/js/BuiltinsCollections.cpp`, `src/js/JsValue.cpp` | ARCHITECTURE.md, Phase 63, section 6; five failing cases of `iteration.dat` | The day array iterators take `next` from a prototype they share, `js_iterates_as_builtin` has to compare that function too (the comment in it says so): the direct read is right now because nothing a script can reach stands between the installed method and the elements. Since Phase 63 nothing reads the properties named `Symbol.iterator` except `Array.from` and `IterationCursor` (the rows above) and `has_property` in `JsValue.cpp` |
 | **What the DOM corpus cannot ask**: `getComputedStyle(el).width` is still `auto` (used values are available via `getBoundingClientRect()`/`offset*`/`client*` since Phase 36), style sheet objects (`sheet.cssRules`, `insertRule`), `document.write`, the SVG DOM (`className.baseVal`, `viewBox`, `getBBox()`: `tests/dom-conformance/open/dates-and-svg.js`) | `src/js/Dom*Bindings.cpp`, `src/main.cpp`, `src/shell/` | ARCHITECTURE.md, Phase 27, section 12 & Phase 36 | jsdom does none of the first two, so each needs a reference of its own before it is built |
 | **Memory is reclaimed only when a script calls `gc()`**, and no leak audit has been done. One leak is known: a function bound to an object that holds it (`o.b = f.bind(o)`, 2,000 times: 2,000 cells left after `gc()`), and what a pending timer holds. The collector cannot see into what a native function captured. What it costs meanwhile: `for (i = 0; i < n; i++) o = { a: i }` keeps about 1 KB for each object it has dropped (433 MB of resident memory after 400,000), so a loop of three million takes more than 3 GB; a benchmark written for Phase 43 brought a 4 GB machine to a stop that way until it called `gc()` between its loops | `src/js/Heap.cpp`, and everything that allocates script objects | Known gaps, 4; ARCHITECTURE.md, Phase 34, section 9; one failing case of `tests/js-conformance/prototypes.dat` | Touches everything that makes script objects, the DOM bindings included: not beside a row that changes `src/js/Dom*Bindings.cpp` |
 | **Six tree-construction cases need a script to run while the page is parsed.** Phase 76 vendored the corpus web-platform-tests publishes (62 files, 1,973 cases, `#description` sections) and made the parser emit a `ProcessingInstruction` for `<?target data>`, taking the vendored score from 1,792 to 1,967. What is left is the six cases of `scripted_adoption01.dat`, `scripted_ark.dat`, `scripted_foster01.dat` and `scripted_webkit01.dat`: each has a `<script>` that edits the document as the parser reaches it, and the parser does not run scripts | `src/html/`, `tools/conformance/`, `src/js/DomBindings.cpp` | Phase 76 / finding 82 (`docs/phases/76-the-wpt-corpus-and-processing-instructions.md`, `docs/findings/82-processing-instructions.md`) | The runner already passes the case's `#script-on` / `#script-off` flag to the binary; nothing in the tree construction loop can execute a script between tokens |
 | **Animated WebP, AVIF, and SVG `<text>`** | `src/render/WebPDecoder.cpp`, `src/render/ImageDecoder.cpp`, `src/render/SvgRenderer.cpp` | ARCHITECTURE.md, Phase 36, Phase 38 & Phase 54; [`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md); AUDIT.md, findings 43, 44 & 60; [`docs/findings/63-lossy-webp-vp8-refused.md`](docs/findings/63-lossy-webp-vp8-refused.md) | PNG, JPEG, GIF, **lossless WebP** (`VP8L`, all four transforms, meta prefix codes, colour cache), **lossy WebP** (a VP8 key frame: the boolean decoder, the 16x16/8x8/4x4 intra predictors, the 4x4 IDCT and the Walsh–Hadamard transform, the loop filter, plus the `VP8X` container and an `ALPH` plane in either compression method and all three spatial filters), SVG, BMP, and PPM are wired through `ImageDecoder::decode()`, and WebP is refused by status for the animated variant only. Canvas 2D text is done (Phase 46, finding 52). What is left: animated WebP (`ANMF` compositing and disposal), AVIF, and SVG `<text>` |
-| **`tools/next_ids.py` hands out a number that is on `main`, when it is asked from a tree behind `main`.** It reads the tree it is run in and the open pull requests. A number that was merged after that tree was made is in neither: its pull request is no longer open. On 18 November, asked from the tree this session began with (`--ref ee88b1c`), it answered Phase 74 and finding 80, which #90 had merged ten minutes before; from a tree with `main` in it, 75 and 81. `tools/ci/check_pr.py claim N` says so once the pull request is open ("Phase 74 is on main already"), and then the cost is a renumbering. The repair is to read `main` as GitHub has it besides the tree, which `check_pr.py` does for its own question (`main_commit`); without `gh` it has to go on answering from the tree, with the warning it already prints for the pull requests | `tools/next_ids.py` | AGENTS.md, "What has gone wrong": "`main`, as the clone remembers it" | Tooling: no phase, no finding. Until it is repaired, the command in step 2 of "Before starting" |

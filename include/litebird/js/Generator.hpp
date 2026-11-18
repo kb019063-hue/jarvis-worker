@@ -23,6 +23,21 @@ public:
     bool run_finalizers;
 };
 
+/// Unwinds a generator body with a return value: raised at the suspended
+/// `yield` when the consumer calls `.return(value)`. Runs `finally` blocks
+/// (never a `catch`); the frame then completes with the carried value. The
+/// argument of `.return()` is awaited at the resumption boundary for an
+/// async generator (AsyncGeneratorUnwrapYieldResumption), so this always
+/// carries the settled value.
+class GeneratorReturnException : public std::exception {
+public:
+    explicit GeneratorReturnException(JsValue return_value) : value(std::move(return_value)) {}
+    JsValue value;
+    const char* what() const noexcept override {
+        return "Generator return";
+    }
+};
+
 /// How deep in a chain of frames the code on this thread is running: 0 on an
 /// agent's own thread, and one more than its resumer's inside a frame.
 ///
@@ -58,12 +73,22 @@ struct GeneratorData {
     /// The frame belongs to an async function: `await` suspends it. (In a
     /// generator, `await` blocks instead; see JsInterpreter::eval_await.)
     bool is_coroutine{false};
+    /// The frame belongs to an async generator (`async function*`), as
+    /// distinct from an async function: `yield` is the consumer-visible
+    /// suspension, and an async generator's own promise machinery wraps its
+    /// result objects (see make_generator in JsEval.cpp).
+    bool is_async{false};
     /// Set when the engine has discarded the frame; nothing may resume it or
     /// act on its result afterwards.
     bool cancelled{false};
 
     JsValue send_value{JsValue::make_undefined()};
     JsValue yielded_value{JsValue::make_undefined()};
+    /// True when the yielded value is an iterator result object that the
+    /// consumer should receive as-is (a sync generator's `yield*` hands the
+    /// delegate's raw step object out; a normal `yield` wraps in a fresh
+    /// {value, done}). Checked and cleared when the resumer takes the yield.
+    bool yielded_raw{false};
     bool is_done{false};
 
     /// t_frame_nesting for the frame's thread, set by whoever resumes it.
@@ -76,6 +101,11 @@ struct GeneratorData {
     JsValue error{JsValue::make_undefined()};
     bool has_pending_throw{false};
     JsValue pending_throw{JsValue::make_undefined()};
+    /// A `.return(value)` that is waiting to resume the frame. Unlike a
+    /// terminate() it unwinds the body as a return completion, so `finally`
+    /// blocks and (inside a `yield*`) the delegate's `return` method run.
+    bool has_pending_return{false};
+    JsValue pending_return{JsValue::make_undefined()};
 
     /// The frame's scope (a JsEnvironment), kept so the collector can reach
     /// the frame's local variables while it is suspended.
@@ -115,11 +145,14 @@ struct GeneratorData {
     }
 
     /// Called on the frame's thread: parks it and hands `val` to the resumer.
-    /// Returns the value passed to the next resume().
-    JsValue yield_to_main(JsValue val) {
+    /// Returns the value passed to the next resume(). With `raw`, the value
+    /// is an iterator result object for the consumer to receive untouched
+    /// (a sync generator's `yield*`).
+    JsValue yield_to_main(JsValue val, bool raw = false) {
         std::unique_lock<std::mutex> lock(mtx);
         if (should_terminate) throw GeneratorAbortException(abort_runs_finalizers);
         yielded_value = std::move(val);
+        yielded_raw = raw;
         waiting = true;
         running = false;
         cv_main.notify_one();
@@ -151,6 +184,7 @@ struct GeneratorData {
     void finish(JsValue result, bool failed, JsValue thrown) {
         std::unique_lock<std::mutex> lock(mtx);
         yielded_value = failed ? JsValue::make_undefined() : std::move(result);
+        yielded_raw = false;
         has_error = failed;
         error = std::move(thrown);
         is_done = true;
@@ -203,6 +237,25 @@ struct GeneratorData {
         has_pending_throw = false;
         out = std::move(pending_throw);
         pending_throw = JsValue::make_undefined();
+        return true;
+    }
+
+    /// Makes the next resume() finish the frame as a return completion.
+    /// The value is awaited at the resumption boundary before the body sees
+    /// the completion (an async generator awaits it; a sync one takes it raw).
+    void inject_return(JsValue value) {
+        std::unique_lock<std::mutex> lock(mtx);
+        has_pending_return = true;
+        pending_return = std::move(value);
+    }
+
+    /// If a return was injected, takes it.
+    bool take_pending_return(JsValue& out) {
+        std::unique_lock<std::mutex> lock(mtx);
+        if (!has_pending_return) return false;
+        has_pending_return = false;
+        out = std::move(pending_return);
+        pending_return = JsValue::make_undefined();
         return true;
     }
 

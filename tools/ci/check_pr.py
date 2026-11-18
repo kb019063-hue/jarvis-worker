@@ -304,14 +304,21 @@ def hours_since(stamp: str) -> float:
     return (datetime.now(timezone.utc) - then).total_seconds() / 3600
 
 
-def next_free(taken: set[int]) -> int:
-    return max(taken, default=0) + 1
+def next_pair() -> str:
+    """'Phase P, finding F': the next free pair, as the allocator gives it.
 
-
-def taken_numbers(claims: list[dict], main: Main) -> tuple[set[int], set[int]]:
-    phases = set(main.phases) | {c["phase"] for c in claims if c["phase"] is not None}
-    findings = set(main.findings) | {c["finding"] for c in claims if c["finding"] is not None}
-    return phases, findings
+    This file used to work the pair out from the claims it had read, and a
+    claim is three lines that may not be there. #98 had `Phase 79` in its
+    title, no claim lines, and finding 85 in its text only: this file said
+    the next free finding was 85, and `tools/next_ids.py`, which reads the
+    whole text of every open pull request, said 86. One allocator, asked.
+    """
+    result = subprocess.run([sys.executable, str(NEXT_IDS), "--json"], cwd=ROOT, capture_output=True, text=True)
+    try:
+        answer = json.loads(result.stdout)
+        return f"Phase {answer['next_phase']}, finding {answer['next_finding']}"
+    except (ValueError, KeyError):
+        return "ask `python3 tools/next_ids.py` (it gave no answer here)"
 
 
 def numbers_of(claim: dict) -> str:
@@ -395,8 +402,7 @@ def show_claims() -> int:
         print("    files: " + (", ".join(own) if own else "(none)"))
         for blocking, problem in claim_problems(claim, claims, main):
             print(f"    {'!!' if blocking else '  '} {problem}")
-    phases, findings = taken_numbers(claims, main)
-    print(f"\nnext free: Phase {next_free(phases)}, finding {next_free(findings)}")
+    print(f"\nnext free: {next_pair()}")
     return 0
 
 
@@ -412,8 +418,7 @@ def check_claim(number: int) -> int:
     if not report.failed:
         report.ok(f"#{number}: {numbers_of(mine)}; no earlier open pull request has its numbers or its files")
     else:
-        phases, findings = taken_numbers(claims, main)
-        report.note(f"next free: Phase {next_free(phases)}, finding {next_free(findings)}")
+        report.note(f"next free: {next_pair()}")
     return 1 if report.failed else 0
 
 

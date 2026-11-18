@@ -1064,6 +1064,192 @@ bool decode_alpha_plane(
 // Public API.
 // ---------------------------------------------------------------------------
 
+namespace {
+
+/// The chunks of a byte range: an `ANMF` payload holds its image's chunks with
+/// no RIFF header around them.
+bool read_nested_chunks(const uint8_t* data, size_t size, std::vector<Chunk>& chunks, std::string& error) {
+    size_t pos = 0;
+    while (pos + 8 <= size) {
+        Chunk chunk;
+        std::memcpy(chunk.fourcc, data + pos, 4);
+        chunk.size = read_u32_le(data + pos + 4);
+        const size_t payload = pos + 8;
+        if (payload + chunk.size > size) {
+            error = "truncated WebP frame: chunk " + std::string(chunk.fourcc) + " runs past its ANMF";
+            return false;
+        }
+        chunk.data = data + payload;
+        chunks.push_back(chunk);
+        pos = payload + chunk.size + (chunk.size & 1u);
+    }
+    return true;
+}
+
+/// One still image, from the chunks that carry it: `VP8L`, or `VP8 ` with the
+/// `ALPH` beside it. `canvas_width`/`canvas_height` bound it when they are not
+/// zero.
+struct StillImage {
+    std::shared_ptr<ImageData> image;
+    bool lossy{false};
+    WebPDecoder::Status status{WebPDecoder::Status::Ok};
+    std::string error;
+};
+
+StillImage decode_still(const std::vector<Chunk>& chunks, int canvas_width, int canvas_height) {
+    StillImage still;
+    const Chunk* lossless = nullptr;
+    const Chunk* lossy = nullptr;
+    const Chunk* alpha_chunk = nullptr;
+    for (const Chunk& chunk : chunks) {
+        if (std::memcmp(chunk.fourcc, "VP8L", 4) == 0) {
+            if (lossless == nullptr) lossless = &chunk;
+        } else if (std::memcmp(chunk.fourcc, "VP8 ", 4) == 0) {
+            if (lossy == nullptr) lossy = &chunk;
+        } else if (std::memcmp(chunk.fourcc, "ALPH", 4) == 0) {
+            if (alpha_chunk == nullptr) alpha_chunk = &chunk;
+        }
+    }
+
+    if (lossless == nullptr && lossy != nullptr) {
+        // A lossy image: decode the VP8 key frame, then fold in the alpha plane
+        // if the file carries one.
+        Vp8Decoder::Frame frame;
+        std::string vp8_error;
+        const Vp8Decoder::Status vp8_status =
+            Vp8Decoder::decode(lossy->data, lossy->size, frame, vp8_error);
+        if (vp8_status != Vp8Decoder::Status::Ok) {
+            switch (vp8_status) {
+                case Vp8Decoder::Status::Truncated: still.status = WebPDecoder::Status::Truncated; break;
+                case Vp8Decoder::Status::TooLarge: still.status = WebPDecoder::Status::TooLarge; break;
+                case Vp8Decoder::Status::NotKeyFrame:
+                case Vp8Decoder::Status::UnsupportedProfile:
+                case Vp8Decoder::Status::Corrupt:
+                default: still.status = WebPDecoder::Status::Corrupt; break;
+            }
+            still.error = "lossy VP8: " + vp8_error;
+            return still;
+        }
+        if (canvas_width > 0 && canvas_height > 0 &&
+            (frame.width > canvas_width || frame.height > canvas_height)) {
+            still.status = WebPDecoder::Status::Corrupt;
+            still.error = "image is larger than its VP8X canvas";
+            return still;
+        }
+        std::vector<uint8_t> alpha;
+        const uint8_t* alpha_pixels = nullptr;
+        if (alpha_chunk != nullptr) {
+            std::string alpha_error;
+            if (!decode_alpha_plane(*alpha_chunk, frame.width, frame.height, alpha, alpha_error)) {
+                still.status = alpha_error.find("level-reduction") != std::string::npos
+                                   ? WebPDecoder::Status::UnsupportedAlpha
+                                   : WebPDecoder::Status::Corrupt;
+                still.error = alpha_error;
+                return still;
+            }
+            alpha_pixels = alpha.data();
+        }
+        std::vector<uint32_t> pixels;
+        Vp8Decoder::to_argb(frame, alpha_pixels, frame.width, pixels);
+        if (pixels.size() != static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height)) {
+            still.status = WebPDecoder::Status::Corrupt;
+            still.error = "the lossy decode produced the wrong number of pixels";
+            return still;
+        }
+        auto image = std::make_shared<ImageData>();
+        image->width = frame.width;
+        image->height = frame.height;
+        image->pixels = std::move(pixels);
+        still.image = std::move(image);
+        still.lossy = true;
+        return still;
+    }
+    if (lossless == nullptr) {
+        still.status = WebPDecoder::Status::Corrupt;
+        still.error = "no VP8L or VP8 image chunk";
+        return still;
+    }
+
+    Vp8lDecoder decoder(lossless->data, lossless->size);
+    std::vector<uint32_t> pixels;
+    int width = 0;
+    int height = 0;
+    if (!decoder.decode_image(pixels, width, height, still.error)) {
+        if (still.error.find("truncated") != std::string::npos) {
+            still.status = WebPDecoder::Status::Truncated;
+        } else if (still.error.find("budget") != std::string::npos ||
+                   still.error.find("dimension") != std::string::npos) {
+            still.status = WebPDecoder::Status::TooLarge;
+        } else {
+            still.status = WebPDecoder::Status::Corrupt;
+        }
+        return still;
+    }
+    if (width <= 0 || height <= 0) {
+        still.status = WebPDecoder::Status::Corrupt;
+        still.error = "decoded image has no pixels";
+        return still;
+    }
+    if (canvas_width > 0 && canvas_height > 0 && (width > canvas_width || height > canvas_height)) {
+        still.status = WebPDecoder::Status::Corrupt;
+        still.error = "image is larger than its VP8X canvas";
+        return still;
+    }
+    if (pixels.size() < static_cast<size_t>(width) * static_cast<size_t>(height)) {
+        still.status = WebPDecoder::Status::Corrupt;
+        still.error = "decoded pixel buffer is short";
+        return still;
+    }
+
+    auto image = std::make_shared<ImageData>();
+    image->width = width;
+    image->height = height;
+    pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
+    image->pixels = std::move(pixels);
+    still.image = std::move(image);
+    return still;
+}
+
+/// Whether a frame's own image data carries transparency: an `ALPH` chunk, or a
+/// `VP8L` image whose alpha bit is set.
+bool frame_has_alpha(const std::vector<Chunk>& chunks) {
+    for (const Chunk& chunk : chunks) {
+        if (std::memcmp(chunk.fourcc, "ALPH", 4) == 0) return true;
+        if (std::memcmp(chunk.fourcc, "VP8L", 4) == 0 && chunk.size >= 5) {
+            const uint32_t bits = read_u32_le(chunk.data + 1);
+            if (((bits >> 28) & 1u) != 0) return true;
+        }
+    }
+    return false;
+}
+
+/// One source pixel over one canvas pixel, as libwebp's animation decoder does
+/// it ("non-premultiplied" mode, src/demux/anim_decode.c): a pixel that is
+/// opaque replaces the canvas pixel, a fully transparent one leaves it, and
+/// anything between is blended with the same integer arithmetic — the
+/// destination's alpha scaled by 256 - src_a, and one reciprocal for the
+/// result's alpha — so that two decoders drawing the same frames give the same
+/// bytes.
+uint32_t blend_over(uint32_t src, uint32_t dst) {
+    const uint32_t src_a = (src >> 24) & 0xffu;
+    if (src_a == 0xffu) return src;
+    if (src_a == 0) return dst;
+    const uint32_t dst_a = (dst >> 24) & 0xffu;
+    const uint32_t dst_factor_a = (dst_a * (256u - src_a)) >> 8;
+    const uint32_t blend_a = src_a + dst_factor_a;
+    const uint32_t scale = (1u << 24) / blend_a;
+    uint32_t out = blend_a << 24;
+    for (int shift = 0; shift < 24; shift += 8) {
+        const uint32_t src_channel = (src >> shift) & 0xffu;
+        const uint32_t dst_channel = (dst >> shift) & 0xffu;
+        const uint32_t blended = (src_channel * src_a + dst_channel * dst_factor_a) * scale;
+        out |= ((blended >> 24) & 0xffu) << shift;
+    }
+    return out;
+}
+
+} // namespace
+
 bool WebPDecoder::is_webp(const uint8_t* data, size_t size) {
     return data != nullptr && size >= 12 && std::memcmp(data, "RIFF", 4) == 0 &&
            std::memcmp(data + 8, "WEBP", 4) == 0;
@@ -1073,7 +1259,6 @@ const char* WebPDecoder::status_string(Status status) {
     switch (status) {
         case Status::Ok: return "ok";
         case Status::NotWebP: return "not a WebP file";
-        case Status::UnsupportedAnimation: return "animated WebP is not supported";
         case Status::UnsupportedAlpha:
             return "lossy WebP alpha with level-reduction preprocessing is not supported";
         case Status::TooLarge: return "image is too large";
@@ -1102,159 +1287,304 @@ WebPDecoder::Status WebPDecoder::probe(const uint8_t* data, size_t size) {
             has_animation = true;
         }
     }
-    if (has_animation) return Status::UnsupportedAnimation;
     if (!complete) return Status::Truncated;
-    if (has_lossless || has_lossy) return Status::Ok;
+    if (has_animation || has_lossless || has_lossy) return Status::Ok;
     return Status::Corrupt;
 }
 
+/// The walk every entry point goes through: fills `animation`, says what went
+/// wrong in its `error`, and returns the status `decode_detailed()` reports.
+WebPDecoder::Status decode_animation(const uint8_t* data, size_t size, size_t max_frames,
+                                     WebPDecoder::Animation& animation, bool& first_is_lossy);
+
 WebPDecoder::DecodeResult WebPDecoder::decode_detailed(const uint8_t* data, size_t size) {
     DecodeResult result;
-    if (!is_webp(data, size)) {
-        result.status = Status::NotWebP;
-        result.error = "not a WebP file";
+    Animation animation;
+    bool first_is_lossy = false;
+    result.status = decode_animation(data, size, 1, animation, first_is_lossy);
+    if (result.status != Status::Ok) {
+        result.error = animation.error;
         return result;
+    }
+    result.image = animation.frames.front().image;
+    result.lossy = first_is_lossy;
+    return result;
+}
+
+WebPDecoder::Animation WebPDecoder::decode_frames(const uint8_t* data, size_t size, size_t max_frames) {
+    Animation animation;
+    bool first_is_lossy = false;
+    const Status status = decode_animation(data, size, max_frames, animation, first_is_lossy);
+    animation.first_is_lossy = first_is_lossy;
+    // A walk that stops part way leaves the frames it did decode in place, as
+    // GifDecoder does: the error says the file is broken, and `ok()` is false,
+    // but what was drawn before the break is there for a caller that wants it.
+    (void)status;
+    return animation;
+}
+
+WebPDecoder::Status decode_animation(const uint8_t* data, size_t size, size_t max_frames,
+                                     WebPDecoder::Animation& animation, bool& first_is_lossy) {
+    using Status = WebPDecoder::Status;
+    using AnimationFrame = WebPDecoder::AnimationFrame;
+    if (!WebPDecoder::is_webp(data, size)) {
+        animation.error = "not a WebP file";
+        return Status::NotWebP;
     }
 
     std::vector<Chunk> chunks;
-    std::string error;
-    if (!read_chunks(data, size, chunks, error)) {
-        result.status = (error.find("truncated") != std::string::npos) ? Status::Truncated : Status::Corrupt;
-        result.error = error;
-        return result;
+    if (!read_chunks(data, size, chunks, animation.error)) {
+        // A chunk that runs past the end is a truncation; a container with no
+        // chunks at all is not, and probe() has always called that one corrupt.
+        return animation.error.find("truncated") != std::string::npos ? Status::Truncated : Status::Corrupt;
     }
 
-    bool animation = false;
-    const Chunk* lossless = nullptr;
-    const Chunk* lossy = nullptr;
-    const Chunk* alpha_chunk = nullptr;
     int canvas_width = 0;
     int canvas_height = 0;
+    bool animation_flag = false;
+    const Chunk* anim = nullptr;
+    std::vector<const Chunk*> frame_chunks;
     for (const Chunk& chunk : chunks) {
         if (std::memcmp(chunk.fourcc, "VP8X", 4) == 0) {
             if (chunk.size < 10) {
-                result.status = Status::Truncated;
-                result.error = "truncated VP8X header";
-                return result;
+                animation.error = "truncated VP8X header";
+                return Status::Truncated;
             }
-            if ((chunk.data[0] & 0x02u) != 0) animation = true;
+            animation_flag = (chunk.data[0] & 0x02u) != 0;
             canvas_width = static_cast<int>(read_u24_le(chunk.data + 4)) + 1;
             canvas_height = static_cast<int>(read_u24_le(chunk.data + 7)) + 1;
-        } else if (std::memcmp(chunk.fourcc, "ANIM", 4) == 0 || std::memcmp(chunk.fourcc, "ANMF", 4) == 0) {
-            animation = true;
-        } else if (std::memcmp(chunk.fourcc, "VP8L", 4) == 0) {
-            if (lossless == nullptr) lossless = &chunk;
-        } else if (std::memcmp(chunk.fourcc, "VP8 ", 4) == 0) {
-            if (lossy == nullptr) lossy = &chunk;
-        } else if (std::memcmp(chunk.fourcc, "ALPH", 4) == 0) {
-            if (alpha_chunk == nullptr) alpha_chunk = &chunk;
+        } else if (std::memcmp(chunk.fourcc, "ANIM", 4) == 0) {
+            if (anim == nullptr) anim = &chunk;
+        } else if (std::memcmp(chunk.fourcc, "ANMF", 4) == 0) {
+            frame_chunks.push_back(&chunk);
         }
     }
 
-    if (animation) {
-        result.status = Status::UnsupportedAnimation;
-        result.error = "animated WebP: only still images are decoded";
-        return result;
-    }
-    if (lossless == nullptr && lossy != nullptr) {
-        // A lossy image: decode the VP8 key frame, then fold in the alpha plane
-        // if the file carries one.
-        Vp8Decoder::Frame frame;
-        std::string vp8_error;
-        const Vp8Decoder::Status vp8_status =
-            Vp8Decoder::decode(lossy->data, lossy->size, frame, vp8_error);
-        if (vp8_status != Vp8Decoder::Status::Ok) {
-            switch (vp8_status) {
-                case Vp8Decoder::Status::Truncated: result.status = Status::Truncated; break;
-                case Vp8Decoder::Status::TooLarge: result.status = Status::TooLarge; break;
-                case Vp8Decoder::Status::NotKeyFrame:
-                case Vp8Decoder::Status::UnsupportedProfile:
-                case Vp8Decoder::Status::Corrupt:
-                default: result.status = Status::Corrupt; break;
-            }
-            result.error = "lossy VP8: " + vp8_error;
-            return result;
+    if (frame_chunks.empty()) {
+        // A still image: one frame, with no duration and the whole image as the
+        // canvas. `probe()` says so too.
+        StillImage still = decode_still(chunks, canvas_width, canvas_height);
+        if (!still.image) {
+            animation.error = still.error.empty() ? "no VP8L or VP8 image chunk" : still.error;
+            return still.status != Status::Ok ? still.status : Status::Corrupt;
         }
-        if (canvas_width > 0 && canvas_height > 0 &&
-            (frame.width > canvas_width || frame.height > canvas_height)) {
-            result.status = Status::Corrupt;
-            result.error = "image is larger than its VP8X canvas";
-            return result;
-        }
-        std::vector<uint8_t> alpha;
-        const uint8_t* alpha_pixels = nullptr;
-        if (alpha_chunk != nullptr) {
-            std::string alpha_error;
-            if (!decode_alpha_plane(*alpha_chunk, frame.width, frame.height, alpha, alpha_error)) {
-                result.status = alpha_error.find("level-reduction") != std::string::npos
-                                    ? Status::UnsupportedAlpha
-                                    : Status::Corrupt;
-                result.error = alpha_error;
-                return result;
-            }
-            alpha_pixels = alpha.data();
-        }
-        std::vector<uint32_t> pixels;
-        Vp8Decoder::to_argb(frame, alpha_pixels, frame.width, pixels);
-        if (pixels.size() != static_cast<size_t>(frame.width) * static_cast<size_t>(frame.height)) {
-            result.status = Status::Corrupt;
-            result.error = "the lossy decode produced the wrong number of pixels";
-            return result;
-        }
-        auto image = std::make_shared<ImageData>();
-        image->width = frame.width;
-        image->height = frame.height;
-        image->pixels = std::move(pixels);
-        result.image = std::move(image);
-        result.status = Status::Ok;
-        result.lossy = true;
-        return result;
-    }
-    if (lossless == nullptr) {
-        result.status = Status::Corrupt;
-        result.error = "no VP8L or VP8 image chunk";
-        return result;
+        AnimationFrame frame;
+        frame.image = still.image;
+        frame.width = still.image->width;
+        frame.height = still.image->height;
+        animation.canvas_width = still.image->width;
+        animation.canvas_height = still.image->height;
+        first_is_lossy = still.lossy;
+        animation.frames.push_back(std::move(frame));
+        return Status::Ok;
     }
 
-    Vp8lDecoder decoder(lossless->data, lossless->size);
-    std::vector<uint32_t> pixels;
-    int width = 0;
-    int height = 0;
-    if (!decoder.decode_image(pixels, width, height, error)) {
-        if (error.find("truncated") != std::string::npos) {
-            result.status = Status::Truncated;
-        } else if (error.find("budget") != std::string::npos || error.find("dimension") != std::string::npos) {
-            result.status = Status::TooLarge;
+    // An animation: the canvas is `VP8X`'s, and `ANIM` carries the background
+    // colour and the loop count (both optional in practice: a file that says
+    // nothing starts transparent and plays once).
+    if (!animation_flag || canvas_width <= 0 || canvas_height <= 0) {
+        animation.error = "an animated WebP without a VP8X canvas";
+        return Status::Corrupt;
+    }
+    if (canvas_width > WebPDecoder::kMaxDimension || canvas_height > WebPDecoder::kMaxDimension ||
+        static_cast<int64_t>(canvas_width) * canvas_height > WebPDecoder::kMaxDecodedPixels) {
+        animation.error = "canvas is too large";
+        return Status::TooLarge;
+    }
+    animation.canvas_width = canvas_width;
+    animation.canvas_height = canvas_height;
+    animation.animated = true;
+    if (anim != nullptr) {
+        if (anim->size < 6) {
+            animation.error = "truncated ANIM header";
+            return Status::Truncated;
+        }
+        // Stored blue, green, red, alpha.
+        const uint32_t blue = anim->data[0];
+        const uint32_t green = anim->data[1];
+        const uint32_t red = anim->data[2];
+        const uint32_t alpha = anim->data[3];
+        animation.background = (alpha << 24) | (red << 16) | (green << 8) | blue;
+        animation.loop_count = static_cast<int>(anim->data[4]) | (static_cast<int>(anim->data[5]) << 8);
+    }
+
+    const size_t canvas_pixels = static_cast<size_t>(canvas_width) * static_cast<size_t>(canvas_height);
+    // Two canvases, as libwebp keeps them: `canvas` is the frame being built and
+    // what a viewer shows, `previous` is what the last frame left behind once
+    // its disposal method was applied.
+    std::vector<uint32_t> canvas(canvas_pixels, 0u);
+    std::vector<uint32_t> previous(canvas_pixels, 0u);
+    // The previous frame's rectangle, and whether it was cleared.
+    int previous_x = 0;
+    int previous_y = 0;
+    int previous_width = 0;
+    int previous_height = 0;
+    bool previous_disposed = false;
+    bool previous_was_key_frame = false;
+    size_t frame_index = 0;
+    int64_t total_frame_pixels = 0;
+    for (const Chunk* chunk : frame_chunks) {
+        if (animation.frames.size() >= max_frames) break;
+        if (chunk->size < 16) {
+            animation.error = "truncated ANMF header";
+            return Status::Truncated;
+        }
+        const uint8_t* header = chunk->data;
+        // Every geometry field is in units of two pixels, but the width and the
+        // height, which are stored minus one.
+        const int x = static_cast<int>(read_u24_le(header)) * 2;
+        const int y = static_cast<int>(read_u24_le(header + 3)) * 2;
+        const int width = static_cast<int>(read_u24_le(header + 6)) + 1;
+        const int height = static_cast<int>(read_u24_le(header + 9)) + 1;
+        const int duration_ms = static_cast<int>(read_u24_le(header + 12));
+        const uint8_t flags = header[15];
+        // Bit 1 is the blending method (0 = alpha blend), bit 0 the disposal
+        // method (0 = none, 1 = clear the rectangle).
+        const bool blend = (flags & 0x02u) == 0;
+        const bool dispose_to_background = (flags & 0x01u) != 0;
+        if (width <= 0 || height <= 0 || x + width > canvas_width || y + height > canvas_height ||
+            static_cast<int64_t>(width) * height > WebPDecoder::kMaxDecodedPixels) {
+            animation.error = "a frame rectangle is not inside the canvas";
+            return Status::Corrupt;
+        }
+
+        std::vector<Chunk> frame_content;
+        if (!read_nested_chunks(header + 16, chunk->size - 16, frame_content, animation.error)) {
+            return Status::Truncated;
+        }
+        StillImage still = decode_still(frame_content, 0, 0);
+        if (!still.image) {
+            animation.error = still.error.empty() ? "a frame has no image chunk" : still.error;
+            return still.status != Status::Ok ? still.status : Status::Corrupt;
+        }
+        if (still.image->width != width || still.image->height != height) {
+            animation.error = "a frame's image is not the size of its rectangle";
+            return Status::Corrupt;
+        }
+
+        // A key frame is drawn on a cleared canvas and is never blended: the
+        // first frame, a full-canvas frame that has no transparency or is not
+        // blended, and a frame that follows one which cleared the whole canvas.
+        // libwebp decides this the same way
+        // (IsKeyFrame(), src/demux/anim_decode.c), and it matters: blending a
+        // frame over transparent pixels is not quite the identity, because the
+        // blend rounds, so an animation that libwebp draws exactly would come
+        // out a shade different here.
+        // The last clause is about the previous frame, not this one: when it was
+        // the whole canvas and cleared itself, everything underneath is
+        // transparent, so this frame can be drawn without blending too.
+        const bool full_canvas = width == canvas_width && height == canvas_height;
+        const bool previous_was_full_canvas = previous_width == canvas_width && previous_height == canvas_height;
+        const bool key_frame =
+            frame_index == 0 || ((!frame_has_alpha(frame_content) || !blend) && full_canvas) ||
+            (previous_disposed && (previous_was_full_canvas || previous_was_key_frame));
+        if (key_frame) {
+            std::fill(canvas.begin(), canvas.end(), 0u);
         } else {
-            result.status = Status::Corrupt;
+            canvas = previous;
         }
-        result.error = error;
-        return result;
-    }
-    if (width <= 0 || height <= 0) {
-        result.status = Status::Corrupt;
-        result.error = "decoded image has no pixels";
-        return result;
-    }
-    if (canvas_width > 0 && canvas_height > 0 && (width > canvas_width || height > canvas_height)) {
-        result.status = Status::Corrupt;
-        result.error = "image is larger than its VP8X canvas";
-        return result;
-    }
-    if (pixels.size() < static_cast<size_t>(width) * static_cast<size_t>(height)) {
-        result.status = Status::Corrupt;
-        result.error = "decoded pixel buffer is short";
-        return result;
-    }
 
-    auto image = std::make_shared<ImageData>();
-    image->width = width;
-    image->height = height;
-    pixels.resize(static_cast<size_t>(width) * static_cast<size_t>(height));
-    image->pixels = std::move(pixels);
-    result.image = std::move(image);
-    result.status = Status::Ok;
-    return result;
+        // Draw the frame's pixels where its rectangle is, transparency included.
+        for (int row = 0; row < height; ++row) {
+            uint32_t* dst = canvas.data() + static_cast<size_t>(y + row) * canvas_width + x;
+            const uint32_t* src = still.image->pixels.data() + static_cast<size_t>(row) * width;
+            std::memcpy(dst, src, static_cast<size_t>(width) * sizeof(uint32_t));
+        }
+
+        // Blend what the frame left translucent over what was underneath, the
+        // way libwebp does it: only over pixels that came from an earlier
+        // frame, so nowhere that the previous frame cleared, and only outside
+        // the previous frame's rectangle when it did clear itself.
+        if (frame_index > 0 && blend && !key_frame) {
+            for (int row = 0; row < height; ++row) {
+                const int canvas_row = y + row;
+                uint32_t* dst = canvas.data() + static_cast<size_t>(canvas_row) * canvas_width;
+                const uint32_t* underneath = previous.data() + static_cast<size_t>(canvas_row) * canvas_width;
+                int left1 = x;
+                int width1 = width;
+                int left2 = 0;
+                int width2 = 0;
+                if (previous_disposed) {
+                    // Rows above and below the cleared rectangle are whole;
+                    // rows through it blend in the parts either side of it.
+                    const int previous_max_x = previous_x + previous_width;
+                    const int previous_max_y = previous_y + previous_height;
+                    width1 = 0;
+                    left1 = -1;
+                    if (canvas_row < previous_y || canvas_row >= previous_max_y || x >= previous_max_x ||
+                        x + width <= previous_x) {
+                        // The row misses the cleared rectangle, or this frame's
+                        // rectangle does: the whole row is blended.
+                        left1 = x;
+                        width1 = width;
+                    } else {
+                        if (x < previous_x) {
+                            left1 = x;
+                            width1 = previous_x - x;
+                        }
+                        if (x + width > previous_max_x) {
+                            left2 = previous_max_x;
+                            width2 = x + width - previous_max_x;
+                        }
+                    }
+                }
+                for (int i = 0; i < width1; ++i) {
+                    const int column = left1 + i;
+                    dst[column] = blend_over(dst[column], underneath[column]);
+                }
+                for (int i = 0; i < width2; ++i) {
+                    const int column = left2 + i;
+                    dst[column] = blend_over(dst[column], underneath[column]);
+                }
+            }
+        }
+
+        auto composited = std::make_shared<ImageData>();
+        composited->width = canvas_width;
+        composited->height = canvas_height;
+        composited->pixels = canvas;
+
+        AnimationFrame frame;
+        frame.image = std::move(composited);
+        frame.duration_ms = duration_ms;
+        frame.x = x;
+        frame.y = y;
+        frame.width = width;
+        frame.height = height;
+        frame.blend = blend;
+        frame.dispose_to_background = dispose_to_background;
+        animation.frames.push_back(std::move(frame));
+
+        // What this frame leaves behind: the canvas, with the rectangle cleared
+        // when the frame asks for that.
+        previous = canvas;
+        if (dispose_to_background) {
+            for (int row = 0; row < height; ++row) {
+                std::memset(previous.data() + static_cast<size_t>(y + row) * canvas_width + x, 0,
+                            static_cast<size_t>(width) * sizeof(uint32_t));
+            }
+        }
+        previous_x = x;
+        previous_y = y;
+        previous_width = width;
+        previous_height = height;
+        previous_disposed = dispose_to_background;
+        previous_was_key_frame = key_frame;
+        ++frame_index;
+
+        total_frame_pixels += static_cast<int64_t>(canvas_pixels);
+        if (animation.frames.size() >= max_frames ||
+            total_frame_pixels + static_cast<int64_t>(canvas_pixels) > WebPDecoder::kMaxAnimationPixels) {
+            break;
+        }
+    }
+    if (animation.frames.empty()) animation.error = "the animation holds no frames";
+    return animation.frames.empty() ? Status::Corrupt : Status::Ok;
+}
+
+std::shared_ptr<ImageData> WebPDecoder::first_frame(const uint8_t* data, size_t size) {
+    Animation animation = decode_frames(data, size, 1);
+    return animation.frames.empty() ? nullptr : animation.frames.front().image;
 }
 
 std::shared_ptr<ImageData> WebPDecoder::decode(const uint8_t* data, size_t size) {

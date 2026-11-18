@@ -8,9 +8,13 @@
     "this file automatically: bump a floor by hand, in the commit that retires",
     "the numbers below it, when no document or pull request mentions it any more."
   ],
-  "phase_floor": 75,
-  "finding_floor": 81,
+  "phase_floor": 79,
+  "finding_floor": 85,
   "history": [
+    {
+      "date": "2026-11-18",
+      "what": "Phase 79 and finding 85 documented animated WebP: the ANMF frame walk and the canvas compositor, byte-identical to libwebp's animation decoder. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."
+    },
     {
       "date": "2026-11-17",
       "what": "Phase 75 and finding 81 documented observable Map/Set constructor dispatch through instance set/add methods. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."

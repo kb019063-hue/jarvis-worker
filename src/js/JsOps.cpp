@@ -1048,7 +1048,11 @@ private:
 
         if (array) {
             m_out.nodes[index].elements.reserve(cell->array_elements.size());
-            for (const JsValue& element : cell->array_elements) {
+            for (std::size_t i = 0; i < cell->array_elements.size(); ++i) {
+                // A hole is written as the undefined it reads as; the receiver
+                // of a message keeps it a hole because `undefined` and a hole
+                // are the same thing to a clone that has no descriptor.
+                JsValue element = value.array_element(i);
                 std::size_t child = 0;
                 if (!write(element, child)) return false;
                 m_out.nodes[index].elements.push_back(child);
@@ -1149,7 +1153,9 @@ const std::string& iterator_name() {
 /// iterator reads it the same way.
 void visit_elements(const JsValue& array, const std::function<bool(const JsValue&)>& visit) {
     for (size_t i = 0; i < array.object_val->array_elements.size(); ++i) {
-        JsValue item = array.object_val->array_elements[i];
+        // The array iterator reads every place, so a hole is yielded as
+        // `undefined`: `[...a]` and `for (x of a)` see an element there.
+        JsValue item = array.array_element(i);
         if (!visit(item)) return;
     }
 }
@@ -1318,7 +1324,9 @@ std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable) {
         visit_code_points(iterable, collect);
     } else {
         // Nothing runs between the first element and the last: one copy.
-        out.assign(iterable.object_val->array_elements.begin(), iterable.object_val->array_elements.end());
+        // The iterator reads every place, so a hole is handed on as
+        // `undefined`: spread and `Array.from` turn holes into elements.
+        out = iterable.array_snapshot();
     }
     return out;
 }

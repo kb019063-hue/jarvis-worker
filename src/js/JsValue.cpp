@@ -673,6 +673,77 @@ const std::deque<JsValue>& JsValue::array_elements() const {
     return (object_val && object_val->is_array) ? object_val->array_elements : s_empty;
 }
 
+// --- Array holes -----------------------------------------------------------
+//
+// The bits are kept to the right of the elements: `Holes::shift` moves them
+// with the elements when an insert or an erase moves those.
+
+void JsObject::Holes::shift(size_t from, std::ptrdiff_t delta) {
+    if (!any() || delta == 0) return;
+    // Rebuilt from the bits that are set: an insert or an erase of an array
+    // with a hole is rare, and this is linear in the words that exist.
+    std::vector<uint64_t> moved;
+    const size_t total = bits.size() * 64;
+    auto bit = [&](size_t i) { return i < total && ((bits[i >> 6] >> (i & 63)) & 1u); };
+    auto put = [&](size_t i) {
+        if (i >= moved.size() * 64) moved.resize((i >> 6) + 1, 0);
+        moved[i >> 6] |= uint64_t(1) << (i & 63);
+    };
+    for (size_t i = 0; i < from; ++i) {
+        if (bit(i)) put(i);
+    }
+    for (size_t i = from; i < total; ++i) {
+        if (!bit(i)) continue;
+        // Nothing at or after `from` can move below zero: an erase only takes
+        // away places that were there.
+        const std::ptrdiff_t target = static_cast<std::ptrdiff_t>(i) + delta;
+        if (target >= 0) put(static_cast<size_t>(target));
+    }
+    bits = std::move(moved);
+}
+
+bool JsValue::is_array_hole(size_t index) const {
+    if (!object_val || !object_val->is_array || !object_val->array_holes) return false;
+    return object_val->array_holes->empty_slot(index);
+}
+
+/// The elements of `cell` moved by `delta` places from `from` onwards (`delta`
+/// negative for an erase): the hole bits move with them, and the places that
+/// were inserted are elements, not holes.
+static void move_holes(JsObject* cell, size_t from, std::ptrdiff_t delta) {
+    if (!cell || !cell->array_holes || delta == 0) return;
+    cell->array_holes->shift(from, delta);
+}
+
+void JsValue::set_array_hole(size_t index) {
+    JsObject* cell = object_val.get();
+    if (!cell || !cell->is_array) return;
+    if (!cell->array_holes) cell->array_holes = std::make_unique<JsObject::Holes>();
+    if (index >= cell->array_elements.size()) cell->array_elements.resize(index + 1, JsValue::make_undefined());
+    cell->array_elements[index] = JsValue::make_undefined();
+    cell->array_holes->set(index);
+}
+
+void JsValue::clear_array_hole(size_t index) {
+    if (!object_val || !object_val->array_holes) return;
+    object_val->array_holes->clear(index);
+}
+
+JsValue JsValue::array_element(size_t index) const {
+    if (!object_val || !object_val->is_array) return JsValue::make_undefined();
+    if (index >= object_val->array_elements.size()) return JsValue::make_undefined();
+    if (is_array_hole(index)) return JsValue::make_undefined();
+    return object_val->array_elements[index];
+}
+
+std::vector<JsValue> JsValue::array_snapshot() const {
+    std::vector<JsValue> out;
+    if (!object_val || !object_val->is_array) return out;
+    out.reserve(object_val->array_elements.size());
+    for (size_t i = 0; i < object_val->array_elements.size(); ++i) out.push_back(array_element(i));
+    return out;
+}
+
 // ECMAScript ToString, except that it never throws for a missing toString():
 // host code calls this on arbitrary values and expects a string back.
 std::string JsValue::to_string() const {
@@ -695,6 +766,8 @@ std::string JsValue::to_string() const {
                 const auto& elements = object_val->array_elements;
                 for (size_t i = 0; i < elements.size(); ++i) {
                     if (i) res += ',';
+                    // A hole joins as the empty string, like undefined and null.
+                    if (is_array_hole(i)) continue;
                     if (!elements[i].is_nullish()) res += elements[i].to_string();
                 }
                 return res;
@@ -811,7 +884,10 @@ bool JsValue::has_own_property(const std::string& name) const {
         if (cell->exotic && cell->exotic->has(cell, name)) return true;
         if (cell->is_array) {
             if (name == "length") return true;
-            if (parse_array_index(name, index)) return index < cell->array_elements.size();
+            if (parse_array_index(name, index)) {
+                // A hole is not an own property: this is the whole of `1 in a`.
+                return index < cell->array_elements.size() && !is_array_hole(index);
+            }
         }
         if (is_wrapped_string_index(cell, name)) return true;
         if (cell->properties.find(name) != cell->properties.end()) return true;
@@ -864,9 +940,10 @@ bool JsValue::delete_property(const std::string& name) {
         if (is_wrapped_string_index(cell, name)) return false;
         size_t index = 0;
         if (cell->is_array && parse_array_index(name, index)) {
-            // Arrays are dense here: deleting an element leaves undefined behind.
+            // A delete leaves a hole: the index stops being an own property,
+            // and stays one of the array's places (its `length` does not move).
             auto& elements = cell->array_elements;
-            if (index < elements.size()) elements[index] = JsValue::make_undefined();
+            if (index < elements.size()) set_array_hole(index);
             return true;
         }
         auto it = cell->properties.find(name);
@@ -899,7 +976,10 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
         else cell->exotic->keys(cell, keys);
     }
     if (cell && cell->is_array) {
-        for (size_t i = 0; i < cell->array_elements.size(); ++i) keys.push_back(std::to_string(i));
+        for (size_t i = 0; i < cell->array_elements.size(); ++i) {
+            if (is_array_hole(i)) continue;   // a hole is not a key
+            keys.push_back(std::to_string(i));
+        }
         if (include_non_enumerable) keys.emplace_back("length");
     }
     if (cell && cell->klass == ObjectClass::String) {
@@ -1019,8 +1099,8 @@ JsValue JsValue::get_property(const std::string& name) const {
             }
             size_t index = 0;
             if (parse_array_index(name, index)) {
-                if (index < obj->array_elements.size()) return obj->array_elements[index];
-                return JsValue::make_undefined();
+                // A hole reads `undefined`, and so does an index past the end.
+                return array_element(index);
             }
         }
 
@@ -1147,7 +1227,17 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                 if (!(requested >= 0) || requested != std::floor(requested) || requested > 4294967295.0) {
                     js_throw_range_error("Invalid array length");
                 }
-                obj->array_elements.resize(static_cast<size_t>(requested), JsValue::make_undefined());
+                const size_t previous = obj->array_elements.size();
+                const size_t next = static_cast<size_t>(requested);
+                obj->array_elements.resize(next, JsValue::make_undefined());
+                // Growing an array adds places that are not properties: holes.
+                if (obj->array_holes) {
+                    for (size_t i = next; i < previous; ++i) obj->array_holes->clear(i);
+                    for (size_t i = previous; i < next; ++i) obj->array_holes->set(i);
+                } else if (next > previous) {
+                    obj->array_holes = std::make_unique<JsObject::Holes>();
+                    for (size_t i = previous; i < next; ++i) obj->array_holes->set(i);
+                }
                 return true;
             }
             size_t index = 0;
@@ -1159,9 +1249,14 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                     if (index > obj->array_elements.size() + (1u << 24)) {
                         js_throw_range_error("Array index too far past the end of the array");
                     }
+                    // The places it skips over are holes, not elements.
+                    const size_t previous = obj->array_elements.size();
                     obj->array_elements.resize(index + 1, JsValue::make_undefined());
+                    if (!obj->array_holes) obj->array_holes = std::make_unique<JsObject::Holes>();
+                    for (size_t i = previous; i < index; ++i) obj->array_holes->set(i);
                 }
                 obj->array_elements[index] = std::move(val);
+                clear_array_hole(index);      // writing a hole makes it an element again
                 return true;
             }
         }

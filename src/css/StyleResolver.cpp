@@ -404,6 +404,7 @@ SharedComputedStyle ComputedStylePool::inherited_only(const SharedComputedStyle&
     s.color = key->color;
     s.font_size = key->font_size;
     s.font_weight = key->font_weight;
+    if (!key->font_family.empty()) s.font_family = key->font_family;
     s.line_height = key->line_height;
     s.line_height_number = key->line_height_number;
     s.text_align = key->text_align;
@@ -456,6 +457,14 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         }
         code {
             background-color: #f1f5f9;
+        }
+        /* HTML §Rendering: the elements whose text is monospaced. Without
+           this the engine had a `monospace` generic family it could resolve
+           and no element that ever asked for it, so `<pre>` -- the element
+           whose whole purpose is that its columns line up -- was laid out
+           proportional. */
+        pre, xmp, plaintext, listing, code, kbd, samp, tt {
+            font-family: monospace;
         }
         body {
             margin: 8px;

@@ -207,6 +207,58 @@ public:
     /// when no face has one, which is a host with no `.ttf` files at all.
     const std::vector<std::string>& family_names() const { return m_family_names; }
 
+    /// Registers a face the page brought with it, under the family name the
+    /// page gave it, and returns the id of the family it joined.
+    ///
+    /// `fetch` is called the first time something wants to draw in this face
+    /// and not before, because a page that declares twenty families usually
+    /// uses one, and a webfont is a network fetch. It returns the bytes, or
+    /// empty when they could not be had — a face that will not load is skipped
+    /// in favour of the next one, which is what a browser does and what keeps
+    /// a page legible when its font server is down.
+    ///
+    /// The family is the one the rule names and not the one inside the file:
+    /// a page may call a font anything it likes, and several rules may serve
+    /// several weights of one family from several files. A webfont also takes
+    /// precedence over a family of the same name already on the host, which is
+    /// the CSS rule — the page's font is the answer, and the system's is what
+    /// it falls back to when the page's does not load.
+    ///
+    /// `fetch` takes no arguments and returns `std::vector<std::uint8_t>`, so
+    /// that this class never has to know what a network is: the caller that
+    /// parsed the rule knows the URL, the origin and the CORS mode, and
+    /// captures them.
+    /// The bytes of a webfont, produced on demand. Empty when they could not
+    /// be had, which is the answer that makes the next source in the list be
+    /// tried.
+    using WebfontFetcher = std::function<std::vector<std::uint8_t>()>;
+
+    /// `sources` is one `@font-face` rule's `src` list, in order: a fetcher per
+    /// source, each returning that source's bytes or nothing. They are called
+    /// only when the face is first wanted, and only until one parses.
+    int register_webfont(std::string family, std::vector<WebfontFetcher> sources,
+                         int weight_min = 400, int weight_max = 400,
+                         bool italic = false);
+
+    /// The path of the face a `font-family` list resolves to, for a caller
+    /// that needs the file itself.
+    ///
+    /// `local()` in a `@font-face` `src` names a font already on the host, so
+    /// resolving one means reading a file the registry knows about rather than
+    /// fetching a URL. Empty when the list names nothing here -- which is the
+    /// signal to move on to the next source.
+    std::string face_path(std::string_view css_family_list) const;
+
+    /// Forgets every face registered by `register_webfont`, and releases any of
+    /// them already loaded.
+    ///
+    /// A webfont belongs to the document that declared it. The registry is a
+    /// process-wide singleton because the rasterizer is, so without this a
+    /// second page could ask for a family by name and be given the first
+    /// page's font — and worse, a name both pages use would silently resolve
+    /// to whichever page was laid out first.
+    void clear_webfonts();
+
     /// Measures exact horizontal advance of UTF-8 text in pixels.
     ///
     /// `css_family` is the element's `font-family` list, resolved here and the
@@ -276,8 +328,24 @@ private:
         std::string family;      ///< as the font states it
         std::string key;         ///< lower-cased, spaces collapsed: what is matched
         std::string subfamily;   ///< "Book", "Bold", "Bold Italic"...
-        int weight{400};
+        /// Weight range this face answers for. A face on disk declares `400`
+        /// or `700`; a webfont declares whatever its rule says, which may be a
+        /// range -- `font-weight: 100 400` -- and a face is eligible only when
+        /// the weight asked for falls inside it.
+        int weight_min{400};
+        int weight_max{400};
         bool italic{false};
+        /// True for a face a page brought with it. A webfont outranks a family
+        /// of the same name that was already on the host: the page's font is
+        /// the answer, and the system's is the fallback.
+        bool webfont{false};
+        /// Where the bytes come from, for a webfont, in the order the rule
+        /// gave them. Each is called in turn the first time the face is
+        /// wanted, until one returns bytes that parse: `src` is a fallback
+        /// list, and `url(a.woff), url(a.ttf)` means "the second, if the
+        /// first is no use". Empty bytes from one is not failure of the face,
+        /// it is an instruction to try the next.
+        std::vector<WebfontFetcher> sources;
     };
 
     /// One family: a name and the faces that carry it, at several weights.

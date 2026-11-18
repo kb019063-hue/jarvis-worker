@@ -126,7 +126,7 @@ Full suite verification on the merged tree:
 
 ```bash
 make -j2 test
-# All 217 engine test suites passed successfully!
+# All 220 engine test suites passed successfully!
 # Cross-origin Window/Location and MessageChannel suite: 114 checks, 0 failure(s).
 
 make bench-styles

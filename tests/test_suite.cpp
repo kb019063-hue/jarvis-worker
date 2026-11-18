@@ -17644,6 +17644,89 @@ TEST(js_direct_eval_runs_in_the_callers_scope) {
            "0,1,2 c function 1 eval");
 }
 
+// ============================================================================
+// Phase 80: direct-eval syntax, variable environments and function-expression names
+// ============================================================================
+
+TEST(js_direct_eval_follows_syntax_and_variable_environment_rules) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"js(
+        var phase80 = [];
+
+        // Optional chaining is not the direct-eval syntactic form.
+        function optionalEval() { var local = 1; return eval?.('typeof local'); }
+        phase80.push(optionalEval());
+
+        // Parsing direct-eval text must reject an object method's super()
+        // before any preceding source text can run. A derived constructor is
+        // the capability that does permit it.
+        var phase80Effects = 0;
+        var phase80Object = {
+            invalid() {
+                try { eval('phase80Effects++; super()'); return 'no error'; }
+                catch (e) { return e.name + ':' + phase80Effects; }
+            }
+        };
+        phase80.push(phase80Object.invalid());
+        class Phase80Parent { constructor() { this.value = 7; } }
+        class Phase80Child extends Phase80Parent {
+            constructor() { eval('super()'); this.value += 2; }
+        }
+        phase80.push(new Phase80Child().value);
+
+        // Sloppy direct-eval var declarations cross the lexical environments
+        // of the call site and remain in the surrounding function afterwards.
+        function phase80ForOf() {
+            var value = 1;
+            for (let [_ = 0] of [[eval('var value = 2')]]) {}
+            return value;
+        }
+        function phase80ForIn() {
+            var value = 1;
+            for (let [_ = 0] in { item: eval('var value = 2') }) {}
+            return value;
+        }
+        function phase80Catch() {
+            var value = 1;
+            try { throw 0; } catch (error) { eval('var value = 3'); }
+            return value;
+        }
+        function phase80Block() {
+            var value = 1;
+            { let hidden = 0; eval('var value = 4'); }
+            return value;
+        }
+        phase80.push(phase80ForOf(), phase80ForIn(), phase80Catch(), phase80Block());
+
+        // The name inside a named function expression is immutable in normal
+        // code and through direct eval: sloppy writes do nothing, strict ones
+        // throw.
+        var phase80Sloppy = (function Phase80Sloppy() {
+            Phase80Sloppy = 1;
+            return typeof Phase80Sloppy;
+        })();
+        var phase80SloppyEval = (function Phase80SloppyEval() {
+            eval('Phase80SloppyEval = 1');
+            return typeof Phase80SloppyEval;
+        })();
+        var phase80Strict = (function Phase80Strict() {
+            'use strict';
+            try { Phase80Strict = 1; return 'no error'; } catch (e) { return e.name; }
+        })();
+        var phase80StrictEval = (function Phase80StrictEval() {
+            'use strict';
+            try { eval('Phase80StrictEval = 1'); return 'no error'; } catch (e) { return e.name; }
+        })();
+        phase80.push(phase80Sloppy, phase80SloppyEval, phase80Strict, phase80StrictEval);
+
+        var phase80Summary = phase80.join(' ');
+    )js");
+    assert(!js.last_eval_failed());
+    assert(js.global_env()->get("phase80Summary").to_string() ==
+           "undefined SyntaxError:0 9 2 2 3 4 function function TypeError TypeError");
+}
+
 TEST(js_lexical_temporal_dead_zone_blocks_and_classes) {
     using namespace litebird;
     JsInterpreter js;
@@ -19258,6 +19341,9 @@ int main() {
 
     // Phase 65: a direct eval runs in the caller's scope.
     RUN_TEST(js_direct_eval_runs_in_the_callers_scope);
+
+    // Phase 80: direct-eval syntax and variable-environment follow-ups.
+    RUN_TEST(js_direct_eval_follows_syntax_and_variable_environment_rules);
 
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);

@@ -216,14 +216,15 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   were not there.
 - **A claim nobody holds.** #66 had the task #67 has since merged, and stood
   open for almost 28 hours, until another agent was asked to close it. It
-  was opened from #62's branch 75 seconds after #62 was merged; #67 came 52
-  minutes later from another branch, with the same task and much of the same
-  text. #81 and #82, that evening, are the same pair (#81 from #80's
-  branch, two minutes after #80 was merged), and the comment that closed #81
-  says what happened: "#81's branch cannot be pushed to from here". After a
-  merge the next message puts a session on a new branch, and a claim opened
-  from the old one in between is left behind. That comment is also what to
-  do: #82 was opened and #81 closed nine seconds apart.
+  was opened from #62's branch 75 seconds after #62 was merged, late on 16
+  November; #67 came 52 minutes later from another branch, with the same
+  task and much of the same text. #81 and #82, on the evening of the 17th,
+  are the same pair (#81 from #80's branch, two minutes after #80 was
+  merged), and the comment that closed #81 says what happened: "#81's branch
+  cannot be pushed to from here". After a merge the next message puts a
+  session on a new branch, and a claim opened from the old one in between is
+  left behind. That comment is also what to do: #82 was opened and #81
+  closed nine seconds apart.
   #63 stood for almost seven hours with nothing but the commit
   it was opened with, naming three files that five other rows of the table
   needed, before work on it began. An open pull request is a claim for as

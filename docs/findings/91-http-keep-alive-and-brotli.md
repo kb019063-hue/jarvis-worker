@@ -46,6 +46,6 @@ non-uniform block-length extra-bit rule and a repeat-count overflow vector.
 - `make verify-brotli` and `make fuzz-brotli` pass **53** valid (**42** Node
   22 differential streams), **49** bomb-cap, **6** invalid, and **2,000** seeded
   mutation fuzz inputs cleanly under both `-O2` Release and ASan+UBSan+LSan.
-- `make test` passes **237 / 237** engine suites + **114 / 114** cross-origin
+- `make test` passes **240 / 240** engine suites + **114 / 114** cross-origin
   checks under Release and ASan+UBSan, including `brotli_rfc7932_decoder_and_http_content_encoding`
   and `http11_keep_alive_socket_pooling_and_tls_reuse`.

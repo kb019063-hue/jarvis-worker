@@ -40,7 +40,7 @@ class LayoutBox;
 struct InlineFragment {
     Rect rect;                      // Exact bounds of fragment (x, y, w, h)
     std::string text;               // Word or text content
-    ComputedStyle style;            // Visual styling for this fragment
+    SharedComputedStyle style{default_computed_style()}; // Visual styling for this fragment
     std::shared_ptr<LayoutBox> box; // Originating layout box
     bool is_text{true};
     bool is_space{false};
@@ -58,7 +58,7 @@ class LayoutBox : public std::enable_shared_from_this<LayoutBox> {
 public:
     BoxType box_type{BoxType::BlockNode};
     BoxDimensions dimensions;
-    ComputedStyle style;
+    SharedComputedStyle style;
     std::shared_ptr<Node> node;
     std::string text;
     std::shared_ptr<ImageData> image;
@@ -67,48 +67,50 @@ public:
     std::vector<std::shared_ptr<LayoutBox>> children;
     std::weak_ptr<LayoutBox> parent;
 
-    LayoutBox(BoxType type, std::shared_ptr<Node> n, ComputedStyle s)
-        : box_type(type), style(std::move(s)), node(std::move(n)) {}
+    LayoutBox(BoxType type, std::shared_ptr<Node> n, SharedComputedStyle s)
+        : box_type(type),
+          style(s ? std::move(s) : default_computed_style()),
+          node(std::move(n)) {}
 
-    static std::shared_ptr<LayoutBox> create_block(std::shared_ptr<Node> n, ComputedStyle s) {
+    static std::shared_ptr<LayoutBox> create_block(std::shared_ptr<Node> n, SharedComputedStyle s) {
         return std::make_shared<LayoutBox>(BoxType::BlockNode, std::move(n), std::move(s));
     }
 
-    static std::shared_ptr<LayoutBox> create_flex(std::shared_ptr<Node> n, ComputedStyle s) {
+    static std::shared_ptr<LayoutBox> create_flex(std::shared_ptr<Node> n, SharedComputedStyle s) {
         return std::make_shared<LayoutBox>(BoxType::FlexNode, std::move(n), std::move(s));
     }
 
-    static std::shared_ptr<LayoutBox> create_grid(std::shared_ptr<Node> n, ComputedStyle s) {
+    static std::shared_ptr<LayoutBox> create_grid(std::shared_ptr<Node> n, SharedComputedStyle s) {
         return std::make_shared<LayoutBox>(BoxType::GridNode, std::move(n), std::move(s));
     }
 
-    static std::shared_ptr<LayoutBox> create_table(std::shared_ptr<Node> n, ComputedStyle s) {
+    static std::shared_ptr<LayoutBox> create_table(std::shared_ptr<Node> n, SharedComputedStyle s) {
         return std::make_shared<LayoutBox>(BoxType::TableNode, std::move(n), std::move(s));
     }
 
-    static std::shared_ptr<LayoutBox> create_table_row(std::shared_ptr<Node> n, ComputedStyle s) {
+    static std::shared_ptr<LayoutBox> create_table_row(std::shared_ptr<Node> n, SharedComputedStyle s) {
         return std::make_shared<LayoutBox>(BoxType::TableRowNode, std::move(n), std::move(s));
     }
 
-    static std::shared_ptr<LayoutBox> create_table_cell(std::shared_ptr<Node> n, ComputedStyle s) {
+    static std::shared_ptr<LayoutBox> create_table_cell(std::shared_ptr<Node> n, SharedComputedStyle s) {
         return std::make_shared<LayoutBox>(BoxType::TableCellNode, std::move(n), std::move(s));
     }
 
-    static std::shared_ptr<LayoutBox> create_inline(std::shared_ptr<Node> n, ComputedStyle s) {
+    static std::shared_ptr<LayoutBox> create_inline(std::shared_ptr<Node> n, SharedComputedStyle s) {
         return std::make_shared<LayoutBox>(BoxType::InlineNode, std::move(n), std::move(s));
     }
 
-    static std::shared_ptr<LayoutBox> create_image(std::shared_ptr<Node> n, ComputedStyle s, std::shared_ptr<ImageData> img = nullptr) {
+    static std::shared_ptr<LayoutBox> create_image(std::shared_ptr<Node> n, SharedComputedStyle s, std::shared_ptr<ImageData> img = nullptr) {
         auto box = std::make_shared<LayoutBox>(BoxType::ImageNode, std::move(n), std::move(s));
         box->image = std::move(img);
         return box;
     }
 
-    static std::shared_ptr<LayoutBox> create_anonymous(ComputedStyle s) {
+    static std::shared_ptr<LayoutBox> create_anonymous(SharedComputedStyle s) {
         return std::make_shared<LayoutBox>(BoxType::AnonymousBlock, nullptr, std::move(s));
     }
 
-    static std::shared_ptr<LayoutBox> create_text(std::shared_ptr<Node> n, std::string t, ComputedStyle s) {
+    static std::shared_ptr<LayoutBox> create_text(std::shared_ptr<Node> n, std::string t, SharedComputedStyle s) {
         auto box = std::make_shared<LayoutBox>(BoxType::TextNode, std::move(n), std::move(s));
         box->text = std::move(t);
         return box;
@@ -170,7 +172,7 @@ public:
         needs_layout = true;
         auto p = parent.lock();
         while (p) {
-            if (p->style.contains_layout()) {
+            if (p->style->contains_layout()) {
                 p->child_needs_layout = true;
                 break;
             }

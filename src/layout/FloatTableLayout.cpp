@@ -37,18 +37,20 @@ float scaled_border(float value, float scale) {
 /// table each cell only owns half of a shared border.
 float horizontal_spacing(const LayoutBox& box) {
     const float scale = box.border_scale;
-    const EdgeSizes& edges = box.border_override ? *box.border_override : box.style.border_width;
+    const ComputedStyle& bs = *box.style;
+    const EdgeSizes& edges = box.border_override ? *box.border_override : bs.border_width;
     return scaled_border(edges.left, scale) +
            scaled_border(edges.right, scale) +
-           box.style.padding.left + box.style.padding.right;
+           bs.padding.left + bs.padding.right;
 }
 
 float vertical_spacing(const LayoutBox& box) {
     const float scale = box.border_scale;
-    const EdgeSizes& edges = box.border_override ? *box.border_override : box.style.border_width;
+    const ComputedStyle& bs = *box.style;
+    const EdgeSizes& edges = box.border_override ? *box.border_override : bs.border_width;
     return scaled_border(edges.top, scale) +
            scaled_border(edges.bottom, scale) +
-           box.style.padding.top + box.style.padding.bottom;
+           bs.padding.top + bs.padding.bottom;
 }
 
 } // namespace
@@ -88,8 +90,8 @@ ResolvedBorders resolve_collapsed_borders(const std::vector<PlacedCell>& placed,
     used.reserve(n);
     used_colors.reserve(n);
     for (const auto& entry : placed) {
-        used.push_back(entry.box->style.border_width);
-        used_colors.push_back(EdgeColors(entry.box->style.border_color));
+        used.push_back(entry.box->style->border_width);
+        used_colors.push_back(EdgeColors(entry.box->style->border_color));
     }
 
     auto relax = [&](std::size_t index, int side, float width, const Color& color) {
@@ -119,12 +121,12 @@ ResolvedBorders resolve_collapsed_borders(const std::vector<PlacedCell>& placed,
                 float width = -1.0f;
                 Color color = Color::black();
                 if (entry.col + entry.colspan == b) {
-                    width = entry.box->style.border_width.right;
-                    color = entry.box->style.border_color;
+                    width = entry.box->style->border_width.right;
+                    color = entry.box->style->border_color;
                     members.emplace_back(i, 1);
                 } else if (entry.col == b) {
-                    width = entry.box->style.border_width.left;
-                    color = entry.box->style.border_color;
+                    width = entry.box->style->border_width.left;
+                    color = entry.box->style->border_color;
                     members.emplace_back(i, 3);
                 } else {
                     continue;
@@ -150,12 +152,12 @@ ResolvedBorders resolve_collapsed_borders(const std::vector<PlacedCell>& placed,
                 float width = -1.0f;
                 Color color = Color::black();
                 if (entry.row + entry.rowspan == b) {
-                    width = entry.box->style.border_width.bottom;
-                    color = entry.box->style.border_color;
+                    width = entry.box->style->border_width.bottom;
+                    color = entry.box->style->border_color;
                     members.emplace_back(i, 2);
                 } else if (entry.row == b) {
-                    width = entry.box->style.border_width.top;
-                    color = entry.box->style.border_color;
+                    width = entry.box->style->border_width.top;
+                    color = entry.box->style->border_color;
                     members.emplace_back(i, 0);
                 } else {
                     continue;
@@ -176,10 +178,11 @@ bool LayoutBox::establishes_bfc() const {
     // overflow, flex/grid containers, table cells and the root establish a
     // new block formatting context.
     if (!parent.lock()) return true;  // the root
-    if (style.is_floated()) return true;
-    if (style.overflow != Overflow::Visible) return true;
-    if (style.is_flex() || style.is_grid()) return true;
-    if (style.is_table() || style.is_table_cell() || style.is_inline_block()) return true;
+    const ComputedStyle& s = *style;
+    if (s.is_floated()) return true;
+    if (s.overflow != Overflow::Visible) return true;
+    if (s.is_flex() || s.is_grid()) return true;
+    if (s.is_table() || s.is_table_cell() || s.is_inline_block()) return true;
     return false;
 }
 
@@ -196,17 +199,18 @@ void LayoutBox::band_at(const std::vector<FloatBand>& bands, float y, float& lef
 
 float LayoutBox::min_content_width(const LayoutBox& box, float fallback) {
     if (stack_is_exhausted()) return fallback;
+    const ComputedStyle& bs = *box.style;
     if (box.box_type == BoxType::TextNode) {
-        return longest_word_width(box.text, box.style);
+        return longest_word_width(box.text, bs);
     }
 
     if (box.box_type == BoxType::ImageNode) {
-        if (box.style.width >= 0.0f) return box.style.width;
+        if (bs.width >= 0.0f) return bs.width;
         return 0.0f;
     }
 
-    if (box.style.width >= 0.0f) {
-        return box.style.width + horizontal_spacing(box) +
+    if (bs.width >= 0.0f) {
+        return bs.width + horizontal_spacing(box) +
                box.dimensions.margin.left + box.dimensions.margin.right;
     }
 
@@ -217,8 +221,8 @@ float LayoutBox::min_content_width(const LayoutBox& box, float fallback) {
     for (const auto& child : box.children) {
         if (child->box_type == BoxType::TextNode) {
             has_inline_text = true;
-            widest = std::max(widest, longest_word_width(child->text, child->style));
-        } else if (!child->style.is_block_level()) {
+            widest = std::max(widest, longest_word_width(child->text, *child->style));
+        } else if (!child->style->is_block_level()) {
             has_inline_text = true;
             widest += min_content_width(*child, 0.0f);
         }
@@ -239,16 +243,17 @@ void LayoutBox::layout_float(float containing_width) {
     // percentages and the style edges have to be resolved here instead.
     resolve_percentages(containing_width, 0.0f);
     apply_style_edges();
+    const ComputedStyle& s = *style;
     const float h_pb = horizontal_spacing(*this);
     const float available = std::max(0.0f, containing_width - dimensions.margin.left - dimensions.margin.right);
 
-    if (style.width >= 0.0f) {
+    if (s.width >= 0.0f) {
         layout_block(containing_width);
         return;
     }
 
     // Shrink-to-fit: the widest unbreakable run, capped by the available width.
-    const float horizontal = style.margin.left + style.margin.right + h_pb;
+    const float horizontal = s.margin.left + s.margin.right + h_pb;
     float natural = min_content_width(*this, 0.0f);
     if (natural <= 0.0f) natural = std::min(available, 120.0f);
     const float content_width = std::min(natural, std::max(0.0f, available - h_pb));
@@ -260,12 +265,13 @@ void LayoutBox::layout_float(float containing_width) {
 // ---------------------------------------------------------------------------
 
 void LayoutBox::layout_table(float containing_width) {
+    const ComputedStyle& s = *style;
     const float h_pb = horizontal_spacing(*this);
     const float v_pb = vertical_spacing(*this);
-    const bool collapsed = (style.border_collapse == BorderCollapse::Collapse);
+    const bool collapsed = (s.border_collapse == BorderCollapse::Collapse);
     // A collapsed table has no spacing at all: its cells share borders.
-    const float spacing_x = collapsed ? 0.0f : style.border_spacing_x;
-    const float spacing_y = collapsed ? 0.0f : style.border_spacing_y;
+    const float spacing_x = collapsed ? 0.0f : s.border_spacing_x;
+    const float spacing_y = collapsed ? 0.0f : s.border_spacing_y;
 
     // Captions are block-level boxes of their own: full grid width, stacked
     // above or below the grid (CSS 2.1 17.4.1, `caption-side`). They are not
@@ -273,8 +279,8 @@ void LayoutBox::layout_table(float containing_width) {
     std::vector<std::shared_ptr<LayoutBox>> top_captions;
     std::vector<std::shared_ptr<LayoutBox>> bottom_captions;
     for (const auto& child : children) {
-        if (child->style.is_table_caption()) {
-            (child->style.caption_side == CaptionSide::Bottom ? bottom_captions : top_captions)
+        if (child->style->is_table_caption()) {
+            (child->style->caption_side == CaptionSide::Bottom ? bottom_captions : top_captions)
                 .push_back(child);
         }
     }
@@ -285,7 +291,7 @@ void LayoutBox::layout_table(float containing_width) {
     std::vector<std::shared_ptr<LayoutBox>> row_boxes;
 
     for (const auto& child : children) {
-        if (child->style.is_table_caption()) continue;
+        if (child->style->is_table_caption()) continue;
         if (child->box_type == BoxType::TableRowNode) {
             std::vector<std::shared_ptr<LayoutBox>> cells;
             for (const auto& cell : child->children) {
@@ -293,7 +299,7 @@ void LayoutBox::layout_table(float containing_width) {
             }
             grid.push_back(std::move(cells));
             row_boxes.push_back(child);
-        } else if (child->style.is_table_row_group()) {
+        } else if (child->style->is_table_row_group()) {
             for (const auto& row : child->children) {
                 std::vector<std::shared_ptr<LayoutBox>> cells;
                 if (row->box_type == BoxType::TableRowNode) {
@@ -318,7 +324,7 @@ void LayoutBox::layout_table(float containing_width) {
     }
 
     if (grid.empty()) {
-        float empty_w = (style.width >= 0.0f) ? style.width - h_pb
+        float empty_w = (s.width >= 0.0f) ? s.width - h_pb
                        : std::max(0.0f, containing_width - h_pb);
         float cap_h = 0.0f;
         for (auto& cap : top_captions) {
@@ -405,10 +411,10 @@ void LayoutBox::layout_table(float containing_width) {
     //    never widen a column, and `auto` table width shares the containing
     //    width equally (there is no shrink-wrap in fixed layout here).
     std::vector<float> column_widths;
-    if (style.table_layout == TableLayout::Fixed) {
-        const float explicit_w = (style.width >= 0.0f)
-            ? ((style.box_sizing == BoxSizing::BorderBox) ? std::max(0.0f, style.width - h_pb)
-                                                          : style.width)
+    if (s.table_layout == TableLayout::Fixed) {
+        const float explicit_w = (s.width >= 0.0f)
+            ? ((s.box_sizing == BoxSizing::BorderBox) ? std::max(0.0f, s.width - h_pb)
+                                                      : s.width)
             : -1.0f;
         const float basis_w = (explicit_w >= 0.0f)
             ? explicit_w
@@ -416,12 +422,12 @@ void LayoutBox::layout_table(float containing_width) {
         std::vector<float> widths(column_count, -1.0f);
         for (const auto& entry : placed) {
             if (entry.row != 0) continue;
-            const float spacing = horizontal_spacing(*entry.box) + entry.box->style.margin.left +
-                                  entry.box->style.margin.right;
+            const ComputedStyle& es = *entry.box->style;
+            const float spacing = horizontal_spacing(*entry.box) + es.margin.left + es.margin.right;
             float required = -1.0f;
-            if (entry.box->style.width >= 0.0f) required = entry.box->style.width + spacing;
-            else if (entry.box->style.width_percent >= 0.0f && explicit_w >= 0.0f) {
-                required = explicit_w * entry.box->style.width_percent / 100.0f + spacing;
+            if (es.width >= 0.0f) required = es.width + spacing;
+            else if (es.width_percent >= 0.0f && explicit_w >= 0.0f) {
+                required = explicit_w * es.width_percent / 100.0f + spacing;
             }
             if (required < 0.0f) continue;
             if (entry.colspan == 1) {
@@ -453,12 +459,12 @@ void LayoutBox::layout_table(float containing_width) {
     column_widths.assign(column_count, 0.0f);
     for (const auto& entry : placed) {
         const auto& cell = entry.box;
-        const float cell_spacing = horizontal_spacing(*cell) +
-                                   cell->style.margin.left + cell->style.margin.right;
-        const float requirement = (cell->style.width >= 0.0f)
-                                      ? cell->style.width + cell_spacing
+        const ComputedStyle& cs = *cell->style;
+        const float cell_spacing = horizontal_spacing(*cell) + cs.margin.left + cs.margin.right;
+        const float requirement = (cs.width >= 0.0f)
+                                      ? cs.width + cell_spacing
                                       : min_content_width(*cell, 32.0f) +
-                                            cell->style.margin.left + cell->style.margin.right;
+                                            cs.margin.left + cs.margin.right;
         if (entry.colspan == 1) {
             column_widths[entry.col] = std::max(column_widths[entry.col], requirement);
         } else {
@@ -487,10 +493,10 @@ void LayoutBox::layout_table(float containing_width) {
     float total = grid_width();
 
     // 4. An explicit table width distributes the surplus evenly.
-    if (style.table_layout != TableLayout::Fixed && style.width >= 0.0f) {
-        const float target = std::max(0.0f, (style.box_sizing == BoxSizing::BorderBox)
-                                                 ? style.width - h_pb
-                                                 : style.width);
+    if (s.table_layout != TableLayout::Fixed && s.width >= 0.0f) {
+        const float target = std::max(0.0f, (s.box_sizing == BoxSizing::BorderBox)
+                                                 ? s.width - h_pb
+                                                 : s.width);
         if (target > total && column_count > 0) {
             const float extra = (target - total) / static_cast<float>(column_count);
             for (auto& width : column_widths) width += extra;
@@ -501,12 +507,12 @@ void LayoutBox::layout_table(float containing_width) {
     // 4b. Percentage cell widths resolve against the table's own width (CSS
     //     2.1 17.5.2), so they are applied once that width is known. Not in
     //     fixed layout: there, columns are fixed and cells overflow them.
-    if (style.table_layout != TableLayout::Fixed) {
-        const bool size_known = (style.width >= 0.0f);
+    if (s.table_layout != TableLayout::Fixed) {
+        const bool size_known = (s.width >= 0.0f);
         float percent_total = total;
         for (auto& entry : placed) {
-            if (entry.box->style.width_percent < 0.0f) continue;
-            const float required = percent_total * entry.box->style.width_percent / 100.0f;
+            if (entry.box->style->width_percent < 0.0f) continue;
+            const float required = percent_total * entry.box->style->width_percent / 100.0f;
             float span_have = 0.0f;
             for (std::size_t c = entry.col; c < entry.col + entry.colspan && c < column_count; ++c) {
                 span_have += column_widths[c];
@@ -529,9 +535,10 @@ void LayoutBox::layout_table(float containing_width) {
     float caption_extent = total;
     for (const auto* caps_ptr : {&top_captions, &bottom_captions}) {
         for (const auto& cap : *caps_ptr) {
-            if (cap->style.width < 0.0f) continue;
-            const float cap_w = cap->style.width + horizontal_spacing(*cap) +
-                                cap->style.margin.left + cap->style.margin.right;
+            const ComputedStyle& cs = *cap->style;
+            if (cs.width < 0.0f) continue;
+            const float cap_w = cs.width + horizontal_spacing(*cap) +
+                                cs.margin.left + cs.margin.right;
             caption_extent = std::max(caption_extent, cap_w);
         }
     }
@@ -556,7 +563,7 @@ void LayoutBox::layout_table(float containing_width) {
     // Fixed layout reads the first row once (CSS 2.1 17.5.2.1): a later cell's
     // own width must not resize its column, so the cell hugs the column it
     // was given instead of the width it asked for.
-    if (style.table_layout == TableLayout::Fixed) {
+    if (s.table_layout == TableLayout::Fixed) {
         for (const auto& entry : placed) {
             entry.box->ignore_own_width = true;
         }
@@ -639,19 +646,19 @@ void LayoutBox::layout_table(float containing_width) {
         row->dimensions.content.y = dimensions.content.y + row_top[r];
         row->dimensions.content.width = total;
         row->dimensions.content.height = row_heights[r];
-        row->dimensions.margin = row->style.margin;
-        row->dimensions.padding = row->style.padding;
-        row->dimensions.border = row->style.border_width;
+        row->dimensions.margin = row->style->margin;
+        row->dimensions.padding = row->style->padding;
+        row->dimensions.border = row->style->border_width;
     }
 
     // 8. Height: explicit, or the grid's own height, plus the bottom
     //    captions. The rows region stays whatever it was; the captions sit
     //    outside it (CSS 2.1 17.4.1).
     float content_height = 0.0f;
-    if (style.height >= 0.0f) {
-        content_height = (style.box_sizing == BoxSizing::BorderBox)
-                             ? std::max(0.0f, style.height - v_pb)
-                             : style.height;
+    if (s.height >= 0.0f) {
+        content_height = (s.box_sizing == BoxSizing::BorderBox)
+                             ? std::max(0.0f, s.height - v_pb)
+                             : s.height;
     } else {
         content_height = y_cursor;
     }

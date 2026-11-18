@@ -11522,7 +11522,12 @@ TEST(cssom_sheets_rules_insert_amounts_and_fonts) {
         function name(f) { try { f(); return 'no throw'; } catch (e) { return e.name; } }
         ok('an unclosed block', name(function () { sheet.insertRule('a {', 0); }), 'SyntaxError');
         ok('not a rule', name(function () { sheet.insertRule('}', 0); }), 'SyntaxError');
-        ok('an at-rule', name(function () { sheet.insertRule('@media print { a {} }', 0); }), 'SyntaxError');
+        // An `@media` rule is a rule of the sheet since Phase 84, and a sheet
+        // holds one like any other rule (see the last suite of this phase).
+        var atRule = name(function () { return sheet.insertRule('@media print { a {} }', 0); });
+        ok('an at-rule is a media rule now', atRule, 'no throw');
+        ok('and it went in at the index it was given', sheet.cssRules[0].type, CSSRule.MEDIA_RULE);
+        sheet.deleteRule(0);
         ok('two blocks', name(function () { sheet.insertRule('a { } b { }', 0); }), 'SyntaxError');
         ok('an index past the end', name(function () { sheet.insertRule('a {}', 99); }), 'IndexSizeError');
         ok('deleting what is not there', name(function () { sheet.deleteRule(99); }), 'IndexSizeError');
@@ -11584,6 +11589,160 @@ TEST(cssom_sheets_rules_insert_amounts_and_fonts) {
     assert(js.eval("document.fonts.answered").to_string() == "true");
 }
 
+TEST(cssom_media_rules_and_the_cascade_inside_them) {
+    using namespace litebird;
+    // Phase 84. A stylesheet's `@media` block was not a rule of the sheet: the
+    // rules inside it were flattened into the sheet when a script read it,
+    // every query that did not contain the word "print" applied, and
+    // `insertRule('@media …')` was a `SyntaxError`. Now the block is a
+    // `CSSMediaRule` with its own rules and its own `MediaList`, and the query
+    // is asked where the cascade reads it — against the window the page is in
+    // (1024x768, a light screen with a mouse), which is what `matchMedia` and
+    // `innerWidth` already answered with.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><html><head><style>"
+        "#target { color: red }"
+        "@media screen and (min-width: 600px) { #target { color: green } }"
+        "@media (max-width: 300px) { #target { color: orange } }"
+        "@media print { #target { color: blue } }"
+        "@media (prefers-color-scheme: dark) { #target { background-color: black } }"
+        "@media screen, print { .never { border-top-width: 7px } }"
+        "</style></head><body><div id=\"target\">x</div></body></html>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function name(f) { try { f(); return 'no throw'; } catch (e) { return e.name; } }
+
+        var sheet = document.querySelector('style').sheet;
+        var target = document.getElementById('target');
+
+        // The block is a rule of the sheet, and the rules inside it are its
+        // own: not the sheet's.
+        ok('the sheet holds six rules', sheet.cssRules.length, 6);
+        var media = sheet.cssRules[1];
+        ok('a media rule is a CSSRule', media instanceof CSSRule, true);
+        ok('and a CSSMediaRule', media instanceof CSSMediaRule, true);
+        ok('not a style rule', media instanceof CSSStyleRule, false);
+        ok('its brand', Object.prototype.toString.call(media), '[object CSSMediaRule]');
+        ok('its type', media.type, CSSRule.MEDIA_RULE);
+        ok('the constant through the subclass', CSSMediaRule.MEDIA_RULE, 4);
+        ok('the rules it holds', media.cssRules.length, 1);
+        ok('the rule inside', media.cssRules[0].selectorText, '#target');
+        ok('and it is a style rule', media.cssRules[0] instanceof CSSStyleRule, true);
+        ok('its parent rule', media.cssRules[0].parentRule === media, true);
+        ok('its parent sheet', media.cssRules[0].parentStyleSheet === sheet, true);
+        ok('the top of the sheet has no parent rule', sheet.cssRules[0].parentRule, null);
+        ok('one object per rule', media.cssRules.item(0) === media.cssRules[0], true);
+
+        // The query, as a `MediaList`.
+        ok('mediaText', media.media.mediaText, 'screen and (min-width: 600px)');
+        ok('its brand', Object.prototype.toString.call(media.media), '[object MediaList]');
+        ok('instanceof', media.media instanceof MediaList, true);
+        ok('one alternative', media.media.length, 1);
+        ok('item(0)', media.media.item(0), 'screen and (min-width: 600px)');
+        ok('item past the end', media.media.item(1), null);
+        ok('the indexed getter', media.media[0], 'screen and (min-width: 600px)');
+        ok('a list of two', sheet.cssRules[4].media.length, 1);
+        ok('the second of the list', sheet.cssRules[5].media.mediaText, 'screen, print');
+
+        // The cascade asks each query. The window is 1024x768 and light, so
+        // the first block applies — and comes after `#target { color: red }`
+        // — and the others do not.
+        ok('the query that matches decides the colour', getComputedStyle(target).color, 'rgb(0, 128, 0)');
+        ok('a width too small does not match', getComputedStyle(target).color, 'rgb(0, 128, 0)');
+        ok('print does not apply', sheet.cssRules[3].media.mediaText, 'print');
+        ok('a dark scheme is not this window', getComputedStyle(target).backgroundColor, 'rgba(0, 0, 0, 0)');
+        ok('a media rule with no rules of its own changes nothing',
+           getComputedStyle(document.querySelector('.never') || target).borderTopWidth, '0px');
+
+        // `cssText` writes the block and the rules in it.
+        ok('cssText', media.cssText, '@media screen and (min-width: 600px) { #target { color: green; } }');
+        ok('the rule inside writes its own', media.cssRules[0].cssText, '#target { color: green; }');
+
+        // A script inserts one, and it styles the page from where it is put.
+        ok('insertRule takes a media rule',
+           sheet.insertRule('@media (min-width: 1px) { #target { color: purple } }', sheet.cssRules.length), 6);
+        ok('the inserted block applies', getComputedStyle(target).color, 'rgb(128, 0, 128)');
+        ok('and it is the sixth rule', sheet.cssRules[6].type, CSSRule.MEDIA_RULE);
+        ok('the rules of the inserted one', sheet.cssRules[6].cssRules.length, 1);
+        sheet.deleteRule(6);
+        ok('out again', getComputedStyle(target).color, 'rgb(0, 128, 0)');
+        ok('and the sheet is back to six', sheet.cssRules.length, 6);
+
+        // The rules of a media rule take an insert of their own, and it is the
+        // same word the cascade reads.
+        ok('insertRule on the media rule', media.insertRule('#target { font-size: 20px }'), 0);
+        ok('the rule inside it', media.cssRules.length, 2);
+        ok('and it applies', getComputedStyle(target).fontSize, '20px');
+        ok('the style rule it made', media.cssRules[0].selectorText, '#target');
+        ok('deleting it', name(function () { media.deleteRule(0); }), 'no throw');
+        ok('gone from the rule', media.cssRules.length, 1);
+        ok('and from the page', getComputedStyle(target).fontSize, '16px');
+        ok('an index past the end', name(function () { media.deleteRule(9); }), 'IndexSizeError');
+        ok('not a rule at all', name(function () { media.insertRule('a {'); }), 'SyntaxError');
+
+        // `MediaList` writes the query back, and what it writes is asked.
+        media.media.appendMedium('print');
+        ok('appended', media.media.mediaText, 'screen and (min-width: 600px), print');
+        ok('two alternatives now', media.media.length, 2);
+        ok('the second one', media.media.item(1), 'print');
+        media.media.appendMedium('print');
+        ok('appending what is there changes nothing', media.media.mediaText, 'screen and (min-width: 600px), print');
+        media.media.deleteMedium('print');
+        ok('deleted', media.media.mediaText, 'screen and (min-width: 600px)');
+        ok('deleting what is not there', name(function () { media.media.deleteMedium('tv'); }), 'NotFoundError');
+        media.media.mediaText = '(max-width: 300px)';
+        ok('written back', media.media.mediaText, '(max-width: 300px)');
+        ok('and asked: 1024 is not at most 300', getComputedStyle(target).color, 'rgb(255, 0, 0)');
+        media.media.mediaText = 'screen and (min-width: 600px)';
+        ok('and asked again', getComputedStyle(target).color, 'rgb(0, 128, 0)');
+
+        // A removed block is the block it was: its query, and the rules in it.
+        var held = sheet.cssRules[1];
+        sheet.deleteRule(1);
+        ok('removed from the sheet', sheet.cssRules.length, 5);
+        ok('the rule it was still reads its query', held.media.mediaText, 'screen and (min-width: 600px)');
+        ok('and its rules', held.cssRules.length, 1);
+        ok('out of the cascade', getComputedStyle(target).color, 'rgb(255, 0, 0)');
+        sheet.insertRule('@media screen and (min-width: 600px) { #target { color: green } }', 1);
+        ok('a new one, and it applies', getComputedStyle(target).color, 'rgb(0, 128, 0)');
+
+        // A `@media` block inside a `@media` block is a rule inside a rule.
+        sheet.insertRule('@media screen { @media (min-width: 1px) { #target { letter-spacing: 3px } } }', 0);
+        ok('nested', sheet.cssRules[0].cssRules[0].type, CSSRule.MEDIA_RULE);
+        ok('the rule in the nested one', sheet.cssRules[0].cssRules[0].cssRules[0].selectorText, '#target');
+        ok('and it applies', getComputedStyle(target).letterSpacing, '3px');
+        ok('the parent of the nested rule', sheet.cssRules[0].cssRules[0].parentRule === sheet.cssRules[0], true);
+        sheet.deleteRule(0);
+
+        // What is not a rule is a syntax error, at either level.
+        ok('an empty query', name(function () { sheet.insertRule('@media { a { color: red } }', 0); }), 'SyntaxError');
+        ok('no block', name(function () { sheet.insertRule('@media screen', 0); }), 'SyntaxError');
+        ok('a block and then another', name(function () { sheet.insertRule('@media screen { a {} } b {}', 0); }), 'SyntaxError');
+        ok('an at-rule this engine does not hold', name(function () { sheet.insertRule('@supports (display: grid) { a {} }', 0); }), 'SyntaxError');
+
+        // The text of a `<style>` element is the sheet's rules, the blocks too.
+        var made = document.createElement('style');
+        made.textContent = '@media (min-width: 1px) { #target { color: teal } }';
+        document.head.appendChild(made);
+        ok('read from the text', made.sheet.cssRules.length, 1);
+        ok('a media rule', made.sheet.cssRules[0].type, CSSRule.MEDIA_RULE);
+        ok('and it styles the page', getComputedStyle(target).color, 'rgb(0, 128, 128)');
+        made.textContent = '#target { color: olive }';
+        ok('a new text, no blocks', made.sheet.cssRules.length, 1);
+        ok('and the colour', getComputedStyle(target).color, 'rgb(128, 128, 0)');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
 TEST(array_holes_are_not_elements) {
     using namespace litebird;
     // Phase 81. `delete a[1]` used to leave an element whose value was
@@ -11607,9 +11766,7 @@ TEST(array_holes_are_not_elements) {
         function ok(what, got, want) {
             if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
         }
-        // `delete` is the way to make a hole that does not go through the
-        // array literal in JsEval.cpp (see the write-up: an array literal with
-        // a hole is not this phase's file).
+        // `delete` is one of the four ways to make a hole.
         function holed() { var a = [1, 2, 3]; delete a[1]; return a; }
 
         ok('a delete leaves a hole', 1 in holed(), false);
@@ -20203,6 +20360,7 @@ int main() {
     // Phase 72: the CSS Object Model — CSSStyleSheet, CSSRule, CSSRuleList,
     // rule.style, insertRule/deleteRule, and document.fonts.
     RUN_TEST(cssom_sheets_rules_insert_amounts_and_fonts);
+    RUN_TEST(cssom_media_rules_and_the_cascade_inside_them);
 
     // Phase 81: an index of an array is either an element or a hole.
     RUN_TEST(array_holes_are_not_elements);

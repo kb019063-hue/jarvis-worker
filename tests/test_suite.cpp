@@ -14693,12 +14693,15 @@ TEST(js_compiled_custom_elements_are_upgraded) {
     auto text = [&](const char* source) { return js.eval(source).to_string(); };
 
     // An element of the page, there before its class is defined. The upgrade
-    // runs the constructor on the element's own object; a constructor written
-    // for ES5 does not pass `this` on but asks HTMLElement for its element
-    // with new.target, and is given that object (JsValue.cpp, "Constructions
-    // in place"). Until Phase 43 it was given nothing: "Illegal constructor".
-    // What it is told afterwards comes in the order of the standard: the
-    // attributes it observes, then that it is connected.
+    // constructs the class the ordinary way; a constructor written for ES5
+    // does not pass `this` on but asks HTMLElement for its element with
+    // new.target, is given that object (JsValue.cpp, "Constructions in
+    // place"), and returns it, which is what makes the upgrade succeed
+    // (Phase 69; until then the element's object was handed to the
+    // constructor as `this`, and until Phase 43 the interface refused:
+    // "Illegal constructor"). What it is told afterwards comes in the order
+    // of the standard: the attributes it observes, then that it is
+    // connected.
     js.eval_ast(R"(
         function nameOf(fn) { try { fn(); return 'no error'; } catch (e) { return e.name; } }
         function inherit(C, Parent) {
@@ -14756,9 +14759,9 @@ TEST(js_compiled_custom_elements_are_upgraded) {
            "true,true,false,,true,true");
 
     // A class on top of the function: its `super()` reaches the function
-    // with the element as `this` and the class as new.target, the function
-    // gets the element back from HTMLElement, and the class's field goes on
-    // it.
+    // with the class as new.target, the function gets the element back from
+    // HTMLElement and returns it, so the element is `this` in the class and
+    // its field goes on it.
     js.eval_ast(R"(
         class Modern extends Old {
             field = 7;
@@ -15082,6 +15085,153 @@ TEST(js_compiled_custom_elements_are_upgraded) {
     assert(text("[fdoc.body.firstChild.made, fdoc.body.firstChild.matches(':defined'), fdoc.body.lastChild.made, "
                 "fdoc.body.lastChild instanceof Both, across.join()].join()") ==
            ",false,both,true,true,page,true");
+}
+
+// Phase 69. An upgrade is an ordinary construction: the definition's
+// constructor runs on an object of its own, the element is what the interface
+// hands out and what `super(...)` returns, and the upgrade fails unless the
+// constructor comes back with the element. The object a script held before the
+// definition existed stays the element's object, and gets the class's
+// prototype at the moment the interface hands the element out.
+TEST(js_an_upgrade_constructs_the_definition_the_ordinary_way) {
+    using namespace litebird;
+
+    auto doc = HtmlParser::parse(
+        "<!DOCTYPE html><body><x-one id='one' lang='en'>hello</x-one><x-two id='two'></x-two>"
+        "<x-three id='three'></x-three><x-four id='four'></x-four><x-five id='five'></x-five>"
+        "<x-six id='six'></x-six><x-eight id='eight'></x-eight>"
+        "<button is='x-seven' id='seven'>b</button><div id='host'></div></body>");
+    JsInterpreter js(doc);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    js.eval_ast(R"(
+        function inherit(C, Parent) {
+            C.prototype = Object.create(Parent.prototype, { constructor: { value: C, writable: true, configurable: true } });
+            return Object.setPrototypeOf(C, Parent);
+        }
+        var $ = function (id) { return document.getElementById(id); }, log = [], seen = null;
+    )");
+
+    // A class: `this` is not bound before `super(...)`, `super(...)` hands back
+    // the element, and `this` is that object from then on. The object `new` made
+    // is left behind, so what is written on it before `super(...)` is on no
+    // element. The field initializes on the element.
+    js.eval_ast(R"(
+        class One extends HTMLElement {
+            field = 'f';
+            constructor() {
+                var early;
+                try { early = this; } catch (e) { early = e.name; }
+                var from = super();
+                log.push(early, from === this, this === $('one'), new.target === One,
+                         this.id + ' ' + this.getAttribute('lang') + ' ' + this.textContent);
+            }
+        }
+        customElements.define('x-one', One);
+        var one = $('one');
+    )");
+    assert(text("[one instanceof One, one.field, one.matches(':defined'), one.localName, log.join()].join()") ==
+           "true,f,true,x-one,ReferenceError,true,true,true,one en hello");
+
+    // A constructor written for ES5 is told the same thing: `this` is not the
+    // element until it asks for it, and the element is what it is given.
+    js.eval_ast(R"(
+        var Two = inherit(function () {
+            this.early = true;
+            var self = Reflect.construct(HTMLElement, [], new.target);
+            self.late = true;
+            seen = [this === self, this.early, 'early' in self].join();
+            return self;
+        }, HTMLElement);
+        customElements.define('x-two', Two);
+        var two = $('two');
+    )");
+    assert(text("[two instanceof Two, two.late, two.early === undefined, two.matches(':defined'), seen].join()") ==
+           "true,true,true,true,false,true,false");
+
+    // The object a script reached the element with before the definition
+    // existed is still the element's object afterwards, with the class's
+    // prototype on it.
+    js.eval_ast(R"(
+        var before = $('three');
+        var Three = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.made = 'three'; return self; }, HTMLElement);
+        customElements.define('x-three', Three);
+        var three = $('three');
+    )");
+    assert(text("[before === three, three instanceof Three, three.made, Object.getPrototypeOf(three) === "
+                "Three.prototype].join()") ==
+           "true,true,three,true");
+
+    // A constructor that returns something else fails the upgrade: the element
+    // keeps the interface it had and is never `:defined`.
+    js.eval_ast(R"(
+        var elsewhere = document.createElement('div');
+        var Four = inherit(function () { Reflect.construct(HTMLElement, [], new.target); return elsewhere; }, HTMLElement);
+        customElements.define('x-four', Four);
+        var four = $('four');
+    )");
+    // The prototype the interface gave the element when it handed it out stays
+    // on it, as it does in a browser: the standard sets it while the
+    // constructor runs, and only the state and the reactions are rolled back.
+    assert(text("[four instanceof Four, four.matches(':defined'), Object.getPrototypeOf(four) === "
+                "Four.prototype, four === elsewhere].join()") ==
+           "true,false,true,false");
+
+    // A constructor that throws, before or after it reached the interface,
+    // leaves the element as it was.
+    js.eval_ast(R"(
+        var Five = inherit(function () {
+            var self = Reflect.construct(HTMLElement, [], new.target);
+            self.seen = 'wrote';
+            throw new RangeError('after');
+        }, HTMLElement);
+        customElements.define('x-five', Five);
+        var FiveSix = inherit(function () { throw new RangeError('before'); }, HTMLElement);
+        customElements.define('x-six', FiveSix);
+        var five = $('five'), six = $('six');
+    )");
+    assert(text("[five instanceof Five, five.seen, five.matches(':defined'), "
+                "Object.getPrototypeOf(five) === Five.prototype, five.localName].join()") ==
+           "true,wrote,false,true,x-five");
+    assert(text("[six instanceof FiveSix, six.matches(':defined'), Object.getPrototypeOf(six) === "
+                "HTMLElement.prototype, six.localName].join()") ==
+           "false,false,true,x-six");
+
+    // The element is handed out once: a second `Reflect.construct` in the same
+    // upgrade is a TypeError, and the upgrade still succeeds.
+    js.eval_ast(R"(
+        var Eight = inherit(function () {
+            var self = Reflect.construct(HTMLElement, [], new.target);
+            try { Reflect.construct(HTMLElement, [], new.target); self.again = 'no error'; }
+            catch (e) { self.again = e.name + ': ' + e.message; }
+            return self;
+        }, HTMLElement);
+        customElements.define('x-eight', Eight);
+        var eight = $('eight');
+    )");
+    assert(text("[eight instanceof Eight, eight.matches(':defined'), eight.again].join()") ==
+           "true,true,TypeError: This instance is already constructed");
+
+    // A customized built-in whose upgrade failed is not `:defined`, and it is
+    // still a button.
+    js.eval_ast(R"(
+        var Seven = inherit(function () { throw new TypeError('no'); }, HTMLButtonElement);
+        customElements.define('x-seven', Seven, { extends: 'button' });
+        var seven = $('seven');
+    )");
+    assert(text("[seven instanceof Seven, seven instanceof HTMLButtonElement, seven.localName, "
+                "seven.matches(':defined'), document.querySelectorAll('button:defined').length].join()") ==
+           "false,true,button,false,0");
+
+    // `new` and createElement are untouched by any of it: each makes an element
+    // of its own with the class's prototype.
+    js.eval_ast(R"(
+        var Nine = inherit(function () { var self = Reflect.construct(HTMLElement, [], new.target); self.kind = 'made'; return self; }, HTMLElement);
+        customElements.define('x-nine', Nine);
+        var made = new Nine(), created = document.createElement('x-nine');
+    )");
+    assert(text("[made instanceof Nine, made.kind, made.localName, made.matches(':defined'), created instanceof "
+                "Nine, created.kind, made !== created].join()") ==
+           "true,made,x-nine,true,true,made,true");
 }
 
 TEST(js_a_page_with_compiled_custom_elements_is_collected) {
@@ -17137,6 +17287,7 @@ int main() {
     RUN_TEST(js_new_target_and_returned_objects_are_collected);
     RUN_TEST(js_compiled_custom_elements_are_constructed);
     RUN_TEST(js_compiled_custom_elements_are_upgraded);
+    RUN_TEST(js_an_upgrade_constructs_the_definition_the_ordinary_way);
     RUN_TEST(js_a_page_with_compiled_custom_elements_is_collected);
 
     // Phase 44: Unicode identifier tables, \u escapes, and escaped keyword rules.

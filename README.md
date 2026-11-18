@@ -30,14 +30,14 @@ suite and two other parsers, and brought in the tests browsers share (see
 | **DOM tree-construction conformance** | **1792 / 1792 (100.0%)** | html5lib/WPT derivation suite run by `make conformance` (Phase 49 solved the last 11 `<select>` cases) |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **1126 / 1152 (97.7%)**; of the 26 that fail, eight were recorded in Phase 34 for what classes still lack and 13 in Phase 63 for the places that still do not ask a value for its iterator | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
-| **DOM corpus** (what a script sees) | **669 / 669**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
+| **DOM corpus** (what a script sees) | **678 / 678**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9538 / 9744 subtests** across 190 files; the 206 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
 | **Legacy encodings** | **40 encodings, 228 labels, every byte of every index table** (including the Big5 two-code-point entries and the `gb18030` ranges), generated from `whatwg/encoding` `@ be17ac5c49881336538acfc7b40dba3c8009144b` | `include/litebird/net/TextEncoding.hpp`, `make test`; pages in these encodings run by `make wpt` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 220 suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 221 suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
@@ -60,7 +60,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 220 engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 221 engine suites + 114 cross-origin Window/Location/channel checks
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
@@ -179,7 +179,7 @@ selected `<option>`'s children into `<selectedcontent>`.
 
 ### The DOM scoreboard
 
-`tests/dom-conformance/` holds 669 cases: a page, a script, and what the
+`tests/dom-conformance/` holds 678 cases: a page, a script, and what the
 script prints in [jsdom](https://github.com/jsdom/jsdom) 31.0.0, an
 independent implementation of the DOM and HTML standards. A case passes when
 `litebird --run-script` prints the same and exits 0. CI runs the whole corpus
@@ -199,7 +199,8 @@ python3 tools/conformance/compare_with_jsdom.py page.html script.js   # any page
 | Phase 28, with 57 more cases (`xml.dat`, `xhr.dat`) | 629 / 629 |
 | Phase 34, with 11 cases (`interfaces.dat`: an interface object has its parent as its prototype) | 640 / 640 |
 | Phase 37, with 4 more cases (`forms.dat` date/time inputs, `style.dat` CSSOM `el.style` shorthands) | 644 / 644 |
-| Now, with the 25 cases of Phase 43 (`compiled.dat`: custom elements compiled for older browsers, made and upgraded) | 669 / 669 |
+| Phase 43, with 25 more cases (`compiled.dat`: custom elements compiled for older browsers, made and upgraded) | 669 / 669 |
+| Now, with the 9 cases of Phase 69 (`upgrades.dat`: what an upgrade's construction is) | 678 / 678 |
 
 `everyday.dat` is the fixed probe: 68 snippets adapted from
 [You Might Not Need jQuery](https://github.com/HubSpot/YouMightNotNeedjQuery),
@@ -727,7 +728,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 220 engine test suites
+# Run the 221 engine test suites
 make test
 ```
 
@@ -795,14 +796,14 @@ make test
 make test
 ```
 
-Output (220 suites; the first and last lines shown):
+Output (221 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 220 engine test suites passed successfully!
+All 221 engine test suites passed successfully!
 ```
 
 ```bash
@@ -948,7 +949,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 220/220 suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 221/221 suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -1139,18 +1140,84 @@ var one = {}; function Single() { return one; } class Child extends Single { con
 console.log(new Circle().kind, new Child() === one, one.added)'
 # Circle true 2        (before: Uncaught TypeError: abstract)
 make js-conformance      # 1124 / 1150; construct.dat 50 / 50
-make dom-conformance     # 669 / 669; compiled.dat 25 / 25
+make dom-conformance     # 678 / 678; compiled.dat 25 / 25, upgrades.dat 9 / 9
 ```
 
-What is still missing: an upgrade still runs the constructor on the element
-itself, where the standard hands the element over when the constructor asks
-for it (a constructor written as a function can tell, and one that never
-reaches `HTMLElement` is accepted); `this` can be used before `super()` has
-run; and a private name is a property that `obj['#p']` reads. Those and what
+What is still missing: a private name is a property that `obj['#p']` reads,
+and `this` in a derived constructor is unbound until `super()` runs but a
+`class` field initializer can still be reached through `eval`. Those and what
 else was found on the way
 are rows of the task table in `AGENTS.md`; the design and what it costs are
 in `ARCHITECTURE.md`, Phase 43, and `AUDIT.md`, finding 49, says what found
-what.
+what. The upgrade itself stopped being one of them in Phase 69, below.
+
+### An upgrade is an ordinary construction (Phase 69)
+
+A custom element that is already in the page is upgraded when its class is
+defined, and until Phase 69 the engine did that by handing the element's own
+object to the constructor as `this`. The standard does not: it constructs the
+class the ordinary way, on an object of its own, and the element is what
+`HTMLElement` gives out when the constructor asks for it — through
+`super(...)`, or through `Reflect.construct(HTMLElement, [], new.target)` —
+and the upgrade fails unless the constructor comes back with that element. So
+the definition now keeps the standard's construction stack (`run_upgrade`
+pushes the element, `construct_custom_element` takes it and marks the entry),
+and a constructor can tell what it is:
+
+```bash
+cat > up.html <<'HTML'
+<!DOCTYPE html><body><x-e id="e"></x-e></body>
+HTML
+cat > up.js <<'JS'
+class E extends HTMLElement {
+  field = 1;
+  constructor() {
+    var early; try { early = this; } catch (err) { early = err.name; }
+    super();
+    console.log(early, this === document.getElementById('e'), new.target === E);
+  }
+}
+customElements.define('x-e', E);
+var e = document.getElementById('e');
+console.log(e.field, e instanceof E, e.matches(':defined'));
+var Plain = function () { this.touched = true; };
+Plain.prototype = Object.create(HTMLElement.prototype, { constructor: { value: Plain } });
+Object.setPrototypeOf(Plain, HTMLElement);
+document.body.insertAdjacentHTML('beforeend', '<x-p id="p"></x-p>');
+customElements.define('x-p', Plain);
+var p = document.getElementById('p');
+console.log(p.touched === undefined, p.matches(':defined'), Object.getPrototypeOf(p) === HTMLElement.prototype);
+JS
+./build/litebird --run-script up.js up.html
+# ReferenceError true true         `this` is unbound before super(), then the element
+# 1 true true                      a field initializer lands on the element, `:defined`
+# Uncaught TypeError: The custom element constructor returned a different object.
+# true false true                  `this.touched` is on no element; the upgrade failed
+```
+
+What follows from it: a constructor written as a plain function is no longer
+`this === self`, one that never reaches `HTMLElement` has written on an object
+that is not the element and its upgrade fails, `super()` returns the element
+and a second `super()` is a `TypeError`, and a constructor that throws or
+returns something else leaves the element a plain `HTMLElement` that is not
+`:defined` — including a customized built-in, which `Element::is_defined` used
+to call defined. The object a script held before the definition existed stays
+the element's object; the class's prototype is put on it when the interface
+hands it out, and stays there if the upgrade then fails, as it does in a
+browser.
+
+```bash
+make dom-conformance     # 678 / 678; upgrades.dat 9 / 9
+make test                # 218 suites; js_an_upgrade_constructs_the_definition_the_ordinary_way
+```
+
+The five lines that measured this before the fix lived in
+`tests/dom-conformance/open/compiled-custom-elements.js` (4 of 5 differed);
+they are cases in `tests/dom-conformance/upgrades.dat` now.
+[`docs/phases/69-custom-element-construction-stack.md`](docs/phases/69-custom-element-construction-stack.md)
+says how it is built and
+[`docs/findings/75-an-upgrade-ran-the-constructor-on-the-element.md`](docs/findings/75-an-upgrade-ran-the-constructor-on-the-element.md)
+what was found.
 
 ### Iteration asks the value for its iterator (Phase 63)
 

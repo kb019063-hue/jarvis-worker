@@ -191,9 +191,9 @@ def main_commit() -> str:
 
 class Main(NamedTuple):
     """What `main` says about the two counters."""
-    phases: set[int]            # taken: in a file, or at or below a floor
+    phases: set[int]            # taken: mentioned in a file, or at or below a floor
     findings: set[int]
-    written_phases: set[int]    # in a file
+    written_phases: set[int]    # has a write-up (tools/next_ids.py, `written`)
     written_findings: set[int]
     phase_floor: int
     finding_floor: int
@@ -220,11 +220,12 @@ def on_main() -> Main:
     itself.
 
     Taken and written are kept apart. Every number up to a floor of
-    `docs/state.json` is taken, so that the allocator never hands it out
-    again, whether or not a write-up of it exists. This file used to call all
-    of them "on main already": #63 (Phase 62, finding 68) and #73 (Phase 58,
-    finding 64) were open, with numbers no file had, when the floors passed
-    them, and were told "not ready" for a reason that was not true.
+    `docs/state.json` is taken, and every number a document mentions, so that
+    the allocator never hands one out again, whether or not a write-up of it
+    exists. This file used to call all of them "on main already": #63 (Phase
+    62, finding 68) and #73 (Phase 58, finding 64) were open, with numbers
+    that had no write-up, when the floors passed them, and were told "not
+    ready" for a reason that was not true.
     """
     result = subprocess.run(
         [sys.executable, str(NEXT_IDS), "--taken", "--ref", main_commit(), "--no-prs"],
@@ -286,7 +287,7 @@ def number_on_main(kind: str, number: int, main: Main) -> tuple[bool, str | None
     if number in written:
         return True, None
     if number <= floor:
-        return False, (f"{kind} {number} is in no file on main. It is at or below the floor of docs/state.json "
+        return False, (f"{kind} {number} has no write-up on main. It is at or below the floor of docs/state.json "
                        f"({floor}), so tools/next_ids.py hands it out no more: it is this pull request's "
                        "if it was claimed while it was free")
     return False, None
@@ -535,19 +536,19 @@ def self_test() -> int:
     ]
 
     # main has write-ups of phases 1-4 and 6 and of findings 1-6 and 8, and
-    # floors of 6 and 8: Phase 5 and finding 7 are taken and in no file.
+    # floors of 6 and 8: Phase 5 and finding 7 are taken and have no write-up.
     main = Main(set(range(1, 7)), set(range(1, 9)), {1, 2, 3, 4, 6}, {1, 2, 3, 4, 5, 6, 8}, 6, 8)
     below = claim_problems(numbered, [numbered], main)
     written = claim_problems(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 6, finding 8\n"), [], main)
     free = claim_problems(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 7, finding 9\n"), [], main)
     cases += [
-        ("a number at or below a floor that no file has does not stop its pull request",
+        ("a number at or below a floor that has no write-up does not stop its pull request",
          [blocking for blocking, _text in below], [False, False]),
         ("and the remark says where it stands",
-         ["in no file on main" in text and "floor" in text for _blocking, text in below], [True, True]),
-        ("a number a file on main has stops it",
+         ["has no write-up on main" in text and "floor" in text for _blocking, text in below], [True, True]),
+        ("a number that has a write-up on main stops it",
          written, [(True, "Phase 6 is on main already"), (True, "finding 8 is on main already")]),
-        ("a number above the floors that no file has is free", free, []),
+        ("a number above the floors that has no write-up is free", free, []),
     ]
     failed = 0
     for name, got, wanted in cases:

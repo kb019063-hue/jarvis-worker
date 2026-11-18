@@ -66,7 +66,9 @@ scoreboard — is not a phase and takes no phase or finding number.
    `P` and `F` come from `python3 tools/next_ids.py`, which reads the
    documents, `docs/`, `docs/state.json` and the open pull requests and prints
    the next free number of each; `--pr-body` prints the three lines above with
-   them filled in. (They used to be read out of ARCHITECTURE.md and AUDIT.md —
+   them filled in. Ask it from a tree that has today's `main`, also when you
+   renumber: `git fetch origin main && python3 tools/next_ids.py --ref
+   FETCH_HEAD` (the last row of the table below says why). (They used to be read out of ARCHITECTURE.md and AUDIT.md —
    see the notice at the top.) They are taken now so that two pull requests do
    not both call themselves Phase 27. A change that is not engine work —
    documents, tooling, CI — takes neither: write `No phase, no finding` and
@@ -188,11 +190,14 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   20:18) `check_pr.py` asked `tools/next_ids.py` what is taken and reported
   the answer as "on main already": to #73 for Phase 58 and finding 64 and to
   #63 for Phase 62 and finding 68, both open since before the floors passed
-  them, with numbers no file has. A pull request can raise the floors to
+  them, with numbers that have no write-up. A pull request can raise the floors to
   its own numbers when it merges (#75 and #83 did), so any open one that a
   later one overtakes would have been told the same. `check_pr.py` now stops
-  a pull request only for a number that a file on `main` has, and remarks on
-  one at or below a floor.
+  a pull request only for a number that has a write-up on `main`: a file
+  `docs/phases/NN-…` or `docs/findings/NN-…`, or a place in one of the two
+  frozen documents. For one at or below a floor it remarks. What a document
+  says *about* a number is not a write-up of it: this paragraph names four,
+  and read as one it would have told #63 and #73 the same thing again.
 - **`main`, as the clone remembers it.** From #80 the same question was put
   to the clone's own branch `main`, which is where the clone was made and
   which `git fetch` of `origin` does not move. Twenty minutes after #83 had
@@ -344,3 +349,4 @@ Rows that share files should not be in work at the same time.
 | **Memory is reclaimed only when a script calls `gc()`**, and no leak audit has been done. One leak is known: a function bound to an object that holds it (`o.b = f.bind(o)`, 2,000 times: 2,000 cells left after `gc()`), and what a pending timer holds. The collector cannot see into what a native function captured. What it costs meanwhile: `for (i = 0; i < n; i++) o = { a: i }` keeps about 1 KB for each object it has dropped (433 MB of resident memory after 400,000), so a loop of three million takes more than 3 GB; a benchmark written for Phase 43 brought a 4 GB machine to a stop that way until it called `gc()` between its loops | `src/js/Heap.cpp`, and everything that allocates script objects | Known gaps, 4; ARCHITECTURE.md, Phase 34, section 9; one failing case of `tests/js-conformance/prototypes.dat` | Touches everything that makes script objects, the DOM bindings included: not beside a row that changes `src/js/Dom*Bindings.cpp` |
 | **The corpus has moved to web-platform-tests** (1,973 cases, 1,868 passed before Phase 49's `<select>` work): vendor it, read its `#description` sections, add processing instructions | `tools/conformance/`, `tests/html5lib/`, `src/html/`, `include/litebird/dom/` | AUDIT.md, finding 30 | Touches `src/html/HtmlTokenizer.cpp`, `src/html/HtmlTreeBuilder.cpp`, and `src/html/HtmlTreeBuilderModes.cpp`. The node type is there since Phase 28 (`include/litebird/dom/ProcessingInstruction.hpp`, its interface, `<?target data>` in the markup serializer); what is left is the tokenizer and the tree builder |
 | **Animated WebP, AVIF, and SVG `<text>`** | `src/render/WebPDecoder.cpp`, `src/render/ImageDecoder.cpp`, `src/render/SvgRenderer.cpp` | ARCHITECTURE.md, Phase 36, Phase 38 & Phase 54; [`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md); AUDIT.md, findings 43, 44 & 60; [`docs/findings/63-lossy-webp-vp8-refused.md`](docs/findings/63-lossy-webp-vp8-refused.md) | PNG, JPEG, GIF, **lossless WebP** (`VP8L`, all four transforms, meta prefix codes, colour cache), **lossy WebP** (a VP8 key frame: the boolean decoder, the 16x16/8x8/4x4 intra predictors, the 4x4 IDCT and the Walsh–Hadamard transform, the loop filter, plus the `VP8X` container and an `ALPH` plane in either compression method and all three spatial filters), SVG, BMP, and PPM are wired through `ImageDecoder::decode()`, and WebP is refused by status for the animated variant only. Canvas 2D text is done (Phase 46, finding 52). What is left: animated WebP (`ANMF` compositing and disposal), AVIF, and SVG `<text>` |
+| **`tools/next_ids.py` hands out a number that is on `main`, when it is asked from a tree behind `main`.** It reads the tree it is run in and the open pull requests. A number that was merged after that tree was made is in neither: its pull request is no longer open. On 18 November, asked from the tree this session began with (`--ref ee88b1c`), it answered Phase 74 and finding 80, which #90 had merged ten minutes before; from a tree with `main` in it, 75 and 81. `tools/ci/check_pr.py claim N` says so once the pull request is open ("Phase 74 is on main already"), and then the cost is a renumbering. The repair is to read `main` as GitHub has it besides the tree, which `check_pr.py` does for its own question (`main_commit`); without `gh` it has to go on answering from the tree, with the warning it already prints for the pull requests | `tools/next_ids.py` | AGENTS.md, "What has gone wrong": "`main`, as the clone remembers it" | Tooling: no phase, no finding. Until it is repaired, the command in step 2 of "Before starting" |

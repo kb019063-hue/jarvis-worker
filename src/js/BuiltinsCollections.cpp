@@ -248,7 +248,7 @@ void require_object_key(const JsValue& key, const char* what) {
 enum class IterKind { Keys, Values, Entries };
 
 JsValue make_collection_iterator(const JsValue& collection, const std::shared_ptr<CollectionData>& data,
-                                 IterKind kind) {
+                                 IterKind kind, JsObject* proto) {
     auto cursor = data->new_cursor();
     return js_make_iterator([data, cursor, kind](JsValue& value) {
         while (cursor->position < data->entries.size()) {
@@ -263,7 +263,7 @@ JsValue make_collection_iterator(const JsValue& collection, const std::shared_pt
         }
         data->release_cursor(cursor);
         return false;
-    }, {collection});
+    }, {collection}, proto);
 }
 
 } // namespace
@@ -344,14 +344,21 @@ void install_collection_builtins(JsIntrinsics& realm) {
     auto map_iter = [](IterKind kind, const char* name) {
         return [kind, name](Args) {
             JsValue map = self();
-            return make_collection_iterator(map, data_of(map, ObjectClass::Map, name), kind);
+            return make_collection_iterator(map, data_of(map, ObjectClass::Map, name), kind,
+                                            JsIntrinsics::get().map_iterator_proto);
         };
     };
     js_define_method(mp, "keys", 0, map_iter(IterKind::Keys, "Map.prototype.keys"));
     js_define_method(mp, "values", 0, map_iter(IterKind::Values, "Map.prototype.values"));
-    js_define_method(mp, "entries", 0, map_iter(IterKind::Entries, "Map.prototype.entries"));
-    js_define_method(mp, kIteratorKey, 0, map_iter(IterKind::Entries, "Map.prototype[Symbol.iterator]"));
-    js_define_method(mp, "Symbol.iterator", 0, map_iter(IterKind::Entries, "Map.prototype[Symbol.iterator]"));
+    // `Map.prototype[Symbol.iterator]` is the same function object as
+    // `Map.prototype.entries`, and its name is "entries": `Map.prototype.entries`
+    // and the @@iterator method are one function in the language, not two that
+    // iterate alike.
+    JsValue map_entries = js_make_native("entries", 0, map_iter(IterKind::Entries, "Map.prototype.entries"));
+    js_define_hidden(mp, "entries", map_entries);
+    js_define_hidden(mp, kIteratorKey, map_entries);
+    js_define_hidden(mp, "Symbol.iterator", map_entries);
+    js_install_iterator_prototype(JsIntrinsics::get().map_iterator_proto, "Map Iterator");
     js_define_method(map_ctor, "groupBy", 2, [](Args args) {
         JsValue map = make_collection(ObjectClass::Map, JsIntrinsics::get().map_proto);
         auto data = data_of(map, ObjectClass::Map, "Map.groupBy");
@@ -437,14 +444,19 @@ void install_collection_builtins(JsIntrinsics& realm) {
     auto set_iter = [](IterKind kind, const char* name) {
         return [kind, name](Args) {
             JsValue set = self();
-            return make_collection_iterator(set, data_of(set, ObjectClass::Set, name), kind);
+            return make_collection_iterator(set, data_of(set, ObjectClass::Set, name), kind,
+                                            JsIntrinsics::get().set_iterator_proto);
         };
     };
-    js_define_method(sp, "values", 0, set_iter(IterKind::Keys, "Set.prototype.values"));
-    js_define_method(sp, "keys", 0, set_iter(IterKind::Keys, "Set.prototype.keys"));
+    // `values`, `keys` and `Symbol.iterator` are one function object, named
+    // "values"; only `entries` is another.
+    JsValue set_values = js_make_native("values", 0, set_iter(IterKind::Keys, "Set.prototype.values"));
+    js_define_hidden(sp, "values", set_values);
+    js_define_hidden(sp, "keys", set_values);
+    js_define_hidden(sp, kIteratorKey, set_values);
+    js_define_hidden(sp, "Symbol.iterator", set_values);
     js_define_method(sp, "entries", 0, set_iter(IterKind::Entries, "Set.prototype.entries"));
-    js_define_method(sp, kIteratorKey, 0, set_iter(IterKind::Keys, "Set.prototype[Symbol.iterator]"));
-    js_define_method(sp, "Symbol.iterator", 0, set_iter(IterKind::Keys, "Set.prototype[Symbol.iterator]"));
+    js_install_iterator_prototype(JsIntrinsics::get().set_iterator_proto, "Set Iterator");
     realm.add_global("Set", set_ctor);
 
     // ---- WeakMap and WeakSet ----------------------------------------------

@@ -14,9 +14,9 @@ SVG's default whitespace mode collapses ASCII whitespace runs across text-node/s
 
 ## Verification
 
-- `make test` — **242/242** engine suites plus 114 cross-origin/channel checks. The new `svg_text_uses_canvas_glyphs_and_svg_positioning` suite compares every pixel with Canvas 2D's rasterization for plain, whitespace-normalized, anchored, transformed, and split painted text; two empty images cannot satisfy the assertion.
+- `make test` — **243/243** engine suites plus 114 cross-origin/channel checks. The new `svg_text_uses_canvas_glyphs_and_svg_positioning` suite compares every pixel with Canvas 2D's rasterization for plain, whitespace-normalized, anchored, transformed, and split painted text; two empty images cannot satisfy the assertion.
 - `make verify-media` — **105** checks, zero failures, including **7** SVG checks. Two added SVG pixel-oracle cases assert an identical alpha mask translated exactly by `(21, 8)` independently of the chosen host font, solid red fill, and a positioned blue tspan against inherited red/group-transform paint.
-- On the branch merged with `main` through #108, `make test` prints **242/242** suites plus 114 cross-origin/channel checks, `make wpt` prints **9567/9824** (257 listed failures, zero unlisted), and full `make asan` passes including **882/882** deep-page runs. The WPT score and floor are inherited; no WPT gain is claimed by this change.
+- On the branch merged with `main` through #107, `make test` prints **243/243** suites plus 114 cross-origin/channel checks, `make wpt` prints **9567/9824** (257 listed failures, zero unlisted), and full `make asan` passes including **882/882** deep-page runs. The WPT score and floor are inherited; no WPT gain is claimed by this change.
 
 ## What remains
 

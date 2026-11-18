@@ -136,7 +136,7 @@ URL_FLOOR ?= 1188
 JS_ASAN_FLOOR ?= 1121
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
-DOM_ASAN_FLOOR ?= 669
+DOM_ASAN_FLOOR ?= 678
 
 # The string type stands alone, so its stress tests can be built without the
 # rest of the engine and run under sanitizers the whole engine cannot use yet.

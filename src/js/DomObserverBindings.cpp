@@ -6,6 +6,7 @@
 #include "litebird/dom/CustomElementRegistry.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/js/EventLoop.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/js/Promise.hpp"
 
 #include <algorithm>
@@ -320,6 +321,18 @@ struct Definition {
     JsValue disconnected;
     JsValue adopted;
     JsValue attribute_changed;
+
+    /// The HTML standard's construction stack, innermost last: the elements an
+    /// upgrade is building right now. The interface's constructor takes the
+    /// top entry — that is how `super()` finds the element to build on — and
+    /// marks it, so a second `super()` in the same constructor is refused
+    /// rather than given the element twice. `run_upgrade` owns the push and
+    /// the comparison, not the constructor.
+    struct Construction {
+        std::shared_ptr<Element> element;
+        bool taken{false};      // the standard's "already constructed" marker
+    };
+    std::vector<Construction> construction;
 };
 
 /// Something a custom element is to be told, or its upgrade.
@@ -399,17 +412,22 @@ bool observes(const Definition& definition, const std::string& name) {
            std::find(definition.observed.begin(), definition.observed.end(), name) != definition.observed.end();
 }
 
-/// Makes an existing element an instance of the definition's class: the
-/// element's own object gets the class's prototype and the constructor runs
-/// on it.
+/// Makes an existing element an instance of the definition's class, the way
+/// the standard does it: the constructor runs the ordinary way — on an object
+/// of its own, with the class's prototype — and reaches the element through
+/// `super()`, which takes it from the definition's construction stack. The
+/// upgrade counts only if what the constructor returns *is* the element; one
+/// that throws, or that returns something else, leaves the element not
+/// `:defined` and with no reactions — the prototype the interface gave it when
+/// it handed it out stays on it, as it does in a browser.
 void run_upgrade(Realm& realm, Element& element, const std::shared_ptr<Definition>& definition) {
     if (element.custom_state() != CustomElementState::Uncustomized) return;
     auto keep = shared(element);
     CustomPart& part = realm.part<CustomPart>();
-    JsValue object = wrap(realm, element);
-    // "Failed" until the constructor has returned: what the constructor does
-    // to its own element is not reported back to it.
-    element.set_custom_state(CustomElementState::Failed);
+    // "Failed" until the constructor has returned, and for good if it does not
+    // come back with the element: what the constructor does to its own object
+    // is not reported back to it.
+    element.set_custom_state(CustomElementState::FailedUpgrade);
 
     // What it will be told once it is constructed: its attributes as they
     // are now, and that it is in the document. These run right after the
@@ -436,19 +454,50 @@ void run_upgrade(Realm& realm, Element& element, const std::shared_ptr<Definitio
         realm.reactions_queued = part.queue.size();
     }
 
-    if (definition->prototype.is_object()) object.object_val->prototype = definition->prototype.object_val;
+    // Push the element where `super()` will find it, then construct the
+    // definition's constructor as `new` would: `this` is an object of its own,
+    // with the constructor's prototype at this moment, and the constructor is
+    // handed nothing else.
+    definition->construction.push_back({keep, false});
+    JsValue instance = JsValue::make_object();
+    {
+        const JsValue prototype = definition->constructor.get_property("prototype");
+        if (prototype.is_object_like()) {
+            if (JsObject* target = prototype.as_prototype()) instance.object_val->prototype = target;
+        }
+    }
+    JsValue returned;
     JsValue thrown;
     const bool ok = js_capture_throw([&] {
         JsScriptScope scope;
-        JsValue result = definition->constructor.construct({}, &object);
-        if (result.is_object_like() && !strict_equals(result, object)) {
-            js_throw_type_error("The custom element constructor returned a different object.");
-        }
+        returned = definition->constructor.construct({}, &instance);
     }, thrown);
-    if (!ok) {
+    // Whatever happened, the entry this upgrade pushed is gone. One the
+    // constructor never took is still on the top and is dropped here; one it
+    // took is what it built on, and it is the feature that says whether the
+    // element was reached at all.
+    bool reached_the_element = false;
+    if (!definition->construction.empty() && definition->construction.back().element.get() == &element) {
+        reached_the_element = definition->construction.back().taken;
+        definition->construction.pop_back();
+    }
+
+    // What the construction made: what the constructor returned when that is an
+    // object, and `this` otherwise — which is the element when `super()` was
+    // reached, since `super()` hands back the element and binds `this` to it.
+    const bool is_the_element = ok &&
+                                ((returned.object_val &&
+                                  returned.object_val->dom_node.get() == static_cast<Node*>(&element)) ||
+                                 (!returned.is_object_like() && reached_the_element));
+    if (!is_the_element) {
         // It stays a plain element, and is told nothing.
         for (std::size_t i = first; i < part.queue.size(); ++i) {
             if (part.queue[i].element == keep) part.queue[i].done = true;
+        }
+        if (ok) {
+            js_capture_throw([] {
+                js_throw_type_error("The custom element constructor returned a different object.");
+            }, thrown);
         }
         js_report_uncaught(thrown);
         return;
@@ -732,6 +781,33 @@ JsValue construct_custom_element(Realm& realm, const InterfaceDef& def, Args, co
     const std::string expected = definition->local_name == definition->name
         ? std::string("HTMLElement") : html_interface_for_tag(definition->local_name);
     if (expected != def.name) js_throw_type_error("Illegal constructor");
+
+    if (!definition->construction.empty()) {
+        // An upgrade is building this element: take it from the definition's
+        // construction stack and mark the entry. What comes back is the
+        // element's own object — the one a script that reached the element
+        // before the definition existed already holds — and it is given the
+        // class's prototype now, which is what "the element gets the class's
+        // prototype at that moment" amounts to. The object `new` made is left
+        // as it was: it is not the element, and `this` becomes the element when
+        // `super()` returns it. The state stays "failed" until the upgrade
+        // finishes.
+        Definition::Construction& entry = definition->construction.back();
+        if (entry.taken) {
+            js_throw_type_error("This instance is already constructed");
+        }
+        entry.taken = true;
+        JsValue built = wrap(realm, entry.element);
+        if (built.object_val) {
+            JsObject* prototype = derived->object_val->prototype;
+            if (!prototype && definition->prototype.object_val) prototype = definition->prototype.object_val.get();
+            if (prototype) built.object_val->prototype = prototype;
+        }
+        // `super(...)` reports it as the object the interface built on, so the
+        // constructor's `this` is the element from its return on.
+        JsValue::hand_back_constructed_object(built);
+        return built;
+    }
 
     auto element = std::make_shared<Element>(definition->local_name);
     if (realm.document) element->set_owner_document(realm.document);

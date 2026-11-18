@@ -1183,6 +1183,296 @@ TEST(font_family_reaches_the_box_that_measures_text) {
     assert(std::fabs(p_narrow - p_wide) > 1.0f);
 }
 
+TEST(font_style_italic_reaches_the_painter) {
+    using namespace litebird;
+
+    // `font-style` has been parsed, listed as a known property, accepted by the
+    // CSSOM and expanded by the `font` shorthand for as long as any of those
+    // existed -- and then dropped. Nothing stored it: not the computed style,
+    // so `<em>` was upright; not the shorthand expansion, which threw the
+    // token away; and not the box that measures text. The guard in `pick_face`
+    // that was meant to stop an italic face being handed out by accident could
+    // never fire, because nothing ever asked for one.
+    auto doc = HtmlParser::parse(R"(
+        <body>
+            <p id="plain"><span>plain text</span></p>
+            <p id="em"><em>emphasis</em></p>
+            <p id="i"><i>idiomatic</i></p>
+            <p id="cite"><cite>a citation</cite></p>
+            <p id="span"><span style="font-style: italic">spanned</span></p>
+            <p id="oblique"><span style="font-style: oblique">oblique</span></p>
+            <p id="shorthand"><span style="font: italic 16px monospace">shorthand</span></p>
+            <p id="undone"><em style="font-style: normal">undone</em></p>
+        </body>
+    )");
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+
+    auto style_of = [&](const char* id) {
+        auto el = doc->get_element_by_id(id);
+        assert(el);
+        const auto inner = std::dynamic_pointer_cast<Element>(el->first_child());
+        assert(inner);
+        return resolver.resolve_style(inner, nullptr);
+    };
+
+    // From the UA stylesheet: the elements HTML §Rendering says are italic.
+    assert(style_of("plain").font_style == FontStyle::Normal);
+    assert(style_of("em").font_style == FontStyle::Italic);
+    assert(style_of("i").font_style == FontStyle::Italic);
+    assert(style_of("cite").font_style == FontStyle::Italic);
+    // From a declaration, two ways of writing it.
+    assert(style_of("span").font_style == FontStyle::Italic);
+    // `oblique` is a value of its own and not a synonym for italic: a face
+    // declares which it is, and `@font-face { font-style: oblique }` has to be
+    // able to find that face.
+    assert(style_of("oblique").font_style == FontStyle::Oblique);
+    // The shorthand. `font: italic 16px monospace` sets six longhands and this
+    // was the one it had no place for.
+    assert(style_of("shorthand").font_style == FontStyle::Italic);
+    assert(style_of("shorthand").font_family == "monospace");
+    // ...and it can be turned off again inside an italic element.
+    assert(style_of("undone").font_style == FontStyle::Normal);
+
+    auto root = LayoutTree::build(doc, resolver, 1024.0f, 768.0f);
+    assert(root);
+
+    // Inherited into the style the text box is built with -- the two lessons of
+    // the previous two phases, and the reason this is checked on the box and
+    // not only on the element.
+    auto em_el = doc->get_element_by_id("em");
+    assert(em_el);
+    auto em_text = text_box_for(root, em_el->first_child()->first_child());
+    if (!em_text) em_text = text_box_for(root, em_el->first_child());
+    assert(em_text);
+    assert(em_text->style.font_style == FontStyle::Italic);
+
+    // The painter is told, or the layout measures a slant the drawing does not
+    // have.
+    const DisplayList list = DisplayList::build(root);
+    bool italic_command_seen = false;
+    bool upright_command_seen = false;
+    for (const auto& cmd : list.commands()) {
+        std::visit([&](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, DrawTextCommand>) {
+                if (arg.text.find("emphasis") != std::string::npos) italic_command_seen = arg.font_italic;
+                if (arg.text.find("plain") != std::string::npos) upright_command_seen = !arg.font_italic;
+            }
+        }, cmd);
+    }
+    std::printf("      [font-style] DrawText: italic=%s upright=%s\n",
+                italic_command_seen ? "yes" : "no", upright_command_seen ? "yes" : "no");
+    std::fflush(stdout);
+    assert(italic_command_seen);
+    assert(upright_command_seen);
+}
+
+TEST(font_style_italic_slants_the_glyphs_it_draws) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    if (!fr.has_truetype_font()) return;
+
+    // The host this was written on has six DejaVu files and not one of them is
+    // slanted, and a shared runner is no likelier to have one. So a test that
+    // needed a real italic face would prove nothing on either machine. The
+    // question here is the one CSS answers for that case -- an upright face
+    // asked for a slant is sheared -- and the oracle is the shape of the ink.
+    struct Ink {
+        std::vector<int> left = std::vector<int>(400, -1);   // per row; -1 = no ink
+        std::vector<int> right = std::vector<int>(400, -1);
+        int top{-1};
+        int bottom{-1};
+        int leftmost{-1};
+        int rightmost{-1};
+    };
+    const auto draw = [](bool italic) {
+        Ink ink;
+        FontRenderer::instance().draw_text(
+            60.0f, 10.0f, "H", 40.0f, 400,
+            [&ink](int px, int py, uint8_t) {
+                if (py < 0 || py >= 400 || px < 0 || px >= 400) return;
+                if (ink.left[py] < 0) {
+                    ink.left[py] = px;
+                    ink.right[py] = px;
+                } else {
+                    ink.left[py] = std::min(ink.left[py], px);
+                    ink.right[py] = std::max(ink.right[py], px);
+                }
+            },
+            {}, italic);
+        for (int y = 0; y < 400; ++y) {
+            if (ink.left[y] < 0) continue;
+            if (ink.top < 0) ink.top = y;
+            ink.bottom = y;
+            if (ink.leftmost < 0 || ink.left[y] < ink.leftmost) ink.leftmost = ink.left[y];
+            if (ink.rightmost < 0 || ink.right[y] > ink.rightmost) ink.rightmost = ink.right[y];
+        }
+        return ink;
+    };
+
+    const Ink upright = draw(false);
+    const Ink italic = draw(true);
+    assert(upright.top >= 0 && italic.top >= 0);
+
+    // 'H' is two vertical stems and a crossbar: its left edge is the left stem
+    // all the way up, so the left edge of the topmost row and of the bottom row
+    // agree for an upright face and differ by the shear for a slanted one.
+    const int upright_lean = upright.left[upright.top] - upright.left[upright.bottom];
+    const int italic_lean = italic.left[italic.top] - italic.left[italic.bottom];
+    // The overall extent, not one row's: the shear pivots on the baseline, so
+    // the bottom row of 'H' is as wide slanted as upright and only the rows
+    // above it move.
+    const int upright_width = upright.rightmost - upright.leftmost;
+    const int italic_width = italic.rightmost - italic.leftmost;
+    std::printf("      [font-style] 'H' lean: upright=%d italic=%d (px, top minus bottom)\n",
+                upright_lean, italic_lean);
+    std::printf("      [font-style] 'H' width: upright=%d italic=%d\n", upright_width, italic_width);
+    std::fflush(stdout);
+
+    // Upright leans nowhere.
+    assert(std::abs(upright_lean) <= 1);
+    // The synthesised oblique leans right at the top by about 0.25 px per row
+    // of height -- 7 px at 40 px type -- and does not lean at the baseline,
+    // which is where the shear pivots.
+    assert(italic_lean >= 4);
+    assert(std::abs(italic.left[italic.bottom] - upright.left[upright.bottom]) <= 2);
+    // ...and the ink is wider, because the shear moved the top of the stems
+    // sideways and the bitmap had to grow to hold them.
+    assert(italic_width >= upright_width + 2);
+
+    // A shear moves ink, not the pen: the advance of the text is the same
+    // slanted or not, because the face that answered is the same face. Getting
+    // this wrong would make every italic word overlap the next one or leave a
+    // gap after it.
+    assert(std::fabs(fr.measure_text("HHHH", 40.0f, 400, {}, true) -
+                     fr.measure_text("HHHH", 40.0f, 400, {}, false)) < 0.01f);
+}
+
+TEST(a_family_with_an_italic_face_is_not_sheared) {
+    using namespace litebird;
+    FontRenderer& fr = FontRenderer::instance();
+    fr.clear_webfonts();
+
+    const ResourceResponse bytes = ResourceLoader::load_file("tests/wpt/fonts/Ahem.ttf");
+    if (!bytes.success || bytes.body.empty()) return;
+
+    const std::vector<std::uint8_t> font_bytes(bytes.body.begin(), bytes.body.end());
+    FontRenderer::WebfontFetcher fetch = [font_bytes]() { return font_bytes; };
+
+    // One family, two faces: a regular and an italic, declared by two rules the
+    // way a real page declares them. Both are the same bytes here, so the
+    // widths cannot tell them apart -- the question in this test is which face
+    // answered, and that is what `face_for` reports.
+    fr.register_webfont("Slanty", {fetch}, 400, 400, /*italic=*/false);
+    const int slanty = fr.register_webfont("Slanty", {fetch}, 400, 400, /*italic=*/true);
+    assert(slanty != FontRenderer::kNoFamily);
+
+    // A family with no slanted face anywhere: the host's own Ahem file.
+    const int upright_only = fr.register_font_file("tests/wpt/fonts/Ahem.ttf");
+    assert(upright_only != FontRenderer::kNoFamily);
+
+    bool sheared = true;
+    const TrueTypeFont* italic_face = fr.face_for('X', false, slanty, /*italic=*/true, &sheared);
+    assert(italic_face);
+    assert(!sheared);   // the family's own italic answered: nothing to synthesise
+
+    sheared = true;
+    const TrueTypeFont* upright_face = fr.face_for('X', false, slanty, /*italic=*/false, &sheared);
+    assert(upright_face);
+    assert(!sheared);   // an upright request has nothing to shear
+
+    sheared = false;
+    const TrueTypeFont* stand_in = fr.face_for('X', false, upright_only, /*italic=*/true, &sheared);
+    assert(stand_in);
+    // No italic on this host: the upright face answers and the caller is told
+    // to shear it. Reporting this rather than assuming it is what keeps
+    // "the family had no italic" apart from "the family's italic is what we
+    // got" -- both are a face, and only one of them is already slanted.
+    assert(sheared);
+
+    // And the stand-in is still measured in the family's own metrics, so an
+    // italic Ahem line lays out at exactly the upright width.
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Slanty", true) - 64.0f) < 0.5f);
+    assert(std::fabs(fr.measure_text("XXXX", 16.0f, 400, "Slanty", false) - 64.0f) < 0.5f);
+
+    fr.clear_webfonts();
+}
+
+TEST(text_is_drawn_at_the_advances_it_was_measured_at) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    const int ahem = fr.register_font_file("tests/wpt/fonts/Ahem.ttf");
+    if (ahem == FontRenderer::kNoFamily) return;
+
+    // `draw_text` used to place every glyph at the *primary* face's advance
+    // whatever family the text was in, while layout measured it at the family's
+    // own. So a run of monospace text -- the one kind of text whose whole
+    // purpose is that the glyphs line up -- was drawn at proportional advances:
+    // every glyph in the right order, packed into the width of a font nobody
+    // asked for. The oracle is Ahem again: 1 em per glyph, so four of them at
+    // 16 px occupy 64 px of pen travel in Ahem and 38.5 in DejaVu Sans.
+    const float measured = fr.measure_text("XXXX", 16.0f, 400, "Ahem");
+    assert(std::fabs(measured - 64.0f) < 0.5f);
+
+    int rightmost = -1;
+    fr.draw_text(20.0f, 10.0f, "XXXX", 16.0f, 400,
+                 [&rightmost](int px, int, uint8_t) { rightmost = std::max(rightmost, px); },
+                 "Ahem", false);
+    assert(rightmost >= 0);
+
+    // The last glyph's ink begins three advances in, so the drawing must reach
+    // at least that far -- 48 px -- and cannot reach much past 64 + one glyph.
+    std::printf("      [draw] 'XXXX' in Ahem: measured %.2f, ink reaches %d (from pen 20)\n",
+                measured, rightmost - 20);
+    std::fflush(stdout);
+    assert(rightmost - 20 >= 48);
+    assert(rightmost - 20 <= 80);
+
+    // And the case where the pen has to change face inside one run, which is
+    // the one that tells the per-codepoint advance apart from "the face the
+    // line is set in": a codepoint the family does not cover is drawn from a
+    // fallback, and measured at *that* face's advance. If the pen advanced
+    // with something else, the glyphs would overlap the space layout made for
+    // them and no sum of the measured widths would describe the line.
+    const int mono = fr.generic_family_id("monospace");
+    if (mono == FontRenderer::kNoFamily) return;
+    const std::string mono_path = fr.face_path("monospace");
+    if (mono_path.empty()) return;
+    TrueTypeFont mono_face;
+    if (!mono_face.load_file(mono_path)) return;
+    TrueTypeFont ahem_face;
+    if (!ahem_face.load_file("tests/wpt/fonts/Ahem.ttf")) return;
+    // '一' U+4E00 is Ahem's and not DejaVu's or DejaVu Sans Mono's, which is
+    // what makes it the one codepoint that forces the fallback chain.
+    if (mono_face.has_glyph(0x4E00) || !ahem_face.has_glyph(0x4E00)) return;
+    if (const TrueTypeFont* primary = fr.face_for(0x0041, false)) {
+        if (primary->has_glyph(0x4E00)) return;   // this host's primary covers CJK
+    }
+
+    const std::vector<std::string> saved_paths = fr.fallback_paths();
+    fr.set_fallbacks({"tests/wpt/fonts/Ahem.ttf"});
+    const std::string wide = "\u4E00\u4E00";
+    const float wide_measured = fr.measure_text(wide, 16.0f, 400, "monospace");
+    int wide_rightmost = -1;
+    fr.draw_text(20.0f, 10.0f, wide, 16.0f, 400,
+                 [&wide_rightmost](int px, int, uint8_t) { wide_rightmost = std::max(wide_rightmost, px); },
+                 "monospace", false);
+    fr.set_fallbacks(saved_paths);
+
+    std::printf("      [draw] fallback glyphs: measured %.2f, ink spans %d\n",
+                wide_measured, wide_rightmost - 20);
+    std::fflush(stdout);
+    assert(std::fabs(wide_measured - 32.0f) < 0.5f);   // two 1 em glyphs
+    // The second glyph starts one 16 px advance along. Advancing by the
+    // monospace face's `.notdef` instead -- 9.63 px -- pulls it 6.4 px left,
+    // which is the whole difference between a fallback glyph sitting in the
+    // space measured for it and sitting in a gap.
+    assert(wide_rightmost - 20 >= 29);
+    assert(wide_rightmost - 20 <= 34);
+}
+
 TEST(inline_formatting_context) {
     using namespace litebird;
     std::string html = R"(
@@ -17146,6 +17436,10 @@ int main() {
     RUN_TEST(font_face_declares_the_family_the_page_names);
     RUN_TEST(font_face_brings_the_family_the_page_names);
     RUN_TEST(font_family_reaches_the_box_that_measures_text);
+    RUN_TEST(font_style_italic_reaches_the_painter);
+    RUN_TEST(font_style_italic_slants_the_glyphs_it_draws);
+    RUN_TEST(a_family_with_an_italic_face_is_not_sheared);
+    RUN_TEST(text_is_drawn_at_the_advances_it_was_measured_at);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);

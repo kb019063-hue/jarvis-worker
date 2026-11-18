@@ -70,6 +70,12 @@ ComputedStyle inherited_only_style(const ComputedStyle& parent) {
     // facts together are why a `<pre>` came out proportional: the size was
     // right, the face was not.
     s.font_family = parent.font_family;
+    // And the slant, for the same reason and by the same argument: it inherits,
+    // and this is the style a text box is measured and drawn with. An `<em>`
+    // whose font-style stopped at the element would be upright in the box that
+    // lays it out and upright in the painter, however italic the computed style
+    // said it was.
+    s.font_style = parent.font_style;
     s.line_height = parent.line_height;
     s.line_height_number = parent.line_height_number;
     s.text_align = parent.text_align;

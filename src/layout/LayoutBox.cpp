@@ -947,7 +947,9 @@ void LayoutBox::layout_inline(float containing_width) {
 void LayoutBox::layout_text(float containing_width) {
     lines.clear();
     FontRenderer& font_renderer = FontRenderer::instance();
-    const float space_advance = font_renderer.measure_text(" ", style.font_size, style.font_weight, style.font_family);
+    const bool italic = style.font_style != FontStyle::Normal;
+    const float space_advance = font_renderer.measure_text(" ", style.font_size, style.font_weight,
+                                                          style.font_family, italic);
     float line_h = style.font_size * 1.25f;
 
     if (containing_width <= 0.0f) containing_width = 800.0f;
@@ -960,7 +962,8 @@ void LayoutBox::layout_text(float containing_width) {
     float max_w = 0.0f;
 
     while (ss >> word) {
-        const float word_w = font_renderer.measure_text(word, style.font_size, style.font_weight, style.font_family);
+        const float word_w = font_renderer.measure_text(word, style.font_size, style.font_weight,
+                                                        style.font_family, italic);
         const float space_w = current_line.empty() ? 0.0f : space_advance;
 
         if (!current_line.empty() && (current_w + space_w + word_w) > containing_width) {
@@ -985,7 +988,8 @@ void LayoutBox::layout_text(float containing_width) {
 
     if (lines.empty()) {
         lines.push_back(text);
-        max_w = font_renderer.measure_text(text, style.font_size, style.font_weight, style.font_family);
+        max_w = font_renderer.measure_text(text, style.font_size, style.font_weight,
+                                          style.font_family, italic);
     }
 
     dimensions.content.width = max_w;
@@ -1015,7 +1019,8 @@ static void collect_items(
         ComputedStyle effective_style = box->style;
         FontRenderer& font_renderer = FontRenderer::instance();
         const float space_w = font_renderer.measure_text(" ", effective_style.font_size, effective_style.font_weight,
-                                               effective_style.font_family);
+                                               effective_style.font_family,
+                                               effective_style.font_style != FontStyle::Normal);
         float line_h = effective_style.effective_line_height();
 
         size_t i = 0;
@@ -1046,7 +1051,8 @@ static void collect_items(
                 item.type = InlineItem::Type::Text;
                 item.text = word;
                 item.width = font_renderer.measure_text(word, effective_style.font_size, effective_style.font_weight,
-                                               effective_style.font_family);
+                                               effective_style.font_family,
+                                               effective_style.font_style != FontStyle::Normal);
                 item.height = line_h;
                 item.style = effective_style;
                 item.source_box = box;

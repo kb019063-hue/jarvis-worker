@@ -26,8 +26,8 @@ JsValue require_object(const JsValue& value, const char* where) {
 std::vector<JsValue> array_like_to_vector(const JsValue& value) {
     if (value.is_nullish()) return {};
     if (value.is_array()) {
-        const auto& elements = value.object_val->array_elements;
-        return std::vector<JsValue>(elements.begin(), elements.end());
+        // CreateListFromArrayLike reads every place, holes included, as undefined.
+        return value.array_snapshot();
     }
     if (!value.is_object_like()) js_throw_type_error("CreateListFromArrayLike called on non-object");
     std::vector<JsValue> out;
@@ -177,7 +177,10 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
     if (cell && cell->is_array) {
         if (key == "length") return data(JsValue::make_number(static_cast<double>(cell->array_elements.size())), true, false, false);
         if (parse_index(key, index)) {
-            if (index < cell->array_elements.size()) return data(cell->array_elements[index], true, true, true);
+            // A hole has no descriptor: getOwnPropertyDescriptor(a, '1') is undefined.
+            if (index < cell->array_elements.size() && !object.is_array_hole(index)) {
+                return data(cell->array_elements[index], true, true, true);
+            }
             return JsValue::make_undefined();
         }
     }
@@ -406,8 +409,12 @@ JsValue structured_clone(const JsValue& value, std::unordered_map<const void*, J
     if (cell->is_array) {
         JsValue copy = JsValue::make_array();
         seen.emplace(value.identity(), copy);
-        for (const auto& item : cell->array_elements) {
-            copy.object_val->array_elements.push_back(structured_clone(item, seen));
+        for (size_t i = 0; i < cell->array_elements.size(); ++i) {
+            // Structured clone keeps a hole a hole (the standard skips the
+            // index rather than writing undefined into it).
+            if (value.is_array_hole(i)) copy.object_val->array_elements.push_back(JsValue::make_undefined());
+            else copy.object_val->array_elements.push_back(structured_clone(cell->array_elements[i], seen));
+            if (value.is_array_hole(i)) copy.set_array_hole(i);
         }
         return copy;
     }

@@ -12059,6 +12059,156 @@ TEST(cssom_media_rules_and_the_cascade_inside_them) {
     assert(js.eval("failures.join('; ')").to_string().empty());
 }
 
+TEST(array_holes_are_not_elements) {
+    using namespace litebird;
+    // Phase 81. `delete a[1]` used to leave an element whose value was
+    // `undefined`: `1 in a` stayed true, `Object.keys` listed it, `forEach`
+    // called the callback for it and `new Array(3)` was three such elements.
+    // The standard has holes — an index that is not an own property at all,
+    // read as `undefined` and skipped by everything that walks the own keys.
+    // ARCHITECTURE.md listed this as missing since Phase 23.
+    //
+    // Every assertion is a comparison made in the page, and the whole set was
+    // run through this engine and through Node.js first: the same text, the
+    // same 38 lines. Where they must differ it is said so in a comment.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><html><body><p id=t>x</p></body></html>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        // `delete` is one of the four ways to make a hole.
+        function holed() { var a = [1, 2, 3]; delete a[1]; return a; }
+
+        ok('a delete leaves a hole', 1 in holed(), false);
+        ok('the length does not move', holed().length, 3);
+        ok('the index reads undefined', holed()[1], undefined);
+        ok('hasOwnProperty', holed().hasOwnProperty(1), false);
+        ok('Object.keys leaves it out', Object.keys(holed()).join(), '0,2');
+        ok('getOwnPropertyNames', Object.getOwnPropertyNames(holed()).join(), '0,2,length');
+        ok('getOwnPropertyDescriptor is undefined', Object.getOwnPropertyDescriptor(holed(), '1') === undefined, true);
+        ok('Object.values', Object.values(holed()).join(), '1,3');
+        ok('join writes it empty', holed().join('-'), '1--3');
+        ok('toString writes it empty', String(holed()), '1,,3');
+        ok('JSON has no way to leave it out', JSON.stringify(holed()), '[1,null,3]');
+
+        var seen = [];
+        holed().forEach(function (v, i) { seen.push(i); });
+        ok('forEach skips it', seen.join(), '0,2');
+        var mapped = holed().map(function (v) { return v * 2; });
+        ok('map keeps it a hole', 1 in mapped, false);
+        ok('map keeps the length', mapped.length, 3);
+        ok('filter drops it', holed().filter(function () { return true; }).join(), '1,3');
+        ok('some', holed().some(function () { return true; }), true);
+        ok('every skips it', holed().every(function () { return false; }), false);
+        ok('find', holed().find(function () { return true; }), 1);
+        ok('findIndex', holed().findIndex(function () { return true; }), 0);
+        var reduced = [];
+        holed().reduce(function (acc, v, i) { reduced.push(i); return acc; }, 0);
+        ok('reduce skips it', reduced.join(), '0,2');
+        // Without a seed, reduce starts at the first element there is.
+        var head = [1, 2, 3]; delete head[0];
+        ok('reduce seeds from the first element', head.reduce(function (x, y) { return x + y; }), 5);
+        var allHoles = new Array(3);
+        ok('reduce of all holes throws', (function () { try { allHoles.reduce(function () {}); return 'no'; } catch (e) { return e.name; } })(), 'TypeError');
+        ok('every of all holes is true', new Array(3).every(function () { return false; }), true);
+
+        // indexOf asks for the property and so steps over the hole; includes
+        // reads the place and so finds `undefined` there.
+        var undef = [undefined, 2]; delete undef[0];
+        ok('indexOf skips it', undef.indexOf(undefined), -1);
+        ok('lastIndexOf skips it', undef.lastIndexOf(undefined), -1);
+        ok('includes reads it as undefined', undef.includes(undefined), true);
+
+        var sliced = holed().slice();
+        ok('slice keeps it', 1 in sliced, false);
+        var spliced = holed().splice(0, 3);
+        ok('splice hands it back', 1 in spliced, false);
+        var joined = holed().concat([4]);
+        ok('concat keeps it', 1 in joined, false);
+        ok('and appends past it', joined.length, 4);
+        ok('and the element after it', joined[3], 4);
+
+        var sorted = [3, 2, 1]; delete sorted[1]; sorted.sort();
+        ok('sort moves it to the end', sorted.join(), '1,3,');
+        ok('and it is still a hole', 2 in sorted, false);
+        var reversed = holed(); reversed.reverse();
+        ok('reverse carries it along', 1 in reversed, false);
+        var filled = holed(); filled.fill(0);
+        ok('fill writes it in', 1 in filled, true);
+        ok('so it reads', filled[1], 0);
+        var copied = holed(); copied.copyWithin(2, 1, 2);
+        ok('copyWithin copies it', 2 in copied, false);
+
+        var made = new Array(3);
+        ok('new Array(3) is three holes', Object.keys(made).length, 0);
+        ok('and so `in` says', 0 in made, false);
+        ok('but the length is there', made.length, 3);
+        ok('and join writes them empty', made.join(','), ',,');
+        made[1] = 1;
+        ok('writing one makes an element', Object.keys(made).join(), '1');
+
+        var grown = [1]; grown.length = 3;
+        ok('a grown length leaves holes', 2 in grown, false);
+        var shrunk = [1, 2, 3]; shrunk.length = 1;
+        ok('a shrunk one drops them', shrunk.length, 1);
+        var written = holed(); written[1] = undefined;
+        ok('writing undefined makes an element', 1 in written, true);
+
+        // The iterator reads every place, so a hole is handed on as undefined:
+        // spread, Array.from and for-of all turn it into an element.
+        ok('spread turns it into undefined', 1 in [...holed()], true);
+        ok('Array.from too', 1 in Array.from(holed()), true);
+        var iterated = [];
+        for (var v of holed()) iterated.push(v === undefined ? 'u' : v);
+        ok('for-of yields undefined', iterated.join(), '1,u,3');
+        ok('entries reads it', holed().entries().next().value.join(), '0,1');
+
+        var structured = structuredClone(holed());
+        ok('structuredClone keeps it', 1 in structured, false);
+        ok('with the same length', structured.length, 3);
+
+        var pushed = holed(); pushed.push(4);
+        ok('a push after a hole', 3 in pushed, true);
+        ok('leaves the hole', 1 in pushed, false);
+        var popped = [1, 2]; delete popped[1];
+        ok('pop of a hole is undefined', popped.pop(), undefined);
+        var shifted = [1, 2]; delete shifted[0];
+        ok('shift of a hole is undefined', shifted.shift(), undefined);
+        ok('and the array is shorter', shifted.length, 1);
+        ok('with the element that was after it', shifted[0], 2);
+        ok('delete past the end is true', (function () { var a = [1]; return delete a[5]; })(), true);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+
+    // An array *literal* with an elision makes a hole too: the evaluator marks
+    // the place it skipped. (That line is in JsEval.cpp, which was open pull
+    // request #103's file when this phase began; it merged before this one.)
+    js.eval(R"JS(
+        var literal = [1, , 3];
+        ok('a literal elision is a hole', 1 in literal, false);
+        ok('and the literal has three places', literal.length, 3);
+        ok('a trailing comma is not one', 2 in [1, 2, 3,], true);
+        ok('[,] is one hole', [ , ].length, 1);
+        ok('so is [, ,]', 1 in [, ,], false);
+        ok('a spread before one shifts it', 2 in [...[1, 2], , 4], false);
+        ok('a spread after one leaves it', 1 in [1, , ...[2, 3]], false);
+
+        // JSON has no way to say "hole", so what an array with one writes is
+        // an element again when it is read back.
+        var fromJson = JSON.parse(JSON.stringify([1, , 3]));
+        ok('JSON.parse makes elements', 1 in fromJson, true);
+        ok('and the value is null', fromJson[1], null);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+}
+
 TEST(html5_date_time_inputs_validation_and_stepping) {
     using namespace litebird;
     auto doc = std::make_shared<Document>();
@@ -20632,6 +20782,9 @@ int main() {
     // rule.style, insertRule/deleteRule, and document.fonts.
     RUN_TEST(cssom_sheets_rules_insert_amounts_and_fonts);
     RUN_TEST(cssom_media_rules_and_the_cascade_inside_them);
+
+    // Phase 81: an index of an array is either an element or a hole.
+    RUN_TEST(array_holes_are_not_elements);
 
     // Per-glyph font fallback: a codepoint the primary face does not cover is
     // drawn from another face instead of painting nothing.

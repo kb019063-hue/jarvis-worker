@@ -346,9 +346,9 @@ public:
                 for (size_t i = 0; i < length; ++i) {
                     if (i) out += ',';
                     newline(out, m_indent);
-                    JsValue element = i < value.object_val->array_elements.size()
-                        ? value.object_val->array_elements[i] : JsValue::make_undefined();
-                    if (!write_value(value, std::to_string(i), element, out)) out += "null";
+                    // A hole, like undefined, has nothing to write and becomes null.
+                    JsValue element = value.array_element(i);
+                    if (value.is_array_hole(i) || !write_value(value, std::to_string(i), element, out)) out += "null";
                 }
                 newline(out, outer_indent);
                 out += ']';

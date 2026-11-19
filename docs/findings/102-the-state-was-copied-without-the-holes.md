@@ -58,7 +58,23 @@ constructor with nothing to spread never makes a hole.
   `new List(3)`, for `List(1, 2, 3)`, for a sort and a slice of a holed
   subclass, and for `Reflect.construct(Array, [3], List)`.
 
-## 4. What is not here
+## 4. A claim this finding first got wrong
+
+While this was open, #118 said #104 had lost two test262 tests. I compared two
+builds over the 15,686-test subset `make test262` walks, saw nothing lost, and
+wrote that the claim did not hold. It did hold: the whole suite is 47,967
+tests, which is what #118 measured. Run one at a time with the harness,
+`built-ins/Array/prototype/forEach/15.4.4.18-7-5.js` and
+`built-ins/Array/prototype/some/15.4.4.17-7-6.js` pass before #104 and fail
+after it. Both passed by accident before: a deleted index stayed an element
+holding `undefined`, so the fifth call happened. The gap is the read through a
+hole to `Array.prototype`, which #118 wrote up as a row of its own. Not this
+change, and not touched by it.
+
+The lesson for the next comparison: `run_test262.py` walks a chosen list of
+directories, and a difference outside them is invisible to it.
+
+## 5. What is not here
 
 - **The subclass does not survive the array methods.** `list.slice()`,
   `list.map(f)` and `list.filter(f)` are plain `Array`s, and `List.from([1])`

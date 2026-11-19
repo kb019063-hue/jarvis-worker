@@ -1334,6 +1334,48 @@ def verify_svg_rendering(binary, tmpdir):
     print("  [PASS] SVG  grad_href_symbol_dash       120x60")
     passed += 1
 
+    # 6. Glyphs use the SVG user-space cursor. This is a spatial oracle, not
+    # a font-specific bitmap: moving the same string must move its complete
+    # alpha mask, including under a viewBox/group transform.
+    def mask(rgba, w):
+        return {(i // 4 % w, i // 4 // w, rgba[i + 3])
+                for i in range(0, len(rgba), 4) if rgba[i + 3]}
+
+    def text_image(x, y):
+        return render_svg("text_position_%s_%s" % (x, y),
+                          '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60">'
+                          '<text x="%d" y="%d" font-size="24" fill="red">AB</text></svg>' % (x, y),
+                          120, 60)
+
+    first = text_image(10, 32)
+    moved = text_image(31, 40)
+    first_mask, moved_mask = mask(first, 120), mask(moved, 120)
+    assert len(first_mask) > 50, f"SVG text did not paint glyphs: {len(first_mask)}"
+    assert {(x + 21, y + 8, a) for x, y, a in first_mask} == moved_mask, "SVG text cursor did not translate"
+    assert all(first[4 * (120 * y + x):4 * (120 * y + x) + 3] == b'\xff\x00\x00'
+               for x, y, _ in first_mask), "SVG text fill is not red"
+    print("  [PASS] SVG  text_cursor_and_fill        120x60")
+    passed += 1
+
+    # 7. tspan x resets the cursor, but style and the surrounding <g>
+    # transform are inherited. Its blue glyph is not flattened into the
+    # parent's red textContent or painted at the end of the red run.
+    spans = render_svg("text_tspan", """
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 60">
+      <g transform="translate(10,0)" font-size="24" fill="red">
+        <text x="5" y="32">A<tspan x="75" fill="blue">B</tspan></text>
+      </g>
+    </svg>
+    """, 120, 60)
+    red = [(i // 4 % 120, i // 4 // 120) for i in range(0, len(spans), 4)
+           if spans[i] > 0 and spans[i + 2] == 0 and spans[i + 3] > 0]
+    blue = [(i // 4 % 120, i // 4 // 120) for i in range(0, len(spans), 4)
+            if spans[i + 2] > 0 and spans[i] == 0 and spans[i + 3] > 0]
+    assert len(red) > 20 and len(blue) > 20, f"tspan colors: {len(red)} red, {len(blue)} blue"
+    assert max(x for x, _ in red) < 45 and min(x for x, _ in blue) >= 84, "tspan x / group transform"
+    print("  [PASS] SVG  text_tspan_inherited_style   120x60")
+    passed += 1
+
     return passed
 
 

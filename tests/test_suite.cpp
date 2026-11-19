@@ -3518,6 +3518,73 @@ TEST(css_pseudo_classes) {
     assert(style_btn_hover.color == Color::parse("yellow"));
 }
 
+TEST(svg_text_uses_canvas_glyphs_and_svg_positioning) {
+    using namespace litebird;
+    auto render = [](const std::string& content) {
+        auto doc = HtmlParser::parse("<svg width='120' height='50' viewBox='0 0 120 50'>" + content + "</svg>");
+        auto svgs = doc->get_elements_by_tag_name("svg");
+        assert(svgs.size() == 1);
+        auto image = SvgRenderer::render(svgs[0], 120.0f, 50.0f);
+        assert(image && image->width == 120 && image->height == 50);
+        return image;
+    };
+    auto same_pixels = [](const std::shared_ptr<ImageData>& a, const std::shared_ptr<ImageData>& b) {
+        assert(a && b && a->width == b->width && a->height == b->height);
+        int painted = 0;
+        for (int y = 0; y < a->height; ++y) for (int x = 0; x < a->width; ++x) {
+            assert(a->get_pixel(x, y) == b->get_pixel(x, y));
+            painted += a->get_pixel_color(x, y).a != 0;
+        }
+        assert(painted > 50); // Do not let two empty images agree by accident.
+    };
+
+    CanvasRenderingContext2D expected(120, 50);
+    expected.font = "normal 400 24px sans-serif";
+    expected.fill_style = Color::parse("red");
+    expected.fill_text("AB", 10, 32);
+    same_pixels(render("<text x='10' y='32' font-size='24' fill='red'>AB</text>"), expected.image_data());
+    same_pixels(render("<text x='10' y='32' font-size='24' fill='red'>\n  AB  \n</text>"),
+                expected.image_data());
+
+    CanvasRenderingContext2D preserved(120, 50);
+    preserved.font = "normal 400 24px sans-serif";
+    preserved.fill_style = Color::parse("red");
+    preserved.fill_text("A B", 10, 32);
+    same_pixels(render("<text x='10' y='32' font-size='24' fill='red' xml:space='preserve'>A B</text>"),
+                preserved.image_data());
+
+    // An inherited font and a tspan's own paint / absolute x must not cause
+    // the earlier and later runs to be painted twice by text_content().
+    CanvasRenderingContext2D spans(120, 50);
+    spans.font = "normal 400 24px sans-serif";
+    spans.fill_style = Color::parse("red");
+    spans.fill_text("A", 10, 32);
+    spans.fill_style = Color::parse("blue");
+    spans.fill_text("B", 70, 32);
+    same_pixels(render("<text x='10' y='32' style='font-size:24px;fill:red'>A"
+                       "<tspan x='70' fill='blue'>B</tspan></text>"), spans.image_data());
+
+    CanvasRenderingContext2D centered(120, 50);
+    centered.font = "normal 400 24px sans-serif";
+    centered.text_align = "center";
+    centered.fill_style = Color::parse("red");
+    centered.fill_text("AB", 60, 32);
+    same_pixels(render("<text x='60' y='32' font-size='24' text-anchor='middle' fill='red'>AB</text>"),
+                centered.image_data());
+
+    CanvasRenderingContext2D translated(120, 50);
+    translated.translate(18, 0);
+    translated.font = "normal 400 24px sans-serif";
+    translated.fill_style = Color::parse("red");
+    translated.fill_text("AB", 10, 32);
+    same_pixels(render("<g transform='translate(18,0)' font-size='24' fill='red'>"
+                       "<text x='10' y='32'>AB</text></g>"), translated.image_data());
+
+    auto hidden = render("<text x='10' y='32' font-size='24' fill='none'>AB</text>");
+    for (int y = 0; y < hidden->height; ++y) for (int x = 0; x < hidden->width; ++x)
+        assert(hidden->get_pixel_color(x, y).a == 0);
+}
+
 TEST(svg_vector_rendering) {
     using namespace litebird;
     std::string html = R"(
@@ -20540,6 +20607,7 @@ int main() {
     RUN_TEST(html5_canvas_2d_context);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
+    RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);
     RUN_TEST(svg_vector_rendering);
     RUN_TEST(es6_map_set_and_destructuring);
     RUN_TEST(css_transitions_and_animations);

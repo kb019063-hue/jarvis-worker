@@ -22,6 +22,13 @@ class HtmlTreeBuilder {
 public:
     /// Parses a complete document. Never returns nullptr.
     std::shared_ptr<Document> parse(std::string_view html);
+    /// Feeds text to the parser at the insertion point it has reached, which
+    /// is what `document.write()` from a script the parser is running does:
+    /// the tokens are dispatched as if they had been written where the script
+    /// is, and the parse that is in progress goes on afterwards. No end-of-file
+    /// token is taken from `text` -- the text ends, the document does not.
+    void write_into_parser(std::string_view text);
+
 
     /// Fragment parsing with an explicit context element
     /// (WHATWG HTML 13.4 "Parsing HTML fragments"). The returned node is a

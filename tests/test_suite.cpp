@@ -12205,8 +12205,33 @@ TEST(array_holes_are_not_elements) {
         var fromJson = JSON.parse(JSON.stringify([1, , 3]));
         ok('JSON.parse makes elements', 1 in fromJson, true);
         ok('and the value is null', fromJson[1], null);
+
+        // A subclass of Array is the case that found the missing copy: the
+        // Array constructor makes the holes, and `super(...)` hands its state
+        // to the object `new` made (`JsEval.cpp`, take_over). That function
+        // copied the elements and left the holes behind, so `new List(3)` was
+        // three elements. Asserted here because nothing else asked: every
+        // other suite calls a subclass constructor with no arguments.
+        class List extends Array {}
+        var listed = new List(3);
+        ok('a subclass length argument is holes', 0 in listed, false);
+        ok('its length', listed.length, 3);
+        ok('and Object.keys sees none', Object.keys(listed).length, 0);
+        listed[1] = 'x';
+        ok('writing one makes an element', Object.keys(listed).join(), '1');
+        // A slice of a subclass comes back a plain array: the Array methods do
+        // not consult `Symbol.species`, which is a row of AGENTS.md of its own.
+        // The holes it carries are this phase's question, and it carries them.
+        ok('a slice carries the holes', 0 in listed.slice(), false);
+        var listedSorted = new List(3); listedSorted[0] = 1; listedSorted.sort();
+        ok('sorting it keeps the holes', 2 in listedSorted, false);
+        ok('and the elements', listedSorted[0], 1);
+        var throughReflect = Reflect.construct(Array, [3], List);
+        ok('Reflect.construct with a subclass is holes too', 0 in throughReflect, false);
+        ok('and is that subclass', throughReflect instanceof List, true);
     )JS");
     assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
 }
 
 TEST(html5_date_time_inputs_validation_and_stepping) {

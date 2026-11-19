@@ -1509,3 +1509,13 @@ The client still lacks browser Origin/mixed-content policy, TLS, full API
 validation and frame compliance; do not use it as a secure browser boundary.
 See [Phase 83](docs/phases/83-websocket-handshake-security.md) and
 [finding 89](docs/findings/89-websocket-handshake-security.md).
+
+### HTTPS certificate identity (Phase 89)
+
+HTTPS now checks an IP URL against the certificate's IP SAN, not just its
+trust chain. `make security-https` runs eight ephemeral local TLS fixtures
+against Python ssl and Litebird: trusted DNS/IP, wrong DNS/IP identities,
+DNS SANs used as IP identities, and untrusted certificates. Rejected peers
+receive no HTTP request. CI runs these normally and under ASan/UBSan.
+See [Phase 89](docs/phases/89-https-certificate-identity.md) and
+[finding 95](docs/findings/95-https-ip-identity.md) for scope and remaining gaps.

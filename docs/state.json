@@ -8,9 +8,13 @@
     "this file automatically: bump a floor by hand, in the commit that retires",
     "the numbers below it, when no document or pull request mentions it any more."
   ],
-  "phase_floor": 92,
-  "finding_floor": 98,
+  "phase_floor": 95,
+  "finding_floor": 101,
   "history": [
+    {
+      "date": "2026-11-18",
+      "what": "Phase 95 and finding 101 documented `document.write()` writing into the parser that called it: the tree builder can be re-entered at its insertion point (`write_into_parser`), the dump path runs the page's scripts as the parser reaches them, and the parser no longer inserts a second element or any text into a document. Five of the six `scripted_*.dat` cases pass. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."
+    },
     {
       "date": "2026-11-18",
       "what": "Phase 91 and finding 97 documented iterator kinds: a prototype per kind of iterator carrying the kind's one `next` and a `Symbol.toStringTag`, one function object for `Map.prototype.entries` and its `@@iterator` (and for `Set`'s `values`/`keys`/`@@iterator`), and the iteration fast path asking the prototype whether `next` is still the installed function before reading elements directly. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."

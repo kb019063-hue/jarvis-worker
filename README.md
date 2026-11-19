@@ -116,7 +116,7 @@ Read the number for what it is:
   strings, arrays, regular expressions, dates, JSON), not every clause of the
   specification. The official suite scores lower: of the 47,967 tests in
   its `built-ins`, `language` and `annexB` directories that are not modules,
-  31,158 pass (65.0%; 29,450 / 61.4% last recorded before Phase 88, 27,872 /
+  31,161 pass (65.0%; 29,450 / 61.4% last recorded before Phase 88, 27,872 /
   58.1% before Phase 55, 26,012 / 54.2% before Phase 44); of the 15,686
   on functions, classes and objects, 13,654 pass (87.0%; 12,657 / 80.7%
   before Phase 88, 12,359 / 78.8% before Phase 59, 10,835 / 69.1% before
@@ -1174,7 +1174,7 @@ class Circle extends Shape {}
 var one = {}; function Single() { return one; } class Child extends Single { constructor() { super(); this.added = 2; } }
 console.log(new Circle().kind, new Child() === one, one.added)'
 # Circle true 2        (before: Uncaught TypeError: abstract)
-make js-conformance      # 1131 / 1152; construct.dat 50 / 50
+make js-conformance      # 1137 / 1156; construct.dat 50 / 50
 make dom-conformance     # 678 / 678; compiled.dat 25 / 25, upgrades.dat 9 / 9
 ```
 

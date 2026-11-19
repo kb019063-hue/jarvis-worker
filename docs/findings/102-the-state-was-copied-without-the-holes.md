@@ -46,9 +46,9 @@ constructor with nothing to spread never makes a hole.
 
 ## 3. How it is verified
 
-- `make test` → **248 / 248** suites; the new assertions are in
+- `make test` → **254 / 254** suites; the new assertions are in
   `array_holes_are_not_elements`.
-- `make js-conformance` 1131 / 1152, `make dom-conformance` 678 / 678,
+- `make js-conformance` 1137 / 1156, `make dom-conformance` 678 / 678,
   `make wpt` 9567 / 9824 with 0 unlisted, URL 1188 / 1188, XML 1718 / 1718 —
   none of them moved.
 - With the line removed and the test kept, the suite fails and names the

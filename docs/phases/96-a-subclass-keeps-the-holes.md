@@ -45,8 +45,8 @@ never makes a hole.
 
 ## 3. How it is verified
 
-- **`make test`** → **248 / 248** suites.
-- **`make js-conformance`** 1131 / 1152, **`make dom-conformance`** 678 / 678,
+- **`make test`** → **254 / 254** suites.
+- **`make js-conformance`** 1137 / 1156, **`make dom-conformance`** 678 / 678,
   **`make wpt`** 9567 / 9824 with 0 unlisted, **`make url-conformance`**
   1188 / 1188, **`make xml-conformance`** 1718 / 1718: none moved.
 - With the line reverted and the test kept, the suite fails and names the

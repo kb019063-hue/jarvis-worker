@@ -33,8 +33,8 @@ The parser already had everything else: `HtmlParser::parse_into(document, html, 
 ## 3. How it was verified
 
 - **`python3 tools/conformance/run_tree_construction.py --quiet`:** **1972 / 1973 (99.9%)**, up from 1967. Five of the six `scripted_*.dat` cases pass — `scripted_adoption01.dat`, both of `scripted_webkit01.dat` and both of `scripted_foster01.dat`. The one that does not is `scripted_ark.dat`, whose diff is one `<font>` too many (below).
-- **`make test`:** **248 / 248** suites, including the new `document_write_inserts_where_the_parser_reached`, which asserts that a written `<b>` lands between the script and the text that follows it, that two writes run together and `writeln` adds its newline, that the written markup is parsed as markup (an unknown tag becomes an element, a written end tag closes it), that `document.write` after the load changes nothing, and that `scripted_foster01.dat`'s tree is the table alone. 114 / 114 cross-origin checks pass.
-- **`make js-conformance`:** 1131 / 1152, unchanged from `main` (measured against a build of `main` in a second worktree, not assumed).
+- **`make test`:** **248 / 248** suites, including the new `document_write_inserts_where_the_parser_reached`, which asserts that a written `<b>` lands between the script and the text that follows it, that two writes run together and `writeln` adds its newline, that the written markup is parsed as markup (an unknown tag becomes an element, a written end tag closes it), that `document.write` after the load changes nothing, and that `scripted_foster01.dat`'s tree is the table alone. 114 / 114 cross-origin checks pass. (Later merges have taken the tree to 255 suites; this phase added one.)
+- **`make js-conformance`:** 1131 / 1152, unchanged from `main` (measured against a build of `main` in a second worktree, not assumed). The corpus went on growing on `main` while this was open — it is 1,156 cases there, 1,137 passing — and none of that movement is this phase's.
 - **`make wpt`:** 9567 / 9824 across 190 files, unchanged. **`make dom-conformance`:** 678 / 678.
 - The conformance floor in `.github/workflows/ci.yml` is raised from 1967 to 1972.
 

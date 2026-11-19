@@ -489,6 +489,18 @@ JsValue JsInterpreter::eval_source(const std::string& source) {
     parser_context.allow_super_property = frame.allow_super_property;
     parser_context.allow_super_call = frame.allow_super_call;
     JsParser parser(std::move(tokens), text, parser_context);
+    // A direct eval written inside a class body can name that class's private
+    // fields; the class put them in scope when it was evaluated, so they are
+    // found the same way a `let` of the caller's is found.
+    {
+        std::vector<std::string> visible;
+        for (JsEnvironment* scope = const_cast<JsEnvironment*>(frame.environment); scope; scope = scope->parent_raw()) {
+            for (const auto& binding : scope->bindings()) {
+                if (!binding.name.empty() && binding.name[0] == '#') visible.push_back(binding.name);
+            }
+        }
+        parser.seed_private_names(std::move(visible));
+    }
     auto program = parser.parse_program();
     // The scope has to outlive this call: the bindings its `var`s make belong
     // to the function whose code called it, and are read after it returns.
@@ -1011,33 +1023,89 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     if (has_parent) ctor.function_cell()->prototype = parent.as_prototype();
     ctor.define_property("%home", proto, PropertyMap::Hidden);
 
+    // The private names this evaluation declares. The key carries a serial
+    // number, so `#p` in two classes (or in two evaluations of one class
+    // expression) is two slots, and no string a script can write is one of
+    // them: they do not live in the property table at all.
+    const std::string private_prefix = "\x01" + std::to_string(++m_next_private_id) + ":";
+    for (const auto& member : cls->members) {
+        if (member.is_private) class_env->define(member.key, JsValue::make_string(private_prefix + member.key));
+    }
+
     std::vector<std::string> member_keys;
     member_keys.reserve(cls->members.size());
     for (const auto& member : cls->members) {
         member_keys.push_back(member.computed_key
                                   ? js_to_property_key(evaluate(member.computed_key.get(), class_env))
-                                  : member.key);
+                                  : member.is_private ? private_prefix + member.key
+                                                      : member.key);
     }
 
     if (!cls->name.empty()) class_env->initialize_lexical(cls->name, ctor, true);
+
+    // A private method, getter or setter is not a property of the prototype:
+    // it is part of the brand every instance gets when it is made, so it is
+    // collected here and installed by initialize_fields(). A getter and a
+    // setter for one name share the slot they are installed under.
+    struct PrivateInstall {
+        std::string key;
+        JsValue value;          // the method, or the getter
+        JsValue setter;
+        bool accessor{false};
+    };
+    std::vector<PrivateInstall> private_installs;
 
     std::vector<JsValue> field_keys;
     for (size_t i = 0; i < cls->members.size(); ++i) {
         const auto& member = cls->members[i];
         JsValue target = member.is_static ? ctor : proto;
         const std::string& key = member_keys[i];
+        // What the function is called: the source spelling for a private name,
+        // so `#m` and `get #x` print as they were written.
+        const std::string& fn_name = member.is_private ? member.key : key;
 
         switch (member.kind) {
             case ClassMember::Kind::Method: {
-                JsValue fn = make_function(member.fn, class_env, key);
+                JsValue fn = make_function(member.fn, class_env, fn_name);
                 if (member.fn->uses_super) fn.define_property("%home", target, PropertyMap::Hidden);
-                target.define_property(key, fn, PropertyMap::Hidden);
+                if (!member.is_private) {
+                    target.define_property(key, fn, PropertyMap::Hidden);
+                } else if (member.is_static) {
+                    // A method is not writable: `this.#m = 1` is a TypeError.
+                    ctor.define_private(key, fn, PropertyMap::Configurable);
+                } else {
+                    private_installs.push_back({key, fn, JsValue(), false});
+                }
                 break;
             }
             case ClassMember::Kind::Getter:
             case ClassMember::Kind::Setter: {
-                JsValue fn = make_function(member.fn, class_env, key);
+                JsValue fn = make_function(member.fn, class_env, fn_name);
                 if (member.fn->uses_super) fn.define_property("%home", target, PropertyMap::Hidden);
+                if (member.is_private) {
+                    if (!member.is_static) {
+                        PrivateInstall* slot = nullptr;
+                        for (auto& install : private_installs) {
+                            if (install.key == key && install.accessor) slot = &install;
+                        }
+                        if (!slot) {
+                            private_installs.push_back({key, JsValue(), JsValue(), true});
+                            slot = &private_installs.back();
+                        }
+                        if (member.kind == ClassMember::Kind::Getter) slot->value = fn;
+                        else slot->setter = fn;
+                        break;
+                    }
+                    // A static private accessor, paired in the class object's
+                    // own private table the same way.
+                    JsValue getter;
+                    JsValue setter;
+                    ctor.private_accessor(key, getter, setter);
+                    if (member.kind == ClassMember::Kind::Getter) getter = fn;
+                    else setter = fn;
+                    ctor.define_private_accessor(key, getter, setter, PropertyMap::Configurable);
+                    break;
+                }
                 // A getter and a setter for the same name share one property.
                 JsValue getter;
                 JsValue setter;
@@ -1062,9 +1130,10 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
                     auto field_env = std::make_shared<JsEnvironment>(class_env);
                     field_env->define("this", ctor);
                     field_env->define("%home", ctor);
-                    value = evaluate_named(member.value.get(), field_env, key);
+                    value = evaluate_named(member.value.get(), field_env, fn_name);
                 }
-                ctor.define_property(key, value, PropertyMap::Default);
+                if (member.is_private) ctor.define_private(key, value, PropertyMap::Default);
+                else ctor.define_property(key, value, PropertyMap::Default);
                 break;
             }
             case ClassMember::Kind::StaticBlock: {
@@ -1078,6 +1147,19 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     if (!field_keys.empty()) {
         ctor.define_property("%field_keys", JsValue::make_array(field_keys), PropertyMap::Hidden);
     }
+    if (!private_installs.empty()) {
+        std::vector<JsValue> rows;
+        rows.reserve(private_installs.size());
+        for (const auto& install : private_installs) {
+            std::vector<JsValue> row;
+            row.push_back(JsValue::make_string(install.key));
+            row.push_back(install.value);
+            row.push_back(install.setter);
+            row.push_back(JsValue::make_boolean(install.accessor));
+            rows.push_back(JsValue::make_array(std::move(row)));
+        }
+        ctor.define_property("%privates", JsValue::make_array(std::move(rows)), PropertyMap::Hidden);
+    }
     return ctor;
 }
 
@@ -1086,6 +1168,21 @@ void JsInterpreter::initialize_fields(const JsValue& ctor, const JsValue& instan
     if (!fd || !fd->class_node || !instance.is_object_like()) return;
     JsObject* ctor_cell = ctor.property_cell();
     if (!ctor_cell) return;
+
+    // The private methods and accessors first: they are the brand, and a field
+    // initialiser may call one of them (`#area = this.#side() * ...`).
+    auto privates_entry = ctor_cell->properties.find("%privates");
+    if (privates_entry != ctor_cell->properties.end()) {
+        for (const auto& row : privates_entry->second.array_elements()) {
+            const auto& parts = row.array_elements();
+            if (parts.size() < 4) continue;
+            const std::string key = parts[0].string_val.str();
+            JsValue target = instance;      // a handle: the slot is on the shared object
+            if (parts[3].is_truthy()) target.define_private_accessor(key, parts[1], parts[2], PropertyMap::Configurable);
+            else target.define_private(key, parts[1], PropertyMap::Configurable);   // a method: not writable
+        }
+    }
+
     auto keys_entry = ctor_cell->properties.find("%field_keys");
     if (keys_entry == ctor_cell->properties.end()) return;
     const auto& keys = keys_entry->second.array_elements();
@@ -1104,7 +1201,8 @@ void JsInterpreter::initialize_fields(const JsValue& ctor, const JsValue& instan
         const std::string key = keys[index++].string_val.str();
         JsValue value = member.value ? evaluate_named(member.value.get(), field_env, key)
                                      : JsValue::make_undefined();
-        target.define_property(key, value, PropertyMap::Default);
+        if (member.is_private) target.define_private(key, value, PropertyMap::Default);
+        else target.define_property(key, value, PropertyMap::Default);
     }
 }
 
@@ -1320,6 +1418,24 @@ void JsInterpreter::assign_identifier(const std::string& name, const JsValue& va
     m_global_env->define(name, value);      // sloppy mode: implicit global
 }
 
+std::string JsInterpreter::private_key_for(const std::string& display, const EnvPtr& env) const {
+    // The class that declared the name put it in scope when it was evaluated;
+    // the code that mentions it looks it up the way any other name is looked
+    // up, so a method of an outer class can read its field from a nested class.
+    auto* binding = env->lookup(display);
+    if (binding && binding->value.type == JsType::String) return binding->value.string_val.str();
+    js_throw_error(JsErrorKind::SyntaxError,
+                   "Private field '" + display + "' must be declared in an enclosing class");
+}
+
+JsValue JsInterpreter::read_private_member(const JsValue& base, const std::string& display, const EnvPtr& env) {
+    if (base.is_nullish()) {
+        js_throw_type_error(std::string("Cannot read properties of ") +
+                            (base.type == JsType::Null ? "null" : "undefined") + " (reading '" + display + "')");
+    }
+    return base.get_private(private_key_for(display, env), display);
+}
+
 JsValue JsInterpreter::get_member(const JsValue& base, const std::string& key) {
     if (base.is_nullish()) {
         js_throw_type_error(std::string("Cannot read properties of ") +
@@ -1348,6 +1464,15 @@ JsInterpreter::Reference JsInterpreter::resolve_reference(const Expr* target, co
             ref.is_property = true;
             ref.base = evaluate(member->object.get(), env);
             ref.name = member->property;
+            ref.is_private = member->private_name;
+            if (ref.is_private) {
+                if (ref.base.is_nullish()) {
+                    js_throw_type_error(std::string("Cannot write properties of ") +
+                                        (ref.base.type == JsType::Null ? "null" : "undefined") +
+                                        " (writing '" + ref.name + "')");
+                }
+                ref.private_key = private_key_for(ref.name, env);
+            }
             break;
         }
         case NodeKind::Index: {
@@ -1378,11 +1503,17 @@ JsInterpreter::Reference JsInterpreter::resolve_reference(const Expr* target, co
 }
 
 JsValue JsInterpreter::read_reference(const Reference& ref, const EnvPtr& env) {
+    if (ref.is_private) return ref.base.get_private(ref.private_key, ref.name);
     if (ref.is_property) return ref.base.get_property(ref.name);
     return lookup_identifier(ref.name, env);
 }
 
 void JsInterpreter::write_reference(const Reference& ref, const JsValue& value, const EnvPtr& env) {
+    if (ref.is_private) {
+        JsValue target = ref.base;
+        target.set_private(ref.private_key, value, ref.name);
+        return;
+    }
     if (ref.is_property) {
         JsValue target = ref.base;
         // A write to a property this object does not take (a getter-only
@@ -2229,7 +2360,8 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
                 m_chain_short_circuit = true;
                 return JsValue::make_undefined();
             }
-            fn = get_member(base, member->property);
+            fn = member->private_name ? read_private_member(base, member->property, env)
+                                      : get_member(base, member->property);
             this_val = std::move(base);
             callee_name = &member->property;
             break;
@@ -2630,6 +2762,119 @@ JsValue JsInterpreter::eval_tagged_template(const TaggedTemplateExpr* expr, cons
     return js_call(fn, this_val, args);
 }
 
+JsValue JsInterpreter::eval_update(const UpdateExpr* update, const EnvPtr& env) {
+    // The target is resolved once, so `a[i++]++` evaluates `i++` once.
+    Reference ref = resolve_reference(update->target.get(), env);
+    double before = js_to_number(read_reference(ref, env));
+    double after = before + (update->op == JsTokenType::PlusPlus ? 1.0 : -1.0);
+    write_reference(ref, JsValue::make_number(after), env);
+    return JsValue::make_number(update->prefix ? after : before);
+}
+
+JsValue JsInterpreter::eval_member(const MemberExpr* member, const EnvPtr& env) {
+    JsValue base = evaluate(member->object.get(), env);
+    if (m_chain_short_circuit) return JsValue::make_undefined();
+    if (member->optional && base.is_nullish()) {
+        m_chain_short_circuit = true;
+        return JsValue::make_undefined();
+    }
+    if (member->private_name) return read_private_member(base, member->property, env);
+    return get_member(base, member->property);
+}
+
+JsValue JsInterpreter::eval_index(const IndexExpr* index, const EnvPtr& env) {
+    JsValue base = evaluate(index->object.get(), env);
+    if (m_chain_short_circuit) return JsValue::make_undefined();
+    if (index->optional && base.is_nullish()) {
+        m_chain_short_circuit = true;
+        return JsValue::make_undefined();
+    }
+    JsValue key = evaluate(index->index.get(), env);
+    // Fast path: array[number].
+    if (key.type == JsType::Number && base.is_array()) {
+        double n = key.number_val;
+        const auto& elements = base.object_val->array_elements;
+        if (n >= 0 && n < static_cast<double>(elements.size()) && n == std::floor(n)) {
+            return elements[static_cast<size_t>(n)];
+        }
+    }
+    return get_member(base, js_to_property_key(key));
+}
+
+JsValue JsInterpreter::eval_private_in(const PrivateInExpr* private_in, const EnvPtr& env) {
+    // `#p in obj`: is this object branded with the name? A private name is not
+    // a property, so this is the one way to ask without reading.
+    JsValue object = evaluate(private_in->object.get(), env);
+    // Only an object can carry a brand: `#p in 1` is a TypeError, not `false`
+    // (a private name is not a property, so `in` is not the HasProperty it is
+    // for strings).
+    if (!object.is_object_like()) {
+        js_throw_type_error("Cannot use 'in' operator to search for '" + private_in->name + "' in " +
+                            js_describe_thrown(object));
+    }
+    return JsValue::make_boolean(object.has_private(private_key_for(private_in->name, env)));
+}
+
+JsValue JsInterpreter::eval_sequence(const SequenceExpr* sequence, const EnvPtr& env) {
+    JsValue last;
+    for (const auto& item : sequence->expressions) {
+        last = evaluate(item.get(), env);
+    }
+    return last;
+}
+
+JsValue JsInterpreter::eval_array_literal(const ArrayLiteralExpr* literal, const EnvPtr& env) {
+    std::vector<JsValue> elements;
+    std::vector<size_t> holes;      // an elision is a hole, not an element
+    for (const auto& element : literal->elements) {
+        if (!element) {
+            holes.push_back(elements.size());
+            elements.push_back(JsValue::make_undefined());
+        } else if (element->kind == NodeKind::Spread) {
+            JsValue iterable = evaluate(static_cast<const SpreadExpr*>(element.get())->argument.get(), env);
+            js_iterate(iterable, [&](const JsValue& item) {
+                elements.push_back(item);
+                return true;
+            });
+        } else {
+            elements.push_back(evaluate(element.get(), env));
+        }
+    }
+    JsValue array = JsValue::make_array(elements);
+    // `[1, , 3]` has three places and two elements. Marked after the array is
+    // made, because a spread in the literal may have added places that shift the
+    // ones after it.
+    for (size_t index : holes) array.set_array_hole(index);
+    return array;
+}
+
+JsValue JsInterpreter::eval_template_literal(const TemplateLiteralExpr* literal, const EnvPtr& env) {
+    // parts alternates text, substitution, text, ..., text. Position is what
+    // tells them apart: a substitution can itself be a literal (`${200000}`,
+    // `${true}`), and that has to be converted, not read as if it were a piece
+    // of the template's own text.
+    const auto& parts = literal->parts;
+    std::string result;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        if (i % 2 == 0) {
+            result += static_cast<const LiteralExpr*>(parts[i].get())->value.string_val.view();
+        } else {
+            JsValue part = evaluate(parts[i].get(), env);
+            if (part.type == JsType::String) result += part.string_val.view();
+            else result += js_to_string(part);
+        }
+    }
+    return JsValue::make_string(result);
+}
+
+JsValue JsInterpreter::eval_super_member(const SuperMemberExpr* super_member, const EnvPtr& env) {
+    JsValue receiver = lookup_identifier("this", env);
+    std::string key = super_member->computed ? js_to_property_key(evaluate(super_member->computed.get(), env))
+                                             : super_member->property;
+    JsValue base = super_base(env);
+    return get_with_receiver(base.property_cell(), key, receiver);
+}
+
 JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
     // Expression evaluation is itself recursive: `1 + (1 + (1 + ...))` and
     // `return 1 + f(n - 1)` both nest evaluate() once per level, so the stack
@@ -2655,15 +2900,8 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
         case NodeKind::Assign:
             return eval_assign(static_cast<const AssignExpr*>(expr), env);
 
-        case NodeKind::Update: {
-            auto* update = static_cast<const UpdateExpr*>(expr);
-            // The target is resolved once, so `a[i++]++` evaluates `i++` once.
-            Reference ref = resolve_reference(update->target.get(), env);
-            double before = js_to_number(read_reference(ref, env));
-            double after = before + (update->op == JsTokenType::PlusPlus ? 1.0 : -1.0);
-            write_reference(ref, JsValue::make_number(after), env);
-            return JsValue::make_number(update->prefix ? after : before);
-        }
+        case NodeKind::Update:
+            return eval_update(static_cast<const UpdateExpr*>(expr), env);
 
         case NodeKind::Conditional: {
             auto* cond = static_cast<const ConditionalExpr*>(expr);
@@ -2671,44 +2909,17 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
                                                                : evaluate(cond->alternate.get(), env);
         }
 
-        case NodeKind::Sequence: {
-            JsValue last;
-            for (const auto& item : static_cast<const SequenceExpr*>(expr)->expressions) {
-                last = evaluate(item.get(), env);
-            }
-            return last;
-        }
+        case NodeKind::Sequence:
+            return eval_sequence(static_cast<const SequenceExpr*>(expr), env);
 
-        case NodeKind::Member: {
-            auto* member = static_cast<const MemberExpr*>(expr);
-            JsValue base = evaluate(member->object.get(), env);
-            if (m_chain_short_circuit) return JsValue::make_undefined();
-            if (member->optional && base.is_nullish()) {
-                m_chain_short_circuit = true;
-                return JsValue::make_undefined();
-            }
-            return get_member(base, member->property);
-        }
+        case NodeKind::Member:
+            return eval_member(static_cast<const MemberExpr*>(expr), env);
 
-        case NodeKind::Index: {
-            auto* index = static_cast<const IndexExpr*>(expr);
-            JsValue base = evaluate(index->object.get(), env);
-            if (m_chain_short_circuit) return JsValue::make_undefined();
-            if (index->optional && base.is_nullish()) {
-                m_chain_short_circuit = true;
-                return JsValue::make_undefined();
-            }
-            JsValue key = evaluate(index->index.get(), env);
-            // Fast path: array[number].
-            if (key.type == JsType::Number && base.is_array()) {
-                double n = key.number_val;
-                const auto& elements = base.object_val->array_elements;
-                if (n >= 0 && n < static_cast<double>(elements.size()) && n == std::floor(n)) {
-                    return elements[static_cast<size_t>(n)];
-                }
-            }
-            return get_member(base, js_to_property_key(key));
-        }
+        case NodeKind::PrivateIn:
+            return eval_private_in(static_cast<const PrivateInExpr*>(expr), env);
+
+        case NodeKind::Index:
+            return eval_index(static_cast<const IndexExpr*>(expr), env);
 
         case NodeKind::OptionalChain: {
             // A short-circuit inside the chain ends the whole chain here.
@@ -2726,49 +2937,11 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
         case NodeKind::ObjectLiteral:
             return eval_object_literal(static_cast<const ObjectLiteralExpr*>(expr), env);
 
-        case NodeKind::ArrayLiteral: {
-            std::vector<JsValue> elements;
-            std::vector<size_t> holes;      // an elision is a hole, not an element
-            for (const auto& element : static_cast<const ArrayLiteralExpr*>(expr)->elements) {
-                if (!element) {
-                    holes.push_back(elements.size());
-                    elements.push_back(JsValue::make_undefined());
-                } else if (element->kind == NodeKind::Spread) {
-                    JsValue iterable = evaluate(static_cast<const SpreadExpr*>(element.get())->argument.get(), env);
-                    js_iterate(iterable, [&](const JsValue& item) {
-                        elements.push_back(item);
-                        return true;
-                    });
-                } else {
-                    elements.push_back(evaluate(element.get(), env));
-                }
-            }
-            JsValue array = JsValue::make_array(elements);
-            // `[1, , 3]` has three places and two elements. Marked after the
-            // array is made, because a spread in the literal may have added
-            // places that shift the ones after it.
-            for (size_t index : holes) array.set_array_hole(index);
-            return array;
-        }
+        case NodeKind::ArrayLiteral:
+            return eval_array_literal(static_cast<const ArrayLiteralExpr*>(expr), env);
 
-        case NodeKind::TemplateLiteral: {
-            // parts alternates text, substitution, text, ..., text. Position is
-            // what tells them apart: a substitution can itself be a literal
-            // (`${200000}`, `${true}`), and that has to be converted, not
-            // read as if it were a piece of the template's own text.
-            const auto& parts = static_cast<const TemplateLiteralExpr*>(expr)->parts;
-            std::string result;
-            for (size_t i = 0; i < parts.size(); ++i) {
-                if (i % 2 == 0) {
-                    result += static_cast<const LiteralExpr*>(parts[i].get())->value.string_val.view();
-                } else {
-                    JsValue part = evaluate(parts[i].get(), env);
-                    if (part.type == JsType::String) result += part.string_val.view();
-                    else result += js_to_string(part);
-                }
-            }
-            return JsValue::make_string(result);
-        }
+        case NodeKind::TemplateLiteral:
+            return eval_template_literal(static_cast<const TemplateLiteralExpr*>(expr), env);
 
         case NodeKind::TaggedTemplate:
             return eval_tagged_template(static_cast<const TaggedTemplateExpr*>(expr), env);
@@ -2807,15 +2980,8 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
         case NodeKind::SuperCall:
             return eval_super_call(static_cast<const SuperCallExpr*>(expr), env);
 
-        case NodeKind::SuperMember: {
-            auto* super_member = static_cast<const SuperMemberExpr*>(expr);
-            JsValue receiver = lookup_identifier("this", env);
-            std::string key = super_member->computed
-                ? js_to_property_key(evaluate(super_member->computed.get(), env))
-                : super_member->property;
-            JsValue base = super_base(env);
-            return get_with_receiver(base.property_cell(), key, receiver);
-        }
+        case NodeKind::SuperMember:
+            return eval_super_member(static_cast<const SuperMemberExpr*>(expr), env);
 
         case NodeKind::NewTarget: {
             auto* binding = env->lookup("%new.target");

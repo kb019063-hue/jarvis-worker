@@ -93,6 +93,19 @@ class JsObject : public HeapObject {
 public:
     JsObject* prototype{nullptr};
     PropertyMap properties;
+
+    /// The private fields, methods and accessors this object carries, keyed by
+    /// a name only the class that made them can spell (see PrivateName in
+    /// JsParser.hpp). They are not properties: no string-keyed read, write,
+    /// `in`, `delete` or key walk reaches them, and `Object.keys` never sees
+    /// them, so `obj['#x']` is an ordinary absent property rather than the
+    /// field. Null for every object that has no private members, which is
+    /// nearly all of them: the table is made on the first private write.
+    std::unique_ptr<PropertyMap> private_slots;
+
+    /// The private table, made if `create`.
+    PropertyMap* private_map(bool create = false);
+    const PropertyMap* private_map() const { return private_slots.get(); }
     // Deque-backed, so shift() and splice() at the front are not a memmove of the whole array.
     std::deque<JsValue> array_elements;
     /// Which of `array_elements` are holes: an index that was never written,

@@ -24,6 +24,11 @@ std::atomic<uint64_t> g_epoch{0};
 }();
 }
 
+PropertyMap* JsObject::private_map(bool create) {
+    if (!private_slots && create) private_slots = std::make_unique<PropertyMap>();
+    return private_slots.get();
+}
+
 void JsObject::trace(Heap& heap) {
     if (prototype) {
         heap.mark_object(prototype);
@@ -31,6 +36,12 @@ void JsObject::trace(Heap& heap) {
     for (auto& entry : properties) {
         heap.mark_value(entry.second);
         if (entry.setter) heap.mark_shared_value(entry.setter);
+    }
+    if (private_slots) {
+        for (auto& entry : *private_slots) {
+            heap.mark_value(entry.second);
+            if (entry.setter) heap.mark_shared_value(entry.setter);
+        }
     }
     for (auto& elem : array_elements) {
         heap.mark_value(elem);
@@ -64,6 +75,9 @@ void JsObject::release_contents() {
     auto dropped_hook = std::move(assign_hook);
     auto dropped_node = std::move(dom_node);
     auto dropped_exotic = std::move(exotic);
+    // Private fields are values like any other: they are moved out first too,
+    // so a destructor that runs while they are dropped finds this cell empty.
+    auto dropped_privates = std::move(private_slots);
     exotic.reset();
     internal.reset();
     trace_extra = nullptr;

@@ -464,6 +464,11 @@ private:
         bool is_property{false};
         std::string name;
         JsValue base;
+        /// `a.#p`: `name` is then the source spelling for error messages and
+        /// `private_key` is the slot the declaring class minted. The accessors
+        /// throw rather than answer `undefined` when the brand is missing.
+        bool is_private{false};
+        std::string private_key;
     };
 
     enum class BindMode { Var, Let, Const, Assign };
@@ -518,6 +523,14 @@ private:
     void hoist_functions(const std::vector<const FunctionDeclStmt*>& functions, const EnvPtr& env);
     JsValue define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env);
     void initialize_fields(const JsValue& ctor, const JsValue& instance);
+    /// The slot a private name stands for in the class that declared it, looked
+    /// up the way the language scopes it: from the code that mentions it, out
+    /// through the classes it was written in. The keys are made per evaluation
+    /// of the class, so two evaluations of one `class {...}` expression make two
+    /// names that cannot read each other's fields.
+    std::string private_key_for(const std::string& display, const EnvPtr& env) const;
+    /// `base.#name`, with the brand check.
+    JsValue read_private_member(const JsValue& base, const std::string& display, const EnvPtr& env);
     JsValue call_legacy_function(const JsValue& fn, const std::vector<JsValue>& args, const JsValue* this_val);
 
     // --- Statements ---------------------------------------------------------
@@ -541,6 +554,20 @@ private:
     // --- Expressions --------------------------------------------------------
     JsValue evaluate(const Expr* expr, const EnvPtr& env);
     JsValue evaluate_named(const Expr* expr, const EnvPtr& env, const std::string& name_hint);
+    // The expression dispatcher is the frame every nested expression pays for,
+    // and a JS call chain nests it several times over. Anything that keeps a
+    // large local (a `Reference`, a vector) alive lives here, out of line, so
+    // that one more local added to a rarely-taken branch cannot make every
+    // expression deeper. Phase 88's private-name work cost `evaluate` 96 bytes
+    // and 7% of the recursion depth before these were split out.
+    JsValue eval_update(const UpdateExpr* expr, const EnvPtr& env);
+    JsValue eval_member(const MemberExpr* expr, const EnvPtr& env);
+    JsValue eval_index(const IndexExpr* expr, const EnvPtr& env);
+    JsValue eval_private_in(const PrivateInExpr* expr, const EnvPtr& env);
+    JsValue eval_sequence(const SequenceExpr* expr, const EnvPtr& env);
+    JsValue eval_template_literal(const TemplateLiteralExpr* expr, const EnvPtr& env);
+    JsValue eval_super_member(const SuperMemberExpr* expr, const EnvPtr& env);
+    JsValue eval_array_literal(const ArrayLiteralExpr* expr, const EnvPtr& env);
     JsValue eval_binary(const BinaryExpr* expr, const EnvPtr& env);
     JsValue eval_binary_chain(const BinaryExpr* expr, const EnvPtr& env);
     JsValue combine_binary(const BinaryExpr* expr, JsValue left, const EnvPtr& env);
@@ -585,6 +612,11 @@ private:
 
     std::shared_ptr<JsEnvironment> m_global_env;
     JsValue m_global_object;
+    /// Serial number for the private names this interpreter has minted. A class
+    /// evaluation takes the next one and every private member it declares is
+    /// stored under a key built from it, so a name never means the same slot in
+    /// two classes, or in two evaluations of one class expression.
+    uint64_t m_next_private_id{0};
     std::shared_ptr<Document> m_document;
     std::shared_ptr<class History> m_history;
     std::vector<std::weak_ptr<struct GeneratorData>> m_generators;

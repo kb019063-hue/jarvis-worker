@@ -82,7 +82,9 @@ font-size first, for the em base             (only the size part of `font` too)
 
 ## Verified
 
-`make test` — **251 suites**, four of them new:
+`make test` — **258 suites**, four of them new (the count includes the four
+`GSUB` ligature suites that landed on `main` while this was in review, and this
+branch merged `main` before it was finished):
 
 | suite | what it holds |
 |---|---|

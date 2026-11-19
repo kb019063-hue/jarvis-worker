@@ -60,19 +60,28 @@ constructor with nothing to spread never makes a hole.
 
 ## 4. A claim this finding first got wrong
 
-While this was open, #118 said #104 had lost two test262 tests. I compared two
+While this was open, #118 said #104 had lost test262 tests. I compared two
 builds over the 15,686-test subset `make test262` walks, saw nothing lost, and
-wrote that the claim did not hold. It did hold: the whole suite is 47,967
-tests, which is what #118 measured. Run one at a time with the harness,
-`built-ins/Array/prototype/forEach/15.4.4.18-7-5.js` and
-`built-ins/Array/prototype/some/15.4.4.17-7-6.js` pass before #104 and fail
-after it. Both passed by accident before: a deleted index stayed an element
-holding `undefined`, so the fifth call happened. The gap is the read through a
-hole to `Array.prototype`, which #118 wrote up as a row of its own. Not this
-change, and not touched by it.
+wrote that the claim did not hold. It did hold, and it was larger than #118
+first said: the whole suite is 47,967 tests, which is what was measured, and
+the count #104 lost is **25**, not two — 30,160 passing before it was merged
+and 30,207 after, 72 gained and 25 lost. `main` now carries the 25 by name and
+by cause in two rows of `AGENTS.md` (14 in the callback methods and the hole,
+11 in the array branch stopping at its own elements), written after this was
+open.
+
+The two I could check by hand, run one at a time through the runner with the
+harness, are `built-ins/Array/prototype/forEach/15.4.4.18-7-5.js` and
+`built-ins/Array/prototype/some/15.4.4.17-7-6.js`: they pass before #104 and
+fail after it, having passed by accident, because a deleted index stayed an
+element holding `undefined`.
 
 The lesson for the next comparison: `run_test262.py` walks a chosen list of
-directories, and a difference outside them is invisible to it.
+directories, and a difference outside them is invisible to it. A scoreboard
+that walks a fifth of the suite cannot answer what a change cost.
+
+None of the 25 is a hole being lost in a subclass construction, and none is
+touched by this change.
 
 ## 5. What is not here
 

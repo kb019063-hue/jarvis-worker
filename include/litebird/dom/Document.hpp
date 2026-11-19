@@ -157,6 +157,15 @@ public:
     const std::string& title() const { return m_title; }
     void set_title(std::string t) { m_title = std::move(t); }
 
+    /// Set while the HTML parser is running and cleared when it finishes: the
+    /// text `document.write()` inserts at the insertion point the parser has
+    /// reached. There is no parser between pages, so this is null then, and
+    /// `document.write()` after the load has nothing to write into.
+    using ParserWrite = std::function<void(std::string_view)>;
+    void set_parser_write(ParserWrite write) { m_parser_write = std::move(write); }
+    bool has_parser_write() const { return static_cast<bool>(m_parser_write); }
+    void parser_write(std::string_view text) { if (m_parser_write) m_parser_write(text); }
+
     std::shared_ptr<Element> document_element() const;
     std::shared_ptr<Element> head() const;
     std::shared_ptr<Element> body() const;
@@ -207,6 +216,7 @@ protected:
 
 private:
     std::string m_title;
+    ParserWrite m_parser_write;
     Doctype m_doctype;
     QuirksMode m_quirks_mode{QuirksMode::NoQuirks};
     std::shared_ptr<DocumentTypeNode> m_doctype_node;

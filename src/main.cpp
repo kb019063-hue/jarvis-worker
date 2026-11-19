@@ -381,7 +381,24 @@ int main(int argc, char* argv[]) {
             auto fragment = litebird::HtmlParser::parse_fragment_with_context(html_content, tag, ns, scripting);
             litebird::dump_tree_webplatform(std::cout, *fragment);
         } else {
-            auto document = litebird::HtmlParser::parse(html_content, scripting);
+            // The page's scripts run as the parser reaches them, which is what
+            // the corpus asks: a case whose script changes the tree (sets an
+            // attribute, writes markup, detaches the root) is dumped after the
+            // change, not before it. A script that throws does not end the
+            // dump: the tree the parser built is still the answer.
+            std::shared_ptr<litebird::Document> document;
+            if (scripting) {
+                document = std::make_shared<litebird::Document>();
+                document->set_url(effective_url);
+                try {
+                    litebird::JsInterpreter js_engine(document);
+                    js_engine.load_page(html_content, scripting, nullptr);
+                } catch (const std::exception&) {
+                    // Fall through: whatever the tree is now is dumped.
+                }
+            } else {
+                document = litebird::HtmlParser::parse(html_content, false);
+            }
             // Written as it is produced. Building the dump as one string
             // first took two copies of it: 2 GB for a page whose dump is
             // 900 MB (800,000 nodes at the nesting limit).

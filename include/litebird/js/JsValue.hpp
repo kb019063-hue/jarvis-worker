@@ -447,6 +447,26 @@ public:
                                   const JsValue** new_target_out = nullptr);
 
     JsValue get_property(const std::string& name) const;
+
+    // --- Private fields, methods and accessors -----------------------------
+    //
+    // A private name is an identity, not a string: `key` is what the class that
+    // declared it minted when it was evaluated (see JsInterpreter::define_class)
+    // and `display` is the source spelling (`"#x"`) for error messages. These
+    // four are the only way in, and they check the brand first: an object that
+    // the declaring class did not construct has no such slot, and reading,
+    // writing or asking `in` about a name it does not carry is not "undefined"
+    // but a TypeError (except `in`, which answers false).
+    bool has_private(const std::string& key) const;
+    JsValue get_private(const std::string& key, const std::string& display) const;
+    void set_private(const std::string& key, const JsValue& value, const std::string& display);
+    /// Installs an own private slot. Used for fields, methods and accessors.
+    void define_private(const std::string& key, JsValue value, uint8_t flags);
+    void define_private_accessor(const std::string& key, const JsValue& getter, const JsValue& setter,
+                                 uint8_t flags);
+    /// The getter and setter already installed under `key`, so a class can pair
+    /// `get #x` with `set #x` in either order. Either may be undefined.
+    void private_accessor(const std::string& key, JsValue& getter, JsValue& setter) const;
     /// False when the write was refused; see the definition for what that
     /// means for strict-mode assignments.
     bool set_property(const std::string& name, JsValue val);

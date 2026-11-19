@@ -16,6 +16,10 @@
       "what": "Phase 91 and finding 97 documented iterator kinds: a prototype per kind of iterator carrying the kind's one `next` and a `Symbol.toStringTag`, one function object for `Map.prototype.entries` and its `@@iterator` (and for `Set`'s `values`/`keys`/`@@iterator`), and the iteration fast path asking the prototype whether `next` is still the installed function before reading elements directly. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."
     },
     {
+      "date": "2026-11-18",
+      "what": "Phase 88 and finding 94 documented private fields, methods and accessors as identities a class mints when it is evaluated, kept in a table no string key reaches. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."
+    },
+    {
       "date": "2026-11-17",
       "what": "Phase 80 and finding 86 recorded the four direct-eval semantic repairs: optional eval calls are indirect, inherited super syntax is checked before source runs, sloppy eval vars target the function variable environment, and named function-expression self names are immutable. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."
     },

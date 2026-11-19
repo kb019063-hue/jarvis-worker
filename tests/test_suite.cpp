@@ -18977,6 +18977,63 @@ TEST(js_map_set_constructors_dispatch_to_instance_methods) {
     )js").to_string() == "TypeError|1");
 }
 
+TEST(document_write_inserts_where_the_parser_reached) {
+    using namespace litebird;
+
+    // What document.write() does from a script the parser is running: the text
+    // is tokenized and dispatched at the insertion point, and the parse goes on.
+    auto parse_with_scripts = [](const std::string& html) {
+        auto document = std::make_shared<Document>();
+        JsInterpreter js(document);
+        js.load_page(html, true, nullptr);
+        return document;
+    };
+    auto dump = [](const std::shared_ptr<Document>& document) {
+        return dump_tree_webplatform(*document);
+    };
+
+    // A write in the middle of an element: the markup is a sibling of the
+    // script, and what follows the script follows the written text.
+    const std::string written = dump(parse_with_scripts(
+        "<div>a<script>document.write(\"<b>w</b>\")</script>b</div>"));
+    assert(written.find("|     <div>\n|       \"a\"\n|       <script>") != std::string::npos);
+    assert(written.find("|       <b>\n|         \"w\"\n|       \"b\"") != std::string::npos);
+
+    // Two writes run together, and writeln adds the newline it promises.
+    const std::string twice = dump(parse_with_scripts(
+        "<p><script>document.write(\"<i>\", 1); document.write(\"</i>\"); document.writeln(\"T\")</script>"));
+    assert(twice.find("|       <i>\n|         \"1\"") != std::string::npos);
+    // The dump writes a character's text as it is, so the newline writeln added
+    // is a newline inside the quotes.
+    assert(twice.find("\"T\n\"") != std::string::npos);
+
+    // The written markup is parsed as markup, not as text: an unknown tag is an
+    // element and a written end tag closes what it names.
+    const std::string markup = dump(parse_with_scripts(
+        "<section><script>document.write(\"<article>x</article>y\")</script></section>"));
+    assert(markup.find("|       <article>\n|         \"x\"") != std::string::npos);
+    assert(markup.find("|       \"y\"") != std::string::npos);
+
+    // After the load there is no parser, so write() has nothing to write into:
+    // the page is not replaced under the script that calls it.
+    auto after = parse_with_scripts("<div id=d>kept</div>");
+    JsInterpreter later(after);
+    later.eval("document.write('<b>gone</b>')");
+    const std::string unchanged = dump(after);
+    assert(unchanged.find("gone") == std::string::npos);
+    assert(unchanged.find("\"kept\"") != std::string::npos);
+
+    // A document has one element child and no text children, so what the parser
+    // inserts into one after a script moved the root away is dropped rather than
+    // built into a tree the DOM would not accept (scripted_foster01.dat).
+    const std::string foster = dump(parse_with_scripts(
+        "<table><tr><script>var t=document.querySelector('table');"
+        "document.documentElement.remove();document.appendChild(t)</script><b>x"));
+    assert(foster.rfind("| <table>", 0) == 0);
+    assert(foster.find("<b>") == std::string::npos);
+    assert(foster.find("\"x\"") == std::string::npos);
+}
+
 TEST(js_iterators_are_kinds_with_prototypes) {
     using namespace litebird;
 
@@ -20774,6 +20831,9 @@ int main() {
 
     // Phase 92: an iterator is a kind with a prototype a script can reach.
     RUN_TEST(js_iterators_are_kinds_with_prototypes);
+
+    // Phase 93: document.write() from a script the parser is running.
+    RUN_TEST(document_write_inserts_where_the_parser_reached);
 
     // Phase 75: Map/Set constructor dispatch through set/add.
     RUN_TEST(js_map_set_constructors_dispatch_to_instance_methods);

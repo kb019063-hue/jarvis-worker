@@ -107,6 +107,7 @@ struct OpenSslApi {
     using SSL_METHOD = void;
     using SSL_CTX = void;
     using SSL = void;
+    using X509_VERIFY_PARAM = void;
 
     void* handle{nullptr};
     bool available{false};
@@ -122,6 +123,8 @@ struct OpenSslApi {
     int (*SSL_set_fd_fn)(SSL*, int) = nullptr;
     long (*SSL_ctrl_fn)(SSL*, int, long, void*) = nullptr;
     int (*SSL_set1_host_fn)(SSL*, const char*) = nullptr;
+    X509_VERIFY_PARAM* (*SSL_get0_param_fn)(SSL*) = nullptr;
+    int (*X509_VERIFY_PARAM_set1_ip_asc_fn)(X509_VERIFY_PARAM*, const char*) = nullptr;
     int (*SSL_connect_fn)(SSL*) = nullptr;
     int (*SSL_read_fn)(SSL*, void*, int) = nullptr;
     int (*SSL_peek_fn)(SSL*, void*, int) = nullptr;
@@ -167,6 +170,8 @@ struct OpenSslApi {
                 load(out.SSL_set_fd_fn, "SSL_set_fd") &&
                 load(out.SSL_ctrl_fn, "SSL_ctrl") &&
                 load(out.SSL_set1_host_fn, "SSL_set1_host") &&
+                load(out.SSL_get0_param_fn, "SSL_get0_param") &&
+                load(out.X509_VERIFY_PARAM_set1_ip_asc_fn, "X509_VERIFY_PARAM_set1_ip_asc") &&
                 load(out.SSL_connect_fn, "SSL_connect") &&
                 load(out.SSL_read_fn, "SSL_read") &&
                 load(out.SSL_write_fn, "SSL_write") &&
@@ -2216,10 +2221,23 @@ ResourceResponse ResourceLoader::load_http_single_hop(
         }
 
         (void)ssl_api.SSL_set_fd_fn(out.ssl, out.sockfd);
-        if (!is_ip_literal(connect_host)) {
+        bool identity_configured = false;
+        if (is_ip_literal(connect_host)) {
+            // IP literals require an iPAddress SAN, not a DNS SAN or CN.
+            // SSL_set1_host is a DNS-name check; use the IP verification
+            // parameter instead, and do not send an IP address as SNI.
+            auto* param = ssl_api.SSL_get0_param_fn(out.ssl);
+            identity_configured = param &&
+                ssl_api.X509_VERIFY_PARAM_set1_ip_asc_fn(param, connect_host.c_str()) == 1;
+        } else {
             // SSL_CTRL_SET_TLSEXT_HOSTNAME = 55, TLSEXT_NAMETYPE_host_name = 0
             (void)ssl_api.SSL_ctrl_fn(out.ssl, 55, 0, const_cast<char*>(connect_host.c_str()));
-            (void)ssl_api.SSL_set1_host_fn(out.ssl, connect_host.c_str());
+            identity_configured = ssl_api.SSL_set1_host_fn(out.ssl, connect_host.c_str()) == 1;
+        }
+        if (!identity_configured) {
+            close_http_connection(out, false);
+            err_out = "Failed to configure TLS certificate identity verification";
+            return false;
         }
 
         if (ssl_api.SSL_connect_fn(out.ssl) != 1 || ssl_api.SSL_get_verify_result_fn(out.ssl) != 0) {

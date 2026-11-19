@@ -929,8 +929,35 @@ void JsInterpreter::init_builtins() {
     // Worker built-in
     m_global_env->define("Worker", WorkerObject::create_constructor(request_context));
 
-    // WebSocket built-in
-    m_global_env->define("WebSocket", WebSocketObject::create_constructor());
+    // WebSocket built-in (inherits document URL, <base>, opaque-origin state,
+    // and interpreter lifetime guard so torn-down realms never fire handlers).
+    auto ws_context = [alive, realm, document]() -> WebSocketContext {
+        WebSocketContext ctx;
+        if (!alive->load()) return ctx;
+        if (!document) {
+            ctx.document_url = "about:blank";
+            ctx.base_url = "about:blank";
+            ctx.opaque_origin = true;
+            return ctx;
+        }
+        ctx.opaque_origin = document->has_opaque_origin();
+        ctx.document_url = document->url();
+        if ((ctx.document_url == "about:srcdoc" || ctx.document_url == "about:blank") &&
+            !document->inherited_origin_url().empty() && !document->has_opaque_origin()) {
+            ctx.document_url = document->inherited_origin_url();
+        }
+        ctx.base_url = ctx.document_url;
+        Url base;
+        if (dom::document_base_url(dom::realm_of(*realm), *document, base)) {
+            ctx.base_url = base.href();
+        }
+        return ctx;
+    };
+    auto ws_sink = std::make_shared<WebSocketEventSink>();
+    ws_sink->loop = &EventLoop::default_loop();
+    ws_sink->alive = true;
+    ws_sink->owner_alive = alive;
+    m_global_env->define("WebSocket", WebSocketObject::create_constructor(ws_context, ws_sink));
 
     // AbortController and AbortSignal
     JsValue abort_ctrl_ctor = JsValue::make_native_function([](const std::vector<JsValue>&) {

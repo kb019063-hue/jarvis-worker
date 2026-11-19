@@ -287,7 +287,24 @@ void VM::init_builtins() {
     set_global("Worker", WorkerObject::create_constructor(request_context));
 
     // WebSocket built-in
-    set_global("WebSocket", WebSocketObject::create_constructor());
+    auto ws_context = [document]() -> WebSocketContext {
+        WebSocketContext ctx;
+        if (!document) {
+            ctx.document_url = "about:blank";
+            ctx.base_url = "about:blank";
+            ctx.opaque_origin = true;
+            return ctx;
+        }
+        ctx.opaque_origin = document->has_opaque_origin();
+        ctx.document_url = document->url();
+        if ((ctx.document_url == "about:srcdoc" || ctx.document_url == "about:blank") &&
+            !document->inherited_origin_url().empty() && !document->has_opaque_origin()) {
+            ctx.document_url = document->inherited_origin_url();
+        }
+        ctx.base_url = ctx.document_url;
+        return ctx;
+    };
+    set_global("WebSocket", WebSocketObject::create_constructor(ws_context));
 
     // Map Constructor
     JsValue map_ctor = JsValue::make_native_function([](const std::vector<JsValue>& args) {

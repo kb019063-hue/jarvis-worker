@@ -279,9 +279,16 @@ bool parse_array_index(const std::string& name, size_t& out) {
 
 /// Keys that are engine bookkeeping rather than script-visible properties:
 /// symbols ("@@..."), internal slots ("%...") and the legacy "__name__" markers.
+///
+/// A `#` prefix used to be one of these, because a private field was stored as
+/// a property called `#p` and hiding it from enumeration was all that could be
+/// done for it. Private members have their own table since Phase 88, so a
+/// property a script itself names `#p` is an ordinary property again:
+/// `Object.keys`, `getOwnPropertyNames` and `JSON.stringify` all see it, as
+/// they do in every other engine.
 bool is_hidden_key(const std::string& key) {
     if (key.size() >= 2 && key[0] == '@' && key[1] == '@') return true;
-    if (!key.empty() && (key[0] == '%' || key[0] == '#')) return true;   // internal slots, #private names
+    if (!key.empty() && key[0] == '%') return true;      // internal slots
     return key.size() >= 5 && key[0] == '_' && key[1] == '_' &&
            key[key.size() - 1] == '_' && key[key.size() - 2] == '_';
 }
@@ -1041,6 +1048,96 @@ void JsValue::define_accessor(const std::string& name, const JsValue& getter, co
         }
     }
     auto& entry = map->entry(name);
+    entry.second = getter;
+    entry.setter = setter.is_function() ? std::make_shared<JsValue>(setter) : nullptr;
+    entry.flags = static_cast<uint8_t>((flags | PropertyMap::Accessor) & ~PropertyMap::Writable);
+}
+
+// ---------------------------------------------------------------------------
+// Private fields, methods and accessors
+// ---------------------------------------------------------------------------
+//
+// The brand check is the whole difference between these and get_property: a
+// private slot belongs to the object, not to a chain, and an object that the
+// declaring class did not make carries nothing under the name. Reading such a
+// name is an error rather than `undefined`, which is what makes a private field
+// private: outside code cannot even tell whether the object has one.
+
+namespace {
+/// The own private slot for `key`, or null: the brand check, and the only way
+/// into the private table.
+PropertyMap::Entry* private_entry_of(const JsValue& value, const std::string& key) {
+    JsObject* cell = value.property_cell();
+    PropertyMap* map = cell ? cell->private_map() : nullptr;
+    if (!map) return nullptr;
+    auto found = map->find(key);
+    return found == map->end() ? nullptr : &*found;
+}
+}   // namespace
+
+bool JsValue::has_private(const std::string& key) const {
+    return private_entry_of(*this, key) != nullptr;
+}
+
+void JsValue::private_accessor(const std::string& key, JsValue& getter, JsValue& setter) const {
+    const PropertyMap::Entry* entry = private_entry_of(*this, key);
+    if (!entry || !(entry->flags & PropertyMap::Accessor)) return;
+    getter = entry->second;
+    if (entry->setter) setter = *entry->setter;
+}
+
+JsValue JsValue::get_private(const std::string& key, const std::string& display) const {
+    const PropertyMap::Entry* entry = private_entry_of(*this, key);
+    if (!entry) {
+        js_throw_type_error("Cannot read private member " + display +
+                            " from an object whose class did not declare it");
+    }
+    if (entry->flags & PropertyMap::Accessor) {
+        if (!entry->second.is_function()) {
+            js_throw_type_error("'" + display + "' was defined without a getter");
+        }
+        return entry->second.call_with_this(*this, {});
+    }
+    return entry->second;
+}
+
+void JsValue::set_private(const std::string& key, const JsValue& value, const std::string& display) {
+    PropertyMap::Entry* entry = private_entry_of(*this, key);
+    if (!entry) {
+        js_throw_type_error("Cannot write private member " + display +
+                            " to an object whose class did not declare it");
+    }
+    if (entry->flags & PropertyMap::Accessor) {
+        // An accessor pair with no setter refuses the write, as it does in
+        // strict code, which every class body is.
+        if (!entry->setter) {
+            js_throw_type_error("Cannot set private accessor " + display + " which has only a getter");
+        }
+        entry->setter->call_with_this(*this, {value});
+        return;
+    }
+    if (!(entry->flags & PropertyMap::Writable)) {
+        js_throw_type_error("Cannot assign to read only private member " + display);
+    }
+    entry->second = value;
+}
+
+void JsValue::define_private(const std::string& key, JsValue value, uint8_t flags) {
+    JsObject* cell = property_cell(true);
+    PropertyMap* map = cell ? cell->private_map(true) : nullptr;
+    if (!map) js_throw_type_error("Cannot define a private member on this value");
+    auto& entry = map->entry(key);
+    entry.second = std::move(value);
+    entry.setter.reset();
+    entry.flags = static_cast<uint8_t>(flags & ~PropertyMap::Accessor);
+}
+
+void JsValue::define_private_accessor(const std::string& key, const JsValue& getter, const JsValue& setter,
+                                      uint8_t flags) {
+    JsObject* cell = property_cell(true);
+    PropertyMap* map = cell ? cell->private_map(true) : nullptr;
+    if (!map) js_throw_type_error("Cannot define a private member on this value");
+    auto& entry = map->entry(key);
     entry.second = getter;
     entry.setter = setter.is_function() ? std::make_shared<JsValue>(setter) : nullptr;
     entry.flags = static_cast<uint8_t>((flags | PropertyMap::Accessor) & ~PropertyMap::Writable);

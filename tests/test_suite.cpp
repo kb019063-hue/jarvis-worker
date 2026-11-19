@@ -5080,6 +5080,12 @@ TEST(websocket_handshake_security_and_secure_transport) {
             char c;
             while (request.size() < 16384 && ::recv(client, &c, 1, 0) == 1) {
                 request += c;
+                if (scheme == "wss" && request.size() == 1 && static_cast<unsigned char>(request[0]) == 0x16) {
+                    // TLS ClientHello record received; refuse on plaintext listener immediately.
+                    ::shutdown(client, SHUT_RDWR);
+                    ::close(client);
+                    return;
+                }
                 if (request.size() >= 4 && request.compare(request.size()-4, 4, "\r\n\r\n") == 0) break;
             }
             const std::string header = "Sec-WebSocket-Key: ";
@@ -5119,7 +5125,13 @@ TEST(websocket_handshake_security_and_secure_transport) {
         assert(connected == expect_connection);
         assert(opened == expect_open);
         assert(expect_open || closed);
-        if (expect_connection) assert(request.rfind("GET /chat?x=1 HTTP/1.1\r\n", 0) == 0);
+        if (expect_connection) {
+            if (scheme == "wss") {
+                assert(request.rfind("GET ", 0) != 0);
+            } else {
+                assert(request.rfind("GET /chat?x=1 HTTP/1.1\r\n", 0) == 0);
+            }
+        }
     };
     check("ws", "/chat?x=1", "", 0, true, true);
     for (int kind = 1; kind <= 6; ++kind) check("ws", "/chat?x=1", "", kind, true, false);
@@ -5128,7 +5140,7 @@ TEST(websocket_handshake_security_and_secure_transport) {
     check("ws", "/chat?x=1", "chat, other", 7, true, true);
     check("ws", "/chat?x=1", "chat", 0, true, false);
     check("ws", "/chat?x=1", "chat", 6, true, false);
-    check("wss", "/chat?x=1", "", 0, false, false);
+    check("wss", "/chat?x=1", "", 0, true, false);
     check("ws", "/chat?x=1\r\nInjected: yes", "", 0, false, false);
     check("ws", "/chat?x=1", "chat\r\nInjected: yes", 0, false, false);
     check("ws", "/chat?x=1", "chat,chat", 0, false, false);
@@ -5150,6 +5162,630 @@ TEST(websocket_handshake_security_and_secure_transport) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     assert(js.eval("wsEvents.join(',')").to_string() == "error,listener:error,close:1006:false");
+}
+
+TEST(websocket_tls_origin_mixed_content_and_framing) {
+    using namespace litebird;
+    namespace fs = std::filesystem;
+
+    // 1. UTF-8 validator edge cases (RFC 3629)
+    assert(WebSocketObject::is_valid_utf8("hello \xE2\x82\xAC \xF0\x9F\x9A\x80"));
+    assert(!WebSocketObject::is_valid_utf8("\xC0\xAF"));             // overlong 2-byte
+    assert(!WebSocketObject::is_valid_utf8("\xE0\x80\xAF"));         // overlong 3-byte
+    assert(!WebSocketObject::is_valid_utf8("\xED\xA0\x80"));         // UTF-16 surrogate
+    assert(!WebSocketObject::is_valid_utf8("\xF4\x90\x80\x80"));     // > U+10FFFF
+    assert(!WebSocketObject::is_valid_utf8("\x80"));                 // stray continuation
+    assert(!WebSocketObject::is_valid_utf8("\xE2\x82"));             // truncated sequence
+
+    // 2. WHATWG WebSockets API validation: DOMException names, protocols, URL resolution, mixed content
+    {
+        auto doc = std::make_shared<Document>();
+        doc->set_url("https://app.example:8443/sub/page.html");
+        auto html_el = std::make_shared<Element>("html");
+        auto head_el = std::make_shared<Element>("head");
+        auto base_el = std::make_shared<Element>("base");
+        base_el->set_attribute("href", "https://ws-host.example:9443/v2/");
+        head_el->append_child(base_el);
+        html_el->append_child(head_el);
+        doc->append_child(html_el);
+        JsInterpreter js(doc);
+
+        assert(js.eval(R"(
+            (function() {
+                var results = [];
+                try { WebSocket('ws://127.0.0.1/'); results.push('NO_NEW:ok'); }
+                catch (e) { results.push('NO_NEW:' + e.name); }
+
+                var badUrls = [
+                    'http://127.0.0.1/chat',
+                    'wss://127.0.0.1/chat#frag',
+                    'wss://user:pass@127.0.0.1/chat',
+                    'wss://127.0.0.1:0/chat'
+                ];
+                for (var i = 0; i < badUrls.length; i++) {
+                    try { new WebSocket(badUrls[i]); results.push('URL' + i + ':ok'); }
+                    catch (e) { results.push('URL' + i + ':' + e.name + ':' + (e instanceof DOMException)); }
+                }
+
+                try { new WebSocket('ws://remote.example/insecure'); results.push('MIXED:ok'); }
+                catch (e) { results.push('MIXED:' + e.name); }
+
+                var badProtos = ['', ['a', 'a'], 'a, b', ['bad proto']];
+                for (var j = 0; j < badProtos.length; j++) {
+                    try { new WebSocket('wss://127.0.0.1:1/', badProtos[j]); results.push('PROTO' + j + ':ok'); }
+                    catch (e) { results.push('PROTO' + j + ':' + e.name); }
+                }
+
+                var rel = new WebSocket('chat?x=1');
+                results.push('REL:' + rel.url);
+                results.push('PROTO_INIT:' + (rel.protocol === ''));
+                results.push('BTYPE_DEF:' + rel.binaryType);
+                rel.binaryType = 'arraybuffer';
+                results.push('BTYPE_SET:' + rel.binaryType);
+                rel.binaryType = 'invalid';
+                results.push('BTYPE_IGN:' + rel.binaryType);
+
+                try { rel.send('hi'); results.push('SEND_CONN:ok'); }
+                catch (e) { results.push('SEND_CONN:' + e.name); }
+                try { rel.close(1001); results.push('CLOSE_CODE:ok'); }
+                catch (e) { results.push('CLOSE_CODE:' + e.name); }
+                try { rel.close(1000, 'a'.repeat(124)); results.push('CLOSE_LEN:ok'); }
+                catch (e) { results.push('CLOSE_LEN:' + e.name); }
+
+                rel.close(3001, 'done');
+                results.push('CLOSING:' + rel.readyState);
+                return results.join('|');
+            })()
+        )").to_string() ==
+            "NO_NEW:TypeError"
+            "|URL0:SyntaxError:true"
+            "|URL1:SyntaxError:true"
+            "|URL2:SyntaxError:true"
+            "|URL3:SyntaxError:true"
+            "|MIXED:SecurityError"
+            "|PROTO0:SyntaxError"
+            "|PROTO1:SyntaxError"
+            "|PROTO2:SyntaxError"
+            "|PROTO3:SyntaxError"
+            "|REL:wss://ws-host.example:9443/v2/chat?x=1"
+            "|PROTO_INIT:true"
+            "|BTYPE_DEF:blob"
+            "|BTYPE_SET:arraybuffer"
+            "|BTYPE_IGN:arraybuffer"
+            "|SEND_CONN:InvalidStateError"
+            "|CLOSE_CODE:InvalidAccessError"
+            "|CLOSE_LEN:SyntaxError"
+            "|CLOSING:2");
+
+        // Drain async fail/close tasks before js leaves scope.
+        auto until = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (EventLoop::default_loop().has_pending_tasks() && std::chrono::steady_clock::now() < until) {
+            EventLoop::default_loop().tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+
+    // 3. Origin header, opaque sandbox Origin: null, trustworthy ws://127.0.0.1 under https://,
+    //    subprotocol selection, fragmented UTF-8 + interleaved Ping/Pong, trailing bytes after 101,
+    //    and masked/invalid-UTF-8 frame rejections
+    {
+        auto read_client_frame = [](int fd, uint8_t& out_opcode, std::string& out_payload) -> bool {
+            uint8_t hdr[2]{};
+            size_t got = 0;
+            while (got < 2) {
+                ssize_t r = ::recv(fd, hdr + got, 2 - got, 0);
+                if (r <= 0) return false;
+                got += static_cast<size_t>(r);
+            }
+            out_opcode = hdr[0] & 0x0Fu;
+            bool masked = (hdr[1] & 0x80u) != 0;
+            uint64_t len = hdr[1] & 0x7Fu;
+            if (len == 126) {
+                uint8_t ext[2]{};
+                if (::recv(fd, ext, 2, MSG_WAITALL) != 2) return false;
+                len = (static_cast<uint64_t>(ext[0]) << 8) | ext[1];
+            }
+            uint8_t mask[4]{};
+            if (masked && ::recv(fd, mask, 4, MSG_WAITALL) != 4) return false;
+            out_payload.resize(static_cast<size_t>(len));
+            size_t read_p = 0;
+            while (read_p < len) {
+                ssize_t r = ::recv(fd, out_payload.data() + read_p, static_cast<size_t>(len) - read_p, 0);
+                if (r <= 0) return false;
+                read_p += static_cast<size_t>(r);
+            }
+            if (masked) {
+                for (size_t i = 0; i < out_payload.size(); ++i) out_payload[i] ^= mask[i % 4];
+            }
+            return true;
+        };
+
+        auto make_server_frame = [](bool fin, uint8_t opcode, std::string_view payload, bool masked = false) {
+            std::vector<uint8_t> out;
+            out.push_back(static_cast<uint8_t>((fin ? 0x80u : 0x00u) | (opcode & 0x0Fu)));
+            out.push_back(static_cast<uint8_t>((masked ? 0x80u : 0x00u) | payload.size()));
+            if (masked) {
+                uint8_t m[4] = {1, 2, 3, 4};
+                for (int i = 0; i < 4; ++i) out.push_back(m[i]);
+                for (size_t i = 0; i < payload.size(); ++i) out.push_back(static_cast<uint8_t>(payload[i]) ^ m[i % 4]);
+            } else {
+                out.insert(out.end(), payload.begin(), payload.end());
+            }
+            return out;
+        };
+
+        // 3a. HTTPS document -> ws://127.0.0.1 (Origin: https://app.example), subprotocol "v2",
+        //     trailing frame coalesced after 101, split multi-byte UTF-8 "€" + interleaved Ping/Pong
+        std::string observed_origin;
+        std::string observed_pong;
+        bool pong_ok = false;
+        std::atomic<bool> handler_done{false};
+        auto srv = WebSocketObject::start_loopback_server([&](int cfd) {
+            timeval tv{3, 0};
+            ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string req;
+            char ch;
+            while (req.size() < 16384 && ::recv(cfd, &ch, 1, 0) == 1) {
+                req += ch;
+                if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+            }
+            auto find_hdr = [&](std::string_view key) -> std::string {
+                size_t pos = req.find(key);
+                if (pos == std::string::npos) return {};
+                pos += key.size();
+                size_t end = req.find("\r\n", pos);
+                return req.substr(pos, end - pos);
+            };
+            observed_origin = find_hdr("Origin: ");
+            std::string sec_key = find_hdr("Sec-WebSocket-Key: ");
+            std::string accept = WebSocketObject::calculate_accept_key(sec_key);
+
+            // Coalesce first WebSocket text frame immediately after 101 headers!
+            std::string hs =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Protocol: v2\r\n"
+                "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
+            auto f0 = make_server_frame(true, 0x01u, "coalesced");
+            hs.append(reinterpret_cast<const char*>(f0.data()), f0.size());
+            ::send(cfd, hs.data(), hs.size(), MSG_NOSIGNAL);
+
+            // Fragment 1 of "€" (0xE2 0x82), interleaved Ping "pq", Fragment 2 (0xAC), then Close 1000 "bye"
+            auto f1 = make_server_frame(false, 0x01u, std::string("\xE2\x82", 2));
+            auto ping = make_server_frame(true, 0x09u, "pq");
+            auto f2 = make_server_frame(true, 0x00u, std::string("\xAC", 1));
+            ::send(cfd, f1.data(), f1.size(), MSG_NOSIGNAL);
+            ::send(cfd, ping.data(), ping.size(), MSG_NOSIGNAL);
+            ::send(cfd, f2.data(), f2.size(), MSG_NOSIGNAL);
+
+            uint8_t op = 0;
+            std::string p;
+            if (read_client_frame(cfd, op, p) && op == 0x0Au) {
+                pong_ok = true;
+                observed_pong = p;
+            }
+            auto close_f = make_server_frame(true, 0x08u, std::string("\x03\xE8" "bye", 5));
+            ::send(cfd, close_f.data(), close_f.size(), MSG_NOSIGNAL);
+            uint8_t c_op = 0;
+            std::string c_pay;
+            (void)read_client_frame(cfd, c_op, c_pay);
+            ::close(cfd);
+            handler_done = true;
+        });
+
+        auto doc = std::make_shared<Document>();
+        doc->set_url("https://app.example:8443/dir/index.html");
+        JsInterpreter js(doc);
+        js.eval(
+            "var wsMsgs = [], wsOpenProto = '', wsCloseInfo = '';"
+            "var ws = new WebSocket('ws://127.0.0.1:" + std::to_string(srv->port) + "/stream', ['v1', 'v2']);"
+            "ws.onopen = function() { wsOpenProto = ws.protocol; };"
+            "ws.onmessage = function(e) { wsMsgs.push(e.data + '@' + e.origin); };"
+            "ws.onclose = function(e) { wsCloseInfo = e.code + ':' + e.reason + ':' + e.wasClean; };"
+        );
+        auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (js.eval("wsCloseInfo").to_string().empty() && std::chrono::steady_clock::now() < until) {
+            EventLoop::default_loop().tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        assert(observed_origin == "https://app.example:8443");
+        assert(pong_ok && observed_pong == "pq");
+        assert(js.eval("wsOpenProto").to_string() == "v2");
+        assert(js.eval("wsMsgs[0]").to_string() == "coalesced@ws://127.0.0.1:" + std::to_string(srv->port));
+        assert(js.eval("wsMsgs[1]").to_string() == std::string("\xE2\x82\xAC@ws://127.0.0.1:") + std::to_string(srv->port));
+        assert(js.eval("wsCloseInfo").to_string() == "1000:bye:true");
+        srv->running = false;
+
+        // 3b. Opaque sandbox Origin: null + server sending masked frame -> 1002 & invalid UTF-8 -> 1007
+        for (int bad_case = 0; bad_case < 2; ++bad_case) {
+            std::string obs_orig;
+            auto srv_bad = WebSocketObject::start_loopback_server([&](int cfd) {
+                timeval tv{2, 0};
+                ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                std::string req;
+                char ch;
+                while (req.size() < 16384 && ::recv(cfd, &ch, 1, 0) == 1) {
+                    req += ch;
+                    if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+                }
+                size_t op = req.find("Origin: ");
+                obs_orig = op == std::string::npos ? "" : req.substr(op + 8, req.find("\r\n", op) - op - 8);
+                size_t kp = req.find("Sec-WebSocket-Key: ");
+                std::string sec_key = req.substr(kp + 19, req.find("\r\n", kp) - kp - 19);
+                std::string hs = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+                                 WebSocketObject::calculate_accept_key(sec_key) + "\r\n\r\n";
+                auto bad_f = bad_case == 0
+                    ? make_server_frame(true, 0x01u, "hi", true)            // masked server frame -> 1002
+                    : make_server_frame(true, 0x01u, std::string("\xFF\xFE", 2), false); // bad UTF-8 -> 1007
+                hs.append(reinterpret_cast<const char*>(bad_f.data()), bad_f.size());
+                ::send(cfd, hs.data(), hs.size(), MSG_NOSIGNAL);
+                uint8_t cop = 0;
+                std::string cpay;
+                (void)read_client_frame(cfd, cop, cpay);
+                ::close(cfd);
+            });
+            auto sb_doc = std::make_shared<Document>();
+            sb_doc->set_url("https://sandbox.example/page.html");
+            sb_doc->set_opaque_origin(true);
+            JsInterpreter sb_js(sb_doc);
+            sb_js.eval(
+                "var badEv = [];"
+                "var bws = new WebSocket('ws://127.0.0.1:" + std::to_string(srv_bad->port) + "/');"
+                "bws.onerror = function() { badEv.push('err'); };"
+                "bws.onclose = function(e) { badEv.push('close:' + e.code + ':' + e.wasClean); };"
+            );
+            auto t2 = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (sb_js.eval("badEv.length").to_number() < 2 && std::chrono::steady_clock::now() < t2) {
+                EventLoop::default_loop().tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            assert(obs_orig == "null");
+            std::string expected_close = bad_case == 0 ? "err,close:1002:false" : "err,close:1007:false";
+            assert(sb_js.eval("badEv.join(',')").to_string() == expected_close);
+        }
+    }
+
+    // 4. Real wss:// TLS loopback verification (valid IP SAN, valid DNS localhost, wrong IP SAN, wrong DNS SAN, untrusted CA)
+    {
+        void* ssl_lib = ::dlopen("libssl.so.3", RTLD_LAZY | RTLD_LOCAL);
+        assert(ssl_lib != nullptr);
+        auto load_sym = [&](auto& fn, const char* sym) {
+            void* p = ::dlsym(ssl_lib, sym);
+            assert(p != nullptr);
+            std::memcpy(&fn, &p, sizeof(p));
+        };
+        const void* (*tls_server_method_fn)() = nullptr;
+        void* (*ctx_new_fn)(const void*) = nullptr;
+        void (*ctx_free_fn)(void*) = nullptr;
+        int (*ctx_use_cert_fn)(void*, const char*, int) = nullptr;
+        int (*ctx_use_key_fn)(void*, const char*, int) = nullptr;
+        void* (*ssl_new_fn)(void*) = nullptr;
+        void (*ssl_free_fn)(void*) = nullptr;
+        int (*ssl_set_fd_fn)(void*, int) = nullptr;
+        int (*ssl_accept_fn)(void*) = nullptr;
+        int (*ssl_read_fn)(void*, void*, int) = nullptr;
+        int (*ssl_write_fn)(void*, const void*, int) = nullptr;
+        int (*ssl_shutdown_fn)(void*) = nullptr;
+        load_sym(tls_server_method_fn, "TLS_server_method");
+        load_sym(ctx_new_fn, "SSL_CTX_new");
+        load_sym(ctx_free_fn, "SSL_CTX_free");
+        load_sym(ctx_use_cert_fn, "SSL_CTX_use_certificate_file");
+        load_sym(ctx_use_key_fn, "SSL_CTX_use_PrivateKey_file");
+        load_sym(ssl_new_fn, "SSL_new");
+        load_sym(ssl_free_fn, "SSL_free");
+        load_sym(ssl_set_fd_fn, "SSL_set_fd");
+        load_sym(ssl_accept_fn, "SSL_accept");
+        load_sym(ssl_read_fn, "SSL_read");
+        load_sym(ssl_write_fn, "SSL_write");
+        load_sym(ssl_shutdown_fn, "SSL_shutdown");
+
+        const fs::path cert_dir = fs::temp_directory_path() / "litebird_phase90_wss_test";
+        fs::remove_all(cert_dir);
+        fs::create_directories(cert_dir);
+        const fs::path good_key = cert_dir / "good.key";
+        const fs::path good_crt = cert_dir / "good.crt";
+        const fs::path wrong_key = cert_dir / "wrong.key";
+        const fs::path wrong_crt = cert_dir / "wrong.crt";
+
+        assert(std::system(("openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes "
+                            "-keyout \"" + good_key.string() + "\" -out \"" + good_crt.string() + "\" "
+                            "-days 2 -subj \"/CN=localhost\" -addext \"subjectAltName=IP:127.0.0.1,DNS:localhost\" >/dev/null 2>&1").c_str()) == 0);
+        assert(std::system(("openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes "
+                            "-keyout \"" + wrong_key.string() + "\" -out \"" + wrong_crt.string() + "\" "
+                            "-days 2 -subj \"/CN=wrong.example\" -addext \"subjectAltName=IP:127.0.0.2,DNS:wrong.example\" >/dev/null 2>&1").c_str()) == 0);
+
+        struct CaGuard {
+            ~CaGuard() { WebSocketObject::set_ca_bundle_for_testing(""); }
+        } ca_guard;
+
+        auto run_wss_probe = [&](const fs::path& cert_file,
+                                 const fs::path& key_file,
+                                 const std::string& client_host,
+                                 const std::string& ca_file,
+                                 bool expect_ok) {
+            void* sctx = ctx_new_fn(tls_server_method_fn());
+            assert(sctx != nullptr);
+            assert(ctx_use_cert_fn(sctx, cert_file.string().c_str(), 1) == 1);
+            assert(ctx_use_key_fn(sctx, key_file.string().c_str(), 1) == 1);
+
+            int lfd = ::socket(AF_INET, SOCK_STREAM, 0);
+            int opt = 1;
+            ::setsockopt(lfd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+            sockaddr_in addr{};
+            addr.sin_family = AF_INET;
+            addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            addr.sin_port = 0;
+            assert(::bind(lfd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+            assert(::listen(lfd, 1) == 0);
+            socklen_t alen = sizeof(addr);
+            assert(::getsockname(lfd, reinterpret_cast<sockaddr*>(&addr), &alen) == 0);
+            const uint16_t port = ntohs(addr.sin_port);
+
+            std::atomic<bool> got_http{false};
+            std::thread tls_srv([&]() {
+                int cfd = ::accept(lfd, nullptr, nullptr);
+                if (cfd < 0) { ::close(lfd); return; }
+                timeval tv{2, 0};
+                ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                void* s = ssl_new_fn(sctx);
+                ssl_set_fd_fn(s, cfd);
+                if (ssl_accept_fn(s) == 1) {
+                    std::string req;
+                    char buf[2048];
+                    while (req.find("\r\n\r\n") == std::string::npos) {
+                        int n = ssl_read_fn(s, buf, sizeof(buf));
+                        if (n <= 0) break;
+                        req.append(buf, static_cast<size_t>(n));
+                    }
+                    if (req.rfind("GET /wss HTTP/1.1\r\n", 0) == 0) {
+                        got_http = true;
+                        size_t kp = req.find("Sec-WebSocket-Key: ");
+                        std::string key = req.substr(kp + 19, req.find("\r\n", kp) - kp - 19);
+                        std::string resp =
+                            "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+                            WebSocketObject::calculate_accept_key(key) + "\r\n\r\n"
+                            "\x81\x09" "hello-wss"
+                            "\x88\x02\x03\xE8";
+                        ssl_write_fn(s, resp.data(), static_cast<int>(resp.size()));
+                        char drain[64];
+                        (void)ssl_read_fn(s, drain, sizeof(drain));
+                    }
+                }
+                ssl_shutdown_fn(s);
+                ssl_free_fn(s);
+                ::close(cfd);
+                ::close(lfd);
+            });
+
+            WebSocketObject::set_ca_bundle_for_testing(ca_file);
+            auto doc = std::make_shared<Document>();
+            doc->set_url("https://secure-app.example/");
+            JsInterpreter js(doc);
+            js.eval(
+                "var wssRes = '', wssClosed = false, wssClean = false, wssCode = 0;"
+                "var s = new WebSocket('wss://" + client_host + ":" + std::to_string(port) + "/wss');"
+                "s.onmessage = function(e) { wssRes = e.data; };"
+                "s.onclose = function(e) { wssClosed = true; wssClean = e.wasClean; wssCode = e.code; };"
+            );
+            auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+            while (!js.eval("wssClosed").is_truthy() && std::chrono::steady_clock::now() < until) {
+                EventLoop::default_loop().tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            tls_srv.join();
+            ctx_free_fn(sctx);
+            assert(js.eval("wssClosed").is_truthy() == true);
+            if (expect_ok) {
+                assert(got_http == true);
+                assert(js.eval("wssRes").to_string() == "hello-wss");
+                assert(js.eval("wssClean").is_truthy() == true);
+                assert(js.eval("wssCode").to_number() == 1000);
+            } else {
+                assert(got_http == false);
+                assert(js.eval("wssRes").to_string().empty());
+                assert(js.eval("wssClean").is_truthy() == false);
+                assert(js.eval("wssCode").to_number() == 1006);
+            }
+        };
+
+        run_wss_probe(good_crt, good_key, "127.0.0.1", good_crt.string(), true);   // Valid IP SAN
+        run_wss_probe(good_crt, good_key, "localhost", good_crt.string(), true);   // Valid DNS SAN + SNI
+        run_wss_probe(wrong_crt, wrong_key, "127.0.0.1", wrong_crt.string(), false); // Wrong IP SAN rejected
+        run_wss_probe(wrong_crt, wrong_key, "localhost", wrong_crt.string(), false); // Wrong DNS SAN rejected
+        run_wss_probe(good_crt, good_key, "127.0.0.1", wrong_crt.string(), false);   // Untrusted CA rejected
+
+        ::dlclose(ssl_lib);
+        fs::remove_all(cert_dir);
+    }
+
+    // 5. WebSocket inside a dedicated Worker thread + VM global wiring check
+    {
+        auto srv = WebSocketObject::start_loopback_server([&](int cfd) {
+            timeval tv{2, 0};
+            ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string req;
+            char ch;
+            while (req.size() < 16384 && ::recv(cfd, &ch, 1, 0) == 1) {
+                req += ch;
+                if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+            }
+            size_t kp = req.find("Sec-WebSocket-Key: ");
+            std::string key = req.substr(kp + 19, req.find("\r\n", kp) - kp - 19);
+            std::string resp =
+                "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+                WebSocketObject::calculate_accept_key(key) + "\r\n\r\n"
+                "\x81\x0B" "from-worker"
+                "\x88\x02\x03\xE8";
+            ::send(cfd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            ::close(cfd);
+        });
+
+        JsInterpreter js(nullptr);
+        js.eval(
+            "var workerMsg = '';"
+            "var w = new Worker('data:text/javascript,"
+            "  var ws = new WebSocket(\"ws://127.0.0.1:" + std::to_string(srv->port) + "/w\");"
+            "  ws.onmessage = function(e) { postMessage(e.data); };"
+            "');"
+            "w.onmessage = function(e) { workerMsg = e.data; };"
+        );
+        auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (js.eval("workerMsg").to_string().empty() && std::chrono::steady_clock::now() < until) {
+            EventLoop::default_loop().tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        assert(js.eval("workerMsg").to_string() == "from-worker");
+        js.eval("w.terminate();");
+    }
+
+    // 6. VM global WebSocket context, IPv6 mixed-content check, client close echo, bufferedAmount,
+    //    once/removeEventListener, and protocol violations (RSV1, 1-byte close, bad close UTF-8)
+    {
+        auto doc = std::make_shared<Document>();
+        doc->set_url("https://127.0.0.1:1/app/index.html");
+        VM vm(doc);
+        JsInterpreter compiler(doc);
+        JsValue vm_ws_ctor = vm.get_global("WebSocket");
+        assert(vm_ws_ctor.get_property("OPEN").to_number() == 1);
+
+        JsValue thrown;
+        assert(!js_capture_throw([&]() {
+            vm.interpret(compiler.compile_to_bytecode("WebSocket('ws://127.0.0.1:1/x');"));
+        }, thrown));
+        assert(thrown.get_property("name").to_string() == "TypeError");
+
+        JsValue thrown_mixed;
+        assert(!js_capture_throw([&]() {
+            js_construct(vm_ws_ctor, {JsValue::make_string("ws://remote.example/x")});
+        }, thrown_mixed));
+        assert(thrown_mixed.get_property("name").to_string() == "SecurityError");
+
+        JsValue thrown_v6;
+        assert(!js_capture_throw([&]() {
+            js_construct(vm_ws_ctor, {JsValue::make_string("ws://[::2]/x")});
+        }, thrown_v6));
+        assert(thrown_v6.get_property("name").to_string() == "SecurityError");
+
+        JsValue v6 = js_construct(vm_ws_ctor, {JsValue::make_string("ws://[::1]:1/x")});
+        JsValue rel = js_construct(vm_ws_ctor, {JsValue::make_string("/sock")});
+        assert(v6.get_property("url").to_string() == "ws://[::1]:1/x");
+        assert(rel.get_property("url").to_string() == "wss://127.0.0.1:1/sock");
+        v6.get_property("close").call_with_this(v6, {JsValue::make_number(3000), JsValue::make_string("vm-stop")});
+        rel.get_property("close").call_with_this(rel, {});
+
+        auto until_vm = std::chrono::steady_clock::now() + std::chrono::milliseconds(500);
+        while (EventLoop::default_loop().has_pending_tasks() && std::chrono::steady_clock::now() < until_vm) {
+            EventLoop::default_loop().tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+
+        // Client close echo + bufferedAmount + once/removeEventListener
+        std::string client_sent;
+        auto srv_echo = WebSocketObject::start_loopback_server([&](int cfd) {
+            timeval tv{2, 0};
+            ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            std::string req;
+            char ch;
+            while (req.size() < 16384 && ::recv(cfd, &ch, 1, 0) == 1) {
+                req += ch;
+                if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+            }
+            size_t kp = req.find("Sec-WebSocket-Key: ");
+            std::string key = req.substr(kp + 19, req.find("\r\n", kp) - kp - 19);
+            std::string resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+                               WebSocketObject::calculate_accept_key(key) + "\r\n\r\n";
+            ::send(cfd, resp.data(), resp.size(), MSG_NOSIGNAL);
+
+            // Read 1 client data frame then 1 client close frame and echo close back.
+            for (int f = 0; f < 2; ++f) {
+                uint8_t hdr[2]{};
+                if (::recv(cfd, hdr, 2, MSG_WAITALL) != 2) break;
+                uint64_t len = hdr[1] & 0x7Fu;
+                uint8_t mask[4]{};
+                if (hdr[1] & 0x80u) ::recv(cfd, mask, 4, MSG_WAITALL);
+                std::vector<uint8_t> pay(static_cast<size_t>(len));
+                if (len > 0) ::recv(cfd, pay.data(), static_cast<size_t>(len), MSG_WAITALL);
+                for (size_t i = 0; i < pay.size(); ++i) pay[i] ^= mask[i % 4];
+                if ((hdr[0] & 0x0Fu) == 0x01u) {
+                    client_sent.assign(pay.begin(), pay.end());
+                } else if ((hdr[0] & 0x0Fu) == 0x08u) {
+                    std::vector<uint8_t> echo = {0x88, static_cast<uint8_t>(pay.size())};
+                    echo.insert(echo.end(), pay.begin(), pay.end());
+                    ::send(cfd, echo.data(), echo.size(), MSG_NOSIGNAL);
+                }
+            }
+            ::close(cfd);
+        });
+
+        JsInterpreter js(nullptr);
+        js.eval(
+            "var onceCount = 0, remCount = 0, bufBefore = -1, closeOut = '';"
+            "var cws = new WebSocket('ws://127.0.0.1:" + std::to_string(srv_echo->port) + "/echo');"
+            "function removedFn() { remCount++; }"
+            "cws.addEventListener('open', function() { onceCount++; }, { once: true });"
+            "cws.addEventListener('open', removedFn);"
+            "cws.removeEventListener('open', removedFn);"
+            "cws.onopen = function() {"
+            "  cws.send('abc');"
+            "  bufBefore = cws.bufferedAmount;"
+            "  cws.close(3000, 'client-bye');"
+            "};"
+            "cws.onclose = function(e) { closeOut = e.code + ':' + e.reason + ':' + e.wasClean; };"
+        );
+        auto until_echo = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (js.eval("closeOut").to_string().empty() && std::chrono::steady_clock::now() < until_echo) {
+            EventLoop::default_loop().tick();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        assert(client_sent == "abc");
+        assert(js.eval("onceCount").to_number() == 1);
+        assert(js.eval("remCount").to_number() == 0);
+        assert(js.eval("bufBefore").to_number() >= 0);
+        assert(js.eval("closeOut").to_string() == "3000:client-bye:true");
+        assert(js.eval("cws.bufferedAmount").to_number() == 0);
+
+        // Protocol rejections: RSV1 set -> 1002, 1-byte Close -> 1002, Close with bad UTF-8 -> 1007
+        const std::vector<std::pair<std::string, std::string>> bad_wire_frames = {
+            {std::string("\xC1\x02hi", 4), "err,close:1002:false"},
+            {std::string("\x88\x01\x03", 3), "err,close:1002:false"},
+            {std::string("\x88\x04\x03\xE8\xFF\xFE", 6), "err,close:1007:false"},
+        };
+        for (const auto& [wire, expected] : bad_wire_frames) {
+            auto srv_proto = WebSocketObject::start_loopback_server([&](int cfd) {
+                timeval tv{2, 0};
+                ::setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+                std::string req;
+                char ch;
+                while (req.size() < 16384 && ::recv(cfd, &ch, 1, 0) == 1) {
+                    req += ch;
+                    if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+                }
+                size_t kp = req.find("Sec-WebSocket-Key: ");
+                std::string key = req.substr(kp + 19, req.find("\r\n", kp) - kp - 19);
+                std::string resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " +
+                                   WebSocketObject::calculate_accept_key(key) + "\r\n\r\n" + wire;
+                ::send(cfd, resp.data(), resp.size(), MSG_NOSIGNAL);
+                uint8_t sink[64];
+                (void)::recv(cfd, sink, sizeof(sink), 0);
+                ::close(cfd);
+            });
+            JsInterpreter pjs(nullptr);
+            pjs.eval(
+                "var pev = [];"
+                "var pws = new WebSocket('ws://127.0.0.1:" + std::to_string(srv_proto->port) + "/');"
+                "pws.onerror = function() { pev.push('err'); };"
+                "pws.onclose = function(e) { pev.push('close:' + e.code + ':' + e.wasClean); };"
+            );
+            auto until_p = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (pjs.eval("pev.length").to_number() < 2 && std::chrono::steady_clock::now() < until_p) {
+                EventLoop::default_loop().tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            assert(pjs.eval("pev.join(',')").to_string() == expected);
+        }
+    }
 }
 
 TEST(mutation_observer_api) {
@@ -21796,6 +22432,9 @@ int main() {
     // Phase 85: RFC 7932 Brotli Content-Encoding and HTTP/1.1 + TLS keep-alive socket pooling.
     RUN_TEST(brotli_rfc7932_decoder_and_http_content_encoding);
     RUN_TEST(http11_keep_alive_socket_pooling_and_tls_reuse);
+
+    // Phase 90: WebSocket wss:// TLS, Fetch Origin/mixed-content policy, and RFC 6455 framing.
+    RUN_TEST(websocket_tls_origin_mixed_content_and_framing);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

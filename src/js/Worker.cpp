@@ -8,6 +8,7 @@
 #include "litebird/net/Fetch.hpp"
 #include "litebird/net/ResourceLoader.hpp"
 #include "litebird/net/UrlParser.hpp"
+#include "litebird/net/WebSocket.hpp"
 
 #include <algorithm>
 #include <array>
@@ -1422,6 +1423,11 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     };
     my_loop_state->alive = true;
 
+    auto ws_event_sink = std::make_shared<WebSocketEventSink>();
+    ws_event_sink->loop = &worker_loop;
+    ws_event_sink->wake = my_loop_state->wake;
+    ws_event_sink->alive = true;
+
     WorkerObject* prev_worker = t_current_worker;
     auto* prev_loop_state = t_current_worker_loop_state;
     t_current_worker = this;
@@ -1430,9 +1436,13 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     struct ThreadScopeGuard {
         WorkerObject* self;
         std::shared_ptr<WorkerOwnerLoopState> loop_state;
+        std::shared_ptr<WebSocketEventSink> ws_sink;
         WorkerObject* prev_w;
         std::shared_ptr<WorkerOwnerLoopState>* prev_ls;
         ~ThreadScopeGuard() {
+            if (ws_sink) {
+                ws_sink->shutdown();
+            }
             // Stop nested workers BEFORE worker_loop is destroyed so none can
             // post to a dead parent EventLoop.
             {
@@ -1456,7 +1466,7 @@ void WorkerObject::worker_thread_main(std::string script_source) {
                 }
             });
         }
-    } scope_guard{this, my_loop_state, prev_worker, prev_loop_state};
+    } scope_guard{this, my_loop_state, ws_event_sink, prev_worker, prev_loop_state};
 
     std::optional<JsInterpreter> worker_js_opt;
     {
@@ -1484,6 +1494,24 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     env->define("fetch", fetch_fn);
     env->define("Worker", nested_worker_ctor);
 
+    WebSocketContext ws_context;
+    const bool is_opaque_worker =
+        m_resolved_url.rfind("data:", 0) == 0 || m_resolved_url.rfind("blob:", 0) == 0;
+    if (is_opaque_worker) {
+        ws_context.opaque_origin = true;
+        ws_context.document_url = (m_context.document_url.rfind("https:", 0) == 0)
+            ? m_context.document_url
+            : m_resolved_url;
+        ws_context.base_url = m_resolved_url;
+    } else {
+        ws_context.opaque_origin = false;
+        ws_context.document_url = m_resolved_url;
+        ws_context.base_url = m_resolved_url;
+    }
+    JsValue ws_ctor = WebSocketObject::create_constructor(
+        [ws_context]() { return ws_context; }, ws_event_sink);
+    env->define("WebSocket", ws_ctor);
+
     ListenerMap worker_listeners;
 
     // self reference (DedicatedWorkerGlobalScope)
@@ -1494,6 +1522,7 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     self_obj.set_property("location", location_obj);
     self_obj.set_property("fetch", fetch_fn);
     self_obj.set_property("Worker", nested_worker_ctor);
+    self_obj.set_property("WebSocket", ws_ctor);
     self_obj.set_property("onmessage", JsValue::make_null());
     self_obj.set_property("onerror", JsValue::make_null());
 

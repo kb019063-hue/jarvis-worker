@@ -77,6 +77,11 @@ jobs:
         # module-worker graph, classic importScripts origin/MIME checks, error
         # listener dispatch, and 60x concurrent 4-worker startup/exit runs (0 crashes).
         run: make security-worker
+      - name: WebSocket wss:// TLS, Fetch Origin/mixed-content policy, API validation, and teardown stability
+        # Verifies wss:// TLS verification (CA, DNS SAN + SNI, IPv4 SAN, expired/wrong-SAN/untrusted/plaintext rejection),
+        # Fetch Origin & mixed-content rules across https:/http:/file:/sandbox, relative URLs,
+        # WHATWG DOMException validation/close semantics, and 60x concurrent wss:// exit stability.
+        run: make security-websocket
       - name: JPEG, GIF, and SVG differential verification and mutation fuzzing
         # Verifies Baseline/Progressive JPEG and GIF87a/89a decoding pixel-by-pixel
         # against ImageMagick/libjpeg when available, real-world SVG rendering,

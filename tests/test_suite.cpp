@@ -1875,6 +1875,204 @@ struct FontKernProbe {
 
 }  // namespace
 
+namespace {
+
+// The `GSUB` ligature substitutions of a font, read from the file for the same
+// reason `FontKernProbe` reads the `kern` table: the engine has to agree with a
+// number nobody asked it about. Only what a Latin run can use — the `latn`
+// script (or `DFLT`), the `liga` and `rlig` features, and type-4 lookups.
+struct GsubProbe {
+    std::string bytes;
+    unsigned upem = 0;
+    unsigned hmetrics = 0;
+    std::size_t hmtx = 0;
+    std::size_t cmap4 = 0;
+    /// Each substitution: the glyphs it consumes, and the one glyph it makes.
+    std::vector<std::pair<std::vector<unsigned>, unsigned>> ligatures;
+
+    static unsigned u16(const std::string& b, std::size_t o) {
+        if (o + 2 > b.size()) return 0;
+        return (static_cast<unsigned>(static_cast<unsigned char>(b[o])) << 8) |
+               static_cast<unsigned>(static_cast<unsigned char>(b[o + 1]));
+    }
+    static unsigned u32(const std::string& b, std::size_t o) { return (u16(b, o) << 16) | u16(b, o + 2); }
+
+    std::size_t table(const char* tag) const {
+        if (bytes.size() < 12) return 0;
+        const unsigned count = u16(bytes, 4);
+        for (unsigned i = 0; i < count; ++i) {
+            const std::size_t rec = 12 + 16 * static_cast<std::size_t>(i);
+            if (rec + 16 > bytes.size()) return 0;
+            if (bytes.compare(rec, 4, tag, 4) == 0) return u32(bytes, rec + 8);
+        }
+        return 0;
+    }
+
+    unsigned glyph(unsigned cp) const {   // cmap format 4
+        if (!cmap4) return 0;
+        const unsigned seg_x2 = u16(bytes, cmap4 + 6);
+        const std::size_t ends = cmap4 + 14, starts = ends + seg_x2 + 2, deltas = starts + seg_x2,
+                          ranges = deltas + seg_x2;
+        for (unsigned i = 0; i < seg_x2 / 2; ++i) {
+            const unsigned end = u16(bytes, ends + 2 * i);
+            if (cp > end) continue;
+            const unsigned start = u16(bytes, starts + 2 * i);
+            if (cp < start) return 0;
+            const int delta = static_cast<int>(u16(bytes, deltas + 2 * i) << 16) >> 16;
+            const unsigned ro = u16(bytes, ranges + 2 * i);
+            if (ro == 0) return (cp + static_cast<unsigned>(delta)) & 0xFFFFu;
+            const unsigned g = u16(bytes, ranges + 2 * i + ro + 2 * (cp - start));
+            return g ? (g + static_cast<unsigned>(delta)) & 0xFFFFu : 0;
+        }
+        return 0;
+    }
+
+    float advance_of(unsigned g) const {
+        if (!upem || !hmtx) return 0.0f;
+        const unsigned index = g < hmetrics ? g : (hmetrics ? hmetrics - 1 : 0);
+        return static_cast<float>(u16(bytes, hmtx + 4 * static_cast<std::size_t>(index))) * 100.0f /
+               static_cast<float>(upem);
+    }
+
+    bool open(const std::string& path) {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) return false;
+        bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        if (bytes.size() < 32) return false;
+        const std::size_t head = table("head");
+        upem = head ? u16(bytes, head + 18) : 0;
+        const std::size_t hhea = table("hhea");
+        hmetrics = hhea ? u16(bytes, hhea + 34) : 0;
+        hmtx = table("hmtx");
+        const std::size_t cmap = table("cmap");
+        if (cmap) {
+            for (unsigned i = 0; i < u16(bytes, cmap + 2); ++i) {
+                const std::size_t sub = cmap + u32(bytes, cmap + 4 + 8 * static_cast<std::size_t>(i) + 4);
+                if (sub + 2 <= bytes.size() && u16(bytes, sub) == 4) {
+                    cmap4 = sub;
+                    break;
+                }
+            }
+        }
+
+        const std::size_t gsub = table("GSUB");
+        if (!gsub || gsub + 10 > bytes.size()) return true;   // no table: no ligatures
+        const unsigned version = u32(bytes, gsub);
+        if (version != 0x00010000u && version != 0x00010001u) return true;
+        const std::size_t scripts = gsub + u16(bytes, gsub + 4);
+        const std::size_t features = gsub + u16(bytes, gsub + 6);
+        const std::size_t lookups = gsub + u16(bytes, gsub + 8);
+
+        std::size_t lang_sys = 0;
+        std::size_t latn = 0, dflt = 0;
+        for (unsigned i = 0; i < u16(bytes, scripts); ++i) {
+            const std::size_t rec = scripts + 2 + 6 * static_cast<std::size_t>(i);
+            if (rec + 6 > bytes.size()) break;
+            const unsigned tag = u32(bytes, rec);
+            const std::size_t script = scripts + u16(bytes, rec + 4);
+            if (tag == 0x6C61746Eu && !latn) latn = script;
+            if (tag == 0x44464C54u && !dflt) dflt = script;
+        }
+        const std::size_t script = latn ? latn : dflt;
+        if (!script) return true;
+        const unsigned default_lang_sys = u16(bytes, script);
+        if (!default_lang_sys) return true;
+        lang_sys = script + default_lang_sys;
+
+        std::vector<unsigned> wanted;
+        const auto consider = [&](unsigned feature_index) {
+            if (feature_index >= u16(bytes, features)) return;
+            const std::size_t rec = features + 2 + 6 * static_cast<std::size_t>(feature_index);
+            const unsigned tag = u32(bytes, rec);
+            if (tag != 0x6C696761u && tag != 0x726C6967u) return;   // liga, rlig
+            const std::size_t feature = features + u16(bytes, rec + 4);
+            for (unsigned i = 0; i < u16(bytes, feature + 2); ++i) {
+                wanted.push_back(u16(bytes, feature + 4 + 2 * static_cast<std::size_t>(i)));
+            }
+        };
+        for (unsigned i = 0; i < u16(bytes, lang_sys + 4); ++i) consider(u16(bytes, lang_sys + 6 + 2 * i));
+        if (u16(bytes, lang_sys + 2) != 0xFFFF) consider(u16(bytes, lang_sys + 2));
+
+        for (unsigned index : wanted) {
+            if (index >= u16(bytes, lookups)) continue;
+            const std::size_t lookup = lookups + u16(bytes, lookups + 2 + 2 * static_cast<std::size_t>(index));
+            if (lookup + 6 > bytes.size()) continue;
+            unsigned type = u16(bytes, lookup);
+            for (unsigned s = 0; s < u16(bytes, lookup + 4); ++s) {
+                std::size_t sub = lookup + u16(bytes, lookup + 6 + 2 * static_cast<std::size_t>(s));
+                if (sub + 6 > bytes.size()) continue;
+                unsigned this_type = type;
+                if (this_type == 7) {   // extension
+                    this_type = u16(bytes, sub + 2);
+                    sub += u32(bytes, sub + 4);
+                    if (sub + 6 > bytes.size()) continue;
+                }
+                if (this_type != 4 || u16(bytes, sub) != 1) continue;
+                const std::size_t coverage = sub + u16(bytes, sub + 2);
+                const unsigned sets = u16(bytes, sub + 4);
+                std::vector<std::pair<unsigned, unsigned>> starts;
+                if (u16(bytes, coverage) == 1) {
+                    for (unsigned i = 0; i < u16(bytes, coverage + 2) && i < sets; ++i) {
+                        starts.emplace_back(u16(bytes, coverage + 4 + 2 * static_cast<std::size_t>(i)), i);
+                    }
+                } else if (u16(bytes, coverage) == 2) {
+                    for (unsigned i = 0; i < u16(bytes, coverage + 2); ++i) {
+                        const std::size_t range = coverage + 4 + 6 * static_cast<std::size_t>(i);
+                        const unsigned first_glyph = u16(bytes, range);
+                        const unsigned last_glyph = u16(bytes, range + 2);
+                        const unsigned first_set = u16(bytes, range + 4);
+                        for (unsigned g = first_glyph; g <= last_glyph; ++g) {
+                            starts.emplace_back(g, first_set + (g - first_glyph));
+                        }
+                    }
+                }
+                for (const auto& [first_glyph, set_index] : starts) {
+                    if (set_index >= sets) continue;
+                    const std::size_t set = sub + u16(bytes, sub + 6 + 2 * static_cast<std::size_t>(set_index));
+                    for (unsigned l = 0; l < u16(bytes, set); ++l) {
+                        const std::size_t ligature =
+                            set + u16(bytes, set + 2 + 2 * static_cast<std::size_t>(l));
+                        if (ligature + 4 > bytes.size()) break;
+                        const unsigned produced = u16(bytes, ligature);
+                        const unsigned components = u16(bytes, ligature + 2);
+                        if (components < 2 || components > 8 || ligature + 4 + 2 * (components - 1) > bytes.size()) {
+                            continue;
+                        }
+                        std::vector<unsigned> sequence{first_glyph};
+                        for (unsigned c = 1; c < components; ++c) {
+                            sequence.push_back(u16(bytes, ligature + 2 + 2 * static_cast<std::size_t>(c)));
+                        }
+                        ligatures.emplace_back(std::move(sequence), produced);
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    /// The glyph this font makes of a UTF-8-shaped ASCII string, or 0.
+    unsigned ligature_for(const std::string& text) const {
+        std::vector<unsigned> wanted;
+        for (char c : text) wanted.push_back(glyph(static_cast<unsigned char>(c)));
+        for (const auto& [sequence, produced] : ligatures) {
+            if (sequence == wanted) return produced;
+        }
+        return 0;
+    }
+};
+
+std::vector<std::pair<int, int>> covered_pixels(float x, float y, const std::string& text, float size,
+                                               const char* family) {
+    std::vector<std::pair<int, int>> pixels;
+    litebird::FontRenderer::instance().draw_text(
+        x, y, text, size, 400,
+        [&pixels](int px, int py, uint8_t) { pixels.emplace_back(px, py); }, family, false);
+    std::sort(pixels.begin(), pixels.end());
+    return pixels;
+}
+
+}  // namespace
+
 TEST(kerning_closes_the_pairs_the_table_names) {
     using namespace litebird;
 
@@ -2063,6 +2261,171 @@ TEST(the_painter_closes_the_same_pairs_the_measurer_counted) {
     // drawn closer by what `kerning_px` reported, to the pixel.
     assert(pair_drawn.right < by_hand_loose.right);
     assert(std::abs(shift - static_cast<int>(std::lround(-kern))) <= 1);
+}
+
+TEST(ligatures_join_the_glyphs_the_table_names) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    const char* const kFamily = "sans-serif";
+    if (!fr.has_truetype_font()) return;
+
+    GsubProbe probe;
+    const std::string path = fr.face_path(kFamily);
+    if (path.empty() || !probe.open(path)) {
+        std::printf("      [liga] no face file to read at '%s'\n", path.c_str());
+        std::fflush(stdout);
+        return;
+    }
+    std::printf("      [liga] %s: %zu substitutions in `liga`/`rlig` for `latn`\n",
+                path.c_str(), probe.ligatures.size());
+    std::fflush(stdout);
+    if (probe.ligatures.empty()) return;
+
+    // The strings a page actually sets, and what the file says each becomes.
+    // The width of the result is the substituted glyph's advance and not the
+    // sum of the letters' -- the point of the test. Where the two are equal
+    // (`fi` and `fl` in DejaVu Sans, whose ligatures are the same width) the
+    // ink test below is what sees the substitution.
+    const char* const kWords[] = {"ff", "fi", "fl", "ffi", "ffl"};
+    constexpr float kSize = 100.0f;
+    int differs = 0;
+    int checked = 0;
+    for (const char* word : kWords) {
+        const unsigned ligature_glyph = probe.ligature_for(word);
+        if (ligature_glyph == 0) continue;   // this font does not join that pair
+        ++checked;
+        const float expected = probe.advance_of(ligature_glyph);
+        float unligated = 0.0f;
+        for (const char* c = word; *c; ++c) unligated += probe.advance_of(probe.glyph(static_cast<unsigned char>(*c)));
+        const float measured = fr.measure_text(word, kSize, 400, kFamily);
+        std::printf("      [liga] %-3s -> glyph %u: file %.3f px, letters %.3f px, engine %.3f px\n",
+                    word, ligature_glyph, expected, unligated, measured);
+        std::fflush(stdout);
+        assert(std::fabs(measured - expected) < 0.01f);
+        if (std::fabs(expected - unligated) > 0.01f) ++differs;
+    }
+    if (checked == 0) return;
+    // The substitution is *measured*: at least one of these words is a
+    // different width joined than unjoined, and the engine reports the joined
+    // one. A font whose ligatures are all the same width as their letters
+    // fails this, and it should -- that is not a font this test can see.
+    assert(differs > 0);
+}
+
+TEST(a_ligature_is_drawn_as_the_glyph_the_table_names) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    const char* const kFamily = "sans-serif";
+    if (!fr.has_truetype_font()) return;
+
+    GsubProbe probe;
+    const std::string path = fr.face_path(kFamily);
+    if (path.empty() || !probe.open(path)) return;
+    const unsigned joined = probe.ligature_for("fi");
+    if (joined == 0) return;
+    // The same glyph, reachable through the `cmap` as U+FB01. That is what
+    // makes the two drawings comparable at all: the engine's shaped `fi` has
+    // to be the picture of that glyph, not of `f` followed by `i`.
+    const unsigned from_cmap = probe.glyph(0xFB01);
+    std::printf("      [liga] the file joins `fi` into glyph %u; U+FB01 is glyph %u\n", joined, from_cmap);
+    std::fflush(stdout);
+    if (from_cmap != joined) return;   // a font whose ligature has no codepoint: not this test
+
+    const auto shaped = covered_pixels(40.0f, 10.0f, "fi", 120.0f, kFamily);
+    const auto as_glyph = covered_pixels(40.0f, 10.0f, "\xEF\xAC\x81" /* U+FB01 */, 120.0f, kFamily);
+    const float advance_f = fr.glyph_advance_px('f', 120.0f, 400, kFamily);
+    auto separately = covered_pixels(40.0f, 10.0f, "f", 120.0f, kFamily);
+    const auto second = covered_pixels(40.0f + advance_f, 10.0f, "i", 120.0f, kFamily);
+    separately.insert(separately.end(), second.begin(), second.end());
+    std::sort(separately.begin(), separately.end());
+
+    std::printf("      [liga] `fi` drawn as %zu pixels, U+FB01 as %zu, f+i as %zu\n",
+                shaped.size(), as_glyph.size(), separately.size());
+    std::fflush(stdout);
+
+    // Same glyph, same pixels, to the last one.
+    assert(shaped == as_glyph);
+    // ...and not the two letters, which is what the engine drew before this.
+    assert(shaped != separately);
+}
+
+TEST(a_face_without_a_gsub_table_is_drawn_letter_by_letter) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    const int ahem = fr.register_font_file("tests/wpt/fonts/Ahem.ttf");
+    if (ahem == FontRenderer::kNoFamily) return;
+
+    GsubProbe probe;
+    const std::string path = fr.face_path("Ahem");
+    if (!path.empty() && probe.open(path)) assert(probe.ligatures.empty());
+
+    // Every Ahem glyph is exactly 1 em: `fi` is 200 px at 100 px if nothing was
+    // joined, and this face has nothing to join with.
+    const float measured = fr.measure_text("fi", 100.0f, 400, "Ahem");
+    std::printf("      [liga] Ahem 'fi' at 100 px = %.3f\n", measured);
+    std::fflush(stdout);
+    assert(std::fabs(measured - 200.0f) < 0.01f);
+
+    const auto drawn = covered_pixels(20.0f, 10.0f, "fi", 60.0f, "Ahem");
+    const auto hand = covered_pixels(20.0f, 10.0f, "f", 60.0f, "Ahem");
+    const auto second = covered_pixels(20.0f + 60.0f, 10.0f, "i", 60.0f, "Ahem");
+    std::vector<std::pair<int, int>> together = hand;
+    together.insert(together.end(), second.begin(), second.end());
+    std::sort(together.begin(), together.end());
+    assert(drawn == together);
+}
+
+TEST(the_canvas_measures_the_ligature_it_paints) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    if (!fr.has_truetype_font()) return;
+    GsubProbe probe;
+    const std::string path = fr.face_path("sans-serif");
+    if (path.empty() || !probe.open(path)) return;
+    const unsigned joined = probe.ligature_for("ff");
+    if (joined == 0) return;
+    if (probe.glyph(0xFB00) != joined) return;   // no codepoint for it: nothing to compare against
+
+    // The canvas has its own pen (it needs each bitmap's ink), and it has to
+    // walk the same shaped list layout does: `ctx.measureText` counts the
+    // ligature, so `fillText` has to paint it.
+    CanvasRenderingContext2D joined_ctx(120, 80), codepoint_ctx(120, 80), letters_ctx(120, 80);
+    for (CanvasRenderingContext2D* ctx : {&joined_ctx, &codepoint_ctx, &letters_ctx}) {
+        ctx->font = "60px sans-serif";
+        ctx->fill_style = Color(0, 0, 0);
+    }
+    joined_ctx.fill_text("ff", 4.0f, 60.0f);
+    codepoint_ctx.fill_text("\xEF\xAC\x80" /* U+FB00 */, 4.0f, 60.0f);
+    const float advance_f = fr.glyph_advance_px('f', 60.0f, 400, "sans-serif");
+    letters_ctx.fill_text("f", 4.0f, 60.0f);
+    letters_ctx.fill_text("f", 4.0f + advance_f, 60.0f);
+
+    const auto ink = [](const CanvasRenderingContext2D& ctx) {
+        std::vector<std::pair<int, int>> pixels;
+        for (int y = 0; y < ctx.height(); ++y) {
+            for (int x = 0; x < ctx.width(); ++x) {
+                if ((ctx.image_data()->get_pixel(x, y) & 0xFF000000u) != 0) pixels.emplace_back(x, y);
+            }
+        }
+        return pixels;
+    };
+    const auto painted = ink(joined_ctx);
+    const auto as_codepoint = ink(codepoint_ctx);
+    const auto separately = ink(letters_ctx);
+    const float measured = joined_ctx.measure_text("ff").width;
+    const float expected = probe.advance_of(joined) * 0.6f;   // the probe's numbers are at 100 px
+    std::printf("      [liga] canvas 'ff': measured %.3f px (file %.3f), %zu pixels vs %zu as U+FB00 vs %zu as f+f\n",
+                measured, expected, painted.size(), as_codepoint.size(), separately.size());
+    std::fflush(stdout);
+
+    assert(!painted.empty());
+    assert(std::fabs(measured - expected) < 0.01f);
+    assert(painted == as_codepoint);   // the ligature glyph, drawn by the canvas
+    assert(painted != separately);     // ...and not the two letters
 }
 
 TEST(inline_formatting_context) {
@@ -3516,6 +3879,73 @@ TEST(css_pseudo_classes) {
     btn->set_hovered(true);
     auto style_btn_hover = resolver.resolve_style(btn);
     assert(style_btn_hover.color == Color::parse("yellow"));
+}
+
+TEST(svg_text_uses_canvas_glyphs_and_svg_positioning) {
+    using namespace litebird;
+    auto render = [](const std::string& content) {
+        auto doc = HtmlParser::parse("<svg width='120' height='50' viewBox='0 0 120 50'>" + content + "</svg>");
+        auto svgs = doc->get_elements_by_tag_name("svg");
+        assert(svgs.size() == 1);
+        auto image = SvgRenderer::render(svgs[0], 120.0f, 50.0f);
+        assert(image && image->width == 120 && image->height == 50);
+        return image;
+    };
+    auto same_pixels = [](const std::shared_ptr<ImageData>& a, const std::shared_ptr<ImageData>& b) {
+        assert(a && b && a->width == b->width && a->height == b->height);
+        int painted = 0;
+        for (int y = 0; y < a->height; ++y) for (int x = 0; x < a->width; ++x) {
+            assert(a->get_pixel(x, y) == b->get_pixel(x, y));
+            painted += a->get_pixel_color(x, y).a != 0;
+        }
+        assert(painted > 50); // Do not let two empty images agree by accident.
+    };
+
+    CanvasRenderingContext2D expected(120, 50);
+    expected.font = "normal 400 24px sans-serif";
+    expected.fill_style = Color::parse("red");
+    expected.fill_text("AB", 10, 32);
+    same_pixels(render("<text x='10' y='32' font-size='24' fill='red'>AB</text>"), expected.image_data());
+    same_pixels(render("<text x='10' y='32' font-size='24' fill='red'>\n  AB  \n</text>"),
+                expected.image_data());
+
+    CanvasRenderingContext2D preserved(120, 50);
+    preserved.font = "normal 400 24px sans-serif";
+    preserved.fill_style = Color::parse("red");
+    preserved.fill_text("A B", 10, 32);
+    same_pixels(render("<text x='10' y='32' font-size='24' fill='red' xml:space='preserve'>A B</text>"),
+                preserved.image_data());
+
+    // An inherited font and a tspan's own paint / absolute x must not cause
+    // the earlier and later runs to be painted twice by text_content().
+    CanvasRenderingContext2D spans(120, 50);
+    spans.font = "normal 400 24px sans-serif";
+    spans.fill_style = Color::parse("red");
+    spans.fill_text("A", 10, 32);
+    spans.fill_style = Color::parse("blue");
+    spans.fill_text("B", 70, 32);
+    same_pixels(render("<text x='10' y='32' style='font-size:24px;fill:red'>A"
+                       "<tspan x='70' fill='blue'>B</tspan></text>"), spans.image_data());
+
+    CanvasRenderingContext2D centered(120, 50);
+    centered.font = "normal 400 24px sans-serif";
+    centered.text_align = "center";
+    centered.fill_style = Color::parse("red");
+    centered.fill_text("AB", 60, 32);
+    same_pixels(render("<text x='60' y='32' font-size='24' text-anchor='middle' fill='red'>AB</text>"),
+                centered.image_data());
+
+    CanvasRenderingContext2D translated(120, 50);
+    translated.translate(18, 0);
+    translated.font = "normal 400 24px sans-serif";
+    translated.fill_style = Color::parse("red");
+    translated.fill_text("AB", 10, 32);
+    same_pixels(render("<g transform='translate(18,0)' font-size='24' fill='red'>"
+                       "<text x='10' y='32'>AB</text></g>"), translated.image_data());
+
+    auto hidden = render("<text x='10' y='32' font-size='24' fill='none'>AB</text>");
+    for (int y = 0; y < hidden->height; ++y) for (int x = 0; x < hidden->width; ++x)
+        assert(hidden->get_pixel_color(x, y).a == 0);
 }
 
 TEST(svg_vector_rendering) {
@@ -19076,6 +19506,110 @@ TEST(js_iterators_are_kinds_with_prototypes) {
     assert(text("[...new Map([[1, 'a']]).keys()].join()") == "1");
 }
 
+TEST(array_from_asks_the_source_for_its_iterator) {
+    using namespace litebird;
+    // Phase 94. `Array.from` decided for itself what was iterable: an array
+    // or a string was read without asking, whatever its `Symbol.iterator`
+    // said, and everything else with a `length` was read as array-like
+    // whether or not it had an iterator. It also collected every value before
+    // it mapped the first, so a mapper that threw did not close the iterator
+    // and an iterator with no end was read to the end of it. Every assertion
+    // below is compared inside the page, where a script sees them.
+    JsInterpreter js;
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function t(f) { try { return String(f()); } catch (e) { return e.name; } }
+
+        // An array and a string are asked, and lose nothing when they answer.
+        ok('array', Array.from([1, 2]).join(), '1,2');
+        ok('string', Array.from('ab').join(), 'a,b');
+
+        // Without the method they are array-like: the elements, or the code
+        // units. Until Phase 94 these three were a TypeError each.
+        var oa = Array.prototype[Symbol.iterator], os = String.prototype[Symbol.iterator];
+        delete Array.prototype[Symbol.iterator]; delete String.prototype[Symbol.iterator];
+        ok('array-like array', t(function () { return Array.from([1, 2]).join(); }), '1,2');
+        ok('array-like string', t(function () { return Array.from('a\u{1F600}').length; }), '3');
+        ok('the array itself is still not iterable', t(function () { return [...[1]]; }), 'TypeError');
+        Array.prototype[Symbol.iterator] = oa; String.prototype[Symbol.iterator] = os;
+
+        // A number whose prototype was given one is asked. Until Phase 94 it
+        // was read as array-like and gave nothing.
+        Number.prototype[Symbol.iterator] = function* () { for (var i = 0; i < this; i++) yield i; };
+        ok('number iterated', Array.from(3).join(), '0,1,2');
+        ok('number mapped', Array.from(3, function (v, i) { return v * 10 + i; }).join(), '0,11,22');
+        delete Number.prototype[Symbol.iterator];
+        ok('number without one is empty', Array.from(3).length, '0');
+
+        // An object that only has next() is array-like, not iterated.
+        ok('next only', Array.from({ next: function () { return { done: true }; } }).length, '0');
+        ok('array-like with length', Array.from({ 0: 'x', 1: 'y', length: 2 }).join(), 'x,y');
+        ok('holes are undefined', JSON.stringify(Array.from({ length: 2 })), '[null,null]');
+        ok('a hole in an array', Array.from([, 1]).map(function (v) { return typeof v; }).join(),
+           'undefined,number');
+
+        // ToLength: negative, fractional and NaN are none, a string is its
+        // number, and a missing length is none.
+        ok('negative', Array.from({ length: -1 }).length, '0');
+        ok('string length', Array.from({ length: '2' }).length, '2');
+        ok('fraction', Array.from({ length: 2.9 }).length, '2');
+        ok('NaN', Array.from({ length: NaN }).length, '0');
+        ok('undefined length', Array.from({}).length, '0');
+
+        // Nullish, and an iterator that is not callable.
+        ok('null', t(function () { return Array.from(null); }), 'TypeError');
+        ok('undefined', t(function () { return Array.from(undefined); }), 'TypeError');
+        ok('not callable', t(function () { return Array.from({ [Symbol.iterator]: 5 }); }), 'TypeError');
+        ok('a null method is none', Array.from({ [Symbol.iterator]: null, length: 1 }).length, '1');
+        ok('mapper not callable', t(function () { return Array.from([1], 2); }), 'TypeError');
+
+        // GetMethod runs once, and before the mapper is called.
+        var reads = 0;
+        var lazy = { length: 1, 0: 'v' };
+        Object.defineProperty(lazy, Symbol.iterator, { get: function () { reads++; return undefined; } });
+        ok('the getter is asked', Array.from(lazy, function (v) { return v; }).join(), 'v');
+        ok('once', reads, '1');
+
+        // A mapper that throws closes the iterator, at the value it threw on:
+        // the iterator has no last value, so a collection that came first
+        // would never have reached this.
+        var log = [];
+        function endless() {
+            return { [Symbol.iterator]: function () {
+                var i = 0;
+                return { next: function () { i++; return { value: i, done: false }; },
+                         return: function () { log.push('closed at ' + i); return { done: true }; } };
+            } };
+        }
+        ok('the mapper throws', t(function () {
+            return Array.from(endless(), function (v) { if (v === 3) throw new RangeError('stop'); return v; });
+        }), 'RangeError');
+        ok('the iterator was closed', log.join(), 'closed at 3');
+
+        // A return() that is not callable does not replace the error thrown.
+        var noReturn = { [Symbol.iterator]: function () {
+            return { next: function () { return { value: 1, done: false }; }, return: 5 };
+        } };
+        ok('a return that is not callable', t(function () {
+            return Array.from(noReturn, function () { throw new RangeError('stop'); });
+        }), 'RangeError');
+
+        // thisArg reaches the mapper, and the index counts from zero.
+        ok('thisArg', Array.from([1], function (v) { return this.tag + v; }, { tag: 'n' }).join(), 'n1');
+        ok('indices', Array.from('abc', function (v, i) { return i; }).join(), '0,1,2');
+
+        // The result is a plain array with the values in it.
+        var made = Array.from([1, 2]);
+        ok('an array', Array.isArray(made), 'true');
+        ok('its length', made.length, '2');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
 TEST(js_iteration_of_another_realms_array) {
     using namespace litebird;
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
@@ -20643,6 +21177,10 @@ int main() {
     RUN_TEST(kerning_closes_the_pairs_the_table_names);
     RUN_TEST(a_face_without_a_kern_table_is_not_kerned);
     RUN_TEST(the_painter_closes_the_same_pairs_the_measurer_counted);
+    RUN_TEST(ligatures_join_the_glyphs_the_table_names);
+    RUN_TEST(a_ligature_is_drawn_as_the_glyph_the_table_names);
+    RUN_TEST(a_face_without_a_gsub_table_is_drawn_letter_by_letter);
+    RUN_TEST(the_canvas_measures_the_ligature_it_paints);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);
@@ -20663,6 +21201,7 @@ int main() {
     RUN_TEST(html5_canvas_2d_context);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
+    RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);
     RUN_TEST(svg_vector_rendering);
     RUN_TEST(es6_map_set_and_destructuring);
     RUN_TEST(css_transitions_and_animations);
@@ -20893,6 +21432,7 @@ int main() {
 
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
+    RUN_TEST(array_from_asks_the_source_for_its_iterator);
     RUN_TEST(js_iteration_of_another_realms_array);
 
     // Phase 92: an iterator is a kind with a prototype a script can reach.

@@ -276,26 +276,47 @@ void install_array_builtins(JsIntrinsics& realm) {
     });
     js_define_method(array_ctor, "of", 0, [](Args args) { return JsValue::make_array(args); });
     js_define_method(array_ctor, "from", 1, [](Args args) {
+        // Array.from ( items [ , mapfn [ , thisArg ] ] ), in the order of the
+        // standard: the mapper is checked, then the source is *asked* for its
+        // iterator (GetMethod(@@iterator)), and only a source that has none is
+        // read as an array-like. An array and a string are asked like anything
+        // else, so deleting the method from `Array.prototype` makes an array
+        // array-like and not a `TypeError`, and a number whose prototype has
+        // one is iterated (Phase 94).
         const JsValue& source = js_arg(args, 0);
         const JsValue& map_fn = js_arg(args, 1);
         const JsValue& this_arg = js_arg(args, 2);
-        if (source.is_nullish()) js_throw_type_error(js_describe_thrown(source) + " is not iterable");
-        if (!map_fn.is_undefined() && !map_fn.is_function()) js_throw_type_error("Array.from: mapper is not a function");
+        const bool mapping = !map_fn.is_undefined();
+        if (mapping && !map_fn.is_function()) js_throw_type_error("Array.from: mapper is not a function");
+
+        auto mapped = [&](const JsValue& value, size_t index) {
+            if (!mapping) return value;
+            return map_fn.call_with_this(this_arg, {value, JsValue::make_number(static_cast<double>(index))});
+        };
 
         std::vector<JsValue> items;
-        const bool iterable = source.is_array() || source.type == JsType::String ||
-                              (source.is_object_like() && (source.get_property(kIteratorKey).is_function() ||
-                                                           source.get_property("Symbol.iterator").is_function()));
+        JsValue method;
+        const bool iterable = js_iterator_method(source, method);
         if (iterable) {
-            items = js_iterable_to_vector(source);
-        } else if (source.is_object_like()) {
-            double length = js_to_integer(js_to_number(source.get_property("length")));
+            // Mapped as each value arrives, not after the last one: a mapper
+            // that throws closes the iterator, and an iterator without an end
+            // costs one value, not all of them.
+            js_iterate(source, [&](const JsValue& value) {
+                items.push_back(mapped(value, items.size()));
+                return true;
+            });
+        } else {
+            // ToObject(items), then ToLength(Get(items, "length")), then each
+            // index as a property — which a string answers one code unit at a
+            // time, and a hole in an array answers as `undefined`.
+            if (source.is_nullish()) js_throw_type_error(js_describe_thrown(source) + " is not iterable");
+            const double length_number = js_to_number(source.get_property("length"));
+            double length = std::isnan(length_number) ? 0.0 : std::floor(length_number);
+            if (!(length > 0)) length = 0;
+            if (length > 9007199254740991.0) length = 9007199254740991.0; // 2^53 - 1
             if (length > (1u << 26)) js_throw_range_error("Invalid array length");
-            for (double i = 0; i < length; ++i) items.push_back(source.get_property(js_number_to_string(i)));
-        }
-        if (map_fn.is_function()) {
-            for (size_t i = 0; i < items.size(); ++i) {
-                items[i] = map_fn.call_with_this(this_arg, {items[i], JsValue::make_number(static_cast<double>(i))});
+            for (double i = 0; i < length; ++i) {
+                items.push_back(mapped(source.get_property(js_number_to_string(i)), static_cast<size_t>(i)));
             }
         }
         return JsValue::make_array(items);

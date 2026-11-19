@@ -1288,6 +1288,11 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
             }
             to->is_array = from->is_array;
             to->array_elements = from->array_elements;
+            // Which of those places are holes travels with them: `class List
+            // extends Array {}` with `new List(3)` is three holes, because the
+            // Array constructor made holes and this is where they are handed on.
+            to->array_holes = from->array_holes ? std::make_unique<JsObject::Holes>(*from->array_holes)
+                                                : nullptr;
             to->klass = from->klass;
             to->internal = from->internal;
             to->exotic = from->exotic;

@@ -2015,7 +2015,7 @@ float FontRenderer::advance_in_family(uint32_t codepoint, float font_size, int f
 }
 
 float FontRenderer::measure_text(std::string_view utf8_text, float font_size, int font_weight,
-                                 std::string_view css_family, bool italic) {
+                                 std::string_view css_family, bool italic, bool kerning) {
     if (utf8_text.empty() || font_size <= 0.0f) return 0.0f;
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
     const std::vector<ShapedGlyph> shaped = shape_text(utf8_text, font_size, font_weight, family_id, italic);
@@ -2025,8 +2025,10 @@ float FontRenderer::measure_text(std::string_view utf8_text, float font_size, in
         // Kerning is a property of a pair, so the first glyph has nothing to
         // kern against. It is asked of the shaped glyphs and not of the
         // codepoints: after a ligature, `ff` is one glyph, and the `kern` table
-        // has an opinion about that glyph only if it names it.
-        if (i > 0) total += kerning_px_shaped(shaped[i - 1], shaped[i], font_size);
+        // has an opinion about that glyph only if it names it. `font-kerning:
+        // none` is the page deciding not to ask at all, so the pair is skipped
+        // rather than asked and ignored.
+        if (kerning && i > 0) total += kerning_px_shaped(shaped[i - 1], shaped[i], font_size);
     }
     return total;
 }
@@ -2081,7 +2083,8 @@ void FontRenderer::draw_text(
     int font_weight,
     const std::function<void(int px, int py, uint8_t coverage)>& emit_pixel,
     std::string_view css_family,
-    bool italic
+    bool italic,
+    bool kerning
 ) {
     if (utf8_text.empty() || font_size <= 0.0f) return;
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
@@ -2120,7 +2123,8 @@ void FontRenderer::draw_text(
         // The pair closes up *before* its second glyph is placed: kerning is
         // the gap between two glyphs, so adding it after drawing the second one
         // would move the gap and leave the glyph where it was.
-        if (i > 0) pen_x += kerning_px_shaped(shaped[i - 1], shaped[i], font_size);
+        // ...and it is skipped entirely when `font-kerning` says so.
+        if (kerning && i > 0) pen_x += kerning_px_shaped(shaped[i - 1], shaped[i], font_size);
         const GlyphBitmap& g = get_glyph_shaped(shaped[i], px_size, font_weight);
         if (g.width > 0 && g.height > 0) {
             const int gx0 = static_cast<int>(std::lround(pen_x)) + g.bearing_x;

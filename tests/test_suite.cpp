@@ -2428,6 +2428,245 @@ TEST(the_canvas_measures_the_ligature_it_paints) {
     assert(painted != separately);     // ...and not the two letters
 }
 
+
+TEST(font_kerning_none_reaches_the_box_and_the_painter) {
+    using namespace litebird;
+
+    // `font-kerning` has been a recognised property name — inherited, with an
+    // initial value of `auto` — for as long as the CSSOM tables have existed,
+    // and no part of the engine ever read it. It is read now, and the thing
+    // worth checking is not that the parser stores a keyword but that `none`
+    // survives the trip down to the box that measures text and the command that
+    // paints it: a property that stops at the element changes nothing.
+    auto doc = HtmlParser::parse(R"(
+        <body>
+            <p id="plain">plain run</p>
+            <p id="off" style="font-kerning: none">unkerned run</p>
+            <p id="on" style="font-kerning: normal">normal run</p>
+            <p id="auto" style="font-kerning: auto">auto run</p>
+            <div id="outer" style="font-kerning: none"><span id="inner">inherited run</span></div>
+            <div id="outer2" style="font-kerning: none"><span id="back" style="font-kerning: auto">restored run</span></div>
+        </body>
+    )");
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+
+    auto style_of = [&](const char* id) {
+        auto el = doc->get_element_by_id(id);
+        assert(el);
+        return resolver.resolve_style(el, nullptr);
+    };
+
+    assert(style_of("plain").font_kerning == FontKerning::Auto);
+    assert(style_of("off").font_kerning == FontKerning::None);
+    assert(style_of("off").kerning_enabled() == false);
+    // `auto` and `normal` are different values meaning the same thing here:
+    // kerning happens. The distinction is kept because it is the author's word,
+    // and `auto` explicitly permits a user agent to kern.
+    assert(style_of("on").font_kerning == FontKerning::Normal);
+    assert(style_of("on").kerning_enabled());
+    assert(style_of("auto").font_kerning == FontKerning::Auto);
+    // Inherited, like every other font property: the `<span>` holds the text
+    // and it is the `<span>`'s box that measures it.
+    assert(style_of("inner").font_kerning == FontKerning::None);
+    assert(!style_of("inner").kerning_enabled());
+    // ...and a declaration on the child puts it back, which is inheritance and
+    // not a sticky bit.
+    assert(style_of("back").font_kerning == FontKerning::Auto);
+    assert(style_of("back").kerning_enabled());
+
+    auto root = LayoutTree::build(doc, resolver, 1024.0f, 768.0f);
+    assert(root);
+    auto off_el = doc->get_element_by_id("off");
+    assert(off_el);
+    auto off_text = text_box_for(root, off_el->first_child());
+    assert(off_text);
+    assert(off_text->style->font_kerning == FontKerning::None);
+    assert(!off_text->style->kerning_enabled());
+
+    const DisplayList list = DisplayList::build(root);
+    bool unkerned_seen = false, kerned_seen = false;
+    for (const auto& cmd : list.commands()) {
+        std::visit([&](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, DrawTextCommand>) {
+                if (arg.text.find("unkerned") != std::string::npos) {
+                    unkerned_seen = !arg.font_kerning;
+                }
+                if (arg.text.find("plain") != std::string::npos) {
+                    kerned_seen = arg.font_kerning;
+                }
+            }
+        }, cmd);
+    }
+    std::printf("      [font-kerning] DrawText: none=%s auto=%s\n",
+                unkerned_seen ? "no kerning" : "still kerning",
+                kerned_seen ? "kerning" : "not kerning");
+    std::fflush(stdout);
+    assert(unkerned_seen);
+    assert(kerned_seen);
+}
+
+TEST(kerning_none_measures_the_plain_advances) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    if (!fr.has_truetype_font()) return;
+
+    // The flag's whole job is to remove the pair adjustment and nothing else:
+    // with `kerning = false` a string is the plain sum of its glyph advances,
+    // whatever the font would have said.
+    const float advance_sum = fr.glyph_advance_px('A', 100.0f) + fr.glyph_advance_px('V', 100.0f);
+    const float unkerned = fr.measure_text("AV", 100.0f, 400, {}, false, false);
+    const float kerned = fr.measure_text("AV", 100.0f, 400);
+    const float pair = fr.kerning_px('A', 'V', 100.0f);
+    std::printf("      [font-kerning] 'AV' at 100 px: kerned %.3f, unkerned %.3f, pair %.3f\n",
+                kerned, unkerned, pair);
+    std::fflush(stdout);
+    // True whether or not this host's face kerns at all, which is the point:
+    // a host with no `kern` table must not see a difference either.
+    assert(std::fabs(unkerned - advance_sum) < 0.01f);
+    assert(std::fabs(kerned - (advance_sum + pair)) < 0.01f);
+
+    // And through layout, where the flag has to travel: two identical runs, one
+    // with the property off, in a large enough size that the pair adjustment is
+    // several pixels wide and cannot hide in a rounding.
+    auto doc = HtmlParser::parse(R"(
+        <body style="margin: 0; font-size: 100px">
+            <p id="k" style="font-kerning: auto; margin: 0">AV</p>
+            <p id="n" style="font-kerning: none; margin: 0">AV</p>
+        </body>
+    )");
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+    auto root = LayoutTree::build(doc, resolver, 1024.0f, 768.0f);
+    assert(root);
+    auto kerned_el = doc->get_element_by_id("k");
+    auto none_el = doc->get_element_by_id("n");
+    assert(kerned_el && none_el);
+    const float kerned_w = laid_out_width(root, kerned_el->first_child());
+    const float none_w = laid_out_width(root, none_el->first_child());
+    std::printf("      [font-kerning] laid out: auto %.2f px, none %.2f px, difference %.2f\n",
+                kerned_w, none_w, none_w - kerned_w);
+    std::fflush(stdout);
+    assert(kerned_w > 0.0f && none_w > 0.0f);
+    assert(none_w >= kerned_w - 0.01f);
+    if (pair != 0.0f) {
+        // The box the layout produced is the one the painter uses, so this is
+        // `font-kerning: none` widening a line, not a rasterizer detail.
+        assert(std::fabs((none_w - kerned_w) - (-pair)) < 0.05f);
+    }
+}
+
+TEST(the_font_shorthand_resets_font_kerning) {
+    using namespace litebird;
+
+    // CSS Fonts 4 has the `font` shorthand reset every font property it does
+    // not name, and `font-kerning` is one of them. So a child that says `font:
+    // 16px serif` kerns again even inside a `font-kerning: none` paragraph —
+    // which is the opposite of what inheriting the parent's value would do, and
+    // the reason the shorthand cannot be treated as "the longhands it names".
+    auto doc = HtmlParser::parse(R"(
+        <body>
+            <div id="outer" style="font-kerning: none">
+                <span id="plain" style="font: 16px serif">reset by the shorthand</span>
+                <span id="order1" style="font-kerning: none; font: 16px serif">shorthand last</span>
+                <span id="order2" style="font: 16px serif; font-kerning: none">declaration last</span>
+            </div>
+        </body>
+    )");
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 1024.0f, 768.0f);
+    auto style_of = [&](const char* id) {
+        auto el = doc->get_element_by_id(id);
+        assert(el);
+        return resolver.resolve_style(el, nullptr);
+    };
+
+    assert(style_of("outer").font_kerning == FontKerning::None);
+    assert(style_of("plain").font_kerning == FontKerning::Auto);
+    assert(style_of("plain").kerning_enabled());
+    // Order within the declaration block decides, as it does for any longhand
+    // and shorthand that set the same property.
+    assert(style_of("order1").font_kerning == FontKerning::Auto);
+    assert(style_of("order2").font_kerning == FontKerning::None);
+
+    // The same ordering rule for a longhand the shorthand names, which is a bug
+    // this phase found on the way: the `font` shorthand used to be applied in a
+    // pass of its own, ahead of the rest of the block, so a `font-family`
+    // written after it lost to the shorthand and a `font-family` written before
+    // it won -- the opposite of the cascade in both directions.
+    auto order_doc = HtmlParser::parse(R"(
+        <body>
+            <span id="before" style="font-family: monospace; font: 16px serif">before</span>
+            <span id="after" style="font: 16px serif; font-family: monospace">after</span>
+        </body>
+    )");
+    StyleResolver order_resolver = DocumentStyles::build_resolver(*order_doc, nullptr, 1024.0f, 768.0f);
+    auto family_of = [&](const char* id) {
+        auto el = order_doc->get_element_by_id(id);
+        assert(el);
+        return order_resolver.resolve_style(el, nullptr).font_family;
+    };
+    assert(family_of("before") == "serif");
+    assert(family_of("after") == "monospace");
+    std::printf("      [font-kerning] shorthand resets to auto; declaration order decides\n");
+    std::fflush(stdout);
+}
+
+TEST(the_painter_honours_font_kerning_none) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    if (!fr.has_truetype_font()) return;
+
+    // The last mile, in pixels: a document painted twice, once with the
+    // property off. `font-kerning` is carried on the `DrawText` command, and a
+    // command field the painter never reads is the same bug as a property the
+    // resolver never stored — the difference only shows up in ink.
+    auto render_right_edge = [](const char* declaration, int& right_edge, int& ink) {
+        auto doc = HtmlParser::parse(
+            std::string("<body style=\"margin:0;padding:0;font-size:100px;color:#000\">"
+                        "<p style=\"margin:0;font-family:sans-serif;") + declaration + "\">AV</p></body>");
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 300.0f);
+        BitmapRenderer bmp(800, 300);
+        bmp.clear(Color::white());
+        bmp.render(DisplayList::build(root));
+        right_edge = -1;
+        ink = 0;
+        for (int y = 0; y < 300; ++y) {
+            for (int x = 0; x < 800; ++x) {
+                const Color c = bmp.get_pixel(x, y);
+                if (c.r < 200 || c.g < 200 || c.b < 200) {
+                    ++ink;
+                    right_edge = std::max(right_edge, x);
+                }
+            }
+        }
+    };
+
+    int kerned_right = 0, unkerned_right = 0, kerned_ink = 0, unkerned_ink = 0;
+    render_right_edge("font-kerning:auto", kerned_right, kerned_ink);
+    render_right_edge("font-kerning:none", unkerned_right, unkerned_ink);
+    const float pair = fr.kerning_px('A', 'V', 100.0f, 400, "sans-serif");
+    std::printf("      [font-kerning] painted right edge: auto %d, none %d, pair %.2f px\n",
+                kerned_right, unkerned_right, pair);
+    std::fflush(stdout);
+
+    // Both drew something -- an empty picture would make the comparison below
+    // true for the wrong reason.
+    assert(kerned_ink > 100);
+    assert(unkerned_ink > 100);
+    assert(kerned_right > 0 && unkerned_right > 0);
+    if (pair != 0.0f) {
+        // The unkerned pair ends further right by the adjustment, within a
+        // pixel of rasterisation.
+        const float shift = static_cast<float>(unkerned_right - kerned_right);
+        assert(std::fabs(shift - (-pair)) <= 1.5f);
+    } else {
+        assert(kerned_right == unkerned_right);
+    }
+}
+
+
 TEST(inline_formatting_context) {
     using namespace litebird;
     std::string html = R"(
@@ -21181,6 +21420,10 @@ int main() {
     RUN_TEST(a_ligature_is_drawn_as_the_glyph_the_table_names);
     RUN_TEST(a_face_without_a_gsub_table_is_drawn_letter_by_letter);
     RUN_TEST(the_canvas_measures_the_ligature_it_paints);
+    RUN_TEST(font_kerning_none_reaches_the_box_and_the_painter);
+    RUN_TEST(kerning_none_measures_the_plain_advances);
+    RUN_TEST(the_font_shorthand_resets_font_kerning);
+    RUN_TEST(the_painter_honours_font_kerning_none);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);

@@ -19506,6 +19506,110 @@ TEST(js_iterators_are_kinds_with_prototypes) {
     assert(text("[...new Map([[1, 'a']]).keys()].join()") == "1");
 }
 
+TEST(array_from_asks_the_source_for_its_iterator) {
+    using namespace litebird;
+    // Phase 94. `Array.from` decided for itself what was iterable: an array
+    // or a string was read without asking, whatever its `Symbol.iterator`
+    // said, and everything else with a `length` was read as array-like
+    // whether or not it had an iterator. It also collected every value before
+    // it mapped the first, so a mapper that threw did not close the iterator
+    // and an iterator with no end was read to the end of it. Every assertion
+    // below is compared inside the page, where a script sees them.
+    JsInterpreter js;
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function t(f) { try { return String(f()); } catch (e) { return e.name; } }
+
+        // An array and a string are asked, and lose nothing when they answer.
+        ok('array', Array.from([1, 2]).join(), '1,2');
+        ok('string', Array.from('ab').join(), 'a,b');
+
+        // Without the method they are array-like: the elements, or the code
+        // units. Until Phase 94 these three were a TypeError each.
+        var oa = Array.prototype[Symbol.iterator], os = String.prototype[Symbol.iterator];
+        delete Array.prototype[Symbol.iterator]; delete String.prototype[Symbol.iterator];
+        ok('array-like array', t(function () { return Array.from([1, 2]).join(); }), '1,2');
+        ok('array-like string', t(function () { return Array.from('a\u{1F600}').length; }), '3');
+        ok('the array itself is still not iterable', t(function () { return [...[1]]; }), 'TypeError');
+        Array.prototype[Symbol.iterator] = oa; String.prototype[Symbol.iterator] = os;
+
+        // A number whose prototype was given one is asked. Until Phase 94 it
+        // was read as array-like and gave nothing.
+        Number.prototype[Symbol.iterator] = function* () { for (var i = 0; i < this; i++) yield i; };
+        ok('number iterated', Array.from(3).join(), '0,1,2');
+        ok('number mapped', Array.from(3, function (v, i) { return v * 10 + i; }).join(), '0,11,22');
+        delete Number.prototype[Symbol.iterator];
+        ok('number without one is empty', Array.from(3).length, '0');
+
+        // An object that only has next() is array-like, not iterated.
+        ok('next only', Array.from({ next: function () { return { done: true }; } }).length, '0');
+        ok('array-like with length', Array.from({ 0: 'x', 1: 'y', length: 2 }).join(), 'x,y');
+        ok('holes are undefined', JSON.stringify(Array.from({ length: 2 })), '[null,null]');
+        ok('a hole in an array', Array.from([, 1]).map(function (v) { return typeof v; }).join(),
+           'undefined,number');
+
+        // ToLength: negative, fractional and NaN are none, a string is its
+        // number, and a missing length is none.
+        ok('negative', Array.from({ length: -1 }).length, '0');
+        ok('string length', Array.from({ length: '2' }).length, '2');
+        ok('fraction', Array.from({ length: 2.9 }).length, '2');
+        ok('NaN', Array.from({ length: NaN }).length, '0');
+        ok('undefined length', Array.from({}).length, '0');
+
+        // Nullish, and an iterator that is not callable.
+        ok('null', t(function () { return Array.from(null); }), 'TypeError');
+        ok('undefined', t(function () { return Array.from(undefined); }), 'TypeError');
+        ok('not callable', t(function () { return Array.from({ [Symbol.iterator]: 5 }); }), 'TypeError');
+        ok('a null method is none', Array.from({ [Symbol.iterator]: null, length: 1 }).length, '1');
+        ok('mapper not callable', t(function () { return Array.from([1], 2); }), 'TypeError');
+
+        // GetMethod runs once, and before the mapper is called.
+        var reads = 0;
+        var lazy = { length: 1, 0: 'v' };
+        Object.defineProperty(lazy, Symbol.iterator, { get: function () { reads++; return undefined; } });
+        ok('the getter is asked', Array.from(lazy, function (v) { return v; }).join(), 'v');
+        ok('once', reads, '1');
+
+        // A mapper that throws closes the iterator, at the value it threw on:
+        // the iterator has no last value, so a collection that came first
+        // would never have reached this.
+        var log = [];
+        function endless() {
+            return { [Symbol.iterator]: function () {
+                var i = 0;
+                return { next: function () { i++; return { value: i, done: false }; },
+                         return: function () { log.push('closed at ' + i); return { done: true }; } };
+            } };
+        }
+        ok('the mapper throws', t(function () {
+            return Array.from(endless(), function (v) { if (v === 3) throw new RangeError('stop'); return v; });
+        }), 'RangeError');
+        ok('the iterator was closed', log.join(), 'closed at 3');
+
+        // A return() that is not callable does not replace the error thrown.
+        var noReturn = { [Symbol.iterator]: function () {
+            return { next: function () { return { value: 1, done: false }; }, return: 5 };
+        } };
+        ok('a return that is not callable', t(function () {
+            return Array.from(noReturn, function () { throw new RangeError('stop'); });
+        }), 'RangeError');
+
+        // thisArg reaches the mapper, and the index counts from zero.
+        ok('thisArg', Array.from([1], function (v) { return this.tag + v; }, { tag: 'n' }).join(), 'n1');
+        ok('indices', Array.from('abc', function (v, i) { return i; }).join(), '0,1,2');
+
+        // The result is a plain array with the values in it.
+        var made = Array.from([1, 2]);
+        ok('an array', Array.isArray(made), 'true');
+        ok('its length', made.length, '2');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
 TEST(js_iteration_of_another_realms_array) {
     using namespace litebird;
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
@@ -21328,6 +21432,7 @@ int main() {
 
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
+    RUN_TEST(array_from_asks_the_source_for_its_iterator);
     RUN_TEST(js_iteration_of_another_realms_array);
 
     // Phase 92: an iterator is a kind with a prototype a script can reach.

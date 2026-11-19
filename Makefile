@@ -136,7 +136,10 @@ URL_FLOOR ?= 1188
 # iteration.dat: 65 of its 78 cases pass, under ASan as in Release. Phase 65
 # added eval.dat (37 cases, all passing) and fixed two cases construct.dat
 # recorded as failing, so 1122 of 1149 pass under ASan and 1123 in Release.
-JS_ASAN_FLOOR ?= 1121
+# Phase 81 made `delete a[1]` leave a hole, which is what arrays.dat's *delete
+# leaves a hole* had always expected: 1 more, so leave one case of headroom
+# under 1129 (one deep-recursion case passes in Release and not under ASan).
+JS_ASAN_FLOOR ?= 1122
 # The DOM corpus must pass whole in the sanitizer build: none of its cases
 # is about depth.
 DOM_ASAN_FLOOR ?= 678

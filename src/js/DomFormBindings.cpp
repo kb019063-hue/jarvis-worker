@@ -355,7 +355,7 @@ void setup_form_data(Iface& I) {
                 if (what == 0) value = pair;
                 else value = pair.array_elements()[static_cast<std::size_t>(what - 1)];
                 return true;
-            }, {self});
+            }, {self}, JsIntrinsics::get().dom_iterator_proto);
         };
     };
     I.method("entries", 0, make_iterator(0));

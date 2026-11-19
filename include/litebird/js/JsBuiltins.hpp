@@ -22,10 +22,20 @@ void install_promise_builtins(JsIntrinsics& realm);     // Promise
 /// plus whatever the current event loop has skipped (EventLoop::clock_skew).
 double js_current_time_ms();
 
-/// Creates an iterator object whose next() calls `step`. `step` fills `value`
-/// and returns true, or returns false when the sequence is exhausted. `roots`
-/// lists the values `step` captured, so the collector keeps them alive.
-JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<JsValue> roots = {});
+/// Creates an iterator object of the kind `proto` stands for, whose state is
+/// `step`: it fills `value` and returns true, or returns false when the
+/// sequence is exhausted. `roots` lists the values `step` captured, so the
+/// collector keeps them alive. The object's own properties are none: `next` is
+/// on `proto`, where a script can replace it, and `proto` must have had
+/// js_install_iterator_prototype() called on it.
+JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<JsValue> roots = {},
+                         JsObject* proto = nullptr);
+
+/// Gives an iterator prototype its `next` — the one function every iterator of
+/// that kind uses, which reads the state from `this` — and, when `tag` is not
+/// null, a `Symbol.toStringTag` naming the kind, so that
+/// `Object.prototype.toString.call(it)` is `[object Array Iterator]`.
+void js_install_iterator_prototype(JsObject* proto, const char* tag);
 
 /// A date and time as `Date.parse` reads it: milliseconds since the epoch,
 /// NaN for text that is not a date.

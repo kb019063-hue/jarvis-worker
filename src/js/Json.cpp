@@ -257,7 +257,10 @@ std::string Json::stringify(const JsValue& value) {
             if (value.object_val && value.object_val->is_array) {
                 std::string res = "[";
                 for (size_t i = 0; i < value.object_val->array_elements.size(); ++i) {
-                    res += stringify(value.object_val->array_elements[i]);
+                    // A hole is not an element with a value to write: JSON has
+                    // no way to leave a place out of an array, so it writes
+                    // null, exactly as it does for undefined.
+                    res += value.is_array_hole(i) ? "null" : stringify(value.object_val->array_elements[i]);
                     if (i + 1 < value.object_val->array_elements.size()) res += ",";
                 }
                 res += "]";

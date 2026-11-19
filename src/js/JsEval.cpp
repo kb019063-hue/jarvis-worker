@@ -2723,9 +2723,11 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
 
         case NodeKind::ArrayLiteral: {
             std::vector<JsValue> elements;
+            std::vector<size_t> holes;      // an elision is a hole, not an element
             for (const auto& element : static_cast<const ArrayLiteralExpr*>(expr)->elements) {
                 if (!element) {
-                    elements.push_back(JsValue::make_undefined());      // hole
+                    holes.push_back(elements.size());
+                    elements.push_back(JsValue::make_undefined());
                 } else if (element->kind == NodeKind::Spread) {
                     JsValue iterable = evaluate(static_cast<const SpreadExpr*>(element.get())->argument.get(), env);
                     js_iterate(iterable, [&](const JsValue& item) {
@@ -2736,7 +2738,12 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
                     elements.push_back(evaluate(element.get(), env));
                 }
             }
-            return JsValue::make_array(elements);
+            JsValue array = JsValue::make_array(elements);
+            // `[1, , 3]` has three places and two elements. Marked after the
+            // array is made, because a spread in the literal may have added
+            // places that shift the ones after it.
+            for (size_t index : holes) array.set_array_hole(index);
+            return array;
         }
 
         case NodeKind::TemplateLiteral: {

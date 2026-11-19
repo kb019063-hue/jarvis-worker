@@ -32,6 +32,8 @@ tree out into a scratch directory and remove it again; no branch moves.
     `[skip ci]` is accepted when CI passed on a commit before it and nothing
     but documents changed since, and a pull request that changes documents
     only needs no CI run of its own;
+    (neither of the two is asked when the merge would put on `main`, file
+    for file, the tree of a commit CI passed on: see "The same tree" below)
   - the checks that read documents fail on what would be merged (see below);
   - its phase or finding is on `main` already;
   - the number of unit suites README.md states is not the number in
@@ -57,6 +59,20 @@ a test directory) or, on the side of `main`, in those checks themselves
 what it said, and those four are run here instead: on the head commit, or
 on the commit GitHub would make by merging, in a scratch worktree that is
 removed afterwards. They take seconds.
+
+The same tree
+-------------
+The plainest case of that rule: merging would put on `main` the very tree a
+run passed on, file for file. It was met on 19 November by #118, which
+carried the head commits of four finished pull requests while the agent of
+one of them came back and was about to merge its own. Whichever of the two
+is merged first, `main` moves, by commits the other has in it already, and
+the tree of the other, merged, is what it was. Asking it for a second run
+would be asking CI to read the same files again. So when `git merge-tree`
+of `main` and the head gives the tree of a commit CI passed on (the head, or
+one before it along the branch), that is said, and the four quick checks
+are run against the new `main` as above. Two trees are the same when git
+gives them the same name; nothing is compared by eye.
 
 Everything else is asked of GitHub through `gh` (which has to be logged in),
 and nothing of the local clone: a sandbox's clone is shallow, and a shallow
@@ -476,6 +492,7 @@ class Evidence(NamedTuple):
     ran_on: str | None              # the nearest commit of the branch with a CI run: the head, or one before it
     ran_state: str                  # ...and what that run says
     since: list[str] | None         # the files changed from that commit to the head
+    same_tree: bool = False         # merged with main, the tree is the tree of `ran_on`, file for file
 
 
 def ci_verdict(e: Evidence) -> tuple[list[tuple[bool, str]], bool]:
@@ -492,6 +509,17 @@ def ci_verdict(e: Evidence) -> tuple[list[tuple[bool, str]], bool]:
     quick = False
     documents_only = all_of(DOCUMENT, e.pr_files)
     quick_only = all_of(QUICK, e.pr_files)
+
+    # The same tree. The rule at its plainest: the merge would put on main the
+    # very tree a run passed on, so no step has anything new to read. It is
+    # what a pull request that carries other pull requests' heads meets when
+    # one of them is merged by its own agent first (main has moved, by commits
+    # the branch had already), and what a head meets that is a merge which
+    # changed no file. One line answers both questions below.
+    if e.same_tree and e.ran_on is not None and e.ran_state == "passed" and e.head_state != "failed":
+        lines.append((True, f"CI passed on {e.ran_on[:7]}, and merged with main this is the tree of that commit, "
+                            "file for file: whatever main has since, the branch had already. No new CI run for that"))
+        return lines, True
 
     # main
     if e.behind == 0:
@@ -591,6 +619,20 @@ def tree_to_merge(number: int, head: str, main_sha: str, behind: int) -> tuple[s
     return made.stdout.strip(), f"the merge with main ({main_sha[:7]})", ""
 
 
+def merges_to_the_tree_of(number: int, head: str, main_sha: str, behind: int, ran_on: str) -> bool:
+    """Whether `gh pr merge` would put on main, file for file, the tree of `ran_on`.
+
+    Two trees are the same when git gives them the same name, so this is one
+    comparison and cannot be nearly right. Anything it cannot find out (a
+    conflict, a clone too shallow to hold `ran_on`) is a no.
+    """
+    made, _called, _why_not = tree_to_merge(number, head, main_sha, behind)
+    if made is None:
+        return False
+    merged, ran = git("rev-parse", f"{made}^{{tree}}"), git("rev-parse", f"{ran_on}^{{tree}}")
+    return merged.returncode == 0 and ran.returncode == 0 and merged.stdout.strip() == ran.stdout.strip() != ""
+
+
 def quick_checks(tree: str, main_sha: str) -> list[str]:
     """The four steps of CI that read documents, run on a commit: what failed.
 
@@ -657,8 +699,12 @@ def check_merge(number: int) -> int:
             if ancestor_state != "none":
                 ran_on, ran_state, since = sha, ancestor_state, delta(sha, head)[1]
                 break
+    # Asked only where it can change the answer: main has moved, or the run
+    # was on a commit before the head.
+    same_tree = (ran_on is not None and ran_state == "passed" and (behind > 0 or ran_on != head)
+                 and merges_to_the_tree_of(number, head, main_sha, behind, ran_on))
     lines, quick = ci_verdict(Evidence(head, behind, main_files, pr_files, head_state, head_bad,
-                                       ran_on, ran_state, since))
+                                       ran_on, ran_state, since, same_tree))
     for ok, text in lines:
         (report.ok if ok else report.no)(text)
     if quick:
@@ -832,6 +878,18 @@ def self_test() -> int:
          verdict(**no_run, since=["AGENTS.md", "src/js/JsEval.cpp"]), ([True, False], False)),
         ("CI still running on an engine change: not ready",
          verdict(head_state="running", head_bad=["Build: in_progress"]), ([True, False], False)),
+        ("main moved by engine code the branch had already (a head it carries was merged first): "
+         "merged, it is the tree CI passed on, and the quick checks decide",
+         verdict(**moved, main_files=["src/js/JsEval.cpp", "tests/test_suite.cpp"], same_tree=True), ([True], True)),
+        ("...the same when the head is a merge that changed no file, pushed with [skip ci] after the run",
+         verdict(**moved, **no_run, main_files=["src/js/JsEval.cpp"], since=["src/js/JsEval.cpp"], same_tree=True),
+         ([True], True)),
+        ("...but a run that failed on the head is not outvoted by an older one on the same tree",
+         verdict(**moved, main_files=["src/js/JsEval.cpp"], head_state="failed", head_bad=["Build: failure"],
+                 same_tree=True), ([False, False], False)),
+        ("...nor is a run that failed made good by the tree being the same",
+         verdict(**moved, **no_run, ran_state="failed", main_files=["src/js/JsEval.cpp"], since=[], same_tree=True),
+         ([False, False], False)),
     ]
 
     failed = 0

@@ -67,7 +67,7 @@ closed, and validated HTTP 101 upgrade responses, leaving four classes of gaps:
 
 ## Verification
 
-- `make test`: **249 / 249** engine test suites + **114 / 114** cross-origin
+- `make test`: **255 / 255** engine test suites + **114 / 114** cross-origin
   checks passed, including `websocket_handshake_security_and_secure_transport`
   and `websocket_tls_origin_mixed_content_and_framing`.
 - `make security-websocket` (`tools/security/verify_websocket.py`): **29 / 29**
@@ -75,15 +75,16 @@ closed, and validated HTTP 101 upgrade responses, leaving four classes of gaps:
   servers and HTTP/HTTPS/Worker/sandboxed-iframe/`file:` origins, including
   **60 / 60** concurrent `4x wss://` startup/exit stress runs.
 - `make security-worker`: **17 / 17** (`60 / 60` stress runs);
-  `make security-fetch`: **3 / 3**.
+  `make security-https`: **8 / 8**; `make security-fetch`: **3 / 3**.
 - `make conformance`: **1967 / 1973 (99.7%)**; `make js-conformance`:
-  **1131 / 1152 (98.2%)**; `make dom-conformance`: **678 / 678 (100.0%)**;
+  **1137 / 1156 (98.4%)**; `make dom-conformance`: **678 / 678 (100.0%)**;
   `make url-conformance`: **1188 / 1188 (100.0%)**; `make wpt`: **9567 / 9824**
   subtests across 190 files (257 listed, 0 unlisted).
-- ASan + UBSan (`build-asan`, `ASAN_OPTIONS=detect_leaks=0`): **249 / 249**
+- ASan + UBSan (`build-asan`, `ASAN_OPTIONS=detect_leaks=0`): **255 / 255**
   unit suites, **114 / 114** cross-origin checks, `verify_websocket.py --stress-runs 20`
-  (**29 / 29**, **20 / 20** stress runs), `verify_worker_policy.py --stress-runs 20`
-  (**17 / 17**), `run_js_conformance.py` (**1130 / 1152**), `run_dom_conformance.py`
+  (**29 / 29**, **20 / 20** stress runs), `verify_https.py` (**8 / 8**),
+  `verify_worker_policy.py --stress-runs 20` (**17 / 17**),
+  `run_js_conformance.py` (**1136 / 1156**), `run_dom_conformance.py`
   (**678 / 678**), `run_url_conformance.py` (**1188 / 1188**), and `run_wpt.py`
   (**9567 / 9824**) passed with zero sanitizer findings.
 

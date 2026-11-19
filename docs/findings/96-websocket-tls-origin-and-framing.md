@@ -34,13 +34,14 @@ and did not coordinate I/O thread shutdown across document and worker exits.
 
 ## Verification
 
-- `make test`: **249 / 249** suites + **114 / 114** cross-origin checks.
+- `make test`: **255 / 255** suites + **114 / 114** cross-origin checks.
 - `make security-websocket`: **29 / 29** checks (**60 / 60** concurrent `4x wss://`
   startup/exit stress runs).
-- ASan + UBSan (`build-asan`): **249 / 249** unit suites, **114 / 114**
+- ASan + UBSan (`build-asan`): **255 / 255** unit suites, **114 / 114**
   cross-origin checks, `verify_websocket.py --stress-runs 20` (**29 / 29**),
-  `verify_worker_policy.py --stress-runs 20` (**17 / 17**), JS (**1130 / 1152**),
-  DOM (**678 / 678**), URL (**1188 / 1188**), and WPT (**9567 / 9824**) all passed cleanly.
+  `verify_https.py` (**8 / 8**), `verify_worker_policy.py --stress-runs 20`
+  (**17 / 17**), JS (**1136 / 1156**), DOM (**678 / 678**), URL
+  (**1188 / 1188**), and WPT (**9567 / 9824**) all passed cleanly.
 
 ## Still open
 

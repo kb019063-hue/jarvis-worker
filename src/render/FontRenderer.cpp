@@ -1,6 +1,7 @@
 #include "litebird/render/FontRenderer.hpp"
 
 #include <algorithm>
+#include <map>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
@@ -482,6 +483,10 @@ bool TrueTypeFont::load_memory(std::vector<uint8_t> data) {
     // that is a normal state of affairs. Version 0 is the Windows table; the
     // Apple version-1 table starts with 0x00010000 as a 32-bit number, is a
     // different format inside, and is left out rather than guessed at.
+    m_ligature_sets.clear();
+    uint32_t gsub_off = 0, gsub_len = 0;
+    if (find_table("GSUB", gsub_off, gsub_len)) load_ligatures(gsub_off, gsub_len);
+
     m_kern_pairs_offset = 0;
     m_kern_pairs = 0;
     uint32_t kern_off = 0, kern_len = 0;
@@ -639,10 +644,214 @@ uint16_t TrueTypeFont::glyph_index(uint32_t codepoint) const {
     return 0;
 }
 
+bool TrueTypeFont::load_ligatures(uint32_t gsub_offset, uint32_t gsub_length) {
+    m_ligature_sets.clear();
+    const std::size_t table_end = static_cast<std::size_t>(gsub_offset) + gsub_length;
+    if (gsub_length < 10 || table_end > m_data.size()) return false;
+    const uint32_t version = read_u32_be(m_data, gsub_offset);
+    // 1.0 and 1.1 have the same three lists at the same offsets; 1.1 adds a
+    // feature-variations table after them, which nothing here asks for yet.
+    if (version != 0x00010000u && version != 0x00010001u) return false;
+
+    const auto within = [table_end](std::size_t pos, std::size_t need) {
+        return pos + need <= table_end;
+    };
+    const uint32_t script_list = gsub_offset + read_u16_be(m_data, gsub_offset + 4);
+    const uint32_t feature_list = gsub_offset + read_u16_be(m_data, gsub_offset + 6);
+    const uint32_t lookup_list = gsub_offset + read_u16_be(m_data, gsub_offset + 8);
+    if (!within(script_list, 2) || !within(feature_list, 2) || !within(lookup_list, 2)) return false;
+
+    // Which script: `latn` when there is one, else the default. A page of Latin
+    // text is what this engine lays out, and `DFLT` is the table's own answer
+    // for a font that does not name Latin separately.
+    std::size_t lang_sys = 0;
+    {
+        std::size_t latn_script = 0, dflt_script = 0;
+        const uint16_t script_count = read_u16_be(m_data, script_list);
+        for (uint16_t i = 0; i < script_count; ++i) {
+            const std::size_t record = script_list + 2u + 6u * i;
+            if (!within(record, 6)) return false;
+            const uint32_t tag = read_u32_be(m_data, record);
+            const uint32_t script = script_list + read_u16_be(m_data, record + 4);
+            if (tag == 0x6C61746Eu && !latn_script) latn_script = script;   // 'latn'
+            if (tag == 0x44464C54u && !dflt_script) dflt_script = script;   // 'DFLT'
+        }
+        const std::size_t script = latn_script ? latn_script : dflt_script;
+        if (!script || !within(script, 4)) return false;
+        const uint16_t default_lang_sys = read_u16_be(m_data, script);
+        if (default_lang_sys == 0 || !within(script + default_lang_sys, 6)) return false;
+        lang_sys = script + default_lang_sys;
+    }
+
+    // The features this language system turns on, filtered to the two that mean
+    // "join these letters": `liga` (common) and `rlig` (required).
+    std::vector<uint16_t> lookup_indices;
+    const auto add_feature = [&](uint16_t feature_index) {
+        const uint16_t feature_count = read_u16_be(m_data, feature_list);
+        if (feature_index >= feature_count) return;
+        const std::size_t record = feature_list + 2u + 6u * feature_index;
+        if (!within(record, 6)) return;
+        const uint32_t tag = read_u32_be(m_data, record);
+        if (tag != 0x6C696761u && tag != 0x726C6967u) return;   // 'liga', 'rlig'
+        const std::size_t feature = feature_list + read_u16_be(m_data, record + 4);
+        if (!within(feature, 4)) return;
+        const uint16_t lookup_count = read_u16_be(m_data, feature + 2);
+        for (uint16_t i = 0; i < lookup_count; ++i) {
+            if (!within(feature + 4u + 2u * i, 2)) return;
+            lookup_indices.push_back(read_u16_be(m_data, feature + 4u + 2u * i));
+        }
+    };
+    const uint16_t feature_count = read_u16_be(m_data, lang_sys + 4);
+    for (uint16_t i = 0; i < feature_count; ++i) {
+        if (!within(lang_sys + 6u + 2u * i, 2)) return false;
+        add_feature(read_u16_be(m_data, lang_sys + 6u + 2u * i));
+    }
+    const uint16_t required_feature = read_u16_be(m_data, lang_sys + 2);
+    if (required_feature != 0xFFFF) add_feature(required_feature);
+    if (lookup_indices.empty()) return false;
+
+    // Each lookup, as a set of type-4 (ligature) subtables. A type-7 lookup is
+    // a wrapper that points at another type, which is how a font with more than
+    // 64k of lookups keeps its offsets small; follow it rather than skip it.
+    std::map<uint16_t, std::vector<Ligature>> by_first;
+    for (uint16_t lookup_index : lookup_indices) {
+        const uint16_t lookup_count = read_u16_be(m_data, lookup_list);
+        if (lookup_index >= lookup_count) continue;
+        const std::size_t lookup_record = lookup_list + 2u + 2u * lookup_index;
+        if (!within(lookup_record, 2)) continue;
+        const std::size_t lookup = lookup_list + read_u16_be(m_data, lookup_record);
+        if (!within(lookup, 6)) continue;
+        const uint16_t subtable_count = read_u16_be(m_data, lookup + 4);
+        for (uint16_t s = 0; s < subtable_count; ++s) {
+            if (!within(lookup + 6u + 2u * s, 2)) break;
+            std::size_t subtable = lookup + read_u16_be(m_data, lookup + 6u + 2u * s);
+            if (!within(subtable, 6)) continue;
+            uint16_t lookup_type = read_u16_be(m_data, lookup);
+            if (lookup_type == 7) {   // extension
+                if (read_u16_be(m_data, subtable) != 1) continue;
+                lookup_type = read_u16_be(m_data, subtable + 2);
+                subtable += read_u32_be(m_data, subtable + 4);
+                if (!within(subtable, 6)) continue;
+            }
+            if (lookup_type != 4) continue;   // only ligature substitution
+            if (read_u16_be(m_data, subtable) != 1) continue;   // format 1 only
+
+            // Coverage: which glyphs may start a ligature, and where each one's
+            // ligature set is. Format 2 is ranges; both are read because a font
+            // picks whichever is smaller.
+            const std::size_t coverage = subtable + read_u16_be(m_data, subtable + 2);
+            if (!within(coverage, 4)) continue;
+            const uint16_t set_count = read_u16_be(m_data, subtable + 4);
+            std::vector<std::pair<uint16_t, uint16_t>> starts;   // glyph, set index
+            const uint16_t coverage_format = read_u16_be(m_data, coverage);
+            const uint16_t covered = read_u16_be(m_data, coverage + 2);
+            if (coverage_format == 1) {
+                for (uint16_t i = 0; i < covered && i < set_count; ++i) {
+                    if (!within(coverage + 4u + 2u * i, 2)) break;
+                    starts.emplace_back(read_u16_be(m_data, coverage + 4u + 2u * i), i);
+                }
+            } else if (coverage_format == 2) {
+                for (uint16_t i = 0; i < covered; ++i) {
+                    if (!within(coverage + 4u + 6u * i, 6)) break;
+                    const uint16_t first_glyph = read_u16_be(m_data, coverage + 4u + 6u * i);
+                    const uint16_t last_glyph = read_u16_be(m_data, coverage + 6u + 6u * i);
+                    const uint16_t first_set = read_u16_be(m_data, coverage + 8u + 6u * i);
+                    for (uint32_t g = first_glyph; g <= last_glyph; ++g) {
+                        starts.emplace_back(static_cast<uint16_t>(g),
+                                            static_cast<uint16_t>(first_set + (g - first_glyph)));
+                    }
+                }
+            }
+
+            for (const auto& [first_glyph, set_index] : starts) {
+                if (set_index >= set_count) continue;
+                const std::size_t set_pos = subtable + read_u16_be(m_data, subtable + 6u + 2u * set_index);
+                if (!within(set_pos, 2)) continue;
+                const uint16_t ligature_count = read_u16_be(m_data, set_pos);
+                for (uint16_t l = 0; l < ligature_count; ++l) {
+                    if (!within(set_pos + 2u + 2u * l, 2)) break;
+                    const std::size_t ligature = set_pos + read_u16_be(m_data, set_pos + 2u + 2u * l);
+                    if (!within(ligature, 4)) break;
+                    const uint16_t produced = read_u16_be(m_data, ligature);
+                    const uint16_t components = read_u16_be(m_data, ligature + 2);
+                    if (components < 2 || components > 8) continue;
+                    if (!within(ligature + 4u, 2u * (components - 1))) break;
+                    Ligature lig;
+                    lig.glyph = produced;
+                    lig.rest.reserve(components - 1);
+                    for (uint16_t c = 1; c < components; ++c) {
+                        lig.rest.push_back(read_u16_be(m_data, ligature + 2u + 2u * c));
+                    }
+                    by_first[first_glyph].push_back(std::move(lig));
+                }
+            }
+        }
+    }
+    if (by_first.empty()) return false;
+
+    m_ligature_sets.reserve(by_first.size());
+    for (auto& [first_glyph, ligatures] : by_first) {
+        LigatureSet set;
+        set.first = first_glyph;
+        // Longest first, so `ffi` wins over `ff` at the same position: the
+        // table's own order is not a promise about which match to prefer.
+        std::stable_sort(ligatures.begin(), ligatures.end(),
+                         [](const Ligature& a, const Ligature& b) {
+                             return a.rest.size() > b.rest.size();
+                         });
+        set.ligatures = std::move(ligatures);
+        m_ligature_sets.push_back(std::move(set));
+    }
+    std::sort(m_ligature_sets.begin(), m_ligature_sets.end(),
+              [](const LigatureSet& a, const LigatureSet& b) { return a.first < b.first; });
+    return true;
+}
+
+void TrueTypeFont::apply_ligatures(std::vector<uint16_t>& glyphs) const {
+    if (m_ligature_sets.empty() || glyphs.size() < 2) return;
+    std::vector<uint16_t> out;
+    out.reserve(glyphs.size());
+    std::size_t i = 0;
+    while (i < glyphs.size()) {
+        std::size_t lo = 0, hi = m_ligature_sets.size();
+        while (lo < hi) {
+            const std::size_t mid = lo + (hi - lo) / 2;
+            if (m_ligature_sets[mid].first < glyphs[i]) lo = mid + 1;
+            else hi = mid;
+        }
+        bool matched = false;
+        if (lo < m_ligature_sets.size() && m_ligature_sets[lo].first == glyphs[i]) {
+            for (const Ligature& lig : m_ligature_sets[lo].ligatures) {
+                if (i + 1u + lig.rest.size() > glyphs.size()) continue;
+                bool same = true;
+                for (std::size_t k = 0; k < lig.rest.size(); ++k) {
+                    if (glyphs[i + 1u + k] != lig.rest[k]) {
+                        same = false;
+                        break;
+                    }
+                }
+                if (same) {
+                    out.push_back(lig.glyph);
+                    i += 1u + lig.rest.size();
+                    matched = true;
+                    break;
+                }
+            }
+        }
+        if (!matched) {
+            out.push_back(glyphs[i]);
+            ++i;
+        }
+    }
+    glyphs.swap(out);
+}
+
 int16_t TrueTypeFont::kerning_units(uint32_t left, uint32_t right) const {
+    return kerning_units_for_glyphs(glyph_index(left), glyph_index(right));
+}
+
+int16_t TrueTypeFont::kerning_units_for_glyphs(uint16_t left_glyph, uint16_t right_glyph) const {
     if (m_kern_pairs == 0) return 0;
-    const uint16_t left_glyph = glyph_index(left);
-    const uint16_t right_glyph = glyph_index(right);
     // A `.notdef` box does not kern against anything: the font has no opinion
     // about a glyph it does not have.
     if (left_glyph == 0 || right_glyph == 0) return 0;
@@ -663,6 +872,12 @@ int16_t TrueTypeFont::kerning_units(uint32_t left, uint32_t right) const {
         else high = mid - 1;
     }
     return 0;
+}
+
+float TrueTypeFont::glyph_advance_by_index(uint16_t glyph, float font_size_px) const {
+    if (m_advance_widths.empty() || m_units_per_em == 0) return font_size_px * 0.5f;
+    const uint16_t adv = glyph < m_advance_widths.size() ? m_advance_widths[glyph] : m_advance_widths[0];
+    return static_cast<float>(adv) * font_size_px / static_cast<float>(m_units_per_em);
 }
 
 float TrueTypeFont::glyph_advance(uint32_t codepoint, float font_size_px) const {
@@ -898,10 +1113,18 @@ GlyphBitmap TrueTypeFont::rasterize_glyph(uint32_t codepoint, int pixel_size) co
     if (!m_loaded) {
         return rasterize_fallback_8x8(codepoint, px, false);
     }
+    return rasterize_glyph_index((codepoint < 128) ? m_ascii_glyphs[codepoint] : glyph_index(codepoint),
+                                 px);
+}
+
+GlyphBitmap TrueTypeFont::rasterize_glyph_index(uint16_t gid, int pixel_size) const {
+    const int px = std::clamp(pixel_size, 6, 160);
+    if (!m_loaded) {
+        return rasterize_fallback_8x8(gid, px, false);
+    }
 
     GlyphBitmap bmp;
     const float scale = static_cast<float>(px) / static_cast<float>(m_units_per_em);
-    const uint16_t gid = (codepoint < 128) ? m_ascii_glyphs[codepoint] : glyph_index(codepoint);
     const uint16_t adv = (gid < m_advance_widths.size()) ? m_advance_widths[gid] : m_advance_widths[0];
     bmp.advance = static_cast<float>(adv) * scale;
 
@@ -1615,6 +1838,10 @@ const TrueTypeFont* FontRenderer::face_for(uint32_t codepoint, int font_weight, 
         if (!std::filesystem::is_regular_file(path, ec)) continue;
         TrueTypeFont face;
         if (!face.load_file(path)) continue;
+        // A shaped glyph's cache entry names the face by its address, and this
+        // vector reallocates: every entry that named a face by address is stale
+        // the moment one is added. Rare enough to pay for by emptying it.
+        m_cache.clear();
         m_fallbacks.push_back(std::move(face));
         if (m_fallbacks.back().has_glyph(codepoint)) {
             if (synthetic_oblique) *synthetic_oblique = italic;
@@ -1681,6 +1908,102 @@ bool FontRenderer::font_kerning(std::string_view css_family, int font_weight, bo
     return face && face->has_kerning();
 }
 
+std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view utf8_text,
+                                                                float font_size, int font_weight,
+                                                                int family_id, bool italic) const {
+    std::vector<ShapedGlyph> out;
+    if (utf8_text.empty()) return out;
+
+    // A run is the stretch of text one face draws. Ligatures are applied inside
+    // a run and never across one, which is also true of the fonts: `latn`'s
+    // table has an opinion about `f` followed by `i`, not about whichever face
+    // happens to supply the `i`.
+    std::vector<uint32_t> run;
+    const TrueTypeFont* run_face = nullptr;
+    bool run_shear = false;
+
+    const auto flush = [&]() {
+        if (run.empty()) return;
+        std::vector<uint16_t> glyphs;
+        glyphs.reserve(run.size());
+        for (uint32_t cp : run) {
+            glyphs.push_back(run_face ? run_face->glyph_index(cp) : 0);
+        }
+        if (run_face) run_face->apply_ligatures(glyphs);
+        for (uint16_t glyph : glyphs) {
+            ShapedGlyph shaped;
+            shaped.glyph = glyph;
+            shaped.face = run_face;
+            shaped.shear = run_shear;
+            shaped.advance = run_face ? run_face->glyph_advance_by_index(glyph, font_size)
+                                      : std::max(1.0f, font_size * 0.55f);
+            out.push_back(shaped);
+        }
+        run.clear();
+    };
+
+    std::size_t pos = 0;
+    while (pos < utf8_text.size()) {
+        const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
+        bool shear = false;
+        const TrueTypeFont* face = face_for(cp, font_weight, family_id, italic, &shear);
+        if (face != run_face && !run.empty()) flush();
+        run_face = face;
+        run_shear = shear;
+        run.push_back(cp);
+    }
+    flush();
+    return out;
+}
+
+std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view utf8_text,
+                                                               float font_size, int font_weight,
+                                                               std::string_view css_family,
+                                                               bool italic) const {
+    const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
+    return shape_text(utf8_text, font_size, font_weight, family_id, italic);
+}
+
+float FontRenderer::kerning_px_shaped(const ShapedGlyph& left, const ShapedGlyph& right,
+                                      float font_size) const {
+    if (!(font_size > 0.0f)) return 0.0f;
+    if (!left.face || left.face != right.face) return 0.0f;
+    if (!left.face->has_kerning()) return 0.0f;
+    const float units = static_cast<float>(left.face->kerning_units_for_glyphs(left.glyph, right.glyph));
+    if (units == 0.0f) return 0.0f;
+    return units * font_size / static_cast<float>(left.face->units_per_em());
+}
+
+const GlyphBitmap& FontRenderer::get_glyph_shaped(const ShapedGlyph& glyph, int pixel_size,
+                                                  int font_weight) {
+    const int px = std::clamp(pixel_size, 6, 160);
+    const int weight = std::clamp(font_weight, 1, 1000);
+    const bool bold = weight >= 600;
+    // The key names the glyph and the face, not the codepoint: a ligature has
+    // no codepoint, and the face that has the glyph need not be the family's
+    // own (a fallback run). The face is folded to 16 bits of pointer; the cache
+    // is cleared whenever a face is added or replaced, so two faces cannot
+    // trade an entry.
+    const uint64_t face_bits = (static_cast<uint64_t>(reinterpret_cast<std::uintptr_t>(glyph.face)) >> 4) & 0xFFFFu;
+    const uint64_t key = (1ull << 63) | static_cast<uint64_t>(glyph.glyph) << 32 |
+                         static_cast<uint64_t>(static_cast<uint32_t>(px)) << 24 |
+                         (static_cast<uint64_t>(glyph.shear ? 1u : 0u) << 23) | face_bits;
+    auto it = m_cache.find(key);
+    if (it != m_cache.end()) return it->second;
+    if (m_cache.size() >= kMaxCachedGlyphs) m_cache.clear();
+
+    GlyphBitmap bmp;
+    if (glyph.face) {
+        bmp = glyph.face->rasterize_glyph_index(glyph.glyph, px);
+    } else {
+        bmp = rasterize_fallback_8x8(glyph.glyph, px, bold);
+    }
+    if (glyph.shear) apply_synthetic_oblique(bmp);
+
+    auto [ins, _] = m_cache.emplace(key, std::move(bmp));
+    return ins->second;
+}
+
 float FontRenderer::advance_in_family(uint32_t codepoint, float font_size, int font_weight,
                                       int family_id, bool italic) const {
     // The slant reaches `face_for` because it can change which face answers,
@@ -1695,20 +2018,15 @@ float FontRenderer::measure_text(std::string_view utf8_text, float font_size, in
                                  std::string_view css_family, bool italic) {
     if (utf8_text.empty() || font_size <= 0.0f) return 0.0f;
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
+    const std::vector<ShapedGlyph> shaped = shape_text(utf8_text, font_size, font_weight, family_id, italic);
     float total = 0.0f;
-    std::size_t pos = 0;
-    uint32_t previous = 0;
-    while (pos < utf8_text.size()) {
-        const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
-        total += advance_in_family(cp, font_size, font_weight, family_id, italic);
+    for (std::size_t i = 0; i < shaped.size(); ++i) {
+        total += shaped[i].advance;
         // Kerning is a property of a pair, so the first glyph has nothing to
-        // kern against. It is added here and not in `advance_in_family` for the
-        // same reason: that function answers for one codepoint at a time, which
-        // is the only thing a per-glyph loop can ask.
-        if (previous != 0) {
-            total += kerning_in_family(previous, cp, font_size, font_weight, family_id, italic);
-        }
-        previous = cp;
+        // kern against. It is asked of the shaped glyphs and not of the
+        // codepoints: after a ligature, `ff` is one glyph, and the `kern` table
+        // has an opinion about that glyph only if it names it.
+        if (i > 0) total += kerning_px_shaped(shaped[i - 1], shaped[i], font_size);
     }
     return total;
 }
@@ -1794,18 +2112,16 @@ void FontRenderer::draw_text(
     float pen_x = top_x;
     const int baseline_y = static_cast<int>(std::lround(top_y + baseline_offset));
 
-    std::size_t pos = 0;
-    uint32_t previous = 0;
-    while (pos < utf8_text.size()) {
-        const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
+    // The same list `measure_text` summed, glyph for glyph: painting walks what
+    // shaping produced, so a ligature is drawn as the glyph it is and the pen
+    // moves by the advance that was counted.
+    const std::vector<ShapedGlyph> shaped = shape_text(utf8_text, font_size, font_weight, family_id, italic);
+    for (std::size_t i = 0; i < shaped.size(); ++i) {
         // The pair closes up *before* its second glyph is placed: kerning is
         // the gap between two glyphs, so adding it after drawing the second one
         // would move the gap and leave the glyph where it was.
-        if (previous != 0) {
-            pen_x += kerning_in_family(previous, cp, font_size, font_weight, family_id, italic);
-        }
-        previous = cp;
-        const GlyphBitmap& g = get_glyph(cp, px_size, font_weight, family_id, italic);
+        if (i > 0) pen_x += kerning_px_shaped(shaped[i - 1], shaped[i], font_size);
+        const GlyphBitmap& g = get_glyph_shaped(shaped[i], px_size, font_weight);
         if (g.width > 0 && g.height > 0) {
             const int gx0 = static_cast<int>(std::lround(pen_x)) + g.bearing_x;
             const int gy0 = baseline_y - g.bearing_y;
@@ -1821,12 +2137,12 @@ void FontRenderer::draw_text(
                 }
             }
         }
-        // The pen advances by the face this codepoint came from -- the same
-        // call layout measured it with -- and not by the primary. Advancing
-        // with the primary is how a `<pre>` measured monospace and drew
+        // The pen advances by the advance shaping resolved for this glyph --
+        // the same number layout measured, from the same face. Advancing with
+        // the primary is how a `<pre>` measured monospace and drew
         // proportional: every glyph in the right order, packed to the width of
         // a font nobody asked for.
-        pen_x += advance_in_family(cp, font_size, font_weight, family_id, italic);
+        pen_x += shaped[i].advance;
     }
 }
 

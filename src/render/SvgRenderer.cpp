@@ -280,6 +280,11 @@ struct SvgStyle {
     float fill_opacity{1.0f};
     float stroke_opacity{1.0f};
     FillRule fill_rule{FillRule::NonZero};
+    float font_size{16.0f};
+    int font_weight{400};
+    std::string font_family{"sans-serif"};
+    std::string font_style{"normal"};
+    std::string text_anchor{"start"};
     bool display_none{false};
     bool visible{true};
 };
@@ -348,6 +353,33 @@ void apply_style_property(SvgStyle& style, std::string_view prop_raw, std::strin
     } else if (prop == "fill-rule") {
         if (val_lower == "evenodd") style.fill_rule = FillRule::EvenOdd;
         else if (val_lower == "nonzero") style.fill_rule = FillRule::NonZero;
+    } else if (prop == "font-size") {
+        float size = 0.0f;
+        if (val_lower.ends_with("em")) {
+            if (parse_float_value(val.substr(0, val.size() - 2), size)) size *= style.font_size;
+        } else if (val_lower.ends_with("%")) {
+            parse_float_value(val, size, style.font_size);
+        } else {
+            parse_float_value(val, size);
+        }
+        if (size > 0.0f && size <= 160.0f) style.font_size = size;
+    } else if (prop == "font-family") {
+        style.font_family = std::string(val);
+    } else if (prop == "font-weight") {
+        if (val_lower == "normal") style.font_weight = 400;
+        else if (val_lower == "bold" || val_lower == "bolder") style.font_weight = 700;
+        else if (val_lower == "lighter") style.font_weight = 300;
+        else {
+            float weight = 0.0f;
+            if (parse_float_value(val, weight) && weight >= 1.0f && weight <= 1000.0f)
+                style.font_weight = static_cast<int>(weight);
+        }
+    } else if (prop == "font-style") {
+        if (val_lower == "normal" || val_lower == "italic" || val_lower == "oblique")
+            style.font_style = val_lower;
+    } else if (prop == "text-anchor") {
+        if (val_lower == "start" || val_lower == "middle" || val_lower == "end")
+            style.text_anchor = val_lower;
     } else if (prop == "display") {
         if (val_lower == "none") style.display_none = true;
     } else if (prop == "visibility") {
@@ -383,7 +415,8 @@ SvgStyle resolve_element_style(
         "color", "fill", "stroke", "stroke-width", "stroke-linecap",
         "stroke-linejoin", "stroke-miterlimit", "stroke-dasharray",
         "stroke-dashoffset", "opacity", "fill-opacity", "stroke-opacity",
-        "fill-rule", "display", "visibility"
+        "fill-rule", "font-size", "font-family", "font-weight", "font-style",
+        "text-anchor", "display", "visibility"
     };
     std::string attr_val;
     for (const char* name : kPresAttrs) {
@@ -1248,6 +1281,96 @@ void paint_shape(
     }
 }
 
+// SVG text uses the same glyph rasterizer as Canvas 2D. The cursor is in SVG
+// user coordinates (before viewBox / group transforms), not device pixels.
+// Text nodes are visited in document order so a tspan can both inherit the
+// current position and change the paint for just its own characters.
+void render_text_content(CanvasRenderingContext2D& ctx,
+                         const std::shared_ptr<Element>& el, const SvgStyle& style,
+                         float ref_w, float ref_h, float& x, float& y, int depth,
+                         bool& started, bool& pending_space, bool preserve_space) {
+    if (depth > 256 || stack_is_exhausted() || style.display_none) return;
+    std::string attr;
+    if (get_attr_ci(el, "xml:space", attr)) {
+        if (attr == "preserve") preserve_space = true;
+        else if (attr == "default") preserve_space = false;
+    }
+    if (get_attr_ci(el, "x", attr) && parse_float_value(attr, x, ref_w)) {
+        started = false;
+        pending_space = false;
+    }
+    if (get_attr_ci(el, "y", attr)) parse_float_value(attr, y, ref_h);
+    float delta = 0.0f;
+    if (get_attr_ci(el, "dx", attr) && parse_float_value(attr, delta, ref_w)) x += delta;
+    if (get_attr_ci(el, "dy", attr) && parse_float_value(attr, delta, ref_h)) y += delta;
+
+    ctx.save();
+    // The outer <text> transform was applied by render_element already.
+    if (depth != 0 && get_attr_ci(el, "transform", attr))
+        ctx.set_transform(ctx.current_transform().multiply(parse_svg_transform(attr)));
+    for (const auto& child : el->children()) {
+        if (child->is_text()) {
+            if (!style.visible) continue;
+            // SVG's default white-space mode collapses runs across text/tspan
+            // boundaries; xml:space="preserve" leaves the bytes unchanged.
+            // Bound the text handed to the Canvas rasterizer on hostile pages.
+            std::string text;
+            const std::string raw = child->text_content();
+            for (size_t i = 0; i < raw.size() && i < 16384; ++i) {
+                const unsigned char c = static_cast<unsigned char>(raw[i]);
+                if (!preserve_space && std::isspace(c)) {
+                    pending_space = true;
+                    continue;
+                }
+                if (pending_space && started) text.push_back(' ');
+                pending_space = false;
+                text.push_back(static_cast<char>(c));
+                started = true;
+            }
+            if (text.empty()) continue;
+            ctx.font = style.font_style + " " + std::to_string(style.font_weight) + " " +
+                       std::to_string(style.font_size) + "px " + style.font_family;
+            const float advance = ctx.measure_text(text).width;
+            if (!std::isfinite(advance)) continue;
+            ctx.text_align = style.text_anchor == "middle" ? "center" :
+                             style.text_anchor == "end" ? "right" : "left";
+            ctx.text_baseline = "alphabetic";
+            ctx.global_alpha = 1.0f; // SVG opacity is already folded into paint alpha.
+            auto paint = [&](const PaintServer& server, float opacity, bool stroke) {
+                Color color;
+                if (server.kind == PaintServer::Kind::None) return;
+                if (server.kind == PaintServer::Kind::Solid) color = server.color;
+                else if (server.kind == PaintServer::Kind::CurrentColor) color = style.color;
+                else if (server.kind == PaintServer::Kind::Url && server.has_fallback) color = server.fallback;
+                else return; // A text gradient/path is not yet a supported paint server.
+                color.a = static_cast<uint8_t>(std::lround(static_cast<float>(color.a) *
+                          std::clamp(style.opacity * opacity, 0.0f, 1.0f)));
+                if (!color.a) return;
+                if (stroke) {
+                    ctx.stroke_style = color;
+                    ctx.stroke_gradient = nullptr;
+                    ctx.line_width = style.stroke_width;
+                    ctx.stroke_text(text, x, y);
+                } else {
+                    ctx.fill_style = color;
+                    ctx.fill_gradient = nullptr;
+                    ctx.fill_text(text, x, y);
+                }
+            };
+            paint(style.fill, style.fill_opacity, false);
+            if (style.stroke_width > 0.0f) paint(style.stroke, style.stroke_opacity, true);
+            x += advance;
+        } else if (auto span = std::dynamic_pointer_cast<Element>(child)) {
+            if (to_lower_ascii(span->tag_name()) != "tspan") continue;
+            const float ref_size = std::hypot(ref_w, ref_h) / 1.41421356f;
+            const SvgStyle span_style = resolve_element_style(span, style, ref_size);
+            render_text_content(ctx, span, span_style, ref_w, ref_h, x, y, depth + 1,
+                                started, pending_space, preserve_space);
+        }
+    }
+    ctx.restore();
+}
+
 void render_element(
     CanvasRenderingContext2D& ctx,
     const SvgDocumentContext& doc_ctx,
@@ -1291,6 +1414,15 @@ void render_element(
                 apply_clip_path_element(ctx, cit->second, ref_w, ref_h);
             }
         }
+    }
+
+    if (tag == "text") {
+        float x = 0.0f, y = 0.0f;
+        bool started = false, pending_space = false;
+        render_text_content(ctx, el, style, ref_w, ref_h, x, y, 0,
+                            started, pending_space, false);
+        ctx.restore();
+        return;
     }
 
     if (tag == "g" || tag == "a") {

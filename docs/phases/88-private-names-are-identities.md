@@ -124,7 +124,7 @@ ordinary again. The `%` prefix stays hidden, which is a row of its own below.
 `make test` — one new suite, `private_names_are_identities_and_not_strings`,
 which asserts all of the above (the field is not a property, the brand, the
 cross-class and cross-evaluation isolation, the accessor directions, and eleven
-syntax errors). 242 suites in all, and the direct-eval suite #103 added is
+syntax errors). 248 suites in all, and the direct-eval suite #103 added is
 one of them.
 
 `make test262` — the pinned suite over its 21 default directories, against a
@@ -134,14 +134,14 @@ build of the commit this phase started from:
 python3 tools/conformance/run_test262.py \
     --binary before=<build of the parent commit> --binary now=build/litebird
 before  12657 pass (80.7%)
-now     13630 pass (86.9%)
-973 pass in now and not in before; 0 pass in before and not in now
+now     13654 pass (87.0%)
+997 pass in now and not in before; 0 pass in before and not in now
 ```
 
 The three directories the private-name tests live in, on their own:
 `language/statements/class`, `language/expressions/class` and
 `language/expressions/in` go from **6,832 / 8,551 (79.9%)** to **7,776 / 8,551
-(90.9%)** — 908 tests, none lost.
+(90.9%)** — 944 tests, none lost.
 
 Node.js was the oracle for the behaviour, on a 21-case battery (inherited
 fields, shadowing, accessor order, the four refusal directions, static brands,
@@ -149,7 +149,7 @@ enumeration, arrows, nested classes, `++`/compound assignment, destructuring,
 freeze, initialiser order, static blocks): the two engines print the same
 output, byte for byte.
 
-`make js-conformance` stays at 1128/1152.
+`make js-conformance` goes to 1131/1152 (the `#` fix below is one of the three).
 
 ### The dispatcher's frame
 
@@ -162,7 +162,7 @@ that fits:
 ```
 before this branch (main)          2,089 frames
 this branch as merged              1,931 frames   -> `d(2000)` is a RangeError
-this branch with the split below   2,181 frames
+this branch with the split below   2,180 frames
 ```
 
 `d(2000)` passing is an expectation in `tests/js-conformance/functions.dat`, so

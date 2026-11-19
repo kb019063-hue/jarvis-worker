@@ -2836,9 +2836,9 @@ JsValue JsInterpreter::eval_array_literal(const ArrayLiteralExpr* literal, const
         }
     }
     JsValue array = JsValue::make_array(elements);
-    // `[1, , 3]` has three places and two elements. Marked after the
-    // array is made, because a spread in the literal may have added
-    // places that shift the ones after it.
+    // `[1, , 3]` has three places and two elements. Marked after the array is
+    // made, because a spread in the literal may have added places that shift the
+    // ones after it.
     for (size_t index : holes) array.set_array_hole(index);
     return array;
 }

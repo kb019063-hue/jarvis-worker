@@ -156,6 +156,10 @@ std::size_t ComputedStyle::hash() const {
     hash_combine(h, hash_float(font_size));
     hash_combine(h, static_cast<std::size_t>(font_weight));
     hash_combine(h, static_cast<std::size_t>(font_style));
+    // Part of the key, not decoration: two boxes that differ only in
+    // `font-kerning` measure to different widths, so they must not share a
+    // cached style any more than they may share a cache of measured text.
+    hash_combine(h, static_cast<std::size_t>(font_kerning));
     if (!font_family.empty()) hash_combine(h, std::hash<std::string>{}(font_family));
     hash_combine(h, hash_float(line_height));
     hash_combine(h, hash_float(line_height_number));
@@ -349,6 +353,7 @@ SharedComputedStyle ComputedStylePool::inherited_only(const SharedComputedStyle&
     // lays it out and upright in the painter, however italic the computed style
     // said it was.
     s.font_style = key->font_style;
+    s.font_kerning = key->font_kerning;
     s.line_height = key->line_height;
     s.line_height_number = key->line_height_number;
     s.text_align = key->text_align;
@@ -1741,6 +1746,12 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
             }
         }
         if (!family.empty()) out.emplace_back("font-family", family);
+        // CSS Fonts 4: the shorthand resets the font properties it does not
+        // name to their initial values, and `font-kerning` is one of them. So
+        // `font: 16px serif` on the child of a `font-kerning: none` paragraph
+        // kerns again, which is what the specification says and not what
+        // inheritance would do if the shorthand were only a bag of longhands.
+        out.emplace_back("font-kerning", "auto");
         return true;
     }
 
@@ -2213,6 +2224,14 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         if (val_lower == "italic") style.font_style = FontStyle::Italic;
         else if (val_lower.starts_with("oblique")) style.font_style = FontStyle::Oblique;
         else style.font_style = FontStyle::Normal;
+    } else if (prop == "font-kerning") {
+        // `auto` and `normal` both mean the pair adjustments happen here; only
+        // `none` stops them. Anything else is not a value of this property and
+        // leaves the inherited one alone, which is what dropping the
+        // declaration amounts to.
+        if (val_lower == "none") style.font_kerning = FontKerning::None;
+        else if (val_lower == "normal") style.font_kerning = FontKerning::Normal;
+        else if (val_lower == "auto") style.font_kerning = FontKerning::Auto;
     } else if (prop == "font-family") {
         // Stored as written. `font-family` was on the list of known properties
         // for a long time and nothing ever read the value back — it is read
@@ -2857,6 +2876,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.font_size = parent_style->font_size;
         style.font_weight = parent_style->font_weight;
         style.font_style = parent_style->font_style;
+        style.font_kerning = parent_style->font_kerning;
         if (!parent_style->font_family.empty()) style.font_family = parent_style->font_family;
         style.text_align = parent_style->text_align;
         if (!parent_style->custom_properties.empty()) style.custom_properties = parent_style->custom_properties;
@@ -3020,7 +3040,6 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
     std::vector<const Declaration*> scheme_decls;
     std::vector<const Declaration*> color_decls;
     std::vector<const Declaration*> font_decls;
-    std::vector<const Declaration*> rest;
     for (const auto* declaration : cascade_order) {
         if (declaration->property.rfind("--", 0) == 0) {
             apply_declaration(style, declaration->property, declaration->value);
@@ -3030,18 +3049,63 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
             color_decls.push_back(declaration);
         } else if (sets_font_size(declaration->property)) {
             font_decls.push_back(declaration);
-        } else {
-            rest.push_back(declaration);
         }
     }
-    apply_all(scheme_decls);
-    apply_all(color_decls);
-    apply_all(font_decls);
+    // Font size first — and *only* font size. `em`, `ex` and `ch` elsewhere on
+    // the element resolve against its own computed size, so the size has to be
+    // known before the rest of the block is applied; nothing else about the
+    // `font` shorthand has to be.
+    //
+    // This used to apply the whole shorthand here, which put every longhand it
+    // names ahead of the rest of the block: a `font-family` written after a
+    // `font` lost to it, and the properties the shorthand resets to their
+    // initial values — `font-kerning` is one — could not be set back by a
+    // declaration written before it either. Source order is the cascade's
+    // first rule after importance, so the block is replayed in order below and
+    // the shorthand takes its turn in the sequence it was written in.
+    for (const auto* declaration : font_decls) {
+        std::string value = declaration->value;
+        if (value.find("var(") != std::string::npos) {
+            value = resolve_var_functions(value, style.custom_properties);
+        }
+        std::vector<std::pair<std::string, std::string>> longhands;
+        if (expand_shorthand(declaration->property, value, longhands)) {
+            for (const auto& [longhand, longhand_value] : longhands) {
+                if (longhand == "font-size") apply_longhand(style, longhand, longhand_value);
+            }
+        } else if (declaration->property == "font-size") {
+            apply_longhand(style, "font-size", value);
+        }
+    }
     if (element->tag_name() == "html") {
         m_root_font_size = style.font_size;
     }
     m_em_base = style.font_size;
-    apply_all(rest);
+    apply_all(scheme_decls);
+    apply_all(color_decls);
+    // ...and then the block in source order, once, with the size left out of it
+    // because it has just been settled above. Everything else about a `font`
+    // shorthand travels with it, so the shorthand lands where it was written
+    // rather than at the front of the block.
+    for (const auto* declaration : cascade_order) {
+        const std::string& prop = declaration->property;
+        if (prop.rfind("--", 0) == 0 || prop == "color" || prop == "color-scheme") continue;
+        if (prop == "font-size") continue;
+        if (prop == "font") {
+            std::string value = declaration->value;
+            if (value.find("var(") != std::string::npos) {
+                value = resolve_var_functions(value, style.custom_properties);
+            }
+            std::vector<std::pair<std::string, std::string>> longhands;
+            if (expand_shorthand(prop, value, longhands)) {
+                for (const auto& [longhand, longhand_value] : longhands) {
+                    if (longhand != "font-size") apply_longhand(style, longhand, longhand_value);
+                }
+                continue;
+            }
+        }
+        apply_declaration(style, declaration->property, declaration->value);
+    }
 
     if (style.border_radius_percent >= 0.0f && style.width > 0.0f) {
         float ref = style.height > 0.0f ? std::min(style.width, style.height) : style.width;

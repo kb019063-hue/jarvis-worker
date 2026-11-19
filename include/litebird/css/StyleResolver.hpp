@@ -152,6 +152,24 @@ enum class FontStyle : uint8_t {
     Oblique
 };
 
+/// CSS `font-kerning`: `auto | normal | none`.
+///
+/// The three values are two behaviours. `auto` lets the user agent decide and
+/// `normal` demands kerning; this engine applies the `kern` table in both, which
+/// is a decision `auto` explicitly permits. `none` turns it off, and that is the
+/// only value with a visible difference — it is why the property is worth
+/// carrying down to the pen at all.
+///
+/// Kept as the specified value rather than a bool because `getComputedStyle`
+/// has to answer with the word the author wrote, and because the difference
+/// between `auto` and `normal` is one a browser can legitimately resolve either
+/// way.
+enum class FontKerning : uint8_t {
+    Auto,
+    Normal,
+    None
+};
+
 enum class TextAlign : uint8_t {
     Left,
     Center,
@@ -231,6 +249,13 @@ struct ComputedStyle {
     /// exactly one line of text and slanted in the next. Ask Phase 74's
     /// `font-family` how that goes.
     FontStyle font_style{FontStyle::Normal};
+    /// `font-kerning`. Inherited, like the rest of the font group: `none` on a
+    /// `<p>` means its `<span>`s are unkerned too, and a property that stopped
+    /// at the element would leave the very children that hold the text kerning.
+    FontKerning font_kerning{FontKerning::Auto};
+
+    /// Whether the pair adjustments of the face are applied to this text.
+    bool kerning_enabled() const { return font_kerning != FontKerning::None; }
     /// The `font-family` list exactly as it was written — quotes, commas and
     /// all. It is not resolved here: which file on the host answers to a name
     /// is the font layer's business, and layout is where it is asked, once per

@@ -294,7 +294,8 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
                     set_pixel(px, py, c);
                 },
                 arg.font_family,
-                arg.font_italic
+                arg.font_italic,
+                arg.font_kerning
             );
         } else if constexpr (std::is_same_v<T, DrawImageCommand>) {
             if (arg.image && arg.image->is_valid()) {

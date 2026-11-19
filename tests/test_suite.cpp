@@ -19751,6 +19751,129 @@ TEST(js_iteration_of_another_realms_array) {
     assert(text("[...[7, 8]].join()") == "7,8");
 }
 
+TEST(private_names_are_identities_and_not_strings) {
+    using namespace litebird;
+
+    // A private name is an identity a class makes when it is evaluated, not a
+    // property whose name happens to begin with '#'. Before this, `#p` was an
+    // ordinary string key: `obj['#p']` read and wrote the field from outside
+    // its class, `'#p' in obj` was true, a class could read another class's
+    // `#p`, and `o.#p` on an object without the field answered `undefined` and
+    // made one. Every one of those is a TypeError or a SyntaxError now.
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    // A runtime error is caught where it happens, as a page would catch it: a
+    // throw that reaches the host is reported by the interpreter, not rethrown.
+    // A parse error is reached the same way, through `eval` in the script: it
+    // is a SyntaxError a `catch` clause can see.
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+    auto syntax_error = [&](const std::string& source) {
+        return text(("errName(function () { eval('" + source + "'); })").c_str()) == "SyntaxError";
+    };
+
+    // The field is read and written from inside the class, and is not a
+    // property: no string key reaches it, it does not enumerate, and a
+    // prototype object is not branded.
+    assert(text(R"JS(
+        class C { #x = 41; read() { return this.#x; } write(v) { this.#x = v; } }
+        var c = new C();
+        c.read() + "|" + (c.write(7), c.read()) + "|" + c['#x'] + "|" + ('#x' in c) +
+        "|" + Object.keys(c).length + "|" + Object.getOwnPropertyNames(c).length
+    )JS") == "41|7|undefined|false|0|0");
+
+    // A property a script itself names `#p` is an ordinary property, seen by
+    // every walk. It was hidden while a private field was stored under the same
+    // kind of name; now that a private member has a table of its own, the `#`
+    // prefix is not engine bookkeeping any more.
+    assert(text(R"JS(
+        var o = {}; o['#p'] = 1;
+        Object.keys(o).join() + "|" + Object.getOwnPropertyNames(o).join() + "|" + JSON.stringify(o)
+    )JS") == "#p|#p|{\"#p\":1}");
+
+    // Reading or writing a private field on an object whose class did not make
+    // it is a TypeError, not `undefined` and not a new field.
+    text("class D { #x = 1; read() { return this.#x; } write(v) { this.#x = v; } }");
+    assert(text("errName(function () { return new D().read.call({}); })") == "TypeError");
+    assert(text("errName(function () { new D().write.call({}, 1); })") == "TypeError");
+    assert(text("errName(function () { new D().write.call(Object.create(D.prototype), 2); })") == "TypeError");
+    assert(text("(function () { var d = new D(); d.write(3); return d.read(); })()") == "3");
+
+    // `#p in o` asks the brand question and is the language's `in`, so it is a
+    // TypeError on something that is not an object.
+    assert(text(R"JS(
+        class E { #x = 1; has(o) { return #x in o; } }
+        var e = new E();
+        e.has(e) + "|" + e.has({}) + "|" + e.has(Object.create(E.prototype))
+    )JS") == "true|false|false");
+    assert(text("class E { #x = 1; has(o) { return #x in o; } } errName(function () { new E().has(1); })") == "TypeError");
+
+    // Two classes that each have a `#x` have two names, and two evaluations of
+    // one class expression have two more: the second cannot read the first's
+    // instance, and neither can the other class.
+    assert(text(R"JS(
+        class A { #x = 1; get(o) { return o.#x; } }
+        class B { #x = 2; get(o) { return o.#x; } }
+        var a = new A();
+        A.prototype.get.call(new B(), a)
+    )JS") == "1");
+    assert(text(R"JS(
+        function make() { return class { #p = 5; get() { return this.#p; } }; }
+        var M = make(), N = make(), n = new N();
+        (function () { try { return n.get.call(new M(), n); } catch (e) { return e.name; } })()
+    )JS") == "TypeError");
+
+    // Instance private methods and accessors are part of the brand every
+    // instance gets, so a subclass instance has the parent's; a static private
+    // field belongs to the constructor that declared it and to nothing below.
+    assert(text(R"JS(
+        class P { #m() { return "m"; } get #v() { return "v"; } run() { return this.#m() + this.#v; } }
+        class Q extends P {}
+        new Q().run() + "|" + new P().run()
+    )JS") == "mv|mv");
+    assert(text(R"JS(
+        class S { static #n = 1; static bump(o) { return o.#n; } }
+        class T extends S {}
+        S.bump(S) + "|" + (function () { try { return S.bump(T); } catch (e) { return e.name; } })()
+    )JS") == "1|TypeError");
+
+    // A getter without a setter, a setter without a getter, and a method are
+    // each a TypeError in the direction they do not support.
+    assert(text(R"JS(class G1 { set #v(v) {} read() { return this.#v; } }
+        errName(function () { new G1().read(); }))JS") == "TypeError");
+    assert(text(R"JS(class G2 { get #v() { return 1; } write() { this.#v = 2; } }
+        errName(function () { new G2().write(); }))JS") == "TypeError");
+    assert(text(R"JS(class G3 { #m() {} write() { this.#m = 1; } }
+        errName(function () { new G3().write(); }))JS") == "TypeError");
+
+    // ...and the syntax errors: a private field cannot be deleted, named with
+    // `super`, declared twice, or used outside a class that declares it, and
+    // `#p` alone is not an expression.
+    for (std::string source : {
+             "class H { #x; m() { delete this.#x; } }",
+             "class H { #x; m() { return super.#x; } }",
+             "class H { #x; #x; }",
+             "class H { static #x; #x; }",
+             "class H { #x() {} get #x() {} }",
+             "class H { #constructor() {} }",
+             "class H { m() { return this.#nope; } }",
+             "class H { m() { return #nope in this; } }",
+             "var h = { #x: 1 };",
+             "class H { #x; m() { return #x; } }",
+             "class H { #x; } new H().#x;",
+         }) {
+        assert(syntax_error(source));
+    }
+
+    // A direct eval written inside the class body can name that class's
+    // private fields -- the names are in scope where they were written -- and
+    // an eval outside every class cannot.
+    assert(text(R"JS(
+        class K { #m() { return "seen"; } v = eval("this.#m()"); }
+        new K().v
+    )JS") == "seen");
+    assert(text("errName(function () { eval('this.#m()'); })") == "SyntaxError");
+}
+
 TEST(shared_computed_style_deduplicates_boxes_and_fragments) {
     using namespace litebird;
 
@@ -21432,6 +21555,7 @@ int main() {
     RUN_TEST(text_align_and_text_decoration_enums_parse_cleanly);
 
     // Phase 73: HTTP/1.1 CookieJar wiring, RFC 9111 HTTP cache, CORS preflight, and Fetch Headers.
+    RUN_TEST(private_names_are_identities_and_not_strings);
     RUN_TEST(http_cookie_jar_rfc6265_domain_path_security_and_redirects);
     RUN_TEST(http_cache_rfc9111_freshness_etag_304_vary_and_invalidation);
     RUN_TEST(cors_preflight_options_max_age_authorization_and_mixed_content);

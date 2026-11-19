@@ -117,10 +117,11 @@ Read the number for what it is:
   strings, arrays, regular expressions, dates, JSON), not every clause of the
   specification. The official suite scores lower: of the 47,967 tests in
   its `built-ins`, `language` and `annexB` directories that are not modules,
-  29,450 pass (61.4%; 27,872 / 58.1% before Phase 55, 26,012 / 54.2% before
-  Phase 44); of the 15,686
-  on functions, classes and objects, 12,359 pass (78.8%; 12,316 / 78.5%
-  before Phase 59, 10,835 / 69.1% before Phase 44). `make test262` runs the
+  31,158 pass (65.0%; 29,450 / 61.4% last recorded before Phase 88, 27,872 /
+  58.1% before Phase 55, 26,012 / 54.2% before Phase 44); of the 15,686
+  on functions, classes and objects, 13,654 pass (87.0%; 12,657 / 80.7%
+  before Phase 88, 12,359 / 78.8% before Phase 59, 10,835 / 69.1% before
+  Phase 44). `make test262` runs the
   latter. It is used for what a change moved between two builds, not as a
   score (Phase 34: 108 more pass and none fewer in those directories; Phase
   44: 1,440 more pass and none fewer in those 21 directories, plus 374/374 =
@@ -1173,13 +1174,14 @@ class Circle extends Shape {}
 var one = {}; function Single() { return one; } class Child extends Single { constructor() { super(); this.added = 2; } }
 console.log(new Circle().kind, new Child() === one, one.added)'
 # Circle true 2        (before: Uncaught TypeError: abstract)
-make js-conformance      # 1124 / 1150; construct.dat 50 / 50
+make js-conformance      # 1131 / 1152; construct.dat 50 / 50
 make dom-conformance     # 678 / 678; compiled.dat 25 / 25, upgrades.dat 9 / 9
 ```
 
-What is still missing: a private name is a property that `obj['#p']` reads,
-and `this` in a derived constructor is unbound until `super()` runs but a
-`class` field initializer can still be reached through `eval`. Those and what
+What is still missing: a private name is an identity now (Phase 88), but the
+early errors an eval written in a class body must raise are not, and `this` in a
+derived constructor is unbound until `super()` runs while a `class` field
+initializer can still be reached through `eval`. Those and what
 else was found on the way
 are rows of the task table in `AGENTS.md`; the design and what it costs are
 in `ARCHITECTURE.md`, Phase 43, and `AUDIT.md`, finding 49, says what found

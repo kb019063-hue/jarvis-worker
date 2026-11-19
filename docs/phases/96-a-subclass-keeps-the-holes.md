@@ -45,7 +45,7 @@ never makes a hole.
 
 ## 3. How it is verified
 
-- **`make test`** → **258 / 258** suites.
+- **`make test`** → **259 / 259** suites.
 - **`make js-conformance`** 1137 / 1156, **`make dom-conformance`** 678 / 678,
   **`make wpt`** 9567 / 9824 with 0 unlisted, **`make url-conformance`**
   1188 / 1188, **`make xml-conformance`** 1718 / 1718: none moved.

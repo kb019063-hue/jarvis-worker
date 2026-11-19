@@ -50,6 +50,12 @@ struct DrawTextCommand {
     /// reason: the painter has to draw the face layout measured with, and a
     /// synthesised oblique is a different bitmap of the same glyph.
     bool font_italic{false};
+    /// `font-kerning` reduced to the question the painter asks: whether the
+    /// face's pair adjustments are applied to this run. Carried rather than
+    /// re-resolved for the same reason as the family and the slant — the
+    /// painter must draw the text layout measured, and `font-kerning: none`
+    /// changes the width of a run, not only its appearance.
+    bool font_kerning{true};
 };
 
 struct DrawImageCommand {

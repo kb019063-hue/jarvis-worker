@@ -341,8 +341,17 @@ public:
     /// had the advance is the upright face's, which is what a synthesised
     /// oblique is — a shear changes where the ink goes, not how far the pen
     /// travels.
+    /// Horizontal extent of `utf8_text` at `font_size` px.
+    ///
+    /// `kerning` is `font-kerning` reduced to the one thing it decides: whether
+    /// the face's pair adjustments are applied. `auto` and `normal` both pass
+    /// `true`; `none` passes `false` and the width is the plain sum of the
+    /// advances, which for `AV` is 6.4 px wider at 100 px in DejaVu Sans.
+    /// Painting takes the same flag, or the box is sized for one width and the
+    /// glyphs are drawn at another (finding 84, finding 97).
     float measure_text(std::string_view utf8_text, float font_size, int font_weight = 400,
-                       std::string_view css_family = {}, bool italic = false);
+                       std::string_view css_family = {}, bool italic = false,
+                       bool kerning = true);
 
     /// Scaled em metrics for `font_size` px: the ascent above the baseline and
     /// the descent below it (positive). Uses the bold font when one is loaded
@@ -396,7 +405,8 @@ public:
         int font_weight,
         const std::function<void(int px, int py, uint8_t coverage)>& emit_pixel,
         std::string_view css_family = {},
-        bool italic = false
+        bool italic = false,
+        bool kerning = true
     );
 
     /// The rasterized glyph, cached by (family, size, bold, italic, codepoint).

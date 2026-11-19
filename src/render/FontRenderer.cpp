@@ -1692,7 +1692,7 @@ float FontRenderer::advance_in_family(uint32_t codepoint, float font_size, int f
 }
 
 float FontRenderer::measure_text(std::string_view utf8_text, float font_size, int font_weight,
-                                 std::string_view css_family, bool italic) {
+                                 std::string_view css_family, bool italic, bool kerning) {
     if (utf8_text.empty() || font_size <= 0.0f) return 0.0f;
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
     float total = 0.0f;
@@ -1705,7 +1705,7 @@ float FontRenderer::measure_text(std::string_view utf8_text, float font_size, in
         // kern against. It is added here and not in `advance_in_family` for the
         // same reason: that function answers for one codepoint at a time, which
         // is the only thing a per-glyph loop can ask.
-        if (previous != 0) {
+        if (kerning && previous != 0) {
             total += kerning_in_family(previous, cp, font_size, font_weight, family_id, italic);
         }
         previous = cp;
@@ -1763,7 +1763,8 @@ void FontRenderer::draw_text(
     int font_weight,
     const std::function<void(int px, int py, uint8_t coverage)>& emit_pixel,
     std::string_view css_family,
-    bool italic
+    bool italic,
+    bool kerning
 ) {
     if (utf8_text.empty() || font_size <= 0.0f) return;
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
@@ -1801,7 +1802,7 @@ void FontRenderer::draw_text(
         // The pair closes up *before* its second glyph is placed: kerning is
         // the gap between two glyphs, so adding it after drawing the second one
         // would move the gap and leave the glyph where it was.
-        if (previous != 0) {
+        if (kerning && previous != 0) {
             pen_x += kerning_in_family(previous, cp, font_size, font_weight, family_id, italic);
         }
         previous = cp;

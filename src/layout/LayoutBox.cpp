@@ -970,7 +970,12 @@ void LayoutBox::layout_text(float containing_width) {
     const ComputedStyle& s = *style;
     FontRenderer& font_renderer = FontRenderer::instance();
     const bool italic = s.font_style != FontStyle::Normal;
-    const float space_advance = font_renderer.measure_text(" ", s.font_size, s.font_weight, s.font_family, italic);
+    // `font-kerning: none` has to reach the pen, or the property is a word in a
+    // stylesheet and nothing else: the box would be measured with the pairs and
+    // its text drawn without them, which is the drift findings 84 and 97 are
+    // both about. Measured and painted with the same flag, from the same style.
+    const bool kerning = s.kerning_enabled();
+    const float space_advance = font_renderer.measure_text(" ", s.font_size, s.font_weight, s.font_family, italic, kerning);
     float line_h = s.font_size * 1.25f;
 
     if (containing_width <= 0.0f) containing_width = 800.0f;
@@ -983,7 +988,7 @@ void LayoutBox::layout_text(float containing_width) {
     float max_w = 0.0f;
 
     while (ss >> word) {
-        const float word_w = font_renderer.measure_text(word, s.font_size, s.font_weight, s.font_family, italic);
+        const float word_w = font_renderer.measure_text(word, s.font_size, s.font_weight, s.font_family, italic, kerning);
         const float space_w = current_line.empty() ? 0.0f : space_advance;
 
         if (!current_line.empty() && (current_w + space_w + word_w) > containing_width) {
@@ -1008,7 +1013,7 @@ void LayoutBox::layout_text(float containing_width) {
 
     if (lines.empty()) {
         lines.push_back(text);
-        max_w = font_renderer.measure_text(text, s.font_size, s.font_weight, s.font_family, italic);
+        max_w = font_renderer.measure_text(text, s.font_size, s.font_weight, s.font_family, italic, kerning);
     }
 
     dimensions.content.width = max_w;
@@ -1041,9 +1046,11 @@ static void collect_items(
         const SharedComputedStyle& effective_style = box->style;
         const ComputedStyle& es = *effective_style;
         FontRenderer& font_renderer = FontRenderer::instance();
+        const bool kerning = es.kerning_enabled();
         const float space_w = font_renderer.measure_text(" ", es.font_size, es.font_weight,
                                                          es.font_family,
-                                                         es.font_style != FontStyle::Normal);
+                                                         es.font_style != FontStyle::Normal,
+                                                         kerning);
         float line_h = es.effective_line_height();
 
         size_t i = 0;
@@ -1074,7 +1081,8 @@ static void collect_items(
                 item.type = InlineItem::Type::Text;
                 item.width = font_renderer.measure_text(word, es.font_size, es.font_weight,
                                                         es.font_family,
-                                                        es.font_style != FontStyle::Normal);
+                                                        es.font_style != FontStyle::Normal,
+                                                        kerning);
                 item.text = std::move(word);
                 item.height = line_h;
                 item.style = effective_style;

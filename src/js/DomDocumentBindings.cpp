@@ -566,10 +566,37 @@ void setup_document(Iface& I) {
         return create_traversal(r, true, root.shared_from_this(), show, js_arg(args, 2));
     });
 
-    // --- Writing into the parser: there is no parser to write into any more -------
-    for (const char* name : {"open", "close", "write", "writeln"}) {
+    // --- Writing into the parser -------------------------------------------------
+    //
+    // `document.write()` from a script the parser is running inserts its text at
+    // the insertion point the parser has reached: the markup is tokenized and
+    // dispatched through the tree builder, and the parse goes on afterwards.
+    // With no parser running there is nothing to write into -- the spec's
+    // "open a new document and write into that" would replace the page under
+    // the script -- so write() there does nothing, as it did before.
+    I.node_method(doc, "write", 0, [](Realm& r, Node& self, Args args) {
+        Document& document = as_document(self);
+        // An XML parser cannot be written into: this much is defined.
+        if (!document.is_html_document()) {
+            throw_dom(r, "InvalidStateError", "Only HTML documents support document.write().");
+        }
+        std::string text;
+        for (const JsValue& argument : args) text += js_to_string(argument);
+        document.parser_write(text);
+        return undefined();
+    });
+    I.node_method(doc, "writeln", 0, [](Realm& r, Node& self, Args args) {
+        Document& document = as_document(self);
+        if (!document.is_html_document()) {
+            throw_dom(r, "InvalidStateError", "Only HTML documents support document.writeln().");
+        }
+        std::string text;
+        for (const JsValue& argument : args) text += js_to_string(argument);
+        document.parser_write(text + "\n");
+        return undefined();
+    });
+    for (const char* name : {"open", "close"}) {
         I.node_method(doc, name, 0, [](Realm& r, Node& self, Args) {
-            // An XML parser cannot be written into: this much is defined.
             if (!as_document(self).is_html_document()) {
                 throw_dom(r, "InvalidStateError", "Only HTML documents support document.write().");
             }

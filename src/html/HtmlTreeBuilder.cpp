@@ -178,6 +178,9 @@ std::shared_ptr<Document> HtmlTreeBuilder::parse(std::string_view html) {
     if (!m_document) m_document = std::make_shared<Document>();
     HtmlTokenizer tokenizer(html);
     m_tokenizer = &tokenizer;
+    // `document.write()` reaches this builder for as long as it is running.
+    const std::shared_ptr<Document> document = m_document;
+    document->set_parser_write([this](std::string_view text) { write_into_parser(text); });
 
     while (true) {
         allow_cdata_in_foreign_content();
@@ -194,7 +197,19 @@ std::shared_ptr<Document> HtmlTreeBuilder::parse(std::string_view html) {
     }
 
     m_tokenizer = nullptr;
+    m_document->set_parser_write(nullptr);
     return m_document;
+}
+
+void HtmlTreeBuilder::write_into_parser(std::string_view text) {
+    if (text.empty()) return;
+    HtmlTokenizer tokenizer(text);
+    while (true) {
+        HtmlToken token = tokenizer.next_token();
+        if (token.type == HtmlTokenType::EndOfFile) break;
+        if (token.type == HtmlTokenType::Character && token.data.empty()) continue;
+        process_token(token);
+    }
 }
 
 std::shared_ptr<Node> HtmlTreeBuilder::parse_fragment(std::string_view html,
@@ -821,6 +836,27 @@ HtmlTreeBuilder::InsertionPlace HtmlTreeBuilder::within_depth_limit(InsertionPla
     return place;
 }
 
+namespace {
+
+/// Whether a document refuses this node. A document has at most one element
+/// child, and no text children at all: those are the DOM's rules, and the
+/// parser does not get to build a tree the DOM would not accept. It happens
+/// when a script the parser ran moved the root away and then put something
+/// else in its place: the insertion point is inside the document, and the
+/// nodes the parser goes on to insert there are dropped, which is what the
+/// browser does -- `scripted_foster01.dat` is the case.
+bool document_refuses(const std::shared_ptr<Node>& parent, const Node* node) {
+    if (!parent || !node || !parent->is_document()) return false;
+    if (node->is_text()) return true;
+    if (!node->is_element()) return false;
+    for (const auto& child : parent->children()) {
+        if (child->is_element()) return true;
+    }
+    return false;
+}
+
+} // namespace
+
 HtmlTreeBuilder::InsertionPlace HtmlTreeBuilder::place_for_new_node() {
     return within_depth_limit(appropriate_place_for_inserting_node());
 }
@@ -828,6 +864,7 @@ HtmlTreeBuilder::InsertionPlace HtmlTreeBuilder::place_for_new_node() {
 void HtmlTreeBuilder::append_node_at(const std::shared_ptr<Node>& node, InsertionPlace place) {
     if (!place.parent) place.parent = m_document;
     if (place.parent == node) return;  // never build a cycle
+    if (document_refuses(place.parent, node.get())) return;
     if (place.before) {
         place.parent->insert_before(node, place.before);
     } else {
@@ -853,6 +890,9 @@ std::shared_ptr<Element> HtmlTreeBuilder::insert_foreign_element(const HtmlToken
 void HtmlTreeBuilder::insert_character(char c) {
     auto place = appropriate_place_for_inserting_node();
     if (!place.parent) place.parent = m_document;
+    // A document has no text children: see document_refuses().
+    std::shared_ptr<Node> as_text = std::make_shared<Text>(std::string(1, c));
+    if (document_refuses(place.parent, as_text.get())) return;
 
     // Merge with a preceding text node, per "insert a character".
     std::shared_ptr<Node> previous;

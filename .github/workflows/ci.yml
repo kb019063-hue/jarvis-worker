@@ -70,6 +70,8 @@ jobs:
         # A web document must not read a marker file by path, file: URL, or
         # relative reference; a file: document keeps local access.
         run: make security-fetch
+      - name: HTTPS rejects untrusted and wrong-identity certificates
+        run: make security-https
       - name: Worker MIME/static-module policy, EventTarget dispatch, and startup/exit stability
         # Verifies WHATWG JavaScript MIME enforcement over HTTP/data:, a static
         # module-worker graph, classic importScripts origin/MIME checks, error

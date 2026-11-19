@@ -33,6 +33,8 @@
 #include <cstdint>
 #include <cstring>
 #include <climits>
+#include <map>
+#include <set>
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/JsBuiltins.hpp"
@@ -1747,6 +1749,320 @@ TEST(bolder_and_lighter_are_relative_to_the_parent) {
     // A number outside the scale is clamped to it, not taken as written.
     assert(resolver.resolve_style(doc->get_element_by_id("big"), nullptr).font_weight == 1000);
     assert(resolver.resolve_style(doc->get_element_by_id("small"), nullptr).font_weight == 1);
+}
+
+namespace {
+
+// A reader for a font's own `kern` table and `cmap`, written out here rather
+// than borrowed from the engine. A test that asks the engine what the font says
+// and then asks the engine whether it listened is not a test: the numbers below
+// come from the file, and the engine has to agree with them.
+struct FontKernProbe {
+    std::string bytes;
+    std::size_t pairs_at = 0;
+    unsigned pair_count = 0;
+    std::size_t cmap4 = 0;
+    unsigned upem = 0;
+    bool has_table = false;
+
+    static unsigned u16(const std::string& b, std::size_t o) {
+        if (o + 2 > b.size()) return 0;
+        return (static_cast<unsigned>(static_cast<unsigned char>(b[o])) << 8) |
+               static_cast<unsigned>(static_cast<unsigned char>(b[o + 1]));
+    }
+    static unsigned u32(const std::string& b, std::size_t o) {
+        return (u16(b, o) << 16) | u16(b, o + 2);
+    }
+    static int i16(const std::string& b, std::size_t o) {
+        const unsigned v = u16(b, o);
+        return v >= 0x8000u ? static_cast<int>(v) - 0x10000 : static_cast<int>(v);
+    }
+
+    std::size_t table(const char* tag) const {
+        if (bytes.size() < 12) return 0;
+        const unsigned count = u16(bytes, 4);
+        for (unsigned i = 0; i < count; ++i) {
+            const std::size_t rec = 12 + 16 * static_cast<std::size_t>(i);
+            if (rec + 16 > bytes.size()) return 0;
+            if (bytes.compare(rec, 4, tag, 4) == 0) return u32(bytes, rec + 8);
+        }
+        return 0;
+    }
+
+    bool open(const std::string& path) {
+        std::ifstream file(path, std::ios::binary);
+        if (!file) return false;
+        bytes.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        if (bytes.size() < 32) return false;
+        const std::size_t head = table("head");
+        upem = head ? u16(bytes, head + 18) : 0;
+
+        const std::size_t cmap = table("cmap");
+        if (cmap) {
+            const unsigned count = u16(bytes, cmap + 2);
+            for (unsigned i = 0; i < count; ++i) {
+                const std::size_t sub = cmap + u32(bytes, cmap + 4 + 8 * static_cast<std::size_t>(i) + 4);
+                if (sub + 2 <= bytes.size() && u16(bytes, sub) == 4) {
+                    cmap4 = sub;
+                    break;
+                }
+            }
+        }
+
+        const std::size_t kern = table("kern");
+        // Version 0, first subtable, format 0 (pair list), horizontal.
+        if (kern && kern + 18 <= bytes.size() && u16(bytes, kern) == 0 && u16(bytes, kern + 2) >= 1) {
+            const unsigned coverage = u16(bytes, kern + 8);
+            if ((coverage >> 8) == 0 && (coverage & 0x1u) != 0) {
+                pair_count = u16(bytes, kern + 10);
+                pairs_at = kern + 18;
+                has_table = pair_count > 0 && pairs_at + 6 * static_cast<std::size_t>(pair_count) <= bytes.size();
+            }
+        }
+        return true;
+    }
+
+    unsigned glyph(unsigned cp) const {   // cmap format 4, which is what these fonts have
+        if (!cmap4) return 0;
+        const unsigned seg_x2 = u16(bytes, cmap4 + 6);
+        const std::size_t ends = cmap4 + 14;
+        const std::size_t starts = ends + seg_x2 + 2;
+        const std::size_t deltas = starts + seg_x2;
+        const std::size_t ranges = deltas + seg_x2;
+        for (unsigned i = 0; i < seg_x2 / 2; ++i) {
+            const unsigned end = u16(bytes, ends + 2 * i);
+            if (cp > end) continue;
+            const unsigned start = u16(bytes, starts + 2 * i);
+            if (cp < start) return 0;
+            const int delta = i16(bytes, deltas + 2 * i);
+            const unsigned range_offset = u16(bytes, ranges + 2 * i);
+            unsigned g = 0;
+            if (range_offset == 0) {
+                g = (cp + static_cast<unsigned>(delta)) & 0xFFFFu;
+            } else {
+                g = u16(bytes, ranges + 2 * i + range_offset + 2 * (cp - start));
+                if (g != 0) g = (g + static_cast<unsigned>(delta)) & 0xFFFFu;
+            }
+            return g;
+        }
+        return 0;
+    }
+
+    bool pair_at(unsigned index, unsigned& left, unsigned& right, int& value) const {
+        if (!has_table || index >= pair_count) return false;
+        const std::size_t rec = pairs_at + 6 * static_cast<std::size_t>(index);
+        left = u16(bytes, rec);
+        right = u16(bytes, rec + 2);
+        value = i16(bytes, rec + 4);
+        return true;
+    }
+
+    int value_for_glyphs(unsigned left, unsigned right) const {
+        if (!has_table) return 0;
+        for (unsigned i = 0; i < pair_count; ++i) {
+            const std::size_t rec = pairs_at + 6 * static_cast<std::size_t>(i);
+            if (u16(bytes, rec) == left && u16(bytes, rec + 2) == right) return i16(bytes, rec + 4);
+        }
+        return 0;
+    }
+
+    int value(uint32_t left, uint32_t right) const {
+        const unsigned lg = glyph(left), rg = glyph(right);
+        if (lg == 0 || rg == 0) return 0;
+        return value_for_glyphs(lg, rg);
+    }
+};
+
+}  // namespace
+
+TEST(kerning_closes_the_pairs_the_table_names) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    if (!fr.has_truetype_font()) return;
+
+    // The same family is named in every call, and the file the oracle reads is
+    // that family's 400/upright face -- so "the file says X" and "the engine
+    // says X" are about one face by construction and not by luck. (They were
+    // luck on this host: its default family and its `sans-serif` happen to be
+    // the same file, and a host where they are not is a different test.)
+    const char* const kFamily = "sans-serif";
+    FontKernProbe probe;
+    const std::string path = fr.face_path(kFamily);
+    if (path.empty() || !probe.open(path)) {
+        std::printf("      [kern] no face file to read at '%s'\n", path.c_str());
+        std::fflush(stdout);
+        return;
+    }
+    std::printf("      [kern] %s: %u pairs in the `kern` table, %u units per em\n",
+                path.c_str(), probe.has_table ? probe.pair_count : 0u, probe.upem);
+    std::fflush(stdout);
+    if (!probe.has_table) return;   // this host's face does not kern; nothing to check
+
+    // The engine must find the table the file has, and must not be answering
+    // "no" for a font that says yes.
+    assert(fr.font_kerning(kFamily));
+
+    // The pairs are taken from the file where possible: every pair it names
+    // between two printable ASCII characters, up to a bound, so that a font
+    // with different opinions than DejaVu Sans is checked against its own
+    // opinions rather than against this host's.
+    std::map<unsigned, char> char_for_glyph;
+    for (unsigned c = 32; c < 127; ++c) {
+        const unsigned g = probe.glyph(c);
+        if (g != 0) char_for_glyph[g] = static_cast<char>(c);
+    }
+    std::vector<std::string> pairs = {"AV", "VA", "To", "LT", "AT", "Wo", "Ty", "rn", "AA", "LA", "o-"};
+    std::set<std::string> have(pairs.begin(), pairs.end());
+    unsigned from_file = 0;
+    for (unsigned i = 0; i < probe.pair_count && pairs.size() < 80; ++i) {
+        unsigned left_glyph = 0, right_glyph = 0;
+        int value = 0;
+        if (!probe.pair_at(i, left_glyph, right_glyph, value)) break;
+        const auto l = char_for_glyph.find(left_glyph);
+        const auto r = char_for_glyph.find(right_glyph);
+        if (l == char_for_glyph.end() || r == char_for_glyph.end()) continue;
+        std::string pair(1, l->second);
+        pair += r->second;
+        if (have.insert(pair).second) {
+            pairs.push_back(pair);
+            ++from_file;
+        }
+    }
+    std::printf("      [kern] %zu pairs to check, %u of them taken from the file\n", pairs.size(), from_file);
+    std::fflush(stdout);
+    if (from_file == 0) return;   // the table names no pair this can write as text
+
+    constexpr float kSize = 100.0f;
+    int named = 0, file_positive = 0;
+    float most_closed = 0.0f;
+    float most_opened = 0.0f;
+    for (const std::string& pair : pairs) {
+        const auto left = static_cast<uint32_t>(static_cast<unsigned char>(pair[0]));
+        const auto right = static_cast<uint32_t>(static_cast<unsigned char>(pair[1]));
+        const int units = probe.value(left, right);
+        const float expected = static_cast<float>(units) * kSize / static_cast<float>(probe.upem);
+        const float kern = fr.kerning_px(left, right, kSize, 400, kFamily);
+        const float advance_sum = fr.glyph_advance_px(left, kSize, 400, kFamily) +
+                                  fr.glyph_advance_px(right, kSize, 400, kFamily);
+        const float measured = fr.measure_text(pair, kSize, 400, kFamily);
+        if (units != 0) {
+            ++named;
+            if (units > 0) ++file_positive;
+            if (kern < most_closed) most_closed = kern;
+            if (kern > most_opened) most_opened = kern;
+        }
+        if (std::fabs(kern - expected) > 0.01f || std::fabs(measured - (advance_sum + kern)) > 0.01f) {
+            std::printf("      [kern] %s: file %d units -> %.3f px, engine %.3f; measured %.3f vs %.3f\n",
+                        pair.c_str(), units, expected, kern, measured, advance_sum + kern);
+        }
+        // The file says one thing, `kerning_px` says the same thing at this
+        // size, and `measure_text` counts it exactly once.
+        assert(std::fabs(kern - expected) < 0.01f);
+        assert(std::fabs(measured - (advance_sum + kern)) < 0.01f);
+    }
+    std::printf("      [kern] %d named by the file (%d of them positive), most closed by %.3f px, "
+                "most opened by %.3f px, at 100 px\n",
+                named, file_positive, most_closed, most_opened);
+    std::fflush(stdout);
+    assert(named > 0);                  // the table is actually being read
+    assert(most_closed < 0.0f);         // closing is a negative adjustment
+    // A table also *opens* pairs up -- `AA` is +57 units in DejaVu Sans -- so
+    // where the file names a positive pair, the engine's answer is positive too
+    // and nothing here may have assumed that kerning only ever tightens.
+    if (file_positive > 0) assert(most_opened > 0.0f);
+}
+
+TEST(a_face_without_a_kern_table_is_not_kerned) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    // The vendored Ahem has no `kern` table. Every advance in it is exactly
+    // 1 em, so two characters at 100 px are 200 px and a third of a pixel of
+    // invented kerning would show.
+    const int ahem = fr.register_font_file("tests/wpt/fonts/Ahem.ttf");
+    if (ahem == FontRenderer::kNoFamily) return;
+
+    FontKernProbe probe;
+    const std::string path = fr.face_path("Ahem");
+    if (!path.empty() && probe.open(path)) {
+        // The premise of the test, read from the file: no pairs to close.
+        std::printf("      [kern] %s: %u pairs\n", path.c_str(), probe.has_table ? probe.pair_count : 0u);
+        std::fflush(stdout);
+        assert(!probe.has_table);
+    }
+
+    assert(!fr.font_kerning("Ahem"));
+    assert(fr.kerning_px('A', 'V', 100.0f, 400, "Ahem") == 0.0f);
+    const float pair = fr.measure_text("AV", 100.0f, 400, "Ahem");
+    std::printf("      [kern] Ahem 'AV' at 100 px = %.3f\n", pair);
+    std::fflush(stdout);
+    assert(std::fabs(pair - 200.0f) < 0.01f);
+
+    // A face that does have a table is a separate question, and the answer is
+    // read from that face's file: where the file closes `AV`, the same two
+    // characters do not measure the sum of their advances.
+    FontKernProbe other;
+    const std::string other_path = fr.face_path("sans-serif");
+    if (!other_path.empty() && other.open(other_path) && other.value('A', 'V') < 0) {
+        const float kerned = fr.measure_text("AV", 100.0f, 400, "sans-serif");
+        const float advances = fr.glyph_advance_px('A', 100.0f, 400, "sans-serif") +
+                               fr.glyph_advance_px('V', 100.0f, 400, "sans-serif");
+        std::printf("      [kern] 'sans-serif' 'AV' at 100 px = %.3f, advances sum to %.3f\n", kerned, advances);
+        std::fflush(stdout);
+        assert(kerned < advances);
+    }
+}
+
+TEST(the_painter_closes_the_same_pairs_the_measurer_counted) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    const char* const kFamily = "sans-serif";
+    if (!fr.has_truetype_font() || !fr.font_kerning(kFamily)) return;
+
+    constexpr float kSize = 200.0f;
+    const float kern = fr.kerning_px('A', 'V', kSize, 400, kFamily);
+    if (std::fabs(kern) < 1.5f) return;   // no room in a pixel grid to see it
+
+    struct Extent {
+        int left = INT_MAX;
+        int right = INT_MIN;
+    };
+    const auto draw = [&fr, kFamily](float x, const char* text, Extent& where) {
+        fr.draw_text(x, 10.0f, text, kSize, 400,
+                     [&where](int px, int, uint8_t) {
+                         where.left = std::min(where.left, px);
+                         where.right = std::max(where.right, px);
+                     },
+                     kFamily, false);
+    };
+
+    // Three copies of the same two glyphs: drawn as the engine sees them, drawn
+    // by hand at the kerned positions, and drawn by hand at the unkerned ones.
+    Extent pair_drawn, by_hand_kerned, by_hand_loose;
+    draw(50.0f, "AV", pair_drawn);
+    const float advance_a = fr.glyph_advance_px('A', kSize, 400, kFamily);
+    draw(50.0f, "A", by_hand_kerned);
+    draw(50.0f + advance_a + kern, "V", by_hand_kerned);
+    draw(50.0f, "A", by_hand_loose);
+    draw(50.0f + advance_a, "V", by_hand_loose);
+
+    const int shift = by_hand_loose.right - pair_drawn.right;
+    std::printf("      [kern] 'AV' at 200 px: kern %.2f, hand-kerned [%d..%d], engine [%d..%d], "
+                "unkerned [%d..%d]\n",
+                kern, by_hand_kerned.left, by_hand_kerned.right, pair_drawn.left, pair_drawn.right,
+                by_hand_loose.left, by_hand_loose.right);
+    std::fflush(stdout);
+
+    // The engine's "AV" is the two glyphs at the positions the measurer said
+    // they would be at -- not merely close to them.
+    assert(pair_drawn.left == by_hand_kerned.left);
+    assert(pair_drawn.right == by_hand_kerned.right);
+    // ...and it is the kerned placement, not the unkerned one: the pair is
+    // drawn closer by what `kerning_px` reported, to the pixel.
+    assert(pair_drawn.right < by_hand_loose.right);
+    assert(std::abs(shift - static_cast<int>(std::lround(-kern))) <= 1);
 }
 
 TEST(inline_formatting_context) {
@@ -11522,7 +11838,12 @@ TEST(cssom_sheets_rules_insert_amounts_and_fonts) {
         function name(f) { try { f(); return 'no throw'; } catch (e) { return e.name; } }
         ok('an unclosed block', name(function () { sheet.insertRule('a {', 0); }), 'SyntaxError');
         ok('not a rule', name(function () { sheet.insertRule('}', 0); }), 'SyntaxError');
-        ok('an at-rule', name(function () { sheet.insertRule('@media print { a {} }', 0); }), 'SyntaxError');
+        // An `@media` rule is a rule of the sheet since Phase 84, and a sheet
+        // holds one like any other rule (see the last suite of this phase).
+        var atRule = name(function () { return sheet.insertRule('@media print { a {} }', 0); });
+        ok('an at-rule is a media rule now', atRule, 'no throw');
+        ok('and it went in at the index it was given', sheet.cssRules[0].type, CSSRule.MEDIA_RULE);
+        sheet.deleteRule(0);
         ok('two blocks', name(function () { sheet.insertRule('a { } b { }', 0); }), 'SyntaxError');
         ok('an index past the end', name(function () { sheet.insertRule('a {}', 99); }), 'IndexSizeError');
         ok('deleting what is not there', name(function () { sheet.deleteRule(99); }), 'IndexSizeError');
@@ -11582,6 +11903,310 @@ TEST(cssom_sheets_rules_insert_amounts_and_fonts) {
     // off it run, which is all the two grid tests of the WPT suite need.
     js.eval("document.fonts.ready.then(function (set) { document.fonts.answered = (set === document.fonts); });");
     assert(js.eval("document.fonts.answered").to_string() == "true");
+}
+
+TEST(cssom_media_rules_and_the_cascade_inside_them) {
+    using namespace litebird;
+    // Phase 84. A stylesheet's `@media` block was not a rule of the sheet: the
+    // rules inside it were flattened into the sheet when a script read it,
+    // every query that did not contain the word "print" applied, and
+    // `insertRule('@media …')` was a `SyntaxError`. Now the block is a
+    // `CSSMediaRule` with its own rules and its own `MediaList`, and the query
+    // is asked where the cascade reads it — against the window the page is in
+    // (1024x768, a light screen with a mouse), which is what `matchMedia` and
+    // `innerWidth` already answered with.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><html><head><style>"
+        "#target { color: red }"
+        "@media screen and (min-width: 600px) { #target { color: green } }"
+        "@media (max-width: 300px) { #target { color: orange } }"
+        "@media print { #target { color: blue } }"
+        "@media (prefers-color-scheme: dark) { #target { background-color: black } }"
+        "@media screen, print { .never { border-top-width: 7px } }"
+        "</style></head><body><div id=\"target\">x</div></body></html>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function name(f) { try { f(); return 'no throw'; } catch (e) { return e.name; } }
+
+        var sheet = document.querySelector('style').sheet;
+        var target = document.getElementById('target');
+
+        // The block is a rule of the sheet, and the rules inside it are its
+        // own: not the sheet's.
+        ok('the sheet holds six rules', sheet.cssRules.length, 6);
+        var media = sheet.cssRules[1];
+        ok('a media rule is a CSSRule', media instanceof CSSRule, true);
+        ok('and a CSSMediaRule', media instanceof CSSMediaRule, true);
+        ok('not a style rule', media instanceof CSSStyleRule, false);
+        ok('its brand', Object.prototype.toString.call(media), '[object CSSMediaRule]');
+        ok('its type', media.type, CSSRule.MEDIA_RULE);
+        ok('the constant through the subclass', CSSMediaRule.MEDIA_RULE, 4);
+        ok('the rules it holds', media.cssRules.length, 1);
+        ok('the rule inside', media.cssRules[0].selectorText, '#target');
+        ok('and it is a style rule', media.cssRules[0] instanceof CSSStyleRule, true);
+        ok('its parent rule', media.cssRules[0].parentRule === media, true);
+        ok('its parent sheet', media.cssRules[0].parentStyleSheet === sheet, true);
+        ok('the top of the sheet has no parent rule', sheet.cssRules[0].parentRule, null);
+        ok('one object per rule', media.cssRules.item(0) === media.cssRules[0], true);
+
+        // The query, as a `MediaList`.
+        ok('mediaText', media.media.mediaText, 'screen and (min-width: 600px)');
+        ok('its brand', Object.prototype.toString.call(media.media), '[object MediaList]');
+        ok('instanceof', media.media instanceof MediaList, true);
+        ok('one alternative', media.media.length, 1);
+        ok('item(0)', media.media.item(0), 'screen and (min-width: 600px)');
+        ok('item past the end', media.media.item(1), null);
+        ok('the indexed getter', media.media[0], 'screen and (min-width: 600px)');
+        ok('a list of two', sheet.cssRules[4].media.length, 1);
+        ok('the second of the list', sheet.cssRules[5].media.mediaText, 'screen, print');
+
+        // The cascade asks each query. The window is 1024x768 and light, so
+        // the first block applies — and comes after `#target { color: red }`
+        // — and the others do not.
+        ok('the query that matches decides the colour', getComputedStyle(target).color, 'rgb(0, 128, 0)');
+        ok('a width too small does not match', getComputedStyle(target).color, 'rgb(0, 128, 0)');
+        ok('print does not apply', sheet.cssRules[3].media.mediaText, 'print');
+        ok('a dark scheme is not this window', getComputedStyle(target).backgroundColor, 'rgba(0, 0, 0, 0)');
+        ok('a media rule with no rules of its own changes nothing',
+           getComputedStyle(document.querySelector('.never') || target).borderTopWidth, '0px');
+
+        // `cssText` writes the block and the rules in it.
+        ok('cssText', media.cssText, '@media screen and (min-width: 600px) { #target { color: green; } }');
+        ok('the rule inside writes its own', media.cssRules[0].cssText, '#target { color: green; }');
+
+        // A script inserts one, and it styles the page from where it is put.
+        ok('insertRule takes a media rule',
+           sheet.insertRule('@media (min-width: 1px) { #target { color: purple } }', sheet.cssRules.length), 6);
+        ok('the inserted block applies', getComputedStyle(target).color, 'rgb(128, 0, 128)');
+        ok('and it is the sixth rule', sheet.cssRules[6].type, CSSRule.MEDIA_RULE);
+        ok('the rules of the inserted one', sheet.cssRules[6].cssRules.length, 1);
+        sheet.deleteRule(6);
+        ok('out again', getComputedStyle(target).color, 'rgb(0, 128, 0)');
+        ok('and the sheet is back to six', sheet.cssRules.length, 6);
+
+        // The rules of a media rule take an insert of their own, and it is the
+        // same word the cascade reads.
+        ok('insertRule on the media rule', media.insertRule('#target { font-size: 20px }'), 0);
+        ok('the rule inside it', media.cssRules.length, 2);
+        ok('and it applies', getComputedStyle(target).fontSize, '20px');
+        ok('the style rule it made', media.cssRules[0].selectorText, '#target');
+        ok('deleting it', name(function () { media.deleteRule(0); }), 'no throw');
+        ok('gone from the rule', media.cssRules.length, 1);
+        ok('and from the page', getComputedStyle(target).fontSize, '16px');
+        ok('an index past the end', name(function () { media.deleteRule(9); }), 'IndexSizeError');
+        ok('not a rule at all', name(function () { media.insertRule('a {'); }), 'SyntaxError');
+
+        // `MediaList` writes the query back, and what it writes is asked.
+        media.media.appendMedium('print');
+        ok('appended', media.media.mediaText, 'screen and (min-width: 600px), print');
+        ok('two alternatives now', media.media.length, 2);
+        ok('the second one', media.media.item(1), 'print');
+        media.media.appendMedium('print');
+        ok('appending what is there changes nothing', media.media.mediaText, 'screen and (min-width: 600px), print');
+        media.media.deleteMedium('print');
+        ok('deleted', media.media.mediaText, 'screen and (min-width: 600px)');
+        ok('deleting what is not there', name(function () { media.media.deleteMedium('tv'); }), 'NotFoundError');
+        media.media.mediaText = '(max-width: 300px)';
+        ok('written back', media.media.mediaText, '(max-width: 300px)');
+        ok('and asked: 1024 is not at most 300', getComputedStyle(target).color, 'rgb(255, 0, 0)');
+        media.media.mediaText = 'screen and (min-width: 600px)';
+        ok('and asked again', getComputedStyle(target).color, 'rgb(0, 128, 0)');
+
+        // A removed block is the block it was: its query, and the rules in it.
+        var held = sheet.cssRules[1];
+        sheet.deleteRule(1);
+        ok('removed from the sheet', sheet.cssRules.length, 5);
+        ok('the rule it was still reads its query', held.media.mediaText, 'screen and (min-width: 600px)');
+        ok('and its rules', held.cssRules.length, 1);
+        ok('out of the cascade', getComputedStyle(target).color, 'rgb(255, 0, 0)');
+        sheet.insertRule('@media screen and (min-width: 600px) { #target { color: green } }', 1);
+        ok('a new one, and it applies', getComputedStyle(target).color, 'rgb(0, 128, 0)');
+
+        // A `@media` block inside a `@media` block is a rule inside a rule.
+        sheet.insertRule('@media screen { @media (min-width: 1px) { #target { letter-spacing: 3px } } }', 0);
+        ok('nested', sheet.cssRules[0].cssRules[0].type, CSSRule.MEDIA_RULE);
+        ok('the rule in the nested one', sheet.cssRules[0].cssRules[0].cssRules[0].selectorText, '#target');
+        ok('and it applies', getComputedStyle(target).letterSpacing, '3px');
+        ok('the parent of the nested rule', sheet.cssRules[0].cssRules[0].parentRule === sheet.cssRules[0], true);
+        sheet.deleteRule(0);
+
+        // What is not a rule is a syntax error, at either level.
+        ok('an empty query', name(function () { sheet.insertRule('@media { a { color: red } }', 0); }), 'SyntaxError');
+        ok('no block', name(function () { sheet.insertRule('@media screen', 0); }), 'SyntaxError');
+        ok('a block and then another', name(function () { sheet.insertRule('@media screen { a {} } b {}', 0); }), 'SyntaxError');
+        ok('an at-rule this engine does not hold', name(function () { sheet.insertRule('@supports (display: grid) { a {} }', 0); }), 'SyntaxError');
+
+        // The text of a `<style>` element is the sheet's rules, the blocks too.
+        var made = document.createElement('style');
+        made.textContent = '@media (min-width: 1px) { #target { color: teal } }';
+        document.head.appendChild(made);
+        ok('read from the text', made.sheet.cssRules.length, 1);
+        ok('a media rule', made.sheet.cssRules[0].type, CSSRule.MEDIA_RULE);
+        ok('and it styles the page', getComputedStyle(target).color, 'rgb(0, 128, 128)');
+        made.textContent = '#target { color: olive }';
+        ok('a new text, no blocks', made.sheet.cssRules.length, 1);
+        ok('and the colour', getComputedStyle(target).color, 'rgb(128, 128, 0)');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
+TEST(array_holes_are_not_elements) {
+    using namespace litebird;
+    // Phase 81. `delete a[1]` used to leave an element whose value was
+    // `undefined`: `1 in a` stayed true, `Object.keys` listed it, `forEach`
+    // called the callback for it and `new Array(3)` was three such elements.
+    // The standard has holes — an index that is not an own property at all,
+    // read as `undefined` and skipped by everything that walks the own keys.
+    // ARCHITECTURE.md listed this as missing since Phase 23.
+    //
+    // Every assertion is a comparison made in the page, and the whole set was
+    // run through this engine and through Node.js first: the same text, the
+    // same 38 lines. Where they must differ it is said so in a comment.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><html><body><p id=t>x</p></body></html>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        // `delete` is one of the four ways to make a hole.
+        function holed() { var a = [1, 2, 3]; delete a[1]; return a; }
+
+        ok('a delete leaves a hole', 1 in holed(), false);
+        ok('the length does not move', holed().length, 3);
+        ok('the index reads undefined', holed()[1], undefined);
+        ok('hasOwnProperty', holed().hasOwnProperty(1), false);
+        ok('Object.keys leaves it out', Object.keys(holed()).join(), '0,2');
+        ok('getOwnPropertyNames', Object.getOwnPropertyNames(holed()).join(), '0,2,length');
+        ok('getOwnPropertyDescriptor is undefined', Object.getOwnPropertyDescriptor(holed(), '1') === undefined, true);
+        ok('Object.values', Object.values(holed()).join(), '1,3');
+        ok('join writes it empty', holed().join('-'), '1--3');
+        ok('toString writes it empty', String(holed()), '1,,3');
+        ok('JSON has no way to leave it out', JSON.stringify(holed()), '[1,null,3]');
+
+        var seen = [];
+        holed().forEach(function (v, i) { seen.push(i); });
+        ok('forEach skips it', seen.join(), '0,2');
+        var mapped = holed().map(function (v) { return v * 2; });
+        ok('map keeps it a hole', 1 in mapped, false);
+        ok('map keeps the length', mapped.length, 3);
+        ok('filter drops it', holed().filter(function () { return true; }).join(), '1,3');
+        ok('some', holed().some(function () { return true; }), true);
+        ok('every skips it', holed().every(function () { return false; }), false);
+        ok('find', holed().find(function () { return true; }), 1);
+        ok('findIndex', holed().findIndex(function () { return true; }), 0);
+        var reduced = [];
+        holed().reduce(function (acc, v, i) { reduced.push(i); return acc; }, 0);
+        ok('reduce skips it', reduced.join(), '0,2');
+        // Without a seed, reduce starts at the first element there is.
+        var head = [1, 2, 3]; delete head[0];
+        ok('reduce seeds from the first element', head.reduce(function (x, y) { return x + y; }), 5);
+        var allHoles = new Array(3);
+        ok('reduce of all holes throws', (function () { try { allHoles.reduce(function () {}); return 'no'; } catch (e) { return e.name; } })(), 'TypeError');
+        ok('every of all holes is true', new Array(3).every(function () { return false; }), true);
+
+        // indexOf asks for the property and so steps over the hole; includes
+        // reads the place and so finds `undefined` there.
+        var undef = [undefined, 2]; delete undef[0];
+        ok('indexOf skips it', undef.indexOf(undefined), -1);
+        ok('lastIndexOf skips it', undef.lastIndexOf(undefined), -1);
+        ok('includes reads it as undefined', undef.includes(undefined), true);
+
+        var sliced = holed().slice();
+        ok('slice keeps it', 1 in sliced, false);
+        var spliced = holed().splice(0, 3);
+        ok('splice hands it back', 1 in spliced, false);
+        var joined = holed().concat([4]);
+        ok('concat keeps it', 1 in joined, false);
+        ok('and appends past it', joined.length, 4);
+        ok('and the element after it', joined[3], 4);
+
+        var sorted = [3, 2, 1]; delete sorted[1]; sorted.sort();
+        ok('sort moves it to the end', sorted.join(), '1,3,');
+        ok('and it is still a hole', 2 in sorted, false);
+        var reversed = holed(); reversed.reverse();
+        ok('reverse carries it along', 1 in reversed, false);
+        var filled = holed(); filled.fill(0);
+        ok('fill writes it in', 1 in filled, true);
+        ok('so it reads', filled[1], 0);
+        var copied = holed(); copied.copyWithin(2, 1, 2);
+        ok('copyWithin copies it', 2 in copied, false);
+
+        var made = new Array(3);
+        ok('new Array(3) is three holes', Object.keys(made).length, 0);
+        ok('and so `in` says', 0 in made, false);
+        ok('but the length is there', made.length, 3);
+        ok('and join writes them empty', made.join(','), ',,');
+        made[1] = 1;
+        ok('writing one makes an element', Object.keys(made).join(), '1');
+
+        var grown = [1]; grown.length = 3;
+        ok('a grown length leaves holes', 2 in grown, false);
+        var shrunk = [1, 2, 3]; shrunk.length = 1;
+        ok('a shrunk one drops them', shrunk.length, 1);
+        var written = holed(); written[1] = undefined;
+        ok('writing undefined makes an element', 1 in written, true);
+
+        // The iterator reads every place, so a hole is handed on as undefined:
+        // spread, Array.from and for-of all turn it into an element.
+        ok('spread turns it into undefined', 1 in [...holed()], true);
+        ok('Array.from too', 1 in Array.from(holed()), true);
+        var iterated = [];
+        for (var v of holed()) iterated.push(v === undefined ? 'u' : v);
+        ok('for-of yields undefined', iterated.join(), '1,u,3');
+        ok('entries reads it', holed().entries().next().value.join(), '0,1');
+
+        var structured = structuredClone(holed());
+        ok('structuredClone keeps it', 1 in structured, false);
+        ok('with the same length', structured.length, 3);
+
+        var pushed = holed(); pushed.push(4);
+        ok('a push after a hole', 3 in pushed, true);
+        ok('leaves the hole', 1 in pushed, false);
+        var popped = [1, 2]; delete popped[1];
+        ok('pop of a hole is undefined', popped.pop(), undefined);
+        var shifted = [1, 2]; delete shifted[0];
+        ok('shift of a hole is undefined', shifted.shift(), undefined);
+        ok('and the array is shorter', shifted.length, 1);
+        ok('with the element that was after it', shifted[0], 2);
+        ok('delete past the end is true', (function () { var a = [1]; return delete a[5]; })(), true);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+
+    // An array *literal* with an elision makes a hole too: the evaluator marks
+    // the place it skipped. (That line is in JsEval.cpp, which was open pull
+    // request #103's file when this phase began; it merged before this one.)
+    js.eval(R"JS(
+        var literal = [1, , 3];
+        ok('a literal elision is a hole', 1 in literal, false);
+        ok('and the literal has three places', literal.length, 3);
+        ok('a trailing comma is not one', 2 in [1, 2, 3,], true);
+        ok('[,] is one hole', [ , ].length, 1);
+        ok('so is [, ,]', 1 in [, ,], false);
+        ok('a spread before one shifts it', 2 in [...[1, 2], , 4], false);
+        ok('a spread after one leaves it', 1 in [1, , ...[2, 3]], false);
+
+        // JSON has no way to say "hole", so what an array with one writes is
+        // an element again when it is read back.
+        var fromJson = JSON.parse(JSON.stringify([1, , 3]));
+        ok('JSON.parse makes elements', 1 in fromJson, true);
+        ok('and the value is null', fromJson[1], null);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
 }
 
 TEST(html5_date_time_inputs_validation_and_stepping) {
@@ -18352,6 +18977,105 @@ TEST(js_map_set_constructors_dispatch_to_instance_methods) {
     )js").to_string() == "TypeError|1");
 }
 
+TEST(js_iterators_are_kinds_with_prototypes) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    JsIntrinsics* previous_realm = &JsIntrinsics::get();
+    JsIntrinsics::set_current(&js.intrinsics());
+    struct Restore { JsIntrinsics* p; ~Restore() { JsIntrinsics::set_current(p); } } restore{previous_realm};
+
+    // One function object under each name a script may read it by: the
+    // language makes `Map.prototype[Symbol.iterator]` the entries method, not
+    // a second method that iterates the same way, and `Set`'s `keys` the
+    // values method.
+    assert(text("Array.prototype[Symbol.iterator] === Array.prototype.values") == "true");
+    assert(text("Array.prototype[Symbol.iterator].name") == "values");
+    assert(text("Map.prototype[Symbol.iterator] === Map.prototype.entries") == "true");
+    assert(text("Map.prototype[Symbol.iterator].name") == "entries");
+    assert(text("Set.prototype[Symbol.iterator] === Set.prototype.values") == "true");
+    assert(text("Set.prototype.keys === Set.prototype.values") == "true");
+    assert(text("Set.prototype.keys.name") == "values");
+    assert(text("String.prototype[Symbol.iterator] === String.prototype.toString") == "false");
+    assert(text("String.prototype[Symbol.iterator].name") == "[Symbol.iterator]");
+
+    // `next` is the prototype's, not the iterator's, and the kind decides
+    // which prototype: an array's `keys()` and `values()` share one, a Map's
+    // another.
+    assert(text("Object.prototype.hasOwnProperty.call([][Symbol.iterator](), 'next')") == "false");
+    assert(text("typeof Object.getPrototypeOf([][Symbol.iterator]()).next") == "function");
+    assert(text("Object.getPrototypeOf([][Symbol.iterator]()) === Object.getPrototypeOf([].keys())") == "true");
+    assert(text("Object.getPrototypeOf([][Symbol.iterator]()) === Object.getPrototypeOf(new Map().keys())") == "false");
+    assert(text("Object.getPrototypeOf(new Set().values()) === Object.getPrototypeOf(new Set().entries())") == "true");
+    assert(text("Object.getPrototypeOf(Object.getPrototypeOf([][Symbol.iterator]())) === "
+                "Object.getPrototypeOf(Object.getPrototypeOf(new Map().keys()))") == "true");
+
+    // Every kind names itself, and `next` on the wrong receiver throws where
+    // the language says a prototype method does.
+    assert(text("Object.prototype.toString.call([][Symbol.iterator]())") == "[object Array Iterator]");
+    assert(text("Object.prototype.toString.call(new Map().keys())") == "[object Map Iterator]");
+    assert(text("Object.prototype.toString.call(new Set().values())") == "[object Set Iterator]");
+    assert(text("Object.prototype.toString.call('ab'[Symbol.iterator]())") == "[object String Iterator]");
+    assert(text("(function () { try { return Object.getPrototypeOf([][Symbol.iterator]()).next.call({}); }"
+                " catch (e) { return e.name; } })()") == "TypeError");
+
+    // The prototype's `next` is script's to replace, and a loop must then call
+    // it: the direct read of an array's elements is only taken while the
+    // function install() wrote is still there. Six calls are `[...[1, 2, 3]]`
+    // (three values and the step that says done) and `for (x of [1])` (one and
+    // done), which a loop that read the elements would never make.
+    assert(text("var it = [][Symbol.iterator](); var proto = Object.getPrototypeOf(it);"
+                "var original = proto.next, calls = 0;"
+                "proto.next = function () { calls++; return original.call(this); };"
+                "var s = [...[1, 2, 3]]; for (var x of [1]) {}"
+                "var seen = [proto.next === original, calls]; proto.next = original; seen.join()") == "false,6");
+    assert(text("s.join()") == "1,2,3");
+    // Restored: the direct path is taken again.
+    assert(text("var p2 = Object.getPrototypeOf([][Symbol.iterator]()); p2.next.name") == "next");
+
+    // The C++ side agrees: a replaced `next` is what makes the fast path
+    // unsafe, and the values it yields are the ones the loop sees.
+    JsValue array = js.eval("var plain = [1, 2, 3]; plain");
+    assert(js_iterates_as_builtin(array));
+    assert(js_iterates_as_builtin(JsValue::make_string("abc")));
+    js.eval("var saved = Object.getPrototypeOf([][Symbol.iterator]()).next;"
+            "Object.getPrototypeOf([][Symbol.iterator]()).next = function () {"
+            "  return { value: 9, done: false }; };");
+    assert(!js_iterates_as_builtin(array));
+    // Only the kind whose prototype was touched: a string still reads its code
+    // points directly, because %StringIteratorPrototype% is another object.
+    assert(js_iterates_as_builtin(JsValue::make_string("abc")));
+    std::vector<JsValue> seen;
+    js_iterate(array, [&](const JsValue& item) {
+        seen.push_back(item);
+        return seen.size() < 2;
+    });
+    assert(seen.size() == 2 && seen[0].to_string() == "9" && seen[1].to_string() == "9");
+    js.eval("Object.getPrototypeOf([][Symbol.iterator]()).next = saved;");
+    assert(js_iterates_as_builtin(array));
+
+    // The same question for a string, whose iterator has a prototype of its own.
+    js.eval("var saved_string_next = Object.getPrototypeOf('ab'[Symbol.iterator]()).next;"
+            "Object.getPrototypeOf('ab'[Symbol.iterator]()).next = function () {"
+            "  return { value: 'z', done: false }; };");
+    assert(!js_iterates_as_builtin(JsValue::make_string("abc")));
+    assert(js_iterates_as_builtin(array));
+    seen.clear();
+    js_iterate(JsValue::make_string("abc"), [&](const JsValue& item) {
+        seen.push_back(item);
+        return seen.size() < 2;
+    });
+    assert(seen.size() == 2 && seen[0].to_string() == "z" && seen[1].to_string() == "z");
+    js.eval("Object.getPrototypeOf('ab'[Symbol.iterator]()).next = saved_string_next;");
+    assert(js_iterates_as_builtin(JsValue::make_string("abc")));
+
+    // The Map and Set iterators still read their collections, in order.
+    assert(text("[...new Map([[1, 'a'], [2, 'b']])].join('|')") == "1,a|2,b");
+    assert(text("[...new Set([3, 3, 4])].join()") == "3,4");
+    assert(text("[...new Map([[1, 'a']]).keys()].join()") == "1");
+}
+
 TEST(js_iteration_of_another_realms_array) {
     using namespace litebird;
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
@@ -19916,6 +20640,9 @@ int main() {
     RUN_TEST(a_face_weight_comes_from_the_font_not_its_name);
     RUN_TEST(font_weight_matching_follows_the_css_order);
     RUN_TEST(bolder_and_lighter_are_relative_to_the_parent);
+    RUN_TEST(kerning_closes_the_pairs_the_table_names);
+    RUN_TEST(a_face_without_a_kern_table_is_not_kerned);
+    RUN_TEST(the_painter_closes_the_same_pairs_the_measurer_counted);
     RUN_TEST(garbage_collector_and_cycles);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);
@@ -20168,12 +20895,19 @@ int main() {
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
     RUN_TEST(js_iteration_of_another_realms_array);
 
+    // Phase 92: an iterator is a kind with a prototype a script can reach.
+    RUN_TEST(js_iterators_are_kinds_with_prototypes);
+
     // Phase 75: Map/Set constructor dispatch through set/add.
     RUN_TEST(js_map_set_constructors_dispatch_to_instance_methods);
 
     // Phase 72: the CSS Object Model — CSSStyleSheet, CSSRule, CSSRuleList,
     // rule.style, insertRule/deleteRule, and document.fonts.
     RUN_TEST(cssom_sheets_rules_insert_amounts_and_fonts);
+    RUN_TEST(cssom_media_rules_and_the_cascade_inside_them);
+
+    // Phase 81: an index of an array is either an element or a hole.
+    RUN_TEST(array_holes_are_not_elements);
 
     // Per-glyph font fallback: a codepoint the primary face does not cover is
     // drawn from another face instead of painting nothing.

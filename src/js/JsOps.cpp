@@ -1048,7 +1048,11 @@ private:
 
         if (array) {
             m_out.nodes[index].elements.reserve(cell->array_elements.size());
-            for (const JsValue& element : cell->array_elements) {
+            for (std::size_t i = 0; i < cell->array_elements.size(); ++i) {
+                // A hole is written as the undefined it reads as; the receiver
+                // of a message keeps it a hole because `undefined` and a hole
+                // are the same thing to a clone that has no descriptor.
+                JsValue element = value.array_element(i);
                 std::size_t child = 0;
                 if (!write(element, child)) return false;
                 m_out.nodes[index].elements.push_back(child);
@@ -1149,7 +1153,9 @@ const std::string& iterator_name() {
 /// iterator reads it the same way.
 void visit_elements(const JsValue& array, const std::function<bool(const JsValue&)>& visit) {
     for (size_t i = 0; i < array.object_val->array_elements.size(); ++i) {
-        JsValue item = array.object_val->array_elements[i];
+        // The array iterator reads every place, so a hole is yielded as
+        // `undefined`: `[...a]` and `for (x of a)` see an element there.
+        JsValue item = array.array_element(i);
         if (!visit(item)) return;
     }
 }
@@ -1234,13 +1240,30 @@ bool holds_installed_method(const JsObject* proto, const JsValue& installed) {
            it->second.is_function() && it->second.identity() == installed.identity();
 }
 
+/// Whether `proto` still holds the `next` install() put there. An iterator's
+/// `next` is a property of its prototype now, so a script can replace it; a
+/// replaced `next` is a function that has to be called once for each step, and
+/// never is by a loop that reads the elements directly.
+bool holds_installed_next(const JsObject* proto, const JsValue& installed) {
+    if (proto->exotic || proto->has_legacy_getters || !installed.is_function()) return false;
+    auto it = proto->properties.find("next");
+    return it != proto->properties.end() && !(it->flags & PropertyMap::Accessor) &&
+           it->second.is_function() && it->second.identity() == installed.identity();
+}
+
 /// The second question, for a value the first one could not answer without
 /// running script: `method` is what the lookup found for it.
 bool method_is_installed(const JsValue& value, const JsValue& method) {
     if (!method.is_function()) return false;
     const JsIntrinsics& realm = JsIntrinsics::get();
-    if (value.is_array()) return method.identity() == realm.array_iterator_method.identity();
-    if (value.type == JsType::String) return method.identity() == realm.string_iterator_method.identity();
+    if (value.is_array()) {
+        return method.identity() == realm.array_iterator_method.identity() &&
+               holds_installed_next(realm.array_iterator_proto, realm.array_iterator_next);
+    }
+    if (value.type == JsType::String) {
+        return method.identity() == realm.string_iterator_method.identity() &&
+               holds_installed_next(realm.string_iterator_proto, realm.string_iterator_next);
+    }
     return false;
 }
 
@@ -1259,14 +1282,17 @@ bool js_iterator_method(const JsValue& value, JsValue& method) {
 
 bool js_iterates_as_builtin(const JsValue& value) {
     // An iterator made by either installed method reads the value the way
-    // visit_elements() and visit_code_points() do, and its next() is its own
-    // property: nothing a script can reach stands between the method and the
-    // elements. Should those iterators ever take `next` from a prototype they
-    // share, as the language has it, that function has to be compared here too.
+    // visit_elements() and visit_code_points() do. Its `next` is a property of
+    // the prototype its kind shares, where a script can replace it, so the
+    // direct read is only taken while that property is still the function
+    // install() wrote (holds_installed_next): a replaced `next` may do anything,
+    // including yield something other than the elements, and the loop has to
+    // call it.
     const JsIntrinsics& realm = JsIntrinsics::get();
     if (value.type == JsType::String) {
         // A primitive has no properties of its own: the lookup starts at the prototype.
-        return holds_installed_method(realm.string_proto, realm.string_iterator_method);
+        return holds_installed_method(realm.string_proto, realm.string_iterator_method) &&
+               holds_installed_next(realm.string_iterator_proto, realm.string_iterator_next);
     }
     if (!value.is_array()) return false;
     // The lookup an array's `Symbol.iterator` would take, step by step, given
@@ -1277,7 +1303,8 @@ bool js_iterates_as_builtin(const JsValue& value) {
     const JsObject* cell = value.object_val.get();
     if (cell->exotic || cell->has_legacy_getters || cell->prototype != realm.array_proto) return false;
     if (!cell->properties.empty() && cell->properties.find(iterator_name()) != cell->properties.end()) return false;
-    return holds_installed_method(realm.array_proto, realm.array_iterator_method);
+    return holds_installed_method(realm.array_proto, realm.array_iterator_method) &&
+           holds_installed_next(realm.array_iterator_proto, realm.array_iterator_next);
 }
 
 void js_iterate(const JsValue& iterable, const std::function<bool(const JsValue&)>& visit) {
@@ -1318,7 +1345,9 @@ std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable) {
         visit_code_points(iterable, collect);
     } else {
         // Nothing runs between the first element and the last: one copy.
-        out.assign(iterable.object_val->array_elements.begin(), iterable.object_val->array_elements.end());
+        // The iterator reads every place, so a hole is handed on as
+        // `undefined`: spread and `Array.from` turn holes into elements.
+        out = iterable.array_snapshot();
     }
     return out;
 }
@@ -1409,6 +1438,12 @@ JsIntrinsics::JsIntrinsics() {
     boolean_proto = make(object_proto);
     symbol_proto = make(object_proto);
     iterator_proto = make(object_proto);
+    array_iterator_proto = make(iterator_proto);
+    map_iterator_proto = make(iterator_proto);
+    set_iterator_proto = make(iterator_proto);
+    string_iterator_proto = make(iterator_proto);
+    regexp_string_iterator_proto = make(iterator_proto);
+    dom_iterator_proto = make(iterator_proto);
     regexp_proto = make(object_proto);
     date_proto = make(object_proto);
     map_proto = make(object_proto);
@@ -1420,7 +1455,9 @@ JsIntrinsics::JsIntrinsics() {
     for (int i = 1; i < 7; ++i) error_protos[i] = make(error_protos[0]);
 
     for (JsObject* cell : {object_proto, function_proto, array_proto, string_proto, number_proto,
-                           boolean_proto, symbol_proto, iterator_proto, regexp_proto, date_proto,
+                           boolean_proto, symbol_proto, iterator_proto, array_iterator_proto,
+                           map_iterator_proto, set_iterator_proto, string_iterator_proto,
+                           regexp_string_iterator_proto, dom_iterator_proto, regexp_proto, date_proto,
                            map_proto, set_proto, weakmap_proto, weakset_proto, promise_proto}) {
         m_roots.push_back(JsValue::make_object(cell));
     }
@@ -1471,10 +1508,16 @@ void JsIntrinsics::install() {
     install_object_builtins(*this);
     install_error_builtins(*this);
     install_array_builtins(*this);
+    // The two kinds with no built-in interface of their own to install them:
+    // RegExp String Iterator, and the one Web IDL iterators share.
+    js_install_iterator_prototype(regexp_string_iterator_proto, "RegExp String Iterator");
+    js_install_iterator_prototype(dom_iterator_proto, nullptr);
     install_string_builtins(*this);
     // What js_iterate() compares with: see js_iterates_as_builtin().
     array_iterator_method = js_object_value(array_proto).get_property(kIteratorKey);
     string_iterator_method = js_object_value(string_proto).get_property(kIteratorKey);
+    array_iterator_next = js_object_value(array_iterator_proto).get_property("next");
+    string_iterator_next = js_object_value(string_iterator_proto).get_property("next");
     install_number_builtins(*this);
     install_collection_builtins(*this);
     install_regexp_builtins(*this);

@@ -338,6 +338,31 @@ public:
     std::string inspect() const;
     std::deque<JsValue>& array_elements();
     const std::deque<JsValue>& array_elements() const;
+
+    // --- Array holes ---------------------------------------------------------
+    //
+    // An index of an array is either an element or a hole. A hole is an index
+    // that is not an own property at all: `delete a[1]`, `new Array(3)`, and
+    // growing `length` make them. Reading one gives `undefined`, and every
+    // method that walks the own indices (`forEach`, `map`, `join`, `sort`, the
+    // iterators, `JSON.stringify` as `null`) leaves a hole out or fills it in,
+    // as the standard has it. The elements vector holds a dead `undefined` in
+    // the slot, so the index still costs what it did; the bits are separate
+    // and only allocated by an array that has one.
+    /// True when `index` is a hole of this array (false for anything that is
+    /// not an array, and for an index that is not there at all).
+    bool is_array_hole(size_t index) const;
+    /// Marks `index` as a hole. Grows the elements to cover it. (Not `const`:
+    /// it may allocate the bits. `JsValue` is a handle, so the callers that
+    /// hold one by value use the handle's own copy and change the same array.)
+    void set_array_hole(size_t index);
+    /// Marks `index` as an element again (writing one is how a hole is filled).
+    void clear_array_hole(size_t index);
+    /// The element at `index`, `undefined` when it is a hole or not there.
+    JsValue array_element(size_t index) const;
+    /// The elements, holes included as `undefined`: what spread, `Array.from`
+    /// and the iterator see.
+    std::vector<JsValue> array_snapshot() const;
     std::string to_string() const;
     double to_number() const;
 

@@ -2820,9 +2820,11 @@ JsValue JsInterpreter::eval_sequence(const SequenceExpr* sequence, const EnvPtr&
 
 JsValue JsInterpreter::eval_array_literal(const ArrayLiteralExpr* literal, const EnvPtr& env) {
     std::vector<JsValue> elements;
+    std::vector<size_t> holes;      // an elision is a hole, not an element
     for (const auto& element : literal->elements) {
         if (!element) {
-            elements.push_back(JsValue::make_undefined());      // hole
+            holes.push_back(elements.size());
+            elements.push_back(JsValue::make_undefined());
         } else if (element->kind == NodeKind::Spread) {
             JsValue iterable = evaluate(static_cast<const SpreadExpr*>(element.get())->argument.get(), env);
             js_iterate(iterable, [&](const JsValue& item) {
@@ -2833,7 +2835,12 @@ JsValue JsInterpreter::eval_array_literal(const ArrayLiteralExpr* literal, const
             elements.push_back(evaluate(element.get(), env));
         }
     }
-    return JsValue::make_array(elements);
+    JsValue array = JsValue::make_array(elements);
+    // `[1, , 3]` has three places and two elements. Marked after the array is
+    // made, because a spread in the literal may have added places that shift the
+    // ones after it.
+    for (size_t index : holes) array.set_array_hole(index);
+    return array;
 }
 
 JsValue JsInterpreter::eval_template_literal(const TemplateLiteralExpr* literal, const EnvPtr& env) {

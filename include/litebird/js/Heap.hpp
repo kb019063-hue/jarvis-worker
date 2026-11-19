@@ -9,6 +9,7 @@
 #include <memory>
 #include <functional>
 #include <cstdint>
+#include <cstddef>
 #include <mutex>
 
 namespace litebird {
@@ -107,6 +108,37 @@ public:
     const PropertyMap* private_map() const { return private_slots.get(); }
     // Deque-backed, so shift() and splice() at the front are not a memmove of the whole array.
     std::deque<JsValue> array_elements;
+    /// Which of `array_elements` are holes: an index that was never written,
+    /// or was deleted, and so is not an own property of the array at all
+    /// (`1 in a` is false, `Object.keys` leaves it out, `forEach` skips it).
+    /// They are kept in the vector all the same, so an index costs nothing
+    /// more than it did before; the bits live in a side struct that only an
+    /// array that has a hole ever allocates, so JsObject does not grow.
+    struct Holes {
+        std::vector<uint64_t> bits;
+        bool any() const {
+            for (uint64_t word : bits) if (word) return true;
+            return false;
+        }
+        bool empty_slot(size_t index) const {
+            size_t word = index >> 6;
+            if (word >= bits.size()) return false;
+            return (bits[word] >> (index & 63)) & 1u;
+        }
+        void set(size_t index) {
+            size_t word = index >> 6;
+            if (word >= bits.size()) bits.resize(word + 1, 0);
+            bits[word] |= uint64_t(1) << (index & 63);
+        }
+        void clear(size_t index) {
+            size_t word = index >> 6;
+            if (word < bits.size()) bits[word] &= ~(uint64_t(1) << (index & 63));
+        }
+        /// Shifts the bits at and after `from` by `delta` places, for the
+        /// insert and erase that shift the elements themselves.
+        void shift(size_t from, ptrdiff_t delta);
+    };
+    std::unique_ptr<Holes> array_holes;
     bool is_array{false};
     bool extensible{true};          // false after Object.preventExtensions/seal/freeze
     bool frozen{false};             // Object.freeze: no writes at all

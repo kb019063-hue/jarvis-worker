@@ -44,6 +44,14 @@ std::deque<JsValue>& elements_of(const JsValue& array) {
     return array.object_val->array_elements;
 }
 
+/// True when `index` of `array` is a hole and must not be visited: absent from
+/// the own keys, so the callback methods skip it and the copying methods keep
+/// it a hole (`HasProperty` in the standard, which an array answers with
+/// `!is_array_hole`).
+bool hole_at(const JsValue& array, size_t index) {
+    return array.is_array_hole(index);
+}
+
 // Array iteration uses ToLength on the original receiver. In particular,
 // Infinity and lengths above 2^53 - 1 must not be cast directly to size_t:
 // out-of-range floating-to-integer conversion is undefined in C++.
@@ -85,6 +93,7 @@ std::string join_array(const JsValue& array, const std::string& separator) {
     std::string out;
     for (size_t i = 0; i < elements_of(array).size(); ++i) {
         if (i) out += separator;
+        if (array.is_array_hole(i)) continue;          // a hole joins empty, like undefined
         JsValue item = elements_of(array)[i];
         if (item.type == JsType::String) out += item.string_val.view();
         else if (!item.is_nullish()) out += js_to_string(item);
@@ -114,13 +123,19 @@ void merge_sort(std::vector<JsValue>& items, Less less) {
     }
 }
 
-void sort_values(std::vector<JsValue>& items, const JsValue& comparator) {
-    // undefined always sorts to the end and is never passed to the comparator.
+/// `holes` is carried alongside `items` so that sort can put the holes at the
+/// end, as the standard does, without asking the comparator about them.
+void sort_values(std::vector<JsValue>& items, std::vector<bool>& holes, const JsValue& comparator) {
+    // undefined always sorts to the end and is never passed to the comparator;
+    // a hole sorts after it, and is never passed either (the standard's SortCompare
+    // is not reached for either, and the holes end up after every element).
     std::vector<JsValue> defined;
     size_t undefined_count = 0;
-    for (auto& item : items) {
-        if (item.is_undefined()) ++undefined_count;
-        else defined.push_back(std::move(item));
+    size_t hole_count = 0;
+    for (size_t i = 0; i < items.size(); ++i) {
+        if (holes[i]) { ++hole_count; continue; }
+        if (items[i].is_undefined()) { ++undefined_count; continue; }
+        defined.push_back(std::move(items[i]));
     }
     if (comparator.is_function()) {
         merge_sort(defined, [&](const JsValue& a, const JsValue& b) {
@@ -141,15 +156,23 @@ void sort_values(std::vector<JsValue>& items, const JsValue& comparator) {
         for (auto& entry : keyed) defined.push_back(std::move(entry.second));
     }
     items = std::move(defined);
-    items.resize(items.size() + undefined_count);
+    items.resize(items.size() + undefined_count + hole_count);
+    holes.assign(items.size(), false);
+    // The holes are the last places of all, after the elements that are undefined.
+    for (size_t i = items.size() - hole_count; i < items.size(); ++i) holes[i] = true;
 }
 
-void flatten_into(std::vector<JsValue>& out, const JsValue& array, double depth) {
+/// `holes` says, per place of `out`, whether it is a hole. A hole of the array
+/// being flattened is skipped (it has no element to move); a hole of an inner
+/// array is a place of the result that is itself a hole — `flat` copies from
+/// the inner array, and copying a hole leaves one.
+void flatten_into(std::vector<JsValue>& out, std::vector<bool>& holes, const JsValue& array, double depth) {
     js_check_stack();       // [[[[...]]]].flat(Infinity) recurses once per level
     for (size_t i = 0; i < elements_of(array).size(); ++i) {
+        if (array.is_array_hole(i)) { if (depth < 1) { out.push_back(JsValue::make_undefined()); holes.push_back(true); } continue; }
         JsValue item = elements_of(array)[i];
-        if (depth >= 1 && item.is_array()) flatten_into(out, item, depth - 1);
-        else out.push_back(std::move(item));
+        if (depth >= 1 && item.is_array()) flatten_into(out, holes, item, depth - 1);
+        else { out.push_back(std::move(item)); holes.push_back(false); }
     }
 }
 
@@ -162,10 +185,33 @@ JsValue iteration_result(const JsValue& value, bool done) {
 
 } // namespace
 
-JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<JsValue> roots) {
+namespace {
+
+/// What an iterator keeps: the step, and whether it has finished. The step is a
+/// std::function the collector cannot see into, so the values it captured are
+/// held separately by trace_extra (see js_make_iterator).
+struct IteratorState {
+    std::function<bool(JsValue& value)> step;
+    bool finished{false};
+};
+
+/// The state behind `this`, for the `next` on an iterator's prototype. A
+/// `next` called on anything that is not one of these iterators throws, which
+/// is what the language says a prototype method does with a wrong receiver.
+IteratorState& iterator_state(const JsValue& me) {
+    if (!me.is_object_like() || me.object_val->klass != ObjectClass::Iterator || !me.object_val->internal) {
+        js_throw_type_error("next method called on an object that is not an iterator");
+    }
+    return *static_cast<IteratorState*>(me.object_val->internal.get());
+}
+
+} // namespace
+
+JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<JsValue> roots, JsObject* proto) {
     JsObject* cell = Heap::default_heap().allocate_object();
-    cell->prototype = JsIntrinsics::get().iterator_proto;
+    cell->prototype = proto ? proto : JsIntrinsics::get().iterator_proto;
     cell->klass = ObjectClass::Iterator;
+    cell->internal = std::make_shared<IteratorState>(IteratorState{std::move(step), false});
     if (!roots.empty()) {
         // `step` holds these inside a std::function, where the collector cannot see them.
         auto kept = std::make_shared<std::vector<JsValue>>(std::move(roots));
@@ -174,22 +220,37 @@ JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<J
             for (const auto& value : *kept) heap.mark_value(value);
         };
     }
-    auto finished = std::make_shared<bool>(false);
-    js_define_method(cell, "next", 0, [step, finished](Args) {
+    return JsValue::make_object(cell);
+}
+
+void js_install_iterator_prototype(JsObject* proto, const char* tag) {
+    // One `next` for every iterator of the kind: the step is the object's, the
+    // function is the prototype's, and replacing the property here changes
+    // what every loop over one of these iterators does -- which is why the
+    // iteration fast paths ask whether it is still this function.
+    js_define_method(proto, "next", 0, [](Args) {
+        IteratorState& state = iterator_state(self());
         JsValue value;
-        if (!*finished && step(value)) return iteration_result(value, false);
-        *finished = true;
+        if (!state.finished && state.step(value)) return iteration_result(value, false);
+        state.finished = true;
         return iteration_result(JsValue::make_undefined(), true);
     });
-    return JsValue::make_object(cell);
+    if (tag) {
+        auto& entry = proto->properties.entry("@@toStringTag");
+        entry.second = JsValue::make_string(tag);
+        entry.flags = PropertyMap::Configurable;   // { writable: false, enumerable: false, configurable: true }
+    }
 }
 
 void install_array_builtins(JsIntrinsics& realm) {
     JsObject* ap = realm.array_proto;
 
-    // Iterators are themselves iterable.
+    // Iterators are themselves iterable: %IteratorPrototype% carries @@iterator
+    // and nothing else, and each kind of iterator's prototype sits between it
+    // and the iterator (see js_install_iterator_prototype).
     js_define_method(realm.iterator_proto, kIteratorKey, 0, [](Args) { return self(); });
     js_define_method(realm.iterator_proto, "Symbol.iterator", 0, [](Args) { return self(); });
+    js_install_iterator_prototype(realm.array_iterator_proto, "Array Iterator");
 
     // ---- Constructor ------------------------------------------------------
     JsValue array_ctor = js_make_native("Array", 1, [](Args args) {
@@ -199,7 +260,10 @@ void install_array_builtins(JsIntrinsics& realm) {
                 js_throw_range_error("Invalid array length");
             }
             if (length > (1u << 26)) js_throw_range_error("Array length exceeds the supported maximum");
-            return JsValue::make_array(std::vector<JsValue>(static_cast<size_t>(length)));
+            // `new Array(3)` makes three holes, not three elements that hold undefined.
+            JsValue created = JsValue::make_array(std::vector<JsValue>(static_cast<size_t>(length)));
+            for (size_t i = 0; i < static_cast<size_t>(length); ++i) created.set_array_hole(i);
+            return created;
         }
         return JsValue::make_array(args);
     });
@@ -243,14 +307,18 @@ void install_array_builtins(JsIntrinsics& realm) {
         JsValue array = receiver("push", true);
         if (array.object_val->frozen) js_throw_type_error("Cannot add property, object is not extensible");
         auto& elements = elements_of(array);
+        const size_t start = elements.size();
         elements.insert(elements.end(), args.begin(), args.end());
+        for (size_t i = start; i < elements.size(); ++i) array.clear_array_hole(i);
         return JsValue::make_number(static_cast<double>(elements.size()));
     });
     js_define_method(ap, "pop", 0, [](Args) {
         JsValue array = receiver("pop", true);
         auto& elements = elements_of(array);
         if (elements.empty()) return JsValue::make_undefined();
-        JsValue last = std::move(elements.back());
+        // A hole pops as undefined: there is no element there to take out.
+        JsValue last = array.is_array_hole(elements.size() - 1) ? JsValue::make_undefined()
+                                                               : std::move(elements.back());
         elements.pop_back();
         return last;
     });
@@ -258,14 +326,19 @@ void install_array_builtins(JsIntrinsics& realm) {
         JsValue array = receiver("shift", true);
         auto& elements = elements_of(array);
         if (elements.empty()) return JsValue::make_undefined();
-        JsValue first = std::move(elements.front());
+        JsValue first = array.is_array_hole(0) ? JsValue::make_undefined() : std::move(elements.front());
         elements.erase(elements.begin());
+        if (array.object_val->array_holes) array.object_val->array_holes->shift(0, -1);
         return first;
     });
     js_define_method(ap, "unshift", 1, [](Args args) {
         JsValue array = receiver("unshift", true);
         auto& elements = elements_of(array);
+        if (array.object_val->array_holes) {
+            array.object_val->array_holes->shift(0, static_cast<std::ptrdiff_t>(args.size()));
+        }
         elements.insert(elements.begin(), args.begin(), args.end());
+        for (size_t i = 0; i < args.size(); ++i) array.clear_array_hole(i);
         return JsValue::make_number(static_cast<double>(elements.size()));
     });
 
@@ -276,8 +349,13 @@ void install_array_builtins(JsIntrinsics& realm) {
         size_t begin = relative_index(js_arg(args, 0), elements.size(), 0);
         size_t end = relative_index(js_arg(args, 1), elements.size(), elements.size());
         if (begin >= end) return JsValue::make_array();
-        return JsValue::make_array(std::vector<JsValue>(elements.begin() + static_cast<std::ptrdiff_t>(begin),
-                                                        elements.begin() + static_cast<std::ptrdiff_t>(end)));
+        JsValue result = JsValue::make_array();
+        result.object_val->array_elements.assign(elements.begin() + static_cast<std::ptrdiff_t>(begin),
+                                                 elements.begin() + static_cast<std::ptrdiff_t>(end));
+        for (size_t i = begin; i < end; ++i) {
+            if (array.is_array_hole(i)) result.set_array_hole(i - begin);
+        }
+        return result;
     });
     auto splice_impl = []<typename Seq>(Seq& elements, Args args) {
         size_t start = relative_index(js_arg(args, 0), elements.size(), 0);
@@ -301,7 +379,28 @@ void install_array_builtins(JsIntrinsics& realm) {
     js_define_method(ap, "splice", 2, [splice_impl](Args args) {
         JsValue array = receiver("splice", true);
         if (args.empty()) return JsValue::make_array();
-        return JsValue::make_array(splice_impl(elements_of(array), args));
+        // Which of the removed places were holes, before the erase moves them.
+        std::vector<bool> removed_holes;
+        {
+            const size_t start = relative_index(js_arg(args, 0), elements_of(array).size(), 0);
+            double requested = args.size() >= 2 ? js_to_integer(js_to_number(args[1]))
+                                                : static_cast<double>(elements_of(array).size() - start);
+            if (requested < 0) requested = 0;
+            const size_t count = static_cast<size_t>(
+                std::min(requested, static_cast<double>(elements_of(array).size() - start)));
+            for (size_t i = 0; i < count; ++i) removed_holes.push_back(array.is_array_hole(start + i));
+            const std::ptrdiff_t delta = static_cast<std::ptrdiff_t>(args.size() - 2) -
+                                         static_cast<std::ptrdiff_t>(count);
+            if (array.object_val->array_holes && delta != 0) {
+                array.object_val->array_holes->shift(start, delta);
+            }
+            for (size_t i = start; i < start + count; ++i) array.clear_array_hole(i);
+        }
+        JsValue result = JsValue::make_array(splice_impl(elements_of(array), args));
+        for (size_t i = 0; i < removed_holes.size() && i < result.object_val->array_elements.size(); ++i) {
+            if (removed_holes[i]) result.set_array_hole(i);
+        }
+        return result;
     });
     js_define_method(ap, "toSpliced", 2, [splice_impl](Args args) {
         JsValue array = receiver("toSpliced");
@@ -311,16 +410,23 @@ void install_array_builtins(JsIntrinsics& realm) {
     });
     js_define_method(ap, "concat", 1, [](Args args) {
         JsValue array = receiver("concat");
-        std::vector<JsValue> result(elements_of(array).begin(), elements_of(array).end());
+        std::vector<JsValue> values(elements_of(array).begin(), elements_of(array).end());
+        std::vector<bool> holes;
+        for (size_t i = 0; i < values.size(); ++i) holes.push_back(array.is_array_hole(i));
         for (const auto& arg : args) {
             if (arg.is_array()) {
-                const auto& more = elements_of(arg);
-                result.insert(result.end(), more.begin(), more.end());
+                for (size_t i = 0; i < elements_of(arg).size(); ++i) {
+                    values.push_back(elements_of(arg)[i]);
+                    holes.push_back(arg.is_array_hole(i));
+                }
             } else {
-                result.push_back(arg);
+                values.push_back(arg);
+                holes.push_back(false);
             }
         }
-        return JsValue::make_array(result);
+        JsValue result = JsValue::make_array(values);
+        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) result.set_array_hole(i);
+        return result;
     });
     js_define_method(ap, "join", 1, [](Args args) {
         JsValue array = receiver("join");
@@ -338,13 +444,29 @@ void install_array_builtins(JsIntrinsics& realm) {
     js_define_method(ap, "reverse", 0, [](Args) {
         JsValue array = receiver("reverse", true);
         std::reverse(elements_of(array).begin(), elements_of(array).end());
+        if (array.object_val->array_holes) {
+            auto& bits = array.object_val->array_holes->bits;
+            const size_t total = elements_of(array).size();
+            std::vector<bool> before;
+            for (size_t i = 0; i < total; ++i) before.push_back(array.is_array_hole(i));
+            for (size_t i = 0; i < total; ++i) {
+                if (before[total - 1 - i]) array.set_array_hole(i);
+                else array.clear_array_hole(i);
+            }
+            (void)bits;
+        }
         return array;
     });
     js_define_method(ap, "toReversed", 0, [](Args) {
         JsValue array = receiver("toReversed");
         std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
+        const size_t total = copy.size();
+        std::vector<bool> holes;
+        for (size_t i = 0; i < total; ++i) holes.push_back(array.is_array_hole(i));
         std::reverse(copy.begin(), copy.end());
-        return JsValue::make_array(copy);
+        JsValue result = JsValue::make_array(copy);
+        for (size_t i = 0; i < total; ++i) if (holes[total - 1 - i]) result.set_array_hole(i);
+        return result;
     });
     js_define_method(ap, "sort", 1, [](Args args) {
         JsValue array = receiver("sort", true);
@@ -354,15 +476,25 @@ void install_array_builtins(JsIntrinsics& realm) {
         }
         // Sort a copy: the comparator is script and may touch the array.
         std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
-        sort_values(copy, comparator);
+        std::vector<bool> holes;
+        for (size_t i = 0; i < copy.size(); ++i) holes.push_back(array.is_array_hole(i));
+        sort_values(copy, holes, comparator);
         elements_of(array).assign(copy.begin(), copy.end());
+        for (size_t i = 0; i < holes.size(); ++i) {
+            if (holes[i]) array.set_array_hole(i);
+            else array.clear_array_hole(i);
+        }
         return array;
     });
     js_define_method(ap, "toSorted", 1, [](Args args) {
         JsValue array = receiver("toSorted");
         std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
-        sort_values(copy, js_arg(args, 0));
-        return JsValue::make_array(copy);
+        std::vector<bool> holes;
+        for (size_t i = 0; i < copy.size(); ++i) holes.push_back(array.is_array_hole(i));
+        sort_values(copy, holes, js_arg(args, 0));
+        JsValue result = JsValue::make_array(copy);
+        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) result.set_array_hole(i);
+        return result;
     });
     js_define_method(ap, "with", 2, [](Args args) {
         JsValue array = receiver("with");
@@ -378,7 +510,10 @@ void install_array_builtins(JsIntrinsics& realm) {
         auto& elements = elements_of(array);
         size_t begin = relative_index(js_arg(args, 1), elements.size(), 0);
         size_t end = relative_index(js_arg(args, 2), elements.size(), elements.size());
-        for (size_t i = begin; i < end; ++i) elements[i] = js_arg(args, 0);
+        for (size_t i = begin; i < end; ++i) {
+            elements[i] = js_arg(args, 0);
+            array.clear_array_hole(i);           // fill writes every place it covers
+        }
         return array;
     });
     js_define_method(ap, "copyWithin", 2, [](Args args) {
@@ -390,15 +525,26 @@ void install_array_builtins(JsIntrinsics& realm) {
         if (begin >= end || target >= elements.size()) return array;
         std::vector<JsValue> chunk(elements.begin() + static_cast<std::ptrdiff_t>(begin),
                                    elements.begin() + static_cast<std::ptrdiff_t>(end));
-        for (size_t i = 0; i < chunk.size() && target + i < elements.size(); ++i) elements[target + i] = chunk[i];
+        std::vector<bool> chunk_holes;
+        for (size_t i = begin; i < end; ++i) chunk_holes.push_back(array.is_array_hole(i));
+        for (size_t i = 0; i < chunk.size() && target + i < elements.size(); ++i) {
+            elements[target + i] = chunk[i];
+            // Copying a hole leaves a hole at the target (the standard calls
+            // DeletePropertyOrThrow for it).
+            if (chunk_holes[i]) array.set_array_hole(target + i);
+            else array.clear_array_hole(target + i);
+        }
         return array;
     });
     js_define_method(ap, "flat", 0, [](Args args) {
         JsValue array = receiver("flat");
         double depth = js_arg(args, 0).is_undefined() ? 1 : js_to_integer(js_to_number(js_arg(args, 0)));
         std::vector<JsValue> result;
-        flatten_into(result, array, depth);
-        return JsValue::make_array(result);
+        std::vector<bool> holes;
+        flatten_into(result, holes, array, depth);
+        JsValue flat = JsValue::make_array(result);
+        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) flat.set_array_hole(i);
+        return flat;
     });
     js_define_method(ap, "at", 1, [](Args args) {
         JsValue array = receiver("at");
@@ -406,7 +552,7 @@ void install_array_builtins(JsIntrinsics& realm) {
         double index = js_to_integer(js_to_number(js_arg(args, 0)));
         if (index < 0) index += static_cast<double>(elements.size());
         if (index < 0 || index >= static_cast<double>(elements.size())) return JsValue::make_undefined();
-        return elements[static_cast<size_t>(index)];
+        return array.array_element(static_cast<size_t>(index));
     });
 
     // ---- Searching --------------------------------------------------------
@@ -414,6 +560,7 @@ void install_array_builtins(JsIntrinsics& realm) {
         JsValue array = receiver("indexOf");
         const auto& elements = elements_of(array);
         for (size_t i = relative_index(js_arg(args, 1), elements.size(), 0); i < elements.size(); ++i) {
+            if (array.is_array_hole(i)) continue;          // indexOf asks HasProperty first
             if (strict_equals(elements[i], js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
         }
         return JsValue::make_number(-1);
@@ -427,6 +574,7 @@ void install_array_builtins(JsIntrinsics& realm) {
         if (from < 0) return JsValue::make_number(-1);
         size_t start = static_cast<size_t>(std::min(from, static_cast<double>(elements.size()) - 1));
         for (size_t i = start + 1; i-- > 0;) {
+            if (array.is_array_hole(i)) continue;
             if (strict_equals(elements[i], js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
         }
         return JsValue::make_number(-1);
@@ -435,7 +583,9 @@ void install_array_builtins(JsIntrinsics& realm) {
         JsValue array = receiver("includes");
         const auto& elements = elements_of(array);
         for (size_t i = relative_index(js_arg(args, 1), elements.size(), 0); i < elements.size(); ++i) {
-            if (js_same_value_zero(elements[i], js_arg(args, 0))) return JsValue::make_boolean(true);
+            // Unlike indexOf, includes does not ask for the property: it reads
+            // the place, so a hole is `undefined` to it.
+            if (js_same_value_zero(array.array_element(i), js_arg(args, 0))) return JsValue::make_boolean(true);
         }
         return JsValue::make_boolean(false);
     });
@@ -454,6 +604,7 @@ void install_array_builtins(JsIntrinsics& realm) {
             for (size_t step = 0; step < length; ++step) {
                 size_t i = from_end ? length - 1 - step : step;
                 if (i >= elements_of(array).size()) continue;
+                if (hole_at(array, i)) continue;            // a hole has no element to test
                 JsValue item = elements_of(array)[i];
                 if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
                     return what == Find::Value ? item : JsValue::make_number(static_cast<double>(i));
@@ -491,13 +642,23 @@ void install_array_builtins(JsIntrinsics& realm) {
         JsValue callback = require_callback(js_arg(args, 0), "map");
         const JsValue this_arg = js_arg(args, 1);
         std::vector<JsValue> result;
+        std::vector<bool> holes;
         size_t length = elements_of(array).size();
         result.reserve(length);
         for (size_t i = 0; i < length; ++i) {
+            if (i < elements_of(array).size() && hole_at(array, i)) {
+                // map keeps the hole; the callback is never called for it.
+                result.push_back(JsValue::make_undefined());
+                holes.push_back(true);
+                continue;
+            }
             JsValue item = i < elements_of(array).size() ? elements_of(array)[i] : JsValue::make_undefined();
             result.push_back(callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}));
+            holes.push_back(false);
         }
-        return JsValue::make_array(result);
+        JsValue mapped = JsValue::make_array(result);
+        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) mapped.set_array_hole(i);
+        return mapped;
     });
     js_define_method(ap, "filter", 1, [](Args args) {
         JsValue array = receiver("filter");
@@ -505,6 +666,7 @@ void install_array_builtins(JsIntrinsics& realm) {
         const JsValue this_arg = js_arg(args, 1);
         std::vector<JsValue> result;
         for (size_t i = 0; i < elements_of(array).size(); ++i) {
+            if (hole_at(array, i)) continue;                // filter asks HasProperty first
             JsValue item = elements_of(array)[i];
             if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
                 result.push_back(std::move(item));
@@ -517,23 +679,30 @@ void install_array_builtins(JsIntrinsics& realm) {
         JsValue callback = require_callback(js_arg(args, 0), "flatMap");
         const JsValue this_arg = js_arg(args, 1);
         std::vector<JsValue> result;
+        std::vector<bool> holes;
         for (size_t i = 0; i < elements_of(array).size(); ++i) {
+            if (hole_at(array, i)) continue;
             JsValue item = elements_of(array)[i];
             JsValue mapped = callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array});
             if (mapped.is_array()) {
                 const auto& inner = elements_of(mapped);
                 result.insert(result.end(), inner.begin(), inner.end());
+                for (size_t k = 0; k < inner.size(); ++k) holes.push_back(mapped.is_array_hole(k));
             } else {
                 result.push_back(std::move(mapped));
+                holes.push_back(false);
             }
         }
-        return JsValue::make_array(result);
+        JsValue flattened = JsValue::make_array(result);
+        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) flattened.set_array_hole(i);
+        return flattened;
     });
     js_define_method(ap, "some", 1, [](Args args) {
         JsValue array = receiver("some");
         JsValue callback = require_callback(js_arg(args, 0), "some");
         const JsValue this_arg = js_arg(args, 1);
         for (size_t i = 0; i < elements_of(array).size(); ++i) {
+            if (hole_at(array, i)) continue;
             JsValue item = elements_of(array)[i];
             if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
                 return JsValue::make_boolean(true);
@@ -546,6 +715,7 @@ void install_array_builtins(JsIntrinsics& realm) {
         JsValue callback = require_callback(js_arg(args, 0), "every");
         const JsValue this_arg = js_arg(args, 1);
         for (size_t i = 0; i < elements_of(array).size(); ++i) {
+            if (hole_at(array, i)) continue;                // every skips them, so all-holes is true
             JsValue item = elements_of(array)[i];
             if (!callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
                 return JsValue::make_boolean(false);
@@ -563,13 +733,22 @@ void install_array_builtins(JsIntrinsics& realm) {
             if (args.size() >= 2) {
                 accumulator = args[1];
             } else {
-                if (length == 0) js_throw_type_error("Reduce of empty array with no initial value");
-                accumulator = elements_of(array)[from_end ? length - 1 : 0];
-                step = 1;
+                // The seed is the first element there is, which a hole is not.
+                bool seeded = false;
+                for (; step < length; ++step) {
+                    size_t i = from_end ? length - 1 - step : step;
+                    if (i >= elements_of(array).size() || hole_at(array, i)) continue;
+                    accumulator = elements_of(array)[i];
+                    seeded = true;
+                    ++step;
+                    break;
+                }
+                if (!seeded) js_throw_type_error("Reduce of empty array with no initial value");
             }
             for (; step < length; ++step) {
                 size_t i = from_end ? length - 1 - step : step;
                 if (i >= elements_of(array).size()) continue;
+                if (hole_at(array, i)) continue;
                 JsValue item = elements_of(array)[i];
                 accumulator = callback.call({accumulator, item, JsValue::make_number(static_cast<double>(i)), array});
             }
@@ -603,7 +782,7 @@ void install_array_builtins(JsIntrinsics& realm) {
                         break;
                 }
                 return true;
-            }, {me});
+            }, {me}, JsIntrinsics::get().array_iterator_proto);
         };
     };
     js_define_method(ap, "keys", 0, make_array_iterator(Kind::Keys));

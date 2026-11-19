@@ -528,8 +528,16 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
     float ink_d = 0.0f;
 
     std::size_t pos = 0;
+    uint32_t previous = 0;
     while (pos < text.size()) {
         const uint32_t cp = canvas_utf8_next(text, pos);
+        // The same pair adjustment `measureText` counted into `layout.advance`,
+        // applied before the second glyph is placed -- a canvas string would
+        // otherwise measure one width and draw another.
+        if (previous != 0) {
+            pen += FontRenderer::instance().kerning_px(previous, cp, size_px, parsed.weight, parsed.family, italic);
+        }
+        previous = cp;
         const GlyphBitmap& g = FontRenderer::instance().get_glyph(cp, px_size, parsed.weight, family_id, italic);
         const float pen_rel = pen - layout.pad_x;
         if (g.width > 0 && g.height > 0) {

@@ -31,17 +31,17 @@ standard now makes, which is 1,967 of the 1,973.
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
-| **DOM tree-construction conformance** | **1972 / 1973 (99.9%)** | the corpus as web-platform-tests publishes it (`html/syntax/parsing/resources/`, vendored at `37cfee8`, 62 files), run by `make conformance`. The six that fail are in `scripted_*.dat`, where a script must edit the document while the page is parsed |
+| **DOM tree-construction conformance** | **1973 / 1973 (100.0%)** | the corpus as web-platform-tests publishes it (`html/syntax/parsing/resources/`, vendored at `37cfee8`, 62 files), run by `make conformance`. All six `scripted_*.dat` cases, where a script must edit the document while the page is parsed, pass since Phase 101 |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **1138 / 1156 (98.4%)<!--metrics:js/frac_pct-->**; of the 19 that fail, eight are what a function or a class still lacks (Phase 34), seven are iteration gaps (Phases 63 and 94), and one each is typed arrays, `Proxy`, `BigInt` and `typeof` | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **1142 / 1158 (98.6%)<!--metrics:js/frac_pct-->**; of the 17 that fail, eight are what a function or a class still lacks (Phase 34), four are iteration gaps (Phases 63, 94 and 102), and one each is typed arrays, `Proxy`, `BigInt`, `typeof` and `Symbol` | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **678 / 678<!--metrics:dom/frac-->**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
-| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9567 / 9824 subtests** across 190 files; the 257 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing, 9550 before the CSS Object Model of Phase 72 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
+| **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9567 / 9824<!--metrics:wpt.pass/frac--> subtests** across 190 files; the 257 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing, 9550 before the CSS Object Model of Phase 72 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
 | **Legacy encodings** | **40 encodings, 228 labels, every byte of every index table** (including the Big5 two-code-point entries and the `gb18030` ranges), generated from `whatwg/encoding` `@ be17ac5c49881336538acfc7b40dba3c8009144b` | `include/litebird/net/TextEncoding.hpp`, `make test`; pages in these encodings run by `make wpt` |
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
-| **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
+| **URL parsing and setters** | **1188 / 1188 (100%)<!--metrics:url.pass/frac_pct-->**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 267<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 268<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
@@ -74,8 +74,8 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 267<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
-make check-numbers   # the numbers above still divide and still count (tools/ci/check_numbers.py)
+make test            # 268<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
+make check-numbers   # the numbers above still divide and still count, and every marked figure and floor agrees (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear
@@ -108,7 +108,7 @@ make diff-trees      # 6,000 random pages and fragments parsed here and by parse
 
 ### The JavaScript scoreboard
 
-`tests/js-conformance/` holds 1,156 small scripts. Each one records what Node.js
+`tests/js-conformance/` holds 1,158 small scripts. Each one records what Node.js
 prints for it, and a case passes when `litebird --run-js` prints the same and
 exits 0. CI re-runs the whole corpus under Node first, so an expectation
 cannot be edited to match what Litebird does.
@@ -189,7 +189,7 @@ iterates; the order in which the protocol reads and calls; closing an
 iterator that is left early; and the plain cases, which must not change. 67
 of the 78 pass; the engine before Phase 63 passes 28, and two do not end.
 
-1,972 of the 1,973 cases of the html5lib tree-construction suite pass (**1972 / 1973**); the one that does not, `scripted_ark.dat`, differs by a formatting element the adoption agency reconstructs once too often. The six `scripted_*.dat` cases used to fail because the dump path ran no script; since Phase 95 it runs the page's scripts as the parser reaches them, and `document.write` writes into that parser;
+All 1,973 cases of the html5lib tree-construction suite pass (**1973 / 1973**); `scripted_ark.dat` was the last, fixed in Phase 101: Noah's Ark compares the attributes on the tokens for which the elements were created, not the live DOM nodes a script may have edited. The six `scripted_*.dat` cases used to fail because the dump path ran no script; since Phase 95 it runs the page's scripts as the parser reaches them, and `document.write` writes into that parser;
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`
 inspects any subset. The final 11 cases (fixed in Phase 49) were all `<select>`:
 treating `<select>` as a default scope boundary, keeping arbitrary HTML/SVG/MathML
@@ -753,7 +753,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 267<!--metrics:unit_suites/int--> engine test suites
+# Run the 268<!--metrics:unit_suites/int--> engine test suites
 make test
 ```
 
@@ -821,14 +821,14 @@ make test
 make test
 ```
 
-Output (267<!--metrics:unit_suites/int--> suites; the first and last lines shown):
+Output (268<!--metrics:unit_suites/int--> suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 267<!--metrics:unit_suites/int--> engine test suites passed successfully!
+All 268<!--metrics:unit_suites/int--> engine test suites passed successfully!
 ```
 
 ```bash
@@ -988,7 +988,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 267/267<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 268/268<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -1519,15 +1519,22 @@ validation and frame compliance; do not use it as a secure browser boundary.
 See [Phase 83](docs/phases/83-websocket-handshake-security.md) and
 [finding 89](docs/findings/89-websocket-handshake-security.md).
 
-### HTTPS certificate identity (Phase 89)
+### HTTPS certificate identity, chains and dates (Phases 89 and 100)
 
-HTTPS now checks an IP URL against the certificate's IP SAN, not just its
-trust chain. `make security-https` runs eight ephemeral local TLS fixtures
-against Python ssl and Litebird: trusted DNS/IP, wrong DNS/IP identities,
-DNS SANs used as IP identities, and untrusted certificates. Rejected peers
-receive no HTTP request. CI runs these normally and under ASan/UBSan.
-See [Phase 89](docs/phases/89-https-certificate-identity.md) and
-[finding 95](docs/findings/95-https-ip-identity.md) for scope and remaining gaps.
+HTTPS checks an IP URL against the certificate's IP SAN, not just its trust
+chain, and `make security-https` runs **twenty** ephemeral local TLS fixtures
+against Python ssl and Litebird: trusted, wrong and untrusted DNS/IP
+identities, DNS SANs used as IP identities, a chain through an intermediate
+(present, missing, and marked not a CA), expired and not-yet-valid leaves, an
+expired intermediate, IPv6 literals in compressed and expanded form with an
+address of the wrong family written both ways, and SNI — the name a DNS host
+sends, the absence of one at a literal URL. Rejected peers receive no HTTP
+request. CI runs these normally and under ASan/UBSan.
+See [Phase 89](docs/phases/89-https-certificate-identity.md),
+[Phase 100](docs/phases/100-https-certificate-chains-dates-and-ipv6.md),
+[finding 95](docs/findings/95-https-ip-identity.md) and
+[finding 106](docs/findings/106-the-tls-fixtures-never-chained.md) for scope and
+the gaps that remain.
 
 ### WebSocket TLS, Fetch policy, and RFC 6455 framing (Phase 90)
 

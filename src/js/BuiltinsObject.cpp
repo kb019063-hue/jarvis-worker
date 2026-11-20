@@ -269,10 +269,20 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     JsObject* cell = object.property_cell(true);
 
     // Array elements are stored densely; attributes on them are not tracked.
+    // An *accessor* already defined on the index is a different matter: it
+    // lives in the property map, and this shortcut would leave it there and
+    // write the element beside it, so redefining it as a data property would
+    // be lost (`Array.prototype[0]` gets this: a setter-only accessor, then a
+    // value — `[, ][0]` read `undefined`). Only take the shortcut when the
+    // map has no accessor on the key.
     size_t index = 0;
     if (cell && cell->is_array && !wants_accessor && (parse_index(key, index) || key == "length")) {
-        if (value.present) object.set_property(key, value.value);
-        return true;
+        const bool accessor_there = cell->properties.find(key) != cell->properties.end()
+            && (cell->properties.find(key)->flags & PropertyMap::Accessor);
+        if (!accessor_there) {
+            if (value.present) object.set_property(key, value.value);
+            return true;
+        }
     }
 
     auto refuse = [&](const std::string& message) {

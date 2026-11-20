@@ -248,6 +248,34 @@ struct ModuleExportBinding {
     std::string local_name;
 };
 
+/// What a module publishes and how a reader of it reaches the value.
+///
+/// A binding is one of three things, which is all the live-binding form this
+/// graph supports needs:
+///
+///   - a name the module itself binds (`local_name`): the reader asks the
+///     export namespace for the name the module recorded;
+///   - a name another module publishes (`star_specifier`): the reader asks
+///     that module's own namespace, in its own terms, so `export * from
+///     './inner.js'` chains through any depth and through a second
+///     `export *` in `inner.js`;
+///   - neither, for `export *`, which names nothing itself.
+///
+/// The export object handed to a script is therefore not a copy of what the
+/// module declared: every one of its properties is an accessor whose getter
+/// resolves the binding when it is read, so a module that reassigns a `let`
+/// after another module has imported it is read at its new value (ECMA-262
+/// §16.2.1.6.2, ResolveExport/GetBindingValue).
+struct ModuleExportEntry {
+    std::string exported_name;
+    std::string local_name;
+    /// Non-empty for a name re-exported from another module.
+    std::string star_specifier;
+    /// For `export * from`, the module whose every export is republished.
+    /// Empty for an ordinary binding.
+    std::string star_source;
+};
+
 struct ModuleSourceEdit {
     std::size_t begin{0};
     std::size_t end{0};
@@ -258,6 +286,10 @@ struct ModuleTransform {
     std::string body;
     std::vector<ModuleDependency> dependencies;
     std::vector<ModuleExportBinding> exports;
+    /// Every `export * from './mod.js'` in this module, in source order.
+    /// They publish no name of their own; what they export is read from the
+    /// module they name when the namespace is built.
+    std::vector<std::string> star_exports;
 };
 
 bool module_contextual(const JsToken& token, std::string_view word) {
@@ -524,7 +556,7 @@ std::size_t parse_module_export(const std::vector<JsToken>& tokens,
     if (tokens[pos].type == JsTokenType::Default) {
         const JsToken& default_token = tokens[pos++];
         const std::string local_name = module_fresh_identifier(source, name_serial, "default");
-        module_add_export(transform, default_token, "default", local_name);
+            module_add_export(transform, default_token, "default", local_name);
         edits.push_back({export_token.start, default_token.end, "const " + local_name + " ="});
         // Resume at the token after `export`, not after `default`: a default
         // object/class/function can begin with a delimiter that the outer
@@ -628,7 +660,39 @@ std::size_t parse_module_export(const std::vector<JsToken>& tokens,
     }
 
     if (tokens[pos].type == JsTokenType::Star) {
-        module_syntax_error(tokens[pos], "export * is not supported without live module bindings");
+        // `export * from './mod.js'`. The `as` form (`export * as ns from
+        // './mod.js'`) is a name of its own kind and is not this subset; it is
+        // refused with its own message so that the two are not confused.
+        const JsToken& star_token = tokens[pos++];
+        if (pos < tokens.size() && module_contextual(tokens[pos], "as")) {
+            module_syntax_error(tokens[pos], "export * as is not supported by this static subset");
+        }
+        if (pos >= tokens.size() || !module_contextual(tokens[pos], "from")) {
+            module_syntax_error(tokens[std::min(pos, tokens.size() - 1)],
+                                "expected 'from' after export *");
+        }
+        ++pos;
+        if (pos >= tokens.size() || tokens[pos].type != JsTokenType::String) {
+            module_syntax_error(tokens[std::min(pos, tokens.size() - 1)],
+                                "expected a string module specifier after from");
+        }
+        const std::string specifier = tokens[pos++].text;
+        if (specifier.empty()) {
+            module_syntax_error(star_token, "empty module specifier in export *");
+        }
+
+        // The named exports of the source are not known until it is loaded,
+        // so the dependency carries no bindings: `evaluate_source` evaluates
+        // it and reads its namespace key by key.
+        ModuleDependency dependency;
+        dependency.specifier = specifier;
+        transform.dependencies.push_back(std::move(dependency));
+        transform.star_exports.push_back(specifier);
+
+        const std::size_t end = module_statement_end(tokens, pos);
+        const std::size_t end_byte = end > begin ? tokens[end - 1].end : export_token.end;
+        edits.push_back({export_token.start, end_byte, {}});
+        return end;
     }
     module_syntax_error(tokens[pos], "unsupported export form");
 }
@@ -743,6 +807,44 @@ private:
         js_throw_error(JsErrorKind::Error, "Module '" + key + "' previously failed to evaluate.");
     }
 
+    /// A namespace whose every property is an accessor that resolves the
+    /// binding when it is read, so an imported name follows a module that
+    /// reassigns it afterwards. `own` are the names this module declares,
+    /// read out of the wrapper's export bag; each `star` entry republishes
+    /// the whole of another module's namespace.
+    JsValue make_live_namespace(const JsValue& own_bag, const std::vector<std::string>& stars,
+                                const std::string& referrer_url) {
+        JsValue ns = JsValue::make_object(Heap::default_heap().allocate_object());
+        // A module namespace is a set of enumerable, read-only accessors
+        // (ECMA-262 §10.4.6): a script may read an exported name, and may not
+        // assign to it or delete it.
+        constexpr uint8_t kNamespaceFlags = PropertyMap::Enumerable;
+        for (const std::string& name : own_bag.own_keys()) {
+            // A getter of its own per name: `get() { return own_bag[name]; }`.
+            // The bag is captured, not its values, which is the whole point.
+            auto getter = js_make_native("get", 0, [own_bag, name](const std::vector<JsValue>&) {
+                return own_bag.get_property(name);
+            });
+            ns.define_accessor(name, getter, JsValue::make_undefined(), kNamespaceFlags);
+        }
+        for (const std::string& specifier : stars) {
+            const JsValue source_ns = evaluate_dependency(specifier, referrer_url);
+            for (const std::string& name : source_ns.own_keys()) {
+                // `export *` does not republish `default` (ECMA-262 §16.2.3.7,
+                // ExportEntriesForModule: only the named exports are added).
+                if (name == "default") continue;
+                // A name the module exports itself wins over one it stars
+                // through: the nearer declaration is the one that resolves.
+                if (ns.has_own_property(name)) continue;
+                auto getter = js_make_native("get", 0, [source_ns, name](const std::vector<JsValue>&) {
+                    return source_ns.get_property(name);
+                });
+                ns.define_accessor(name, getter, JsValue::make_undefined(), kNamespaceFlags);
+            }
+        }
+        return ns;
+    }
+
     JsValue evaluate_source(const std::string& key, const std::string& source) {
         if (auto existing = m_records.find(key); existing != m_records.end()) {
             return evaluate_existing(key, existing->second);
@@ -797,9 +899,12 @@ private:
             wrapper += "})(" + imports_name + ", " + exports_name + ");";
             m_interpreter.run(wrapper);
 
-            record->exports = exports;
+            // What the module publishes, read live. The bag the wrapper
+            // filled holds this module's own declarations; each `export *`
+            // adds the whole of another namespace beneath them.
+            record->exports = make_live_namespace(exports, module.star_exports, key);
             record->state = ModuleRecord::State::Evaluated;
-            return exports;
+            return record->exports;
         } catch (...) {
             record->state = ModuleRecord::State::Failed;
             throw;

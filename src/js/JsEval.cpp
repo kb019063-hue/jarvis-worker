@@ -143,30 +143,48 @@ JsValue get_with_receiver(JsObject* start, const std::string& key, const JsValue
 
 /// Pulls values out of an iterable one at a time, for array destructuring,
 /// which must not consume more of an infinite generator than it binds.
+///
+/// Which way a source is read is the question every other loop here asks,
+/// js_iterates_as_builtin(): an array whose `Symbol.iterator` is, by a plain
+/// lookup, still the function this realm put on `Array.prototype` has its
+/// elements read directly, and so does a string whose method and `next` are
+/// still the installed ones. Everything else is asked for its iterator and
+/// the protocol is followed — a replaced method, a subclass, a getter, an
+/// object that only has `next`, a value that is not iterable at all (which is
+/// the TypeError the language asks for). Before this, an array was recognised
+/// by `is_array()` alone, so `var a = [1, 2]; a[Symbol.iterator] = ...` bound
+/// the elements and not what the iterator yields, deleting the method off
+/// `Array.prototype` did not stop `var [x] = [1]`, and a bare `{next(){}}`
+/// was accepted as an iterator. (AGENTS.md, open tasks; Phase 102, finding
+/// 108.)
 class IterationCursor {
 public:
     explicit IterationCursor(const JsValue& source) : m_source(source) {
-        if (source.is_array()) {
-            m_mode = Mode::Array;
-        } else if (source.type == JsType::String) {
-            m_mode = Mode::Buffered;
-            m_buffer = js_iterable_to_vector(source);
-        } else {
-            m_mode = Mode::Protocol;
-            JsValue method;
-            if (source.is_object_like()) {
-                method = source.get_property(kIteratorKey);
-                if (!method.is_function()) method = source.get_property("Symbol.iterator");
-            }
-            if (method.is_function()) {
-                m_iterator = method.call_with_this(source, {});
-            } else if (source.is_object_like() && source.get_property("next").is_function()) {
-                m_iterator = source;
+        if (js_iterates_as_builtin(source)) {
+            if (source.type == JsType::String) {
+                m_mode = Mode::Units;
+                m_text = source.string_val;
             } else {
-                js_throw_type_error(js_describe_thrown(source) + " is not iterable");
+                m_mode = Mode::Array;
+            }
+            return;
+        }
+        JsValue method;
+        if (js_iterator_method(source, method)) {
+            m_mode = Mode::Protocol;
+            m_iterator = method.call_with_this(source, {});
+            if (!m_iterator.is_object_like()) {
+                js_throw_type_error("Result of the Symbol.iterator method is not an object");
             }
             m_next = m_iterator.get_property("next");
+            return;
         }
+        // A pattern asks for the iterator and nothing else. An object that only
+        // has `next` is not iterable, however much it looks like an iterator:
+        // `var [x] = { next() {} }` is a TypeError here, as it is in the
+        // language, where for...of accepts that object. (IterationCursor used
+        // to accept it too, which is the case `iteration.dat` records.)
+        js_throw_type_error(js_describe_thrown(source) + " is not iterable");
     }
 
     /// The next value, or undefined once the source is exhausted.
@@ -175,14 +193,28 @@ public:
         switch (m_mode) {
             case Mode::Array: {
                 const auto& elements = m_source.object_val->array_elements;
-                if (m_index < elements.size()) return elements[m_index++];
+                if (m_index < elements.size()) return m_source.array_element(m_index++);
                 m_done = true;
                 return JsValue::make_undefined();
             }
-            case Mode::Buffered:
-                if (m_index < m_buffer.size()) return m_buffer[m_index++];
-                m_done = true;
-                return JsValue::make_undefined();
+            case Mode::Units: {
+                // A string iterator yields code points, and a lone surrogate
+                // half is a code point of its own: the pair is only one once
+                // both halves are there, so a unit inside one is yielded alone.
+                if (m_index >= m_text.length()) {
+                    m_done = true;
+                    return JsValue::make_undefined();
+                }
+                size_t take = 1;
+                const char16_t unit = m_text.unit_at(m_index);
+                if (unit >= 0xD800 && unit <= 0xDBFF && m_index + 1 < m_text.length()) {
+                    const char16_t low = m_text.unit_at(m_index + 1);
+                    if (low >= 0xDC00 && low <= 0xDFFF) take = 2;
+                }
+                JsString piece = m_text.substring(m_index, m_index + take);
+                m_index += take;
+                return JsValue::make_string(piece);
+            }
             case Mode::Protocol: {
                 JsValue step = js_call(m_next, m_iterator, {});
                 if (!step.is_object_like()) js_throw_type_error("Iterator result is not an object");
@@ -198,19 +230,27 @@ public:
 
     bool done() const { return m_done; }
 
-    /// Tells a protocol iterator that it will not be drained.
+    /// Tells an iterator that will not be drained. IteratorClose (ECMA-262
+    /// 7.4.11) checks what `return` is and what it gives back, but not a
+    /// `return` that is missing or null — and not one that throws, because a
+    /// pattern that binds fewer names than the iterator holds has not failed.
     void close() {
         if (m_mode != Mode::Protocol || m_done) return;
         m_done = true;
         JsValue ret = m_iterator.get_property("return");
-        if (ret.is_function()) ret.call_with_this(m_iterator, {});
+        if (ret.is_nullish()) return;
+        if (!ret.is_function()) js_throw_type_error(js_describe_thrown(ret) + " is not a function");
+        JsValue result = ret.call_with_this(m_iterator, {});
+        if (!result.is_object_like()) {
+            js_throw_type_error("Iterator result " + js_describe_thrown(result) + " is not an object");
+        }
     }
 
 private:
-    enum class Mode { Array, Buffered, Protocol };
+    enum class Mode { Array, Units, Protocol };
     JsValue m_source;
     Mode m_mode{Mode::Array};
-    std::vector<JsValue> m_buffer;
+    JsString m_text;
     JsValue m_iterator;
     JsValue m_next;
     size_t m_index{0};
@@ -2790,12 +2830,16 @@ JsValue JsInterpreter::eval_index(const IndexExpr* index, const EnvPtr& env) {
         return JsValue::make_undefined();
     }
     JsValue key = evaluate(index->index.get(), env);
-    // Fast path: array[number].
+    // Fast path: array[number]. A hole is not one of the array's properties,
+    // so it is not an answer here: `[, ][0]` has to reach the prototype with
+    // `get_member`, as `HasProperty` says it does. An element still answers
+    // without the call, which is the case this path exists for.
     if (key.type == JsType::Number && base.is_array()) {
         double n = key.number_val;
         const auto& elements = base.object_val->array_elements;
         if (n >= 0 && n < static_cast<double>(elements.size()) && n == std::floor(n)) {
-            return elements[static_cast<size_t>(n)];
+            const size_t i = static_cast<size_t>(n);
+            if (!base.is_array_hole(i)) return elements[i];
         }
     }
     return get_member(base, js_to_property_key(key));

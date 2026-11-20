@@ -347,6 +347,18 @@ bool lookup_chain(JsObject* start, const std::string& name, const JsValue& recei
             out = read_entry(*it, receiver);
             return true;
         }
+        // An array prototype can have an index of its own, and it keeps those
+        // in `array_elements` rather than in the property map: without this,
+        // `Array.prototype[4] = 5` would not reach `[1, 2, 3][4]`. A hole is
+        // not one of them, so the walk goes on past it.
+        if (obj->is_array) {
+            size_t index = 0;
+            if (parse_array_index(name, index) && index < obj->array_elements.size()
+                && !(obj->array_holes && obj->array_holes->empty_slot(index))) {
+                out = obj->array_elements[index];
+                return true;
+            }
+        }
         if (const JsValue* function = obj->function_value()) {
             if (function_implicit_property(*function, obj, name, out)) return true;
         }
@@ -922,6 +934,11 @@ bool JsValue::has_property(const std::string& name) const {
     int guard = 0;
     for (JsObject* obj = proto; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
         if (obj->properties.find(name) != obj->properties.end()) return true;
+        if (obj->is_array) {
+            size_t index = 0;
+            if (parse_array_index(name, index) && index < obj->array_elements.size()
+                && !(obj->array_holes && obj->array_holes->empty_slot(index))) return true;
+        }
         if (const JsValue* function = obj->function_value()) {
             if (function_has_implicit_property(*function, name)) return true;
         }
@@ -947,8 +964,19 @@ bool JsValue::delete_property(const std::string& name) {
         if (is_wrapped_string_index(cell, name)) return false;
         size_t index = 0;
         if (cell->is_array && parse_array_index(name, index)) {
-            // A delete leaves a hole: the index stops being an own property,
-            // and stays one of the array's places (its `length` does not move).
+            // An index can also be in the property map: `Object.defineProperty`
+            // puts an accessor there, and a data property defined over one
+            // stays there too. Both are the index's own property, so both have
+            // to go; and erasing one that was never an element must not mark a
+            // hole, or `0 in [, ]` stays true after `delete Array.prototype[0]`.
+            auto mapped = cell->properties.find(name);
+            if (mapped != cell->properties.end()) {
+                if (!(mapped->flags & PropertyMap::Configurable)) return false;
+                cell->properties.erase(name);
+            }
+            // A delete of an element leaves a hole: the index stops being an
+            // own property, and stays one of the array's places (its `length`
+            // does not move).
             auto& elements = cell->array_elements;
             if (index < elements.size()) set_array_hole(index);
             return true;
@@ -1196,8 +1224,13 @@ JsValue JsValue::get_property(const std::string& name) const {
             }
             size_t index = 0;
             if (parse_array_index(name, index)) {
-                // A hole reads `undefined`, and so does an index past the end.
-                return array_element(index);
+                // An index that is an element is the answer. A hole is not an
+                // own property at all (`1 in a` is false), so the read goes on
+                // and may find one on the prototype, as `HasProperty` does;
+                // and when nothing does, it is `undefined`.
+                if (index < obj->array_elements.size() && !is_array_hole(index)) {
+                    return obj->array_elements[index];
+                }
             }
         }
 

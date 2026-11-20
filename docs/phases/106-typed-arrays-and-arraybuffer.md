@@ -60,6 +60,18 @@ come back as the double it was.
 
 Bytes are little-endian regardless of the host, as every browser's are.
 
+Two results look wrong and are not, which is why they are in the suite:
+
+- `Object.getOwnPropertyDescriptor(new Uint8Array([7]), "0")` reports
+  `configurable: true`, and `delete a[0]` returns `false`. Both are what
+  ECMA-262 says: `IntegerIndexedExoticObject.[[GetOwnProperty]]` reports a
+  configurable element, and its `[[Delete]]` answers `false` for an index that
+  is in range. A browser agrees; a reader does not expect it.
+- `new Uint8Array(1)[0] = -0.5` is `0` and `0.5` into a `Uint8ClampedArray` is
+  `0`, not `1`: `ToUint8` truncates toward zero before the modulo, and the
+  clamped type rounds half to **even**, so `0.5 -> 0`, `1.5 -> 2`, `2.5 -> 2`,
+  `3.5 -> 4`.
+
 ### Windows
 
 `new Uint8Array(buffer)`, `new Uint8Array(buffer, byteOffset)` and

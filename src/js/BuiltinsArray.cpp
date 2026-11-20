@@ -167,18 +167,17 @@ std::string join_array(const JsValue& array, const std::string& separator) {
     const size_t length = elements_of(array).size();
     for (size_t i = 0; i < length; ++i) {
         if (i) out += separator;
-        JsValue item;
-        if (i >= elements_of(array).size() || array.is_array_hole(i)) {
+        // Nothing is made for a hole that joins empty: not even an empty value.
+        const bool hole = i >= elements_of(array).size() || array.is_array_hole(i);
+        if (hole) {
             if (!holes_known) {
                 holes_empty = js_array_holes_read_undefined(array);
                 holes_known = true;
             }
             if (holes_empty) continue;
-            item = js_array_get(array, i);
-            holes_known = false;
-        } else {
-            item = elements_of(array)[i];
+            holes_known = false;                                 // the read below may run a getter
         }
+        JsValue item = hole ? js_array_get(array, i) : elements_of(array)[i];
         if (item.type == JsType::String) out += item.string_val.view();
         else if (!item.is_nullish()) {
             out += js_to_string(item);

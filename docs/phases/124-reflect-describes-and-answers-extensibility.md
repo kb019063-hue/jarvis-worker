@@ -1,8 +1,8 @@
-# Phase 122 — `Reflect` gets the three functions it was missing
+# Phase 124 — `Reflect` gets the three functions it was missing
 
 Task row: **`Reflect.getOwnPropertyDescriptor`, `Reflect.isExtensible`,
 `Reflect.preventExtensions` and the four `__defineGetter__` relatives do not
-exist** — the `Reflect` half only. Finding 127.
+exist** — the `Reflect` half only. Finding 129.
 
 The `__defineGetter__` / `__defineSetter__` / `__lookupGetter__` /
 `__lookupSetter__` half of the same row is **not** taken here and is still open.

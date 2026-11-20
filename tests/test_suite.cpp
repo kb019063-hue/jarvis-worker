@@ -24865,7 +24865,7 @@ TEST(instanceof_asks_symbol_has_instance) {
 
 TEST(reflect_describes_and_answers_extensibility) {
     using namespace litebird;
-    // Phase 122, finding 127. `Reflect` had ten of its thirteen functions;
+    // Phase 124, finding 129. `Reflect` had ten of its thirteen functions;
     // `getOwnPropertyDescriptor`, `isExtensible` and `preventExtensions` were
     // `undefined`, so `Reflect.getOwnPropertyDescriptor({a:1},'a')` was a
     // TypeError and `Reflect.isExtensible` did not exist to ask. The three
@@ -25407,7 +25407,7 @@ int main() {
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
 
-    // Phase 122: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
+    // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
 
 

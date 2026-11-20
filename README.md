@@ -41,7 +41,7 @@ standard now makes, which is 1,967 of the 1,973.
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 265 suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 266 suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
@@ -73,7 +73,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 265 engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 266 engine suites + 114 cross-origin Window/Location/channel checks
 make check-numbers   # the numbers above still divide and still count (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
@@ -752,7 +752,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 265 engine test suites
+# Run the 266 engine test suites
 make test
 ```
 
@@ -820,14 +820,14 @@ make test
 make test
 ```
 
-Output (265 suites; the first and last lines shown):
+Output (266 suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 265 engine test suites passed successfully!
+All 266 engine test suites passed successfully!
 ```
 
 ```bash
@@ -1553,7 +1553,7 @@ ligature components, zeroing monospaced combining-mark advances (`SinglePos`
 under `mark`), resolving stacked mark-to-mark chains after base attachment,
 respecting `font-kerning: none` for `kern` lookups while keeping mark
 anchoring active, and painting/padding `(x_offset, y_offset)` across
-`FontRenderer` and `Canvas2D`. `make test` passes all **265** suites (5 new GPOS
+`FontRenderer` and `Canvas2D`. `make test` passes all **266** suites (5 new GPOS
 suites) in both Release and ASan+UBSan (`fuzz_pipeline` **400** runs, **0**
 findings). Complex-script contextual positioning (`Type 7`/`Type 8`) and bidi
 remain open. See [Phase 99](docs/phases/99-gdef-and-gpos-text-positioning.md)

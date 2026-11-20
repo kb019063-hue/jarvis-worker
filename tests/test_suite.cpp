@@ -14518,6 +14518,119 @@ TEST(array_holes_are_not_elements) {
     assert(js.eval("failures.join('; ')").to_string().empty());
 }
 
+TEST(a_hole_is_a_place_the_prototype_can_fill) {
+    using namespace litebird;
+    // Phase 98, finding 104. Phase 81 made a hole a hole, and two things that
+    // ask `HasProperty` kept answering from the own elements alone:
+    //
+    //   1. `find`, `findIndex`, `findLast` and `findLastIndex` skipped a hole.
+    //      They are the one family that does not: the standard reads `O[k]` for
+    //      every index and calls the predicate, so `[1, , , 4].find(f)` calls
+    //      `f` four times and this engine called it twice.
+    //   2. `every`, `some`, `map`, `filter`, `reduce`, `reduceRight`, `indexOf`
+    //      and `lastIndexOf` decided with "is a hole?", where the standard asks
+    //      `HasProperty`, which goes on to the prototype. With a setter-only
+    //      accessor at `Array.prototype[0]`, `[, ].every(f)` must call `f`
+    //      once and this engine called it not at all.
+    //
+    // Behind both: `lookup_chain`, `has_property` and the array branch of
+    // `get_property` looked only in the property map, so an index an array
+    // prototype has in its elements was invisible, and `eval_index`'s fast
+    // path answered a hole from the elements it had just been told were not
+    // there. Those 12 test262 tests that passed before Phase 81 pass again.
+    //
+    // Every assertion is compared in the page, and the whole set was run
+    // through this engine and through Node.js first: the same lines.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    // The find family visits every place, holes included.
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function count(array, method) {
+            var calls = 0;
+            array[method](function () { calls++; return false; });
+            return calls;
+        }
+        var sparse = [1, , , 4];
+        ok('find visits every place', count(sparse, 'find'), 4);
+        ok('findIndex visits every place', count(sparse, 'findIndex'), 4);
+        ok('findLast visits every place', count(sparse, 'findLast'), 4);
+        ok('findLastIndex visits every place', count(sparse, 'findLastIndex'), 4);
+        ok('and the value of a hole is undefined', sparse.find(function (v, i) { return i === 1; }), undefined);
+        var foundIndex = sparse.findIndex(function (v) { return v === undefined; });
+        ok('the first undefined is the hole', foundIndex, 1);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+
+    // HasProperty goes on to the prototype, and every method that asks it sees
+    // an index the prototype has. A setter-only accessor is the case the
+    // standard's own tests use: the index exists, so the callback is called,
+    // and it reads `undefined`.
+    js.eval(R"JS(
+        var visit = 0;
+        function callbackfn(val, idx, obj) { visit++; return typeof val === 'undefined'; }
+        Object.defineProperty(Array.prototype, '0', { set: function () {}, configurable: true });
+        ok('a setter-only accessor makes the index one every visits', [, ].every(callbackfn), true);
+        ok('and it was visited', visit, 1);
+        Object.defineProperty(Array.prototype, '0', { value: 'p', writable: true, configurable: true });
+        ok('the prototype value is the value of the hole', [, ][0], 'p');
+        ok('`in` finds it', 0 in [, ], true);
+        ok('but it is still not an own property', [, ].hasOwnProperty(0), false);
+        ok('Object.keys does not list it', Object.keys([, ]).length, 0);
+        ok('some reads it', [, ].some(function (v) { return v === 'p'; }), true);
+        ok('every reads it', [, ].every(function (v) { return v === 'p'; }), true);
+        ok('filter keeps it', [, ].filter(function () { return true; }).length, 1);
+        ok('map passes it through', [, ].map(function (v) { return v; })[0], 'p');
+        ok('indexOf finds it', [, ].indexOf('p'), 0);
+        ok('lastIndexOf finds it', [, ].lastIndexOf('p'), 0);
+        ok('reduce seeds from it', [, ].reduce(function (a, b) { return String(a) + '|' + String(b); }), 'p');
+        // `map` still writes a hole where the source had one, for an index the
+        // prototype does not have: the callback is not called, and the answer
+        // has no element there.
+        delete Array.prototype[0];
+        var mapped = [1, , 3].map(function (v) { return v; });
+        ok('map keeps a hole a hole', 1 in mapped, false);
+        ok('and still calls the callback for the elements', mapped.join(), '1,,3');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+
+    // An index past the end and an index with nothing behind it are the same
+    // answer, and neither one is an own property.
+    js.eval(R"JS(
+        ok('past the end reads undefined', [1, 2, 3][9], undefined);
+        ok('and is not in', 9 in [1, 2, 3], false);
+        ok('a hole with nothing behind it reads undefined', [, ][0], undefined);
+        // An object whose prototype is an array inherits its indices one by
+        // one -- the elements are the prototype's own properties, which is
+        // what `lookup_chain` did not look at. Its `length` is a *different*
+        // gap and a row of AGENTS.md of its own: the standard inherits it from
+        // the prototype's `length` and this engine answers `undefined`, so it
+        // is asserted here as it is, where a change to it will be noticed.
+        var inherited = Object.create([7, 8, 9]);
+        ok('an object with an array prototype inherits an index', inherited[0], 7);
+        ok('an index past the array end is undefined', inherited[3], undefined);
+        ok('its length is not inherited here', inherited.length, undefined);
+        var prototypeIndexed = Object.create(Array.prototype);
+        Array.prototype[2] = 'two';
+        ok('a plain object still sees an index the prototype has', prototypeIndexed[2], 'two');
+        delete Array.prototype[2];
+        // The one place `hole_at` is still the right question: what
+        // `Object.getOwnPropertyDescriptor` and `Object.keys` answer.
+        var own = [1, , 3];
+        ok('a hole has no descriptor', Object.getOwnPropertyDescriptor(own, '1'), undefined);
+        ok('but the length still counts it', own.length, 3);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
 TEST(html5_date_time_inputs_validation_and_stepping) {
     using namespace litebird;
     auto doc = std::make_shared<Document>();
@@ -23391,6 +23504,7 @@ int main() {
 
     // Phase 81: an index of an array is either an element or a hole.
     RUN_TEST(array_holes_are_not_elements);
+    RUN_TEST(a_hole_is_a_place_the_prototype_can_fill);
 
     // Per-glyph font fallback: a codepoint the primary face does not cover is
     // drawn from another face instead of painting nothing.

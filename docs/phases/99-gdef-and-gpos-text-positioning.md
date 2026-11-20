@@ -69,7 +69,7 @@ Without `GDEF` and `GPOS`:
 
 ## Verified
 
-- Release `make all test`: **265 / 265** unit suites + **114 / 114**
+- Release `make all test`: **266 / 266** unit suites + **114 / 114**
   cross-origin checks passing, including five new Phase 99 suites:
   - `gpos_pair_and_single_positioning_without_kern_table` (`SinglePos`, `PairPos`
     fmt1/2, `ValueFormat2`, `ExtensionPos` Type 9, `IgnoreMarks`, `font-kerning:
@@ -87,8 +87,8 @@ Without `GDEF` and `GPOS`:
 - Existing conformance suites (Release): `make conformance` (`1972/1973`),
   `make js-conformance` (`1137/1156`), `make dom-conformance` (`678/678`),
   `make url-conformance` (`1188/1188`), `make wpt` (`9567/9824`, `0` unlisted).
-- Sanitizer (`-fsanitize=address,undefined`): `build-asan/test_suite` (**265 /
-  265** suites, **0** sanitizer findings), `build-asan/cross_origin_test` (**114 /
+- Sanitizer (`-fsanitize=address,undefined`): `build-asan/test_suite` (**266 /
+  266** suites, **0** sanitizer findings), `build-asan/cross_origin_test` (**114 /
   114**), and `tools/fuzz/fuzz_pipeline.py --binary build-asan/litebird` (**400 /
   400** runs, **0** findings).
 

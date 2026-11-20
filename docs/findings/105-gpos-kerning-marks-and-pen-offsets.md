@@ -53,6 +53,6 @@ fonts (`DejaVuSans.ttf`, `DejaVuSans-Bold.ttf`, `DejaVuSerif.ttf`,
 
 ## Verified
 
-`make all test` (**265 / 265** suites, including the five new GPOS/GDEF suites)
+`make all test` (**266 / 266** suites, including the five new GPOS/GDEF suites)
 and ASan+UBSan `build-asan/test_suite` + `tools/fuzz/fuzz_pipeline.py` (**400**
 runs, **0** findings).

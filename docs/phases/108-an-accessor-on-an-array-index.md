@@ -191,7 +191,8 @@ and the two corpora were run again on the tree with it.
   whether the place was a hole.
 - **Under the sanitizers** (`make asan-build`, then `build-asan/litebird`),
   on the head of #134, which is this change before `main` moved under it by
-  four merges that touch none of its files, and before `join` was reordered:
+  seven merges, none of which touches an engine file this changes, and before
+  `join` was reordered:
   the suite's 58 cases, the nine scripts this was compared with Node.js by,
   and 1,231 test262 tests, each run alone, of the sixteen methods of
   `Array.prototype` this touches (the tests that give a method an object

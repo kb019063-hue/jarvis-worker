@@ -22,6 +22,7 @@
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/ImageDecoder.hpp"
 #include "litebird/render/FontRenderer.hpp"
+#include "litebird/text/Bidi.hpp"
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/GifDecoder.hpp"
 #include "litebird/render/WebPDecoder.hpp"
@@ -14586,6 +14587,130 @@ TEST(cssom_media_rules_and_the_cascade_inside_them) {
     assert(js.eval("failures.join('; ')").to_string().empty());
 }
 
+TEST(keyframes_are_rules_of_the_cssom) {
+    using namespace litebird;
+    // Phase 112. The engine has parsed `@keyframes` since the cascade could
+    // animate with it, but the CSS Object Model skipped the block: a sheet's
+    // `cssRules` had no entry for it, so every rule after it answered with the
+    // next one's index, and `insertRule('@keyframes …')` was a `SyntaxError`.
+    // A browser lists the block as a `CSSKeyframesRule` whose frames are a
+    // `CSSRuleList` of their own.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><html><head><style>"
+        "@keyframes slide { 0% { left: 0px } 50%, 100% { left: 10px; opacity: .5 } }"
+        "@keyframes colours { from { color: red } to { color: blue } }"
+        "@-webkit-keyframes wink { 0% { opacity: 1 } }"
+        "@media screen { @keyframes inside { 0% { left: 1px } } }"
+        "#target { color: red }"
+        "</style></head><body><div id=\"target\">x</div></body></html>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function name(f) { try { f(); return 'no throw'; } catch (e) { return e.name; } }
+
+        var sheet = document.querySelector('style').sheet;
+        var target = document.getElementById('target');
+        var slide = sheet.cssRules[0];
+        var colours = sheet.cssRules[1];
+
+        // The block is a rule of the sheet, in the order it was written, and
+        // the style rule after it keeps its own index.
+        ok('the rules, in order', sheet.cssRules.length, 5);
+        ok('the block is first', slide.constructor.name, 'CSSKeyframesRule');
+        ok('it is a CSSRule', slide instanceof CSSRule, true);
+        ok('and a CSSKeyframesRule', slide instanceof CSSKeyframesRule, true);
+        ok('type', slide.type, CSSRule.KEYFRAMES_RULE);
+        ok('the constant on the class', CSSKeyframesRule.KEYFRAMES_RULE, 7);
+        ok('the name', slide.name, 'slide');
+        ok('a second block', colours.name, 'colours');
+        ok('the prefixed one', sheet.cssRules[2].constructor.name, 'CSSKeyframesRule');
+        ok('its name', sheet.cssRules[2].name, 'wink');
+        ok('the media rule is still a media rule', sheet.cssRules[3].constructor.name, 'CSSMediaRule');
+        ok('and the style rule is last', sheet.cssRules[4].selectorText, '#target');
+        ok('the style rule still styles', getComputedStyle(target).color, 'rgb(255, 0, 0)');
+
+        // Its frames are a CSSRuleList of their own.
+        ok('two frames', slide.cssRules.length, 2);
+        ok('the first key', slide.cssRules[0].keyText, '0%');
+        ok('the second key', slide.cssRules[1].keyText, '50%, 100%');
+        ok('a frame is a CSSKeyframeRule', slide.cssRules[0] instanceof CSSKeyframeRule, true);
+        ok('a frame is a CSSRule', slide.cssRules[0] instanceof CSSRule, true);
+        ok('a frame type', slide.cssRules[0].type, CSSRule.KEYFRAME_RULE);
+        ok('one object per frame', slide.cssRules.item(0) === slide.cssRules[0], true);
+        ok('from and to are kept as written', colours.cssRules[0].keyText + '|' + colours.cssRules[1].keyText,
+           'from|to');
+        ok('the frame style', slide.cssRules[1].style.left, '10px');
+        ok('a number is a number', slide.cssRules[1].style.opacity, '0.5');
+        ok('the frame is a CSSStyleDeclaration', slide.cssRules[0].style instanceof CSSStyleDeclaration, true);
+        ok('parentRule of the block', slide.parentRule, null);
+        ok('parentRule of a frame', slide.cssRules[0].parentRule === slide, true);
+        ok('parentStyleSheet', slide.parentStyleSheet === sheet, true);
+        ok('the block cssText', slide.cssText,
+           '@keyframes slide { 0% { left: 0px; } 50%, 100% { left: 10px; opacity: 0.5; } }');
+        ok('the frame cssText', slide.cssRules[0].cssText, '0% { left: 0px; }');
+
+        // A keyframes block declares no selector, so it colours nothing: this
+        // is the rule that keeps the cascade out of it.
+        ok('a frame does not style the page', getComputedStyle(target).color, 'rgb(255, 0, 0)');
+        ok('nor does another block', getComputedStyle(target).opacity, '1');
+
+        // findRule, appendRule and deleteRule address a frame by its selector.
+        ok('findRule by key', slide.findRule('50%, 100%') === slide.cssRules[1], true);
+        ok('findRule that finds nothing', slide.findRule('75%'), null);
+        ok('deleteRule of a key that is not there', name(function () { slide.deleteRule('75%'); }), 'no throw');
+        ok('the frames are untouched', slide.cssRules.length, 2);
+        ok('appendRule', name(function () { slide.appendRule('75% { left: 5px }'); }), 'no throw');
+        ok('three frames', slide.cssRules.length, 3);
+        ok('the appended key', slide.cssRules[2].keyText, '75%');
+        ok('the appended style', slide.cssRules[2].style.left, '5px');
+        ok('a new frame is a CSSKeyframeRule', slide.cssRules[2] instanceof CSSKeyframeRule, true);
+        ok('appendRule of nonsense', name(function () { slide.appendRule('nonsense'); }), 'SyntaxError');
+        ok('appendRule of two frames', name(function () { slide.appendRule('10% { left: 0 } 20% { left: 1px }'); }),
+           'SyntaxError');
+        slide.deleteRule('0%');
+        ok('deleted by key', slide.cssRules.length, 2);
+        ok('the one that was left first', slide.cssRules[0].keyText, '50%, 100%');
+
+        // A frame and a block are still editable, and the list follows.
+        slide.cssRules[0].keyText = '60%';
+        ok('keyText is writable', slide.findRule('60%') === slide.cssRules[0], true);
+        slide.cssRules[0].style.left = '3px';
+        ok('and its style', slide.cssRules[0].style.left, '3px');
+        slide.name = 'renamed';
+        ok('name is writable', slide.name, 'renamed');
+
+        // The sheet takes an @keyframes rule through `insertRule`, and drops it
+        // through `deleteRule`, like any other rule.
+        ok('insertRule of a block', sheet.insertRule('@keyframes spin { from { left: 2px } }', 1), 1);
+        ok('it went in where it was put', sheet.cssRules[1].name, 'spin');
+        ok('with its frame', sheet.cssRules[1].cssRules[0].keyText, 'from');
+        ok('the rule after it moved', sheet.cssRules[2].constructor.name, 'CSSKeyframesRule');
+        sheet.deleteRule(1);
+        ok('and out again', sheet.cssRules.length, 5);
+        ok('a block with no name', name(function () { sheet.insertRule('@keyframes { 0% { left: 0 } }', 0); }),
+           'SyntaxError');
+        ok('a block with an empty body is a rule', sheet.insertRule('@keyframes empty {}', 0), 0);
+        ok('with no frames', sheet.cssRules[0].cssRules.length, 0);
+        sheet.deleteRule(0);
+
+        // A block inside `@media` belongs to the media rule, and is listed
+        // whether or not the query matches.
+        var media = sheet.cssRules[3];
+        ok('the media block holds the keyframes rule', media.cssRules[0].constructor.name, 'CSSKeyframesRule');
+        ok('its name', media.cssRules[0].name, 'inside');
+        ok('and its frame', media.cssRules[0].cssRules[0].keyText, '0%');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
 TEST(array_holes_are_not_elements) {
     using namespace litebird;
     // Phase 81. `delete a[1]` used to leave an element whose value was
@@ -23619,6 +23744,667 @@ TEST(http11_keep_alive_socket_pooling_and_tls_reuse) {
     ResourceLoader::clear_http_cache();
 }
 
+TEST(an_accessor_on_an_array_index_is_its_property) {
+    using namespace litebird;
+    // Phase 108, finding 114. An accessor defined on an index of an array went
+    // into the property map, and every question about an index of an array was
+    // answered from the elements before the map was looked at. So the getter
+    // was never called and the setter was never called; and on a hole, since
+    // Phase 81 made a hole a hole, the index was not even an own property,
+    // which is how four test262 tests that define a setter on a hole and then
+    // call `reduce`, `reduceRight` or `lastIndexOf` came to fail.
+    //
+    // `JsValue::define_accessor` now makes the place a hole, and a hole is
+    // where the map is asked: by `has_own_property`, by a write, by the
+    // descriptor and by the list of keys (a read went on to the map already).
+    // The methods that read a place and did not ask (`join`, `includes`, `at`,
+    // `pop`, the iterator, `JSON.stringify`, and the methods that copy) read
+    // it as `a[i]` does, which is also what makes them see an index that
+    // `Array.prototype` has.
+    //
+    // Every case was run through Node.js first, and the expected text of each
+    // is what it printed. What is not here because it is not so yet: the
+    // methods that move elements in place (`reverse`, `sort`, `shift`,
+    // `unshift`, `splice`, `fill`, `copyWithin`) and array destructuring move
+    // and read the places and not what an accessor makes of them (AGENTS.md).
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    auto none_failed = [&]() {
+        const std::string failed = js.eval("failures.join('\\n')").to_string();
+        if (!failed.empty()) std::cerr << failed << "\n";
+        return failed.empty();
+    };
+
+    // The four tests, as test262 writes them: a setter and no getter, on a
+    // hole.
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function describe(o, k) {
+            var d = Object.getOwnPropertyDescriptor(o, k);
+            if (!d) return 'none';
+            var parts = [];
+            ['value', 'writable', 'get', 'set', 'enumerable', 'configurable'].forEach(function (name) {
+                if (name in d) parts.push(name + '=' + (typeof d[name] === 'function' ? 'fn' : String(d[name])));
+            });
+            return parts.join(' ');
+        }
+        function seven() { return 7; }
+        function nothing() {}
+        check('a setter-only accessor on a hole is an own property', function () {
+            var a = [, , , ];
+            Object.defineProperty(a, '0', { set: nothing, configurable: true });
+            return [a.hasOwnProperty(0), 0 in a, a[0] === undefined, a.length, Object.keys(a), Object.getOwnPropertyNames(a), describe(a, 0)];
+        }, '[true,true,true,3,[],["0","length"],"get=undefined set=fn enumerable=false configurable=true"]');
+        check('lastIndexOf, indexOf and includes find undefined at it', function () {
+            var a = [, 1];
+            Object.defineProperty(a, '0', { set: nothing, configurable: true });
+            return [a.lastIndexOf(undefined), a.indexOf(undefined), a.includes(undefined)];
+        }, '[0,0,true]');
+        check('reduce without a first value starts from it', function () {
+            var first = 'not called';
+            var a = [, 1];
+            Object.defineProperty(a, '0', { set: nothing, configurable: true });
+            a.reduce(function (previous, current, index) { if (index === 1) first = typeof previous; });
+            return first;
+        }, '"undefined"');
+        check('reduce with a first value visits it', function () {
+            var seen = [];
+            var a = [, 1];
+            Object.defineProperty(a, '0', { set: nothing, configurable: true });
+            a.reduce(function (previous, current, index) { seen.push(index + ':' + typeof current); }, 'first');
+            return seen;
+        }, '["0:undefined","1:number"]');
+        check('reduceRight visits it', function () {
+            var seen = [];
+            var a = [0, , 2];
+            Object.defineProperty(a, '1', { set: nothing, configurable: true });
+            a.reduceRight(function (previous, current, index) { seen.push(index + ':' + typeof current); }, 'first');
+            return seen;
+        }, '["2:number","1:undefined","0:number"]');
+    )JS");
+    assert(none_failed());
+
+    // A getter is what the index reads, for everything that reads an index.
+    js.eval(R"JS(
+        check('a getter on a hole is read by the index, by join and by every callback method', function () {
+            var a = [1, , 3];
+            Object.defineProperty(a, '1', { get: seven, enumerable: true, configurable: true });
+            var seen = [];
+            a.forEach(function (v, i) { seen.push(i + ':' + v); });
+            return [a[1], a.join(), Object.keys(a), seen,
+                    a.map(function (v) { return v * 2; }), a.filter(function (v) { return v > 2; }),
+                    a.reduce(function (x, y) { return x + y; }), a.reduceRight(function (x, y) { return x + y; }),
+                    a.indexOf(7), a.lastIndexOf(7), a.includes(7), a.at(1),
+                    a.some(function (v) { return v === 7; }), a.every(function (v) { return v > 0; }),
+                    a.find(function (v) { return v === 7; }), a.findIndex(function (v) { return v === 7; }),
+                    a.findLast(function (v) { return v === 7; }), a.findLastIndex(function (v) { return v === 7; })];
+        }, '[7,"1,7,3",["0","1","2"],["0:1","1:7","2:3"],[2,14,6],[7,3],11,11,1,1,true,7,true,true,7,1,7,1]');
+        check('one that is not enumerable is no key, and is a name', function () {
+            var a = [1, , 3];
+            Object.defineProperty(a, '1', { get: seven });
+            return [Object.keys(a), Object.getOwnPropertyNames(a), describe(a, 1), JSON.stringify(a), String(a), a.length];
+        }, '[["0","2"],["0","1","2","length"],"get=fn set=undefined enumerable=false configurable=false","[1,7,3]","1,7,3",3]');
+        check('a getter defined where an element is replaces it, enumerable and configurable as the element was', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven });
+            var values = [];
+            for (var v of a) values.push(v);
+            var keys = [];
+            for (var k in a) keys.push(k);
+            return [a[1], a.join(), describe(a, 1), Object.keys(a), JSON.stringify(a), values, keys, a.length, a.hasOwnProperty(1), 1 in a];
+        }, '[7,"1,7,3","get=fn set=undefined enumerable=true configurable=true",["0","1","2"],"[1,7,3]",[1,7,3],["0","1","2"],3,true,true]');
+        check('and the methods that copy an array copy what it reads', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven });
+            return [[...a], a.slice(), a.concat([4]), [0].concat(a), Array.from(a), Object.values(a), Object.entries(a),
+                    a.flat(), a.toSorted(), a.toReversed(), a.with(0, 9), a.toSpliced(0, 1), Math.max.apply(null, a), Math.max(...a)];
+        }, '[[1,7,3],[1,7,3],[1,7,3,4],[0,1,7,3],[1,7,3],[1,7,3],[["0",1],["1",7],["2",3]],[1,7,3],[1,3,7],[3,7,1],[9,7,3],[7,3],7,7]');
+        check('the getter is called with the array as this', function () {
+            var a = [1, 2, 3];
+            var self;
+            Object.defineProperty(a, '1', { get: function () { self = this; return 7; } });
+            a[1];
+            return self === a;
+        }, 'true');
+        check('JSON.stringify asks the replacer about a hole, as about any index', function () {
+            return JSON.parse(JSON.stringify([1, , 3], function (key, value) { return value === undefined ? 'hole' : value; }));
+        }, '[1,"hole",3]');
+    )JS");
+    assert(none_failed());
+
+    // A setter is what a write to the index calls.
+    js.eval(R"JS(
+        check('a write calls the setter and stores nothing', function () {
+            var log = [];
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { set: function (v) { log.push(v); }, configurable: true });
+            a[1] = 9;
+            return [log, a[1] === undefined, a.length, describe(a, 1)];
+        }, '[[9],true,3,"get=undefined set=fn enumerable=true configurable=true"]');
+        check('a getter and a setter together', function () {
+            var store = 5;
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: function () { return store; }, set: function (v) { store = v * 2; }, enumerable: true });
+            a[1] = 4;
+            a[1] += 1;
+            return [a[1], store, a.join()];
+        }, '[18,18,"1,18,3"]');
+        check('a write to a getter alone is a TypeError in strict code', function () {
+            'use strict';
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven });
+            a[1] = 9;
+            return a[1];
+        }, 'throws TypeError');
+        check('and is ignored in code that is not strict', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven });
+            a[1] = 9;
+            return a[1];
+        }, '7');
+    )JS");
+    assert(none_failed());
+
+    // Past the end, the array grows to the index, and the places between are
+    // holes.
+    js.eval(R"JS(
+        check('an accessor past the end makes the array that long', function () {
+            var a = [1, 2];
+            Object.defineProperty(a, '5', { get: seven, enumerable: true });
+            return [a.length, Object.keys(a), a[5], 3 in a, a.hasOwnProperty(5), a.join()];
+        }, '[6,["0","1","5"],7,false,true,"1,2,,,,7"]');
+        check('on an empty array too', function () {
+            var a = [];
+            Object.defineProperty(a, 0, { get: function () { return 'g'; } });
+            return [a.length, a[0], describe(a, 0)];
+        }, '[1,"g","get=fn set=undefined enumerable=false configurable=false"]');
+    )JS");
+    assert(none_failed());
+
+    // delete, a second definition, and length.
+    js.eval(R"JS(
+        check('delete takes a configurable accessor away and leaves a hole', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven, configurable: true });
+            var deleted = delete a[1];
+            return [deleted, a[1] === undefined, 1 in a, a.hasOwnProperty(1), describe(a, 1), a.length];
+        }, '[true,true,false,false,"none",3]');
+        check('delete leaves one that is not configurable', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven, configurable: false });
+            var deleted = delete a[1];
+            return [deleted, a[1], 1 in a];
+        }, '[false,7,true]');
+        check('a value defined over an accessor keeps the attributes it does not name', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven, configurable: true });
+            Object.defineProperty(a, '1', { value: 4 });
+            var described = describe(a, 1);
+            a[1] = 9;
+            return [a[1], described, a.join(), Object.keys(a)];
+        }, '[4,"value=4 writable=false enumerable=true configurable=true","1,4,3",["0","1","2"]]');
+        check('and is written when it is writable', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven, configurable: true, enumerable: true });
+            Object.defineProperty(a, '1', { value: 4, writable: true });
+            a[1] = 9;
+            return [a[1], describe(a, 1), a.join(), Object.keys(a)];
+        }, '[9,"value=9 writable=true enumerable=true configurable=true","1,9,3",["0","1","2"]]');
+        check('an accessor that is not configurable cannot become a value', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven, configurable: false });
+            Object.defineProperty(a, '1', { value: 4 });
+            return 'defined';
+        }, 'throws TypeError');
+        check('an accessor defined on a hole is not configurable unless it says so, and delete leaves it', function () {
+            var a = [1, , 3];
+            Object.defineProperty(a, '1', { get: seven });
+            var deleted = delete a[1];
+            return [deleted, a[1], describe(a, 1)];
+        }, '[false,7,"get=fn set=undefined enumerable=false configurable=false"]');
+        check('a second getter replaces the first', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven, configurable: true });
+            Object.defineProperty(a, '1', { get: function () { return 8; } });
+            return [a[1], describe(a, 1)];
+        }, '[8,"get=fn set=undefined enumerable=true configurable=true"]');
+        check('a shorter length takes the accessor with it', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '2', { get: seven, configurable: true });
+            a.length = 1;
+            a.length = 3;
+            return [a[2] === undefined, 2 in a, a.length, describe(a, 2)];
+        }, '[true,false,3,"none"]');
+        check('length stops above an accessor that is not configurable', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven, configurable: false });
+            a.length = 0;
+            return [a.length, a[1], a[0] === undefined, 0 in a];
+        }, '[2,7,false,true]');
+        check('which is a TypeError in strict code too', function () {
+            'use strict';
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '1', { get: seven, configurable: false });
+            a.length = 0;
+            return a.length;
+        }, 'throws TypeError');
+        check('pop reads the getter and takes the accessor away', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '2', { get: seven, configurable: true });
+            var popped = a.pop();
+            a.push(5);
+            return [popped, a.length, a[2], describe(a, 2)];
+        }, '[7,3,5,"value=5 writable=true enumerable=true configurable=true"]');
+        check('pop cannot take one that is not configurable', function () {
+            var a = [1, 2, 3];
+            Object.defineProperty(a, '2', { get: seven, configurable: false });
+            a.pop();
+            return a.length;
+        }, 'throws TypeError');
+        check('push goes after it', function () {
+            var a = [1, 2];
+            Object.defineProperty(a, '0', { get: seven, configurable: true });
+            a.push(5);
+            return [a.length, a.join()];
+        }, '[3,"7,2,5"]');
+    )JS");
+    assert(none_failed());
+
+    // An array that takes no changes.
+    js.eval(R"JS(
+        check('a frozen array refuses an accessor on an element', function () {
+            var a = Object.freeze([1, 2]);
+            Object.defineProperty(a, '0', { get: seven });
+            return 'defined';
+        }, 'throws TypeError');
+        check('a sealed one does too', function () {
+            var a = Object.seal([1, 2]);
+            Object.defineProperty(a, '0', { get: seven });
+            return 'defined';
+        }, 'throws TypeError');
+        check('one that only takes no new properties lets an element become an accessor', function () {
+            var a = Object.preventExtensions([1, 2]);
+            Object.defineProperty(a, '0', { get: seven });
+            return [a[0], a.length];
+        }, '[7,2]');
+        check('and refuses one past the end', function () {
+            var a = Object.preventExtensions([1, 2]);
+            Object.defineProperty(a, '2', { get: seven });
+            return 'defined';
+        }, 'throws TypeError');
+        check('freezing an array that has an accessor keeps it', function () {
+            var a = [1, 2];
+            Object.defineProperty(a, '0', { get: seven, configurable: true });
+            Object.freeze(a);
+            return [Object.isFrozen(a), describe(a, 0), a[0]];
+        }, '[true,"get=fn set=undefined enumerable=true configurable=false",7]');
+    )JS");
+    assert(none_failed());
+
+    // The prototype: an index it has is still read, by the methods that read a
+    // place too.
+    js.eval(R"JS(
+        check('an accessor on Array.prototype makes it one place long, as any index does', function () {
+            Object.defineProperty(Array.prototype, '0', { set: nothing, configurable: true });
+            var result = [Array.prototype.length, 0 in [, ], [, ].hasOwnProperty(0)];
+            delete Array.prototype[0];
+            result.push(0 in [, ], Array.prototype.length);
+            Array.prototype.length = 0;
+            return result;
+        }, '[1,true,false,false,1]');
+        check('a getter on Array.prototype is what a hole reads', function () {
+            Object.defineProperty(Array.prototype, '1', { get: function () { return 'p'; }, configurable: true });
+            var a = [1, , 3];
+            var result = [a[1], a.join(), 1 in a, a.hasOwnProperty(1), a.indexOf('p')];
+            delete Array.prototype[1];
+            Array.prototype.length = 0;
+            return result;
+        }, '["p","1,p,3",true,false,1]');
+        check('an accessor of the array itself comes before the prototype', function () {
+            var a = [1, , 3];
+            Object.defineProperty(a, '1', { set: nothing, configurable: true });
+            Array.prototype[1] = 'p';
+            var result = [a[1] === undefined, a.indexOf(undefined), a.hasOwnProperty(1)];
+            delete Array.prototype[1];
+            Array.prototype.length = 0;
+            return result;
+        }, '[true,1,true]');
+        check('a value on Array.prototype is read by join, the iterator, JSON, includes, at and the copying methods', function () {
+            Array.prototype[1] = 'p';
+            var a = [1, , 3];
+            var result = [a.join(), [...a], JSON.parse(JSON.stringify(a)), a.includes('p'), a.at(1), a.slice(), a.concat(), a.flat(),
+                          a.toReversed(), a.pop(), a.pop(), a.length];
+            delete Array.prototype[1];
+            Array.prototype.length = 0;
+            return result;
+        }, '["1,p,3",[1,"p",3],[1,"p",3],true,"p",[1,"p",3],[1,"p",3],[1,"p",3],[3,"p",1],3,"p",1]');
+    )JS");
+    assert(none_failed());
+
+    // The length is taken once, as the standard takes it: an element a getter
+    // adds is not looked at. `with` does not read the index it replaces, and
+    // `toSpliced` not the places it drops.
+    js.eval(R"JS(
+        check('indexOf, includes and lastIndexOf do not look at an element a getter adds', function () {
+            function grown() {
+                var a = [20];
+                Object.defineProperty(a, '0', { get: function () { a[1] = 1; return 0; }, configurable: true });
+                return a;
+            }
+            var a = grown(), b = grown(), c = grown();
+            return [a.indexOf(1), a.length, b.includes(1), b.length, c.lastIndexOf(1), c.length];
+        }, '[-1,2,false,2,-1,2]');
+        check('the methods that copy, copy the places there were', function () {
+            function grown() {
+                var a = [5, 0, 3];
+                Object.defineProperty(a, '0', { get: function () { a.push(1); return 5; } });
+                return a;
+            }
+            return [grown().toReversed(), grown().toSorted(), grown().toSpliced(1, 0, 0.5), grown().with(1, 4),
+                    grown().slice(), grown().concat(), grown().flat()];
+        }, '[[3,0,5],[0,3,5],[5,0.5,0,3],[5,4,3],[5,0,3],[5,0,3],[5,0,3]]');
+        check('join joins the places there were', function () {
+            var longer = [0, 1, 2];
+            Object.defineProperty(longer, '0', { get: function () { longer.push(9); return 'g'; } });
+            var shorter = [0, 1, 2, 3];
+            Object.defineProperty(shorter, '0', { get: function () { shorter.length = 2; return 'g'; } });
+            return [longer.join(), longer.length, shorter.join(), shorter.length];
+        }, '["g,1,2",4,"g,1,,",2]');
+        check('with does not call the getter of the index it replaces', function () {
+            var calls = 0;
+            var a = [0, 1, 2, 3];
+            Object.defineProperty(a, '2', { get: function () { calls++; return 'g'; } });
+            return [a.with(2, 6), calls, a.with(1, 5), calls, a.with(-2, 7), calls];
+        }, '[[0,1,6,3],0,[0,5,"g",3],1,[0,1,7,3],1]');
+        check('with takes the length before it asks what the index is', function () {
+            var longer = [0, 1, 2];
+            var first = longer.with({ valueOf: function () { longer.push(3); return 1; } }, 8);
+            var shorter = [0, 1, 2];
+            var second = shorter.with({ valueOf: function () { shorter.length = 1; return 1; } }, 8);
+            return [first, longer.length, second, 2 in second, shorter.length];
+        }, '[[0,8,2],4,[0,8,null],true,1]');
+        check('toSpliced does not call the getter of a place it drops, and asks what its arguments are once', function () {
+            var calls = 0, asked = 0;
+            var a = [0, 1, 2, 3];
+            Object.defineProperty(a, '1', { get: function () { calls++; return 'g'; } });
+            var start = { valueOf: function () { asked++; return 1; } };
+            return [a.toSpliced(start, 1), calls, asked, a.toSpliced(2, 1, 'x'), calls, a.toSpliced(1), calls, a.toSpliced(), calls];
+        }, '[[0,2,3],0,1,[0,"g","x",3],1,[0],1,[0,"g",2,3],2]');
+        check('toSpliced takes the length before it asks what its arguments are', function () {
+            var longer = [0, 1, 2];
+            var first = longer.toSpliced({ valueOf: function () { longer.push(3); return 1; } }, 1);
+            var shorter = [0, 1, 2, 3];
+            var second = shorter.toSpliced({ valueOf: function () { shorter.length = 2; return 1; } }, 1);
+            return [first, second, 2 in second];
+        }, '[[0,2],[0,null,null],true]');
+        check('a place that is gone by the time it is read is read from the prototype like any other', function () {
+            Array.prototype[2] = 'p';
+            var shorter = [0, 1, 2, 3];
+            var spliced = shorter.toSpliced({ valueOf: function () { shorter.length = 2; return 0; } }, 0);
+            var other = [0, 1, 2, 3];
+            var replaced = other.with({ valueOf: function () { other.length = 2; return 0; } }, 'w');
+            delete Array.prototype[2];
+            Array.prototype.length = 0;
+            return [spliced, replaced];
+        }, '[[0,1,"p",null],["w",1,"p",null]]');
+        check('includes asks where to start before it asks whether a hole can read as anything', function () {
+            var a = [1, , 3];
+            var found = a.includes('late', { valueOf: function () { Object.defineProperty(a, '1', { get: function () { return 'late'; } }); return 0; } });
+            var b = [1, 2, 3];
+            var gone = b.includes(undefined, { valueOf: function () { b.length = 1; return 0; } });
+            return [found, gone, b.length];
+        }, '[true,true,1]');
+    )JS");
+    assert(none_failed());
+
+    // Whether a hole can read as anything is remembered between holes, and
+    // what happens in the middle of a loop is not missed.
+    js.eval(R"JS(
+        check('an index Array.prototype gets while a loop is under way is read from then on', function () {
+            var a = [1, , , 4];
+            var seen = [];
+            for (var v of a) {
+                seen.push(v === undefined ? 'hole' : v);
+                if (seen.length === 2) Array.prototype[2] = 'p';
+            }
+            delete Array.prototype[2];
+            Array.prototype.length = 0;
+            return [seen, [...a], a.join()];
+        }, '[[1,"hole","p",4],[1,null,null,4],"1,,,4"]');
+        check('and one Object.prototype gets', function () {
+            var a = [1, , , 4];
+            var seen = [];
+            for (var v of a) {
+                seen.push(v === undefined ? 'hole' : v);
+                if (seen.length === 2) Object.prototype[2] = 'o';
+            }
+            var during = [[...a], a.join(), JSON.parse(JSON.stringify(a)), a.includes('o'), a.at(1), a.at(2)];
+            delete Object.prototype[2];
+            return [seen, during, [...a], a.join()];
+        }, '[[1,"hole","o",4],[[1,null,"o",4],"1,,o,4",[1,null,"o",4],true,null,"o"],[1,null,null,4],"1,,,4"]');
+        check('and one a new prototype of the array brings', function () {
+            var a = [1, , , 4];
+            var seen = [];
+            for (var v of a) {
+                seen.push(v === undefined ? 'hole' : v);
+                if (seen.length === 2) Object.setPrototypeOf(a, Object.create(Array.prototype, { 2: { value: 'n' } }));
+            }
+            return [seen, Array.prototype.join.call(a), [1, , , 4].join()];
+        }, '[[1,"hole","n",4],"1,,n,4","1,,,4"]');
+        check('and one a new prototype of Array.prototype brings', function () {
+            var behind = { 1: 'deep' };
+            var before = [...[1, , 3]];
+            Object.setPrototypeOf(Array.prototype, behind);
+            var during = [[...[1, , 3]], [1, , 3].join(), [1, , 3].at(1)];
+            Object.setPrototypeOf(Array.prototype, Object.prototype);
+            return [before, during, [...[1, , 3]], [1, , 3].join()];
+        }, '[[1,null,3],[[1,"deep",3],"1,deep,3","deep"],[1,null,3],"1,,3"]');
+        check('and an accessor the array gets on a hole in the middle', function () {
+            var a = [1, , , 4];
+            var seen = [];
+            for (var v of a) {
+                seen.push(v === undefined ? 'hole' : v);
+                if (seen.length === 2) Object.defineProperty(a, '2', { get: seven, configurable: true });
+            }
+            return [seen, a.pop(), a.pop(), a.pop(), a.length];
+        }, '[[1,"hole",7,4],4,7,null,1]');
+        check('pop reads what the prototype has for a hole, and an array from another chain is asked for itself', function () {
+            class List extends Array {}
+            var listed = new List(3);
+            var plain = new Array(3);
+            List.prototype[2] = 'listed';
+            var result = [listed.pop(), plain.pop() === undefined, listed.pop() === undefined, plain.pop() === undefined, listed.length, plain.length];
+            return result;
+        }, '["listed",true,true,true,1,1]');
+    )JS");
+    assert(none_failed());
+
+    // What has not changed: a hole with nothing behind it, and an accessor
+    // that is not on an index.
+    js.eval(R"JS(
+        check('a hole is still no property', function () {
+            var a = [1, , 3];
+            return [1 in a, a.hasOwnProperty(1), Object.keys(a), describe(a, 1), a[1] === undefined, a.length, describe(a, 0), describe(a, 'length')];
+        }, '[false,false,["0","2"],"none",true,3,"value=1 writable=true enumerable=true configurable=true","value=3 writable=true enumerable=false configurable=false"]');
+        check('an array of holes still joins, spreads and copies as holes', function () {
+            var a = new Array(5);
+            return [a.join('x'), [...a], a.includes(undefined), JSON.stringify(a), a.slice().length, 0 in a.slice(), a.pop() === undefined, a.length];
+        }, '["xxxx",[null,null,null,null,null],true,"[null,null,null,null,null]",5,false,true,4]');
+        check('length still makes and takes places', function () {
+            var a = [1, 2, 3];
+            a[5] = 6;
+            a.length = 2;
+            a.length = 4;
+            return [a.join(), Object.keys(a), 3 in a];
+        }, '["1,2,,",["0","1"],false]');
+        check('an accessor with a name is as it was', function () {
+            var a = [1, 2, 3];
+            a.x = 1;
+            Object.defineProperty(a, 'y', { get: function () { return 2; }, enumerable: true });
+            return [Object.keys(a), a.y, a.length, a[1]];
+        }, '[["0","1","2","x","y"],2,3,2]');
+    )JS");
+    assert(none_failed());
+}
+
+// Phase 109 / finding 115: Hebrew and Arabic are reordered by UAX #9 and not
+// painted left to right like Latin.
+//
+// Two kinds of check. The algorithm is asked for the levels and the visual
+// order of a handful of cases whose answers are Unicode's (they are lines of
+// tests/bidi/BidiCharacterTest.txt, which `make bidi-conformance` runs in
+// full). Then the layout is asked what it paints, because levels that are right
+// and a painter that ignores them is the failure this phase is about.
+TEST(bidi_reorders_hebrew_and_arabic_runs) {
+    using namespace litebird;
+
+    // שלום עולם -- "shalom olam", two Hebrew words in a left-to-right page.
+    const std::string shalom = "\u05e9\u05dc\u05d5\u05dd";
+    const std::string olam = "\u05e2\u05d5\u05dc\u05dd";
+    const std::string shalom_reversed = "\u05dd\u05d5\u05dc\u05e9";
+    const std::string olam_reversed = "\u05dd\u05dc\u05d5\u05e2";
+
+    // Bidi_Class, from the generated table.
+    assert(BidiClass::R == bidi_class(0x05D0));   // HEBREW LETTER ALEF
+    assert(BidiClass::AL == bidi_class(0x0627));  // ARABIC LETTER ALEF
+    assert(BidiClass::L == bidi_class('a'));
+    assert(BidiClass::EN == bidi_class('7'));
+    assert(BidiClass::NSM == bidi_class(0x05B0));  // HEBREW POINT SHEVA
+    assert(BidiClass::ON == bidi_class('('));
+    // An unassigned code point takes the @missing default of its block.
+    assert(BidiClass::R == bidi_class(0x0590));
+    assert(BidiClass::AL == bidi_class(0x08B5));
+
+    // L4's pairs: parentheses, and the angle brackets that have a pair.
+    assert(bidi_mirror('(') == ')');
+    assert(bidi_mirror(')') == '(');
+    assert(bidi_mirror('a') == 'a');
+    assert(bidi_is_mirrored('['));
+
+    // P2/P3: the first strong character decides, and it is Hebrew.
+    const BidiParagraph hebrew = bidi_paragraph_utf8(shalom + " " + olam);
+    assert(hebrew.size() == 9);
+    for (std::size_t i = 0; i < hebrew.size(); ++i) {
+        assert(hebrew.levels[i] == 1);  // one right-to-left run, the space included
+    }
+    // L2: the second word comes out leftmost, and each word's characters run
+    // right to left. The line is painted left to right, so the first thing
+    // drawn is the last logical word.
+    {
+        const std::vector<std::size_t> order = bidi_reorder(hebrew);
+        assert(order.size() == 9);
+        assert(order.front() == 8);  // the last letter of the last word is leftmost
+        assert(order.back() == 0);   // and the first letter of the first word is rightmost
+    }
+
+    // A left-to-right page with one Hebrew word in the middle: the Latin stays
+    // where it was, the word stays between them, and only its own characters
+    // reverse.
+    const BidiParagraph mixed = bidi_paragraph_utf8("abc " + shalom + " def");
+    assert(mixed.base_level == 0);
+    assert(mixed.levels[0] == 0);
+    assert(mixed.levels[4] == 1);   // the first Hebrew letter
+    assert(mixed.levels[7] == 1);   // the last one
+    assert(mixed.levels[8] == 0);   // the space after the word is neutral again
+    {
+        const std::vector<std::size_t> order = bidi_reorder(mixed);
+        assert(order.front() == 0);  // 'a' is still leftmost
+        assert(order.back() == 11);  // 'f' of "def" is still rightmost
+        // The Hebrew letters are in visual order 7,6,5,4.
+        const auto first_hebrew = std::find(order.begin(), order.end(), std::size_t{7});
+        assert(first_hebrew != order.end());
+        assert(*(first_hebrew + 1) == 6);
+        assert(*(first_hebrew + 2) == 5);
+        assert(*(first_hebrew + 3) == 4);
+    }
+
+    // An Arabic page: the number stays left-to-right inside a right-to-left
+    // paragraph, and the words around it swap ends (W2, W7, I2, L2).
+    const std::string arabic = "\u0627\u0644\u0639\u062f\u062f 123 \u0647\u0646\u0627";
+    const BidiParagraph numbers = bidi_paragraph_utf8(arabic);
+    assert(numbers.base_level == 1);
+    assert(numbers.levels[6] == 2);  // the first digit, even inside an odd paragraph
+    assert(numbers.levels[9] == 1);  // the space after the number
+    {
+        // The digits are at an even level inside the odd paragraph, so they are
+        // drawn left to right and the word before them is on the right.
+        const std::vector<std::size_t> order = bidi_reorder(numbers);
+        assert(order.front() == numbers.size() - 1);
+        assert(order.back() == 0);
+    }
+
+    // ------------------------------------------------------------------
+    // What the layout does with them.
+    // ------------------------------------------------------------------
+    auto layout_line = [](const std::string& inner, float width) {
+        const std::string html = "<html><body style=\"margin:0\"><p id=\"p\" style=\"margin:0;"
+                                 "width:" + std::to_string(static_cast<int>(width)) +
+                                 "px;font-size:20px\">" + inner + "</p></body></html>";
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, width, 600.0f);
+        std::shared_ptr<LayoutBox> paragraph;
+        std::function<void(const std::shared_ptr<LayoutBox>&)> walk =
+            [&](const std::shared_ptr<LayoutBox>& box) {
+                if (!box) return;
+                if (box->node && box->node->type() == NodeType::Element) {
+                    auto element = std::static_pointer_cast<Element>(box->node);
+                    if (element->get_attribute("id") == "p") paragraph = box;
+                }
+                for (const auto& child : box->children) walk(child);
+            };
+        walk(root);
+        assert(paragraph);
+        assert(!paragraph->line_boxes.empty());
+        return paragraph->line_boxes.front();
+    };
+
+    // A Hebrew sentence: two fragments, the second logical word first, each
+    // written backwards because the painter draws left to right.
+    {
+        const LineBox line = layout_line(shalom + " " + olam, 600.0f);
+        assert(line.fragments.size() >= 2);
+        const InlineFragment& left = line.fragments.front();
+        const InlineFragment& right = line.fragments.back();
+        assert(left.text == olam_reversed);
+        assert(right.text == shalom_reversed);
+        assert(left.rect.x < right.rect.x);
+        // The first logical character is drawn rightmost, which is the whole
+        // point: `ש` ends the right-hand fragment.
+        assert(right.text.size() >= 2);
+        assert(right.text.compare(right.text.size() - 2, 2, "\u05e9") == 0);
+    }
+
+    // A Latin line is untouched: same order, same text.
+    {
+        const LineBox line = layout_line("alpha beta gamma", 600.0f);
+        assert(line.fragments.size() >= 3);
+        assert(line.fragments.front().text == "alpha");
+        assert(line.fragments.back().text == "gamma");
+    }
+
+    // Parentheses around a Hebrew word in a right-to-left line: rule L4 mirrors
+    // the glyphs, so the painted text opens with the closing bracket's glyph.
+    {
+        const LineBox line = layout_line("(" + shalom + ")", 600.0f);
+        assert(!line.fragments.empty());
+        const std::string& painted = line.fragments.front().text;
+        assert(painted.front() == '(');
+        assert(painted.back() == ')');
+        // The word inside is reversed, so the last letter of `shalom` comes
+        // first, right after the bracket.
+        assert(painted.compare(1, 2, "\u05dd") == 0);
+    }
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -23927,6 +24713,7 @@ int main() {
     // rule.style, insertRule/deleteRule, and document.fonts.
     RUN_TEST(cssom_sheets_rules_insert_amounts_and_fonts);
     RUN_TEST(cssom_media_rules_and_the_cascade_inside_them);
+    RUN_TEST(keyframes_are_rules_of_the_cssom);
 
     // Phase 81: an index of an array is either an element or a hole.
     RUN_TEST(array_holes_are_not_elements);
@@ -23964,6 +24751,13 @@ int main() {
     RUN_TEST(gpos_mark_to_ligature_and_lookup_flag_filtering);
     RUN_TEST(canvas2d_and_html_paint_gpos_marks_and_kerning);
     RUN_TEST(gpos_rejects_malformed_and_cyclic_tables_safely);
+
+    // Phase 108: an accessor on an array index is the index's property.
+    RUN_TEST(an_accessor_on_an_array_index_is_its_property);
+
+    // Phase 109: UAX #9 -- Hebrew and Arabic reordered, and not painted left to right.
+    RUN_TEST(bidi_reorders_hebrew_and_arabic_runs);
+
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

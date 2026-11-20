@@ -25900,6 +25900,124 @@ failures;
     if (!none_failed()) { std::cout << "\033[31mFAILED\033[0m"; return; }
     std::cout << "\033[32mPASSED\033[0m";
 }
+// ---------------------------------------------------------------------------
+// Phase 125: Object.isFrozen and Object.isSealed ask the properties
+// ---------------------------------------------------------------------------
+
+TEST(object_integrity_levels_ask_every_property) {
+    using namespace litebird;
+    // Phase 125, finding 130. Both answered from a bit that only `freeze()`
+    // and `seal()` ever set, so an object that is non-extensible and has
+    // nothing writable or configurable in it — which is *exactly* what frozen
+    // means — was reported `false` unless somebody had called `freeze` on it.
+    // ECMA-262 §20.1.2.13 and §20.1.2.15 define them by §7.3.15
+    // TestIntegrityLevel: `[[IsExtensible]]` false, and then every own
+    // property asked one at a time.
+    //
+    // Every expected string below is what Node.js printed for the same script,
+    // checked line for line against a second run of the same script in Node.
+    // The suite it was found in (Phase 124) wrote this case down and did not
+    // assert it, because the bug was outside that task's files; this is the
+    // task that owns them.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    auto none_failed = [&]() {
+        const std::string failed = js.eval("failures.join('\\n')").to_string();
+        if (!failed.empty()) std::cerr << failed << "\n";
+        return failed.empty();
+    };
+
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        // Both levels at once, which is the whole point: the two questions are
+        // different and an object can answer them differently.
+        function levels(o) { return [Object.isFrozen(o), Object.isSealed(o)]; }
+        function data(w, c) { return { value: 1, writable: w, configurable: c }; }
+
+        // The case the row was written about: nothing there, nothing to write.
+        check('preventExtensions of an empty object', function () {
+            return levels(Object.preventExtensions({}));
+        }, '[true,true]');
+        check('seal of an empty object', function () { return levels(Object.seal({})); }, '[true,true]');
+        check('freeze of an empty object', function () { return levels(Object.freeze({})); }, '[true,true]');
+
+        // A property that is still writable or still configurable fails.
+        check('preventExtensions with a plain property', function () {
+            return levels(Object.preventExtensions({ a: 1 }));
+        }, '[false,false]');
+        check('preventExtensions, non-writable and non-configurable', function () {
+            return levels(Object.preventExtensions(Object.defineProperty({}, 'a', data(false, false))));
+        }, '[true,true]');
+        check('preventExtensions, non-writable but configurable', function () {
+            return levels(Object.preventExtensions(Object.defineProperty({}, 'a', data(false, true))));
+        }, '[false,false]');
+        //   The clause that separates frozen from sealed: a writable property
+        //   that cannot be reconfigured is sealed but not frozen.
+        check('preventExtensions, writable and non-configurable', function () {
+            return levels(Object.preventExtensions(Object.defineProperty({}, 'a', data(true, false))));
+        }, '[false,true]');
+        //   An accessor has no `writable` to fail the frozen test with.
+        check('preventExtensions, a non-configurable accessor', function () {
+            return levels(Object.preventExtensions(Object.defineProperty({}, 'a', { get: function () { return 1; }, configurable: false })));
+        }, '[true,true]');
+        check('preventExtensions, a configurable accessor', function () {
+            return levels(Object.preventExtensions(Object.defineProperty({}, 'a', { get: function () { return 1; }, configurable: true })));
+        }, '[false,false]');
+
+        // An extensible object is never either, whatever its properties say.
+        check('an extensible object with sealed-looking properties', function () {
+            return levels(Object.defineProperty({}, 'a', data(false, false)));
+        }, '[false,false]');
+        check('a plain object', function () { return levels({}); }, '[false,false]');
+
+        // What the two operations actually do to descriptors, which the levels
+        // now read: seal keeps `writable`, freeze clears it.
+        check('seal keeps writable', function () {
+            var d = Object.getOwnPropertyDescriptor(Object.seal({ a: 1 }), 'a');
+            return [d.writable, d.configurable];
+        }, '[true,false]');
+        check('freeze clears writable', function () {
+            var d = Object.getOwnPropertyDescriptor(Object.freeze({ a: 1 }), 'a');
+            return [d.writable, d.configurable];
+        }, '[false,false]');
+
+        // Arrays, including a hole, which is not an own property to fail on.
+        check('a sealed array', function () { return levels(Object.seal([1, 2])); }, '[false,true]');
+        check('a frozen array', function () { return levels(Object.freeze([1, 2])); }, '[true,true]');
+        check('a sealed array with a hole', function () {
+            var a = Object.seal([1, , 3]);
+            return [Object.isFrozen(a), Object.isSealed(a), a.length];
+        }, '[false,true,3]');
+
+        // The frozen level asks each own property, so the answer follows what
+        // `defineProperty` does afterwards — and a write that `freeze` refused
+        // is not a level that stays.
+        check('a sealed object whose last writable property is made read-only', function () {
+            var o = Object.seal({ a: 1 });
+            var before = Object.isFrozen(o);
+            Object.defineProperty(o, 'a', { writable: false });
+            return [before, Object.isFrozen(o)];
+        }, '[false,true]');
+
+        // Primitives: §20.1.2.13 step 1 and step 2 — not an object is `true`.
+        check('a primitive is frozen and sealed', function () {
+            return [Object.isFrozen(1), Object.isSealed('x'), Object.isFrozen(null),
+                    Object.isFrozen(undefined), Object.isSealed(true)];
+        }, '[true,true,true,true,true]');
+        failures;
+    )JS");
+    if (!none_failed()) { std::cout << "\033[31mFAILED\033[0m"; return; }
+    std::cout << "\033[32mPASSED\033[0m";
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -26270,6 +26388,7 @@ int main() {
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
+    RUN_TEST(object_integrity_levels_ask_every_property);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

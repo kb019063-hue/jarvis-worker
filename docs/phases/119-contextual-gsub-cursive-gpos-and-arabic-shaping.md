@@ -82,7 +82,7 @@ remained unhandled:
 
 ## Verified
 
-- Release `make all test`: **288 / 288** unit suites + **114 / 114**
+- Release `make all test`: **291 / 291** unit suites + **114 / 114**
   cross-origin checks passing (including the six new Phase 119 suites plus
   HTML-Bidi vs logical `draw_text` pixel-identity for `"سلام"` using both a
   self-contained synthetic Arabic+Latin SFNT webfont `"TestArabicSans"` and
@@ -97,8 +97,8 @@ remained unhandled:
   `make dom-conformance` (`678/678`), `make url-conformance` (`1188/1188`),
   `make js-conformance` (`1143/1158`), `make bidi-conformance` (`861948/861948`),
   `make render-conformance` (`10/10`), and `make wpt` (`9567/9824`, `0` unlisted).
-- Sanitizer (`-fsanitize=address,undefined`): `build-asan/test_suite` (**288 /
-  288** suites, **0** sanitizer findings), `build-asan/cross_origin_test` (**114 /
+- Sanitizer (`-fsanitize=address,undefined`): `build-asan/test_suite` (**291 /
+  291** suites, **0** sanitizer findings), `build-asan/cross_origin_test` (**114 /
   114**), and `tools/fuzz/fuzz_pipeline.py --binary build-asan/litebird` (**400 /
   400** runs, **0** findings).
 

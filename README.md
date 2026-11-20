@@ -43,13 +43,14 @@ standard now makes, which is 1,967 of the 1,973.
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
 | **Bidirectional text (UAX #9)** | **861,948 / 861,948 (100.0%)** of Unicode's own conformance suites: `BidiTest.txt` 770,241 cases of `Bidi_Class` sequences, and `BidiCharacterTest.txt` 91,707 cases of code points, which is where bracket pairs and mirroring are exercised (Phase 109) | `tests/bidi`, vendored as Unicode publishes them, ungzipped and run by `make bidi-conformance` |
 | **Collection at a safe point** | A collection is taken at a seeded allocation count, between statements (and between bytecode instructions), and the program must print exactly what it prints when nothing is collected — **1,186 JS cases agree at interval 1 and 678 DOM pages at interval 2, 254,174 collections served, no case differing**. The negative control runs first: two cases the harness must be seen to catch (a count only a collection can change; a case that already fails) and one it must refuse to count (an interval the program never reaches) | `make verify-gc-stress`, `make verify-gc-stress-full` |
-| Engine unit tests | 271<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 272<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
 | **`font-family` selection** | A CSS family list is resolved against the face names the host's own fonts declare, per element, and the winning face is loaded lazily and used to measure and draw (Phase 67). The oracle is absolute rather than a comparison: every glyph in the vendored Ahem is exactly 1em wide, so four characters at 16 px measure 64.0 px in it and in nothing else. `monospace` is checked by measurement too — `'i'` and `'W'` advance the same there and not in a proportional face | `make test`, suites `font_family_selects_a_face`, `font_family_reaches_layout_from_css` |
 | **`@font-face`** | A page brings its own typeface: the rule's `font-family` names a family the host may never have heard of, and the `src` list is fetched lazily, in order, until a source parses (Phase 74). The oracle is the vendored Ahem served through a `data:` URL, so the bytes arrive the way a browser's would — every glyph in it is exactly 1em wide, so four characters at 16 px lay out at 64.0 px or the rule did not take. A webfont outranks a host family of the same name, `format()` skips what the engine cannot read, and `local()` answers out of the host's own fonts | `make test`, suites `font_face_declares_the_family_the_page_names`, `font_face_brings_the_family_the_page_names` |
 | **HTTP/1.1 cookies, RFC 9111 cache & CORS preflight** | Thread-safe RFC 6265bis `CookieJar` (`Domain`/host-only, `Path`, wall-clock `Max-Age`/`Expires`, `Secure`, `HttpOnly` script isolation, `SameSite`, `__Secure-`/`__Host-`) wired to HTTP `Set-Cookie`/`Cookie` across redirects after CORS checks; bounded LRU HTTP cache (`Cache-Control`, `ETag`/`If-None-Match`, `Last-Modified`/`If-Modified-Since`, `304` merge, `Vary`, unsafe invalidation); WHATWG Fetch CORS `OPTIONS` preflight + `Max-Age` cache, W3C mixed-content blocking, and `HeadersExotic` `fetch()` options (Phase 73) | `make test`, 4 loopback HTTP/1.1 & Fetch suites |
+| **HTTP authentication (`Basic` & `Digest`)** | A `401` is read rather than swallowed: RFC 9110 §11.6.1 challenges, RFC 7617 `Basic` and RFC 7616 `Digest` (`MD5`, `SHA-256`, `-sess`, `qop=auth`). Nothing is sent pre-emptively (RFC 7617 §2.2) — the first request carries no `Authorization`, and the hop is retried **once** with credentials held for that origin *and* that realm, so a password for one realm is never offered to another. MD5 (RFC 1321) and SHA-256 (FIPS 180-4) are written out and held to the RFCs' own published vectors, including all of RFC 7616 §3.9.1 (MD5 → `8ca523f5…`) and §3.9.2 (SHA-256 → `753927fa…`); a loopback server proves the wire, with request 1 carrying no credential and request 2 carrying exactly `Authorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==` (Phase 113, finding 117). Still open: `auth-int`, `SHA-512-256`, `userhash`, `Authentication-Info`/`nextnonce`, `407`/`Proxy-Authenticate` | `make test`, suite `http_authentication_basic_and_digest_challenges` |
 | **HTTP/1.1 keep-alive pooling & Brotli (`br`)** | Thread-safe HTTP/1.1 and HTTPS (`SSL*`) persistent socket pool (`Connection: keep-alive`, `Keep-Alive: timeout/max`, bounded 4 per key / 32 total, incremental chunked/CL framing, `poll` + `SSL_peek` stale eviction, safe idempotent EOF retry) and pure-C++20 RFC 7932 Brotli (`br`) decoder (`Accept-Encoding: gzip, deflate, br`, right-to-left stacked `Content-Encoding`, `max_output_bytes` bomb cap); **53** RFC/Node streams across qualities 0–11 and `lgwin` 10–24, **49** bomb-cap checks, **6** invalid headers, and **2,000** mutation fuzz inputs (`0` discrepancies vs Node `zlib`) (Phase 85, finding 91) | `make verify-brotli`, `make fuzz-brotli`, `make test` |
 | **`font-style: italic`** | `em`, `i`, `cite`, `dfn`, `var` and `address` are italic, and so is anything a page slants itself. A family that has a slanted face is asked for it; a family that has none is *sheared*, which is what CSS asks for and what a browser does — 0.25 px of run per px of height, the 14° an `oblique` with no angle means (Phase 78). The oracle is the shape of the ink rather than a font, because the machine has no italic face at all: at 40 px `'H'` leans 8 px from its bottom row to its top row slanted and 0 px upright. The advance does not change, so an italic line measures exactly as wide as the upright one | `make test`, suites `font_style_italic_reaches_the_painter`, `font_style_italic_slants_the_glyphs_it_draws`, `a_family_with_an_italic_face_is_not_sheared` |
 | **`font-weight` and the font's own tables** | A face's weight and slant are read from the file — `OS/2.usWeightClass`, `OS/2.fsSelection` bit 0, `head.macStyle` bit 1 — not guessed from the words in its subfamily name, and the weight a page asks for reaches the registry instead of being flattened to `bold`/`not` (Phase 87). Matching follows CSS Fonts 4 §5.2.1's search order rather than nearest distance, and `bolder`/`lighter` are relative to the parent. The oracle is a file that disagrees with itself: the vendored Ahem with its `OS/2` rewritten to 700 while its name still says "Regular", one table field changed per test. A family of two faces at 200 and 500 answers 350 with the 200 and 600 with the 700 — which no bool can express | `make test`, suites `a_face_weight_comes_from_the_font_not_its_name`, `font_weight_matching_follows_the_css_order`, `bolder_and_lighter_are_relative_to_the_parent` |
@@ -75,7 +76,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 271<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 272<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
 make check-numbers   # the numbers above still divide and still count, and every marked figure and floor agrees (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
@@ -758,7 +759,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 271<!--metrics:unit_suites/int--> engine test suites
+# Run the 272<!--metrics:unit_suites/int--> engine test suites
 make test
 ```
 
@@ -826,14 +827,14 @@ make test
 make test
 ```
 
-Output (271<!--metrics:unit_suites/int--> suites; the first and last lines shown):
+Output (272<!--metrics:unit_suites/int--> suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 271<!--metrics:unit_suites/int--> engine test suites passed successfully!
+All 272<!--metrics:unit_suites/int--> engine test suites passed successfully!
 ```
 
 ```bash
@@ -993,7 +994,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 271/271<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 272/272<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++

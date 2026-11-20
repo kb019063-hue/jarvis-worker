@@ -990,6 +990,42 @@ void install_one(JsEnvironment& global, ElementType type) {
 
 } // namespace
 
+bool typed_array_bytes(const JsValue& value, std::string& out) {
+    out.clear();
+    // A view: its window of the buffer, in bytes, whatever its element type.
+    if (auto view = view_of(value)) {
+        if (view->buffer->detached) return false;
+        const auto size = static_cast<std::size_t>(element_size(view->type));
+        out.assign(reinterpret_cast<const char*>(elements_of_const(*view)), view->length * size);
+        return true;
+    }
+    // A buffer: all of it.
+    if (auto buffer = buffer_of(value)) {
+        if (buffer->detached) return false;
+        out.assign(reinterpret_cast<const char*>(buffer->bytes.data()), buffer->bytes.size());
+        return true;
+    }
+    return false;
+}
+
+bool typed_array_write(const JsValue& view, const uint8_t* bytes, std::size_t count) {
+    auto data = view_of(view);
+    if (!data || data->buffer->detached) return false;
+    const auto capacity = data->length * static_cast<std::size_t>(element_size(data->type));
+    if (count > capacity) return false;
+    if (count) std::memcpy(elements_of(*data), bytes, count);
+    return true;
+}
+
+JsValue typed_array_from_bytes(const std::string& bytes) {
+    auto data = std::make_shared<TypedArrayData>();
+    data->buffer = std::make_shared<ArrayBufferData>();
+    data->length = bytes.size();
+    data->type = ElementType::Uint8;
+    data->buffer->bytes.assign(bytes.begin(), bytes.end());
+    return make_view_object(std::move(data), realm().protos[static_cast<int>(ElementType::Uint8)]);
+}
+
 void install_typed_array_builtins(JsEnvironment& global) {
     JsIntrinsics& intrinsics = JsIntrinsics::get();
     install_array_buffer(intrinsics, global);

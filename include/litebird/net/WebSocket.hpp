@@ -158,6 +158,13 @@ private:
     std::string m_host_header;
     uint16_t m_port{80};
     std::string m_path{"/"};
+    // Cookie matching is scheme-sensitive only through `Secure`: a `ws` upgrade
+    // is an `http` request and a `wss` upgrade is an `https` one, so the same
+    // URL with the http(s) scheme is what the jar is asked about.
+    std::string m_cookie_url;
+    // Page URL the upgrade is made for (site-for-cookies); empty when there is
+    // no document, which leaves SameSite filtering off.
+    std::string m_cookie_site;
 
     int m_wake_fds[2]{-1, -1};
     std::atomic<WebSocketReadyState> m_ready_state{WebSocketReadyState::Connecting};

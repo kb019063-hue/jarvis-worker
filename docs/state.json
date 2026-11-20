@@ -12,6 +12,10 @@
   "finding_floor": 101,
   "history": [
     {
+      "date": "2026-11-20",
+      "what": "Phase 117 and finding 122 documented cookies on the WebSocket upgrade: the RFC 6455 request carries what `CookieJar` holds for the same URL with `ws` matched as `http` and `wss` as `https`, the page URL is the site for cookies, and a `Set-Cookie` on the `101` is stored before the upgrade is validated (`make security-websocket`, 32/32). The floors are unchanged: the open pull requests still name the numbers above them."
+    },
+    {
       "date": "2026-11-18",
       "what": "Phase 95 and finding 101 documented `document.write()` writing into the parser that called it: the tree builder can be re-entered at its insertion point (`write_into_parser`), the dump path runs the page's scripts as the parser reaches them, and the parser no longer inserts a second element or any text into a document. Five of the six `scripted_*.dat` cases pass. The floors now preserve those allocated identifiers even if their documents or pull request later disappear."
     },

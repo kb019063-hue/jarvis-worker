@@ -43,9 +43,10 @@ at one that is not configurable. The phase write-up has the files.
 
 - The 25 tests pass, each run alone.
 - The whole of test262 with a build of `main` and a build of this change, the
-  same tree otherwise: @T262_LINE@
-- `make test` 268 / 268, `make js-conformance` @JS_CONF@,
-  `make dom-conformance` @DOM_CONF@.
+  same tree otherwise: 31,366 → 31,643 of 47,967 passing,
+  277 gained and none lost.
+- `make test` 269 / 269, `make js-conformance` 1141 / 1158 with the everyday
+  probe at 90 / 90, `make dom-conformance` 678 / 678.
 - The new suite's 58 cases have the answers Node.js 22 printed; 48 of them
   fail on a build of `main`.
 
@@ -95,4 +96,4 @@ Node.js line by line.
 - `test262_whole_suite` in `docs/metrics.json` is not changed by this pull
   request: an open pull request (#132) named the file first. The figure
   there, 31,220, is Phase 98's. The tree this was merged as passes
-  @T262_FIX_PLAIN@; the next change to the ledger starts from that.
+  31,643 of 47,967; the next change to the ledger starts from that.

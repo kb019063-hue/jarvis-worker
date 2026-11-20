@@ -117,34 +117,73 @@ and the places in between are holes.
 
 ## 3. How it is verified
 
-Everything here was measured on the tree that was merged: `main` at
-`@MAIN_SHA@` with this change, against a build of `main` at that commit.
+The measurements are of `main` at `01bbf07` with this change, against a
+build of `main` at that commit. `main` moved once more before the merge, by
+Phase 109 (bidi), which changes nothing of the script engine; the unit suites
+and the two corpora were run again on the tree with it.
 
 - **The 25 tests Phase 81 lost pass**, each run alone with the harness
   (`assert.js`, `sta.js`, `propertyHelper.js`, `compareArray.js`). 21 passed
   since Phase 98; the four above failed before this change and pass now.
 - **The whole of test262, two builds**
   (`python3 tools/conformance/run_test262.py --binary main=… --binary fix=… built-ins language annexB`,
-  @T262_TOTAL@ tests): `main` @T262_MAIN@, this change @T262_FIX@. @T262_GAINED@
-  pass that did not, and none that passed fails. @T262_WHERE@
-- **`make test`** → **268 / 268** suites and 114 cross-origin checks.
-- **`make js-conformance`** @JS_CONF@,
-  **`make dom-conformance`** @DOM_CONF@: neither moved.
+  47,967 tests): `main` **31,366** passing, this change **31,643**. 277
+  pass that did not, and none that passed fails. 163 of them are under
+  `built-ins/Array/prototype` and 108 under `built-ins/Object`
+  (`defineProperty` and `defineProperties` on an index of an array). The
+  other six are a reviver of `JSON.parse`, a `for…of` over an array and the
+  constructors of `Map` and `WeakMap`, each meeting a getter on an index that
+  throws, and an accessor on an index of `arguments`. Two of them, the two of
+  `Map`, do not fail on `main` but never end.
+- **`make test`** → **269 / 269** suites and 114 cross-origin checks.
+- **`make js-conformance`** 1141 / 1158 and 90 / 90 everyday,
+  **`make dom-conformance`** 678 / 678: neither moved.
 - **The new suite fails without the change**: 48 of its 58 cases fail when
   they are run through a build of `main`.
-- **Time.** `make bench` passes; it times strings. For arrays, 24 loops over
-  an array of 200,000 places, the best of five runs of each loop, each build
-  run twice, in milliseconds:
+- **Time.** For arrays, 24 loops over an array of 200,000 places. The
+  machine ran at two speeds while this was measured (one loop took 20 ms or
+  40 from one process to the next, with either build), so each figure is the
+  lowest of five runs of the script, which is 25 runs of the loop, in
+  milliseconds:
 
   | loop | `main` | this change |
   | :--- | :--- | :--- |
-@BENCH_ROWS@
+  | index read, dense | 57 | 56 |
+  | index write, dense | 84 | 82 |
+  | index read, sparse | 73 | 72 |
+  | index write into holes | 90 | 89 |
+  | join, dense | 10 | 10 |
+  | join, all holes | 26 | 29 |
+  | join, sparse | 1 | 1 |
+  | for-of, dense | 31 | 30 |
+  | for-of, sparse | 17 | 19 |
+  | spread, dense | 33 | 35 |
+  | spread, sparse | 29 | 33 |
+  | includes, dense, absent | 4 | 5 |
+  | includes, sparse, absent | 1 | 1 |
+  | slice, dense | 9 | 10 |
+  | slice, sparse | 21 | 22 |
+  | concat, sparse | 78 | 88 |
+  | JSON.stringify, dense | 14 | 12 |
+  | JSON.stringify, sparse | 3 | 8 |
+  | pop until empty, dense | 84 | 85 |
+  | pop until empty, holes | 96 | 104 |
+  | at, dense | 106 | 103 |
+  | hasOwnProperty, sparse | 90 | 82 |
+  | Object.keys, sparse | 1 | 0 |
+  | forEach, sparse | 20 | 19 |
 
-  "Sparse" is one element in a hundred, the rest holes. One loop moved:
-  `JSON.stringify` of the sparse array takes each hole the way it takes an
-  element now, so that a replacer function is asked about it, which is 20 to
-  25 ns a hole. The rest differ by no more than two runs of one build do.
-  Two of them did differ before they were looked at. `for…of`, spread and
+  "Sparse" is one element in a hundred, the rest holes. What a hole costs
+  more is the question whether it can read as anything, which the iterator
+  asks again for each one, because in a `for…of` a script runs between two
+  of them: 10 to 20 ns, which is `for…of` 17 → 19 and spread 29 → 33 over
+  the sparse array. `JSON.stringify`
+  of it, 3 → 8, also takes each hole the way it takes an element now, so that
+  a replacer function is asked about it. `join` of holes is 26 → 29. The 10
+  and 8 ms of `concat` and of `pop` of holes are not in other runs of those
+  two loops (`concat`: 85, 93, 103 against 75, 88, 89; `pop`: 92, 103, 116
+  against 88, 102, 104), and the rest differ by less than runs do.
+  Two things did cost more before they were looked at. `for…of`, spread and
   `JSON.stringify` over the sparse array took 40, 41 and 25 ms while each
   hole was looked up by name in `Array.prototype` and `Object.prototype`,
   which is why the chain is remembered. And `join` of the holes took 37 ms

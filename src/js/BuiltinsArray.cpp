@@ -78,15 +78,23 @@ JsValue index_value(const JsValue& array, size_t index) {
 /// nothing answers is a hole in the copy too. An array that never had a hole
 /// is told apart by one pointer.
 ///
-/// The copy has the places the array had when this was called, as the
-/// standard takes the length once: a getter that makes the array longer adds
-/// nothing to it, and one that makes it shorter leaves the places past the
-/// new end to be read like any other that is not there. The places from
-/// `skip_from` up to `skip_to` are not read at all (`with` does not read the
-/// index it replaces) and are holes in the copy.
-JsValue read_through(const JsValue& array, size_t skip_from = 0, size_t skip_to = 0) {
-    if (!array.object_val->array_holes || js_array_holes_read_undefined(array)) return array;
-    const size_t count = elements_of(array).size();
+/// The copy has `count` places: the standard takes the length once, and the
+/// caller that took it before something else could run (`with` and
+/// `toSpliced` ask what their arguments are first) passes it; otherwise it
+/// is the length now. A getter that makes the array longer adds nothing to
+/// the copy, and a place that is gone by the time it is reached is read like
+/// any other that is not there. The places from `skip_from` up to `skip_to`
+/// are not read at all (`with` does not read the index it replaces, and
+/// `toSpliced` not the ones it drops) and are holes in the copy.
+///
+/// The array itself is the answer when it has no hole to ask about and no
+/// place is missing, or when nothing would answer for one: the caller copies
+/// its elements, and makes the copy `count` long when it passed one.
+JsValue read_through(const JsValue& array, size_t skip_from = 0, size_t skip_to = 0,
+                     size_t count = std::numeric_limits<size_t>::max()) {
+    if (count == std::numeric_limits<size_t>::max()) count = elements_of(array).size();
+    const bool all_there = !array.object_val->array_holes && count <= elements_of(array).size();
+    if (all_there || js_array_holes_read_undefined(array)) return array;
     JsValue copy = JsValue::make_array();
     auto& out = copy.object_val->array_elements;
     for (size_t i = 0; i < count; ++i) {
@@ -525,10 +533,30 @@ void install_array_builtins(JsIntrinsics& realm) {
         }
         return result;
     });
-    js_define_method(ap, "toSpliced", 2, [splice_impl](Args args) {
-        JsValue array = read_through(receiver("toSpliced"));
+    js_define_method(ap, "toSpliced", 2, [](Args args) {
+        // The length, then where to start and how many to drop, then the
+        // places: the standard's order. The places that are dropped are not
+        // read, so a getter on one of them is not called; and what the
+        // arguments are is asked once, before any place is read.
+        JsValue source = receiver("toSpliced");
+        const size_t length = elements_of(source).size();
+        const size_t start = relative_index(js_arg(args, 0), length, 0);
+        size_t dropped = 0;
+        if (args.size() == 1) {
+            dropped = length - start;
+        } else if (args.size() >= 2) {
+            double requested = js_to_integer(js_to_number(args[1]));
+            if (requested < 0) requested = 0;
+            dropped = static_cast<size_t>(std::min(requested, static_cast<double>(length - start)));
+        }
+        JsValue array = read_through(source, start, start + dropped, length);
         std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
-        if (!args.empty()) splice_impl(copy, args);
+        copy.resize(length, JsValue::make_undefined());
+        copy.erase(copy.begin() + static_cast<std::ptrdiff_t>(start),
+                   copy.begin() + static_cast<std::ptrdiff_t>(start + dropped));
+        if (args.size() > 2) {
+            copy.insert(copy.begin() + static_cast<std::ptrdiff_t>(start), args.begin() + 2, args.end());
+        }
         return JsValue::make_array(copy);
     });
     js_define_method(ap, "concat", 1, [](Args args) {
@@ -632,7 +660,7 @@ void install_array_builtins(JsIntrinsics& realm) {
         if (index < 0) index += static_cast<double>(length);
         if (index < 0 || index >= static_cast<double>(length)) js_throw_range_error("Invalid index");
         const size_t at = static_cast<size_t>(index);
-        JsValue array = read_through(source, at, at + 1);
+        JsValue array = read_through(source, at, at + 1, length);
         std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
         copy.resize(length, JsValue::make_undefined());
         copy[at] = js_arg(args, 1);
@@ -721,10 +749,14 @@ void install_array_builtins(JsIntrinsics& realm) {
         // Unlike indexOf, includes does not ask for the property: it reads
         // the place as `a[i]` does. A hole is `undefined` to it, unless the
         // index has an accessor of its own or the prototype has the index,
-        // which is asked once: nothing here runs a script if no hole can.
-        const bool plain = js_array_holes_read_undefined(array);
+        // which is asked once: nothing in the loop runs a script if no hole
+        // can. It is asked after the index to start from, because turning
+        // that into a number can run one; the length is taken before it, as
+        // the standard takes it, and a place that is gone reads `undefined`.
         const size_t length = elements.size();
-        for (size_t i = relative_index(js_arg(args, 1), length, 0); i < length; ++i) {
+        const size_t start = relative_index(js_arg(args, 1), length, 0);
+        const bool plain = js_array_holes_read_undefined(array);
+        for (size_t i = start; i < length; ++i) {
             if (js_same_value_zero(plain ? array.array_element(i) : js_array_get(array, i), js_arg(args, 0))) {
                 return JsValue::make_boolean(true);
             }

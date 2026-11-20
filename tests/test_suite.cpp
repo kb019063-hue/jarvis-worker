@@ -23540,7 +23540,8 @@ TEST(an_accessor_on_an_array_index_is_its_property) {
     assert(none_failed());
 
     // The length is taken once, as the standard takes it: an element a getter
-    // adds is not looked at, and `with` does not read the index it replaces.
+    // adds is not looked at. `with` does not read the index it replaces, and
+    // `toSpliced` not the places it drops.
     js.eval(R"JS(
         check('indexOf, includes and lastIndexOf do not look at an element a getter adds', function () {
             function grown() {
@@ -23580,6 +23581,99 @@ TEST(an_accessor_on_an_array_index_is_its_property) {
             var second = shorter.with({ valueOf: function () { shorter.length = 1; return 1; } }, 8);
             return [first, longer.length, second, 2 in second, shorter.length];
         }, '[[0,8,2],4,[0,8,null],true,1]');
+        check('toSpliced does not call the getter of a place it drops, and asks what its arguments are once', function () {
+            var calls = 0, asked = 0;
+            var a = [0, 1, 2, 3];
+            Object.defineProperty(a, '1', { get: function () { calls++; return 'g'; } });
+            var start = { valueOf: function () { asked++; return 1; } };
+            return [a.toSpliced(start, 1), calls, asked, a.toSpliced(2, 1, 'x'), calls, a.toSpliced(1), calls, a.toSpliced(), calls];
+        }, '[[0,2,3],0,1,[0,"g","x",3],1,[0],1,[0,"g",2,3],2]');
+        check('toSpliced takes the length before it asks what its arguments are', function () {
+            var longer = [0, 1, 2];
+            var first = longer.toSpliced({ valueOf: function () { longer.push(3); return 1; } }, 1);
+            var shorter = [0, 1, 2, 3];
+            var second = shorter.toSpliced({ valueOf: function () { shorter.length = 2; return 1; } }, 1);
+            return [first, second, 2 in second];
+        }, '[[0,2],[0,null,null],true]');
+        check('a place that is gone by the time it is read is read from the prototype like any other', function () {
+            Array.prototype[2] = 'p';
+            var shorter = [0, 1, 2, 3];
+            var spliced = shorter.toSpliced({ valueOf: function () { shorter.length = 2; return 0; } }, 0);
+            var other = [0, 1, 2, 3];
+            var replaced = other.with({ valueOf: function () { other.length = 2; return 0; } }, 'w');
+            delete Array.prototype[2];
+            Array.prototype.length = 0;
+            return [spliced, replaced];
+        }, '[[0,1,"p",null],["w",1,"p",null]]');
+        check('includes asks where to start before it asks whether a hole can read as anything', function () {
+            var a = [1, , 3];
+            var found = a.includes('late', { valueOf: function () { Object.defineProperty(a, '1', { get: function () { return 'late'; } }); return 0; } });
+            var b = [1, 2, 3];
+            var gone = b.includes(undefined, { valueOf: function () { b.length = 1; return 0; } });
+            return [found, gone, b.length];
+        }, '[true,true,1]');
+    )JS");
+    assert(none_failed());
+
+    // Whether a hole can read as anything is remembered between holes, and
+    // what happens in the middle of a loop is not missed.
+    js.eval(R"JS(
+        check('an index Array.prototype gets while a loop is under way is read from then on', function () {
+            var a = [1, , , 4];
+            var seen = [];
+            for (var v of a) {
+                seen.push(v === undefined ? 'hole' : v);
+                if (seen.length === 2) Array.prototype[2] = 'p';
+            }
+            delete Array.prototype[2];
+            Array.prototype.length = 0;
+            return [seen, [...a], a.join()];
+        }, '[[1,"hole","p",4],[1,null,null,4],"1,,,4"]');
+        check('and one Object.prototype gets', function () {
+            var a = [1, , , 4];
+            var seen = [];
+            for (var v of a) {
+                seen.push(v === undefined ? 'hole' : v);
+                if (seen.length === 2) Object.prototype[2] = 'o';
+            }
+            var during = [[...a], a.join(), JSON.parse(JSON.stringify(a)), a.includes('o'), a.at(1), a.at(2)];
+            delete Object.prototype[2];
+            return [seen, during, [...a], a.join()];
+        }, '[[1,"hole","o",4],[[1,null,"o",4],"1,,o,4",[1,null,"o",4],true,null,"o"],[1,null,null,4],"1,,,4"]');
+        check('and one a new prototype of the array brings', function () {
+            var a = [1, , , 4];
+            var seen = [];
+            for (var v of a) {
+                seen.push(v === undefined ? 'hole' : v);
+                if (seen.length === 2) Object.setPrototypeOf(a, Object.create(Array.prototype, { 2: { value: 'n' } }));
+            }
+            return [seen, Array.prototype.join.call(a), [1, , , 4].join()];
+        }, '[[1,"hole","n",4],"1,,n,4","1,,,4"]');
+        check('and one a new prototype of Array.prototype brings', function () {
+            var behind = { 1: 'deep' };
+            var before = [...[1, , 3]];
+            Object.setPrototypeOf(Array.prototype, behind);
+            var during = [[...[1, , 3]], [1, , 3].join(), [1, , 3].at(1)];
+            Object.setPrototypeOf(Array.prototype, Object.prototype);
+            return [before, during, [...[1, , 3]], [1, , 3].join()];
+        }, '[[1,null,3],[[1,"deep",3],"1,deep,3","deep"],[1,null,3],"1,,3"]');
+        check('and an accessor the array gets on a hole in the middle', function () {
+            var a = [1, , , 4];
+            var seen = [];
+            for (var v of a) {
+                seen.push(v === undefined ? 'hole' : v);
+                if (seen.length === 2) Object.defineProperty(a, '2', { get: seven, configurable: true });
+            }
+            return [seen, a.pop(), a.pop(), a.pop(), a.length];
+        }, '[[1,"hole",7,4],4,7,null,1]');
+        check('pop reads what the prototype has for a hole, and an array from another chain is asked for itself', function () {
+            class List extends Array {}
+            var listed = new List(3);
+            var plain = new Array(3);
+            List.prototype[2] = 'listed';
+            var result = [listed.pop(), plain.pop() === undefined, listed.pop() === undefined, plain.pop() === undefined, listed.length, plain.length];
+            return result;
+        }, '["listed",true,true,true,1,1]');
     )JS");
     assert(none_failed());
 

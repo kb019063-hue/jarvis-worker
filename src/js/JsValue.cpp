@@ -189,6 +189,14 @@ PropertyMap::const_iterator PropertyMap::find(const std::string& key) const {
     return m_entries.end();
 }
 
+/// How many times a property whose name begins with a digit has entered a
+/// property map, any map. This is the one place a key enters a map, so an
+/// object comes to have an index in its map only when this goes up, and what
+/// js_array_holes_read_undefined worked out about a prototype chain at one
+/// count holds for that chain while the count stands. Atomic because a worker
+/// runs on a thread of its own; the answers are remembered per thread.
+static std::atomic<uint64_t> g_index_named_keys{0};
+
 PropertyMap::Entry& PropertyMap::entry(const std::string& key) {
     if (auto it = m_index_built ? m_index.find(key) : m_index.end(); it != m_index.end()) return *it->second;
     if (!m_index_built) {
@@ -196,6 +204,7 @@ PropertyMap::Entry& PropertyMap::entry(const std::string& key) {
             if (it->first == key) return *it;
         }
     }
+    if (!key.empty() && key[0] >= '0' && key[0] <= '9') g_index_named_keys.fetch_add(1, std::memory_order_relaxed);
     m_entries.emplace_back();
     m_entries.back().first = key;
     auto back = std::prev(m_entries.end());
@@ -761,8 +770,11 @@ JsValue js_array_get(const JsValue& array, size_t index) {
     if (index < cell->array_elements.size() && !(cell->array_holes && cell->array_holes->empty_slot(index))) {
         return cell->array_elements[index];
     }
-    // A hole, or a place past the end: the long way, which finds what
-    // `Object.defineProperty` made of the index and what the prototype has.
+    // A hole, or a place past the end. Nearly always nothing answers for it,
+    // and that is known without looking the index up by name; otherwise the
+    // long way, which finds what `Object.defineProperty` made of the index
+    // and what the prototype has.
+    if (js_array_holes_read_undefined(array)) return JsValue::make_undefined();
     return array.get_property(std::to_string(index));
 }
 
@@ -772,19 +784,48 @@ bool js_array_holes_read_undefined(const JsValue& array) {
     // Its own: an index is in the property map only after define_accessor.
     if (cell->has_accessors || cell->exotic || cell->has_legacy_getters || cell->lookup_fallback) return false;
     // The chain: an array with elements, or a property whose name is a
-    // number. Array.prototype and Object.prototype have some sixty names
-    // between them and none begins with a digit, so this is sixty
-    // comparisons of one character, once for a loop, where the loop would
-    // otherwise look every hole up by name in both.
-    int guard = 0;
-    for (const JsObject* proto = cell->prototype; proto && guard < kMaxPrototypeChain; proto = proto->prototype, ++guard) {
+    // number. What an object is and whether an array has elements is looked
+    // at every time, and costs nothing. The names are the long part
+    // (Array.prototype and Object.prototype have some sixty between them, and
+    // none begins with a digit), so the chain whose names were last found
+    // clean is remembered with the count of g_index_named_keys it was found
+    // at: the same objects at the same count have the same answer. An object
+    // that takes the address of one that is gone starts with no names, and
+    // gets every one of them through PropertyMap::entry, which counts.
+    struct Clean {
+        uint64_t count = 0;
+        int length = -1;
+        const JsObject* chain[4] = {nullptr, nullptr, nullptr, nullptr};
+    };
+    static thread_local Clean clean;
+    const uint64_t count = g_index_named_keys.load(std::memory_order_relaxed);
+    const int remembered = clean.count == count ? clean.length : -1;
+    bool same = remembered >= 0;
+    const JsObject* chain[4] = {nullptr, nullptr, nullptr, nullptr};
+    int length = 0;
+    for (const JsObject* proto = cell->prototype; proto; proto = proto->prototype, ++length) {
+        if (length >= kMaxPrototypeChain) return false;
         if (proto->exotic || proto->has_legacy_getters || proto->lookup_fallback) return false;
         if (proto->is_array && !proto->array_elements.empty()) return false;
+        if (length < 4) {
+            chain[length] = proto;
+            if (same && (length >= remembered || clean.chain[length] != proto)) same = false;
+        } else {
+            same = false;
+        }
+    }
+    if (same && length == remembered) return true;
+    for (const JsObject* proto = cell->prototype; proto; proto = proto->prototype) {
         for (const auto& entry : proto->properties) {
             if (!entry.first.empty() && entry.first[0] >= '0' && entry.first[0] <= '9') return false;
         }
     }
-    return guard < kMaxPrototypeChain;
+    if (length <= 4) {
+        clean.count = count;
+        clean.length = length;
+        for (int i = 0; i < 4; ++i) clean.chain[i] = chain[i];
+    }
+    return true;
 }
 
 std::vector<JsValue> JsValue::array_snapshot() const {

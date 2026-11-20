@@ -118,12 +118,18 @@ count is the `RUN_TEST` list of `tests/test_suite.cpp`, the corpus totals are
 the cases on disk. Measured things are in `docs/metrics.json` with the command
 that produced them and the day it did, so a figure can be argued with instead
 of trusted. `make check-numbers` fails when any marked figure disagrees, and
-`--write` never lowers a `--min-pass` floor: a floor that would go down is a
-regression, and it is reported.
+`--write` never lowers a floor — neither the `--min-pass` ones of `ci.yml` nor
+`URL_FLOOR` and `WPT_FLOOR` in the Makefile, which it also maintains: a floor
+that would go down is a regression, and it is reported instead.
 
 A number without a marker is history — a phase write-up quoting the figure of
 its own day — and history is left alone. `ARCHITECTURE.md` and `AUDIT.md` are
 frozen append targets, so their rows are not marked either.
+
+Three numbers are still a person's to correct, and `docs/metrics.json` says
+why: `XML_FLOOR`, whose corpus is downloaded on first use, and the two ASan
+floors, which are the same scores under sanitizers and are written by `make
+asan`.
 
 ## What "done" means
 

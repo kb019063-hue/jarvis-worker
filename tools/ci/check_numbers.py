@@ -93,6 +93,7 @@ ROADMAP = ROOT / "ROADMAP.md"
 SUITE_SOURCE = ROOT / "tests" / "test_suite.cpp"
 LEDGER = ROOT / "docs" / "metrics.json"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+MAKEFILE = ROOT / "Makefile"
 
 # The documents whose marked claims are refreshed. ARCHITECTURE.md and AUDIT.md
 # are frozen append targets, and a phase row quotes the figures of its own day.
@@ -169,6 +170,10 @@ def figures() -> tuple[dict[str, int], set[str]]:
     out["dom.pass"] = int(ledger["dom_conformance"]["pass"])
     out["probe.pass"] = int(ledger["everyday_probe"]["pass"])
     out["probe.total"] = int(ledger["everyday_probe"]["of"])
+    out["url.pass"] = int(ledger["url_conformance"]["pass"])
+    out["url.total"] = int(ledger["url_conformance"]["of"])
+    out["wpt.pass"] = int(ledger["wpt"]["pass"])
+    out["wpt.total"] = int(ledger["wpt"]["of"])
     for prefix, key in (
         ("t262.default", "test262_default_directories"),
         ("t262.class", "test262_class_directories"),
@@ -183,7 +188,7 @@ def figures() -> tuple[dict[str, int], set[str]]:
     out["t262.full.pass"] = int(whole["pass"])
     out["t262.full.total"] = int(whole["of"])
     measured |= {
-        "js.pass", "dom.pass", "probe.pass",
+        "js.pass", "dom.pass", "probe.pass", "url.pass", "url.total", "wpt.pass", "wpt.total",
         "t262.default.before", "t262.default.before_total", "t262.default.now", "t262.default.total", "t262.default.fixed",
         "t262.class.before", "t262.class.before_total", "t262.class.now", "t262.class.total", "t262.class.fixed",
         "t262.full.pass", "t262.full.total",
@@ -198,7 +203,10 @@ def percent(passed: int, total: int) -> str:
     column is read by eye and `65%` next to `98.4%` reads as a different
     precision rather than as the same measure.
     """
-    return f"{round(passed / total * 100, 1):.1f}"
+    value = round(passed / total * 100, 1)
+    # `100%` is the one percentage the documents write without a decimal: it is
+    # the only exact one, and it is read as a slogan rather than as a measure.
+    return "100" if value == 100 else f"{value:.1f}"
 
 
 def num(value: int) -> str:
@@ -361,6 +369,12 @@ def write_markers(values: dict[str, int], measured: set[str], problems: list[str
 # ---------------------------------------------------------------------------
 
 MIN_PASS = re.compile(r"--min-pass\s+(\d+)")
+# Two floors are Makefile variables rather than `--min-pass` arguments.
+FLOOR_VARIABLES = {
+    "URL_FLOOR": "url.pass",
+    "WPT_FLOOR": "wpt.pass",
+}
+FLOOR_VARIABLE = re.compile(r"^(%s)\s*\?=\s*(\d+)$" % "|".join(FLOOR_VARIABLES), re.MULTILINE)
 # A floor is the score a corpus reaches today; the runner that measures it names
 # the figure. The others (wpt, url, xml) take their floor from the Makefile.
 FLOOR_RUNNERS = {
@@ -390,6 +404,15 @@ def check_floors(problems: list[str], values: dict[str, int]) -> int:
                 f"ci.yml: `--min-pass {floor}` is not what the ledger says"
                 f" {values[name]} ({name}) — run `make metrics`"
             )
+    for match in FLOOR_VARIABLE.finditer(read(MAKEFILE)):
+        variable = match.group(1)
+        name = FLOOR_VARIABLES[variable]
+        checked += 1
+        if int(match.group(2)) != values[name]:
+            problems.append(
+                f"Makefile: {variable} is {match.group(2)}, not the ledger's"
+                f" {values[name]} ({name}) — run `make metrics`"
+            )
     return checked
 
 
@@ -417,6 +440,29 @@ def write_floors(values: dict[str, int], problems: list[str]) -> list[str]:
     out.append(text[cursor:])
     if changes:
         CI_WORKFLOW.write_text("".join(out), encoding="utf-8")
+
+    makefile = read(MAKEFILE)
+    out = []
+    cursor = 0
+    for match in FLOOR_VARIABLE.finditer(makefile):
+        variable = match.group(1)
+        name = FLOOR_VARIABLES[variable]
+        floor, want = int(match.group(2)), values[name]
+        if floor == want:
+            continue
+        if floor > want:
+            problems.append(
+                f"Makefile: {variable} is {floor}, above what the tree reaches"
+                f" ({want}, {name}): a regression, and a floor is not lowered"
+            )
+            continue
+        out.append(makefile[cursor : match.start(2)])
+        out.append(str(want))
+        cursor = match.end(2)
+        changes.append(f"Makefile: {variable} {floor} -> {want} ({name})")
+    out.append(makefile[cursor:])
+    if changes and "".join(out) != makefile:
+        MAKEFILE.write_text("".join(out), encoding="utf-8")
     return changes
 
 
@@ -513,6 +559,10 @@ SELF_TEST_FIGURES = {
     "t262.default.total": 15686,
     "t262.full.pass": 31161,
     "t262.full.total": 47967,
+    "url.pass": 1188,
+    "url.total": 1188,
+    "wpt.pass": 9567,
+    "wpt.total": 9824,
 }
 
 SELF_TEST_CASES = [
@@ -531,6 +581,9 @@ SELF_TEST_CASES = [
     ("t262.default", "pct", "87.0%"),
     ("t262.default.before", "num", "12,657"),
     ("t262.default.before_pct", "pct", "80.7%"),
+    ("url", "frac_pct", "1188 / 1188 (100%)"),
+    ("wpt", "frac", "9567 / 9824"),
+    ("wpt.pass", "num", "9,567"),
 ]
 
 
@@ -622,9 +675,9 @@ def main(argv: list[str]) -> int:
     else:
         print(f"  ok    {marks} marked claim(s) match docs/metrics.json and the tree")
     if floors:
-        print(f"  FAIL  {len(floors)} `--min-pass` floor(s) disagree with the ledger")
+        print(f"  FAIL  {len(floors)} floor(s) in ci.yml or the Makefile disagree with the ledger")
     else:
-        print(f"  ok    ci.yml: {floor_count} `--min-pass` floor(s) match the ledger")
+        print(f"  ok    ci.yml and the Makefile: {floor_count} floor(s) match the ledger")
 
     problems = arithmetic + denominators + suites + marked + floors
     if problems:

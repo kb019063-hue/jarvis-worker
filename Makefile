@@ -375,12 +375,48 @@ deep: $(TARGET)
 asan: asan-core
 	$(MAKE) asan-deep
 
-## The corpus is run for what the sanitizers see while the scripts execute, not
-## for its score: a sanitizer report makes a case fail, and --min-pass turns a
-## batch of those into a failed build.
+## What the sanitizer build is put through, as parts. `make asan-core` runs
+## them one after another in this order, which is what it did when all of it
+## was one recipe: `make -n asan-core` prints the commands it printed then.
+##
+## The parts are here for CI. As one step this took 19 to 24 minutes of a run
+## of 24 to 31, and every other job was done in six. CI now gives the parts
+## to jobs that run side by side (.github/workflows/ci.yml, the jobs named
+## "Sanitizers: ..."), each of which makes its own `asan-build` first. Locally
+## a part can be run alone the same way: `make asan-build asan-js`.
+##
+## A new check goes into the part it belongs with, and then CI runs it. A new
+## part goes into this recipe and into a job: tools/ci/check_ci_parts.py,
+## which CI runs before anything is built, fails for a part that no job runs.
+##
+## (The parts are declared here and not on the long .PHONY line above, which
+## every pull request that adds a target changes, and which two of them then
+## change at once.)
+.PHONY: asan-build asan-unit asan-verify asan-js asan-dom asan-xml asan-wpt asan-xml-generated asan-fuzz
 asan-core:
+	$(MAKE) asan-build
+	$(MAKE) asan-unit
+	$(MAKE) asan-verify
+	$(MAKE) asan-js
+	$(MAKE) asan-dom
+	$(MAKE) asan-xml
+	$(MAKE) asan-wpt
+	$(MAKE) asan-xml-generated
+	$(MAKE) asan-fuzz
+
+## The sanitizer build itself: build-asan/litebird, which every other part and
+## asan-deep run.
+asan-build:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
+
+## The unit suites, built and run with the sanitizers.
+asan-unit:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
+
+## The checks that have a verifier of their own: media, colour, Brotli, regular
+## expressions, string operations, and the three security ones (HTTPS, worker
+## policy, WebSocket).
+asan-verify:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-media
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-color
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-brotli BROTLI_VERIFY_FLAGS=--skip-node
@@ -389,13 +425,34 @@ asan-core:
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_https.py --binary build-asan/litebird
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_worker_policy.py --binary build-asan/litebird --stress-runs 20
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_websocket.py --binary build-asan/litebird --stress-runs 20
+
+## The corpus is run for what the sanitizers see while the scripts execute, not
+## for its score: a sanitizer report makes a case fail, and --min-pass turns a
+## batch of those into a failed build.
+asan-js:
 	ASAN_OPTIONS=detect_leaks=0 $(JS_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(JS_ASAN_FLOOR)
+
+## The script DOM corpus and the URL cases, for the same reason.
+asan-dom:
 	ASAN_OPTIONS=detect_leaks=0 $(DOM_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 60 --min-pass $(DOM_ASAN_FLOOR)
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/run_url_conformance.py --binary build-asan/litebird --timeout 600 --min-pass $(URL_FLOOR)
+
+## The W3C XML suite.
+asan-xml:
 	ASAN_OPTIONS=detect_leaks=0 $(XML_CONFORMANCE) --binary build-asan/litebird --quiet --timeout 120 --min-pass $(XML_FLOOR)
+
+## The web-platform-tests.
+asan-wpt:
 	ASAN_OPTIONS=detect_leaks=0 $(WPT) --binary build-asan/litebird --quiet --timeout 600 --min-pass $(WPT_FLOOR)
+
+## Generated XML against Expat, and the serializer's round trip.
+asan-xml-generated:
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/diff_xml.py --binary build-asan/litebird --count $(XML_ASAN_DIFF_COUNT) --timeout 120 --expat-only
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/xml_roundtrip.py --binary build-asan/litebird --count $(XML_ASAN_ROUNDTRIP_COUNT) --timeout 900
+
+## The fuzz smoke run: mutated pages, XML documents, media, colours and Brotli
+## streams.
+asan-fuzz:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" fuzz BROTLI_VERIFY_FLAGS=--skip-node
 
 ## The deep pages in the sanitizer build made by asan-core. This run is for
@@ -511,3 +568,4 @@ clean:
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
 	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, verify-brotli, fuzz-brotli, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, clean"
+	@echo "Parts of asan-core, which CI runs as jobs side by side: asan-build, asan-unit, asan-verify, asan-js, asan-dom, asan-xml, asan-wpt, asan-xml-generated, asan-fuzz"

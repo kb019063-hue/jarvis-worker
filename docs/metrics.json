@@ -30,7 +30,7 @@
       "pass": 1138,
       "command": "make js-conformance",
       "date": "2026-11-20",
-      "note": "the total is the corpus on disk; only the pass count needs a run. 1138 since Phase 106 (ArrayBuffer and the typed arrays): the Uint8Array case of collections-iterators.dat was waiting for it"
+      "note": "the total is the corpus on disk; only the pass count needs a run. 1138 since Phase 106 (ArrayBuffer and the typed arrays), whose Uint8Array case of collections-iterators.dat was waiting for it; #128 raises the same field for Phase 102, so whoever merges second runs `make metrics` on the merged tree"
     },
     "dom_conformance": {
       "pass": 678,

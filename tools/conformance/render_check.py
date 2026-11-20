@@ -188,10 +188,25 @@ class Result:
     name: str
     failures: list[Failure] = field(default_factory=list)
     error: str = ""
+    known_failure: str = ""       # why this page is expected not to match yet
+
+    @property
+    def failed(self) -> bool:
+        return bool(self.failures) or bool(self.error)
 
     @property
     def passed(self) -> bool:
-        return not self.failures and not self.error
+        return not self.failed
+
+    @property
+    def known(self) -> bool:
+        """Expected to fail, and did: not a pass, and not a surprise."""
+        return bool(self.known_failure) and self.failed
+
+    @property
+    def fixed(self) -> bool:
+        """Expected to fail, and does not any more: the entry must come out."""
+        return bool(self.known_failure) and not self.failed
 
 
 def _colour(value) -> tuple[int, int, int, int]:
@@ -320,6 +335,7 @@ def run_reftest(binary: str, test: dict, workdir: Path) -> Result:
         failure = check_assertion(image, spec)
         if failure:
             result.failures.append(failure)
+    result.known_failure = test.get("known_failure", "")
     return result
 
 
@@ -443,6 +459,19 @@ def self_test() -> int:
         for spec in must_fail:
             if check_assertion(image, spec) is None:
                 failures.append(f"{spec['kind']} accepted a false statement: {spec}")
+
+        # 4. The known-failure ledger, in both directions. An entry that excuses a
+        #    page which fails is not a pass; an entry attached to a page that
+        #    passes must be refused, or the corpus keeps an excuse it has outgrown.
+        failure = Failure("rect", "the page is wrong")
+        expected_bad = Result("page", [failure], known_failure="a reason")
+        expected_good = Result("page", [], known_failure="a reason")
+        if not (expected_bad.known and not expected_bad.passed and not expected_bad.fixed):
+            failures.append("a page that fails with an entry is not reported as known")
+        if not (expected_good.fixed and not expected_good.known and expected_good.passed):
+            failures.append("a page that passes with an entry is not reported as fixed")
+        if Result("page").known or Result("page").fixed:
+            failures.append("a page with no entry is reported as known or fixed")
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -505,27 +534,54 @@ def main(argv: list[str]) -> int:
         for test in tests:
             result = run_reftest(binary, test, workdir)
             results.append(result)
-            if args.verbose or not result.passed:
-                mark = "ok  " if result.passed else "FAIL"
+            if args.verbose or result.failed or result.fixed:
+                if result.fixed:
+                    mark = "FIXED"
+                elif result.known:
+                    mark = "KNOWN"
+                elif result.passed:
+                    mark = "ok  "
+                else:
+                    mark = "FAIL"
                 print(f"{mark} {test['name']}")
+                if result.known:
+                    print(f"       known: {result.known_failure}")
+                if result.fixed:
+                    print("       it passes now -- take the known_failure entry out of "
+                          "tests/render/reftests.json and let it count")
                 if result.error:
                     print(f"       {result.error}")
-                for failure in result.failures:
-                    print(f"       {failure.assertion}: {failure.detail}")
+                if not result.known:
+                    for failure in result.failures:
+                        print(f"       {failure.assertion}: {failure.detail}")
 
     passed = sum(1 for r in results if r.passed)
+    known = sum(1 for r in results if r.known)
     total = len(results)
+    # A page that fails with no entry is a surprise; one that passes with an
+    # entry is a stale entry, and the corpus is supposed to shrink, not rot.
+    unexplained = [r for r in results if r.fixed or (not r.passed and not r.known)]
     if args.json:
         print(json.dumps({
             "pass": passed,
+            "known": known,
             "total": total,
-            "tests": [{"name": r.name, "passed": r.passed,
+            "tests": [{"name": r.name, "passed": r.passed, "known": r.known,
+                       "known_failure": r.known_failure,
                        "failures": [f"{f.assertion}: {f.detail}" for f in r.failures],
                        "error": r.error} for r in results],
         }))
     else:
-        print(f"\nRender reftests: {passed}/{total} pages match their reference pixels")
-    return 0 if passed == total else 1
+        fixed = [r.name for r in results if r.fixed]
+        if fixed:
+            print(f"\n{len(fixed)} page(s) pass now but still carry a known_failure entry: "
+                  + ", ".join(fixed))
+        line = f"\nRender reftests: {passed}/{total} pages match their reference pixels"
+        if known:
+            line += (f"; {known} more fail as recorded, with a reason in the corpus"
+                     f" ({passed + known} of {total} accounted for)")
+        print(line)
+    return 0 if not unexplained else 1
 
 
 if __name__ == "__main__":

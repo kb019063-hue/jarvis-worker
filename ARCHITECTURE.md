@@ -398,7 +398,9 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    than resolving the CSS 2.1 "widest wins" rule edge by edge); Phase 36 added
    block-in-inline splitting (`<a>x<p>y</p></a>`), `inline-block` shrink-to-fit,
    form-control `InlineBlock` boxes, and on-demand script reflow. Still missing:
-   multicol, bidi, complex font shaping/HarfBuzz, the table's outer border merge in
+   multicol, `direction` and `unicode-bidi` (the bidi algorithm itself runs, and
+   reorders each line — Phase 109), complex font shaping/HarfBuzz, the table's
+   outer border merge in
    the collapsed model, `empty-cells`, `caption-side`, `table-layout: fixed`,
    per-element scrollable `overflow: auto` containers (the viewport scrolls, inner
    boxes clip), and rounded-corner clipping. The DOM is trustworthy; the box tree
@@ -449,8 +451,9 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    system `.ttf` font is present, `FontRenderer` rasterizes anti-aliased UTF-8
    glyphs at the computed `font-size`; when no `.ttf` file is available on the
    host, rendering falls back to the unscaled 8×8 bitmap font. Webfont
-   downloads (`@font-face`, WOFF/WOFF2), kerning/ligatures (`GPOS`/`GSUB`), and
-   right-to-left bidi shaping are not implemented.
+   downloads (`@font-face`, WOFF/WOFF2) and complex-script shaping are not
+   implemented; text is reordered by UAX #9 (Phase 109) but Arabic letters are
+   drawn unjoined, which is shaping and not bidi.
 9. **The DOM a script sees is measured against jsdom and a part of
    web-platform-tests, plus targeted end-to-end integration tests.**
    It passes all 678 cases of its corpus (Phases 27, 28, 34, 37, 43 and 69) and 7,968 of

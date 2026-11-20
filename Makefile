@@ -279,6 +279,12 @@ verify-collection-iterators: $(TARGET)
 dom-conformance: $(TARGET)
 	@$(DOM_CONFORMANCE)
 
+## What the page actually looks like. `ROADMAP.md` Tier 1 row 8 said nothing
+## measured a pixel; this reads the PNG back with its own decoder and compares
+## it with what each reftest asserts.
+render-conformance: $(TARGET)
+	@python3 tools/conformance/render_check.py --binary $(TARGET)
+
 ## Twenty-one directories of test262, the suite of the language's standard:
 ## what a change to functions, classes, prototypes or property definition
 ## can move. Downloaded the first time into build/test262, at a pinned

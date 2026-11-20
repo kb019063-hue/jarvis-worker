@@ -358,6 +358,52 @@ bool dense_path(const JsValue& object) {
     return entry == cell->properties.end() || (entry->flags & PropertyMap::Writable) != 0;
 }
 
+/// Visit each index below `limit` whose place is there, in ascending order,
+/// asking `HasProperty` as the standard does — once per index that is
+/// reached — but skipping a run of places that cannot be there in one step.
+///
+/// `visit` returns false to stop. The function returns true when the walk ran
+/// to the end, false when `visit` stopped it. A callback may make a *later*
+/// place appear or disappear, and both are seen: the place is asked about when
+/// it is reached, not when the walk started.
+///
+/// The skipping is what keeps a length of 2^53 affordable. `chain_has_index`
+/// says whether anything above the receiver can answer for an index; when it
+/// is false, a place is there exactly when the receiver's own element is not a
+/// hole, and past the last element no index is there at all, so the walk ends.
+template <typename Visit>
+static bool walk_present_indices(const JsValue& object, size_t limit, bool chain_has_index, Visit visit) {
+    if (limit == 0) return true;
+    const bool sparse = object.is_array() && !object.object_val->has_accessors && !chain_has_index;
+    size_t index = 0;
+    while (index < limit) {
+        if (!sparse) {
+            if (!has_index_property(object, index)) {
+                // One at a time, because a place can appear under anything the
+                // chain holds. Only a length short enough to ask about takes
+                // this path: test262's receivers here have a few places.
+                ++index;
+                if (index > kMaxWalkedIndices && !chain_has_index) break;
+                continue;
+            }
+            if (!visit(index)) return false;
+            ++index;
+            continue;
+        }
+        // A real array with no accessor and no prototype index: the hole bit
+        // is the answer, and the first index past the elements is not there.
+        const auto& elements = object.object_val->array_elements;
+        const size_t count = std::min(elements.size(), limit);
+        for (; index < count; ++index) {
+            if (object.is_array_hole(index)) continue;
+            if (!visit(index)) return false;
+        }
+        return true;   // nothing past the elements can be there
+    }
+    if (index >= limit) return true;
+    return true;
+}
+
 /// The places `begin` up to `end` of `object`, as an array: `Array.prototype.
 /// slice`, and the shape every method that copies wants. A place the source
 /// has is its value; a place it does not have is a hole.
@@ -380,14 +426,17 @@ static JsValue copy_places(const JsValue& object, size_t begin, size_t end, cons
         js_throw_range_error(std::string("Array.prototype.") + method +
                              ": the result would be too long to build");
     }
+    // Fill first, then make the array: `make_array` copies the vector, so a
+    // write after it would go to a vector the array no longer holds.
     std::vector<JsValue> kept(count, JsValue::make_undefined());
-    JsValue result = JsValue::make_array(kept);
-    for (size_t i = 0; i < count; ++i) result.set_array_hole(i);
+    std::vector<bool> holes(count, true);
     for (size_t index : walk.indices) {
         if (index < begin || index >= end) continue;
         kept[index - begin] = get_index(object, index);
-        result.clear_array_hole(index - begin);
+        holes[index - begin] = false;
     }
+    JsValue result = JsValue::make_array(kept);
+    for (size_t i = 0; i < count; ++i) if (holes[i]) result.set_array_hole(i);
     return result;
 }
 
@@ -529,37 +578,50 @@ std::string join_array(const JsValue& array, const std::string& separator) {
     // recursing forever.
     if (std::find(t_joining.begin(), t_joining.end(), cell) != t_joining.end()) return std::string();
     t_joining.push_back(cell);
-    struct Pop { ~Pop() { t_joining.pop_back(); } } pop;
-
-    std::string out;
-    // `join` reads each place as `a[i]` does. A hole reads `undefined` and
-    // joins empty, unless the index has an accessor of its own or the
-    // prototype has the index; whether any hole can is asked once, and again
-    // after anything that may have run a script (`new Array(n + 1).join(s)`
-    // is how a string was repeated before `repeat`, and is all holes).
-    bool holes_known = false;
-    bool holes_empty = false;
-    // The length is taken once, as the standard takes it. A place that is no
-    // longer there by the time it is reached (a getter or a toString made
-    // the array shorter) is read like a hole.
-    const size_t length = elements_of(array).size();
-    for (size_t i = 0; i < length; ++i) {
-        if (i) out += separator;
-        // Nothing is made for a hole that joins empty: not even an empty value.
-        const bool hole = i >= elements_of(array).size() || array.is_array_hole(i);
-        if (hole) {
-            if (!holes_known) {
-                holes_empty = js_array_holes_read_undefined(array);
-                holes_known = true;
-            }
-            if (holes_empty) continue;
-            holes_known = false;                                 // the read below may run a getter
+    // The guard erases *this* cell, not whatever happens to be last: joining
+    // an element runs a script (`[1,2].toString()` joins while the outer join
+    // is still running), and popping the back there removed the inner cell and
+    // left this one in the list for good, so every later join answered an
+    // empty string.
+    struct Pop {
+        const JsObject* cell;
+        ~Pop() {
+            auto at = std::find(t_joining.begin(), t_joining.end(), cell);
+            if (at != t_joining.end()) t_joining.erase(at);
         }
-        JsValue item = hole ? js_array_get(array, i) : elements_of(array)[i];
+    } pop{cell};
+
+    const size_t length = length_of(array);
+    // The places that are there, and nothing about the places that are not: a
+    // hole joins as `undefined` does, which is empty, and there can be 2^53-1
+    // of them. `{ length: 2**31 }` used to be a copy of every place first.
+    const size_t separator_bytes = separator.size();
+    if (length > 1 && separator_bytes > 0 && length - 1 > kMaxJoinedBytes / separator_bytes) {
+        // No engine builds a string that long: a string has a maximum length,
+        // and going past it is a RangeError rather than a process that never
+        // answers.
+        js_throw_range_error("Invalid string length");
+    }
+    const IndexWalk walk = present_indices(array, length);
+    std::string out;
+    size_t place = 0;
+    for (size_t index : walk.indices) {
+        if (!has_index_property(array, index)) continue;
+        for (; place < index; ++place) { if (place) out += separator; }
+        if (place) out += separator;
+        ++place;
+        JsValue item = get_index(array, index);
         if (item.type == JsType::String) out += item.string_val.view();
-        else if (!item.is_nullish()) {
-            out += js_to_string(item);
-            if (item.is_object_like()) holes_known = false;      // its toString is a script
+        else if (!item.is_nullish()) out += js_to_string(item);
+    }
+    // The places after the last one that is there are empty but still
+    // separated: one separator each, and nothing to read for any of them.
+    if (place < length) {
+        const size_t tail = length - 1 - place;
+        if (separator.empty()) {
+            out.append(tail, ',');
+        } else {
+            for (size_t k = 0; k < tail; ++k) out += separator;
         }
     }
     return out;
@@ -632,15 +694,18 @@ void sort_values(std::vector<JsValue>& items, std::vector<bool>& holes, const Js
 /// the inner array, and copying a hole leaves one.
 void flatten_into(std::vector<JsValue>& out, std::vector<bool>& holes, const JsValue& array, double depth) {
     js_check_stack();       // [[[[...]]]].flat(Infinity) recurses once per level
-    for (size_t i = 0; i < elements_of(array).size(); ++i) {
-        if (array.is_array_hole(i)) { if (depth < 1) { out.push_back(JsValue::make_undefined()); holes.push_back(true); } continue; }
-        JsValue item = elements_of(array)[i];
+    const size_t length = length_of(array);
+    // `flat` asks HasProperty: a place that is not there is neither flattened
+    // nor an element, so a receiver with a huge `length` and no places costs
+    // nothing (there used to be a copy of every place first).
+    const IndexWalk walk = present_indices(array, length);
+    for (size_t i : walk.indices) {
+        if (!has_index_property(array, i)) continue;
+        JsValue item = get_index(array, i);
         if (depth >= 1 && item.is_array()) flatten_into(out, holes, item, depth - 1);
         else { out.push_back(std::move(item)); holes.push_back(false); }
     }
-}
-
-JsValue iteration_result(const JsValue& value, bool done) {
+}JsValue iteration_result(const JsValue& value, bool done) {
     JsValue result = JsValue::make_object();
     result.set_property("value", value);
     result.set_property("done", JsValue::make_boolean(done));
@@ -914,18 +979,12 @@ void install_array_builtins(JsIntrinsics& realm) {
 
     // ---- Copying and slicing ----------------------------------------------
     js_define_method(ap, "slice", 2, [](Args args) {
-        JsValue array = read_through(receiver("slice"));
-        const auto& elements = elements_of(array);
-        size_t begin = relative_index(js_arg(args, 0), elements.size(), 0);
-        size_t end = relative_index(js_arg(args, 1), elements.size(), elements.size());
+        JsValue source = receiver("slice");
+        const size_t length = array_like_length(source, "slice");
+        const size_t begin = relative_index(js_arg(args, 0), length, 0);
+        const size_t end = relative_index(js_arg(args, 1), length, length);
         if (begin >= end) return JsValue::make_array();
-        JsValue result = JsValue::make_array();
-        result.object_val->array_elements.assign(elements.begin() + static_cast<std::ptrdiff_t>(begin),
-                                                 elements.begin() + static_cast<std::ptrdiff_t>(end));
-        for (size_t i = begin; i < end; ++i) {
-            if (array.is_array_hole(i)) result.set_array_hole(i - begin);
-        }
-        return result;
+        return copy_places(source, begin, end, "slice");
     });
     auto splice_impl = []<typename Seq>(Seq& elements, Args args) {
         size_t start = relative_index(js_arg(args, 0), elements.size(), 0);
@@ -1070,26 +1129,28 @@ void install_array_builtins(JsIntrinsics& realm) {
         return JsValue::make_array(copy);
     });
     js_define_method(ap, "concat", 1, [](Args args) {
-        JsValue array = read_through(receiver("concat"));
-        std::vector<JsValue> values(elements_of(array).begin(), elements_of(array).end());
+        JsValue source = receiver("concat");
+        std::vector<JsValue> values;
         std::vector<bool> holes;
-        for (size_t i = 0; i < values.size(); ++i) holes.push_back(array.is_array_hole(i));
-        for (const auto& given : args) {
-            if (given.is_array()) {
-                const JsValue arg = read_through(given);
-                for (size_t i = 0; i < elements_of(arg).size(); ++i) {
-                    values.push_back(elements_of(arg)[i]);
-                    holes.push_back(arg.is_array_hole(i));
-                }
-            } else {
-                const JsValue& arg = given;
-                values.push_back(arg);
+        auto append_places = [&](const JsValue& from) {
+            const size_t length = array_like_length(from, "concat");
+            const IndexWalk walk = present_indices(from, length);
+            size_t next = 0;
+            for (size_t index : walk.indices) {
+                for (; next < index; ++next) { values.push_back(JsValue::make_undefined()); holes.push_back(true); }
+                values.push_back(get_index(from, index));
                 holes.push_back(false);
+                ++next;
             }
+        };
+        append_places(source);
+        for (const auto& given : args) {
+            if (given.is_array()) append_places(given);
+            else { values.push_back(given); holes.push_back(false); }
         }
-        JsValue result = JsValue::make_array(values);
-        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) result.set_array_hole(i);
-        return result;
+        JsValue joined = JsValue::make_array(values);
+        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) joined.set_array_hole(i);
+        return joined;
     });
     js_define_method(ap, "join", 1, [](Args args) {
         JsValue array = receiver("join");
@@ -1100,6 +1161,24 @@ void install_array_builtins(JsIntrinsics& realm) {
         JsValue me = self();
         if (!me.is_array()) return JsValue::make_string("[object Object]");
         return JsValue::make_string(join_array(me, ","));
+    });
+    // Array.prototype.toString is the standard's generic form: `join`, looked
+    // up **on this** by name, not this engine's join called directly. Without
+    // it an array fell through to Object.prototype.toString and
+    // `[1,2].toString()` was "[object Array]", which is why joining an array
+    // into itself was not the text the test262 cases expect.
+    js_define_method(ap, "toString", 0, [](Args) {
+        JsValue array = self();
+        if (array.is_nullish()) {
+            js_throw_type_error("Array.prototype.toString called on null or undefined");
+        }
+        JsValue join = array.get_property("join");
+        if (!join.is_function()) {
+            // Object.prototype.toString's answer for this receiver, which is
+            // what the standard's fallback produces.
+            return JsValue::make_string(array.is_array() ? "[object Array]" : "[object Object]");
+        }
+        return join.call_with_this(array, {});
     });
     js_define_method(ap, "toLocaleString", 0, [](Args) {
         return JsValue::make_string(join_array(receiver("toLocaleString"), ","));
@@ -1455,72 +1534,86 @@ void install_array_builtins(JsIntrinsics& realm) {
         return array;
     });
     js_define_method(ap, "flat", 0, [](Args args) {
-        JsValue array = read_through(receiver("flat"));
         double depth = js_arg(args, 0).is_undefined() ? 1 : js_to_integer(js_to_number(js_arg(args, 0)));
         std::vector<JsValue> result;
         std::vector<bool> holes;
-        flatten_into(result, holes, array, depth);
+        flatten_into(result, holes, receiver("flat"), depth);
         JsValue flat = JsValue::make_array(result);
         for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) flat.set_array_hole(i);
         return flat;
     });
     js_define_method(ap, "at", 1, [](Args args) {
         JsValue array = receiver("at");
-        const auto& elements = elements_of(array);
+        const size_t length = array_like_length(array, "at");
+        // One index, counted from either end: the length is all that is needed,
+        // so `{ length: 2**53 }` answers without a walk.
         double index = js_to_integer(js_to_number(js_arg(args, 0)));
-        if (index < 0) index += static_cast<double>(elements.size());
-        if (index < 0 || index >= static_cast<double>(elements.size())) return JsValue::make_undefined();
-        return js_array_get(array, static_cast<size_t>(index));
+        if (index < 0) index += static_cast<double>(length);
+        if (index < 0 || index >= static_cast<double>(length)) return JsValue::make_undefined();
+        return get_index(array, static_cast<size_t>(index));
     });
-
     // ---- Searching --------------------------------------------------------
     js_define_method(ap, "indexOf", 1, [](Args args) {
         JsValue array = receiver("indexOf");
-        const auto& elements = elements_of(array);
-        // The length is taken once: reading an index can call a getter now,
-        // and an element it adds is not one indexOf looks at.
-        const size_t length = elements.size();
-        for (size_t i = relative_index(js_arg(args, 1), length, 0); i < length; ++i) {
-            if (!has_index(array, i)) continue;            // indexOf asks HasProperty first
-            if (strict_equals(index_value(array, i), js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
-        }
-        return JsValue::make_number(-1);
+        const size_t length = array_like_length(array, "indexOf");
+        // indexOf asks HasProperty before it reads, so a hole is skipped. It
+        // starts from `fromIndex`, taken before the first question is asked.
+        const size_t start = relative_index(js_arg(args, 1), length, 0);
+        if (start >= length) return JsValue::make_number(-1);
+        size_t found = length;
+        walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
+            if (i < start) return true;
+            if (!strict_equals(get_index(array, i), js_arg(args, 0))) return true;
+            found = i;
+            return false;
+        });
+        return JsValue::make_number(found == length ? -1 : static_cast<double>(found));
     });
     js_define_method(ap, "lastIndexOf", 1, [](Args args) {
         JsValue array = receiver("lastIndexOf");
-        const auto& elements = elements_of(array);
-        if (elements.empty()) return JsValue::make_number(-1);
-        double from = args.size() > 1 ? js_to_integer(js_to_number(args[1])) : static_cast<double>(elements.size()) - 1;
-        if (from < 0) from += static_cast<double>(elements.size());
+        const size_t length = array_like_length(array, "lastIndexOf");
+        if (length == 0) return JsValue::make_number(-1);
+        const double len = static_cast<double>(length);
+        double from = args.size() > 1 ? js_to_integer(js_to_number(args[1])) : len - 1;
+        if (from < 0) from += len;
         if (from < 0) return JsValue::make_number(-1);
-        size_t start = static_cast<size_t>(std::min(from, static_cast<double>(elements.size()) - 1));
-        for (size_t i = start + 1; i-- > 0;) {
-            if (!has_index(array, i)) continue;
-            if (strict_equals(index_value(array, i), js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
+        const size_t start = static_cast<size_t>(std::min(from, len - 1));
+        // Backwards without counting backwards: the places that are there are
+        // a finite list, and the answer is its last member at or below `start`.
+        const IndexWalk walk = present_indices(array, length);
+        for (size_t k = walk.indices.size(); k-- > 0;) {
+            const size_t i = walk.indices[k];
+            if (i > start) continue;
+            if (!has_index_property(array, i)) continue;
+            if (strict_equals(get_index(array, i), js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
         }
         return JsValue::make_number(-1);
     });
     js_define_method(ap, "includes", 1, [](Args args) {
+        // Unlike indexOf, includes does not ask HasProperty: it reads the place
+        // as `a[i]` does, so a hole is `undefined` to it. A place that is not
+        // there and that nothing on the chain answers for is still `undefined`,
+        // which one comparison covers for the whole run.
         JsValue array = receiver("includes");
-        const auto& elements = elements_of(array);
-        // Unlike indexOf, includes does not ask for the property: it reads
-        // the place as `a[i]` does. A hole is `undefined` to it, unless the
-        // index has an accessor of its own or the prototype has the index,
-        // which is asked once: nothing in the loop runs a script if no hole
-        // can. It is asked after the index to start from, because turning
-        // that into a number can run one; the length is taken before it, as
-        // the standard takes it, and a place that is gone reads `undefined`.
-        const size_t length = elements.size();
+        const size_t length = array_like_length(array, "includes");
         const size_t start = relative_index(js_arg(args, 1), length, 0);
-        const bool plain = js_array_holes_read_undefined(array);
+        if (start >= length) return JsValue::make_boolean(false);
+        const bool chain = prototype_holds_an_index(array);
+        const IndexWalk walk = present_indices(array, length);
+        size_t next = 0;
         for (size_t i = start; i < length; ++i) {
-            if (js_same_value_zero(plain ? array.array_element(i) : js_array_get(array, i), js_arg(args, 0))) {
-                return JsValue::make_boolean(true);
+            while (next < walk.indices.size() && walk.indices[next] < i) ++next;
+            if (next < walk.indices.size() && walk.indices[next] == i && has_index_property(array, i)) {
+                if (js_same_value_zero(get_index(array, i), js_arg(args, 0))) return JsValue::make_boolean(true);
+                continue;
             }
+            // Not there. `a[i]` is `undefined` unless the chain answers.
+            JsValue absent = get_index(array, i);
+            if (js_same_value_zero(absent, js_arg(args, 0))) return JsValue::make_boolean(true);
+            if (!chain) break;   // every remaining place reads the same
         }
         return JsValue::make_boolean(false);
     });
-
     // ---- Iteration with a callback ----------------------------------------
     //
     // The element vector can be replaced by the callback, so every step
@@ -1529,26 +1622,40 @@ void install_array_builtins(JsIntrinsics& realm) {
     auto make_find = [](const char* name, bool from_end, Find what) {
         return [name, from_end, what](Args args) {
             JsValue array = receiver(name);
+            const size_t length = array_like_length(array, name);
             JsValue callback = require_callback(js_arg(args, 0), name);
             const JsValue this_arg = js_arg(args, 1);
-            size_t length = elements_of(array).size();
-            for (size_t step = 0; step < length; ++step) {
-                size_t i = from_end ? length - 1 - step : step;
-                if (i >= elements_of(array).size()) continue;
-                // `find` and its relatives are the one family that does *not*
-                // skip a hole: the standard reads `kValue = O[k]` for every
-                // index and calls the predicate with it, so a hole is an index
-                // the callback sees, holding `undefined` (or whatever the
-                // prototype has, once the read reaches it).
-                JsValue item = array.get_property(std::to_string(i));
-                if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
-                    return what == Find::Value ? item : JsValue::make_number(static_cast<double>(i));
+            auto test = [&](size_t i, JsValue& found) {
+                JsValue item = get_index(array, i);
+                if (!callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) return false;
+                found = what == Find::Value ? item : JsValue::make_number(static_cast<double>(i));
+                return true;
+            };
+            JsValue found;
+            // `find` and its relatives are the one family that does not skip a
+            // hole: the standard reads `kValue = O[k]` for every index and
+            // calls the predicate with it. A length past the bound is hours of
+            // callbacks with the same `undefined`, so the places that are there
+            // are visited in the standard's order and the run of missing places
+            // past them is not walked. That is a deviation, stated where it is
+            // made, and it changes only an answer that could not be produced.
+            if (length <= kMaxWalkedIndices) {
+                for (size_t step = 0; step < length; ++step) {
+                    const size_t i = from_end ? length - 1 - step : step;
+                    if (test(i, found)) return found;
                 }
+                return what == Find::Value ? JsValue::make_undefined() : JsValue::make_number(-1);
+            }
+            const IndexWalk walk = present_indices(array, length);
+            if (from_end) {
+                for (size_t k = walk.indices.size(); k-- > 0;) if (test(walk.indices[k], found)) return found;
+            } else {
+                for (size_t i : walk.indices) if (test(i, found)) return found;
             }
             return what == Find::Value ? JsValue::make_undefined() : JsValue::make_number(-1);
         };
     };
-    js_define_method(ap, "find", 1, make_find("find", false, Find::Value));
+    js_define_method(ap, "find", 1, make_find("find", false, Find::Value));    js_define_method(ap, "find", 1, make_find("find", false, Find::Value));
     js_define_method(ap, "findIndex", 1, make_find("findIndex", false, Find::Index));
     js_define_method(ap, "findLast", 1, make_find("findLast", true, Find::Value));
     js_define_method(ap, "findLastIndex", 1, make_find("findLastIndex", true, Find::Index));
@@ -1559,66 +1666,59 @@ void install_array_builtins(JsIntrinsics& realm) {
     // arguments) and reports the receiver rather than a snapshot.
     js_define_method(ap, "forEach", 1, [](Args args) {
         JsValue me = self();
-        if (me.is_nullish()) {
-            js_throw_type_error("Array.prototype.forEach called on null or undefined");
-        }
-        const size_t length = iteration_length(me); // LengthOfArrayLike precedes IsCallable.
+        const size_t length = array_like_length(me, "forEach");  // LengthOfArrayLike precedes IsCallable.
         JsValue callback = require_callback(js_arg(args, 0), "forEach");
         const JsValue this_arg = js_arg(args, 1);
-        for (size_t i = 0; i < length; ++i) {
-            const std::string key = js_number_to_string(static_cast<double>(i));
-            if (!me.has_property(key)) continue;
-            callback.call_with_this(this_arg, {me.get_property(key), JsValue::make_number(static_cast<double>(i)), me});
-        }
+        walk_present_indices(me, length, prototype_holds_an_index(me), [&](size_t i) {
+            callback.call_with_this(this_arg, {get_index(me, i), JsValue::make_number(static_cast<double>(i)), me});
+            return true;
+        });
         return JsValue::make_undefined();
     });
     js_define_method(ap, "map", 1, [](Args args) {
         JsValue array = receiver("map");
+        const size_t length = array_like_length(array, "map");
         JsValue callback = require_callback(js_arg(args, 0), "map");
         const JsValue this_arg = js_arg(args, 1);
-        std::vector<JsValue> result;
-        std::vector<bool> holes;
-        size_t length = elements_of(array).size();
-        result.reserve(length);
-        for (size_t i = 0; i < length; ++i) {
-            if (!has_index(array, i)) {
-                // map keeps the hole; the callback is never called for it.
-                result.push_back(JsValue::make_undefined());
-                holes.push_back(true);
-                continue;
-            }
-            JsValue item = index_value(array, i);
-            result.push_back(callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}));
-            holes.push_back(false);
-        }
+        // The result is a real array, so it is at most 2^32-1 long: a longer
+        // source is the RangeError of ArrayCreate, thrown before the first
+        // callback rather than after four billion of them.
+        array_result_length(length, "map");
+        std::vector<JsValue> result(length, JsValue::make_undefined());
+        std::vector<bool> holes(length, true);
+        walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
+            result[i] = callback.call_with_this(this_arg, {get_index(array, i), JsValue::make_number(static_cast<double>(i)), array});
+            holes[i] = false;
+            return true;
+        });
         JsValue mapped = JsValue::make_array(result);
         for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) mapped.set_array_hole(i);
         return mapped;
     });
     js_define_method(ap, "filter", 1, [](Args args) {
         JsValue array = receiver("filter");
+        const size_t length = array_like_length(array, "filter");
         JsValue callback = require_callback(js_arg(args, 0), "filter");
         const JsValue this_arg = js_arg(args, 1);
         std::vector<JsValue> result;
-        for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (!has_index(array, i)) continue;             // filter asks HasProperty first
-            JsValue item = index_value(array, i);
+        walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
+            JsValue item = get_index(array, i);
             if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
-                result.push_back(std::move(item));
+                result.push_back(item);
             }
-        }
+            return true;
+        });
         return JsValue::make_array(result);
     });
     js_define_method(ap, "flatMap", 1, [](Args args) {
         JsValue array = receiver("flatMap");
+        const size_t length = array_like_length(array, "flatMap");
         JsValue callback = require_callback(js_arg(args, 0), "flatMap");
         const JsValue this_arg = js_arg(args, 1);
         std::vector<JsValue> result;
         std::vector<bool> holes;
-        for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (!has_index(array, i)) continue;
-            JsValue item = index_value(array, i);
-            JsValue mapped = callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array});
+        walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
+            JsValue mapped = callback.call_with_this(this_arg, {get_index(array, i), JsValue::make_number(static_cast<double>(i)), array});
             if (mapped.is_array()) {
                 const auto& inner = elements_of(mapped);
                 result.insert(result.end(), inner.begin(), inner.end());
@@ -1627,64 +1727,66 @@ void install_array_builtins(JsIntrinsics& realm) {
                 result.push_back(std::move(mapped));
                 holes.push_back(false);
             }
-        }
+            return true;
+        });
         JsValue flattened = JsValue::make_array(result);
         for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) flattened.set_array_hole(i);
         return flattened;
     });
     js_define_method(ap, "some", 1, [](Args args) {
         JsValue array = receiver("some");
+        const size_t length = array_like_length(array, "some");  // LengthOfArrayLike precedes IsCallable.
         JsValue callback = require_callback(js_arg(args, 0), "some");
         const JsValue this_arg = js_arg(args, 1);
-        for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (!has_index(array, i)) continue;
-            JsValue item = index_value(array, i);
-            if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
-                return JsValue::make_boolean(true);
+        bool answered = false;
+        walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
+            if (callback.call_with_this(this_arg, {get_index(array, i), JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
+                answered = true;
+                return false;
             }
-        }
-        return JsValue::make_boolean(false);
+            return true;
+        });
+        return JsValue::make_boolean(answered);
     });
     js_define_method(ap, "every", 1, [](Args args) {
         JsValue array = receiver("every");
+        const size_t length = array_like_length(array, "every");
         JsValue callback = require_callback(js_arg(args, 0), "every");
         const JsValue this_arg = js_arg(args, 1);
-        for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (!has_index(array, i)) continue;             // every skips ones that are nowhere
-            JsValue item = index_value(array, i);
-            if (!callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
-                return JsValue::make_boolean(false);
+        bool answered = false;
+        walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
+            if (!callback.call_with_this(this_arg, {get_index(array, i), JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
+                answered = true;
+                return false;
             }
-        }
-        return JsValue::make_boolean(true);
+            return true;
+        });
+        return JsValue::make_boolean(!answered);
     });
     auto make_reduce = [](const char* name, bool from_end) {
         return [name, from_end](Args args) {
             JsValue array = receiver(name);
+            const size_t length = array_like_length(array, name);
             JsValue callback = require_callback(js_arg(args, 0), name);
-            size_t length = elements_of(array).size();
+            // reduce visits the places that are there, in order (or in reverse
+            // for reduceRight), and never asks about one that is not: a
+            // receiver with a huge `length` and one place reduces in one step.
+            const IndexWalk walk = present_indices(array, length);
+            const size_t count = walk.indices.size();
             size_t step = 0;
             JsValue accumulator;
+            auto place = [&](size_t k) { return walk.indices[from_end ? count - 1 - k : k]; };
             if (args.size() >= 2) {
                 accumulator = args[1];
             } else {
-                // The seed is the first element there is, which a hole is not.
-                bool seeded = false;
-                for (; step < length; ++step) {
-                    size_t i = from_end ? length - 1 - step : step;
-                    if (i >= elements_of(array).size() || !has_index(array, i)) continue;
-                    accumulator = index_value(array, i);
-                    seeded = true;
-                    ++step;
-                    break;
-                }
-                if (!seeded) js_throw_type_error("Reduce of empty array with no initial value");
+                if (count == 0) js_throw_type_error("Reduce of empty array with no initial value");
+                accumulator = get_index(array, place(0));
+                ++step;
             }
-            for (; step < length; ++step) {
-                size_t i = from_end ? length - 1 - step : step;
-                if (i >= elements_of(array).size()) continue;
-                if (!has_index(array, i)) continue;
-                JsValue item = index_value(array, i);
+            for (; step < count; ++step) {
+                const size_t i = place(step);
+                if (!has_index_property(array, i)) continue;   // a callback can delete it first
+                JsValue item = get_index(array, i);
                 accumulator = callback.call({accumulator, item, JsValue::make_number(static_cast<double>(i)), array});
             }
             return accumulator;

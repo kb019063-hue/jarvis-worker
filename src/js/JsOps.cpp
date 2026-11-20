@@ -1153,9 +1153,11 @@ const std::string& iterator_name() {
 /// iterator reads it the same way.
 void visit_elements(const JsValue& array, const std::function<bool(const JsValue&)>& visit) {
     for (size_t i = 0; i < array.object_val->array_elements.size(); ++i) {
-        // The array iterator reads every place, so a hole is yielded as
-        // `undefined`: `[...a]` and `for (x of a)` see an element there.
-        JsValue item = array.array_element(i);
+        // The array iterator reads every place, so a hole is yielded too:
+        // `[...a]` and `for (x of a)` see a value there. It is what `a[i]`
+        // reads, which is `undefined` unless the index has an accessor of
+        // its own or the prototype has the index.
+        JsValue item = js_array_get(array, i);
         if (!visit(item)) return;
     }
 }

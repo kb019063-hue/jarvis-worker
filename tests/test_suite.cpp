@@ -24581,7 +24581,7 @@ TEST(bidi_reorders_hebrew_and_arabic_runs) {
 
 TEST(array_methods_that_move_places_ask_the_index) {
     using namespace litebird;
-    // Phase 116, finding 121. The seven methods that move elements inside an
+    // Phase 116, finding 125. The seven methods that move elements inside an
     // array -- `reverse`, `sort`, `splice`, `copyWithin`, `fill`, `shift`,
     // `unshift` -- used to read and write `array_elements` directly, which is
     // this engine's dense vector for a plain array. That vector is not the

@@ -1,4 +1,4 @@
-# Finding 121 — `reverse` ran over the accessor
+# Finding 125 — `reverse` ran over the accessor
 
 Phase 116. The architecture and the measurements are in
 [`docs/phases/116-the-methods-that-move-places.md`](../phases/116-the-methods-that-move-places.md).

@@ -1,6 +1,6 @@
 # Phase 116 — the methods that move places go through the accessor
 
-Finding: [`docs/findings/121-reverse-ran-over-the-accessor.md`](../findings/121-reverse-ran-over-the-accessor.md).
+Finding: [`docs/findings/125-reverse-ran-over-the-accessor.md`](../findings/125-reverse-ran-over-the-accessor.md).
 Everything here is in `src/js/BuiltinsArray.cpp`.
 
 ## 1. What was wrong

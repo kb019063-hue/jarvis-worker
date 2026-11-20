@@ -25939,6 +25939,123 @@ TEST(instanceof_asks_symbol_has_instance) {
     assert(none_failed());
 }
 
+// ---------------------------------------------------------------------------
+// Phase 123: a strict `delete` refuses what it cannot remove.
+// ---------------------------------------------------------------------------
+TEST(a_strict_delete_refuses_what_it_cannot_remove) {
+    using namespace litebird;
+    // Phase 123, finding 128. `delete` was one line of the evaluator: it asked
+    // the object and returned what it was told. Three things were missing.
+    //
+    //   * `[[Delete]]` answered true for an array's `length`, which is
+    //     computed and not configurable: `delete a.length` was a "yes" and the
+    //     array kept its length, so no code could tell the two apart.
+    //   * nothing turned a refused delete into a TypeError in strict code,
+    //     where `DeletePropertyOrThrow` requires one. Sloppy code reads the
+    //     same refusal as the answer `false`, which is why the two modes had
+    //     to be told apart at the operator and not in `[[Delete]]`.
+    //   * `delete name` was never an early error, and answered `false` for
+    //     every name: for one that resolves to nothing (`delete notDeclared`)
+    //     and for a property of the global object (`globalThis.x = 1; delete
+    //     x`) the language answers `true` and removes the property.
+    //
+    // The messages are V8's — `Cannot delete property 'x' of #<Object>` — and
+    // every expected string below is what Node.js printed for the same script.
+    // What is not here because it is not so yet: an index of an array defined
+    // with a descriptor keeps no attributes of its own (its own row), so
+    // `Object.defineProperty(a, '0', { value: 1 })` makes an element that can
+    // still be deleted; and `arguments` prints as `#<Array>` in the message
+    // because its prototype is `Array.prototype` here, which is its own
+    // divergence.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    auto none_failed = [&]() {
+        const std::string failed = js.eval("failures.join('\\n')").to_string();
+        if (!failed.empty()) std::cerr << failed << "\n";
+        return failed.empty();
+    };
+    js.eval(R"JS(
+var failures = [];
+function check(what, f, want) {
+  var got;
+  try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+  if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+}
+function refused(o, k) { Object.defineProperty(o, k, { value: 1 }); return o; }
+check('sloppy code reads the refusal as false', function () {
+  var o = refused({}, 'x');
+  return [delete o.x, o.x, 'x' in o];
+}, '[false,1,true]');
+check('strict code makes it a TypeError', function () {
+  var caught = [];
+  (function () { 'use strict'; var o = refused({}, 'x'); try { delete o.x; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var o = Object.freeze({ y: 2 }); try { delete o.y; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var s = new String('ab'); try { delete s.length; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var d = refused(new Date(0), 'q'); try { delete d.q; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var m = refused(new Map(), 'q'); try { delete m.q; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; class C {} var c = refused(new C(), 'q'); try { delete c.q; } catch (e) { caught.push(e.name); } })();
+  return caught;
+}, '["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]');
+check('an array length cannot be deleted', function () {
+  var a = [1, 2, 3];
+  var sloppy = delete a.length;
+  var caught = 'none';
+  (function () { 'use strict'; try { delete a.length; } catch (e) { caught = e.name; } })();
+  return [sloppy, caught, a.length, a.join()];
+}, '[false,"TypeError",3,"1,2,3"]');
+check('what the message names', function () {
+  var said = [];
+  function refusal(o, k) {
+    var caught = '';
+    (function () { 'use strict'; try { delete o[k]; } catch (e) { caught = e.message; } })();
+    return caught;
+  }
+  function f() {}
+  said.push(refusal(refused({}, 'x'), 'x'));
+  said.push(refusal([1], 'length'));
+  said.push(refusal(refused(new Date(0), 'd'), 'd'));
+  said.push(refusal(refused(new Map(), 'm'), 'm'));
+  said.push(refusal(refused(Object.create(null), 'n'), 'n'));
+  said.push(refusal(refused(f, 'q'), 'q'));
+  said.push(refusal(refused(new String('ab'), 's'), 's'));
+  return said.join(' || ');
+}, "\"Cannot delete property 'x' of #<Object> || Cannot delete property 'length' of [object Array] || Cannot delete property 'd' of [object Date] || Cannot delete property 'm' of #<Map> || Cannot delete property 'n' of [object Object] || Cannot delete property 'q' of function f() {} || Cannot delete property 's' of [object String]\"");
+check('strictness belongs to the code that deletes', function () {
+  var o = refused({}, 'x');
+  var strict_inner = function () { 'use strict'; try { return delete o.x; } catch (e) { return e.name; } };
+  class Holder { static run() { try { return delete o.x; } catch (e) { return e.name; } } }
+  return [strict_inner(), Holder.run(), (function () { return delete o.x; })()];
+}, '["TypeError","TypeError",false]');
+check('what may be deleted is still deleted', function () {
+  var o = { x: 1 };
+  var a = [1, 2, 3];
+  var gone = delete a[1];
+  return [delete o.x, 'x' in o, gone, a.length, 1 in a, a.join(), delete o.nothere, delete this, delete (function () { return 1; })(), delete 1];
+}, '[true,false,true,3,false,"1,,3",true,true,true,true]');
+check('an identifier', function () {
+  var declared = 1;
+  var said = 'none';
+  try { eval("'use strict'; var x = 1; delete x;"); } catch (e) { said = e.name; }
+  return [delete declared, delete neverDeclaredAnywhere, said];
+}, '[false,true,"SyntaxError"]');
+check('a global property', function () {
+  globalThis.temp = 1;
+  var gone = delete temp;
+  var stays = 'temp' in globalThis;
+  var v = 1;
+  return [gone, stays, delete v];
+}, '[true,false,false]');
+check('Reflect answers false rather than throwing', function () {
+  var o = refused({}, 'x');
+  return [Reflect.deleteProperty(o, 'x'), o.x];
+}, '[false,1]');
+    )JS");
+    assert(none_failed());
+}
+
 // Phase 106: ArrayBuffer and the typed arrays.
 //
 // The oracle is the standard's conversions, not an implementation: an element
@@ -25950,11 +26067,9 @@ TEST(instanceof_asks_symbol_has_instance) {
 // object, a subarray shares its bytes and a slice does not).
 TEST(arraybuffer_and_typed_arrays) {
     using namespace litebird;
-
     JsInterpreter js(nullptr);
     auto text = [&](const char* source) { return js.eval(source).to_string(); };
     text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
-
     // ---- the eleven element types, each storing its own conversion --------
     assert(text("new Uint8Array([1, 2, 300]).join()") == "1,2,44");
     assert(text("var a = new Uint8Array(1); a[0] = 258; a[0]") == "2");
@@ -25971,11 +26086,9 @@ TEST(arraybuffer_and_typed_arrays) {
            "255,0,2,4");
     // A float that is not finite survives Float64Array and is widened by it.
     assert(text("var a = new Float64Array([1, 2, 3]); a.length + '|' + a[1] + '|' + a.join('-')") == "3|2|1-2-3");
-
     // ---- length, byteLength, byteOffset, BYTES_PER_ELEMENT ---------------
     assert(text("var u = new Uint16Array(3); u.length + '|' + u.byteLength + '|' + u.byteOffset") == "3|6|0");
     assert(text("Uint32Array.BYTES_PER_ELEMENT + '|' + Uint8Array.prototype.BYTES_PER_ELEMENT") == "4|1");
-
     // ---- indexing: in range, past the end, and not an index at all -------
     assert(text("var a = new Uint8Array(2); a[5] = 9; String(a[5])") == "undefined");
     assert(text("var a = new Uint8Array(2); a[5] = 9; a.length") == "2");
@@ -25987,7 +26100,6 @@ TEST(arraybuffer_and_typed_arrays) {
     // `-1` is not a canonical index, so it is an ordinary property.
     assert(text("var a = new Uint8Array(2); a[-1] = 9; a[-1]") == "9");
     assert(text("var a = new Uint8Array(2); a['x'] = 5; a.x") == "5");
-
     // ---- windows: one buffer, one object, shared bytes -------------------
     assert(text("var b = new ArrayBuffer(8); new Uint8Array(b).buffer === new Uint16Array(b).buffer") == "true");
     assert(text("var b = new ArrayBuffer(8); b.byteLength") == "8");
@@ -25998,7 +26110,6 @@ TEST(arraybuffer_and_typed_arrays) {
     // subarray shares the bytes; slice copies them.
     assert(text("var t = new Uint8Array([1,2,3]); var w = t.subarray(1); w[0] = 9; t[1]") == "9");
     assert(text("var t = new Uint8Array([1,2,3]); var w = t.slice(1); w[0] = 9; t[1]") == "2");
-
     // ---- methods ---------------------------------------------------------
     assert(text("new Uint8Array([3,1,2]).slice(1).join()") == "1,2");
     // A negative index counts from the end.
@@ -26024,12 +26135,10 @@ TEST(arraybuffer_and_typed_arrays) {
     assert(text("Uint8Array.from([1,2], function (x) { return x * 2; }).join()") == "2,4");
     assert(text("Uint16Array.of(1,2).join()") == "1,2");
     assert(text("ArrayBuffer.isView(new Uint8Array(1)) + '|' + ArrayBuffer.isView({})") == "true|false");
-
     // ---- iterators and Array.from ---------------------------------------
     assert(text("var o = []; for (var v of new Uint8Array([4,5])) o.push(v); o.join()") == "4,5");
     assert(text("var o = []; for (var k of new Uint8Array(2).keys()) o.push(k); o.join()") == "0,1");
     assert(text("Array.from(new Uint8Array([1,2])).join()") == "1,2");
-
     // ---- the chain the standard has -------------------------------------
     assert(text("new Uint8Array(1) instanceof Uint8Array") == "true");
     assert(text("new Uint8Array(1) instanceof Int8Array") == "false");
@@ -26039,7 +26148,6 @@ TEST(arraybuffer_and_typed_arrays) {
     // A subclass of a typed array is one: the element type follows new.target.
     assert(text("class L extends Uint8Array {} var l = new L(2); "
                 "(l instanceof L) + '|' + (l instanceof Uint8Array) + '|' + l.length") == "true|true|2");
-
     // ---- the errors a browser throws ------------------------------------
     assert(text("errName(function () { new Uint8Array(-1); })") == "TypeError");
     assert(text("errName(function () { new Uint16Array(new ArrayBuffer(8), 1); })") == "TypeError");
@@ -26718,6 +26826,9 @@ int main() {
     RUN_TEST(array_methods_that_move_places_ask_the_index);
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
+
+    // Phase 123: a strict `delete` refuses what it cannot remove.
+    RUN_TEST(a_strict_delete_refuses_what_it_cannot_remove);
 
     // Phase 106: ArrayBuffer and the typed arrays.
     RUN_TEST(arraybuffer_and_typed_arrays);

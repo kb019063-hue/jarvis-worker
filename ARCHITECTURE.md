@@ -487,8 +487,10 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    `MessageChannel`, XPath, Web Animations, `ElementInternals`, and what needs
    typed arrays (`ArrayBuffer`). The full lists are in Phase 27, section 12,
    Phase 28, section 10, Phase 36, section 9, and Phase 42.
-10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
-   modules, `with`, `Intl`. Holes in arrays arrived in Phase 81 (finding 87): an
+10. **JavaScript features that do not exist:** BigInt, `Proxy`, modules, `with`,
+   `Intl`. (Typed arrays and `ArrayBuffer` left this list in Phase 106, and
+   `DataView` and the iterating half of `%TypedArray%.prototype` in Phase 126 —
+   `src/js/TypedArray.cpp`, finding 131.) Holes in arrays arrived in Phase 81 (finding 87): an
    index is an own property or a hole, and every built-in agrees — `delete`,
    `new Array(n)`, a grown `length` and an elision in a literal all make holes.
    Details and the approximate

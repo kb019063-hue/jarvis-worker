@@ -4686,10 +4686,19 @@ JsValue make_rule(Realm& realm, std::shared_ptr<ParsedSheet> sheet, SheetRulePtr
     state.sheet = sheet;
     state.rule = rule;
     state.parent = std::move(parent);
-    // One object per rule: `cssRules[0] === cssRules.item(0)`.
+    // One object per rule: `cssRules[0] === cssRules.item(0)`. The entry is
+    // keyed by the rule's id, and a `replaceSync` numbers the new rules from
+    // the same start, so the id alone does not say the object is this rule:
+    // it is only this rule's when the object it was made for still wraps the
+    // same rule. (A sheet's own object check has the same shape, and there the
+    // sheet cannot be replaced under it.)
     auto& objects = realm.part<RuleObjectsPart>().objects;
     auto found = objects.find(rule->id);
-    if (found != objects.end() && found->second.sheet.lock() == sheet) return found->second.object;
+    if (found != objects.end() && found->second.sheet.lock() == sheet) {
+        const JsValue& cached = found->second.object;
+        RuleState* cached_state = state_of<RuleState>(cached);
+        if (cached_state && cached_state->rule == rule) return cached;
+    }
     auto shared_state = std::make_shared<RuleState>(state);
     const char* interface_name = rule->is_media()            ? "CSSMediaRule"
                                  : rule->is_keyframes()      ? "CSSKeyframesRule"
@@ -5171,6 +5180,21 @@ void setup_style_sheet(Iface& I) {
         touch_sheet(state.sheet);
         return num(static_cast<double>(index));
     });
+    // `replace`/`replaceSync`: the sheet's text becomes exactly this. CSSOM
+    // has `replace` wait for any `@import` in it; nothing here loads a
+    // stylesheet, so the promise is already settled when it is made.
+    I.method("replaceSync", 1, [](Realm& realm, Args args) {
+        require_args(args, 1, "CSSStyleSheet.replaceSync");
+        SheetState& state = this_state<SheetState>("CSSStyleSheet");
+        auto parsed = std::make_shared<ParsedSheet>();
+        std::size_t at = 0;
+        parse_rules(to_str(args[0]), at, parsed->rules, false);
+        parsed->number_rules();
+        state.sheet->rules = std::move(parsed->rules);
+        state.sheet->next_rule_id = parsed->next_rule_id;
+        touch_sheet(state.sheet);
+        return JsValue::make_undefined();
+    });
     I.method("deleteRule", 1, [](Realm& realm, Args args) {
         require_args(args, 1, "CSSStyleSheet.deleteRule");
         SheetState& state = this_state<SheetState>("CSSStyleSheet");
@@ -5237,6 +5261,25 @@ void set_inline_css_text(Realm& realm, Element& element, const std::string& text
     state.store();
 }
 
+/// `new CSSStyleSheet()`: a sheet no element owns, which a script builds up
+/// with `insertRule`. The cascade does not read it (there is no element to read
+/// it from), and `replace`/`replaceSync` give it text.
+JsValue construct_style_sheet(Realm& realm, const InterfaceDef&, Args args, const JsValue* derived) {
+    auto state = std::make_shared<SheetState>();
+    state->realm = &realm;
+    state->sheet = std::make_shared<ParsedSheet>();
+    state->own_sheet = true;
+    state->applied = false;
+    // The argument is CSSOM's `options` dictionary (`baseURL`, and in newer
+    // drafts `media`/`disabled`), and an object is the only thing accepted.
+    if (!args.empty() && !args[0].is_undefined() && !args[0].is_object_like()) {
+        js_throw_type_error("Failed to construct 'CSSStyleSheet': The provided value is not of type 'CSSStyleSheetInit'.");
+    }
+    JsValue object = realm.make("CSSStyleSheet", state, derived);
+    realm.part<RuleObjectsPart>().sheets[state->sheet.get()] = RuleObjectEntry{state->sheet, object};
+    return object;
+}
+
 void register_style_interfaces() {
     register_interface({"CSSStyleDeclaration", nullptr, setup_style_declaration, nullptr, 0, nullptr});
     register_interface({"CSSRule", nullptr, setup_rule, nullptr, 0, nullptr});
@@ -5246,7 +5289,7 @@ void register_style_interfaces() {
     register_interface({"CSSKeyframeRule", "CSSRule", setup_keyframe_rule, nullptr, 0, nullptr});
     register_interface({"CSSRuleList", nullptr, setup_rule_list, nullptr, 0, nullptr});
     register_interface({"MediaList", nullptr, setup_media_list, nullptr, 0, nullptr});
-    register_interface({"CSSStyleSheet", nullptr, setup_style_sheet, nullptr, 0, nullptr});
+    register_interface({"CSSStyleSheet", nullptr, setup_style_sheet, construct_style_sheet, 0, nullptr});
     register_interface({"FontFaceSet", nullptr, setup_font_face_set, nullptr, 0, nullptr});
 }
 

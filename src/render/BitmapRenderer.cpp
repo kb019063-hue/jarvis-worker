@@ -295,7 +295,9 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
                 },
                 arg.font_family,
                 arg.font_italic,
-                arg.font_kerning
+                arg.font_kerning,
+                /*visual_rtl=*/true,
+                /*pre_reversed=*/arg.is_rtl_visual
             );
         } else if constexpr (std::is_same_v<T, DrawImageCommand>) {
             if (arg.image && arg.image->is_valid()) {

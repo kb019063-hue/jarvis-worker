@@ -44,9 +44,9 @@ at one that is not configurable. The phase write-up has the files.
 - The 25 tests pass, each run alone.
 - The whole of test262 with a build of `main` and a build of this change, the
   same tree otherwise: @T262_LINE@
-- `make test` 267 / 267, `make js-conformance` 1137 / 1156,
-  `make dom-conformance` 678 / 678.
-- The new suite's 58 cases have the answers Node.js 22 printed; 44 of them
+- `make test` 268 / 268, `make js-conformance` @JS_CONF@,
+  `make dom-conformance` @DOM_CONF@.
+- The new suite's 58 cases have the answers Node.js 22 printed; 48 of them
   fail on a build of `main`.
 
 ## 4. Three things the first form of the change got wrong
@@ -73,8 +73,13 @@ places, 99% of them holes, `for…of` went from 17 ms to 40, spread from 23 to
 `js_array_holes_read_undefined` remembers the chain whose names it last found
 clean, and a count that goes up whenever a name beginning with a digit enters
 any property map; the same chain at the same count has the same answer. The
-three are back at 18, 22 and 7 ms (the 7 is each hole going to the replacer
-path, which is what the standard does with it).
+three are back within what two runs of one build differ by, except
+`JSON.stringify`, which takes each hole the way it takes an element now, so
+that a replacer function is asked about it (the table is in the phase
+write-up). The same timing, repeated on the merged tree, found one more of
+the kind: `join` of an array of holes took 37 ms against `main`'s 27, because
+`join_array` made an empty value for every place before it asked whether the
+place was a hole. It asks first now.
 
 **`toSpliced` read the places it drops.** With a getter on a dropped index,
 Node.js does not call it; `main` did not either, because it called no getter
@@ -88,6 +93,6 @@ Node.js line by line.
   keeping holes, and array destructuring: the phase write-up, section 4, and
   the rows of `AGENTS.md`.
 - `test262_whole_suite` in `docs/metrics.json` is not changed by this pull
-  request, because two open pull requests (#128 and #132) had the file first.
-  The figure there is `main`'s before this change; whichever of them merges
-  after it measures again.
+  request: an open pull request (#132) named the file first. The figure
+  there, 31,220, is Phase 98's. The tree this was merged as passes
+  @T262_FIX_PLAIN@; the next change to the ledger starts from that.

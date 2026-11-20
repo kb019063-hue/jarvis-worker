@@ -117,57 +117,83 @@ and the places in between are holes.
 
 ## 3. How it is verified
 
+Everything here was measured on the tree that was merged: `main` at
+`@MAIN_SHA@` with this change, against a build of `main` at that commit.
+
 - **The 25 tests Phase 81 lost pass**, each run alone with the harness
   (`assert.js`, `sta.js`, `propertyHelper.js`, `compareArray.js`). 21 passed
   since Phase 98; the four above failed before this change and pass now.
-- **The whole of test262, two builds of the same tree**
+- **The whole of test262, two builds**
   (`python3 tools/conformance/run_test262.py --binary main=… --binary fix=… built-ins language annexB`,
-  47,967 tests): `main` @T262_MAIN@, this change @T262_FIX@. @T262_GAINED@
+  @T262_TOTAL@ tests): `main` @T262_MAIN@, this change @T262_FIX@. @T262_GAINED@
   pass that did not, and none that passed fails. @T262_WHERE@
-- **`make test`** → **267 / 267** suites and 114 cross-origin checks.
-- **`make js-conformance`** 1137 / 1156 and 90 / 90 everyday,
-  **`make dom-conformance`** 678 / 678: none moved.
-- **The new suite fails without the change**: its 58 cases run through a
-  build of `main` fail in 44.
-- **Time** (`make bench` is strings; this is 24 loops over an array of 200,000
-  places, best of five runs, each build run twice, in milliseconds):
+- **`make test`** → **268 / 268** suites and 114 cross-origin checks.
+- **`make js-conformance`** @JS_CONF@,
+  **`make dom-conformance`** @DOM_CONF@: neither moved.
+- **The new suite fails without the change**: 48 of its 58 cases fail when
+  they are run through a build of `main`.
+- **Time.** `make bench` passes; it times strings. For arrays, 24 loops over
+  an array of 200,000 places, the best of five runs of each loop, each build
+  run twice, in milliseconds:
 
   | loop | `main` | this change |
   | :--- | :--- | :--- |
 @BENCH_ROWS@
 
-  Nothing moved but `JSON.stringify` of an array that is 99% holes, which now
-  asks the replacer path about each hole: 25 ns a hole. Before the chain was
-  remembered, `for…of`, spread and `JSON.stringify` over that array took 40,
-  41 and 25 ms, because each hole was looked up by name in `Array.prototype`
-  and `Object.prototype`.
-- **Under the sanitizers** (`make asan-build`, then the suite's cases, the
-  probes and `make asan-js`): @ASAN@
+  "Sparse" is one element in a hundred, the rest holes. One loop moved:
+  `JSON.stringify` of the sparse array takes each hole the way it takes an
+  element now, so that a replacer function is asked about it, which is 20 to
+  25 ns a hole. The rest differ by no more than two runs of one build do.
+  Two of them did differ before they were looked at. `for…of`, spread and
+  `JSON.stringify` over the sparse array took 40, 41 and 25 ms while each
+  hole was looked up by name in `Array.prototype` and `Object.prototype`,
+  which is why the chain is remembered. And `join` of the holes took 37 ms
+  while `join_array` made an empty value for every place before it asked
+  whether the place was a hole.
+- **Under the sanitizers** (`make asan-build`, then `build-asan/litebird`),
+  on the head of #134, which is this change before `main` moved under it by
+  four merges that touch none of its files, and before `join` was reordered:
+  the suite's 58 cases, the nine scripts this was compared with Node.js by,
+  and 1,231 test262 tests, each run alone, of the sixteen methods of
+  `Array.prototype` this touches (the tests that give a method an object
+  with a `length` near 2^32 or 2^53 left out). No report from either
+  sanitizer. CI's four sanitizer jobs run the unit suites and the corpora on
+  the merged tree.
 
 ## 4. What is still open
 
-Each of these is a row of `AGENTS.md`, and none is new with this change except
-where it says so.
+Each of these is a row of `AGENTS.md`. None is new with this change, except
+that two of them answer differently than they did, as said below.
 
 - **The methods that move elements in place** (`reverse`, `sort`, `shift`,
   `unshift`, `splice`, `fill`, `copyWithin`) move and write the places, and
   not what an accessor makes of them. `[1, 2, 3]` with an accessor on index 0
-  that returns `"g"`: after `reverse()`, Node.js has `a[0]` and `a[2]` both
-  `"g"`; this engine has `3` and `undefined`. Before this change the accessor
-  was ignored and the answer was `3` and `1`, so the answer is wrong in a
-  different way than it was.
+  whose getter returns `"g"` and whose setter does nothing: after `reverse()`,
+  Node.js has `a[0]` and `a[2]` both `"g"`; this engine has `3` and
+  `undefined`. Before this change the accessor was ignored and the answer was
+  `3` and `1`, so the answer is wrong in a different way than it was.
 - **`toReversed` and `toSorted` keep a hole a hole**, where the standard
   writes `undefined` to every place (`1 in [1, , 3].toReversed()` is `true`).
   `toReversed` reads from the first place up, where the standard reads from
   the last down, which a getter can tell.
-- **Array destructuring reads the elements** (`IterationCursor` in
-  `JsEval.cpp`, the row about destructuring and the iterator): `var [x] = a`
-  with an accessor on index 0 is `undefined`, where it was the element under
-  the accessor and Node.js has what the getter returns.
+- **Array destructuring reads the elements** (`IterationCursor::pull` in
+  `src/js/JsEval.cpp`): `var [x] = a` with an accessor on index 0 binds
+  `undefined`, where it bound the element under the accessor before and
+  Node.js binds what the getter returns; `for (x of a)` and `[...a]` give
+  what the getter returns now. It is one line, `js_array_get` in place of
+  `array_element`, in a file an open pull request (#129) named.
 - **`length` is not inherited from an array prototype**:
-  `Object.create([7, 8, 9]).length` is `undefined`. Part (2) of the row.
+  `Object.create([7, 8, 9]).length` is `undefined`. Part (2) of the row this
+  phase was taken from.
+- **A data property on an index of an array keeps no attributes**:
+  `Object.defineProperty(a, "0", { value: 1, writable: false })` leaves the
+  index writable. The property map with the place a hole, which is where an
+  accessor is kept now, is where such a property could be kept too.
 - **`delete` of a property that is not configurable does not throw in strict
-  code**, for any object.
+  code**, for any object, and `delete a.length` answers `true`.
 - **`Reflect.getOwnPropertyDescriptor`, `Reflect.isExtensible`,
   `Reflect.preventExtensions` and the four `__defineGetter__` relatives do
   not exist.**
+- **An array method called on an object with a huge `length` copies the
+  object first** and runs out of memory. Tests that do it are why a test262
+  run with two jobs can report a neighbouring test as timed out or killed.

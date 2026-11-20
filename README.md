@@ -31,7 +31,7 @@ standard now makes, which is 1,967 of the 1,973.
 
 | Metric | Value | How it is measured |
 | :--- | :--- | :--- |
-| **DOM tree-construction conformance** | **1972 / 1973 (99.9%)** | the corpus as web-platform-tests publishes it (`html/syntax/parsing/resources/`, vendored at `37cfee8`, 62 files), run by `make conformance`. The six that fail are in `scripted_*.dat`, where a script must edit the document while the page is parsed |
+| **DOM tree-construction conformance** | **1973 / 1973 (100.0%)** | the corpus as web-platform-tests publishes it (`html/syntax/parsing/resources/`, vendored at `37cfee8`, 62 files), run by `make conformance`. All six `scripted_*.dat` cases, where a script must edit the document while the page is parsed, pass since Phase 101 |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
 | **JavaScript corpus** | **1141 / 1158 (98.5%)<!--metrics:js/frac_pct-->**; of the 17 that fail, eight are what a function or a class still lacks (Phase 34), four are iteration gaps (Phases 63, 94 and 102), and one each is typed arrays, `Proxy`, `BigInt`, `typeof` and `Symbol` | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **678 / 678<!--metrics:dom/frac-->**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
@@ -188,7 +188,7 @@ iterates; the order in which the protocol reads and calls; closing an
 iterator that is left early; and the plain cases, which must not change. 67
 of the 78 pass; the engine before Phase 63 passes 28, and two do not end.
 
-1,972 of the 1,973 cases of the html5lib tree-construction suite pass (**1972 / 1973**); the one that does not, `scripted_ark.dat`, differs by a formatting element the adoption agency reconstructs once too often. The six `scripted_*.dat` cases used to fail because the dump path ran no script; since Phase 95 it runs the page's scripts as the parser reaches them, and `document.write` writes into that parser;
+All 1,973 cases of the html5lib tree-construction suite pass (**1973 / 1973**); `scripted_ark.dat` was the last, fixed in Phase 101: Noah's Ark compares the attributes on the tokens for which the elements were created, not the live DOM nodes a script may have edited. The six `scripted_*.dat` cases used to fail because the dump path ran no script; since Phase 95 it runs the page's scripts as the parser reaches them, and `document.write` writes into that parser;
 `python3 tools/conformance/run_tree_construction.py --filter NAMEFRAGMENT --show 5`
 inspects any subset. The final 11 cases (fixed in Phase 49) were all `<select>`:
 treating `<select>` as a default scope boundary, keeping arbitrary HTML/SVG/MathML

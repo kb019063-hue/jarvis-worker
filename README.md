@@ -41,7 +41,7 @@ standard now makes, which is 1,967 of the 1,973.
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 261<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 266<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
@@ -54,6 +54,7 @@ standard now makes, which is 1,967 of the 1,973.
 | **`kern` pair kerning** | The font's own `kern` table is read — version 0, format 0, the horizontal pair list — and its adjustment is counted by `measure_text` and applied by `draw_text` and the canvas painter, so a line measures the width it draws (Phase 91). The oracle is the file, not the engine: the test parses DejaVu Sans's 2,727 pairs itself and requires the engine to report the same unit value scaled by the face's own `units_per_em` (2,048) — `AV` is −131 units, −6.396 px at 100 px. Kerning **opens** pairs as well as closes them (`AA` is +57 units), so nothing assumes it only tightens, and a face with no table is left alone: Ahem's `AV` at 100 px is exactly 200.000 px. Measuring and painting are compared in pixels: the engine's `AV` must be identical to the two glyphs placed by hand at the kerned positions and *not* to the unkerned ones | `make test`, suites `kerning_closes_the_pairs_the_table_names`, `a_face_without_a_kern_table_is_not_kerned`, `the_painter_closes_the_same_pairs_the_measurer_counted` |
 | **`GSUB` `liga`/`rlig` ligatures** | The font's own `GSUB` is read — the `latn` script (or `DFLT`), the `liga` and `rlig` features, type-4 ligature lookups, following type-7 extension wrappers — and applied to each run of glyphs of one face, longest match first (Phase 93). `ff`, `fi`, `fl`, `ffi` and `ffl` become one glyph each in DejaVu Sans, and the engine measures and paints that glyph: `ff` at 100 px is 68.896 px where its letters are 70.410. Measurement, the text painter and the canvas painter all walk one shaped list, so a canvas string measures the ligature it paints. The oracle is the file — a `GSUB` reader in the test says what each string becomes — plus ink: `fi` must be the same 2,491 pixels as `U+FB01` and not the 2,404 of `f` + `i` | `make test`, suites `ligatures_join_the_glyphs_the_table_names`, `a_ligature_is_drawn_as_the_glyph_the_table_names`, `the_canvas_measures_the_ligature_it_paints` |
 | **`font-kerning`** | The property a page uses to switch the pair adjustments off, and the first text property here whose value changes how wide a run *is* rather than how it looks — so it has to reach layout and the painter together (Phase 97). `none` is carried from the computed style to the text box, to the `DrawText` command, to the pen; `auto` and `normal` both kern, which is what `auto` means. The oracle is the same pair measured four ways: `AV` at 100 px is 130.420 px kerned and 136.816 px with the property off — the plain sum of the two advances — a `<p>` laid out in each style differs by the same 6.40 px, and painted at 100 px the unkerned pair ends 6 columns further right. The `font` shorthand resets it to `auto`, per CSS Fonts 4, which exposed a cascade bug: the shorthand used to be applied in a pass of its own, ahead of the rest of the block, so declaration order did not hold for anything it touched (finding 103) | `make test`, suites `font_kerning_none_reaches_the_box_and_the_painter`, `kerning_none_measures_the_plain_advances`, `the_font_shorthand_resets_font_kerning`, `the_painter_honours_font_kerning_none` |
+| **`GDEF` & `GPOS` kerning and mark positioning** | OpenType `GDEF` (`GlyphClassDef`, `MarkAttachClassDef`, `MarkGlyphSetsDef`) and `GPOS` (`SinglePos` fmt1/2, `PairPos` fmt1/2, `MarkToBase`, `MarkToLigature`, `MarkToMark`, `ExtensionPos` Type 9) position kerning pairs without needing legacy `kern`, zero monospaced combining-mark advances under `mark`, and anchor/stack diacritics via `(x_offset, y_offset)` across `FontRenderer`, `BitmapRenderer`, and `Canvas2D` while respecting `font-kerning: none` and malformed-table bounds (Phase 99, finding 105) | `make test`, 5 `gpos_*` / `canvas2d_*` suites |
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | String Unicode 17.0 & CLDR 48 | **50,580 / 50,580 (0 diffs)** in `make diff-strings` (down from 71); **12,255,232** all-code-point (`1,114,112 × 11` ops) + **1,112** curated/fuzz strings + **1,038** collation pairs + **400,680** UCD `NormalizationTest.txt` assertions + **206,297** CLDR `CollationTest_CLDR` pairs = **0 diffs**; test262 String Unicode/locale 9 dirs **152 / 156 (97.4%)** (up from 105/156), full `built-ins/String` **1,199 / 1,223 (98.0%)** | `make diff-strings`, `make verify-string-unicode`, `tools/conformance/run_test262.py` |
 | Worker MIME/static-module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, a `{type:"module"}` static import graph, classic `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
@@ -72,7 +73,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 261<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 266<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
 make check-numbers   # the numbers above still divide and still count (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
@@ -751,7 +752,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 261<!--metrics:unit_suites/int--> engine test suites
+# Run the 266<!--metrics:unit_suites/int--> engine test suites
 make test
 ```
 
@@ -819,14 +820,14 @@ make test
 make test
 ```
 
-Output (261<!--metrics:unit_suites/int--> suites; the first and last lines shown):
+Output (266<!--metrics:unit_suites/int--> suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 261<!--metrics:unit_suites/int--> engine test suites passed successfully!
+All 266<!--metrics:unit_suites/int--> engine test suites passed successfully!
 ```
 
 ```bash
@@ -986,7 +987,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 261/261<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 266/266<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -1548,3 +1549,20 @@ CSPRNG keys/masking, full RFC 6455/3629 framing/UTF-8 validation, non-blocking
 unit suite. `ArrayBuffer`/`Blob` binary frame exposure awaits Wave 2 typed
 arrays. See [Phase 90](docs/phases/90-websocket-tls-fetch-policy-and-frames.md)
 and [finding 96](docs/findings/96-websocket-tls-origin-and-framing.md).
+
+### OpenType `GDEF` and `GPOS` kerning and mark positioning (Phase 99)
+
+`TrueTypeFont` and `FontRenderer` now parse OpenType `GDEF` (`GlyphClassDef`,
+`MarkAttachClassDef`, `MarkGlyphSetsDef`) and `GPOS` (`SinglePos` fmt1/2,
+`PairPos` fmt1/2, `MarkToBase`, `MarkToLigature`, `MarkToMark`, and
+`ExtensionPos` Type 9) for `latn`/`DFLT`, preserving `GSUB` `IgnoreMarks`
+ligature components, zeroing monospaced combining-mark advances (`SinglePos`
+under `mark`), resolving stacked mark-to-mark chains after base attachment,
+respecting `font-kerning: none` for `kern` lookups while keeping mark
+anchoring active, and painting/padding `(x_offset, y_offset)` across
+`FontRenderer` and `Canvas2D`. `make test` passes all **266** suites (5 new GPOS
+suites) in both Release and ASan+UBSan (`fuzz_pipeline` **400** runs, **0**
+findings). Complex-script contextual positioning (`Type 7`/`Type 8`) and bidi
+remain open. See [Phase 99](docs/phases/99-gdef-and-gpos-text-positioning.md)
+and [finding 105](docs/findings/105-gpos-kerning-marks-and-pen-offsets.md).
+

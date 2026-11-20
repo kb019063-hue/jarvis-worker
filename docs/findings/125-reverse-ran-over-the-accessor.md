@@ -90,7 +90,7 @@ python3 tools/conformance/run_test262.py \
   attributes), 1 a setter on `Array.prototype` written through, 1 `sort`'s
   exact get/set order, and 2 a `copyWithin` case where V8 answers differently
   from the standard's own text.
-- `make test` 280/280 (279 on `main` before the merge, plus this one); `make conformance` 1973/1973;
+- `make test` 281/281 (280 on `main` before the merge, plus this one); `make conformance` 1973/1973;
   `make js-conformance` 1143/1158 (98.7%); `make check-numbers` 0 failures.
 - The new suite `array_methods_that_move_places_ask_the_index` holds 14 checks;
   each expected string was taken from Node.js 22 by running the same script,

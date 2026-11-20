@@ -25474,6 +25474,114 @@ TEST(instanceof_asks_symbol_has_instance) {
     assert(none_failed());
 }
 
+// Phase 106: ArrayBuffer and the typed arrays.
+//
+// The oracle is the standard's conversions, not an implementation: an element
+// type is the function it applies to a value, so Uint8Array's 258 is 2 and
+// Int8Array's 200 is -56 whatever a browser's source says. Each case below is
+// one of those conversions, one of the indexing rules (an index past the end
+// is dropped, an element cannot be deleted, a non-index name is an ordinary
+// property), or one of the window rules (two views of one buffer are one
+// object, a subarray shares its bytes and a slice does not).
+TEST(arraybuffer_and_typed_arrays) {
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- the eleven element types, each storing its own conversion --------
+    assert(text("new Uint8Array([1, 2, 300]).join()") == "1,2,44");
+    assert(text("var a = new Uint8Array(1); a[0] = 258; a[0]") == "2");
+    assert(text("var a = new Int8Array(1); a[0] = 200; a[0]") == "-56");
+    assert(text("var a = new Int16Array(1); a[0] = 40000; a[0]") == "-25536");
+    assert(text("var a = new Uint16Array(1); a[0] = 65537; a[0]") == "1");
+    assert(text("var a = new Int32Array(1); a[0] = 2147483648; a[0]") == "-2147483648");
+    assert(text("var a = new Uint32Array(1); a[0] = -1; a[0]") == "4294967295");
+    assert(text("var a = new Float32Array(1); a[0] = 1.5; a[0]") == "1.5");
+    assert(text("var a = new Float64Array(1); a[0] = 0.1; a[0]") == "0.1");
+    // Uint8ClampedArray clamps and rounds half to even, and never wraps: this
+    // is the one type whose conversion is not modulo 2^8.
+    assert(text("var a = new Uint8ClampedArray(4); a[0] = 300; a[1] = -4; a[2] = 2.5; a[3] = 3.5; a.join()") ==
+           "255,0,2,4");
+    // A float that is not finite survives Float64Array and is widened by it.
+    assert(text("var a = new Float64Array([1, 2, 3]); a.length + '|' + a[1] + '|' + a.join('-')") == "3|2|1-2-3");
+
+    // ---- length, byteLength, byteOffset, BYTES_PER_ELEMENT ---------------
+    assert(text("var u = new Uint16Array(3); u.length + '|' + u.byteLength + '|' + u.byteOffset") == "3|6|0");
+    assert(text("Uint32Array.BYTES_PER_ELEMENT + '|' + Uint8Array.prototype.BYTES_PER_ELEMENT") == "4|1");
+
+    // ---- indexing: in range, past the end, and not an index at all -------
+    assert(text("var a = new Uint8Array(2); a[5] = 9; String(a[5])") == "undefined");
+    assert(text("var a = new Uint8Array(2); a[5] = 9; a.length") == "2");
+    assert(text("var a = new Uint8Array(2); 1 in a") == "true");
+    assert(text("var a = new Uint8Array(2); 5 in a") == "false");
+    // An element is not configurable, and `delete` of one answers false.
+    assert(text("var a = new Uint8Array(2); delete a[0]") == "false");
+    assert(text("Object.keys(new Uint8Array(3)).join()") == "0,1,2");
+    // `-1` is not a canonical index, so it is an ordinary property.
+    assert(text("var a = new Uint8Array(2); a[-1] = 9; a[-1]") == "9");
+    assert(text("var a = new Uint8Array(2); a['x'] = 5; a.x") == "5");
+
+    // ---- windows: one buffer, one object, shared bytes -------------------
+    assert(text("var b = new ArrayBuffer(8); new Uint8Array(b).buffer === new Uint16Array(b).buffer") == "true");
+    assert(text("var b = new ArrayBuffer(8); b.byteLength") == "8");
+    assert(text("var u = new Uint8Array(new ArrayBuffer(8), 4); u.length + '|' + u.byteOffset") == "4|4");
+    assert(text("var u = new Uint16Array(new ArrayBuffer(8), 4, 2); u.length + '|' + u.byteOffset") == "2|4");
+    assert(text("var b = new ArrayBuffer(4); var x = new Uint8Array(b); var y = new Uint8Array(b); "
+                "x[0] = 7; y[0]") == "7");
+    // subarray shares the bytes; slice copies them.
+    assert(text("var t = new Uint8Array([1,2,3]); var w = t.subarray(1); w[0] = 9; t[1]") == "9");
+    assert(text("var t = new Uint8Array([1,2,3]); var w = t.slice(1); w[0] = 9; t[1]") == "2");
+
+    // ---- methods ---------------------------------------------------------
+    assert(text("new Uint8Array([3,1,2]).slice(1).join()") == "1,2");
+    // A negative index counts from the end.
+    assert(text("new Uint8Array([3,1,2]).slice(-2).join()") == "1,2");
+    assert(text("new Uint8Array([3,1,2]).slice(0,-1).join()") == "3,1");
+    assert(text("new Uint8Array(3).fill(7).join()") == "7,7,7");
+    assert(text("new Uint8Array([0,0,0,0]).fill(5, 1, 3).join()") == "0,5,5,0");
+    assert(text("new Uint8Array([1,0,1]).indexOf(1)") == "0");
+    assert(text("new Uint8Array([1,0,1]).lastIndexOf(1)") == "2");
+    assert(text("new Uint8Array([1,0,1]).indexOf(9)") == "-1");
+    assert(text("new Uint8Array([1,2]).includes(2)") == "true");
+    assert(text("new Uint8Array([4,5]).join('-')") == "4-5");
+    assert(text("String(new Uint8Array([1,2]))") == "1,2");
+    assert(text("var t = new Uint8Array(4); t.set([1,2], 1); t.join()") == "0,1,2,0");
+    // A set from an overlapping window reads before it writes.
+    assert(text("var t = new Uint8Array([1,2,3,4]); t.set(t.subarray(0,3), 1); t.join()") == "1,1,2,3");
+    assert(text("new Uint8Array([1,2,3]).reverse().join()") == "3,2,1");
+    assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(0,3).join()") == "4,5,3,4,5");
+    assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(1,0,3).join()") == "1,1,2,3,5");
+    // A negative relative index counts from the end here too.
+    assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(0,-2).join()") == "4,5,3,4,5");
+    assert(text("Uint8Array.from([1,2]).join()") == "1,2");
+    assert(text("Uint8Array.from([1,2], function (x) { return x * 2; }).join()") == "2,4");
+    assert(text("Uint16Array.of(1,2).join()") == "1,2");
+    assert(text("ArrayBuffer.isView(new Uint8Array(1)) + '|' + ArrayBuffer.isView({})") == "true|false");
+
+    // ---- iterators and Array.from ---------------------------------------
+    assert(text("var o = []; for (var v of new Uint8Array([4,5])) o.push(v); o.join()") == "4,5");
+    assert(text("var o = []; for (var k of new Uint8Array(2).keys()) o.push(k); o.join()") == "0,1");
+    assert(text("Array.from(new Uint8Array([1,2])).join()") == "1,2");
+
+    // ---- the chain the standard has -------------------------------------
+    assert(text("new Uint8Array(1) instanceof Uint8Array") == "true");
+    assert(text("new Uint8Array(1) instanceof Int8Array") == "false");
+    assert(text("Object.prototype.toString.call(new Float32Array(0))") == "[object Float32Array]");
+    assert(text("Object.getPrototypeOf(Uint8Array) === Object.getPrototypeOf(Int16Array)") == "true");
+    assert(text("Object.getPrototypeOf(new Uint8Array(1)) === Uint8Array.prototype") == "true");
+    // A subclass of a typed array is one: the element type follows new.target.
+    assert(text("class L extends Uint8Array {} var l = new L(2); "
+                "(l instanceof L) + '|' + (l instanceof Uint8Array) + '|' + l.length") == "true|true|2");
+
+    // ---- the errors a browser throws ------------------------------------
+    assert(text("errName(function () { new Uint8Array(-1); })") == "TypeError");
+    assert(text("errName(function () { new Uint16Array(new ArrayBuffer(8), 1); })") == "TypeError");
+    assert(text("errName(function () { new Uint32Array(new ArrayBuffer(8), 0, 3); })") == "TypeError");
+    assert(text("errName(function () { new Uint16Array(new ArrayBuffer(7)); })") == "TypeError");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -25838,6 +25946,8 @@ int main() {
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
 
+    // Phase 106: ArrayBuffer and the typed arrays.
+    RUN_TEST(arraybuffer_and_typed_arrays);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

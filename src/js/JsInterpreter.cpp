@@ -1,4 +1,5 @@
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/js/TypedArray.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Event.hpp"
 #include "litebird/dom/Document.hpp"
@@ -910,6 +911,10 @@ void JsInterpreter::init_builtins() {
         }
         return context;
     };
+    // ArrayBuffer and the typed arrays (Wave 2 #8): the bytes a fetch() body,
+    // a binary WebSocket frame and an ImageData are made of.
+    install_typed_array_builtins(*m_global_env);
+
     m_global_env->define("Headers", HeadersObject::create_constructor());
     m_global_env->define("Response", ResponseObject::create_constructor());
     m_global_env->define("fetch", JsValue::make_native_function(

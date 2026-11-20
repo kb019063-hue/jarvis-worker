@@ -41,10 +41,11 @@ standard now makes, which is 1,967 of the 1,973.
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 261 suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 262 suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
+| **`ArrayBuffer` and the typed arrays** | All nine views — `Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, `Float32Array`, `Float64Array` — over a real `ArrayBuffer`, so the four interfaces that were blocked on it can be written (Phase 106). Each write stores the element type's conversion: `Uint8Array`'s 258 is `2`, `Int8Array`'s 200 is `-56`, and `Uint8ClampedArray`'s 300 is `255` where the others wrap, because clamps-and-rounds is that type's whole definition. An index past the end is dropped (`a[5] = 9` leaves `a[5]` `undefined`), an element cannot be deleted (`delete a[0]` is `false`), `-1` is an ordinary property and not an index, and `Object.keys` gives the indices in order. One buffer has one script object, so `new Uint8Array(b).buffer === new Uint16Array(b).buffer`; `subarray` shares its bytes and `slice` copies them; `set` from an overlapping window reads before it writes. `Object.getPrototypeOf(Uint8Array)` is `%TypedArray%`, the abstract class that throws when constructed, and a subclass of a view is one, because the element type is read from `new.target`: `class L extends Uint8Array {}` makes an `Int8Array`-length-2 `L` | `make test`, suite `arraybuffer_and_typed_arrays`; and the `Uint8Array` case of `collections-iterators.dat`, which `make js-conformance` had been failing for want of this (1138/1156, up from 1137) |
 | **`font-family` selection** | A CSS family list is resolved against the face names the host's own fonts declare, per element, and the winning face is loaded lazily and used to measure and draw (Phase 67). The oracle is absolute rather than a comparison: every glyph in the vendored Ahem is exactly 1em wide, so four characters at 16 px measure 64.0 px in it and in nothing else. `monospace` is checked by measurement too — `'i'` and `'W'` advance the same there and not in a proportional face | `make test`, suites `font_family_selects_a_face`, `font_family_reaches_layout_from_css` |
 | **`@font-face`** | A page brings its own typeface: the rule's `font-family` names a family the host may never have heard of, and the `src` list is fetched lazily, in order, until a source parses (Phase 74). The oracle is the vendored Ahem served through a `data:` URL, so the bytes arrive the way a browser's would — every glyph in it is exactly 1em wide, so four characters at 16 px lay out at 64.0 px or the rule did not take. A webfont outranks a host family of the same name, `format()` skips what the engine cannot read, and `local()` answers out of the host's own fonts | `make test`, suites `font_face_declares_the_family_the_page_names`, `font_face_brings_the_family_the_page_names` |
 | **HTTP/1.1 cookies, RFC 9111 cache & CORS preflight** | Thread-safe RFC 6265bis `CookieJar` (`Domain`/host-only, `Path`, wall-clock `Max-Age`/`Expires`, `Secure`, `HttpOnly` script isolation, `SameSite`, `__Secure-`/`__Host-`) wired to HTTP `Set-Cookie`/`Cookie` across redirects after CORS checks; bounded LRU HTTP cache (`Cache-Control`, `ETag`/`If-None-Match`, `Last-Modified`/`If-Modified-Since`, `304` merge, `Vary`, unsafe invalidation); WHATWG Fetch CORS `OPTIONS` preflight + `Max-Age` cache, W3C mixed-content blocking, and `HeadersExotic` `fetch()` options (Phase 73) | `make test`, 4 loopback HTTP/1.1 & Fetch suites |
@@ -72,7 +73,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 261 engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 262 engine suites + 114 cross-origin Window/Location/channel checks
 make check-numbers   # the numbers above still divide and still count (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
@@ -751,7 +752,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 261 engine test suites
+# Run the 262 engine test suites
 make test
 ```
 
@@ -826,7 +827,7 @@ Output (260 suites; the first and last lines shown):
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 261 engine test suites passed successfully!
+All 262 engine test suites passed successfully!
 ```
 
 ```bash

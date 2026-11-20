@@ -23,6 +23,15 @@ jobs:
         # the suite count — instead of trusting a sentence. Seconds, not
         # minutes: it runs before the build so a wrong number fails first.
         run: make check-numbers
+      - name: Every part of the sanitizer run has a job
+        # `make asan-core` is nine parts in the Makefile, and the jobs at the
+        # end of this file run them side by side. A part that is in
+        # the Makefile and in no job would fail nothing: the run would be
+        # green and the check not made. This step fails instead. It reads the
+        # two files and needs no build.
+        run: |
+          python3 tools/ci/check_ci_parts.py --self-test
+          python3 tools/ci/check_ci_parts.py
       - name: Build
         run: make -j"$(nproc)"
       - name: Engine test suites
@@ -379,8 +388,163 @@ jobs:
         # here to catch does not finish at all.
         run: make deep
 
-  sanitizers:
-    name: Address/UB sanitizers + parser fuzzing
+  # The sanitizer run, as jobs side by side.
+  #
+  # Until 20 November this was one job, "Address/UB sanitizers + parser
+  # fuzzing": `make tsan`, then `make asan-core` as one step, then `make
+  # asan-deep`. It took 21 to 28 minutes while every other job of a run was
+  # done in six, so a run was as long as that one job, and everything after a
+  # push waited for it.
+  #
+  # Nothing was taken out to make it shorter. `asan-core` is nine parts in the
+  # Makefile (it still runs all nine, in the old order, for `make asan`), and
+  # the jobs below run those nine parts, `asan-deep` and `tsan` between them,
+  # each part once, with the options, counts, floors and timeouts they had.
+  # tools/ci/check_ci_parts.py, a step of "Build & unit tests", fails the run
+  # if a part of `asan-core` is in no job or in two.
+  #
+  # Which part is in which job is decided by how long the parts take and by
+  # nothing else (AGENTS.md has the times): each job is the build and five to
+  # six minutes of checks. To add a check, put it in the part of the Makefile
+  # it belongs with. To move a part to another job, move its step; `asan-xml`
+  # and `asan-fuzz` stay in one job, in that order (the step says why).
+  sanitizers-unit:
+    name: "Sanitizers: unit suites"
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Address randomisation the sanitizers can live with
+        # See the string stress tests in the last of these jobs. Every
+        # sanitizer step has always run after this setting, so each job makes
+        # it before it builds.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
+      - name: Sanitizer build
+        # Each of these jobs makes build-asan/litebird for itself: a job starts
+        # on a clean machine, and passing the build between jobs would put it
+        # in front of all of them instead of beside them. It is five to six
+        # minutes, and it is what a job cannot go below.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+      - name: Unit suites in the sanitizer build
+        # The longest part, and the reason the suites are run a second time: a
+        # suite that passes in the normal build can fail in this one.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-unit 2>&1 | tee "$RUNNER_TEMP/part-asan-unit.log"
+      - name: What failed, as annotations
+        # A job's log is served by another host than the API, and a failure
+        # here has had nothing but `exit code 2` to go by where the log could
+        # not be fetched (finding 49). The annotations of a job are served by
+        # the API itself:
+        #   gh api repos/OWNER/REPO/check-runs/JOB_ID/annotations --jq '.[].message'
+        # Each step keeps its output in a file of its own, and the step that
+        # failed is the last one that wrote one, so the newest file is read.
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
+
+  sanitizers-xml-fuzz:
+    name: "Sanitizers: XML suite and fuzzing"
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Address randomisation the sanitizers can live with
+        # See the string stress tests in the last of these jobs. Every
+        # sanitizer step has always run after this setting, so each job makes
+        # it before it builds.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
+      - name: The XML suite archive
+        # See the xml-and-wpt job: downloaded, checked against a pinned
+        # SHA-256, cached.
+        uses: actions/cache@v4
+        with:
+          path: build/xml-conformance/xmlts20130923.zip
+          key: xmlts20130923-f9510b3532926e1b4c2e54855b021e4b8a66ec98a5337dcf4ff07e8a41968deb
+      - name: Sanitizer build
+        # As in the first of these jobs.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+      - name: W3C XML suite in the sanitizer build
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-xml 2>&1 | tee "$RUNNER_TEMP/part-asan-xml.log"
+      - name: Fuzz smoke run (pages, XML, media, colours, Brotli)
+        # This step has to come after the XML suite step, in the same job.
+        # tools/fuzz/fuzz_xml.py mutates the documents of the W3C suite, which
+        # that step unpacks under build/xml-conformance/. Without them it does
+        # not fail: it mutates the dozen documents written in the script instead
+        # and passes, having checked far less.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-fuzz 2>&1 | tee "$RUNNER_TEMP/part-asan-fuzz.log"
+      - name: What failed, as annotations
+        # As in the first of these jobs.
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
+
+  sanitizers-wpt-deep:
+    name: "Sanitizers: web-platform-tests, deep and oversized pages"
+    runs-on: ubuntu-latest
+    needs: build-and-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Address randomisation the sanitizers can live with
+        # See the string stress tests in the last of these jobs. Every
+        # sanitizer step has always run after this setting, so each job makes
+        # it before it builds.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
+      - name: Sanitizer build
+        # As in the first of these jobs.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+      - name: Web-platform-tests in the sanitizer build
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-wpt 2>&1 | tee "$RUNNER_TEMP/part-asan-wpt.log"
+      - name: Deep and oversized pages in the sanitizer build
+        # For memory errors on these pages. They are a twentieth as deep as in
+        # the deep-pages job, which is the one that looks for recursion: a
+        # sanitizer build is several times slower.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make asan-deep 2>&1 | tee "$RUNNER_TEMP/part-asan-deep.log"
+      - name: What failed, as annotations
+        # As in the first of these jobs.
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
+
+  sanitizers-corpora:
+    name: "Sanitizers: script corpora, verifiers, generated XML, string stress tests"
     runs-on: ubuntu-latest
     needs: build-and-test
     steps:
@@ -392,38 +556,50 @@ jobs:
         # Strings are shared between threads without locks; only ThreadSanitizer
         # can check that. It cannot map its shadow memory when the kernel
         # randomises addresses with more than 28 bits, which some runner images do.
+        #
+        # No ASAN_OPTIONS here, unlike every other step of these jobs: the
+        # second half of `make tsan` is the one place where leaks are looked for.
         run: |
+          set -o pipefail
           sudo sysctl -w vm.mmap_rnd_bits=28 || true
-          make tsan
-      - name: The XML suite archive
-        # See the xml-and-wpt job: downloaded, checked against a pinned
-        # SHA-256, cached.
-        uses: actions/cache@v4
-        with:
-          path: build/xml-conformance/xmlts20130923.zip
-          key: xmlts20130923-f9510b3532926e1b4c2e54855b021e4b8a66ec98a5337dcf4ff07e8a41968deb
-      - name: Sanitizer build, tests, the corpora (JavaScript, DOM, URL, XML, web-platform-tests) and a fuzz smoke run
-        # The output is also kept in a file: the last step of this job says
-        # from it what failed.
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -o pipefail
-          make -j"$(nproc)" asan-core 2>&1 | tee "$RUNNER_TEMP/asan-core.log"
-      - name: Deep and oversized pages in the sanitizer build
-        # For memory errors on these pages. They are a twentieth as deep as in
-        # the deep-pages job, which is the one that looks for recursion: a
-        # sanitizer build is several times slower.
+          make tsan 2>&1 | tee "$RUNNER_TEMP/part-tsan.log"
+      - name: Sanitizer build
+        # As in the first of these jobs.
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
           set -o pipefail
-          make asan-deep 2>&1 | tee "$RUNNER_TEMP/asan-deep.log"
+          make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+      - name: JavaScript corpus in the sanitizer build
+        # Run for what the sanitizers see while the scripts execute, not for the
+        # score: a report makes a case fail, and the floor (JS_ASAN_FLOOR in the
+        # Makefile) turns a batch of those into a failed step.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-js 2>&1 | tee "$RUNNER_TEMP/part-asan-js.log"
+      - name: Script DOM corpus and URL cases in the sanitizer build
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-dom 2>&1 | tee "$RUNNER_TEMP/part-asan-dom.log"
+      - name: Verifiers in the sanitizer build (media, colour, Brotli, RegExp, strings, HTTPS, workers, WebSocket)
+        # The eight checks that have a verifier of their own, each with the
+        # options `make asan-core` has always given it.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-verify 2>&1 | tee "$RUNNER_TEMP/part-asan-verify.log"
+      - name: Generated XML against Expat, and the serializer's round trip, in the sanitizer build
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-xml-generated 2>&1 | tee "$RUNNER_TEMP/part-asan-xml-generated.log"
       - name: What failed, as annotations
-        # This job takes a quarter of an hour and has failed with nothing but
-        # `exit code 2` to go by where the log could not be fetched (finding
-        # 49). The annotations of a job are served by the API itself:
-        #   gh api repos/OWNER/REPO/check-runs/JOB_ID/annotations --jq '.[].message'
+        # As in the first of these jobs.
         if: failure()
-        run: python3 tools/ci/annotate_failure.py "$RUNNER_TEMP/asan-core.log" "$RUNNER_TEMP/asan-deep.log"
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"

@@ -85,7 +85,7 @@ scoreboard — is not a phase and takes no phase or finding number.
    next free numbers, or stays out of the file, and the earlier one changes
    nothing. A pull request holds the files it has changed as well as the
    ones it names. Put `[skip ci]` in the message of the first commit: an
-   empty commit needs no 28 minutes of runner time.
+   empty commit needs no run, and a run is an hour of runner time.
 
 ## The files every pull request changes
 
@@ -131,19 +131,22 @@ frozen append targets, so their rows are not marked either.
   `make dom-conformance`, `make url-conformance`, `make xml-conformance`,
   `make wpt`, `make diff-trees`, `make diff-xml`,
   `make fuzz`, `make deep`, `make asan`. The last two take
-  about eight minutes each. CI runs all of them, and one CI run is about 28
-  minutes of runner time: run the checks here first and push when they pass,
-  not to find out whether they do. `make xml-conformance` downloads the
+  about eight minutes each. CI runs all of them, and one CI run is about 16
+  minutes and an hour of runner time: run the checks here first and push
+  when they pass, not to find out whether they do. `make xml-conformance` downloads the
   W3C suite the first time (`tests/xml/README.md`), and `make diff-xml`
   needs `pip install lxml`.
 - A unit suite that passes in the normal build can fail in the sanitizer
   build, and CI's log cannot be read from every sandbox: run `make asan`
-  here first. When CI's sanitizer job fails all the same, its last step
-  says what failed in the job's annotations, which the API itself serves:
+  here first. When one of CI's four sanitizer jobs fails all the same, its
+  last step says what failed in the job's annotations, which the API itself serves:
   `gh run view RUN --json jobs` for the job's id, then
   `gh api repos/OWNER/REPO/check-runs/JOB_ID/annotations --jq '.[].message'`.
   (`tools/ci/annotate_failure.py`; any job that keeps its output with
-  `tee` can end with the same step.)
+  `tee` can end with the same step.) The name of the step that failed is a
+  part of `make asan-core`, and `make asan-build` and then that part
+  (`make asan-unit`, say; `make help` lists the nine) runs it here without
+  the rest.
 - A floor in CI is not lowered to let a pull request pass.
   `tests/js-conformance/everyday-*.dat` and
   `tests/dom-conformance/everyday.dat` are not edited. A DOM case that
@@ -364,12 +367,52 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
 - **A push starts no CI run while the pull request conflicts with `main`.**
   It looks like a run that has not started yet. `gh pr view N --json
   mergeable` after `git fetch`, before spending a commit on CI.
-- **A run is seven jobs, about 28 minutes.** `[skip ci]` goes on every
+- **A run is eleven jobs, about 16 minutes, and an hour of runner time.**
+  `[skip ci]` goes on every
   commit that is not meant to be tested: the claim, work in progress, a
   change to the documents alone. The commit that is merged has a green run,
   or differs from one that has only in documents, and the pull request says
   so; a pull request of documents alone needs no run at all
   (`check_pr.py merge N` says which it is).
+- **A run was as long as its one sanitizer job, and that job is now four.**
+  Until 20 November `make tsan`, `make asan-core` and `make asan-deep` were
+  three steps of one job: 21 to 28 minutes, while every other job was done
+  in six. Everything after a push waited for it: the merge, the next
+  agent's merge of `main`, the look at `main` afterwards. The same checks
+  are now four jobs side by side. A run on the same engine code went from
+  31.3 minutes (run 44664786397 on `main`, 03:00 that day) to 15.6 (run
+  44672093418 on this change, an hour later); the two runs on `main` the
+  day before had taken 24.4 and 26.7. Nothing was taken out and no count,
+  floor or timeout was changed. What it costs is runner time, 46 minutes
+  of it before and 65 after: each of the four jobs makes the sanitizer
+  build for itself.
+
+  | job (`Sanitizers: …`) | what it runs, after `asan-build` (4:20 to 5:39) | the job |
+  | :--- | :--- | :--- |
+  | unit suites | `asan-unit` 5:52 | 11.6 min |
+  | XML suite and fuzzing | `asan-xml` 1:29, then `asan-fuzz` 3:06 | 9.2 min |
+  | web-platform-tests, deep and oversized pages | `asan-wpt` 3:18, `asan-deep` 3:01 | 11.8 min |
+  | script corpora, verifiers, generated XML, string stress tests | `tsan` 1:05 (before the build), `asan-js` 2:28, `asan-dom` 0:42, `asan-verify` 0:23, `asan-xml-generated` 0:51 | 11.1 min |
+
+  They start when "Build & unit tests" has passed (2.9 to 3.8 minutes), so
+  a run cannot be shorter than that job, the sanitizer build and the unit
+  suites in it: about 15 minutes. Three rules keep it the same checks:
+  - `make asan-core` is nine parts in the Makefile and runs them in the
+    order it always had; **a new check goes into the part it belongs
+    with**, and then both `make asan` and CI run it.
+  - **A part that no job runs fails the run** before anything is built:
+    `tools/ci/check_ci_parts.py`, a step of the first job, reads the recipe
+    of `asan-core` and the workflow. It also fails for a check written into
+    `asan-core` itself, for a part two jobs run, and for a job that runs a
+    part before `asan-build`. With one job none of this could happen; with
+    four, a part that is in the Makefile and in no job would be a green run
+    that did not make the check.
+  - **`asan-fuzz` runs after `asan-xml`, in the same job.** The XML fuzzer
+    mutates the documents of the W3C suite, which `asan-xml` unpacks under
+    `build/xml-conformance/`. Without them it does not fail: it mutates the
+    dozen documents written in the script, passes, and has checked far
+    less. The one job ran them in this order and nothing said that it
+    mattered; the check above now requires it.
 
 **The sandbox**
 

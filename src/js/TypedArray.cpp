@@ -771,22 +771,20 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
 
     js_define_method(proto, "copyWithin", 3, [](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.copyWithin");
-        std::size_t target_begin = 0;
-        std::size_t source_begin = 0;
-        std::size_t source_end = 0;
-        if (!args.empty()) {
-            const double target = to_integer_or_infinity(js_to_number(args[0]));
-            target_begin = target < 0 ? 0 : static_cast<std::size_t>(std::min(target, static_cast<double>(data->length)));
-        }
-        if (args.size() > 1) {
-            const double start = to_integer_or_infinity(js_to_number(args[1]));
-            source_begin = start < 0 ? 0 : static_cast<std::size_t>(std::min(start, static_cast<double>(data->length)));
-        }
-        source_end = data->length;
-        if (args.size() > 2 && !args[2].is_undefined()) {
-            const double end = to_integer_or_infinity(js_to_number(args[2]));
-            source_end = end < 0 ? 0 : static_cast<std::size_t>(std::min(end, static_cast<double>(data->length)));
-        }
+        // A negative relative index counts from the end and is then clamped:
+        // copyWithin(0, -2) copies the last two elements to the front.
+        const double length = static_cast<double>(data->length);
+        auto relative = [length](const JsValue& value) {
+            double index = to_integer_or_infinity(js_to_number(value));
+            if (index < 0) index += length;
+            if (index < 0) index = 0;
+            if (index > length) index = length;
+            return static_cast<std::size_t>(index);
+        };
+        const std::size_t target_begin = args.empty() ? 0 : relative(args[0]);
+        const std::size_t source_begin = args.size() > 1 ? relative(args[1]) : 0;
+        const std::size_t source_end =
+            args.size() > 2 && !args[2].is_undefined() ? relative(args[2]) : data->length;
         const std::size_t count = std::min(source_end - source_begin, data->length - target_begin);
         std::vector<double> values;
         for (std::size_t i = 0; i < count; ++i)

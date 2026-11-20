@@ -22293,6 +22293,9 @@ TEST(arraybuffer_and_typed_arrays) {
     assert(text("var t = new Uint8Array([1,2,3,4]); t.set(t.subarray(0,3), 1); t.join()") == "1,1,2,3");
     assert(text("new Uint8Array([1,2,3]).reverse().join()") == "3,2,1");
     assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(0,3).join()") == "4,5,3,4,5");
+    assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(1,0,3).join()") == "1,1,2,3,5");
+    // A negative relative index counts from the end here too.
+    assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(0,-2).join()") == "4,5,3,4,5");
     assert(text("Uint8Array.from([1,2]).join()") == "1,2");
     assert(text("Uint8Array.from([1,2], function (x) { return x * 2; }).join()") == "2,4");
     assert(text("Uint16Array.of(1,2).join()") == "1,2");

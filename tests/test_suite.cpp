@@ -24024,6 +24024,18 @@ TEST(http_authentication_basic_and_digest_challenges) {
     assert(ResourceLoader::auth_base64("foob") == "Zm9vYg==");
     assert(ResourceLoader::auth_base64("Aladdin:open sesame") == "QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
 
+    //    Phase 115: FIPS 180-4 §6.7's SHA-512/256, whose answers FIPS does not
+    //    list under a separate appendix — so these are computed by an
+    //    independent implementation (Python's `hashlib.new("sha512_256")`),
+    //    and the point of the pair is that the second is *not* SHA-512 cut
+    //    short. FIPS 180-4 §5.3.6.2 gives the IV; §6.7 gives the truncation.
+    assert(ResourceLoader::auth_sha512_256_hex("") ==
+           "c672b8d1ef56ed28ab87c3622c5114069bdd3ad7b8f9737498d0c01ecef0967a");
+    assert(ResourceLoader::auth_sha512_256_hex("abc") ==
+           "53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23");
+    assert(ResourceLoader::auth_sha512_256_hex("abc") !=
+           "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a");    // SHA-512's first 256 bits
+
     // 2. RFC 7616 §3.9.1's example, reproduced field for field: the RFC's own
     //    cnonce and nc, so the expected hex is the RFC's and not this code's.
     {
@@ -24043,7 +24055,89 @@ TEST(http_authentication_basic_and_digest_challenges) {
 
         // An algorithm this client cannot compute is refused, not guessed.
         assert(!ResourceLoader::auth_Digest_response(
-            "SHA-512-256", "u", "p", "r", "n", "GET", "/", "auth", "c", "00000001", hex));
+            "SHA-512", "u", "p", "r", "n", "GET", "/", "auth", "c", "00000001", hex));
+        assert(!ResourceLoader::auth_Digest_response(
+            "SHA-384", "u", "p", "r", "n", "GET", "/", "auth", "c", "00000001", hex));
+
+        // RFC 7616 §3.9.2, with **erratum 4897 applied**. The RFC as published
+        // prints username=48886947… and response=ae66e67d…; those are SHA-512/256
+        // computed the wrong way (SHA-512 truncated, which the erratum's note
+        // describes as "Section 7 of FIPS 180-3/180-4" behaviour). The verified
+        // correction is the pair below, and it is exactly what an independent
+        // implementation gives. Writing the published values here would have
+        // asserted a bug.
+        {
+            std::string value;
+            assert(ResourceLoader::auth_Digest_build(
+                "SHA-512-256", "J\xC3\xA4s\xC3\xB8n Doe", "Secret, or not?", "api@example.org",
+                "5TsQWLVdgBdmrQ0XsxbDODV+57QdFR34I9HAbC/RVvkK",
+                "HRPCssKJSGjCrkzDg8OhwpzCiGPChXYjwrI2QmXDnsOS",
+                "GET", "/doe.json", "auth", "NTg6RKcb9boFIAS3KrFK9BGeh+iDa/sm6jUMp2wds69v",
+                "00000001", "", /*hash_username=*/true, value));
+            // The username field is H(username ":" realm), which is
+            // 793263caabb707a56211940d90411ea4a575adeccb7e360aeb624ed06ece9b0b —
+            // hashed with SHA-512-256, not with SHA-256 whatever the algorithm.
+            assert(value.find("username=\"793263caabb707a56211940d90411ea4a575adeccb7e360aeb624ed06ece9b0b\"") !=
+                   std::string::npos);
+            assert(value.find("response=\"3798d4131c277846293534c3edc11bd8a5e4cdcbff78b05db9d95eeb1cec68a5\"") !=
+                   std::string::npos);
+            assert(value.find(", userhash=true") != std::string::npos);
+            assert(value.find("algorithm=SHA-512-256") != std::string::npos);
+            assert(value.find("opaque=\"HRPCssKJSGjCrkzDg8OhwpzCiGPChXYjwrI2QmXDnsOS\"") != std::string::npos);
+        }
+
+        // `-sess` hashes A1 with the algorithm in use (RFC 7616 §3.4.2), which
+        // this used to do with MD5 whatever the algorithm was. Python computes
+        // the right-hand values; the SHA-256-sess one is not the MD5-sess one.
+        {
+            std::string md5_sess, sha_sess;
+            assert(ResourceLoader::auth_Digest_response(
+                "MD5-sess", "u", "p", "r", "N", "GET", "/x", "auth", "C", "00000001", md5_sess));
+            assert(ResourceLoader::auth_Digest_response(
+                "SHA-256-sess", "u", "p", "r", "N", "GET", "/x", "auth", "C", "00000001", sha_sess));
+            assert(md5_sess == "788ad15034a6ad9289524125c81f7b88");
+            assert(sha_sess == "1eba72f3eff655e53c4ad247210979d455f73e1cc7bdc5502abe54ee4cc40c98");
+            //   The value the old code gave for SHA-256-sess: it folded A1 with
+            //   MD5 whatever the algorithm said, so this is the answer it would
+            //   have sent, and it is not the one above.
+            assert(sha_sess != "1dfbe580e0d00ced3367cc3bf0a6209f94ef590bfefd2cebf3852b4040fc08eb");
+        }
+
+        // `auth-int` digests the body (RFC 7616 §3.4.3), so two bodies are two
+        // answers and the empty body is a third.
+        {
+            std::string empty_body, body_a, body_b;
+            assert(ResourceLoader::auth_Digest_build(
+                "SHA-256", "u", "p", "r", "N", "", "POST", "/x", "auth-int", "C", "00000001",
+                "", false, empty_body));
+            assert(ResourceLoader::auth_Digest_build(
+                "SHA-256", "u", "p", "r", "N", "", "POST", "/x", "auth-int", "C", "00000001",
+                "a", false, body_a));
+            assert(ResourceLoader::auth_Digest_build(
+                "SHA-256", "u", "p", "r", "N", "", "POST", "/x", "auth-int", "C", "00000001",
+                "b", false, body_b));
+            assert(empty_body != body_a && body_a != body_b);
+            //   `auth-int`'s answer is not `auth`'s, even with the same body.
+            std::string plain;
+            assert(ResourceLoader::auth_Digest_build(
+                "SHA-256", "u", "p", "r", "N", "", "POST", "/x", "auth", "C", "00000001",
+                "a", false, plain));
+            assert(plain != body_a);
+        }
+
+        // A qop this client cannot do is refused; an unknown qop name is too.
+        {
+            std::string value;
+            assert(!ResourceLoader::auth_Digest_build(
+                "MD5", "u", "p", "r", "N", "", "GET", "/x", "auth-conf", "C", "00000001",
+                "", false, value));
+            //   ...and an empty qop is the RFC 2069 form, which is still legal.
+            assert(ResourceLoader::auth_Digest_build(
+                "MD5", "u", "p", "r", "N", "", "GET", "/x", "", "", "",
+                "", false, value));
+            assert(value.find(", qop=") == std::string::npos);
+            assert(value.find(", nc=") == std::string::npos);
+        }
     }
 
     // 3. Basic is offered only when nothing better is, and never for a realm or
@@ -24165,6 +24259,206 @@ TEST(http_authentication_basic_and_digest_challenges) {
         assert(resp.auth_schemes.size() == 1);
         assert(resp.auth_schemes[0] == "Digest");
         assert(resp.auth_realm == "locked");
+    }
+
+    // 6. A credential a server refuses is forgotten, so the next load does not
+    //    replay it. Phase 115: before this, the store kept the refused pair for
+    //    the life of the process and every later load sent it again.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 4) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::vector<std::string> requested;
+        std::thread server_thread([server, &requested]() {
+            for (int i = 0; i < 2; ++i) {
+                const int client = accept(server, nullptr, nullptr);
+                if (client < 0) return;
+                std::string request;
+                char buffer[4096];
+                while (request.find("\r\n\r\n") == std::string::npos) {
+                    const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+                    if (count <= 0) break;
+                    request.append(buffer, static_cast<std::size_t>(count));
+                }
+                requested.push_back(request);
+                // Always 401: the credentials are wrong and the server says so
+                // again, which is what makes them refused rather than missing.
+                const std::string reply =
+                    "HTTP/1.1 401 Unauthorized\r\n"
+                    "WWW-Authenticate: Basic realm=\"locked\"\r\n"
+                    "Content-Length: 0\r\nConnection: close\r\n\r\n";
+                (void)::send(client, reply.data(), reply.size(), 0);
+                ::close(client);
+            }
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceLoader::set_auth_credentials(base, "locked", "Aladdin", "wrong");
+        assert(ResourceLoader::has_credentials(base, "locked"));
+        ResourceResponse resp = ResourceLoader::load_http(base + "/", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(resp.status_code == 401);
+        // The first request offered nothing, the second offered the credential,
+        // and after the second 401 the store no longer has it.
+        assert(requested.size() == 2);
+        assert(requested[0].find("\r\nAuthorization:") == std::string::npos);
+        assert(requested[1].find("\r\nAuthorization: Basic ") != std::string::npos);
+        assert(!ResourceLoader::has_credentials(base, "locked"));
+        assert(ResourceLoader::auth_credential_count() == 0);
+    }
+
+    // 7. A 407 is the proxy's challenge, not the document's: it is reported as
+    //    a proxy challenge and never answered with `Authorization`.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 1) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::string seen_request;
+        std::thread server_thread([server, &seen_request]() {
+            const int client = accept(server, nullptr, nullptr);
+            if (client < 0) return;
+            char buffer[4096];
+            const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+            if (count > 0) seen_request.assign(buffer, static_cast<std::size_t>(count));
+            const std::string reply =
+                "HTTP/1.1 407 Proxy Authentication Required\r\n"
+                "Proxy-Authenticate: Basic realm=\"gateway\"\r\n"
+                "Content-Length: 0\r\nConnection: close\r\n\r\n";
+            (void)::send(client, reply.data(), reply.size(), 0);
+            ::close(client);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        // Credentials are held for the very realm the proxy names. They must
+        // still not be sent, because they are the *document's* and this is the
+        // proxy asking.
+        ResourceLoader::set_auth_credentials(base, "gateway", "Aladdin", "open sesame");
+        ResourceResponse resp = ResourceLoader::load_http(base + "/", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(resp.status_code == 407);
+        assert(resp.proxy_auth_schemes.size() == 1 && resp.proxy_auth_schemes[0] == "Basic");
+        assert(resp.proxy_auth_realm == "gateway");
+        assert(resp.auth_schemes.empty() && resp.auth_realm.empty());
+        assert(seen_request.find("\r\nAuthorization:") == std::string::npos);
+        //   ...and a 407 is not a 401, so the credential is not thrown away.
+        assert(ResourceLoader::has_credentials(base, "gateway"));
+        ResourceLoader::clear_auth_credentials();
+    }
+
+    // 8. `Authentication-Info`'s `nextnonce` replaces the challenge's nonce on
+    //    the next request in that protection space (RFC 7616 §3.5).
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 4) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::vector<std::string> requested;
+        std::thread server_thread([server, &requested]() {
+            for (int i = 0; i < 4; ++i) {
+                const int client = accept(server, nullptr, nullptr);
+                if (client < 0) return;
+                std::string request;
+                char buffer[4096];
+                while (request.find("\r\n\r\n") == std::string::npos) {
+                    const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+                    if (count <= 0) break;
+                    request.append(buffer, static_cast<std::size_t>(count));
+                }
+                requested.push_back(request);
+                const bool has_auth = request.find("\r\nAuthorization:") != std::string::npos;
+                // The third request is the one that carries a nonce we named
+                // ("second") with a count of 1 for it, since a count is per
+                // nonce (RFC 7616 §3.4.4) and that nonce is new.
+                const bool has_nc2 = request.find("nonce=\"second\"") != std::string::npos;
+                std::string reply;
+                if (!has_auth) {
+                    reply = "HTTP/1.1 401 Unauthorized\r\n"
+                            "WWW-Authenticate: Digest realm=\"nonced\", qop=\"auth\", "
+                            "nonce=\"first\", algorithm=SHA-256\r\n"
+                            "Content-Length: 0\r\nConnection: close\r\n\r\n";
+                } else if (has_nc2) {
+                    // The third request carried the nonce we named and a count
+                    // of 2 for it, so this is the one that is accepted.
+                    reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                            "Connection: close\r\n\r\nok";
+                } else {
+                    reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                            "Authentication-Info: nextnonce=\"second\", qop=auth\r\n"
+                            "Connection: close\r\n\r\nok";
+                }
+                (void)::send(client, reply.data(), reply.size(), 0);
+                ::close(client);
+            }
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceLoader::set_auth_credentials(base, "nonced", "u", "p");
+        const ResourceResponse first = ResourceLoader::load_http(base + "/one", "GET", {}, "");
+        assert(first.status_code == 200);
+        // The nonce the server named is remembered against origin and realm.
+        assert(ResourceLoader::auth_next_nonce_for_testing(base, "nonced") == "second");
+        ResourceLoader::clear_http_cache();
+        const ResourceResponse second = ResourceLoader::load_http(base + "/two", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(second.status_code == 200 && second.body == "ok");
+        // Four requests, because nothing is sent pre-emptively (RFC 7617 §2.2):
+        // each load offers nothing, is challenged, and then answers.
+        assert(requested.size() == 4);
+        assert(requested[0].find("\r\nAuthorization:") == std::string::npos);
+        assert(requested[1].find("nonce=\"first\"") != std::string::npos);
+        assert(requested[2].find("\r\nAuthorization:") == std::string::npos);
+        // The later load answered with the nonce the server named last time,
+        // which is the whole point of reading Authentication-Info.
+        assert(requested[3].find("nonce=\"second\"") != std::string::npos);
+        assert(requested[3].find("nonce=\"first\"") == std::string::npos);
+        // A new nonce restarts the count (§3.4.4), so this is 1 and not 2.
+        assert(requested[3].find("nc=00000001") != std::string::npos);
+        ResourceLoader::clear_auth_credentials();
+        assert(ResourceLoader::auth_next_nonce_for_testing(base, "nonced").empty());
     }
 }
 

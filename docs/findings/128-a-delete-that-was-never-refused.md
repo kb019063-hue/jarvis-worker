@@ -46,7 +46,7 @@ Three things follow from that shape:
 
 ## 3. Verification
 
-- `make test` → **275 / 275**, the new suite being
+- `make test` → **279 / 279** (278 on `main`), the new suite being
   `a_strict_delete_refuses_what_it_cannot_remove`, nine checks whose expected
   text Node.js 22.22.3 printed first.
 - Every corpus unchanged: js-conformance 1142/1158, DOM 678/678, tree

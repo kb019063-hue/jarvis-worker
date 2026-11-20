@@ -15,30 +15,30 @@ using Args = const std::vector<JsValue>&;
 
 JsValue self() { return JsValue::current_this(); }
 
-/// The array a method operates on. Real arrays are used in place. Array-likes
-/// (`{0: "a", length: 1}`, strings) are copied into a temporary, which is
-/// enough for the methods that only read.
+/// The array a method operates on.
+///
+/// This used to *become* the receiver: an array-like was copied into a real
+/// array by reading index 0 up to its `length`, before the method read a
+/// single argument. That made `{ 0: 9, length: Infinity }` four billion
+/// property reads pushing four billion values — `std::bad_alloc` if the
+/// machine had the patience, the out-of-memory killer if it did not — and it
+/// made `{ length: 2**32 }` an allocation rather than the RangeError the
+/// standard asks for. Phase 129 removed the copy; the methods that need the
+/// places now take the receiver whole and ask `present_indices` which ones are
+/// there, or ask `HasProperty` one index at a time for a length small enough
+/// to be worth it.
+///
+/// What remains is what the old form was right about: the receiver has to
+/// exist, and a method that would write it has to have something writable.
 JsValue receiver(const char* method, bool mutates = false) {
     JsValue me = self();
-    if (me.is_array()) return me;
     if (me.is_nullish()) {
         js_throw_type_error(std::string("Array.prototype.") + method + " called on null or undefined");
     }
     if (mutates) {
         js_throw_type_error(std::string("Array.prototype.") + method + " requires an array");
     }
-    std::vector<JsValue> elements;
-    if (me.type == JsType::String) {
-        const JsString& text = me.string_val;
-        elements.reserve(text.length());
-        for (size_t i = 0; i < text.length(); ++i) elements.push_back(JsValue::make_string(JsString::from_unit(text.unit_at(i))));
-    } else if (me.is_object_like()) {
-        double length = js_to_integer(js_to_number(me.get_property("length")));
-        for (double i = 0; i < length && i < 4294967295.0; ++i) {
-            elements.push_back(me.get_property(js_number_to_string(i)));
-        }
-    }
-    return JsValue::make_array(elements);
+    return me;
 }
 
 std::deque<JsValue>& elements_of(const JsValue& array) {
@@ -124,8 +124,221 @@ size_t to_length(const JsValue& value) {
     return static_cast<size_t>(number);
 }
 
-/// LengthOfArrayLike(O).
-size_t length_of(JsValue object) { return to_length(object.get_property("length")); }
+/// LengthOfArrayLike(O): `? ToLength(? Get(O, "length"))`, and that is a
+/// property lookup, not an own-property read. A `String` object keeps `length`
+/// on `String.prototype` and its characters on the object, so reading it any
+/// other way made `Array.prototype.every.call(new String("432"), f)` visit
+/// nothing: the receiver answered a length of 0 and the run was skipped.
+size_t length_of(JsValue object) {
+    if (object.type == JsType::String) return object.string_val.length();
+    return to_length(object.get_property("length"));
+}
+
+/// LengthOfArrayLike for a method, with the receiver null check first.
+size_t array_like_length(const JsValue& object, const char* method) {
+    if (object.is_nullish()) {
+        js_throw_type_error(std::string("Array.prototype.") + method + " called on null or undefined");
+    }
+    return length_of(object);
+}
+
+/// The length a method that *builds* an array may have. `map`, `slice` and
+/// their relatives make a real array of their result, and a real array is at
+/// most 2^32-1 long; a longer source is the RangeError of ArrayCreate, thrown
+/// before the first callback runs, which is what `create-non-array-invalid-len`
+/// asks for.
+size_t array_result_length(size_t length, const char* method) {
+    if (length > 4294967295ull) {
+        js_throw_range_error(std::string("Array.prototype.") + method +
+                             ": the result would be longer than 2^32 - 1");
+    }
+    return length;
+}
+
+/// The largest index the standard will visit one at a time. Past this a run of
+/// holes is not walked: 16 million indices is already a test of this engine's
+/// patience, not a page.
+constexpr size_t kMaxWalkedIndices = 1u << 24;
+
+/// The largest string `join` will build (512 MiB). A `length` whose *minimum*
+/// result — every place empty and only the separators — already exceeds it is
+/// a RangeError, which is what V8 and SpiderMonkey answer for
+/// `{ length: 2**53 - 1 }.join()`; the alternative is a loop that never ends.
+constexpr size_t kMaxJoinedBytes = 1u << 29;
+
+/// The integer key a property key is: "0", "17", "9007199254740989", but not
+/// "01", "-1" or "1.5". Not an *array index* — one of those is below 2^32-1 —
+/// because these methods ask `Get(O, ToString(k))` of an object whose keys are
+/// ordinary strings, and test262's `length-exceeding-integer-limit` and
+/// `15.4.4.15-3-28` both put a key past 2^32-1 on one. Keys go up to 2^53-1,
+/// the last integer a double holds exactly, which is the longest `length` the
+/// standard allows. `JsValue.cpp` has its own copy of a narrower rule; it is
+/// private to that file and answers a different question.
+static bool as_array_index(const std::string& key, size_t& out) {
+    if (key.empty() || key.size() > 16) return false;
+    if (key[0] == '0' && key.size() > 1) return false;
+    size_t value = 0;
+    for (char c : key) {
+        if (c < '0' || c > '9') return false;
+        const size_t digit = static_cast<size_t>(c - '0');
+        if (value > (9007199254740991ull - digit) / 10) return false;
+        value = value * 10 + digit;
+    }
+    out = value;
+    return true;
+}
+
+/// Keys that are engine bookkeeping rather than script-visible properties:
+/// symbols ("@@..."), internal slots ("%...") and the legacy "__name__"
+/// markers. `JsValue.cpp` has the same list; it is private to that file.
+static bool hidden_key(const std::string& key) {
+    if (key.size() >= 2 && key[0] == '@' && key[1] == '@') return true;
+    if (!key.empty() && key[0] == '%') return true;
+    return key.size() >= 5 && key[0] == '_' && key[1] == '_' &&
+           key[key.size() - 1] == '_' && key[key.size() - 2] == '_';
+}
+
+/// The indices `cell` itself answers HasProperty for, below `limit`, added to
+/// `out`: its property map's integer keys, and — because `Array.prototype` is
+/// an array — its elements. `Array.prototype[0] = "x"` writes an element, not
+/// a property, and every array below it answers yes to index 0 afterwards.
+static void collect_link_indices(const JsObject* cell, size_t limit, std::vector<size_t>& out) {
+    if (!cell) return;
+    for (const auto& entry : cell->properties) {
+        if (hidden_key(entry.first)) continue;
+        size_t index = 0;
+        if (as_array_index(entry.first, index) && index < limit) out.push_back(index);
+    }
+    if (cell->is_array) {
+        const size_t count = std::min(cell->array_elements.size(), limit);
+        for (size_t i = 0; i < count; ++i) {
+            if (!cell->array_holes || !cell->array_holes->empty_slot(i)) out.push_back(i);
+        }
+    }
+}
+
+/// True when any link in `object`'s prototype chain has an index of its own.
+/// Such a link can make `HasProperty` say yes to an index `object` does not
+/// have, which is the one case a walk of the object's own places cannot answer
+/// on its own.
+static bool prototype_holds_an_index(const JsValue& object) {
+    // A receiver that is not an object (`[].forEach.call(5)`) has no chain for
+    // a property to reach, so it cannot be made to answer for an index.
+    if (!object.is_object_like()) return false;
+    size_t guard = 0;
+    for (JsObject* cell = object.prototype_object(); cell && guard < 512; cell = cell->prototype, ++guard) {
+        for (const auto& entry : cell->properties) {
+            size_t index = 0;
+            if (!hidden_key(entry.first) && as_array_index(entry.first, index)) return true;
+        }
+        if (cell->is_array && !cell->array_elements.empty()) {
+            if (!cell->array_holes) return true;
+            for (size_t i = 0; i < cell->array_elements.size(); ++i) {
+                if (!cell->array_holes->empty_slot(i)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+/// The places of `object` that are there, below `limit`, ascending: what
+/// `HasProperty(O, k)` would say yes to, without asking it once per index.
+///
+/// This is the difference between an answer and a dead process. The standard
+/// says `for k = 0 to len-1: HasProperty`; read literally, `{ 0: 9, length:
+/// Infinity }` is four billion questions to find one element, and `{ length:
+/// 2**32 }` cannot be counted at all. The places that are there is a finite
+/// list — the own elements that are not holes, the map's integer keys, and the
+/// chain's integer keys bounded by `limit` — so that is what is walked.
+struct IndexWalk {
+    std::vector<size_t> indices;
+};
+
+/// A `String` object (`new String("432")`) keeps its characters and its
+/// `length` on `String.prototype`, not on itself, so neither the element walk
+/// nor the property map below finds them. It is a string: its places are
+/// 0 … len-1.
+static bool is_string_object(const JsValue& value) {
+    return value.is_object_like() && value.object_val && value.object_val->klass == ObjectClass::String;
+}
+
+static IndexWalk present_indices(const JsValue& object, size_t limit) {
+    IndexWalk walk;
+    std::vector<size_t> found;
+    if (object.type == JsType::String) {
+        const size_t length = std::min<size_t>(object.string_val.length(), limit);
+        found.reserve(length);
+        for (size_t i = 0; i < length; ++i) found.push_back(i);
+        walk.indices = std::move(found);
+        return walk;
+    }
+    if (is_string_object(object)) {
+        const size_t length = std::min<size_t>(length_of(object), limit);
+        found.reserve(length);
+        for (size_t i = 0; i < length; ++i) found.push_back(i);
+    }
+    if (object.is_array()) {
+        // The places that are elements. A hole is not one, unless the map has
+        // it (an accessor on an index, `Object.defineProperty`), which the
+        // property scan below adds.
+        const auto& elements = object.object_val->array_elements;
+        const size_t count = std::min(elements.size(), limit);
+        for (size_t i = 0; i < count; ++i) {
+            if (!object.is_array_hole(i)) found.push_back(i);
+        }
+    }
+    JsObject* cell = object.property_cell();
+    if (cell) {
+        for (const auto& entry : cell->properties) {
+            if (hidden_key(entry.first)) continue;
+            size_t index = 0;
+            if (!as_array_index(entry.first, index) || index >= limit) continue;
+            // An own element already answered for this index above: the map
+            // holds it only as the place it became, and the element is the
+            // property.
+            if (object.is_array() && index < object.object_val->array_elements.size() &&
+                !object.is_array_hole(index)) {
+                continue;
+            }
+            found.push_back(index);
+        }
+    }
+    // The chain's own indices, bounded by the length like everything else: an
+    // index the prototype has past the length is not visited, because the loop
+    // stops at the length.
+    if (prototype_holds_an_index(object)) {
+        size_t guard = 0;
+        for (JsObject* proto = object.prototype_object(); proto && guard < 512; proto = proto->prototype, ++guard) {
+            collect_link_indices(proto, limit, found);
+        }
+        // A `String` object's characters are on its prototype as one link's
+        // own indices; they are already merged above.
+    }
+    std::sort(found.begin(), found.end());
+    found.erase(std::unique(found.begin(), found.end()), found.end());
+    walk.indices = std::move(found);
+    return walk;
+}
+
+/// The value at `index`, asked as the standard asks it: `Get(O, key)`. A
+/// string receiver answers its own characters, which are properties of the
+/// primitive and not of any object this engine made for it.
+static JsValue get_index(const JsValue& object, size_t index) {
+    if (object.type == JsType::String) {
+        if (index < object.string_val.length()) {
+            return JsValue::make_string(JsString::from_unit(object.string_val.unit_at(index)));
+        }
+        return JsValue::make_undefined();
+    }
+    return object.get_property(js_number_to_string(static_cast<double>(index)));
+}
+
+/// `HasProperty(O, key)` the same way. A string has its own indices; every
+/// other receiver asks the ordinary lookup, which walks the prototype chain.
+static bool has_index_property(const JsValue& object, size_t index) {
+    if (object.type == JsType::String) return index < object.string_val.length();
+    return object.has_property(std::to_string(index));
+}
 
 /// True when a method may keep using this engine's dense element vector: a real
 /// array, no accessor on a place, and nothing that would refuse a write.
@@ -144,6 +357,40 @@ bool dense_path(const JsValue& object) {
     const auto entry = cell->properties.find("length");
     return entry == cell->properties.end() || (entry->flags & PropertyMap::Writable) != 0;
 }
+
+/// The places `begin` up to `end` of `object`, as an array: `Array.prototype.
+/// slice`, and the shape every method that copies wants. A place the source
+/// has is its value; a place it does not have is a hole.
+
+static JsValue copy_places(const JsValue& object, size_t begin, size_t end, const char* method) {
+    const size_t count = end - begin;
+    if (dense_path(object) && !object.object_val->array_holes && end <= elements_of(object).size()) {
+        const auto& elements = elements_of(object);
+        JsValue result = JsValue::make_array();
+        result.object_val->array_elements.assign(elements.begin() + static_cast<std::ptrdiff_t>(begin),
+                                                 elements.begin() + static_cast<std::ptrdiff_t>(end));
+        return result;
+    }
+    const IndexWalk walk = present_indices(object, end);
+    // Every place between `begin` and `end` is laid out, and the ones the walk
+    // did not name are holes. A range too long to lay out is the RangeError of
+    // ArrayCreate, before anything is allocated.
+    array_result_length(count, method);
+    if (count > kMaxWalkedIndices) {
+        js_throw_range_error(std::string("Array.prototype.") + method +
+                             ": the result would be too long to build");
+    }
+    std::vector<JsValue> kept(count, JsValue::make_undefined());
+    JsValue result = JsValue::make_array(kept);
+    for (size_t i = 0; i < count; ++i) result.set_array_hole(i);
+    for (size_t index : walk.indices) {
+        if (index < begin || index >= end) continue;
+        kept[index - begin] = get_index(object, index);
+        result.clear_array_hole(index - begin);
+    }
+    return result;
+}
+
 
 /// The dense form for a method that reads the places as well as writing them:
 /// a place the array does not have must read `undefined`, or the vector would

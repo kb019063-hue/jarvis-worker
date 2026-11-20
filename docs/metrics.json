@@ -1,0 +1,74 @@
+{
+  "_what_this_is": [
+    "The numbers the documents publish that had to be *measured* rather than counted.",
+    "A count is derived from the tree at check time and never stored: the unit suite",
+    "count is the RUN_TEST list in tests/test_suite.cpp, and the corpus totals are the",
+    "cases in tests/js-conformance and tests/dom-conformance, parsed by the same parser",
+    "the runners use. A score is measured by running something, so it is written down",
+    "here with the command that produced it and the day it was produced.",
+    "",
+    "tools/ci/check_numbers.py reads this file. Its check mode fails when a figure in",
+    "the documents disagrees with the ledger or with the tree; its --write mode",
+    "rewrites the figures the documents publish from both, in one pass. `make metrics`",
+    "is --write, and is what to run after merging main instead of editing the counts",
+    "by hand in five files.",
+    "",
+    "A figure here is not a promise: it is what a command printed on the date beside",
+    "it. When the command no longer prints it, re-run the command, not the number.",
+    "",
+    "Not in this ledger, and why: the web-platform-tests, URL and XML scores need a",
+    "corpus that is downloaded on first use (tests/xml/README.md), so `make wpt`,",
+    "`make url-conformance` and `make xml-conformance` are the authority for those and",
+    "their floors live in the Makefile. The ASan floors are the same scores under",
+    "sanitizers and are written by `make asan`, not here."
+  ],
+  "measured": {
+    "unit_suites": {
+      "derived": "RUN_TEST lines of tests/test_suite.cpp"
+    },
+    "js_conformance": {
+      "pass": 1137,
+      "command": "make js-conformance",
+      "date": "2026-11-20",
+      "note": "the total is the corpus on disk; only the pass count needs a run"
+    },
+    "dom_conformance": {
+      "pass": 678,
+      "command": "make dom-conformance",
+      "date": "2026-11-20"
+    },
+    "everyday_probe": {
+      "pass": 90,
+      "of": 90,
+      "command": "make js-conformance (the probe runs at the end of it)",
+      "date": "2026-11-20"
+    },
+    "test262_default_directories": {
+      "before_pass": 12657,
+      "before_of": 15686,
+      "now_pass": 13654,
+      "now_of": 15686,
+      "fixed": 997,
+      "command": "python3 tools/conformance/run_test262.py --binary before=<branch point> --binary now=build/litebird",
+      "date": "2026-11-20",
+      "note": "the 21 default directories; 'before' is the commit the phase started from"
+    },
+    "test262_class_directories": {
+      "before_pass": 6832,
+      "before_of": 8551,
+      "now_pass": 7776,
+      "now_of": 8551,
+      "fixed": 944,
+      "command": "python3 tools/conformance/run_test262.py language/statements/class language/expressions/class language/expressions/in",
+      "date": "2026-11-20",
+      "note": "language/statements/class, language/expressions/class, language/expressions/in"
+    },
+    "test262_whole_suite": {
+      "pass": 31161,
+      "of": 47967,
+      "command": "python3 tools/conformance/run_test262.py built-ins language annexB",
+      "date": "2026-11-20",
+      "note": "modules are skipped by the runner; built-ins, language and annexB only"
+    }
+  }
+}

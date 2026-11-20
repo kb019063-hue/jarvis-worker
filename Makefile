@@ -51,6 +51,7 @@ SRCS = src/common/Color.cpp \
        src/js/Heap.cpp \
        src/js/VM.cpp \
        src/js/JsInterpreter.cpp \
+       src/js/TypedArray.cpp \
        src/js/JsEval.cpp \
        src/js/JsOps.cpp \
        src/js/BuiltinsObject.cpp \

@@ -15063,8 +15063,6 @@ TEST(cssom_media_rules_and_the_cascade_inside_them) {
         }
         function name(f) { try { f(); return 'no throw'; } catch (e) { return e.name; } }
 
-        var sheet = document.querySelector('style').sheet;
-        var target = document.getElementById('target');
 
         // The block is a rule of the sheet, and the rules inside it are its
         // own: not the sheet's.
@@ -15485,6 +15483,144 @@ TEST(array_holes_are_not_elements) {
     assert(js.eval("failures.join('; ')").to_string().empty());
 }
 
+TEST(cssom_a_sheet_a_script_constructs) {
+    using namespace litebird;
+    // Phase 111. `new CSSStyleSheet()` is legal CSSOM, and it was an "Illegal
+    // constructor": `register_style_interfaces` gave it no `construct`, so the
+    // only sheets a script could reach were the ones an element owned. That
+    // made the rest of the CSSOM unusable from script — `insertRule` on a sheet
+    // of one's own is how a page writes a rule — and it is what the row in
+    // AGENTS.md was about.
+    //
+    // The rules a constructed sheet holds are the same `SheetRule`s a <style>
+    // element's are, so everything below is the existing machinery: rules in
+    // source order, a live `cssRules`, one object per rule, `@media` as a
+    // rule of its own. What is new is `replace`/`replaceSync` and the
+    // constructor. Every line was compared against jsdom before it was
+    // written down.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+
+        // The constructor, and what a sheet with nothing in it is.
+        var sheet = new CSSStyleSheet();
+        ok('it is a CSSStyleSheet', sheet instanceof CSSStyleSheet, true);
+        ok('its brand', Object.prototype.toString.call(sheet), '[object CSSStyleSheet]');
+        ok('it starts empty', sheet.cssRules.length, 0);
+        ok('no element owns it', sheet.ownerNode, null);
+        ok('and no rule does', sheet.ownerRule, null);
+        ok('its type', sheet.type, 'text/css');
+        ok('its href', sheet.href, null);
+
+        // insertRule fills it, and the rules are the same objects the rules of
+        // a sheet read from text are.
+        ok('insertRule answers the index', sheet.insertRule('a { color: red }', 0), 0);
+        ok('one rule now', sheet.cssRules.length, 1);
+        var rule = sheet.cssRules[0];
+        ok('it is a style rule', rule instanceof CSSStyleRule, true);
+        ok('a CSSRule too', rule instanceof CSSRule, true);
+        ok('its selector', rule.selectorText, 'a');
+        ok('its declaration', rule.style.color, 'red');
+        ok('its cssText', rule.cssText, 'a { color: red; }');
+        ok('it is in this sheet', rule.parentStyleSheet === sheet, true);
+        ok('and not in another rule', rule.parentRule, null);
+        ok('one object per rule', sheet.cssRules.item(0) === sheet.cssRules[0], true);
+
+        // A second rule, and the order they are in.
+        ok('insertRule at the end', sheet.insertRule('b { color: blue }', 1), 1);
+        ok('two rules', sheet.cssRules.length, 2);
+        ok('the first', sheet.cssRules[0].selectorText, 'a');
+        ok('the second', sheet.cssRules[1].selectorText, 'b');
+        sheet.insertRule('c { color: green }', 0);
+        ok('inserted at 0 comes first', sheet.cssRules[0].selectorText, 'c');
+        ok('and the rest moved down', sheet.cssRules[2].selectorText, 'b');
+
+        // An `@media` block is a rule of the sheet.
+        var mediaIndex = sheet.insertRule('@media (min-width: 500px) { d { color: red } }', 3);
+        ok('the media rule lands where it was put', mediaIndex, 3);
+        var mediaRule = sheet.cssRules[3];
+        ok('it is a CSSMediaRule', mediaRule instanceof CSSMediaRule, true);
+        ok('its query', mediaRule.media.mediaText, '(min-width: 500px)');
+        ok('the rule inside', mediaRule.cssRules.length, 1);
+        ok('and its selector', mediaRule.cssRules[0].selectorText, 'd');
+        ok('the inner rule knows its media rule', mediaRule.cssRules[0].parentRule === mediaRule, true);
+
+        // deleteRule.
+        var before = sheet.cssRules.length;
+        sheet.deleteRule(0);
+        ok('deleteRule removes one', sheet.cssRules.length, before - 1);
+        ok('the one after it is first now', sheet.cssRules[0].selectorText, 'a');
+
+        // The errors CSSOM has for this.
+        var thrown = null;
+        try { sheet.insertRule('a {', 0); } catch (e) { thrown = e; }
+        ok('a rule that is not one', thrown && thrown.name, 'SyntaxError');
+        thrown = null;
+        try { sheet.insertRule('a { color: red }', 99); } catch (e) { thrown = e; }
+        ok('an index past the end', thrown && thrown.name, 'IndexSizeError');
+        thrown = null;
+        try { sheet.deleteRule(99); } catch (e) { thrown = e; }
+        ok('deleting past the end', thrown && thrown.name, 'IndexSizeError');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+
+    // replace and replaceSync: the text becomes exactly this.
+    js.eval(R"JS(
+        var fresh = new CSSStyleSheet();
+        fresh.replaceSync('a { color: red } b { color: blue }');
+        ok('replaceSync takes two rules', fresh.cssRules.length, 2);
+        ok('the first', fresh.cssRules[0].selectorText, 'a');
+        ok('and the second', fresh.cssRules[1].selectorText, 'b');
+        fresh.replaceSync('c { color: green }');
+        ok('replaceSync replaces them', fresh.cssRules.length, 1);
+        ok('with the one it was given', fresh.cssRules[0].selectorText, 'c');
+        fresh.replaceSync('');
+        ok('and an empty text empties it', fresh.cssRules.length, 0);
+        // A rule inserted before a replace does not survive it: the text is
+        // the whole of the sheet.
+        var mixed = new CSSStyleSheet();
+        mixed.insertRule('a { color: red }', 0);
+        mixed.replaceSync('b { color: blue }');
+        ok('insertRule then replaceSync', mixed.cssRules.length, 1);
+        ok('the replace wins', mixed.cssRules[0].selectorText, 'b');
+
+        // A subclass keeps working: the constructor is one that `new.target`
+        // can change, as every constructible interface's is.
+        class Mine extends CSSStyleSheet {}
+        var mine = new Mine();
+        mine.insertRule('x { color: red }', 0);
+        ok('a subclass is one', mine instanceof Mine, true);
+        ok('and fills like one', mine.cssRules.length, 1);
+        ok('its rule is a style rule', mine.cssRules[0] instanceof CSSStyleRule, true);
+
+        // The sheet a script builds is not the cascade's: no element reads it,
+        // and a rule added to it does not style the page.
+        document.head.innerHTML = '<style id="s">p { color: red }</style>';
+        document.body.innerHTML = '<p id="p">x</p>';
+        var owned = document.getElementById('s').sheet;
+        ok('an owned sheet is a CSSStyleSheet', owned instanceof CSSStyleSheet, true);
+        ok('it has its rule', owned.cssRules.length, 1);
+        ok('and it names its element', owned.ownerNode === document.getElementById('s'), true);
+        ok('the cascade reads it', getComputedStyle(document.getElementById('p')).color, 'rgb(255, 0, 0)');
+        // A sheet a script builds is not in the cascade: nothing owns it, so
+        // a rule inserted into it styles nothing.
+        var standalone = new CSSStyleSheet();
+        standalone.insertRule('p { color: blue }', 0);
+        ok('the constructed sheet has its rule', standalone.cssRules.length, 1);
+        ok('and the page is not styled by it', getComputedStyle(document.getElementById('p')).color, 'rgb(255, 0, 0)');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
 TEST(destructuring_asks_the_value_for_its_iterator) {
     using namespace litebird;
     // Phase 102, finding 108. `IterationCursor` chose its array mode by
@@ -25638,6 +25774,114 @@ TEST(instanceof_asks_symbol_has_instance) {
     assert(none_failed());
 }
 
+// Phase 106: ArrayBuffer and the typed arrays.
+//
+// The oracle is the standard's conversions, not an implementation: an element
+// type is the function it applies to a value, so Uint8Array's 258 is 2 and
+// Int8Array's 200 is -56 whatever a browser's source says. Each case below is
+// one of those conversions, one of the indexing rules (an index past the end
+// is dropped, an element cannot be deleted, a non-index name is an ordinary
+// property), or one of the window rules (two views of one buffer are one
+// object, a subarray shares its bytes and a slice does not).
+TEST(arraybuffer_and_typed_arrays) {
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- the eleven element types, each storing its own conversion --------
+    assert(text("new Uint8Array([1, 2, 300]).join()") == "1,2,44");
+    assert(text("var a = new Uint8Array(1); a[0] = 258; a[0]") == "2");
+    assert(text("var a = new Int8Array(1); a[0] = 200; a[0]") == "-56");
+    assert(text("var a = new Int16Array(1); a[0] = 40000; a[0]") == "-25536");
+    assert(text("var a = new Uint16Array(1); a[0] = 65537; a[0]") == "1");
+    assert(text("var a = new Int32Array(1); a[0] = 2147483648; a[0]") == "-2147483648");
+    assert(text("var a = new Uint32Array(1); a[0] = -1; a[0]") == "4294967295");
+    assert(text("var a = new Float32Array(1); a[0] = 1.5; a[0]") == "1.5");
+    assert(text("var a = new Float64Array(1); a[0] = 0.1; a[0]") == "0.1");
+    // Uint8ClampedArray clamps and rounds half to even, and never wraps: this
+    // is the one type whose conversion is not modulo 2^8.
+    assert(text("var a = new Uint8ClampedArray(4); a[0] = 300; a[1] = -4; a[2] = 2.5; a[3] = 3.5; a.join()") ==
+           "255,0,2,4");
+    // A float that is not finite survives Float64Array and is widened by it.
+    assert(text("var a = new Float64Array([1, 2, 3]); a.length + '|' + a[1] + '|' + a.join('-')") == "3|2|1-2-3");
+
+    // ---- length, byteLength, byteOffset, BYTES_PER_ELEMENT ---------------
+    assert(text("var u = new Uint16Array(3); u.length + '|' + u.byteLength + '|' + u.byteOffset") == "3|6|0");
+    assert(text("Uint32Array.BYTES_PER_ELEMENT + '|' + Uint8Array.prototype.BYTES_PER_ELEMENT") == "4|1");
+
+    // ---- indexing: in range, past the end, and not an index at all -------
+    assert(text("var a = new Uint8Array(2); a[5] = 9; String(a[5])") == "undefined");
+    assert(text("var a = new Uint8Array(2); a[5] = 9; a.length") == "2");
+    assert(text("var a = new Uint8Array(2); 1 in a") == "true");
+    assert(text("var a = new Uint8Array(2); 5 in a") == "false");
+    // An element is not configurable, and `delete` of one answers false.
+    assert(text("var a = new Uint8Array(2); delete a[0]") == "false");
+    assert(text("Object.keys(new Uint8Array(3)).join()") == "0,1,2");
+    // `-1` is not a canonical index, so it is an ordinary property.
+    assert(text("var a = new Uint8Array(2); a[-1] = 9; a[-1]") == "9");
+    assert(text("var a = new Uint8Array(2); a['x'] = 5; a.x") == "5");
+
+    // ---- windows: one buffer, one object, shared bytes -------------------
+    assert(text("var b = new ArrayBuffer(8); new Uint8Array(b).buffer === new Uint16Array(b).buffer") == "true");
+    assert(text("var b = new ArrayBuffer(8); b.byteLength") == "8");
+    assert(text("var u = new Uint8Array(new ArrayBuffer(8), 4); u.length + '|' + u.byteOffset") == "4|4");
+    assert(text("var u = new Uint16Array(new ArrayBuffer(8), 4, 2); u.length + '|' + u.byteOffset") == "2|4");
+    assert(text("var b = new ArrayBuffer(4); var x = new Uint8Array(b); var y = new Uint8Array(b); "
+                "x[0] = 7; y[0]") == "7");
+    // subarray shares the bytes; slice copies them.
+    assert(text("var t = new Uint8Array([1,2,3]); var w = t.subarray(1); w[0] = 9; t[1]") == "9");
+    assert(text("var t = new Uint8Array([1,2,3]); var w = t.slice(1); w[0] = 9; t[1]") == "2");
+
+    // ---- methods ---------------------------------------------------------
+    assert(text("new Uint8Array([3,1,2]).slice(1).join()") == "1,2");
+    // A negative index counts from the end.
+    assert(text("new Uint8Array([3,1,2]).slice(-2).join()") == "1,2");
+    assert(text("new Uint8Array([3,1,2]).slice(0,-1).join()") == "3,1");
+    assert(text("new Uint8Array(3).fill(7).join()") == "7,7,7");
+    assert(text("new Uint8Array([0,0,0,0]).fill(5, 1, 3).join()") == "0,5,5,0");
+    assert(text("new Uint8Array([1,0,1]).indexOf(1)") == "0");
+    assert(text("new Uint8Array([1,0,1]).lastIndexOf(1)") == "2");
+    assert(text("new Uint8Array([1,0,1]).indexOf(9)") == "-1");
+    assert(text("new Uint8Array([1,2]).includes(2)") == "true");
+    assert(text("new Uint8Array([4,5]).join('-')") == "4-5");
+    assert(text("String(new Uint8Array([1,2]))") == "1,2");
+    assert(text("var t = new Uint8Array(4); t.set([1,2], 1); t.join()") == "0,1,2,0");
+    // A set from an overlapping window reads before it writes.
+    assert(text("var t = new Uint8Array([1,2,3,4]); t.set(t.subarray(0,3), 1); t.join()") == "1,1,2,3");
+    assert(text("new Uint8Array([1,2,3]).reverse().join()") == "3,2,1");
+    assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(0,3).join()") == "4,5,3,4,5");
+    assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(1,0,3).join()") == "1,1,2,3,5");
+    // A negative relative index counts from the end here too.
+    assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(0,-2).join()") == "4,5,3,4,5");
+    assert(text("Uint8Array.from([1,2]).join()") == "1,2");
+    assert(text("Uint8Array.from([1,2], function (x) { return x * 2; }).join()") == "2,4");
+    assert(text("Uint16Array.of(1,2).join()") == "1,2");
+    assert(text("ArrayBuffer.isView(new Uint8Array(1)) + '|' + ArrayBuffer.isView({})") == "true|false");
+
+    // ---- iterators and Array.from ---------------------------------------
+    assert(text("var o = []; for (var v of new Uint8Array([4,5])) o.push(v); o.join()") == "4,5");
+    assert(text("var o = []; for (var k of new Uint8Array(2).keys()) o.push(k); o.join()") == "0,1");
+    assert(text("Array.from(new Uint8Array([1,2])).join()") == "1,2");
+
+    // ---- the chain the standard has -------------------------------------
+    assert(text("new Uint8Array(1) instanceof Uint8Array") == "true");
+    assert(text("new Uint8Array(1) instanceof Int8Array") == "false");
+    assert(text("Object.prototype.toString.call(new Float32Array(0))") == "[object Float32Array]");
+    assert(text("Object.getPrototypeOf(Uint8Array) === Object.getPrototypeOf(Int16Array)") == "true");
+    assert(text("Object.getPrototypeOf(new Uint8Array(1)) === Uint8Array.prototype") == "true");
+    // A subclass of a typed array is one: the element type follows new.target.
+    assert(text("class L extends Uint8Array {} var l = new L(2); "
+                "(l instanceof L) + '|' + (l instanceof Uint8Array) + '|' + l.length") == "true|true|2");
+
+    // ---- the errors a browser throws ------------------------------------
+    assert(text("errName(function () { new Uint8Array(-1); })") == "TypeError");
+    assert(text("errName(function () { new Uint16Array(new ArrayBuffer(8), 1); })") == "TypeError");
+    assert(text("errName(function () { new Uint32Array(new ArrayBuffer(8), 0, 3); })") == "TypeError");
+    assert(text("errName(function () { new Uint16Array(new ArrayBuffer(7)); })") == "TypeError");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -25952,6 +26196,7 @@ int main() {
     RUN_TEST(cssom_sheets_rules_insert_amounts_and_fonts);
     RUN_TEST(cssom_media_rules_and_the_cascade_inside_them);
     RUN_TEST(keyframes_are_rules_of_the_cssom);
+    RUN_TEST(cssom_a_sheet_a_script_constructs);
 
     // Phase 81: an index of an array is either an element or a hole.
     RUN_TEST(array_holes_are_not_elements);
@@ -26007,6 +26252,8 @@ int main() {
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
 
+    // Phase 106: ArrayBuffer and the typed arrays.
+    RUN_TEST(arraybuffer_and_typed_arrays);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

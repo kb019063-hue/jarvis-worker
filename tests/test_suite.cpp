@@ -24863,6 +24863,125 @@ TEST(instanceof_asks_symbol_has_instance) {
     assert(none_failed());
 }
 
+// ---------------------------------------------------------------------------
+// Phase 123: a strict `delete` refuses what it cannot remove.
+// ---------------------------------------------------------------------------
+
+TEST(a_strict_delete_refuses_what_it_cannot_remove) {
+    using namespace litebird;
+    // Phase 123, finding 128. `delete` was one line of the evaluator: it asked
+    // the object and returned what it was told. Three things were missing.
+    //
+    //   * `[[Delete]]` answered true for an array's `length`, which is
+    //     computed and not configurable: `delete a.length` was a "yes" and the
+    //     array kept its length, so no code could tell the two apart.
+    //   * nothing turned a refused delete into a TypeError in strict code,
+    //     where `DeletePropertyOrThrow` requires one. Sloppy code reads the
+    //     same refusal as the answer `false`, which is why the two modes had
+    //     to be told apart at the operator and not in `[[Delete]]`.
+    //   * `delete name` was never an early error, and answered `false` for
+    //     every name: for one that resolves to nothing (`delete notDeclared`)
+    //     and for a property of the global object (`globalThis.x = 1; delete
+    //     x`) the language answers `true` and removes the property.
+    //
+    // The messages are V8's — `Cannot delete property 'x' of #<Object>` — and
+    // every expected string below is what Node.js printed for the same script.
+    // What is not here because it is not so yet: an index of an array defined
+    // with a descriptor keeps no attributes of its own (its own row), so
+    // `Object.defineProperty(a, '0', { value: 1 })` makes an element that can
+    // still be deleted; and `arguments` prints as `#<Array>` in the message
+    // because its prototype is `Array.prototype` here, which is its own
+    // divergence.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    auto none_failed = [&]() {
+        const std::string failed = js.eval("failures.join('\\n')").to_string();
+        if (!failed.empty()) std::cerr << failed << "\n";
+        return failed.empty();
+    };
+
+    js.eval(R"JS(
+var failures = [];
+function check(what, f, want) {
+  var got;
+  try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+  if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+}
+function refused(o, k) { Object.defineProperty(o, k, { value: 1 }); return o; }
+check('sloppy code reads the refusal as false', function () {
+  var o = refused({}, 'x');
+  return [delete o.x, o.x, 'x' in o];
+}, '[false,1,true]');
+check('strict code makes it a TypeError', function () {
+  var caught = [];
+  (function () { 'use strict'; var o = refused({}, 'x'); try { delete o.x; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var o = Object.freeze({ y: 2 }); try { delete o.y; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var s = new String('ab'); try { delete s.length; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var d = refused(new Date(0), 'q'); try { delete d.q; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var m = refused(new Map(), 'q'); try { delete m.q; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; class C {} var c = refused(new C(), 'q'); try { delete c.q; } catch (e) { caught.push(e.name); } })();
+  return caught;
+}, '["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]');
+check('an array length cannot be deleted', function () {
+  var a = [1, 2, 3];
+  var sloppy = delete a.length;
+  var caught = 'none';
+  (function () { 'use strict'; try { delete a.length; } catch (e) { caught = e.name; } })();
+  return [sloppy, caught, a.length, a.join()];
+}, '[false,"TypeError",3,"1,2,3"]');
+check('what the message names', function () {
+  var said = [];
+  function refusal(o, k) {
+    var caught = '';
+    (function () { 'use strict'; try { delete o[k]; } catch (e) { caught = e.message; } })();
+    return caught;
+  }
+  function f() {}
+  said.push(refusal(refused({}, 'x'), 'x'));
+  said.push(refusal([1], 'length'));
+  said.push(refusal(refused(new Date(0), 'd'), 'd'));
+  said.push(refusal(refused(new Map(), 'm'), 'm'));
+  said.push(refusal(refused(Object.create(null), 'n'), 'n'));
+  said.push(refusal(refused(f, 'q'), 'q'));
+  said.push(refusal(refused(new String('ab'), 's'), 's'));
+  return said.join(' || ');
+}, "\"Cannot delete property 'x' of #<Object> || Cannot delete property 'length' of [object Array] || Cannot delete property 'd' of [object Date] || Cannot delete property 'm' of #<Map> || Cannot delete property 'n' of [object Object] || Cannot delete property 'q' of function f() {} || Cannot delete property 's' of [object String]\"");
+check('strictness belongs to the code that deletes', function () {
+  var o = refused({}, 'x');
+  var strict_inner = function () { 'use strict'; try { return delete o.x; } catch (e) { return e.name; } };
+  class Holder { static run() { try { return delete o.x; } catch (e) { return e.name; } } }
+  return [strict_inner(), Holder.run(), (function () { return delete o.x; })()];
+}, '["TypeError","TypeError",false]');
+check('what may be deleted is still deleted', function () {
+  var o = { x: 1 };
+  var a = [1, 2, 3];
+  var gone = delete a[1];
+  return [delete o.x, 'x' in o, gone, a.length, 1 in a, a.join(), delete o.nothere, delete this, delete (function () { return 1; })(), delete 1];
+}, '[true,false,true,3,false,"1,,3",true,true,true,true]');
+check('an identifier', function () {
+  var declared = 1;
+  var said = 'none';
+  try { eval("'use strict'; var x = 1; delete x;"); } catch (e) { said = e.name; }
+  return [delete declared, delete neverDeclaredAnywhere, said];
+}, '[false,true,"SyntaxError"]');
+check('a global property', function () {
+  globalThis.temp = 1;
+  var gone = delete temp;
+  var stays = 'temp' in globalThis;
+  var v = 1;
+  return [gone, stays, delete v];
+}, '[true,false,false]');
+check('Reflect answers false rather than throwing', function () {
+  var o = refused({}, 'x');
+  return [Reflect.deleteProperty(o, 'x'), o.x];
+}, '[false,1]');
+    )JS");
+    assert(none_failed());
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -25222,6 +25341,9 @@ int main() {
 
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
+
+    // Phase 123: a strict `delete` refuses what it cannot remove.
+    RUN_TEST(a_strict_delete_refuses_what_it_cannot_remove);
 
 
     std::cout << "\n\033[1;32mAll " << g_tests_run

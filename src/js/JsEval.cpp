@@ -1710,10 +1710,20 @@ void JsInterpreter::exec_var_decl(const VarDeclStmt* stmt, const EnvPtr& env) {
     }
 }
 
+void JsInterpreter::gc_stress_point() {
+    Heap& heap = Heap::default_heap();
+    if (!heap.take_gc_stress_request()) return;
+    // The collector finds its own roots, so nothing needs naming here; what
+    // the stress mode adds is that the moment is chosen by an allocation count
+    // rather than by the script.
+    heap.collect_garbage();
+}
+
 JsInterpreter::Flow JsInterpreter::exec(const Stmt* stmt, const EnvPtr& env, Frame& frame) {
     // Statements nest too (`if (a) if (b) ...`, an `else if` ladder, blocks in
     // blocks), with no expression in between for evaluate()'s guard to catch.
     js_check_stack();
+    gc_stress_point();
     switch (stmt->kind) {
         case NodeKind::ExprStmt: {
             JsValue value = evaluate(static_cast<const ExprStmt*>(stmt)->expression.get(), env);

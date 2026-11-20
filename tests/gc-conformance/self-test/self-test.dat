@@ -1,0 +1,16 @@
+#name a count only a collection can change
+#code
+var first = gc();
+var junk = [];
+for (var i = 0; i < 400; i++) junk.push({ i: i });
+var second = gc();
+console.log(second.collections_count - first.collections_count);
+
+#name a case that already fails says nothing about the collector
+#code
+console.log("about to fail");
+throw new Error("self-test");
+
+#name a case whose allocation rate never reaches the interval
+#code
+console.log(1 + 1);

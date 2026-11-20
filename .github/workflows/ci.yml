@@ -113,6 +113,15 @@ jobs:
         run: |
           make verify-brotli BROTLI_VERIFY_FLAGS=--skip-node
           make fuzz-brotli BROTLI_VERIFY_FLAGS=--skip-node
+      - name: Collection at a safe point changes nothing a program can see
+        # The negative control first (three cases the harness must be caught
+        # failing on), then 28 corpus cases at three seeds, then the 678 DOM
+        # pages at interval 2. The oracle is each program's own un-stressed
+        # output; a case whose stress run served no collection fails, so this
+        # cannot go green by not collecting. `make verify-gc-stress-full` runs
+        # interval 1 over the whole JS corpus and is not in CI.
+        run: make verify-gc-stress
+
 
   docs:
     name: Documentation shape

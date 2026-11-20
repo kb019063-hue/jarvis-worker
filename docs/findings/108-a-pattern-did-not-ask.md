@@ -52,7 +52,7 @@ python3 tools/conformance/run_js_conformance.py --quiet
 python3 tools/conformance/run_js_conformance.py --filter iteration --reference "node -e"
 # iteration.dat   84/84   100.0%
 ./build/test_suite
-# 262 engine test suites, all passing
+# 267 engine test suites, all passing
 ```
 
 Two cases were added to `tests/js-conformance/iteration.dat` (a string's code

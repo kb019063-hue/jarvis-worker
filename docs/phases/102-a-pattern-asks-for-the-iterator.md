@@ -95,7 +95,7 @@ make js-conformance
 # Everyday probe (fixed 90 cases): 90/90 (100.0%), before and after
 
 ./build/test_suite
-# 262 engine test suites, the new one being
+# 267 engine test suites, the new one being
 # destructuring_asks_the_value_for_its_iterator
 ```
 

@@ -56,6 +56,10 @@ struct DrawTextCommand {
     /// painter must draw the text layout measured, and `font-kerning: none`
     /// changes the width of a run, not only its appearance.
     bool font_kerning{true};
+    /// True when UAX #9 bidi already wrote this run's characters in visual
+    /// left-to-right order (mirrored and reversed); `FontRenderer` restores
+    /// logical order for OpenType shaping before reordering clusters visually.
+    bool is_rtl_visual{false};
 };
 
 struct DrawImageCommand {

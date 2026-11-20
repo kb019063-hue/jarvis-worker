@@ -168,9 +168,14 @@ void apply_bidi_to_line(LineBox& line) {
     if (text.empty()) return;
 
     const BidiParagraph paragraph = bidi_paragraph(text);
+    // UAX #9 X9 marks BN as removed for bidi resolution, including ZWNJ/ZWJ,
+    // which OpenType shaping still needs inside Arabic/Indic runs.
+    auto is_bidi_removed = [&](std::size_t idx) {
+        return paragraph.removed[idx] && text[idx] != 0x200C && text[idx] != 0x200D;
+    };
     bool right_to_left = false;
     for (std::size_t k = 0; k < text.size(); ++k) {
-        if (paragraph.removed[k]) continue;
+        if (is_bidi_removed(k)) continue;
         if (paragraph.levels[k] % 2 == 1) {
             right_to_left = true;
             break;
@@ -187,14 +192,14 @@ void apply_bidi_to_line(LineBox& line) {
     };
     std::vector<Run> runs;
     for (std::size_t k = 0; k < text.size();) {
-        if (paragraph.removed[k]) {
+        if (is_bidi_removed(k)) {
             ++k;
             continue;
         }
         const std::size_t f = fragment_of[k];
         const int level = paragraph.levels[k];
         std::size_t end = k + 1;
-        while (end < text.size() && !paragraph.removed[end] && fragment_of[end] == f &&
+        while (end < text.size() && !is_bidi_removed(end) && fragment_of[end] == f &&
                paragraph.levels[end] == level) {
             ++end;
         }
@@ -253,12 +258,17 @@ void apply_bidi_to_line(LineBox& line) {
         if (source.is_text && run.level % 2 == 1) {
             // The painter draws a run's characters left to right, so an
             // odd-level run is written out backwards (that is L2 inside the
-            // run) with each character mirrored (that is L4).
+            // run) with each character mirrored (that is L4). `is_rtl_visual`
+            // lets the OpenType shaper reverse back to logical order before
+            // joining/anchoring Arabic/Hebrew glyphs and then reorder clusters.
             const DecodedFragment& decoded_source = decoded[run.fragment];
             piece.text.clear();
             for (std::size_t k = run.last_char; k-- > run.first_char;) {
                 append_utf8(piece.text, bidi_mirror(decoded_source.codepoints[k]));
             }
+            piece.is_rtl_visual = true;
+        } else {
+            piece.is_rtl_visual = false;
         }
         visual.push_back(std::move(piece));
     }

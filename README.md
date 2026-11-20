@@ -680,7 +680,14 @@ twice.
   modifiers, duplicate named groups, `RegExp.escape()`, and `Symbol.*`
   dispatch), `Map`, `Set`, `WeakMap`, `WeakSet`, `Reflect`, the `Error` family,
   `structuredClone`, `globalThis`, `eval` and `Function`. Methods live on
-  shared prototypes; each interpreter has its own set (a realm).
+  shared prototypes; each interpreter has its own set (a realm). The
+  `Array.prototype` methods that move or copy places inside an array —
+  `reverse`, `sort`, `splice`, `copyWithin`, `fill`, `shift`, `unshift`,
+  `push`, `pop`, `toReversed`, `toSorted`, `toSpliced`, `with` — ask each place
+  as a property, so a getter or setter defined on an index runs, a frozen array
+  refuses the write with a `TypeError`, and an array-like object or a boxed
+  primitive is a receiver; a plain array still takes the dense path
+  (Phase 116, `docs/phases/116-the-methods-that-move-places.md`).
 - **Event loop:** tasks, microtasks and timers, with a microtask checkpoint
   whenever the script stack empties. `setTimeout`/`setInterval` (with extra
   arguments), `queueMicrotask`, `requestAnimationFrame`, `performance.now()`.

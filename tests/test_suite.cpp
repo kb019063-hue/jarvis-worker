@@ -25444,6 +25444,171 @@ TEST(bidi_reorders_hebrew_and_arabic_runs) {
     }
 }
 
+TEST(array_methods_that_move_places_ask_the_index) {
+    using namespace litebird;
+    // Phase 116, finding 125. The seven methods that move elements inside an
+    // array -- `reverse`, `sort`, `splice`, `copyWithin`, `fill`, `shift`,
+    // `unshift` -- used to read and write `array_elements` directly, which is
+    // this engine's dense vector for a plain array. That vector is not the
+    // array's properties: a place can be an accessor that
+    // `Object.defineProperty` put there (Phase 108), or a place only
+    // `Array.prototype` has. So `reverse` over a getter at index 0 never
+    // called it and left a data property where the accessor had been, `sort`
+    // never called a getter, and every one of the seven threw "requires an
+    // array" for a receiver that was an array-like object, a boxed primitive or
+    // a string -- while the standard has them work on any of those and only
+    // that, and throw for a write it is refused.
+    //
+    // Each method now asks `HasProperty`, `Get` and `Set` place by place,
+    // the way the standard is written, whenever the dense vector cannot answer
+    // the same (an accessor, a frozen or non-extensible array, a read-only
+    // `length`, or a hole that some prototype would answer). The dense form is
+    // still there for a plain array, which is why the shift/unshift/splice
+    // timings in tools/bench/bench_delete_shift.py are ~30/10/25 ms.
+    //
+    // Every case was run through Node.js first, and the expected text of each
+    // is what it printed.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+var failures = [];
+function check(what, f, want) {
+    var got;
+    try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+    if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+}
+function places(a) { var out = []; for (var i = 0; i < a.length; i++) out.push(i in a ? 'x' : '.'); return out.join(''); }
+check('reverse asks the accessor at a place and writes through it', function () {
+    var log = [];
+    var a = [1, 2, 3];
+    var store = 10;
+    Object.defineProperty(a, 0, { get: function () { log.push('get'); return store; },
+                                  set: function (v) { log.push('set=' + v); store = v; },
+                                  enumerable: true, configurable: true });
+    a.reverse();
+    return [log, a[0], a[1], a[2], places(a)];
+}, '[["get","set=3","get"],3,2,10,"xxx"]');
+check('sort reads what a getter answers and writes what a setter takes', function () {
+    var a = [3, 1, 2];
+    var log = [];
+    var store = 1;
+    Object.defineProperty(a, 1, { get: function () { log.push('get'); return store; },
+                                 set: function (v) { log.push('set=' + v); store = v; },
+                                 enumerable: true, configurable: true });
+    a.sort();
+    return [log.length > 0, a[0], a[1], a[2]];
+}, '[true,1,2,3]');
+check('splice reads the places it removes, and refuses to write one it cannot', function () {
+    var a = [1, 2, 3];
+    var log = [];
+    Object.defineProperty(a, 1, { get: function () { log.push('get'); return 20; },
+                                 enumerable: true, configurable: true });
+    var outcome;
+    try { a.splice(1, 1, 'x'); outcome = 'no throw'; } catch (e) { outcome = e.name; }
+    return [outcome, log];
+}, '["TypeError",["get"]]');
+check('copyWithin copies what a getter answers', function () {
+    var a = [1, 2, 3];
+    Object.defineProperty(a, 2, { get: function () { return 9; }, enumerable: true, configurable: true });
+    a.copyWithin(0, 2);
+    return [a[0], a[1], a[2]];
+}, '[9,2,9]');
+check('fill writes through the setter of a place', function () {
+    var log = [];
+    var a = [1, 2];
+    Object.defineProperty(a, 0, { get: function () { return 1; }, set: function (v) { log.push(v); },
+                                 enumerable: true, configurable: true });
+    a.fill(7);
+    return [log, a[0]];
+}, '[[7],1]');
+check('a frozen array refuses every method that writes', function () {
+    var results = [];
+    [function (a) { a.fill(0); }, function (a) { a.reverse(); }, function (a) { a.sort(); },
+     function (a) { a.splice(0, 1); }, function (a) { a.copyWithin(0, 1); },
+     function (a) { a.push(1); }, function (a) { a.pop(); }, function (a) { a.shift(); },
+     function (a) { a.unshift(1); }].forEach(function (f) {
+        var a = Object.freeze([1, 2]);
+        try { f(a); results.push('no throw'); } catch (e) { results.push(e.name); }
+    });
+    return results;
+}, '["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]');
+check('a primitive receiver is boxed, not refused', function () {
+    return [Array.prototype.reverse.call(true) instanceof Boolean,
+            Array.prototype.fill.call(1, 0) instanceof Number];
+}, '[true,true]');
+check('a string receiver refuses the writes to its characters', function () {
+    var results = [];
+    [function () { return Array.prototype.reverse.call('abc'); },
+     function () { return Array.prototype.fill.call('abc', 'x'); },
+     function () { return Array.prototype.splice.call('abc', 0, 1); }].forEach(function (f) {
+        try { f(); results.push('no throw'); } catch (e) { results.push(e.name); }
+    });
+    return results;
+}, '["TypeError","TypeError","TypeError"]');
+check('an array-like receiver is moved and answered with itself', function () {
+    var o = { 0: 'a', 1: 'b', length: 2 };
+    var back = Array.prototype.reverse.call(o);
+    var moved = { 0: 'a', 1: 'b', 2: 'c', length: 3 };
+    var removed = Array.prototype.splice.call(moved, 1, 1, 'x', 'y');
+    var one = { 0: 'a', length: 1 };
+    var grown = Array.prototype.unshift.call(one, 'z');
+    var shrunk = { 0: 'a', 1: 'b', length: 2 };
+    var first = Array.prototype.shift.call(shrunk);
+    var sorted = { 0: 'b', 1: 'a', length: 2 };
+    Array.prototype.sort.call(sorted);
+    return [back === o, o, removed, moved, grown, one, first, shrunk, sorted];
+}, '[true,{"0":"b","1":"a","length":2},["b"],{"0":"a","1":"x","2":"y","3":"c","length":4},2,{"0":"z","1":"a","length":2},"a",{"0":"b","length":1},{"0":"a","1":"b","length":2}]');
+check('a place the prototype has is read, and becomes own where it lands', function () {
+    Array.prototype[1] = 1;
+    var a = [0];
+    a.length = 2;
+    a.reverse();
+    var answer = [a[0], a[1], 0 in a, 1 in a];
+    delete Array.prototype[1];
+    return answer;
+}, '[1,0,true,true]');
+check('the methods that copy write every place', function () {
+    var holey = [3, , 1];
+    var sorted = holey.toSorted();
+    var reversed = [0, , 2].toReversed();
+    var spliced = [0, , 2].toSpliced(0, 0);
+    var replaced = [0, , 2].with(0, 9);
+    return [sorted, places(sorted), '2' in sorted,
+            reversed, places(reversed), '1' in reversed,
+            spliced, places(spliced), '1' in spliced,
+            replaced, places(replaced), '1' in replaced];
+}, '[[1,3,null],"xxx",true,[2,null,0],"xxx",true,[0,null,2],"xxx",true,[9,null,2],"xxx",true]');
+check('the methods that move in place keep a hole a hole', function () {
+    var a = [3, , 1];
+    a.sort();
+    var b = [1, , 3];
+    b.reverse();
+    return [a, places(a), b, places(b), a.hasOwnProperty(2), b.hasOwnProperty(1)];
+}, '[[1,3,null],"xx.",[3,null,1],"x.x",false,false]');
+check('none of the methods is a constructor', function () {
+    var results = [];
+    ['reverse', 'sort', 'splice', 'fill', 'copyWithin', 'shift', 'unshift', 'push', 'pop',
+     'toReversed', 'toSorted', 'toSpliced', 'with'].forEach(function (name) {
+        try { new (Array.prototype[name])(); results.push('made'); } catch (e) { results.push(e.name); }
+    });
+    return results;
+}, '["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]');
+check('length is taken once, before a getter can change it', function () {
+    var a = [1, 2, 3];
+    Object.defineProperty(a, 0, { get: function () { a.length = 1; return 7; },
+                                 enumerable: true, configurable: true });
+    a.reverse();
+    return a.length;
+}, '3');
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 // ---------------------------------------------------------------------------
 // Phase 114: `instanceof` asks Symbol.hasInstance.
 // ---------------------------------------------------------------------------
@@ -26262,6 +26427,8 @@ int main() {
     // Phase 109: UAX #9 -- Hebrew and Arabic reordered, and not painted left to right.
     RUN_TEST(bidi_reorders_hebrew_and_arabic_runs);
 
+    // Phase 116: the methods that move elements ask the places for what they are.
+    RUN_TEST(array_methods_that_move_places_ask_the_index);
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
 

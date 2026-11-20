@@ -5,6 +5,7 @@
 #include "litebird/common/StackLimit.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
@@ -46,10 +47,20 @@ bool get_attr_ci(const std::shared_ptr<Element>& el, std::string_view name, std:
         out = el->get_attribute(exact);
         return true;
     }
-    std::string lower = to_lower_ascii(name);
-    if (lower != exact && el->has_attribute(lower)) {
+    // SVG is parsed with the case it was written in — `startOffset`,
+    // `gradientUnits`, `viewBox` — so a caller asking by another case has to
+    // find it. The old fallback compared the lowercased query with the query
+    // itself (`lower != exact`) and so could never fire.
+    const std::string lower = to_lower_ascii(name);
+    if (el->has_attribute(lower)) {
         out = el->get_attribute(lower);
         return true;
+    }
+    for (const auto& attr : el->attributes()) {
+        if (to_lower_ascii(attr.name) == lower) {
+            out = attr.value;
+            return true;
+        }
     }
     return false;
 }
@@ -522,9 +533,64 @@ struct BBox {
     float height() const { return valid() ? std::max(0.0f, max_y - min_y) : 0.0f; }
 };
 
+// A path sink that keeps the polyline instead of drawing it: <textPath> needs
+// the geometry, not the pixels. A curve is sampled densely enough that a glyph
+// origin along it lands where the eye expects, and at a fixed step so a test
+// can predict the position without reading the renderer's mind.
+class PathFlattener {
+public:
+    void move_to(float x, float y) {
+        m_points.clear();
+        m_points.push_back({x, y});
+        m_cur_x = m_start_x = x;
+        m_cur_y = m_start_y = y;
+    }
+
+    void line_to(float x, float y) {
+        m_points.push_back({x, y});
+        m_cur_x = x;
+        m_cur_y = y;
+    }
+
+    void bezier_curve_to(float x1, float y1, float x2, float y2, float x, float y) {
+        const float x0 = m_cur_x, y0 = m_cur_y;
+        constexpr int kSteps = 24;
+        for (int i = 1; i <= kSteps; ++i) {
+            const float t = static_cast<float>(i) / static_cast<float>(kSteps);
+            const float u = 1.0f - t;
+            m_points.push_back({u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x,
+                                u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y});
+        }
+        m_cur_x = x;
+        m_cur_y = y;
+    }
+
+    void quadratic_curve_to(float x1, float y1, float x, float y) {
+        const float x0 = m_cur_x, y0 = m_cur_y;
+        constexpr int kSteps = 16;
+        for (int i = 1; i <= kSteps; ++i) {
+            const float t = static_cast<float>(i) / static_cast<float>(kSteps);
+            const float u = 1.0f - t;
+            m_points.push_back({u * u * x0 + 2 * u * t * x1 + t * t * x,
+                                u * u * y0 + 2 * u * t * y1 + t * t * y});
+        }
+        m_cur_x = x;
+        m_cur_y = y;
+    }
+
+    void close_path() { line_to(m_start_x, m_start_y); }
+
+    const std::vector<std::array<float, 2>>& points() const { return m_points; }
+
+private:
+    std::vector<std::array<float, 2>> m_points;
+    float m_cur_x{0.0f}, m_cur_y{0.0f}, m_start_x{0.0f}, m_start_y{0.0f};
+};
+
 // SVG 1.1 Implementation Notes F.6.5 & F.6.6: endpoint-to-center elliptical arc conversion.
+template <typename Sink>
 void emit_svg_arc(
-    CanvasRenderingContext2D& ctx,
+    Sink& ctx,
     BBox& bbox,
     double x1, double y1,
     double rx, double ry,
@@ -698,7 +764,8 @@ private:
     size_t m_pos{0};
 };
 
-void build_svg_path(CanvasRenderingContext2D& ctx, std::string_view d, BBox& bbox) {
+template <typename Sink>
+void build_svg_path(Sink& ctx, std::string_view d, BBox& bbox) {
     PathStream ps(d);
     char cmd = '\0';
     char prev_cmd = '\0';
@@ -884,6 +951,50 @@ void build_svg_path(CanvasRenderingContext2D& ctx, std::string_view d, BBox& bbo
     }
 }
 
+// A polyline with its cumulative lengths: what <textPath> needs to answer "what
+// point is 37 px along this path, and which way is it facing".
+class PathSampler {
+public:
+    bool build(std::string_view d) {
+        PathFlattener flattener;
+        BBox scratch;
+        build_svg_path(flattener, d, scratch);
+        const auto& points = flattener.points();
+        if (points.size() < 2) return false;
+        m_points.assign(points.begin(), points.end());
+        m_lengths.assign(m_points.size(), 0.0f);
+        float total = 0.0f;
+        for (size_t i = 1; i < m_points.size(); ++i) {
+            total += std::hypot(m_points[i][0] - m_points[i - 1][0],
+                                m_points[i][1] - m_points[i - 1][1]);
+            m_lengths[i] = total;
+        }
+        return total > 0.0f;
+    }
+
+    float length() const { return m_lengths.empty() ? 0.0f : m_lengths.back(); }
+
+    bool at(float s, float& x, float& y, float& angle_degrees) const {
+        if (m_points.size() < 2 || !std::isfinite(s)) return false;
+        if (s < 0.0f || s > length()) return false;
+        size_t i = static_cast<size_t>(
+            std::upper_bound(m_lengths.begin(), m_lengths.end(), s) - m_lengths.begin());
+        if (i == 0) i = 1;
+        if (i >= m_points.size()) i = m_points.size() - 1;
+        const float segment = m_lengths[i] - m_lengths[i - 1];
+        const float t = segment > 1e-6f ? (s - m_lengths[i - 1]) / segment : 0.0f;
+        x = m_points[i - 1][0] + (m_points[i][0] - m_points[i - 1][0]) * t;
+        y = m_points[i - 1][1] + (m_points[i][1] - m_points[i - 1][1]) * t;
+        angle_degrees = std::atan2(m_points[i][1] - m_points[i - 1][1],
+                                   m_points[i][0] - m_points[i - 1][0]) * (180.0f / kPi);
+        return true;
+    }
+
+private:
+    std::vector<std::array<float, 2>> m_points;
+    std::vector<float> m_lengths;
+};
+
 struct SvgDocumentContext {
     std::unordered_map<std::string, std::shared_ptr<Element>> by_id;
     float viewport_w{300.0f};
@@ -1061,6 +1172,40 @@ std::shared_ptr<CanvasGradient> build_svg_gradient(
     return grad;
 }
 
+// One answer for "what colour is this paint server", for shapes and for glyphs:
+// a solid colour, `currentColor`, a gradient built from the document, or the
+// fallback colour SVG puts after an unresolvable `url(#...)`.
+bool resolve_svg_paint(const SvgDocumentContext& doc_ctx, const SvgStyle& style,
+                       const PaintServer& ps, float paint_opacity, const BBox& bbox,
+                       Color& out_color, std::shared_ptr<CanvasGradient>& out_grad) {
+    out_grad = nullptr;
+    const float eff_op = std::clamp(style.opacity * paint_opacity, 0.0f, 1.0f);
+    if (eff_op <= 0.0f) return false;
+
+    if (ps.kind == PaintServer::Kind::None) return false;
+    if (ps.kind == PaintServer::Kind::Solid) {
+        out_color = ps.color;
+        out_color.a = static_cast<uint8_t>(std::lround(static_cast<float>(out_color.a) * eff_op));
+        return out_color.a > 0;
+    }
+    if (ps.kind == PaintServer::Kind::CurrentColor) {
+        out_color = style.color;
+        out_color.a = static_cast<uint8_t>(std::lround(static_cast<float>(out_color.a) * eff_op));
+        return out_color.a > 0;
+    }
+    if (ps.kind == PaintServer::Kind::Url) {
+        out_grad = build_svg_gradient(doc_ctx, ps.url_id, bbox, eff_op);
+        if (out_grad) return true;
+        if (ps.has_fallback) {
+            out_color = ps.fallback;
+            out_color.a = static_cast<uint8_t>(std::lround(static_cast<float>(out_color.a) * eff_op));
+            return out_color.a > 0;
+        }
+        return false;
+    }
+    return false;
+}
+
 bool build_shape_geometry(
     CanvasRenderingContext2D& ctx,
     const std::shared_ptr<Element>& el,
@@ -1224,32 +1369,7 @@ void paint_shape(
 ) {
     auto resolve_paint = [&](const PaintServer& ps, float paint_opacity,
                              Color& out_color, std::shared_ptr<CanvasGradient>& out_grad) -> bool {
-        out_grad = nullptr;
-        const float eff_op = std::clamp(style.opacity * paint_opacity, 0.0f, 1.0f);
-        if (eff_op <= 0.0f) return false;
-
-        if (ps.kind == PaintServer::Kind::None) return false;
-        if (ps.kind == PaintServer::Kind::Solid) {
-            out_color = ps.color;
-            out_color.a = static_cast<uint8_t>(std::lround(static_cast<float>(out_color.a) * eff_op));
-            return out_color.a > 0;
-        }
-        if (ps.kind == PaintServer::Kind::CurrentColor) {
-            out_color = style.color;
-            out_color.a = static_cast<uint8_t>(std::lround(static_cast<float>(out_color.a) * eff_op));
-            return out_color.a > 0;
-        }
-        if (ps.kind == PaintServer::Kind::Url) {
-            out_grad = build_svg_gradient(doc_ctx, ps.url_id, bbox, eff_op);
-            if (out_grad) return true;
-            if (ps.has_fallback) {
-                out_color = ps.fallback;
-                out_color.a = static_cast<uint8_t>(std::lround(static_cast<float>(out_color.a) * eff_op));
-                return out_color.a > 0;
-            }
-            return false;
-        }
-        return false;
+        return resolve_svg_paint(doc_ctx, style, ps, paint_opacity, bbox, out_color, out_grad);
     };
 
     ctx.global_alpha = 1.0f; // Opacity already folded into color/gradient alpha
@@ -1281,94 +1401,467 @@ void paint_shape(
     }
 }
 
-// SVG text uses the same glyph rasterizer as Canvas 2D. The cursor is in SVG
-// user coordinates (before viewBox / group transforms), not device pixels.
-// Text nodes are visited in document order so a tspan can both inherit the
-// current position and change the paint for just its own characters.
-void render_text_content(CanvasRenderingContext2D& ctx,
-                         const std::shared_ptr<Element>& el, const SvgStyle& style,
-                         float ref_w, float ref_h, float& x, float& y, int depth,
-                         bool& started, bool& pending_space, bool preserve_space) {
-    if (depth > 256 || stack_is_exhausted() || style.display_none) return;
-    std::string attr;
-    if (get_attr_ci(el, "xml:space", attr)) {
-        if (attr == "preserve") preserve_space = true;
-        else if (attr == "default") preserve_space = false;
+// ---------------------------------------------------------------------------
+// SVG text.
+//
+// Canvas draws a string, one origin, one direction. SVG does not: `x`, `y`,
+// `dx`, `dy` and `rotate` are lists with one value per character, an absolute
+// `x` or `y` starts a new *text chunk*, `text-anchor` is a property of that
+// chunk rather than of one text node, `<textPath>` lays the glyphs along a
+// path, and a gradient can be the paint of a glyph. So the text is collected
+// into glyphs first (with the style and the path each one belongs to), and
+// then measured and drawn a segment at a time.
+// ---------------------------------------------------------------------------
+
+std::vector<std::string> split_utf8_codepoints(std::string_view text) {
+    std::vector<std::string> out;
+    size_t i = 0;
+    while (i < text.size()) {
+        const unsigned char lead = static_cast<unsigned char>(text[i]);
+        size_t len = 1;
+        if ((lead & 0xE0) == 0xC0) len = 2;
+        else if ((lead & 0xF0) == 0xE0) len = 3;
+        else if ((lead & 0xF8) == 0xF0) len = 4;
+        if (i + len > text.size()) len = 1;
+        out.emplace_back(text.substr(i, len));
+        i += len;
     }
-    if (get_attr_ci(el, "x", attr) && parse_float_value(attr, x, ref_w)) {
-        started = false;
-        pending_space = false;
+    return out;
+}
+
+// A length list: SVG allows `10, 20 30` and percentages, and each value is
+// resolved against the viewport axis it belongs to.
+std::vector<float> parse_length_list(std::string_view raw, float pct_ref) {
+    std::vector<float> out;
+    size_t i = 0;
+    while (i < raw.size() && out.size() < 4096) {
+        while (i < raw.size() &&
+               (std::isspace(static_cast<unsigned char>(raw[i])) || raw[i] == ',')) ++i;
+        if (i >= raw.size()) break;
+        const size_t start = i;
+        while (i < raw.size() &&
+               !std::isspace(static_cast<unsigned char>(raw[i])) && raw[i] != ',') ++i;
+        float value = 0.0f;
+        if (parse_float_value(raw.substr(start, i - start), value, pct_ref)) out.push_back(value);
     }
-    if (get_attr_ci(el, "y", attr)) parse_float_value(attr, y, ref_h);
-    float delta = 0.0f;
-    if (get_attr_ci(el, "dx", attr) && parse_float_value(attr, delta, ref_w)) x += delta;
-    if (get_attr_ci(el, "dy", attr) && parse_float_value(attr, delta, ref_h)) y += delta;
+    return out;
+}
+
+struct PositionList {
+    std::vector<float> x, y, dx, dy, rotate;
+    size_t index{0};
+
+    bool empty() const {
+        return x.empty() && y.empty() && dx.empty() && dy.empty() && rotate.empty();
+    }
+};
+
+struct TextGlyph {
+    std::string utf8;   // one Unicode code point
+    int style{0};       // index into TextLayoutData::styles
+    int path{-1};       // index into TextLayoutData::paths, -1 for straight text
+    int transform{-1};  // index into TextLayoutData::transforms, -1 for none
+    float x{0.0f}, y{0.0f};
+    bool has_x{false}, has_y{false};
+    float dx{0.0f}, dy{0.0f};
+    float rotate{0.0f};
+    bool has_rotate{false};
+};
+
+struct TextPathRef {
+    std::string id;
+    std::string d;
+    float start_offset{0.0f};
+    bool start_is_percent{false};
+};
+
+struct TextLayoutData {
+    std::vector<TextGlyph> glyphs;
+    std::vector<SvgStyle> styles;
+    std::vector<TextPathRef> paths;
+    std::vector<TransformMatrix2D> transforms;
+};
+
+class TextCollector {
+public:
+    TextCollector(const SvgDocumentContext& doc_ctx, float ref_w, float ref_h)
+        : m_doc_ctx(doc_ctx), m_ref_w(ref_w), m_ref_h(ref_h) {}
+
+    TextLayoutData collect(const std::shared_ptr<Element>& el, const SvgStyle& style) {
+        TextLayoutData out;
+        out.styles.push_back(style);
+        bool started = false, pending_space = false;
+        walk(el, style, 0, 0, started, pending_space, false, -1, -1, out);
+        return out;
+    }
+
+private:
+    void walk(const std::shared_ptr<Element>& el, const SvgStyle& style, int style_id, int depth,
+              bool& started, bool& pending_space, bool preserve_space, int path, int transform,
+              TextLayoutData& out) {
+        if (!el || depth > 256 || stack_is_exhausted() || style.display_none) return;
+
+        std::string attr;
+        if (get_attr_ci(el, "xml:space", attr)) {
+            if (attr == "preserve") preserve_space = true;
+            else if (attr == "default") preserve_space = false;
+        }
+
+        PositionList lists;
+        if (get_attr_ci(el, "x", attr)) lists.x = parse_length_list(attr, m_ref_w);
+        if (get_attr_ci(el, "y", attr)) lists.y = parse_length_list(attr, m_ref_h);
+        if (get_attr_ci(el, "dx", attr)) lists.dx = parse_length_list(attr, m_ref_w);
+        if (get_attr_ci(el, "dy", attr)) lists.dy = parse_length_list(attr, m_ref_h);
+        if (get_attr_ci(el, "rotate", attr)) lists.rotate = parse_number_list(attr);
+        if (!lists.empty()) m_lists.push_back(std::move(lists));
+
+        int child_transform = transform;
+        if (depth != 0 && get_attr_ci(el, "transform", attr)) {
+            TransformMatrix2D composed = parse_svg_transform(attr);
+            if (transform >= 0) {
+                composed = out.transforms[static_cast<size_t>(transform)].multiply(composed);
+            }
+            out.transforms.push_back(composed);
+            child_transform = static_cast<int>(out.transforms.size()) - 1;
+        }
+
+        int child_path = path;
+        if (to_lower_ascii(el->tag_name()) == "textpath") {
+            TextPathRef ref;
+            std::string href;
+            if (get_href_attr(el, href)) ref.id = extract_fragment_id(href);
+            auto it = ref.id.empty() ? m_doc_ctx.by_id.end() : m_doc_ctx.by_id.find(ref.id);
+            if (it != m_doc_ctx.by_id.end()) get_attr_ci(it->second, "d", ref.d);
+            if (get_attr_ci(el, "startoffset", attr)) {
+                const std::string value = to_lower_ascii(trim_wsp(attr));
+                if (!value.empty() && value.back() == '%') {
+                    ref.start_is_percent = true;
+                    float pct = 0.0f;
+                    if (parse_float_value(value.substr(0, value.size() - 1), pct, 100.0f))
+                        ref.start_offset = pct;
+                } else {
+                    float len = 0.0f;
+                    if (parse_float_value(value, len, m_ref_w)) ref.start_offset = len;
+                }
+            }
+            if (!ref.d.empty()) {
+                out.paths.push_back(std::move(ref));
+                child_path = static_cast<int>(out.paths.size()) - 1;
+            }
+        }
+
+        const float ref_size = std::hypot(m_ref_w, m_ref_h) / 1.41421356f;
+        for (const auto& child : el->children()) {
+            if (child->is_text()) {
+                const std::string raw = child->text_content();
+                std::string collapsed;
+                for (size_t i = 0; i < raw.size() && i < 16384; ++i) {
+                    const unsigned char c = static_cast<unsigned char>(raw[i]);
+                    if (!preserve_space && std::isspace(c)) {
+                        pending_space = true;
+                        continue;
+                    }
+                    if (pending_space && started) collapsed.push_back(' ');
+                    pending_space = false;
+                    collapsed.push_back(static_cast<char>(c));
+                    started = true;
+                }
+                if (!style.visible) continue;
+                for (const auto& codepoint : split_utf8_codepoints(collapsed)) {
+                    TextGlyph glyph;
+                    glyph.utf8 = codepoint;
+                    glyph.style = style_id;
+                    // The element's own <textPath> and transform apply to the
+                    // characters it holds, not only to the ones below it.
+                    glyph.path = child_path;
+                    glyph.transform = child_transform;
+                    for (auto& pl : m_lists) {
+                        const size_t i = pl.index;
+                        if (i < pl.x.size()) { glyph.x = pl.x[i]; glyph.has_x = true; }
+                        if (i < pl.y.size()) { glyph.y = pl.y[i]; glyph.has_y = true; }
+                        if (i < pl.dx.size()) glyph.dx += pl.dx[i];
+                        if (i < pl.dy.size()) glyph.dy += pl.dy[i];
+                        // SVG 1.1 §10.5: the last `rotate` value applies to the
+                        // characters after the list is exhausted; x, y, dx and
+                        // dy do not repeat.
+                        if (!pl.rotate.empty()) {
+                            glyph.rotate = (i < pl.rotate.size()) ? pl.rotate[i] : pl.rotate.back();
+                            glyph.has_rotate = true;
+                        }
+                        ++pl.index;
+                    }
+                    out.glyphs.push_back(std::move(glyph));
+                }
+            } else if (auto span = std::dynamic_pointer_cast<Element>(child)) {
+                const std::string tag = to_lower_ascii(span->tag_name());
+                if (tag != "tspan" && tag != "textpath") continue;
+                const SvgStyle span_style = resolve_element_style(span, style, ref_size);
+                if (span_style.display_none) continue;
+                out.styles.push_back(span_style);
+                const int child_style = static_cast<int>(out.styles.size()) - 1;
+                // A copy: the table can grow while the child walks, and a
+                // reference into it would then point at freed storage.
+                const SvgStyle child_style_value = out.styles[static_cast<size_t>(child_style)];
+                walk(span, child_style_value, child_style, depth + 1, started, pending_space,
+                     preserve_space, child_path, child_transform, out);
+            }
+        }
+
+        if (!lists.empty()) m_lists.pop_back();
+    }
+
+    const SvgDocumentContext& m_doc_ctx;
+    float m_ref_w{100.0f};
+    float m_ref_h{100.0f};
+    std::vector<PositionList> m_lists;
+};
+
+struct TextSegment {
+    int style{0};
+    std::string text;
+    float x{0.0f}, y{0.0f};
+    float rotate{0.0f};
+    bool rotated{false};
+    bool has_transform{false};
+    TransformMatrix2D transform{};
+    float width{0.0f};
+};
+
+void set_svg_canvas_font(CanvasRenderingContext2D& ctx, const SvgStyle& style) {
+    ctx.font = style.font_style + " " + std::to_string(style.font_weight) + " " +
+               std::to_string(style.font_size) + "px " + style.font_family;
+}
+
+void paint_text_segment(CanvasRenderingContext2D& ctx, const SvgDocumentContext& doc_ctx,
+                        const SvgStyle& style, const TextSegment& seg, const BBox& bbox) {
+    Color fill_color;
+    std::shared_ptr<CanvasGradient> fill_gradient;
+    const bool filled = resolve_svg_paint(doc_ctx, style, style.fill, style.fill_opacity, bbox,
+                                          fill_color, fill_gradient);
+    Color stroke_color;
+    std::shared_ptr<CanvasGradient> stroke_gradient;
+    const bool stroked = style.stroke_width > 0.0f &&
+        resolve_svg_paint(doc_ctx, style, style.stroke, style.stroke_opacity, bbox,
+                          stroke_color, stroke_gradient);
+    if (!filled && !stroked) return;
+    if (seg.text.empty()) return;
 
     ctx.save();
-    // The outer <text> transform was applied by render_element already.
-    if (depth != 0 && get_attr_ci(el, "transform", attr))
-        ctx.set_transform(ctx.current_transform().multiply(parse_svg_transform(attr)));
-    for (const auto& child : el->children()) {
-        if (child->is_text()) {
-            if (!style.visible) continue;
-            // SVG's default white-space mode collapses runs across text/tspan
-            // boundaries; xml:space="preserve" leaves the bytes unchanged.
-            // Bound the text handed to the Canvas rasterizer on hostile pages.
-            std::string text;
-            const std::string raw = child->text_content();
-            for (size_t i = 0; i < raw.size() && i < 16384; ++i) {
-                const unsigned char c = static_cast<unsigned char>(raw[i]);
-                if (!preserve_space && std::isspace(c)) {
-                    pending_space = true;
-                    continue;
-                }
-                if (pending_space && started) text.push_back(' ');
-                pending_space = false;
-                text.push_back(static_cast<char>(c));
-                started = true;
-            }
-            if (text.empty()) continue;
-            ctx.font = style.font_style + " " + std::to_string(style.font_weight) + " " +
-                       std::to_string(style.font_size) + "px " + style.font_family;
-            const float advance = ctx.measure_text(text).width;
-            if (!std::isfinite(advance)) continue;
-            ctx.text_align = style.text_anchor == "middle" ? "center" :
-                             style.text_anchor == "end" ? "right" : "left";
-            ctx.text_baseline = "alphabetic";
-            ctx.global_alpha = 1.0f; // SVG opacity is already folded into paint alpha.
-            auto paint = [&](const PaintServer& server, float opacity, bool stroke) {
-                Color color;
-                if (server.kind == PaintServer::Kind::None) return;
-                if (server.kind == PaintServer::Kind::Solid) color = server.color;
-                else if (server.kind == PaintServer::Kind::CurrentColor) color = style.color;
-                else if (server.kind == PaintServer::Kind::Url && server.has_fallback) color = server.fallback;
-                else return; // A text gradient/path is not yet a supported paint server.
-                color.a = static_cast<uint8_t>(std::lround(static_cast<float>(color.a) *
-                          std::clamp(style.opacity * opacity, 0.0f, 1.0f)));
-                if (!color.a) return;
-                if (stroke) {
-                    ctx.stroke_style = color;
-                    ctx.stroke_gradient = nullptr;
-                    ctx.line_width = style.stroke_width;
-                    ctx.stroke_text(text, x, y);
-                } else {
-                    ctx.fill_style = color;
-                    ctx.fill_gradient = nullptr;
-                    ctx.fill_text(text, x, y);
-                }
-            };
-            paint(style.fill, style.fill_opacity, false);
-            if (style.stroke_width > 0.0f) paint(style.stroke, style.stroke_opacity, true);
-            x += advance;
-        } else if (auto span = std::dynamic_pointer_cast<Element>(child)) {
-            if (to_lower_ascii(span->tag_name()) != "tspan") continue;
-            const float ref_size = std::hypot(ref_w, ref_h) / 1.41421356f;
-            const SvgStyle span_style = resolve_element_style(span, style, ref_size);
-            render_text_content(ctx, span, span_style, ref_w, ref_h, x, y, depth + 1,
-                                started, pending_space, preserve_space);
-        }
+    if (seg.has_transform) {
+        // A <tspan transform> applies to the run it wraps, exactly as the
+        // element's own transform would.
+        ctx.set_transform(ctx.current_transform().multiply(seg.transform));
+    }
+    if (seg.rotated) {
+        ctx.translate(seg.x, seg.y);
+        ctx.rotate(seg.rotate * (kPi / 180.0f));
+    }
+    ctx.text_align = "left";
+    ctx.text_baseline = "alphabetic";
+    ctx.global_alpha = 1.0f;
+    const float pen_x = seg.rotated ? 0.0f : seg.x;
+    const float pen_y = seg.rotated ? 0.0f : seg.y;
+    if (filled) {
+        ctx.fill_style = fill_color;
+        ctx.fill_gradient = fill_gradient;
+        ctx.fill_text(seg.text, pen_x, pen_y);
+    }
+    if (stroked) {
+        ctx.stroke_style = stroke_color;
+        ctx.stroke_gradient = stroke_gradient;
+        ctx.line_width = style.stroke_width;
+        ctx.stroke_text(seg.text, pen_x, pen_y);
     }
     ctx.restore();
+}
+
+// Measure a chunk's segments, then draw them shifted by the chunk's anchor.
+void paint_text(CanvasRenderingContext2D& ctx, const SvgDocumentContext& doc_ctx,
+                const TextLayoutData& layout) {
+    if (layout.glyphs.empty()) return;
+
+    std::unordered_map<int, PathSampler> samplers;
+    for (size_t i = 0; i < layout.paths.size(); ++i) {
+        PathSampler sampler;
+        if (!layout.paths[i].d.empty() && sampler.build(layout.paths[i].d)) {
+            samplers.emplace(static_cast<int>(i), std::move(sampler));
+        }
+    }
+
+    // The pen does not reset between chunks: a <tspan> that names only `y`
+    // keeps the x the previous run left it at.
+    float carry_x = 0.0f, carry_y = 0.0f;
+    size_t begin = 0;
+    while (begin < layout.glyphs.size()) {
+        size_t end = begin + 1;
+        while (end < layout.glyphs.size()) {
+            const TextGlyph& glyph = layout.glyphs[end];
+            if (glyph.path != layout.glyphs[begin].path) break;
+            if (glyph.transform != layout.glyphs[begin].transform) break;
+            // An absolute position starts a new text chunk; text-anchor is a
+            // property of the chunk, so it must not reach past this point.
+            if (glyph.has_x || glyph.has_y) break;
+            ++end;
+        }
+
+        const int chunk_transform = layout.glyphs[begin].transform;
+        auto give_transform = [&](TextSegment& seg) {
+            if (chunk_transform >= 0) {
+                seg.has_transform = true;
+                seg.transform = layout.transforms[static_cast<size_t>(chunk_transform)];
+            }
+        };
+
+        std::vector<TextSegment> segments;
+        const int chunk_path = layout.glyphs[begin].path;
+        if (chunk_path >= 0) {
+            auto it = samplers.find(chunk_path);
+            if (it == samplers.end()) { begin = end; continue; }
+            const PathSampler& sampler = it->second;
+            const TextPathRef& ref = layout.paths[static_cast<size_t>(chunk_path)];
+
+            std::vector<float> widths;
+            float total = 0.0f;
+            for (size_t i = begin; i < end; ++i) {
+                const TextGlyph& glyph = layout.glyphs[i];
+                set_svg_canvas_font(ctx, layout.styles[static_cast<size_t>(glyph.style)]);
+                float width = ctx.measure_text(glyph.utf8).width;
+                if (!std::isfinite(width)) width = 0.0f;
+                widths.push_back(width);
+                total += width;
+            }
+            float offset = ref.start_is_percent
+                ? sampler.length() * (std::clamp(ref.start_offset, -100000.0f, 100000.0f) / 100.0f)
+                : ref.start_offset;
+            const std::string& anchor =
+                layout.styles[static_cast<size_t>(layout.glyphs[begin].style)].text_anchor;
+            if (anchor == "middle") offset -= total * 0.5f;
+            else if (anchor == "end") offset -= total;
+
+            float along = offset;
+            for (size_t i = begin; i < end; ++i) {
+                const TextGlyph& glyph = layout.glyphs[i];
+                const float width = widths[i - begin];
+                if (along < 0.0f) { along += width; continue; }
+                float px = 0.0f, py = 0.0f, angle = 0.0f;
+                if (!sampler.at(along, px, py, angle)) break;
+                TextSegment seg;
+                seg.style = glyph.style;
+                seg.text = glyph.utf8;
+                seg.x = px;
+                seg.y = py;
+                seg.rotated = true;
+                seg.rotate = angle;
+                seg.width = width;
+                give_transform(seg);
+                segments.push_back(std::move(seg));
+                along += width;
+            }
+        } else {
+            float cursor_x = carry_x, cursor_y = carry_y;
+            std::string open_text;
+            int open_style = -1;
+            float open_x = 0.0f, open_y = 0.0f;
+
+            auto flush = [&]() {
+                if (open_text.empty()) return;
+                TextSegment seg;
+                seg.style = open_style;
+                seg.text = open_text;
+                seg.x = open_x;
+                seg.y = open_y;
+                give_transform(seg);
+                set_svg_canvas_font(ctx, layout.styles[static_cast<size_t>(seg.style)]);
+                float width = ctx.measure_text(seg.text).width;
+                if (!std::isfinite(width)) width = 0.0f;
+                seg.width = width;
+                cursor_x = seg.x + width;
+                cursor_y = seg.y;
+                segments.push_back(std::move(seg));
+                open_text.clear();
+                open_style = -1;
+            };
+
+            for (size_t i = begin; i < end; ++i) {
+                const TextGlyph& glyph = layout.glyphs[i];
+                const bool moves = glyph.has_x || glyph.has_y || glyph.dx != 0.0f ||
+                                   glyph.dy != 0.0f || glyph.has_rotate;
+                if (moves) {
+                    flush();
+                    if (glyph.has_x) cursor_x = glyph.x;
+                    if (glyph.has_y) cursor_y = glyph.y;
+                    cursor_x += glyph.dx;
+                    cursor_y += glyph.dy;
+                }
+                if (glyph.has_rotate) {
+                    // A rotated glyph turns about its own origin, so it cannot
+                    // share a segment with its neighbours.
+                    TextSegment seg;
+                    seg.style = glyph.style;
+                    seg.text = glyph.utf8;
+                    seg.x = cursor_x;
+                    seg.y = cursor_y;
+                    seg.rotated = true;
+                    seg.rotate = glyph.rotate;
+                    give_transform(seg);
+                    set_svg_canvas_font(ctx, layout.styles[static_cast<size_t>(seg.style)]);
+                    float width = ctx.measure_text(seg.text).width;
+                    if (!std::isfinite(width)) width = 0.0f;
+                    seg.width = width;
+                    cursor_x += width;
+                    segments.push_back(std::move(seg));
+                    continue;
+                }
+                if (open_text.empty() || glyph.style != open_style) {
+                    flush();
+                    open_style = glyph.style;
+                    open_x = cursor_x;
+                    open_y = cursor_y;
+                }
+                open_text += glyph.utf8;
+            }
+            flush();
+
+            if (segments.empty()) { begin = end; continue; }
+
+            // text-anchor is measured over the whole chunk, which is why the
+            // segments are laid out before any of them is drawn.
+            const float extent = cursor_x - segments.front().x;
+            const std::string& anchor =
+                layout.styles[static_cast<size_t>(layout.glyphs[begin].style)].text_anchor;
+            float shift = 0.0f;
+            if (anchor == "middle") shift = -extent * 0.5f;
+            else if (anchor == "end") shift = -extent;
+            for (auto& seg : segments) seg.x += shift;
+
+            carry_x = cursor_x + shift;
+            carry_y = cursor_y;
+        }
+
+        if (segments.empty()) { begin = end; continue; }
+
+        // The bounding box a `objectBoundingBox` gradient is resolved against
+        // is the box the chunk's glyphs occupy.
+        BBox bbox;
+        for (const auto& seg : segments) {
+            set_svg_canvas_font(ctx, layout.styles[static_cast<size_t>(seg.style)]);
+            const auto metrics = ctx.measure_text(seg.text);
+            const float ascent = metrics.font_bounding_box_ascent;
+            const float descent = metrics.font_bounding_box_descent;
+            if (seg.rotated && seg.width > 0.0f) {
+                bbox.include(seg.x - descent, seg.y - seg.width);
+                bbox.include(seg.x + ascent, seg.y + ascent);
+            } else {
+                bbox.include(seg.x, seg.y - ascent);
+                bbox.include(seg.x + seg.width, seg.y + descent);
+            }
+        }
+        for (const auto& seg : segments) {
+            paint_text_segment(ctx, doc_ctx, layout.styles[static_cast<size_t>(seg.style)], seg,
+                               bbox);
+        }
+        begin = end;
+    }
 }
 
 void render_element(
@@ -1417,10 +1910,9 @@ void render_element(
     }
 
     if (tag == "text") {
-        float x = 0.0f, y = 0.0f;
-        bool started = false, pending_space = false;
-        render_text_content(ctx, el, style, ref_w, ref_h, x, y, 0,
-                            started, pending_space, false);
+        TextCollector collector(doc_ctx, ref_w, ref_h);
+        const TextLayoutData layout = collector.collect(el, style);
+        paint_text(ctx, doc_ctx, layout);
         ctx.restore();
         return;
     }

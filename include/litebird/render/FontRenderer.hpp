@@ -47,14 +47,14 @@ public:
     /// failure.
     int16_t kerning_units(uint32_t left, uint32_t right) const;
 
-    /// True when this face has a `kern` table this can read, so that a caller
-    /// can skip the question for the thousands of pairs it will not find.
-    bool has_kerning() const { return m_kern_pairs > 0; }
+    /// True when this face has a `kern` table or `GPOS` `kern` feature this
+    /// can read, so that a caller can skip the question for the thousands of
+    /// pairs it will not find.
+    bool has_kerning() const { return m_has_gpos_kern || m_kern_pairs > 0; }
 
-    /// The `kern` adjustment between two glyph *ids*, in font units. The table
-    /// is a table of glyph pairs; the codepoint-taking overload above is a
-    /// convenience that maps through the `cmap` first, and after a ligature
-    /// there is no codepoint to map from.
+    /// The `kern` adjustment between two glyph *ids*, in font units. Checks
+    /// `GPOS` `kern` when the face defines one (which is authoritative on
+    /// modern fonts), otherwise falls back to the legacy `kern` table.
     int16_t kerning_units_for_glyphs(uint16_t left, uint16_t right) const;
 
     /// The advance of one glyph addressed by id, in px at `font_size_px`.
@@ -66,10 +66,36 @@ public:
     /// the faces that have none (which is most of them on this host).
     bool has_ligatures() const { return !m_ligature_sets.empty(); }
 
+    /// True when this face's `GPOS` table provides positioning lookups (`kern`,
+    /// `mark`, `mkmk`, or single adjustments).
+    bool has_gpos() const { return !m_gpos_lookups.empty(); }
+
+    /// True when this face's `GPOS` defines mark positioning (`mark` / `mkmk`).
+    bool has_mark_positioning() const { return m_has_gpos_marks; }
+
     /// Replaces common ligatures in a run of glyph ids, in place: `f i` becomes
     /// the `fi` glyph, `f f i` the `ffi` one. Longest match first, left to
     /// right, which is what `liga` asks for.
     void apply_ligatures(std::vector<uint16_t>& glyphs) const;
+
+    /// One glyph after `GSUB` ligatures and `GPOS` (or legacy `kern`)
+    /// positioning for a single-face run, with coordinates in font units.
+    struct PositionedGlyph {
+        uint16_t glyph{0};
+        int32_t x_advance{0};
+        int32_t y_advance{0};
+        int32_t x_offset{0};
+        int32_t y_offset{0};
+    };
+
+    /// Shapes a run of Unicode codepoints mapped to this face: applies `GSUB`
+    /// `liga`/`rlig` ligatures (tracking ligature components for `MarkToLig`),
+    /// then `GPOS` (`SinglePos`, `PairPos` `kern`, `MarkToBase`, `MarkToLig`,
+    /// `MarkToMark`), falling back to legacy `kern` when `GPOS` has no `kern`
+    /// feature. `kerning = false` disables pair kerning while keeping mark
+    /// positioning and non-kern adjustments active.
+    std::vector<PositionedGlyph> shape_glyphs(const std::vector<uint32_t>& codepoints,
+                                              bool kerning = true) const;
 
     GlyphBitmap rasterize_glyph(uint32_t codepoint, int pixel_size) const;
 
@@ -165,6 +191,7 @@ private:
     struct Ligature {
         uint16_t glyph{0};
         std::vector<uint16_t> rest;
+        bool ignore_marks{false};
     };
     /// The ligatures that start with one glyph, longest first, which is the
     /// order a left-to-right longest match wants and the order the table
@@ -177,10 +204,158 @@ private:
     /// lookup those features name, merged into one sorted table.
     std::vector<LigatureSet> m_ligature_sets;
 
+    /// OpenType `Coverage` table (format 1 array or format 2 range list).
+    struct OtfCoverage {
+        uint16_t format{0};
+        bool sorted{true};
+        std::vector<uint16_t> glyphs;
+        struct Range {
+            uint16_t start{0};
+            uint16_t end{0};
+            uint16_t start_index{0};
+        };
+        std::vector<Range> ranges;
+        int index(uint16_t glyph) const;
+        bool empty() const { return glyphs.empty() && ranges.empty(); }
+    };
+
+    /// OpenType `ClassDef` table (format 1 array or format 2 range list).
+    struct OtfClassDef {
+        uint16_t format{0};
+        uint16_t start_glyph{0};
+        bool sorted{true};
+        std::vector<uint16_t> classes;
+        struct Range {
+            uint16_t start{0};
+            uint16_t end{0};
+            uint16_t cls{0};
+        };
+        std::vector<Range> ranges;
+        uint16_t class_of(uint16_t glyph) const;
+        bool empty() const { return classes.empty() && ranges.empty(); }
+    };
+
+    struct GposValue {
+        int16_t x_placement{0};
+        int16_t y_placement{0};
+        int16_t x_advance{0};
+        int16_t y_advance{0};
+    };
+
+    struct GposAnchor {
+        bool present{false};
+        int16_t x{0};
+        int16_t y{0};
+    };
+
+    struct GposMarkRecord {
+        uint16_t mark_class{0};
+        GposAnchor anchor;
+    };
+
+    struct GposSingleSubtable {
+        uint16_t format{0};
+        OtfCoverage cov;
+        GposValue single_val;
+        std::vector<GposValue> vals;
+    };
+
+    struct GposPairEntry {
+        uint16_t second{0};
+        GposValue v1;
+        GposValue v2;
+    };
+
+    struct GposPairFmt1Subtable {
+        OtfCoverage cov;
+        bool has_v2{false};
+        std::vector<std::vector<GposPairEntry>> pair_sets;
+    };
+
+    struct GposPairFmt2Subtable {
+        OtfCoverage cov;
+        OtfClassDef class1;
+        OtfClassDef class2;
+        uint16_t c1_count{0};
+        uint16_t c2_count{0};
+        uint16_t vf1{0};
+        uint16_t vf2{0};
+        uint32_t matrix_offset{0};
+    };
+
+    struct GposMarkBaseSubtable {
+        OtfCoverage mark_cov;
+        OtfCoverage base_cov;
+        uint16_t class_count{0};
+        std::vector<GposMarkRecord> marks;
+        std::vector<GposAnchor> base_anchors;
+    };
+
+    struct GposMarkLigSubtable {
+        OtfCoverage mark_cov;
+        OtfCoverage lig_cov;
+        uint16_t class_count{0};
+        std::vector<GposMarkRecord> marks;
+        struct LigAttach {
+            uint16_t component_count{0};
+            std::vector<GposAnchor> anchors; // [component * class_count + mark_class]
+        };
+        std::vector<LigAttach> lig_attaches;
+    };
+
+    struct GposMarkMarkSubtable {
+        OtfCoverage mark1_cov;
+        OtfCoverage mark2_cov;
+        uint16_t class_count{0};
+        std::vector<GposMarkRecord> mark1s;
+        std::vector<GposAnchor> mark2_anchors;
+    };
+
+    struct GposSubRef {
+        enum class Kind : uint8_t { Single, PairFmt1, PairFmt2, MarkBase, MarkLig, MarkMark };
+        Kind kind{Kind::Single};
+        uint32_t index{0};
+    };
+
+    struct GposLookup {
+        enum class Feature : uint8_t { Kern, Mark, Mkmk };
+        uint16_t type{0};   // 1, 2, 4, 5, or 6 after extension unwrap
+        uint16_t flag{0};
+        uint16_t mark_filtering_set{0};
+        Feature feature{Feature::Kern};
+        std::vector<GposSubRef> subtables;
+    };
+
     /// Reads `GSUB`'s script, feature and lookup lists far enough to collect
     /// the type-4 substitutions of `liga` and `rlig` for `latn` (or `DFLT`
     /// when a font has no Latin script record).
     bool load_ligatures(uint32_t gsub_offset, uint32_t gsub_length);
+    bool load_gdef(uint32_t gdef_offset, uint32_t gdef_length);
+    bool load_gpos(uint32_t gpos_offset, uint32_t gpos_length);
+    bool parse_coverage(std::size_t cov_off, std::size_t table_end, OtfCoverage& out) const;
+    bool parse_classdef(std::size_t cd_off, std::size_t table_end, OtfClassDef& out) const;
+    bool read_gpos_value(std::size_t pos, std::size_t table_end, uint16_t vf, GposValue& out) const;
+    bool read_gpos_anchor(std::size_t pos, std::size_t table_end, GposAnchor& out) const;
+    bool is_mark_glyph(uint16_t gid) const;
+    bool is_ignored_by_lookup(uint16_t gid, uint16_t flag, uint16_t mark_filtering_set) const;
+    bool match_pair_subtable(const GposSubRef& ref, uint16_t left, uint16_t right,
+                             GposValue& v1, GposValue& v2, bool& advance_two) const;
+
+    bool m_has_gdef_glyph_class{false};
+    OtfClassDef m_gdef_glyph_class;
+    OtfClassDef m_gdef_mark_attach_class;
+    std::vector<OtfCoverage> m_gdef_mark_sets;
+
+    bool m_has_gpos_kern{false};
+    bool m_has_gpos_marks{false};
+    std::vector<uint16_t> m_gpos_known_marks;
+    std::vector<GposSingleSubtable> m_gpos_singles;
+    std::vector<GposPairFmt1Subtable> m_gpos_pair_fmt1;
+    std::vector<GposPairFmt2Subtable> m_gpos_pair_fmt2;
+    std::vector<GposMarkBaseSubtable> m_gpos_mark_base;
+    std::vector<GposMarkLigSubtable> m_gpos_mark_lig;
+    std::vector<GposMarkMarkSubtable> m_gpos_mark_mark;
+    std::vector<GposLookup> m_gpos_lookups;
 
     /// Where the pairs of the `kern` subtable start, and how many there are.
     /// They are sorted by `(left << 16) | right`, so a pair is found by binary
@@ -383,6 +558,8 @@ public:
         uint16_t glyph{0};
         const TrueTypeFont* face{nullptr};
         float advance{0.0f};
+        float x_offset{0.0f};
+        float y_offset{0.0f};
         bool shear{false};
     };
 
@@ -451,17 +628,19 @@ public:
                       bool italic = false) const;
 
     /// Turns text into the glyphs the font wants drawn: a run per face (so a
-    /// fallback keeps its own advances), the ligature substitutions of that
-    /// face applied to the run, and each resulting glyph's advance resolved
-    /// once. Measuring and painting both walk this list, which is the only
-    /// reason they can still agree now that a character is not a glyph.
+    /// fallback keeps its own advances), `GSUB` ligature substitutions and
+    /// `GPOS` positioning (or legacy `kern` fallback) applied to the run, and
+    /// each glyph's final advance and `(x_offset, y_offset)` resolved once.
+    /// Measuring and painting both walk this list, so marks, ligatures, and
+    /// kerning always match between layout and raster.
     std::vector<ShapedGlyph> shape_text(std::string_view utf8_text, float font_size, int font_weight,
-                                        int family_id, bool italic) const;
+                                        int family_id, bool italic, bool kerning = true) const;
 
     /// `shape_text` for a caller that has a `font-family` list rather than an
     /// id -- the canvas does, because it parses its own `ctx.font`.
     std::vector<ShapedGlyph> shape_text(std::string_view utf8_text, float font_size, int font_weight,
-                                        std::string_view css_family, bool italic) const;
+                                        std::string_view css_family, bool italic,
+                                        bool kerning = true) const;
 
     /// The `kern` adjustment between two shaped glyphs, in px. Zero across a
     /// face boundary: a pair split between two fonts is not a pair.

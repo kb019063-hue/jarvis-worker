@@ -54,6 +54,12 @@ struct ResourceResponse {
     /// The `realm` parameter of the first challenge that has one. Empty when
     /// none did.
     std::string auth_realm;
+    /// The scheme a `407` offered (RFC 9110 §11.7.1), which is proxy
+    /// authentication and not this document's. Empty when the response was not
+    /// a 407, or carried no readable `Proxy-Authenticate`.
+    std::vector<std::string> proxy_auth_schemes;
+    /// The `realm` of the first proxy challenge that has one.
+    std::string proxy_auth_realm;
 };
 
 /// Where a page-initiated request comes from. `document_url` decides what
@@ -171,17 +177,39 @@ public:
     // same functions the loader uses, not a second copy.
     static std::string auth_md5_hex(std::string_view data);
     static std::string auth_sha256_hex(std::string_view data);
+    /// FIPS 180-4 §6.7 SHA-512/256 — the `SHA-512-256` of RFC 7616 §3.2, which
+    /// is the SHA-512 compression function with its own IV and a 256-bit
+    /// truncation, *not* SHA-512's output cut in half.
+    static std::string auth_sha512_256_hex(std::string_view data);
     static std::string auth_base64(std::string_view bytes);
-    /// The value a client sends, or false when the challenge cannot be
-    /// answered (an unknown algorithm, `auth-int` only, no credentials held).
-    /// `cnonce` is an argument so that a test can reproduce RFC 7616 §3.9.1
-    /// exactly; the loader generates a fresh one.
+    /// The `nextnonce` remembered for a protection space, or empty. RFC 7616
+    /// §3.5: `Authentication-Info` names the nonce to use next, and a server
+    /// issuing one-time nonces requires it.
+    static std::string auth_next_nonce_for_testing(const std::string& origin, const std::string& realm);
+    /// The response hex alone, for the RFC 7616 §3.9.1 and §3.9.2 examples.
+    /// `cnonce` is an argument so a test can reproduce them exactly; the
+    /// loader generates a fresh one.
     static bool auth_Digest_response(const std::string& algorithm,
                                      const std::string& username, const std::string& password,
                                      const std::string& realm, const std::string& nonce,
                                      const std::string& method, const std::string& request_target,
                                      const std::string& qop, const std::string& cnonce,
                                      const std::string& nc, std::string& out_hex);
+    /// The whole `Authorization` value, which is what the §3.9.2 example needs:
+    /// it carries `opaque`, sends the username hashed (`userhash=true`) when
+    /// `hash_username`, and digests `entity_body` under `qop=auth-int`. Empty
+    /// `qop` is the RFC 2069 form. False when the algorithm is not one of
+    /// MD5, SHA-256, SHA-512-256 (each optionally `-sess`), or when `qop` is
+    /// neither empty, `auth`, nor `auth-int`.
+    static bool auth_Digest_build(const std::string& algorithm,
+                                  const std::string& username, const std::string& password,
+                                  const std::string& realm, const std::string& nonce,
+                                  const std::string& opaque,
+                                  const std::string& method, const std::string& request_target,
+                                  const std::string& qop, const std::string& cnonce,
+                                  const std::string& nc,
+                                  std::string_view entity_body, bool hash_username,
+                                  std::string& out);
 };
 
 } // namespace litebird

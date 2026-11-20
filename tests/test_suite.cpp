@@ -14536,6 +14536,130 @@ TEST(cssom_media_rules_and_the_cascade_inside_them) {
     assert(js.eval("failures.join('; ')").to_string().empty());
 }
 
+TEST(keyframes_are_rules_of_the_cssom) {
+    using namespace litebird;
+    // Phase 112. The engine has parsed `@keyframes` since the cascade could
+    // animate with it, but the CSS Object Model skipped the block: a sheet's
+    // `cssRules` had no entry for it, so every rule after it answered with the
+    // next one's index, and `insertRule('@keyframes …')` was a `SyntaxError`.
+    // A browser lists the block as a `CSSKeyframesRule` whose frames are a
+    // `CSSRuleList` of their own.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page(
+        "<!DOCTYPE html><html><head><style>"
+        "@keyframes slide { 0% { left: 0px } 50%, 100% { left: 10px; opacity: .5 } }"
+        "@keyframes colours { from { color: red } to { color: blue } }"
+        "@-webkit-keyframes wink { 0% { opacity: 1 } }"
+        "@media screen { @keyframes inside { 0% { left: 1px } } }"
+        "#target { color: red }"
+        "</style></head><body><div id=\"target\">x</div></body></html>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function name(f) { try { f(); return 'no throw'; } catch (e) { return e.name; } }
+
+        var sheet = document.querySelector('style').sheet;
+        var target = document.getElementById('target');
+        var slide = sheet.cssRules[0];
+        var colours = sheet.cssRules[1];
+
+        // The block is a rule of the sheet, in the order it was written, and
+        // the style rule after it keeps its own index.
+        ok('the rules, in order', sheet.cssRules.length, 5);
+        ok('the block is first', slide.constructor.name, 'CSSKeyframesRule');
+        ok('it is a CSSRule', slide instanceof CSSRule, true);
+        ok('and a CSSKeyframesRule', slide instanceof CSSKeyframesRule, true);
+        ok('type', slide.type, CSSRule.KEYFRAMES_RULE);
+        ok('the constant on the class', CSSKeyframesRule.KEYFRAMES_RULE, 7);
+        ok('the name', slide.name, 'slide');
+        ok('a second block', colours.name, 'colours');
+        ok('the prefixed one', sheet.cssRules[2].constructor.name, 'CSSKeyframesRule');
+        ok('its name', sheet.cssRules[2].name, 'wink');
+        ok('the media rule is still a media rule', sheet.cssRules[3].constructor.name, 'CSSMediaRule');
+        ok('and the style rule is last', sheet.cssRules[4].selectorText, '#target');
+        ok('the style rule still styles', getComputedStyle(target).color, 'rgb(255, 0, 0)');
+
+        // Its frames are a CSSRuleList of their own.
+        ok('two frames', slide.cssRules.length, 2);
+        ok('the first key', slide.cssRules[0].keyText, '0%');
+        ok('the second key', slide.cssRules[1].keyText, '50%, 100%');
+        ok('a frame is a CSSKeyframeRule', slide.cssRules[0] instanceof CSSKeyframeRule, true);
+        ok('a frame is a CSSRule', slide.cssRules[0] instanceof CSSRule, true);
+        ok('a frame type', slide.cssRules[0].type, CSSRule.KEYFRAME_RULE);
+        ok('one object per frame', slide.cssRules.item(0) === slide.cssRules[0], true);
+        ok('from and to are kept as written', colours.cssRules[0].keyText + '|' + colours.cssRules[1].keyText,
+           'from|to');
+        ok('the frame style', slide.cssRules[1].style.left, '10px');
+        ok('a number is a number', slide.cssRules[1].style.opacity, '0.5');
+        ok('the frame is a CSSStyleDeclaration', slide.cssRules[0].style instanceof CSSStyleDeclaration, true);
+        ok('parentRule of the block', slide.parentRule, null);
+        ok('parentRule of a frame', slide.cssRules[0].parentRule === slide, true);
+        ok('parentStyleSheet', slide.parentStyleSheet === sheet, true);
+        ok('the block cssText', slide.cssText,
+           '@keyframes slide { 0% { left: 0px; } 50%, 100% { left: 10px; opacity: 0.5; } }');
+        ok('the frame cssText', slide.cssRules[0].cssText, '0% { left: 0px; }');
+
+        // A keyframes block declares no selector, so it colours nothing: this
+        // is the rule that keeps the cascade out of it.
+        ok('a frame does not style the page', getComputedStyle(target).color, 'rgb(255, 0, 0)');
+        ok('nor does another block', getComputedStyle(target).opacity, '1');
+
+        // findRule, appendRule and deleteRule address a frame by its selector.
+        ok('findRule by key', slide.findRule('50%, 100%') === slide.cssRules[1], true);
+        ok('findRule that finds nothing', slide.findRule('75%'), null);
+        ok('deleteRule of a key that is not there', name(function () { slide.deleteRule('75%'); }), 'no throw');
+        ok('the frames are untouched', slide.cssRules.length, 2);
+        ok('appendRule', name(function () { slide.appendRule('75% { left: 5px }'); }), 'no throw');
+        ok('three frames', slide.cssRules.length, 3);
+        ok('the appended key', slide.cssRules[2].keyText, '75%');
+        ok('the appended style', slide.cssRules[2].style.left, '5px');
+        ok('a new frame is a CSSKeyframeRule', slide.cssRules[2] instanceof CSSKeyframeRule, true);
+        ok('appendRule of nonsense', name(function () { slide.appendRule('nonsense'); }), 'SyntaxError');
+        ok('appendRule of two frames', name(function () { slide.appendRule('10% { left: 0 } 20% { left: 1px }'); }),
+           'SyntaxError');
+        slide.deleteRule('0%');
+        ok('deleted by key', slide.cssRules.length, 2);
+        ok('the one that was left first', slide.cssRules[0].keyText, '50%, 100%');
+
+        // A frame and a block are still editable, and the list follows.
+        slide.cssRules[0].keyText = '60%';
+        ok('keyText is writable', slide.findRule('60%') === slide.cssRules[0], true);
+        slide.cssRules[0].style.left = '3px';
+        ok('and its style', slide.cssRules[0].style.left, '3px');
+        slide.name = 'renamed';
+        ok('name is writable', slide.name, 'renamed');
+
+        // The sheet takes an @keyframes rule through `insertRule`, and drops it
+        // through `deleteRule`, like any other rule.
+        ok('insertRule of a block', sheet.insertRule('@keyframes spin { from { left: 2px } }', 1), 1);
+        ok('it went in where it was put', sheet.cssRules[1].name, 'spin');
+        ok('with its frame', sheet.cssRules[1].cssRules[0].keyText, 'from');
+        ok('the rule after it moved', sheet.cssRules[2].constructor.name, 'CSSKeyframesRule');
+        sheet.deleteRule(1);
+        ok('and out again', sheet.cssRules.length, 5);
+        ok('a block with no name', name(function () { sheet.insertRule('@keyframes { 0% { left: 0 } }', 0); }),
+           'SyntaxError');
+        ok('a block with an empty body is a rule', sheet.insertRule('@keyframes empty {}', 0), 0);
+        ok('with no frames', sheet.cssRules[0].cssRules.length, 0);
+        sheet.deleteRule(0);
+
+        // A block inside `@media` belongs to the media rule, and is listed
+        // whether or not the query matches.
+        var media = sheet.cssRules[3];
+        ok('the media block holds the keyframes rule', media.cssRules[0].constructor.name, 'CSSKeyframesRule');
+        ok('its name', media.cssRules[0].name, 'inside');
+        ok('and its frame', media.cssRules[0].cssRules[0].keyText, '0%');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
 TEST(array_holes_are_not_elements) {
     using namespace litebird;
     // Phase 81. `delete a[1]` used to leave an element whose value was
@@ -23876,6 +24000,7 @@ int main() {
     // rule.style, insertRule/deleteRule, and document.fonts.
     RUN_TEST(cssom_sheets_rules_insert_amounts_and_fonts);
     RUN_TEST(cssom_media_rules_and_the_cascade_inside_them);
+    RUN_TEST(keyframes_are_rules_of_the_cssom);
 
     // Phase 81: an index of an array is either an element or a hole.
     RUN_TEST(array_holes_are_not_elements);

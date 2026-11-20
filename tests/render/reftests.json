@@ -1,0 +1,327 @@
+{
+  "_what_this_is": [
+    "Pixel reftests: a page, and assertions about what it must look like.",
+    "Run by `make render-conformance` (tools/conformance/render_check.py),",
+    "which reads the PNG with its own decoder so the engine is not asked to",
+    "grade its own writer.",
+    "",
+    "An assertion is one of:",
+    "  pixel      a point is a colour (tolerance optional, 0 by default)",
+    "  rect       a rectangle is uniformly a colour",
+    "  uniform    a rectangle is one colour, whichever it is",
+    "  not-colour a point is anything but a colour",
+    "  differs    two points are not the same colour (something was painted)",
+    "",
+    "Coordinates are CSS pixels from the top left of the 800x600 viewport.",
+    "Exact equality is the default on purpose: box edges here are not",
+    "anti-aliased, so an off-by-one is a bug rather than a rounding."
+  ],
+  "tests": [
+    {
+      "name": "a_block_paints_its_background_exactly",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .box { width: 50px; height: 50px; background: #ff0000 }\n</style></head><body><div class=\"box\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 50,
+          "height": 50,
+          "colour": "#ff0000",
+          "describe": "the 50x50 block is red throughout"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "its top-left corner is inside it"
+        },
+        {
+          "kind": "pixel",
+          "x": 49,
+          "y": 49,
+          "colour": "#ff0000",
+          "describe": "its bottom-right corner is inside it"
+        },
+        {
+          "kind": "pixel",
+          "x": 50,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "one pixel to its right is not (no overflow)"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 50,
+          "colour": "#ffffff",
+          "describe": "one pixel below it is not"
+        }
+      ]
+    },
+    {
+      "name": "stacked_blocks_stack_in_document_order",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .a { width: 40px; height: 30px; background: #0000ff }\n  .b { width: 40px; height: 30px; background: #00ff00 }\n</style></head><body><div class=\"a\"></div><div class=\"b\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 30,
+          "colour": "#0000ff",
+          "describe": "the first block is blue"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 30,
+          "width": 40,
+          "height": 30,
+          "colour": "#00ff00",
+          "describe": "the second starts where the first ended"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 60,
+          "colour": "#ffffff",
+          "describe": "and nothing is painted below the second"
+        }
+      ]
+    },
+    {
+      "name": "margin_left_moves_the_box_and_leaves_its_margin_blank",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .box { margin-left: 80px; width: 25px; height: 20px; background: #00ff00 }\n</style></head><body><div class=\"box\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 80,
+          "y": 0,
+          "width": 25,
+          "height": 20,
+          "colour": "#00ff00",
+          "describe": "the box begins at its margin-left"
+        },
+        {
+          "kind": "pixel",
+          "x": 79,
+          "y": 5,
+          "colour": "#ffffff",
+          "describe": "the margin to its left is unpainted"
+        },
+        {
+          "kind": "pixel",
+          "x": 105,
+          "y": 5,
+          "colour": "#ffffff",
+          "describe": "and nothing overflows to its right"
+        }
+      ]
+    },
+    {
+      "name": "borders_paint_around_the_content_and_the_content_stays_inside",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .box { border: 4px solid #008000; width: 30px; height: 20px; background: #0000ff }\n</style></head><body><div class=\"box\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 38,
+          "height": 4,
+          "colour": "#008000",
+          "describe": "the top border is 4px of the border colour, across the padding box"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 4,
+          "height": 28,
+          "colour": "#008000",
+          "describe": "the left border is 4px down the full border box"
+        },
+        {
+          "kind": "rect",
+          "x": 4,
+          "y": 4,
+          "width": 30,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "the content is inside the border, not under it"
+        },
+        {
+          "kind": "pixel",
+          "x": 38,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "nothing is painted past the border box"
+        }
+      ]
+    },
+    {
+      "name": "padding_moves_the_content_without_painting",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .outer { padding: 20px; width: 40px; height: 40px; background: #ff00ff }\n  .inner { width: 10px; height: 10px; background: #000000 }\n</style></head><body><div class=\"outer\"><div class=\"inner\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 20,
+          "colour": "#ff00ff",
+          "describe": "the padding band above the content is the outer background"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 10,
+          "height": 10,
+          "colour": "#000000",
+          "describe": "the content box begins after 20px of padding"
+        },
+        {
+          "kind": "pixel",
+          "x": 19,
+          "y": 25,
+          "colour": "#ff00ff",
+          "describe": "and the padding to its left is still the outer background"
+        }
+      ]
+    },
+    {
+      "name": "text_is_painted_where_its_line_box_starts",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0; font-size: 32px }\n</style></head><body>x</body></html>",
+      "assert": [
+        {
+          "kind": "differs",
+          "ax": 8,
+          "ay": 20,
+          "bx": 200,
+          "by": 300,
+          "a-besides": "#ffffff",
+          "describe": "the glyph's stem is painted in the line box and is not the page colour, while the page below is blank"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 60,
+          "width": 200,
+          "height": 60,
+          "colour": "#ffffff",
+          "describe": "nothing is painted below the single line of text"
+        }
+      ],
+      "note": "The glyph's exact grey is font-dependent, so this asserts where the ink is and that the page below it is untouched, rather than a colour."
+    },
+    {
+      "name": "a_later_block_covers_an_earlier_one",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0; position: relative }\n  .under { width: 60px; height: 60px; background: #ff0000 }\n  .over  { position: absolute; left: 10px; top: 10px; width: 20px; height: 20px; background: #0000ff }\n</style></head><body><div class=\"under\"></div><div class=\"over\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 10,
+          "y": 10,
+          "width": 20,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "the absolutely positioned box paints over the one before it"
+        },
+        {
+          "kind": "pixel",
+          "x": 5,
+          "y": 5,
+          "colour": "#ff0000",
+          "describe": "and the box underneath still shows where it is not covered"
+        },
+        {
+          "kind": "pixel",
+          "x": 30,
+          "y": 30,
+          "colour": "#ff0000",
+          "describe": "including one pixel past the covering box"
+        }
+      ]
+    },
+    {
+      "name": "display_none_paints_nothing",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .shown { width: 30px; height: 30px; background: #0000ff }\n  .hidden { display: none; width: 100px; height: 100px; background: #ff0000 }\n</style></head><body><div class=\"shown\"></div><div class=\"hidden\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 30,
+          "height": 30,
+          "colour": "#0000ff",
+          "describe": "the shown box is painted"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 30,
+          "width": 200,
+          "height": 100,
+          "colour": "#ffffff",
+          "describe": "and the display:none box occupies no pixels at all"
+        }
+      ]
+    },
+    {
+      "name": "a_percentage_width_is_resolved_against_the_viewport",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .half { width: 50%; height: 20px; background: #008000 }\n</style></head><body><div class=\"half\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 10,
+          "colour": "#008000",
+          "describe": "the half-width box starts at the left edge"
+        },
+        {
+          "kind": "pixel",
+          "x": 399,
+          "y": 10,
+          "colour": "#008000",
+          "describe": "50% of an 800px viewport still covers x=399"
+        },
+        {
+          "kind": "pixel",
+          "x": 400,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "and stops at x=400"
+        }
+      ]
+    },
+    {
+      "name": "an_offscreen_box_paints_inside_the_image_only",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .a { width: 700px; height: 10px; background: #ff0000 }\n  .b { width: 400px; height: 10px; background: #0000ff }\n</style></head><body><div class=\"a\"></div><div class=\"b\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 699,
+          "y": 5,
+          "colour": "#ff0000",
+          "describe": "the wide box reaches the last pixel it should"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 5,
+          "colour": "#ffffff",
+          "describe": "and no further"
+        },
+        {
+          "kind": "pixel",
+          "x": 399,
+          "y": 15,
+          "colour": "#0000ff",
+          "describe": "the second box is clipped at the viewport edge, not scrolled into view"
+        }
+      ]
+    }
+  ]
+}

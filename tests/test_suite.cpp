@@ -3908,18 +3908,18 @@ TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions) {
     const auto alt_a = f.shape_glyphs({'A'}, true);
     assert(alt_a.size() == 1 && alt_a[0].glyph == 11 && alt_a[0].x_advance == 750);
 
-    // 5. Host DejaVuSans.ttf real `ccmp` ChainContext (L3 -> L33): 'i' + acute converts to dotless i!
+    // 5. Optional host DejaVuSans.ttf real `ccmp` ChainContext: 'i' + acute converts to dotless i!
     FontRenderer& fr = FontRenderer::instance();
-    const std::string sans_path = fr.face_path("sans-serif");
-    if (!sans_path.empty()) {
-        TrueTypeFont sans;
-        if (sans.load_file(sans_path) && sans.has_contextual_shaping()) {
-            const uint16_t gid_i = sans.glyph_index('i');
-            const uint16_t gid_dotless = sans.glyph_index(0x0131);
-            const auto d_ia = sans.shape_glyphs({'i', 0x0301}, true);
-            const auto d_ip = sans.shape_glyphs({'i', 'a'}, true);
-            assert(d_ia.size() == 2 && d_ip.size() == 2);
-            if (gid_dotless != 0) {
+    const std::string dejavu_path = fr.face_path("DejaVu Sans");
+    if (!dejavu_path.empty()) {
+        TrueTypeFont dejavu;
+        if (dejavu.load_file(dejavu_path) && dejavu.has_contextual_shaping()) {
+            const uint16_t gid_i = dejavu.glyph_index('i');
+            const uint16_t gid_dotless = dejavu.glyph_index(0x0131);
+            if (gid_i != 0 && gid_dotless != 0) {
+                const auto d_ia = dejavu.shape_glyphs({'i', 0x0301}, true);
+                const auto d_ip = dejavu.shape_glyphs({'i', 'a'}, true);
+                assert(d_ia.size() == 2 && d_ip.size() == 2);
                 assert(d_ia[0].glyph == gid_dotless);
                 assert(d_ip[0].glyph == gid_i);
             }
@@ -4121,33 +4121,40 @@ TEST(arabic_joining_zwnj_zwj_lam_alef_and_mark_anchoring) {
     assert(zwj_pre.size() == 1 && zwj_pre[0].glyph == 15);
     assert(zwj_post.size() == 1 && zwj_post[0].glyph == 17);
 
-    // 6. Real host DejaVuSans.ttf Arabic shaping ("سلام" + "لا" + "ل\u200cا" + "م\u200d" + shadda+fatha)!
+    // 6. Optional host DejaVuSans.ttf Arabic shaping ("سلام" + "لا" + "ل\u200cا" + "م\u200d" + shadda+fatha)!
     FontRenderer& fr = FontRenderer::instance();
-    const std::string sans_path = fr.face_path("sans-serif");
-    if (!sans_path.empty()) {
-        TrueTypeFont sans;
-        if (sans.load_file(sans_path) && sans.has_contextual_shaping()) {
-            const uint16_t lam_iso = sans.glyph_index(0x0644);
-            const uint16_t alef_iso = sans.glyph_index(0x0627);
-            const uint16_t meem_iso = sans.glyph_index(0x0645);
-            const auto d_la = sans.shape_glyphs({0x0644, 0x0627}, false);
-            const auto d_zwnj = sans.shape_glyphs({0x0644, 0x200C, 0x0627}, false);
-            const auto d_zwj = sans.shape_glyphs({0x0645, 0x200D}, false);
-            const auto d_salam_log = sans.shape_glyphs({0x0633, 0x0644, 0x0627, 0x0645}, true, false);
-            const auto d_salam = sans.shape_glyphs({0x0633, 0x0644, 0x0627, 0x0645}, true, true);
-            const auto d_shadda = sans.shape_glyphs({0x0628, 0x0651, 0x064E}, false);
-            assert(d_la.size() == 1 && d_la[0].glyph != lam_iso && d_la[0].glyph != alef_iso);
-            assert(d_zwnj.size() == 2 && d_zwnj[0].glyph == lam_iso && d_zwnj[1].glyph == alef_iso);
-            assert(d_zwj.size() == 1 && d_zwj[0].glyph != meem_iso);
-            // "سلام" logical: [س_init, لا_fina, م_isol]; visually RTL: [م_isol, لا_fina, س_init]
-            assert(d_salam_log.size() == 3 && d_salam.size() == 3);
-            assert(d_salam_log[2].glyph == meem_iso);
-            assert(d_salam_log[0].glyph != sans.glyph_index(0x0633));
-            assert(d_salam[0].glyph == meem_iso);
-            assert(d_salam[2].glyph == d_salam_log[0].glyph);
-            assert(d_salam[1].glyph == d_salam_log[1].glyph);
-            // Shadda + Fatha ligates in DejaVuSans rlig!
-            assert(d_shadda.size() == 2 && d_shadda[1].x_advance == 0);
+    const std::string dejavu_path = fr.face_path("DejaVu Sans");
+    if (!dejavu_path.empty()) {
+        TrueTypeFont dejavu;
+        if (dejavu.load_file(dejavu_path) && dejavu.has_contextual_shaping()) {
+            const uint16_t lam_iso = dejavu.glyph_index(0x0644);
+            const uint16_t alef_iso = dejavu.glyph_index(0x0627);
+            const uint16_t meem_iso = dejavu.glyph_index(0x0645);
+            const uint16_t seen_iso = dejavu.glyph_index(0x0633);
+            const uint16_t beh_iso = dejavu.glyph_index(0x0628);
+            const uint16_t shadda = dejavu.glyph_index(0x0651);
+            const uint16_t fatha = dejavu.glyph_index(0x064E);
+            if (lam_iso != 0 && alef_iso != 0 && meem_iso != 0 &&
+                seen_iso != 0 && beh_iso != 0 && shadda != 0 && fatha != 0) {
+                const auto d_la = dejavu.shape_glyphs({0x0644, 0x0627}, false);
+                const auto d_zwnj = dejavu.shape_glyphs({0x0644, 0x200C, 0x0627}, false);
+                const auto d_zwj = dejavu.shape_glyphs({0x0645, 0x200D}, false);
+                const auto d_salam_log = dejavu.shape_glyphs({0x0633, 0x0644, 0x0627, 0x0645}, true, false);
+                const auto d_salam = dejavu.shape_glyphs({0x0633, 0x0644, 0x0627, 0x0645}, true, true);
+                const auto d_shadda = dejavu.shape_glyphs({0x0628, 0x0651, 0x064E}, false);
+                assert(d_la.size() == 1 && d_la[0].glyph != lam_iso && d_la[0].glyph != alef_iso);
+                assert(d_zwnj.size() == 2 && d_zwnj[0].glyph == lam_iso && d_zwnj[1].glyph == alef_iso);
+                assert(d_zwj.size() == 1 && d_zwj[0].glyph != meem_iso);
+                // "سلام" logical: [س_init, لا_fina, م_isol]; visually RTL: [م_isol, لا_fina, س_init]
+                assert(d_salam_log.size() == 3 && d_salam.size() == 3);
+                assert(d_salam_log[2].glyph == meem_iso);
+                assert(d_salam_log[0].glyph != seen_iso);
+                assert(d_salam[0].glyph == meem_iso);
+                assert(d_salam[2].glyph == d_salam_log[0].glyph);
+                assert(d_salam[1].glyph == d_salam_log[1].glyph);
+                // Shadda + Fatha ligates in DejaVuSans rlig!
+                assert(d_shadda.size() == 2 && d_shadda[1].x_advance == 0);
+            }
         }
     }
     std::printf("      [arab] init/medi/fina/isol, ZWNJ/ZWJ, Lam-Alef, MarkToLig & DejaVu Arabic passed\n");
@@ -4315,34 +4322,180 @@ TEST(gpos_cursive_attachment_ltr_rtl_and_contextual_pos) {
     std::fflush(stdout);
 }
 
+// Reusable synthetic Arabic+Latin SFNT with ASCII (` `, `1`..`3`, `h`, `i`, `k`, `o`),
+// Arabic letters (`ا`, `ب`, `ح`, `ر`, `س`, `ع`, `ك`, `ل`, `م`, `ي`, `َ`, ZWNJ, ZWJ),
+// `init`/`medi`/`fina` positional forms, `rlig` Lam-Alef ligatures, and GPOS mark advance zeroing.
+inline std::vector<uint8_t> build_test_arabic_latin_sfnt() {
+    using namespace litebird;
+    const std::vector<TestGlyphSpec> glyphs = {
+        {0, 500, false, 0, 0, 0, 0},                    // 0 .notdef
+        {' ', 300, false, 0, 0, 0, 0},                  // 1 space
+        {'1', 500, true, 50, 0, 450, 650},              // 2 '1'
+        {'2', 500, true, 50, 0, 450, 650},              // 3 '2'
+        {'3', 500, true, 50, 0, 450, 650},              // 4 '3'
+        {'h', 550, true, 50, 0, 500, 650},              // 5 'h'
+        {'i', 300, true, 50, 0, 250, 650},              // 6 'i'
+        {'k', 550, true, 50, 0, 500, 650},              // 7 'k'
+        {'o', 550, true, 50, 0, 500, 500},              // 8 'o'
+        {0x0627, 320, true, 80, 0, 240, 700},           // 9 ALEF isol
+        {0x0628, 650, true, 50, 0, 600, 380},           // 10 BEH isol
+        {0x062D, 650, true, 50, 0, 600, 450},           // 11 HAH isol
+        {0x0631, 400, true, 50, -100, 350, 400},        // 12 REH isol
+        {0x0633, 750, true, 50, 0, 700, 450},           // 13 SEEN isol
+        {0x0639, 650, true, 50, 0, 600, 450},           // 14 AIN isol
+        {0x0643, 600, true, 50, 0, 550, 650},           // 15 KAF isol
+        {0x0644, 550, true, 50, 0, 500, 700},           // 16 LAM isol
+        {0x0645, 600, true, 50, 0, 550, 450},           // 17 MEEM isol
+        {0x064A, 650, true, 50, 0, 600, 450},           // 18 YEH isol
+        {0x064E, 200, true, 100, 560, 260, 640},        // 19 FATHA mark
+        {0x200C, 100, false, 0, 0, 0, 0},               // 20 ZWNJ
+        {0x200D, 100, false, 0, 0, 0, 0},               // 21 ZWJ
+        // init (22..29) for dual-joining 10,11,13,14,15,16,17,18
+        {0, 620, true, 40, 0, 580, 380},                // 22 BEH.init
+        {0, 620, true, 40, 0, 580, 450},                // 23 HAH.init
+        {0, 720, true, 40, 0, 680, 450},                // 24 SEEN.init
+        {0, 620, true, 40, 0, 580, 450},                // 25 AIN.init
+        {0, 580, true, 40, 0, 540, 650},                // 26 KAF.init
+        {0, 520, true, 40, 0, 480, 700},                // 27 LAM.init
+        {0, 580, true, 40, 0, 540, 450},                // 28 MEEM.init
+        {0, 620, true, 40, 0, 580, 450},                // 29 YEH.init
+        // medi (30..37) for dual-joining 10,11,13,14,15,16,17,18
+        {0, 600, true, 30, 0, 570, 380},                // 30 BEH.medi
+        {0, 600, true, 30, 0, 570, 450},                // 31 HAH.medi
+        {0, 700, true, 30, 0, 670, 450},                // 32 SEEN.medi
+        {0, 600, true, 30, 0, 570, 450},                // 33 AIN.medi
+        {0, 560, true, 30, 0, 530, 650},                // 34 KAF.medi
+        {0, 500, true, 30, 0, 470, 700},                // 35 LAM.medi
+        {0, 560, true, 30, 0, 530, 450},                // 36 MEEM.medi
+        {0, 600, true, 30, 0, 570, 450},                // 37 YEH.medi
+        // fina (38..47) for 9..18
+        {0, 340, true, 60, 0, 280, 700},                // 38 ALEF.fina
+        {0, 620, true, 40, 0, 580, 380},                // 39 BEH.fina
+        {0, 620, true, 40, 0, 580, 450},                // 40 HAH.fina
+        {0, 420, true, 50, -100, 370, 400},             // 41 REH.fina
+        {0, 720, true, 40, 0, 680, 450},                // 42 SEEN.fina
+        {0, 620, true, 40, 0, 580, 450},                // 43 AIN.fina
+        {0, 580, true, 40, 0, 540, 650},                // 44 KAF.fina
+        {0, 520, true, 40, 0, 480, 700},                // 45 LAM.fina
+        {0, 580, true, 40, 0, 540, 450},                // 46 MEEM.fina
+        {0, 620, true, 40, 0, 580, 450},                // 47 YEH.fina
+        // rlig Lam-Alef ligatures (48..49): strictly narrower than Lam(520) + Alef(340) = 860
+        {0, 520, true, 40, 0, 480, 700},                // 48 LAM_ALEF.isol
+        {0, 520, true, 40, 0, 480, 700},                // 49 LAM_ALEF.fina
+    };
+
+    SfntByteBuf gdef;
+    gdef.u32(0x00010000u);
+    gdef.u16(12); gdef.u16(0); gdef.u16(0); gdef.u16(0);
+    auto gcd = build_classdef_fmt2({{1, 18, 1}, {19, 19, 3}, {22, 47, 1}, {48, 49, 2}});
+    gdef.data.insert(gdef.data.end(), gcd.begin(), gcd.end());
+
+    auto make_single_map = [](const std::vector<std::pair<uint16_t, uint16_t>>& pairs) {
+        SfntByteBuf b;
+        b.u16(2); b.u16(0); b.u16(static_cast<uint16_t>(pairs.size()));
+        std::vector<uint16_t> cov;
+        for (const auto& [src, dst] : pairs) {
+            cov.push_back(src);
+            b.u16(dst);
+        }
+        b.patch_u16(2, static_cast<uint16_t>(b.data.size()));
+        auto cv = build_cov_fmt1(cov);
+        b.data.insert(b.data.end(), cv.begin(), cv.end());
+        return b.data;
+    };
+
+    auto s_init = make_single_map({{10, 22}, {11, 23}, {13, 24}, {14, 25}, {15, 26}, {16, 27}, {17, 28}, {18, 29}});
+    auto s_medi = make_single_map({{10, 30}, {11, 31}, {13, 32}, {14, 33}, {15, 34}, {16, 35}, {17, 36}, {18, 37}});
+    auto s_fina = make_single_map({{9, 38}, {10, 39}, {11, 40}, {12, 41}, {13, 42}, {14, 43}, {15, 44}, {16, 45}, {17, 46}, {18, 47}});
+
+    // rlig: sorted coverage {16 (LAM.isol), 27 (LAM.init), 35 (LAM.medi)}
+    SfntByteBuf s_rlig;
+    s_rlig.u16(1); s_rlig.u16(0); s_rlig.u16(3);
+    s_rlig.u16(0); s_rlig.u16(0); s_rlig.u16(0);
+    s_rlig.patch_u16(2, static_cast<uint16_t>(s_rlig.data.size()));
+    auto rcov = build_cov_fmt1({16, 27, 35});
+    s_rlig.data.insert(s_rlig.data.end(), rcov.begin(), rcov.end());
+    const uint16_t lig_specs[3][2] = {
+        {48, 9},   // 16 + 9 -> 48
+        {48, 38},  // 27 + 38 -> 48
+        {49, 38},  // 35 + 38 -> 49
+    };
+    for (int set_i = 0; set_i < 3; ++set_i) {
+        const std::size_t ls_pos = s_rlig.data.size();
+        s_rlig.patch_u16(6 + set_i * 2, static_cast<uint16_t>(ls_pos));
+        s_rlig.u16(1); s_rlig.u16(4);
+        s_rlig.u16(lig_specs[set_i][0]);
+        s_rlig.u16(2);
+        s_rlig.u16(lig_specs[set_i][1]);
+    }
+
+    auto gsub_bytes = build_otl_table(
+        {{"arab", {{"init", {0}}, {"medi", {1}}, {"fina", {2}}, {"rlig", {3}}}}},
+        {
+            {"init", 1, 0x0000, -1, {s_init}},
+            {"medi", 1, 0x0000, -1, {s_medi}},
+            {"fina", 1, 0x0000, -1, {s_fina}},
+            {"rlig", 4, 0x0008, -1, {s_rlig.data}},
+        });
+
+    SfntByteBuf sp_zero;
+    sp_zero.u16(1); sp_zero.u16(8); sp_zero.u16(0x0004); sp_zero.i16(-200);
+    auto mc = build_cov_fmt1({19});
+    sp_zero.data.insert(sp_zero.data.end(), mc.begin(), mc.end());
+
+    SfntByteBuf mkbase;
+    mkbase.u16(1); mkbase.u16(0); mkbase.u16(0); mkbase.u16(1); mkbase.u16(0); mkbase.u16(0);
+    mkbase.patch_u16(2, static_cast<uint16_t>(mkbase.data.size()));
+    mkbase.data.insert(mkbase.data.end(), mc.begin(), mc.end());
+    mkbase.patch_u16(4, static_cast<uint16_t>(mkbase.data.size()));
+    auto bc = build_cov_fmt1({22});
+    mkbase.data.insert(mkbase.data.end(), bc.begin(), bc.end());
+    mkbase.patch_u16(8, static_cast<uint16_t>(mkbase.data.size()));
+    mkbase.u16(1); mkbase.u16(0); mkbase.u16(6); mkbase.u16(1); mkbase.i16(100); mkbase.i16(560);
+    mkbase.patch_u16(10, static_cast<uint16_t>(mkbase.data.size()));
+    mkbase.u16(1); mkbase.u16(4); mkbase.u16(1); mkbase.i16(310); mkbase.i16(460);
+
+    auto gpos_bytes = build_otl_table(
+        {{"arab", {{"mark", {0, 1}}}}},
+        {
+            {"mark", 1, 0x0000, -1, {sp_zero.data}},
+            {"mark", 4, 0x0000, -1, {mkbase.data}},
+        });
+
+    return build_synthetic_sfnt(1000, 800, -200, glyphs,
+                                {{"GDEF", gdef.data}, {"GSUB", gsub_bytes}, {"GPOS", gpos_bytes}});
+}
+
 TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs) {
     using namespace litebird;
 
     FontRenderer& fr = FontRenderer::instance();
-    const std::string sans_path = fr.face_path("sans-serif");
-    if (sans_path.empty()) return;
-
-    TrueTypeFont sans;
-    if (!sans.load_file(sans_path) || !sans.has_contextual_shaping()) return;
+    fr.clear_webfonts();
+    const auto ar_sfnt = build_test_arabic_latin_sfnt();
+    const int ar_fam = fr.register_webfont("TestArabicSans", {[ar_sfnt]() { return ar_sfnt; }}, 400, 400, false);
+    assert(ar_fam != FontRenderer::kNoFamily);
+    TrueTypeFont ar_font;
+    assert(ar_font.load_memory(ar_sfnt) && ar_font.has_gsub() && ar_font.has_mark_positioning());
 
     // 1. Multi-word Arabic keeps internal space in a single RTL run and reverses visually!
-    const auto salam_alaykum = fr.shape_text("\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85 \xD8\xB9\xD9\x84\xD9\x8A\xD9\x83\xD9\x85", 24.0f, 400, "sans-serif", false, true);
-    // "سلام" (3 glyphs) + ' ' (1) + "عليكم" (5 glyphs) -> 9 glyphs visually: [م, ك, ي, ل, ع, ' ', م, لا, س]
+    const auto salam_alaykum = fr.shape_text("\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85 \xD8\xB9\xD9\x84\xD9\x8A\xD9\x83\xD9\x85", 24.0f, 400, "TestArabicSans", false, true);
+    // "سلام" (3 glyphs) + ' ' (1) + "عليكم" (5 glyphs) -> 9 glyphs visually: [م_fina, ك_medi, ي_medi, ل_medi, ع_init, ' ', م_isol, لا_fina, س_init]
     assert(salam_alaykum.size() == 9);
-    assert(salam_alaykum[5].glyph == sans.glyph_index(' '));
-    assert(salam_alaykum[6].glyph == sans.glyph_index(0x0645)); // Meem isolated at end of "سلام"
+    assert(salam_alaykum[5].glyph == ar_font.glyph_index(' '));
+    assert(salam_alaykum[6].glyph == ar_font.glyph_index(0x0645)); // Meem isolated at end of "سلام"
+    assert(salam_alaykum[8].glyph != ar_font.glyph_index(0x0633)); // initial Sin!
 
     // 2. Mixed Latin + Arabic + Latin keeps LTR segments LTR and reverses RTL segment in between!
-    const auto mixed = fr.shape_text("hi \xD9\x85\xD8\xB1\xD8\xAD\xD8\xA8\xD8\xA7 ok", 24.0f, 400, "sans-serif", false, true);
+    const auto mixed = fr.shape_text("hi \xD9\x85\xD8\xB1\xD8\xAD\xD8\xA8\xD8\xA7 ok", 24.0f, 400, "TestArabicSans", false, true);
     assert(mixed.size() >= 10);
-    assert(mixed[0].glyph == sans.glyph_index('h'));
-    assert(mixed[1].glyph == sans.glyph_index('i'));
-    assert(mixed[mixed.size() - 2].glyph == sans.glyph_index('o'));
-    assert(mixed[mixed.size() - 1].glyph == sans.glyph_index('k'));
+    assert(mixed[0].glyph == ar_font.glyph_index('h'));
+    assert(mixed[1].glyph == ar_font.glyph_index('i'));
+    assert(mixed[mixed.size() - 2].glyph == ar_font.glyph_index('o'));
+    assert(mixed[mixed.size() - 1].glyph == ar_font.glyph_index('k'));
 
     // 3. European digits inside Arabic stay LTR ("123" stays '1','2','3', NOT '3','2','1')!
-    const auto rtl_num = fr.shape_text("\xD9\x85\xD8\xB1 123 \xD8\xA8\xD8\xA7", 24.0f, 400, "sans-serif", false, true);
-    const uint16_t g1 = sans.glyph_index('1'), g2 = sans.glyph_index('2'), g3 = sans.glyph_index('3');
+    const auto rtl_num = fr.shape_text("\xD9\x85\xD8\xB1 123 \xD8\xA8\xD8\xA7", 24.0f, 400, "TestArabicSans", false, true);
+    const uint16_t g1 = ar_font.glyph_index('1'), g2 = ar_font.glyph_index('2'), g3 = ar_font.glyph_index('3');
     int pos1 = -1, pos2 = -1, pos3 = -1;
     for (int i = 0; i < static_cast<int>(rtl_num.size()); ++i) {
         if (rtl_num[i].glyph == g1) pos1 = i;
@@ -4352,27 +4505,58 @@ TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs) {
     assert(pos1 >= 0 && pos1 + 1 == pos2 && pos2 + 1 == pos3);
 
     // 4. Combining marks stay AFTER their base after visual RTL cluster reversal ([base, mark], not [mark, base])!
-    const auto rtl_mark = fr.shape_text("\xD8\xA8\xD9\x8E\xD8\xB3", 24.0f, 400, "sans-serif", false, true);
+    const auto rtl_mark = fr.shape_text("\xD8\xA8\xD9\x8E\xD8\xB3", 24.0f, 400, "TestArabicSans", false, true);
     assert(rtl_mark.size() == 3);
-    assert(rtl_mark[1].glyph != sans.glyph_index(0x064E)); // base Beh comes before Fatha!
-    assert(rtl_mark[2].glyph == sans.glyph_index(0x064E)); // Fatha follows Beh in same cluster!
+    assert(rtl_mark[1].glyph != ar_font.glyph_index(0x064E)); // base Beh comes before Fatha!
+    assert(rtl_mark[2].glyph == ar_font.glyph_index(0x064E)); // Fatha follows Beh in same cluster!
 
     // 5. Fallback preservation across common spaces: a Latin-only primary webfont (covering ASCII)
-    //    must keep "سلام عليكم" on DejaVuSans as one coherent Arabic run!
+    //    falling back via system fallbacks to TestArabicSans must keep "سلام عليكم" as one coherent Arabic run!
     const std::vector<TestGlyphSpec> latin_only = {
         {0, 500, false, 0, 0, 0, 0},
         {' ', 300, false, 0, 0, 0, 0},
         {'a', 500, true, 40, 0, 460, 500},
     };
     auto latin_sfnt = build_synthetic_sfnt(1000, 800, -200, latin_only, {});
-    fr.clear_webfonts();
     const int fam = fr.register_webfont("LatinOnlyPrimary", {[latin_sfnt]() { return latin_sfnt; }}, 400, 400, false);
     assert(fam != FontRenderer::kNoFamily);
+    const std::string tmp_ar_path =
+        (std::filesystem::temp_directory_path() / "litebird_test_arabic_fallback.ttf").string();
+    {
+        std::ofstream tf(tmp_ar_path, std::ios::binary | std::ios::trunc);
+        assert(tf.good());
+        tf.write(reinterpret_cast<const char*>(ar_sfnt.data()),
+                 static_cast<std::streamsize>(ar_sfnt.size()));
+        assert(tf.good());
+    }
+    const std::vector<std::string> saved_fallbacks = fr.fallback_paths();
+    fr.set_fallbacks({tmp_ar_path});
     const auto fallback_rtl = fr.shape_text("\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85 \xD8\xB9\xD9\x84\xD9\x8A\xD9\x83\xD9\x85", 24.0f, 400, "LatinOnlyPrimary", false, true);
+    fr.set_fallbacks(saved_fallbacks);
+    std::error_code rm_ec;
+    std::filesystem::remove(tmp_ar_path, rm_ec);
     assert(fallback_rtl.size() == 9);
-    // Space stays from the fallback face (DejaVuSans), not broken into 3 subruns with non-reversed words!
-    assert(fallback_rtl[6].glyph == sans.glyph_index(0x0645));
-    assert(fallback_rtl[8].glyph != sans.glyph_index(0x0633)); // initial Sin!
+    // Space stays from whichever Arabic fallback face was selected (`m_regular` or `tmp_ar_path`),
+    // NOT split into 3 subruns with non-reversed words!
+    const TrueTypeFont* fb = fallback_rtl[6].face;
+    assert(fb != nullptr);
+    assert(fallback_rtl[5].face == fb);
+    assert(fallback_rtl[5].glyph == fb->glyph_index(' '));
+    assert(fallback_rtl[6].glyph == fb->glyph_index(0x0645));
+    assert(fallback_rtl[8].glyph != fb->glyph_index(0x0633)); // initial Sin!
+
+    // Optional live host-DejaVu verification when installed with Arabic coverage
+    const std::string dejavu_path = fr.face_path("DejaVu Sans");
+    if (!dejavu_path.empty()) {
+        TrueTypeFont dv;
+        if (dv.load_file(dejavu_path) && dv.has_contextual_shaping() &&
+            dv.glyph_index(0x0645) != 0 && dv.glyph_index(0x0633) != 0 && dv.glyph_index(0x0644) != 0 && dv.glyph_index(0x0627) != 0) {
+            const auto dv_rtl = fr.shape_text("\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85 \xD8\xB9\xD9\x84\xD9\x8A\xD9\x83\xD9\x85", 24.0f, 400, "DejaVu Sans", false, true);
+            assert(dv_rtl.size() == 9);
+            assert(dv_rtl[6].glyph == dv.glyph_index(0x0645));
+        }
+    }
+
     fr.clear_webfonts();
     std::printf("      [shaping] multiscript itemization, visual RTL, digits & fallback runs passed\n");
     std::fflush(stdout);
@@ -4382,14 +4566,14 @@ TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs) {
     using namespace litebird;
 
     FontRenderer& fr = FontRenderer::instance();
-    const std::string sans_path = fr.face_path("sans-serif");
-    if (sans_path.empty()) return;
-    TrueTypeFont sans;
-    if (!sans.load_file(sans_path) || !sans.has_contextual_shaping()) return;
+    fr.clear_webfonts();
+    const auto ar_sfnt = build_test_arabic_latin_sfnt();
+    const int ar_fam = fr.register_webfont("TestArabicSans", {[ar_sfnt]() { return ar_sfnt; }}, 400, 400, false);
+    assert(ar_fam != FontRenderer::kNoFamily);
 
     // 1. Canvas2D measureText & fillText: "لا" (1 ligature) is measurably narrower than "ل\u200cا" (2 glyphs)!
     CanvasRenderingContext2D ctx(320, 140);
-    ctx.font = "40px sans-serif";
+    ctx.font = "40px TestArabicSans";
     const double w_lig = ctx.measure_text("\xD9\x84\xD8\xA7").width;
     const double w_zwnj = ctx.measure_text("\xD9\x84\xE2\x80\x8C\xD8\xA7").width;
     assert(w_lig > 0.0 && w_zwnj > w_lig + 4.0);
@@ -4416,7 +4600,6 @@ TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs) {
     sp_neg.data.insert(sp_neg.data.end(), spc_a.begin(), spc_a.end());
     auto gpos_over = build_gpos_table({{"kern", 1, 0x0000, -1, {sp_neg.data}}});
     auto over_sfnt = build_synthetic_sfnt(1000, 800, -200, over_glyphs, {{"GPOS", gpos_over}});
-    fr.clear_webfonts();
     const int fam = fr.register_webfont("OverhangFont", {[over_sfnt]() { return over_sfnt; }}, 400, 400, false);
     assert(fam != FontRenderer::kNoFamily);
     CanvasRenderingContext2D ctx_over(200, 120);
@@ -4433,13 +4616,12 @@ TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs) {
         }
     }
     assert(min_ink_x < 75 && max_ink_x <= 90);
-    fr.clear_webfonts();
 
     // 4. HTML/DOM layout + BitmapRenderer paints Arabic "لا" narrower than "ل\u200cا"!
-    auto render_right_edge = [](const char* utf8) {
+    auto render_right_edge = [](const char* utf8, const char* family) {
         auto doc = HtmlParser::parse(
             std::string("<body style=\"margin:0;padding:0;font-size:48px;color:#000\">"
-                        "<p style=\"margin:0;font-family:sans-serif;\">") + utf8 + "</p></body>");
+                        "<p style=\"margin:0;font-family:") + family + ";\">" + utf8 + "</p></body>");
         StyleResolver resolver;
         auto root = LayoutTree::build(doc, resolver, 400.0f, 150.0f);
         BitmapRenderer bmp(400, 150);
@@ -4453,60 +4635,71 @@ TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs) {
         }
         return max_x;
     };
-    const int right_lig = render_right_edge("\xD9\x84\xD8\xA7");
-    const int right_zwnj = render_right_edge("\xD9\x84\xE2\x80\x8C\xD8\xA7");
+    const int right_lig = render_right_edge("\xD9\x84\xD8\xA7", "TestArabicSans");
+    const int right_zwnj = render_right_edge("\xD9\x84\xE2\x80\x8C\xD8\xA7", "TestArabicSans");
     assert(right_lig > 0 && right_zwnj > right_lig + 5);
 
     // 5. Pixel-identity oracle: HTML Bidi + Arabic shaping ("سلام") renders identically to
     //    direct logical FontRenderer::draw_text("سلام") (no double-reversal or broken joining).
-    auto render_html_word = [](const char* utf8, BitmapRenderer& out, float& out_x, float& out_y) {
+    auto render_html_and_verify_oracle = [](const char* family) {
         auto doc = HtmlParser::parse(
             std::string("<body style=\"margin:0;padding:0;font-size:40px;color:#000\">"
-                        "<p id=\"p\" style=\"margin:0;font-family:sans-serif;\">") + utf8 + "</p></body>");
+                        "<p id=\"p\" style=\"margin:0;font-family:") + family + ";\">\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85</p></body>");
         StyleResolver resolver;
         auto root = LayoutTree::build(doc, resolver, 400.0f, 150.0f);
-        out_x = 0.0f;
-        out_y = 0.0f;
+        float hx = 0.0f, hy = 0.0f;
         std::function<void(const std::shared_ptr<LayoutBox>&)> find_p =
             [&](const std::shared_ptr<LayoutBox>& b) {
                 if (!b) return;
                 if (!b->line_boxes.empty() && !b->line_boxes.front().fragments.empty()) {
-                    out_x = b->line_boxes.front().fragments.front().rect.x;
-                    out_y = b->line_boxes.front().fragments.front().rect.y;
+                    hx = b->line_boxes.front().fragments.front().rect.x;
+                    hy = b->line_boxes.front().fragments.front().rect.y;
                 }
                 for (const auto& ch : b->children) find_p(ch);
             };
         find_p(root);
-        out.clear(Color::white());
-        out.render(DisplayList::build(root));
+        BitmapRenderer bmp_html(400, 150);
+        bmp_html.clear(Color::white());
+        bmp_html.render(DisplayList::build(root));
+
+        BitmapRenderer bmp_direct(400, 150);
+        bmp_direct.clear(Color::white());
+        DisplayList dl_direct;
+        DrawTextCommand cmd_direct;
+        cmd_direct.position = Point(hx, hy);
+        cmd_direct.text = "\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85";
+        cmd_direct.color = Color(0, 0, 0);
+        cmd_direct.font_size = 40.0f;
+        cmd_direct.font_weight = 400;
+        cmd_direct.font_family = family;
+        cmd_direct.font_italic = false;
+        cmd_direct.font_kerning = true;
+        cmd_direct.is_rtl_visual = false;
+        dl_direct.add(cmd_direct);
+        bmp_direct.render(dl_direct);
+        int salam_dark = 0;
+        for (int y = 0; y < 150; ++y) {
+            for (int x = 0; x < 400; ++x) {
+                assert(bmp_html.get_pixel(x, y).r == bmp_direct.get_pixel(x, y).r);
+                if (bmp_html.get_pixel(x, y).r < 200) ++salam_dark;
+            }
+        }
+        assert(salam_dark > 80);
     };
-    const char* salam = "\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85";
-    BitmapRenderer bmp_html(400, 150);
-    float hx = 0.0f, hy = 0.0f;
-    render_html_word(salam, bmp_html, hx, hy);
-    BitmapRenderer bmp_direct(400, 150);
-    bmp_direct.clear(Color::white());
-    DisplayList dl_direct;
-    DrawTextCommand cmd_direct;
-    cmd_direct.position = Point(hx, hy);
-    cmd_direct.text = salam;
-    cmd_direct.color = Color(0, 0, 0);
-    cmd_direct.font_size = 40.0f;
-    cmd_direct.font_weight = 400;
-    cmd_direct.font_family = "sans-serif";
-    cmd_direct.font_italic = false;
-    cmd_direct.font_kerning = true;
-    cmd_direct.is_rtl_visual = false;
-    dl_direct.add(cmd_direct);
-    bmp_direct.render(dl_direct);
-    int salam_dark = 0;
-    for (int y = 0; y < 150; ++y) {
-        for (int x = 0; x < 400; ++x) {
-            assert(bmp_html.get_pixel(x, y).r == bmp_direct.get_pixel(x, y).r);
-            if (bmp_html.get_pixel(x, y).r < 200) ++salam_dark;
+    render_html_and_verify_oracle("TestArabicSans");
+
+    // Optional live host-DejaVu end-to-end verification when installed with Arabic coverage
+    const std::string dejavu_path = fr.face_path("DejaVu Sans");
+    if (!dejavu_path.empty()) {
+        TrueTypeFont dv;
+        if (dv.load_file(dejavu_path) && dv.has_contextual_shaping() &&
+            dv.glyph_index(0x0644) != 0 && dv.glyph_index(0x0627) != 0 &&
+            dv.glyph_index(0x0633) != 0 && dv.glyph_index(0x0645) != 0) {
+            render_html_and_verify_oracle("DejaVu Sans");
         }
     }
-    assert(salam_dark > 80);
+
+    fr.clear_webfonts();
     std::printf("      [shaping] Canvas2D & HTML Arabic + overhang rendering passed (right_lig=%d, right_zwnj=%d)\n",
                 right_lig, right_zwnj);
     std::fflush(stdout);

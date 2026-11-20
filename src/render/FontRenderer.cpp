@@ -2958,9 +2958,11 @@ int16_t TrueTypeFont::kerning_units_for_glyphs(uint16_t left_glyph, uint16_t rig
     if (m_has_gpos_kern) {
         const GposScriptPlan* plan = find_gpos_script(kTagLatn);
         if (plan) {
+            bool plan_has_kern = false;
             int32_t total = 0;
             for (const auto& [li, feat] : plan->lookups) {
                 if (feat != GposLookup::Feature::Kern || li >= m_gpos_lookups.size()) continue;
+                plan_has_kern = true;
                 const GposLookup& lk = m_gpos_lookups[li];
                 if (lk.type != 2) continue;
                 for (const GposSubRef& ref : lk.subtables) {
@@ -2972,7 +2974,9 @@ int16_t TrueTypeFont::kerning_units_for_glyphs(uint16_t left_glyph, uint16_t rig
                     }
                 }
             }
-            return static_cast<int16_t>(std::clamp<int32_t>(total, -32768, 32767));
+            if (plan_has_kern) {
+                return static_cast<int16_t>(std::clamp<int32_t>(total, -32768, 32767));
+            }
         }
     }
 

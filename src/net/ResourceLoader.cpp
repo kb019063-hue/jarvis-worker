@@ -1392,7 +1392,576 @@ ResourceResponse execute_http_hop_with_cache(
     return net_resp;
 }
 
+// ---------------------------------------------------------------------------
+// HTTP authentication challenges (RFC 7617 Basic, RFC 7616 Digest)
+// ---------------------------------------------------------------------------
+//
+// A 401 is not an ordinary failure: RFC 9110 §15.5.2 says the server is asking
+// for credentials, and the challenge in `WWW-Authenticate` says which kind.
+// Nothing here fetches pre-emptively — the first request carries no
+// `Authorization`, which is what a browser does and what keeps a credential
+// from being offered to a server that never asked (RFC 7617 §2.2).
+//
+// The digests are written out rather than taken from a library: MD5 (RFC 1321)
+// and SHA-256 (FIPS 180-4) are each a few dozen lines, and RFC 7616 §3.9.1
+// publishes the expected answers, so the test can hold this code to a value it
+// did not compute.
+
+std::string auth_hex(std::string_view digest) {
+    static const char* digits = "0123456789abcdef";
+    std::string out;
+    out.reserve(digest.size() * 2);
+    for (unsigned char byte : digest) {
+        out.push_back(digits[byte >> 4]);
+        out.push_back(digits[byte & 0x0f]);
+    }
+    return out;
+}
+
+// RFC 1321. Four rounds over a 16-word state; the message is padded with a 1
+// bit, zeros, and the length in bits little-endian.
+std::string auth_md5(std::string_view message) {
+    static const uint32_t K[64] = {
+        0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a,
+        0xa8304613, 0xfd469501, 0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be,
+        0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821, 0xf61e2562, 0xc040b340,
+        0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+        0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8,
+        0x676f02d9, 0x8d2a4c8a, 0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c,
+        0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70, 0x289b7ec6, 0xeaa127fa,
+        0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+        0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92,
+        0xffeff47d, 0x85845dd1, 0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1,
+        0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391};
+    static const int S[64] = {7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+                              5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+                              4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+                              6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21};
+    uint32_t a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+
+    std::string msg(message);
+    const uint64_t bit_length = static_cast<uint64_t>(msg.size()) * 8ull;
+    msg.push_back(static_cast<char>(0x80));
+    while (msg.size() % 64 != 56) msg.push_back(static_cast<char>(0));
+    for (int i = 0; i < 8; ++i) msg.push_back(static_cast<char>((bit_length >> (8 * i)) & 0xff));
+
+    for (std::size_t chunk = 0; chunk < msg.size(); chunk += 64) {
+        uint32_t M[16];
+        for (int i = 0; i < 16; ++i) {
+            const auto* p = reinterpret_cast<const unsigned char*>(msg.data() + chunk + i * 4);
+            M[i] = static_cast<uint32_t>(p[0]) | (static_cast<uint32_t>(p[1]) << 8) |
+                   (static_cast<uint32_t>(p[2]) << 16) | (static_cast<uint32_t>(p[3]) << 24);
+        }
+        uint32_t A = a0, B = b0, C = c0, D = d0;
+        for (int i = 0; i < 64; ++i) {
+            uint32_t F;
+            int g;
+            if (i < 16) {
+                F = (B & C) | (~B & D);
+                g = i;
+            } else if (i < 32) {
+                F = (D & B) | (~D & C);
+                g = (5 * i + 1) % 16;
+            } else if (i < 48) {
+                F = B ^ C ^ D;
+                g = (3 * i + 5) % 16;
+            } else {
+                F = C ^ (B | ~D);
+                g = (7 * i) % 16;
+            }
+            F = F + A + K[i] + M[g];
+            A = D;
+            D = C;
+            C = B;
+            B = B + ((F << S[i]) | (F >> (32 - S[i])));
+        }
+        a0 += A;
+        b0 += B;
+        c0 += C;
+        d0 += D;
+    }
+
+    std::string out;
+    for (uint32_t word : {a0, b0, c0, d0}) {
+        for (int i = 0; i < 4; ++i) out.push_back(static_cast<char>((word >> (8 * i)) & 0xff));
+    }
+    return out;
+}
+
+// FIPS 180-4 §6.2. Two rounds of 48/64 words; the message is padded with a 1
+// bit, zeros, and the length in bits big-endian.
+std::string auth_sha256(std::string_view message) {
+    static const uint32_t K[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    uint32_t h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                     0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
+
+    std::string msg(message);
+    const uint64_t bit_length = static_cast<uint64_t>(msg.size()) * 8ull;
+    msg.push_back(static_cast<char>(0x80));
+    while (msg.size() % 64 != 56) msg.push_back(static_cast<char>(0));
+    for (int i = 7; i >= 0; --i) msg.push_back(static_cast<char>((bit_length >> (8 * i)) & 0xff));
+
+    auto rotr = [](uint32_t x, int n) { return (x >> n) | (x << (32 - n)); };
+    for (std::size_t chunk = 0; chunk < msg.size(); chunk += 64) {
+        uint32_t w[64];
+        for (int i = 0; i < 16; ++i) {
+            const auto* p = reinterpret_cast<const unsigned char*>(msg.data() + chunk + i * 4);
+            w[i] = (static_cast<uint32_t>(p[0]) << 24) | (static_cast<uint32_t>(p[1]) << 16) |
+                   (static_cast<uint32_t>(p[2]) << 8) | static_cast<uint32_t>(p[3]);
+        }
+        for (int i = 16; i < 64; ++i) {
+            const uint32_t s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+            const uint32_t s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+        }
+        uint32_t a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+        for (int i = 0; i < 64; ++i) {
+            const uint32_t S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
+            const uint32_t ch = (e & f) ^ (~e & g);
+            const uint32_t t1 = hh + S1 + ch + K[i] + w[i];
+            const uint32_t S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
+            const uint32_t maj = (a & b) ^ (a & c) ^ (b & c);
+            const uint32_t t2 = S0 + maj;
+            hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d;
+        h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+    }
+
+    std::string out;
+    for (uint32_t word : h) {
+        for (int i = 3; i >= 0; --i) out.push_back(static_cast<char>((word >> (8 * i)) & 0xff));
+    }
+    return out;
+}
+
+// RFC 4648 §4, with padding. Used for `Basic`.
+std::string auth_base64(std::string_view bytes) {
+    static const char* table = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((bytes.size() + 2) / 3 * 4);
+    std::size_t i = 0;
+    while (i + 2 < bytes.size()) {
+        const uint32_t triple = (static_cast<uint32_t>(static_cast<unsigned char>(bytes[i])) << 16) |
+                                (static_cast<uint32_t>(static_cast<unsigned char>(bytes[i + 1])) << 8) |
+                                static_cast<uint32_t>(static_cast<unsigned char>(bytes[i + 2]));
+        out.push_back(table[(triple >> 18) & 0x3f]);
+        out.push_back(table[(triple >> 12) & 0x3f]);
+        out.push_back(table[(triple >> 6) & 0x3f]);
+        out.push_back(table[triple & 0x3f]);
+        i += 3;
+    }
+    if (i + 1 == bytes.size()) {
+        const uint32_t triple = static_cast<uint32_t>(static_cast<unsigned char>(bytes[i])) << 16;
+        out.push_back(table[(triple >> 18) & 0x3f]);
+        out.push_back(table[(triple >> 12) & 0x3f]);
+        out += "==";
+    } else if (i + 2 == bytes.size()) {
+        const uint32_t triple = (static_cast<uint32_t>(static_cast<unsigned char>(bytes[i])) << 16) |
+                                (static_cast<uint32_t>(static_cast<unsigned char>(bytes[i + 1])) << 8);
+        out.push_back(table[(triple >> 18) & 0x3f]);
+        out.push_back(table[(triple >> 12) & 0x3f]);
+        out.push_back(table[(triple >> 6) & 0x3f]);
+        out.push_back('=');
+    }
+    return out;
+}
+
+std::string auth_digest_hex(const std::string& algorithm, std::string_view data) {
+    if (algorithm == "MD5") return auth_hex(auth_md5(data));
+    return auth_hex(auth_sha256(data));
+}
+
+// RFC 9110 §11.6.1: a challenge is a scheme token and a comma-separated list
+// of parameters. `token68` (Basic's bare token) is not used by either scheme
+// here, and an unknown scheme is kept only so that its name can be reported.
+struct AuthChallenge {
+    std::string scheme;
+    std::unordered_map<std::string, std::string> params;
+};
+
+std::string auth_unquote(std::string_view value) {
+    if (value.size() >= 2 && value.front() == '"' && value.back() == '"') {
+        std::string out;
+        for (std::size_t i = 1; i + 1 < value.size(); ++i) {
+            if (value[i] == '\\' && i + 2 < value.size()) {
+                out.push_back(value[++i]);
+            } else {
+                out.push_back(value[i]);
+            }
+        }
+        return out;
+    }
+    return std::string(value);
+}
+
+/// Every challenge in one `WWW-Authenticate` field, in the order the server
+/// wrote them. Parsing is deliberately forgiving: a malformed parameter ends
+/// that challenge rather than the whole header.
+std::vector<AuthChallenge> auth_parse_challenges(std::string_view field) {
+    std::vector<AuthChallenge> challenges;
+    std::size_t pos = 0;
+    auto skip_ws = [&] {
+        while (pos < field.size() && (field[pos] == ' ' || field[pos] == '\t' || field[pos] == ',')) ++pos;
+    };
+    while (pos < field.size()) {
+        skip_ws();
+        if (pos >= field.size()) break;
+        const std::size_t scheme_start = pos;
+        while (pos < field.size() && field[pos] != ' ' && field[pos] != '\t' && field[pos] != ',') ++pos;
+        AuthChallenge challenge;
+        challenge.scheme = std::string(field.substr(scheme_start, pos - scheme_start));
+        if (challenge.scheme.empty()) {
+            ++pos;
+            continue;
+        }
+        // Parameters run until the next scheme token. A `key=value` pair is a
+        // parameter; a bare token followed by `=`-less text at the top level
+        // starts the next challenge.
+        while (pos < field.size()) {
+            while (pos < field.size() && (field[pos] == ' ' || field[pos] == '\t' || field[pos] == ',')) ++pos;
+            if (pos >= field.size()) break;
+            const std::size_t name_start = pos;
+            while (pos < field.size() && (std::isalnum(static_cast<unsigned char>(field[pos])) ||
+                                          field[pos] == '-' || field[pos] == '_')) {
+                ++pos;
+            }
+            if (pos == name_start) break;
+            std::string name = ascii_lower(field.substr(name_start, pos - name_start));
+            std::size_t look = pos;
+            while (look < field.size() && (field[look] == ' ' || field[look] == '\t')) ++look;
+            if (look >= field.size() || field[look] != '=') {
+                // A bare token: the next challenge's scheme.
+                pos = name_start;
+                break;
+            }
+            pos = look + 1;
+            while (pos < field.size() && (field[pos] == ' ' || field[pos] == '\t')) ++pos;
+            std::string value;
+            if (pos < field.size() && field[pos] == '"') {
+                const std::size_t quote_start = pos++;
+                while (pos < field.size()) {
+                    if (field[pos] == '\\' && pos + 1 < field.size()) {
+                        pos += 2;
+                        continue;
+                    }
+                    if (field[pos] == '"') {
+                        ++pos;
+                        break;
+                    }
+                    ++pos;
+                }
+                value = auth_unquote(field.substr(quote_start, pos - quote_start));
+            } else {
+                const std::size_t value_start = pos;
+                while (pos < field.size() && field[pos] != ',' && field[pos] != ' ' && field[pos] != '\t') ++pos;
+                value = std::string(field.substr(value_start, pos - value_start));
+            }
+            challenge.params[name] = value;
+        }
+        challenges.push_back(std::move(challenge));
+    }
+    return challenges;
+}
+
+/// The credentials a server asked for: one entry per (origin, realm), held for
+/// the life of the process. RFC 7617 §2.2 says the user is asked for them
+/// again per realm, and a browser keeps them until the session ends; this is
+/// that store, without the prompt (an embedder fills it).
+struct AuthCredentials {
+    std::string username;
+    std::string password;
+};
+
+std::mutex g_auth_mutex;
+std::unordered_map<std::string, AuthCredentials> g_auth_store;
+
+std::string auth_store_key(std::string_view origin, std::string_view realm) {
+    return std::string(origin) + "\n" + std::string(realm);
+}
+
+/// RFC 7616 §3.4: the `username` in a Digest response is sent in the clear
+/// unless `userhash` is used, so both fields are checked against the header
+/// rules before they go into one.
+bool auth_is_header_safe(std::string_view value) {
+    return is_safe_header_value(value);
+}
+
+
+/// The `uri` a Digest response is computed over: the absolute path and the
+/// query, as RFC 7616 §3.4.3 requires (the origin is not part of it).
+std::string auth_request_target(const Url& url) {
+    std::string target = url.pathname();
+    if (target.empty()) target = "/";
+    if (url.has_query) target += "?" + url.query;
+    return target;
+}
+
+/// Records what a `401` asked for on the response, for the embedder and for
+/// `auth_authorization_for`. Returns the parsed challenges.
+std::vector<AuthChallenge> auth_note_challenge(ResourceResponse& resp) {
+    std::vector<AuthChallenge> challenges;
+    if (resp.status_code != 401) return challenges;
+    for (const auto& [name, value] : resp.header_list) {
+        if (ascii_lower(name) != "www-authenticate") continue;
+        auto parsed = auth_parse_challenges(value);
+        for (auto& challenge : parsed) {
+            resp.auth_schemes.push_back(challenge.scheme);
+            if (resp.auth_realm.empty()) {
+                auto it = challenge.params.find("realm");
+                if (it != challenge.params.end()) resp.auth_realm = it->second;
+            }
+            challenges.push_back(std::move(challenge));
+        }
+    }
+    return challenges;
+}
+
+// ---------------------------------------------------------------------------
+// Turning a challenge into an `Authorization` value
+// ---------------------------------------------------------------------------
+
+// RFC 7617 §2: `Basic base64(user:password)`. The colon is the separator, so a
+// user name containing one would change what it means: refused here.
+bool auth_basic_value(const AuthCredentials& creds, std::string& out) {
+    if (creds.username.find(':') != std::string::npos) return false;
+    out = "Basic " + auth_base64(creds.username + ":" + creds.password);
+    return true;
+}
+
+std::string auth_quote(std::string_view value) {
+    std::string out = "\"";
+    for (char c : value) {
+        if (c == '"' || c == '\\') out.push_back('\\');
+        out.push_back(c);
+    }
+    out.push_back('"');
+    return out;
+}
+
+/// A random 16-byte client nonce, hex. `qop=auth` requires one (RFC 7616
+/// §3.4.6) and it must not repeat, so this is read from the system's CSPRNG.
+std::string auth_client_nonce() {
+    std::string bytes(16, '\0');
+    bool filled = false;
+    if (FILE* f = std::fopen("/dev/urandom", "rb")) {
+        filled = std::fread(bytes.data(), 1, bytes.size(), f) == bytes.size();
+        std::fclose(f);
+    }
+    if (!filled) {
+        // No CSPRNG: a predictable nonce is worse than none only for replay,
+        // and the server rejects a repeated one, so time is the fallback.
+        for (std::size_t i = 0; i < bytes.size(); ++i) {
+            bytes[i] = static_cast<char>((std::chrono::steady_clock::now().time_since_epoch().count() >> (i * 3)) & 0xff);
+        }
+    }
+    return auth_hex(bytes);
+}
+
+/// RFC 7616 §3.4.1: `cnonce` is counted in the digest, so the client and the
+/// server must agree on the octet it was built from. `nc` is the request
+/// counter in eight hex digits.
+bool auth_digest_value(const AuthChallenge& challenge,
+                       const std::string& method,
+                       const std::string& request_target,
+                       const AuthCredentials& creds,
+                       std::string& out) {
+    std::string algorithm = "MD5";
+    if (auto it = challenge.params.find("algorithm"); it != challenge.params.end()) {
+        algorithm = it->second;
+        for (char& c : algorithm) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        // `MD5-sess` and `SHA-256-sess` fold the client nonce into A1.
+    }
+    const bool sess = algorithm.size() > 5 && algorithm.compare(algorithm.size() - 5, 5, "-SESS") == 0;
+    const std::string base_algorithm = sess ? algorithm.substr(0, algorithm.size() - 5) : algorithm;
+    if (base_algorithm != "MD5" && base_algorithm != "SHA-256") return false;
+
+    auto param = [&](const char* name) -> std::string {
+        auto it = challenge.params.find(name);
+        return it == challenge.params.end() ? std::string() : it->second;
+    };
+
+    const std::string realm = param("realm");
+    const std::string nonce = param("nonce");
+    const std::string opaque = param("opaque");
+    if (nonce.empty()) return false;
+    // RFC 7616 §3.4.7: an unquoted `userhash` and a `charset` other than
+    // UTF-8 change what the octets mean, and neither is supported here.
+    if (param("charset") != "" && ascii_lower(param("charset")) != "utf-8") return false;
+    if (ascii_lower(param("userhash")) == "true") return false;
+    // RFC 7616 §3.2: `UTF-8` encoding of the user name and password is what
+    // this sends; a server that asked for anything else is not answered.
+    const std::string username = creds.username;
+
+    const std::string cnonce = auth_client_nonce();
+    const std::string nc = "00000001";
+    std::string qop = param("qop");
+    // A `qop` list is a comma-separated set of tokens; `auth` is the only one
+    // this client can do (`auth-int` needs the entity body hashed).
+    std::string chosen_qop;
+    if (!qop.empty()) {
+        std::size_t start = 0;
+        while (start <= qop.size()) {
+            const std::size_t comma = qop.find(',', start);
+            std::string token = trim_http_ws(std::string_view(qop).substr(
+                start, comma == std::string::npos ? std::string::npos : comma - start));
+            for (char& c : token) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (token == "auth") {
+                chosen_qop = "auth";
+                break;
+            }
+            if (comma == std::string::npos) break;
+            start = comma + 1;
+        }
+        if (chosen_qop.empty()) return false;
+    }
+
+    std::string a1 = username + ":" + realm + ":" + creds.password;
+    if (sess) a1 = auth_hex(auth_md5(a1)) + ":" + nonce + ":" + cnonce;
+    // RFC 7616 §3.4.3: for Digest, the request-target is the path and query,
+    // and the method is the one actually being sent.
+    const std::string a2 = method + ":" + request_target;
+
+    const std::string ha1 = auth_digest_hex(base_algorithm, a1);
+    const std::string ha2 = auth_digest_hex(base_algorithm, a2);
+
+    std::string response_input;
+    if (chosen_qop.empty()) {
+        response_input = ha1 + ":" + nonce + ":" + ha2;
+    } else {
+        response_input = ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + chosen_qop + ":" + ha2;
+    }
+    const std::string response = auth_digest_hex(base_algorithm, response_input);
+
+    out = "Digest username=" + auth_quote(username) +
+          ", realm=" + auth_quote(realm) +
+          ", nonce=" + auth_quote(nonce) +
+          ", uri=" + auth_quote(request_target) +
+          ", response=" + auth_quote(response) +
+          ", algorithm=" + algorithm;
+    if (!chosen_qop.empty()) {
+        out += ", qop=" + chosen_qop + ", nc=" + nc + ", cnonce=" + auth_quote(cnonce);
+    }
+    if (!opaque.empty()) out += ", opaque=" + auth_quote(opaque);
+    return true;
+}
+
+/// Picks a challenge this client can answer, preferring the strongest scheme
+/// the server offered: Digest with SHA-256, then Digest with MD5, then Basic.
+/// A server that offers both gets Digest, which is what RFC 7616 §1 asks for,
+/// and Basic is the last resort because it sends the password in the clear.
+bool auth_authorization_for(const std::vector<AuthChallenge>& challenges,
+                            const std::string& origin,
+                            const std::string& method,
+                            const std::string& request_target,
+                            std::string& out) {
+    const AuthChallenge* best_digest_sha = nullptr;
+    const AuthChallenge* best_digest_md5 = nullptr;
+    const AuthChallenge* basic = nullptr;
+    for (const AuthChallenge& challenge : challenges) {
+        std::string scheme = ascii_lower(challenge.scheme);
+        if (scheme == "digest") {
+            auto it = challenge.params.find("algorithm");
+            std::string algorithm = it == challenge.params.end() ? "MD5" : it->second;
+            for (char& c : algorithm) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+            if (!best_digest_sha && algorithm.rfind("SHA-256", 0) == 0) best_digest_sha = &challenge;
+            else if (!best_digest_md5 && algorithm.rfind("MD5", 0) == 0) best_digest_md5 = &challenge;
+        } else if (scheme == "basic" && !basic) {
+            basic = &challenge;
+        }
+    }
+
+    for (const AuthChallenge* challenge : {best_digest_sha, best_digest_md5}) {
+        if (!challenge) continue;
+        auto it = challenge->params.find("realm");
+        const std::string realm = it == challenge->params.end() ? std::string() : it->second;
+        AuthCredentials creds;
+        {
+            std::lock_guard<std::mutex> lock(g_auth_mutex);
+            auto found = g_auth_store.find(auth_store_key(origin, realm));
+            if (found == g_auth_store.end()) continue;
+            creds = found->second;
+        }
+        if (!auth_is_header_safe(creds.username) || !auth_is_header_safe(creds.password)) continue;
+        if (auth_digest_value(*challenge, method, request_target, creds, out)) return true;
+    }
+
+    if (basic) {
+        auto it = basic->params.find("realm");
+        const std::string realm = it == basic->params.end() ? std::string() : it->second;
+        AuthCredentials creds;
+        {
+            std::lock_guard<std::mutex> lock(g_auth_mutex);
+            auto found = g_auth_store.find(auth_store_key(origin, realm));
+            if (found == g_auth_store.end()) return false;
+            creds = found->second;
+        }
+        if (!auth_is_header_safe(creds.username) || !auth_is_header_safe(creds.password)) return false;
+        return auth_basic_value(creds, out);
+    }
+    return false;
+}
+
 } // namespace
+
+std::string ResourceLoader::auth_md5_hex(std::string_view data) { return auth_hex(auth_md5(data)); }
+std::string ResourceLoader::auth_sha256_hex(std::string_view data) { return auth_hex(auth_sha256(data)); }
+std::string ResourceLoader::auth_base64(std::string_view bytes) { return ::litebird::auth_base64(bytes); }
+
+bool ResourceLoader::auth_Digest_response(const std::string& algorithm,
+                                          const std::string& username, const std::string& password,
+                                          const std::string& realm, const std::string& nonce,
+                                          const std::string& method, const std::string& request_target,
+                                          const std::string& qop, const std::string& cnonce,
+                                          const std::string& nc, std::string& out_hex) {
+    std::string base = algorithm;
+    for (char& c : base) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+    bool sess = base.size() > 5 && base.compare(base.size() - 5, 5, "-SESS") == 0;
+    if (sess) base = base.substr(0, base.size() - 5);
+    if (base != "MD5" && base != "SHA-256") return false;
+    std::string a1 = username + ":" + realm + ":" + password;
+    if (sess) a1 = auth_hex(auth_md5(a1)) + ":" + nonce + ":" + cnonce;
+    const std::string a2 = method + ":" + request_target;
+    const std::string ha1 = auth_digest_hex(base, a1);
+    const std::string ha2 = auth_digest_hex(base, a2);
+    const std::string input = qop.empty()
+        ? ha1 + ":" + nonce + ":" + ha2
+        : ha1 + ":" + nonce + ":" + nc + ":" + cnonce + ":" + qop + ":" + ha2;
+    out_hex = auth_digest_hex(base, input);
+    return true;
+}
+
+void ResourceLoader::set_auth_credentials(const std::string& origin, const std::string& realm,
+                                         const std::string& username, const std::string& password) {
+    std::lock_guard<std::mutex> lock(g_auth_mutex);
+    g_auth_store[auth_store_key(origin, realm)] = AuthCredentials{username, password};
+}
+
+bool ResourceLoader::has_credentials(const std::string& origin, const std::string& realm) {
+    std::lock_guard<std::mutex> lock(g_auth_mutex);
+    return g_auth_store.count(auth_store_key(origin, realm)) != 0;
+}
+
+void ResourceLoader::clear_auth_credentials() {
+    std::lock_guard<std::mutex> lock(g_auth_mutex);
+    g_auth_store.clear();
+}
+
+std::size_t ResourceLoader::auth_credential_count() {
+    std::lock_guard<std::mutex> lock(g_auth_mutex);
+    return g_auth_store.size();
+}
 
 void ResourceLoader::clear_http_cache() {
     {
@@ -1902,6 +2471,9 @@ ResourceResponse ResourceLoader::load_http(
     std::string cur_method = method.empty() ? "GET" : method;
     std::unordered_map<std::string, std::string> cur_caller_headers = headers;
     std::string cur_body = body;
+    /// One retry per load, after the first 401: RFC 9110 leaves the number to
+    /// the client, and one is what a browser does before giving up.
+    bool auth_attempted = false;
 
     for (int hop = 0; hop <= MaxRedirects; ++hop) {
         const std::string hop_address = cur_url.href(true);
@@ -1929,6 +2501,29 @@ ResourceResponse ResourceLoader::load_http(
             nullptr
         );
         if (!resp.network_ok) return resp;
+
+        // RFC 9110 §15.5.2. The first request carried no `Authorization`; if
+        // credentials are held for this origin *and* the realm the server
+        // named, ask once with them. One retry, never a loop: a server that
+        // answers 401 to the credentials themselves is left to fail.
+        if (resp.status_code == 401 && !auth_attempted) {
+            const std::vector<AuthChallenge> challenges = auth_note_challenge(resp);
+            std::string authorization;
+            if (!challenges.empty() &&
+                auth_authorization_for(challenges, cur_url.origin(), cur_method,
+                                       auth_request_target(cur_url), authorization) &&
+                is_safe_header_value(authorization)) {
+                auth_attempted = true;
+                hop_headers["Authorization"] = authorization;
+                // Same hop again, with the header this time. The cookie jar and
+                // the cache are consulted as they were; the response cache does
+                // not keep a 401, so nothing is served from it here.
+                resp = execute_http_hop_with_cache(
+                    hop_address, cur_method, hop_headers, cur_body,
+                    CacheMode::Default, "nav:cred", /*ingest_cookies=*/true, nullptr);
+                if (!resp.network_ok) return resp;
+            }
+        }
 
         if (is_redirect_status(resp.status_code)) {
             auto loc_it = resp.headers.find("location");

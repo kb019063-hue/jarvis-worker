@@ -233,6 +233,23 @@ void js_append_code_point(std::string& out, uint32_t code_point);
 void js_iterate(const JsValue& iterable, const std::function<bool(const JsValue&)>& visit);
 std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable);
 
+/// What `array[index]` reads, which is what the standard's `Get` gives and
+/// what the iterator, `join`, `includes`, `at` and `JSON.stringify` are
+/// defined by: the element when there is one, and for a hole whatever the
+/// index has otherwise, an accessor that `Object.defineProperty` put on it
+/// or a property of the prototype, and `undefined` when it has nothing.
+/// (`JsValue::array_element` is the array's own storage and nothing else.)
+/// An element costs what array_element costs. A hole can run a getter, so
+/// the caller holds nothing of the array across the call.
+JsValue js_array_get(const JsValue& array, size_t index);
+
+/// True when every hole of `array` reads `undefined`: it has no accessor on
+/// an index of its own, and nothing on its prototype chain has an index.
+/// Then js_array_get is `array_element` and runs no script, and a loop over
+/// many holes asks this once instead of looking each one up by name. The
+/// answer holds only as long as no script runs.
+bool js_array_holes_read_undefined(const JsValue& array);
+
 /// GetMethod(value, @@iterator) (ECMA-262 7.3.11): the function `value` hands
 /// out its iterator with, looked up once, so a getter for it runs once. False,
 /// with `method` undefined, when there is none: the property is undefined or

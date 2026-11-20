@@ -36,6 +36,8 @@ jobs:
         run: make -j"$(nproc)"
       - name: Engine test suites
         run: make test
+      - name: Bidi conformance (Unicode's own two suites)
+        run: make bidi-conformance
       - name: Sized-float index keeps placements fast
         # Full CLI parse + layout + dump of packed, mixed-side, and cleared
         # 1k/10k floats. The old repeated band sweep takes 5-12 seconds at

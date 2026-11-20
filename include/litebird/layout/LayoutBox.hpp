@@ -44,6 +44,7 @@ struct InlineFragment {
     std::shared_ptr<LayoutBox> box; // Originating layout box
     bool is_text{true};
     bool is_space{false};
+    bool is_rtl_visual{false};      // True when `apply_bidi_to_line` rewrote an odd-level run visually
 };
 
 struct LineBox {

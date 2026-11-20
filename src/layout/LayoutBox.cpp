@@ -1,6 +1,7 @@
 #include "litebird/layout/LayoutBox.hpp"
 #include "litebird/common/StackLimit.hpp"
 #include "litebird/render/FontRenderer.hpp"
+#include "litebird/text/Bidi.hpp"
 #include <algorithm>
 #include <cmath>
 #include <iomanip>
@@ -16,6 +17,263 @@
 namespace litebird {
 
 namespace {
+
+/// One fragment's text, decoded, with the byte offset each code point starts
+/// at (so a run can be cut back out of the UTF-8 without re-encoding it).
+struct DecodedFragment {
+    std::vector<uint32_t> codepoints;
+    std::vector<std::size_t> byte_at;
+};
+
+DecodedFragment decode_utf8_with_offsets(std::string_view text) {
+    DecodedFragment out;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const unsigned char lead = static_cast<unsigned char>(text[i]);
+        std::size_t length = 1;
+        uint32_t cp = lead;
+        if ((lead & 0xE0) == 0xC0) {
+            length = 2;
+            cp = lead & 0x1Fu;
+        } else if ((lead & 0xF0) == 0xE0) {
+            length = 3;
+            cp = lead & 0x0Fu;
+        } else if ((lead & 0xF8) == 0xF0) {
+            length = 4;
+            cp = lead & 0x07u;
+        } else if (lead >= 0x80) {
+            out.codepoints.push_back(0xFFFD);
+            out.byte_at.push_back(i);
+            ++i;
+            continue;
+        }
+        if (i + length > text.size()) length = 1;
+        if (length > 1) {
+            bool valid = true;
+            for (std::size_t k = 1; k < length; ++k) {
+                const unsigned char continuation = static_cast<unsigned char>(text[i + k]);
+                if ((continuation & 0xC0) != 0x80) {
+                    valid = false;
+                    break;
+                }
+                cp = (cp << 6) | (continuation & 0x3Fu);
+            }
+            if (!valid) {
+                out.codepoints.push_back(0xFFFD);
+                out.byte_at.push_back(i);
+                ++i;
+                continue;
+            }
+        }
+        out.codepoints.push_back(cp);
+        out.byte_at.push_back(i);
+        i += length;
+    }
+    return out;
+}
+
+void append_utf8(std::string& out, uint32_t cp) {
+    if (cp < 0x80) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+/// UAX #9 rule L2 over items whose levels are uniform: from the highest level
+/// down to the lowest odd level, reverse every run at or above it.
+std::vector<std::size_t> reorder_by_level(const std::vector<int>& levels) {
+    std::vector<std::size_t> order(levels.size());
+    std::iota(order.begin(), order.end(), std::size_t{0});
+    if (order.size() < 2) return order;
+    int highest = 0;
+    int lowest_odd = 1 << 20;
+    for (int level : levels) {
+        highest = std::max(highest, level);
+        if (level % 2 == 1) lowest_odd = std::min(lowest_odd, level);
+    }
+    for (int level = highest; level >= lowest_odd; --level) {
+        for (std::size_t k = 0; k < order.size();) {
+            if (levels[order[k]] < level) {
+                ++k;
+                continue;
+            }
+            std::size_t end = k;
+            while (end + 1 < order.size() && levels[order[end + 1]] >= level) ++end;
+            std::reverse(order.begin() + static_cast<std::ptrdiff_t>(k),
+                         order.begin() + static_cast<std::ptrdiff_t>(end + 1));
+            k = end + 1;
+        }
+    }
+    return order;
+}
+
+/// UAX #9 for one laid-out line, rules L2 and L4.
+///
+/// The inline formatting context places fragments in logical order, left to
+/// right, which is right for every line of Latin script and wrong for a Hebrew
+/// word (one fragment, drawn mirrored) and for a line that mixes directions
+/// (the runs themselves come out in the wrong order). This splits a fragment
+/// at a change of level, reorders the pieces by their levels, and mirrors the
+/// characters of the odd ones. A line with no right-to-left character in it
+/// returns here without touching anything, which is why 99% of pages are
+/// unaffected by this pass.
+void apply_bidi_to_line(LineBox& line) {
+    if (line.fragments.empty()) return;
+    // Every right-to-left script is above U+0080, and the Latin pages that
+    // make up almost all of what this engine lays out are pure ASCII. One
+    // scan of the bytes answers for them without decoding anything.
+    bool non_ascii = false;
+    for (const InlineFragment& fragment : line.fragments) {
+        for (char c : fragment.text) {
+            if (static_cast<unsigned char>(c) >= 0x80) {
+                non_ascii = true;
+                break;
+            }
+        }
+        if (non_ascii) break;
+    }
+    if (!non_ascii) return;
+
+    std::vector<DecodedFragment> decoded(line.fragments.size());
+    std::u32string text;
+    std::vector<std::size_t> fragment_of;
+    std::vector<std::size_t> char_in;
+    for (std::size_t f = 0; f < line.fragments.size(); ++f) {
+        const InlineFragment& fragment = line.fragments[f];
+        if (fragment.is_text) {
+            decoded[f] = decode_utf8_with_offsets(fragment.text);
+        } else {
+            // CSS 2.1 asks for U+FFFC in place of a non-text inline: it is one
+            // neutral character as wide as the box.
+            decoded[f].codepoints.push_back(0xFFFC);
+            decoded[f].byte_at.push_back(0);
+        }
+        for (std::size_t k = 0; k < decoded[f].codepoints.size(); ++k) {
+            text.push_back(decoded[f].codepoints[k]);
+            fragment_of.push_back(f);
+            char_in.push_back(k);
+        }
+    }
+    if (text.empty()) return;
+
+    const BidiParagraph paragraph = bidi_paragraph(text);
+    // UAX #9 X9 marks BN as removed for bidi resolution, including ZWNJ/ZWJ,
+    // which OpenType shaping still needs inside Arabic/Indic runs.
+    auto is_bidi_removed = [&](std::size_t idx) {
+        return paragraph.removed[idx] && text[idx] != 0x200C && text[idx] != 0x200D;
+    };
+    bool right_to_left = false;
+    for (std::size_t k = 0; k < text.size(); ++k) {
+        if (is_bidi_removed(k)) continue;
+        if (paragraph.levels[k] % 2 == 1) {
+            right_to_left = true;
+            break;
+        }
+    }
+    if (!right_to_left) return;
+
+    struct Run {
+        std::size_t fragment;
+        std::size_t first_char;
+        std::size_t last_char;  // exclusive
+        int level;
+        float width{0.0f};
+    };
+    std::vector<Run> runs;
+    for (std::size_t k = 0; k < text.size();) {
+        if (is_bidi_removed(k)) {
+            ++k;
+            continue;
+        }
+        const std::size_t f = fragment_of[k];
+        const int level = paragraph.levels[k];
+        std::size_t end = k + 1;
+        while (end < text.size() && !is_bidi_removed(end) && fragment_of[end] == f &&
+               paragraph.levels[end] == level) {
+            ++end;
+        }
+        runs.push_back(Run{f, char_in[k], char_in[end - 1] + 1, level, 0.0f});
+        k = end;
+    }
+    if (runs.empty()) return;
+
+    FontRenderer& font_renderer = FontRenderer::instance();
+    std::vector<float> measured(line.fragments.size(), 0.0f);
+    for (Run& run : runs) {
+        const InlineFragment& fragment = line.fragments[run.fragment];
+        const DecodedFragment& source = decoded[run.fragment];
+        const bool whole = run.first_char == 0 && run.last_char == source.codepoints.size();
+        if (!fragment.is_text || whole) {
+            run.width = fragment.rect.width;
+            measured[run.fragment] += run.width;
+            continue;
+        }
+        const std::size_t first_byte = source.byte_at[run.first_char];
+        const std::size_t last_byte = run.last_char < source.byte_at.size()
+                                          ? source.byte_at[run.last_char]
+                                          : fragment.text.size();
+        const auto& style = *fragment.style;
+        run.width = font_renderer.measure_text(
+            std::string_view(fragment.text).substr(first_byte, last_byte - first_byte),
+            style.font_size, style.font_weight, style.font_family,
+            style.font_style != FontStyle::Normal, style.kerning_enabled());
+        measured[run.fragment] += run.width;
+    }
+    // A fragment cut into runs must still occupy the width the line was broken
+    // for, so the pieces share the fragment's own width in proportion.
+    for (Run& run : runs) {
+        const float total = measured[run.fragment];
+        if (total <= 0.0f) continue;
+        run.width *= line.fragments[run.fragment].rect.width / total;
+    }
+
+    std::vector<int> levels;
+    levels.reserve(runs.size());
+    for (const Run& run : runs) levels.push_back(run.level);
+    const std::vector<std::size_t> order = reorder_by_level(levels);
+
+    float cursor = line.fragments.front().rect.x;
+    for (const InlineFragment& fragment : line.fragments) cursor = std::min(cursor, fragment.rect.x);
+
+    std::vector<InlineFragment> visual;
+    visual.reserve(runs.size());
+    for (std::size_t index : order) {
+        const Run& run = runs[index];
+        const InlineFragment& source = line.fragments[run.fragment];
+        InlineFragment piece = source;
+        piece.rect.x = cursor;
+        piece.rect.width = run.width;
+        cursor += run.width;
+        if (source.is_text && run.level % 2 == 1) {
+            // The painter draws a run's characters left to right, so an
+            // odd-level run is written out backwards (that is L2 inside the
+            // run) with each character mirrored (that is L4). `is_rtl_visual`
+            // lets the OpenType shaper reverse back to logical order before
+            // joining/anchoring Arabic/Hebrew glyphs and then reorder clusters.
+            const DecodedFragment& decoded_source = decoded[run.fragment];
+            piece.text.clear();
+            for (std::size_t k = run.last_char; k-- > run.first_char;) {
+                append_utf8(piece.text, bidi_mirror(decoded_source.codepoints[k]));
+            }
+            piece.is_rtl_visual = true;
+        } else {
+            piece.is_rtl_visual = false;
+        }
+        visual.push_back(std::move(piece));
+    }
+    line.fragments = std::move(visual);
+}
 
 /// Where a float is placed and how much of each side it takes intruded at
 /// that position (the running maxima at the placement y, not before it).
@@ -1413,6 +1671,7 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
                 frag.rect.y += (line.rect.height - frag.rect.height) * 0.5f;
             }
         }
+        apply_bidi_to_line(line);
 
         y_cursor += line.rect.height;
     }

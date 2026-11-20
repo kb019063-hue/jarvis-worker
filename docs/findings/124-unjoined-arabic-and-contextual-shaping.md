@@ -1,4 +1,4 @@
-# Finding 119 — Unjoined Arabic glyphs, ignored contextual `GSUB`/`GPOS`, and fallback/RTL run splitting
+# Finding 124 — Unjoined Arabic glyphs, ignored contextual `GSUB`/`GPOS`, and fallback/RTL run splitting
 
 **Severity:** medium — Arabic words painted in disconnected isolated forms,
 contextual `ccmp`/`calt`/`rlig` rules (including dotless `'ı'` before marks and
@@ -47,14 +47,18 @@ and tracing `TrueTypeFont::shape_glyphs`, `FontRenderer::shape_text`, and
 - Updated `TrueTypeFont::shape_glyphs`, `FontRenderer::shape_text` / `draw_text`,
   and `CanvasRenderingContext2D::layout_text` (`src/render/Canvas2D.cpp`) for
   coherent RTL fallback runs, cluster-safe `visual_rtl` ordering, and bounded
-  (`1024.0f`) horizontal overhang padding.
+  (`1024.0f`) horizontal overhang padding, and coordinated Phase 109's
+  `apply_bidi_to_line()` (`LayoutBox.{hpp,cpp}`, `PaintCommand.{hpp,cpp}`,
+  `BitmapRenderer.cpp`) so `U+200C`/`U+200D` join controls survive X9 removal
+  and `is_rtl_visual` fragments shape logically before cluster reordering.
 
 ## Verified
 
-- Release `make all test`: **273 / 273** suites passing (including six new Phase
-  114 contextual/cursive/Arabic/malformed-table suites) + **114 / 114**
-  cross-origin checks.
-- ASan+UBSan: `build-asan/test_suite` (**273 / 273** suites, **0** sanitizer
+- Release `make all test`: **277 / 277** suites passing (including six new Phase
+  119 contextual/cursive/Arabic/malformed-table suites + HTML-Bidi `"سلام"`
+  pixel-identity oracle) + **114 / 114** cross-origin checks +
+  `make bidi-conformance` (**861,948 / 861,948**).
+- ASan+UBSan: `build-asan/test_suite` (**277 / 277** suites, **0** sanitizer
   findings), `build-asan/cross_origin_test` (**114 / 114**), and
   `tools/fuzz/fuzz_pipeline.py --binary build-asan/litebird` (**400** runs,
   **0** findings).

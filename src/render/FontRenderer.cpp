@@ -2925,6 +2925,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                     pg.y_advance = run[k].y_advance;
                     pg.x_offset = run[k].x_offset;
                     pg.y_offset = run[k].y_offset;
+                    pg.is_mark = (run[k].mark_base >= 0 || is_mark_glyph(run[k].glyph));
                     result.push_back(pg);
                 }
             }
@@ -2936,6 +2937,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                 pg.y_advance = st.y_advance;
                 pg.x_offset = st.x_offset;
                 pg.y_offset = st.y_offset;
+                pg.is_mark = (st.mark_base >= 0 || is_mark_glyph(st.glyph));
                 result.push_back(pg);
             }
         }
@@ -4031,7 +4033,8 @@ bool FontRenderer::font_kerning(std::string_view css_family, int font_weight, bo
 std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view utf8_text,
                                                                 float font_size, int font_weight,
                                                                 int family_id, bool italic,
-                                                                bool kerning, bool visual_rtl) const {
+                                                                bool kerning, bool visual_rtl,
+                                                                bool pre_reversed) const {
     std::vector<ShapedGlyph> out;
     if (utf8_text.empty()) return out;
 
@@ -4040,6 +4043,11 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
     std::size_t pos = 0;
     while (pos < utf8_text.size()) {
         cps.push_back(next_utf8_codepoint(utf8_text, pos));
+    }
+    if (pre_reversed && cps.size() > 1u) {
+        // Bidi L2 wrote this odd-level run in visual order; restore logical
+        // codepoint order before script itemization, Arabic joining, and GSUB/GPOS.
+        std::reverse(cps.begin(), cps.end());
     }
     const std::vector<uint32_t> scripts = itemize_codepoint_scripts(cps);
 
@@ -4087,18 +4095,20 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
         prev_script = sc;
     }
 
+    const bool face_visual_rtl = visual_rtl && !pre_reversed;
     for (FaceRun& fr : runs) {
         if (fr.face) {
             const float upem = static_cast<float>(fr.face->units_per_em());
             const float scale = (upem > 0.0f) ? (font_size / upem) : 0.0f;
             const std::vector<TrueTypeFont::PositionedGlyph> positioned =
-                fr.face->shape_glyphs(fr.cps, kerning, visual_rtl);
+                fr.face->shape_glyphs(fr.cps, kerning, face_visual_rtl);
             fr.glyphs.reserve(positioned.size());
             for (const TrueTypeFont::PositionedGlyph& pg : positioned) {
                 ShapedGlyph shaped;
                 shaped.glyph = pg.glyph;
                 shaped.face = fr.face;
                 shaped.shear = fr.shear;
+                shaped.is_mark = pg.is_mark;
                 shaped.advance = static_cast<float>(pg.x_advance) * scale;
                 shaped.x_offset = static_cast<float>(pg.x_offset) * scale;
                 shaped.y_offset = static_cast<float>(pg.y_offset) * scale;
@@ -4113,7 +4123,7 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
             for (uint32_t cp : fr.cps) {
                 if (!is_join_control(cp)) vis.push_back(cp);
             }
-            if (visual_rtl && fr.is_rtl && vis.size() > 1u) {
+            if (face_visual_rtl && fr.is_rtl && vis.size() > 1u) {
                 std::reverse(vis.begin(), vis.end());
             }
             for (uint32_t cp : vis) {
@@ -4125,6 +4135,37 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
                 fr.glyphs.push_back(shaped);
             }
         }
+    }
+
+    if (pre_reversed) {
+        std::vector<ShapedGlyph> logical_all;
+        for (const FaceRun& fr : runs) {
+            logical_all.insert(logical_all.end(), fr.glyphs.begin(), fr.glyphs.end());
+        }
+        if (visual_rtl && logical_all.size() > 1u) {
+            std::vector<std::pair<std::size_t, std::size_t>> clusters;
+            std::size_t c = 0;
+            while (c < logical_all.size()) {
+                if (logical_all[c].is_mark) {
+                    clusters.emplace_back(c, c + 1u);
+                    ++c;
+                    continue;
+                }
+                std::size_t ce = c + 1u;
+                while (ce < logical_all.size() && logical_all[ce].is_mark) ++ce;
+                clusters.emplace_back(c, ce);
+                c = ce;
+            }
+            out.reserve(logical_all.size());
+            for (auto it = clusters.rbegin(); it != clusters.rend(); ++it) {
+                out.insert(out.end(),
+                           logical_all.begin() + static_cast<std::ptrdiff_t>(it->first),
+                           logical_all.begin() + static_cast<std::ptrdiff_t>(it->second));
+            }
+        } else {
+            out = std::move(logical_all);
+        }
+        return out;
     }
 
     // Emit shaped runs; if a contiguous RTL script span split across fallback
@@ -4152,9 +4193,11 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
                                                                float font_size, int font_weight,
                                                                std::string_view css_family,
                                                                bool italic, bool kerning,
-                                                               bool visual_rtl) const {
+                                                               bool visual_rtl,
+                                                               bool pre_reversed) const {
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
-    return shape_text(utf8_text, font_size, font_weight, family_id, italic, kerning, visual_rtl);
+    return shape_text(utf8_text, font_size, font_weight, family_id, italic, kerning,
+                      visual_rtl, pre_reversed);
 }
 
 float FontRenderer::kerning_px_shaped(const ShapedGlyph& left, const ShapedGlyph& right,
@@ -4272,7 +4315,8 @@ void FontRenderer::draw_text(
     std::string_view css_family,
     bool italic,
     bool kerning,
-    bool visual_rtl
+    bool visual_rtl,
+    bool pre_reversed
 ) {
     if (utf8_text.empty() || font_size <= 0.0f) return;
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
@@ -4308,7 +4352,8 @@ void FontRenderer::draw_text(
     // already baked into `advance`, `x_offset`, `y_offset`), so measurement and
     // ink agree to the pixel.
     const std::vector<ShapedGlyph> shaped =
-        shape_text(utf8_text, font_size, font_weight, family_id, italic, kerning, visual_rtl);
+        shape_text(utf8_text, font_size, font_weight, family_id, italic, kerning,
+                   visual_rtl, pre_reversed);
     for (std::size_t i = 0; i < shaped.size(); ++i) {
         const GlyphBitmap& g = get_glyph_shaped(shaped[i], px_size, font_weight);
         if (g.width > 0 && g.height > 0) {

@@ -96,6 +96,7 @@ public:
         int32_t y_advance{0};
         int32_t x_offset{0};
         int32_t y_offset{0};
+        bool is_mark{false};
     };
 
     /// Shapes a run of Unicode codepoints mapped to this face: itemizes by
@@ -727,6 +728,7 @@ public:
         float x_offset{0.0f};
         float y_offset{0.0f};
         bool shear{false};
+        bool is_mark{false};
     };
 
     /// Measures exact horizontal advance of UTF-8 text in pixels.
@@ -802,13 +804,15 @@ public:
     /// visually ordered left-to-right per cluster.
     std::vector<ShapedGlyph> shape_text(std::string_view utf8_text, float font_size, int font_weight,
                                         int family_id, bool italic, bool kerning = true,
-                                        bool visual_rtl = true) const;
+                                        bool visual_rtl = true,
+                                        bool pre_reversed = false) const;
 
     /// `shape_text` for a caller that has a `font-family` list rather than an
     /// id -- the canvas does, because it parses its own `ctx.font`.
     std::vector<ShapedGlyph> shape_text(std::string_view utf8_text, float font_size, int font_weight,
                                         std::string_view css_family, bool italic,
-                                        bool kerning = true, bool visual_rtl = true) const;
+                                        bool kerning = true, bool visual_rtl = true,
+                                        bool pre_reversed = false) const;
 
     /// The `kern` adjustment between two shaped glyphs, in px. Zero across a
     /// face boundary: a pair split between two fonts is not a pair.
@@ -836,7 +840,8 @@ public:
         std::string_view css_family = {},
         bool italic = false,
         bool kerning = true,
-        bool visual_rtl = true
+        bool visual_rtl = true,
+        bool pre_reversed = false
     );
 
     /// The rasterized glyph, cached by (family, size, bold, italic, codepoint).

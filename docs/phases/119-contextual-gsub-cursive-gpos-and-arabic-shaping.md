@@ -1,4 +1,4 @@
-# Phase 114 — Contextual `GSUB`, `CursiveAttachment` `GPOS`, and Arabic/Multi-Script Shaping
+# Phase 119 — Contextual `GSUB`, `CursiveAttachment` `GPOS`, and Arabic/Multi-Script Shaping
 
 Phase 99 added `GDEF` glyph classes and `GPOS` positioning (`SinglePos`, `PairPos`,
 `MarkToBase`, `MarkToLig`, and `MarkToMark`), while Phase 93 read `GSUB` `Type 4`
@@ -61,12 +61,20 @@ remained unhandled:
    - Scoped `kerning_units_for_glyphs()` to `latn`/`DFLT` and exposed `has_gsub()`,
      `has_cursive_positioning()`, and `has_contextual_shaping()`.
 
-3. **`FontRenderer` and `Canvas2D` integration (`src/render/FontRenderer.cpp`, `src/render/Canvas2D.cpp`)**
-   - Updated `FontRenderer::shape_text(..., visual_rtl = true)` and `draw_text()`
-     to preserve the active `run_face` across join controls and same-RTL-script
-     covered glyphs (so an Arabic run with a fallback font is not fractured at
-     spaces covered by a Latin primary font), reverse contiguous RTL subruns across
-     face transitions, and handle `visual_rtl` in the 8x8 bitmap fallback path.
+3. **UAX #9 bidi coordination, `FontRenderer`, and `Canvas2D` integration (`include/litebird/layout/LayoutBox.hpp`, `src/layout/LayoutBox.cpp`, `include/litebird/render/PaintCommand.hpp`, `src/render/PaintCommand.cpp`, `src/render/BitmapRenderer.cpp`, `src/render/FontRenderer.cpp`, `src/render/Canvas2D.cpp`)**
+   - Coordinated Phase 109's `apply_bidi_to_line()` with OpenType shaping:
+     retained `U+200C` (ZWNJ) / `U+200D` (ZWJ) inside runs (since X9 removes `BN`
+     only for bidi level resolution) and flagged odd-level visually reversed
+     fragments with `is_rtl_visual` (`InlineFragment` -> `DrawTextCommand` ->
+     `FontRenderer::draw_text(..., pre_reversed = true)`) so `FontRenderer`
+     restores logical order for Arabic joining/ligatures/`GPOS` mark anchoring
+     before reordering shaped clusters back to visual left-to-right order.
+   - Updated `FontRenderer::shape_text(..., visual_rtl = true, pre_reversed = false)`
+     and `draw_text()` to preserve the active `run_face` across join controls
+     and same-RTL-script covered glyphs (so an Arabic run with a fallback font
+     is not fractured at spaces covered by a Latin primary font), reverse
+     contiguous RTL subruns across face transitions, and handle `visual_rtl` in
+     the 8x8 bitmap fallback path.
    - Updated `CanvasRenderingContext2D::layout_text()` to compute shaped ink bounds
      (`min_x`, `max_x`, `max_y_up`, `max_y_down`) across `x_offset`/`y_offset`/
      `advance` and expand `layout.pad_x` (bounded at `1024.0f`), `natural_w`,
@@ -74,8 +82,9 @@ remained unhandled:
 
 ## Verified
 
-- Release `make all test`: **273 / 273** unit suites + **114 / 114**
-  cross-origin checks passing, including six new Phase 114 suites:
+- Release `make all test`: **277 / 277** unit suites + **114 / 114**
+  cross-origin checks passing (including the six new Phase 119 suites plus
+  HTML-Bidi vs logical `draw_text` pixel-identity for `"سلام"`):
   - `gsub_contextual_chaining_multiple_and_alternate_substitutions`
   - `arabic_joining_zwnj_zwj_lam_alef_and_mark_anchoring`
   - `gpos_cursive_attachment_ltr_rtl_and_contextual_pos`
@@ -84,9 +93,10 @@ remained unhandled:
   - `complex_shaping_rejects_malformed_and_cyclic_tables_safely`
 - Existing conformance suites (Release): `make conformance` (`1973/1973`),
   `make dom-conformance` (`678/678`), `make url-conformance` (`1188/1188`),
-  `make js-conformance`, and `make wpt` (`9567/9824`, `0` unlisted).
-- Sanitizer (`-fsanitize=address,undefined`): `build-asan/test_suite` (**273 /
-  273** suites, **0** sanitizer findings), `build-asan/cross_origin_test` (**114 /
+  `make js-conformance` (`1141/1158`), `make bidi-conformance` (`861948/861948`),
+  and `make wpt` (`9567/9824`, `0` unlisted).
+- Sanitizer (`-fsanitize=address,undefined`): `build-asan/test_suite` (**277 /
+  277** suites, **0** sanitizer findings), `build-asan/cross_origin_test` (**114 /
   114**), and `tools/fuzz/fuzz_pipeline.py --binary build-asan/litebird` (**400 /
   400** runs, **0** findings).
 
@@ -95,5 +105,4 @@ remained unhandled:
 - Indic syllable clustering/reordering (`indic`/`use` engines), `LangSys`
   language-tag matching beyond `defaultLangSys`/`DFLT`, and
   `Device`/`VariationIndex` delta refinement remain open.
-- Full UAX #9 Unicode Bidirectional Algorithm across DOM inline boxes (`Bidi`)
-  is tracked separately.
+- CSS `direction` and `unicode-bidi` properties remain open on the layout side.

@@ -60,7 +60,13 @@ Each document ends with an index of what moved out of it. The number in a
 filename here is what counts: the index is for a reader, and
 `tools/next_ids.py` reads the filenames.
 
-## The second file here
+## The other files here
 
 `state.json` holds the durable floors for the two counters. It says what it is
 inside.
+
+`metrics.json` holds the figures the documents publish that had to be
+*measured* — a score from running a corpus — each with the command that
+produced it and the day it did. The live numbers in `README.md` and
+`ROADMAP.md` are written by `make metrics` from it and from the tree, so this
+is where a score is argued with. It says what it is inside too.

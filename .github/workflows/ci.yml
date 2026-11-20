@@ -126,6 +126,12 @@ jobs:
         # "ready" before a merge. These are the forms it is trusted for, and
         # it asks GitHub nothing here.
         run: python3 tools/ci/check_pr.py --self-test
+      - name: check_numbers reads a marked figure the way the documents write one
+        # `make metrics` rewrites the text in front of every marker, and the
+        # wrong shape there is a document rewritten and still plausible. These
+        # are the figures and shapes it is trusted for, and it asks the tree
+        # nothing here.
+        run: python3 tools/ci/check_numbers.py --self-test
       - name: The documents keep their shape and stay under their budgets
         # ARCHITECTURE.md is 84% phase write-ups and AUDIT.md is 53 resolved
         # findings of 61. Both are frozen as append targets; new write-ups go
@@ -216,7 +222,7 @@ jobs:
         # Raise the floor as the engine improves; it exists to catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 1128
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 1137
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a

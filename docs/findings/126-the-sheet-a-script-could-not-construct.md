@@ -1,4 +1,4 @@
-# Finding 117 — the sheet a script could not construct
+# Finding 126 — the sheet a script could not construct
 
 Phase 111. The architecture is in
 [`docs/phases/111-a-sheet-a-script-constructs.md`](../phases/111-a-sheet-a-script-constructs.md).
@@ -44,11 +44,11 @@ argument for writing the test first.
 
 ## 3. How it is verified
 
-- `make test` → **268 / 268**; the new suite is
+- `make test` → **275 / 275**; the new suite is
   `cssom_a_sheet_a_script_constructs`, 61 assertions.
 - With `src/js/DomStyleBindings.cpp` reverted and the test kept, the suite fails
   at its first line, `Uncaught TypeError: Illegal constructor`.
-- `make js-conformance` 1141/1158, `make dom-conformance` 678/678,
+- `make js-conformance` 1142/1158, `make dom-conformance` 678/678,
   `make wpt` 9567/9824 with 0 unlisted, URL 1188/1188, XML 1718/1718: unchanged.
 - The suite checks the rule order and the errors (`SyntaxError` for a rule that
   is not one, `IndexSizeError` for an index past the end), that `cssRules` is

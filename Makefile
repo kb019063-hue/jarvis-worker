@@ -98,7 +98,9 @@ SRCS = src/common/Color.cpp \
        src/net/WebSocket.cpp \
        src/net/AbortController.cpp \
        src/shell/BrowserShell.cpp \
-       src/shell/WebBrowserServer.cpp
+       src/shell/WebBrowserServer.cpp \
+       src/text/Bidi.cpp \
+       src/text/BidiTables.cpp
 
 OBJS = $(SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 
@@ -108,6 +110,7 @@ CROSS_ORIGIN_TARGET = $(BUILD_DIR)/cross_origin_test
 MEDIA_CHECK_TARGET = $(BUILD_DIR)/media_check
 COLOR_CHECK_TARGET = $(BUILD_DIR)/color_check
 BROTLI_CHECK_TARGET = $(BUILD_DIR)/brotli_check
+BIDI_CHECK_TARGET = $(BUILD_DIR)/bidi_check
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 DOM_CONFORMANCE = python3 tools/conformance/run_dom_conformance.py
@@ -197,6 +200,12 @@ $(MEDIA_CHECK_TARGET): $(OBJS) tools/media_check.cpp
 $(COLOR_CHECK_TARGET): $(BUILD_DIR)/common/Color.o tools/color_check.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/common/Color.o tools/color_check.cpp -o $@
+
+## The Unicode Bidirectional Algorithm's conformance suites (tests/bidi), run
+## against the two generated tables and the algorithm alone.
+$(BIDI_CHECK_TARGET): $(BUILD_DIR)/text/Bidi.o $(BUILD_DIR)/text/BidiTables.o tools/conformance/bidi_check.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/text/Bidi.o $(BUILD_DIR)/text/BidiTables.o tools/conformance/bidi_check.cpp -o $@
 
 $(BROTLI_CHECK_TARGET): $(BUILD_DIR)/net/Brotli.o $(BUILD_DIR)/net/BrotliTables.o tools/brotli_check.cpp
 	@mkdir -p $(BUILD_DIR)
@@ -290,6 +299,20 @@ url-conformance: $(TARGET)
 ## the suite not run.
 xml-conformance: $(TARGET)
 	@$(XML_CONFORMANCE) --min-pass $(XML_FLOOR)
+
+## The Unicode Bidirectional Algorithm against Unicode's own conformance
+## suites: BidiTest.txt (sequences of Bidi_Class values, 770,241 cases over
+## the paragraph directions each line allows) and BidiCharacterTest.txt (code
+## points, so bracket pairs and mirroring too, 91,707 cases). Both are
+## vendored gzipped in tests/bidi, byte for byte as the Unicode Consortium
+## publishes them; tests/bidi/README.md records where from. This target needs
+## the algorithm and the two generated tables, not the engine.
+.PHONY: bidi-conformance
+bidi-conformance: $(BIDI_CHECK_TARGET)
+	@mkdir -p $(BUILD_DIR)/bidi
+	@gzip -dc tests/bidi/BidiTest.txt.gz > $(BUILD_DIR)/bidi/BidiTest.txt
+	@gzip -dc tests/bidi/BidiCharacterTest.txt.gz > $(BUILD_DIR)/bidi/BidiCharacterTest.txt
+	@$(BIDI_CHECK_TARGET) $(BUILD_DIR)/bidi/BidiTest.txt $(BUILD_DIR)/bidi/BidiCharacterTest.txt
 
 ## The web-platform-tests in tests/wpt (the DOM suites, and the CSS Grid and
 ## Flexbox parsing suites), the tests browsers are tested with, run with their
@@ -422,6 +445,7 @@ asan-verify:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-brotli BROTLI_VERIFY_FLAGS=--skip-node
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_regexp.py --binary build-asan/litebird --fuzz-count 200 --skip-node
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_string_unicode.py --binary build-asan/litebird --fuzz 400 --skip-node --skip-full-sweep
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" bidi-conformance
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_https.py --binary build-asan/litebird
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_worker_policy.py --binary build-asan/litebird --stress-runs 20
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_websocket.py --binary build-asan/litebird --stress-runs 20

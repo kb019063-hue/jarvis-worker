@@ -6194,6 +6194,124 @@ TEST(websocket_handshake_security_and_secure_transport) {
     assert(js.eval("wsEvents.join(',')").to_string() == "error,listener:error,close:1006:false");
 }
 
+// RFC 6265 with RFC 6455 §4.1: the upgrade is a GET, so it carries the cookies
+// the jar holds for that URL, and it stores what the 101 response sets. `ws`
+// behaves as `http` and `wss` as `https`, which is the whole of the scheme
+// question, because `Secure` is the only scheme-dependent cookie attribute.
+TEST(websocket_upgrade_sends_and_stores_cookies) {
+    using namespace litebird;
+
+    int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    int opt = 1;
+    ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    assert(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    assert(::listen(listener, 1) == 0);
+    socklen_t addr_len = sizeof(addr);
+    assert(::getsockname(listener, reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0);
+    const int port = ntohs(addr.sin_port);
+
+    std::string request;
+    std::mutex request_mutex;
+    std::atomic<bool> release{false};
+    std::thread server([&] {
+        pollfd fd{listener, POLLIN, 0};
+        if (::poll(&fd, 1, 2000) <= 0) return;
+        int client = ::accept(listener, nullptr, nullptr);
+        if (client < 0) return;
+        timeval timeout{2, 0};
+        ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        std::string got;
+        char c;
+        while (got.size() < 16384 && ::recv(client, &c, 1, 0) == 1) {
+            got += c;
+            if (got.size() >= 4 && got.compare(got.size() - 4, 4, "\r\n\r\n") == 0) break;
+        }
+        {
+            std::lock_guard<std::mutex> lock(request_mutex);
+            request = got;
+        }
+        const std::string header = "Sec-WebSocket-Key: ";
+        size_t k = got.find(header);
+        std::string key = k == std::string::npos ? "" : got.substr(k + header.size(), got.find("\r\n", k) - k - header.size());
+        std::string accept = WebSocketObject::calculate_accept_key(key);
+        std::string response =
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: " + accept + "\r\n"
+            "Set-Cookie: ws_session=abc; Path=/chat\r\n"
+            "Set-Cookie: ws_elsewhere=1; Path=/other\r\n"
+            "\r\n";
+        ::send(client, response.data(), response.size(), MSG_NOSIGNAL);
+        auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!release && std::chrono::steady_clock::now() < until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ::shutdown(client, SHUT_RDWR);
+        ::close(client);
+    });
+
+    const std::string site = "http://127.0.0.1:" + std::to_string(port) + "/index.html";
+    const std::string secure_site = "https://127.0.0.1:" + std::to_string(port) + "/index.html";
+    CookieJar& jar = CookieJar::default_jar();
+    jar.set_cookie_from_header("ws_pre=1; Path=/", site);
+    jar.set_cookie_from_header("ws_same_site=1; Path=/; SameSite=Strict", site);
+    jar.set_cookie_from_header("ws_cross_site=1; Path=/; SameSite=Strict", "http://other.example/");
+    jar.set_cookie_from_header("ws_secure=1; Path=/; Secure", secure_site);
+    jar.set_cookie_from_header("ws_other_path=1; Path=/other", site);
+
+    WebSocketContext context;
+    context.document_url = site;
+    context.base_url = site;
+    context.opaque_origin = false;
+    auto ws = std::make_shared<WebSocketObject>(
+        "ws://127.0.0.1:" + std::to_string(port) + "/chat", std::string(), context);
+    ws->connect();
+    auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (ws->ready_state() == WebSocketReadyState::Connecting && std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(ws->ready_state() == WebSocketReadyState::Open);
+
+    std::string seen;
+    {
+        std::lock_guard<std::mutex> lock(request_mutex);
+        seen = request;
+    }
+    if (ws->ready_state() == WebSocketReadyState::Open) ws->close();
+    release = true;
+    server.join();
+    ::close(listener);
+    ws.reset();
+
+    assert(seen.rfind("GET /chat HTTP/1.1\r\n", 0) == 0);
+    const std::string cookie_header = "Cookie: ";
+    const size_t cookie_pos = seen.find(cookie_header);
+    assert(cookie_pos != std::string::npos);
+    const size_t cookie_end = seen.find("\r\n", cookie_pos);
+    assert(cookie_end != std::string::npos);
+    const std::string cookies = seen.substr(cookie_pos + cookie_header.size(), cookie_end - cookie_pos - cookie_header.size());
+    assert(cookies.find("ws_pre=1") != std::string::npos);
+    // SameSite=Strict for the page's own site is a subresource request from
+    // that site, so it goes; the same attribute from another site does not.
+    assert(cookies.find("ws_same_site=1") != std::string::npos);
+    assert(cookies.find("ws_cross_site=1") == std::string::npos);
+    // `ws` is an `https`-free request: `Secure` cookies stay behind.
+    assert(cookies.find("ws_secure=1") == std::string::npos);
+    // Path matching is the URL's, not the origin's.
+    assert(cookies.find("ws_other_path=1") == std::string::npos);
+
+    // The 101 response's cookies land in the jar under the upgrade's URL.
+    const std::string chat_cookies = jar.get_cookie_header("http://127.0.0.1:" + std::to_string(port) + "/chat");
+    assert(chat_cookies.find("ws_session=abc") != std::string::npos);
+    const std::string other_cookies = jar.get_cookie_header("http://127.0.0.1:" + std::to_string(port) + "/other");
+    assert(other_cookies.find("ws_elsewhere=1") != std::string::npos);
+    assert(other_cookies.find("ws_session=abc") == std::string::npos);
+}
+
 TEST(websocket_tls_origin_mixed_content_and_framing) {
     using namespace litebird;
     namespace fs = std::filesystem;
@@ -24986,6 +25104,7 @@ int main() {
     RUN_TEST(css_flexbox_and_grid_modern_refinements);
     RUN_TEST(websocket_rfc6455_client_and_handshake);
     RUN_TEST(websocket_handshake_security_and_secure_transport);
+    RUN_TEST(websocket_upgrade_sends_and_stores_cookies);
     RUN_TEST(mutation_observer_api);
     RUN_TEST(node_connected_state_tracks_attach_detach_and_shadow_hosts);
     RUN_TEST(custom_elements_api);

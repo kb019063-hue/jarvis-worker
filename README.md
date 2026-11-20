@@ -45,7 +45,7 @@ standard now makes, which is 1,967 of the 1,973.
 | **`instanceof` and `Symbol.hasInstance`** | The operator is ECMAScript §13.10.2 rather than a walk: `GetMethod(rhs, @@hasInstance)` is read and called, so a class's `static [Symbol.hasInstance]` and a plain object's own method both decide, a subclass inherits the answer, and a getter is read once. `Function.prototype[Symbol.hasInstance]` exists — `[Symbol.hasInstance]`, length 1, non-writable, non-configurable — and does OrdinaryHasInstance; the operator recognizes it by identity, so the ordinary `a instanceof Array` still walks the chain without a call. A bound function delegates the whole operator to what it was bound from (`new F() instanceof F.bind(null)` is `true`, and `7 instanceof A.bind(null)` asks `A`'s own method), which needed a bound target on the function value. An arrow function, a method or `Math.max` on the right now throws the language's `TypeError` where it answered `false` (Phase 114, finding 119). Still open: `Symbol.species` and the statics that should construct a subclass, and six host constructors with no `prototype` | `make test`, suite `instanceof_asks_symbol_has_instance`; `prototypes.dat` 69/76 |
 | **Collection at a safe point** | A collection is taken at a seeded allocation count, between statements (and between bytecode instructions), and the program must print exactly what it prints when nothing is collected — **1,186 JS cases agree at interval 1 and 678 DOM pages at interval 2, 254,174 collections served, no case differing**. The negative control runs first: two cases the harness must be seen to catch (a count only a collection can change; a case that already fails) and one it must refuse to count (an interval the program never reaches) | `make verify-gc-stress`, `make verify-gc-stress-full` |
 | **Collection's answer, invariants checked** | The collector's answer is checked in-process and through the CLI: unreachable cycles of every shape are reclaimed (self, mutual, closure, self-containing array), a global-kept thread of a graph is untouched while the cyclic pile around it is reclaimed, and the live set stays flat across 24 churn rounds within 16 cells | `make test`, suites `gc_oracle_cycles_are_reclaimed`, `gc_oracle_retention_is_exact`, `gc_oracle_repeated_churn_stays_flat`; `make gc-oracle` |
-| Engine unit tests | 276<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 277<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
@@ -63,7 +63,7 @@ standard now makes, which is 1,967 of the 1,973.
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | String Unicode 17.0 & CLDR 48 | **50,580 / 50,580 (0 diffs)** in `make diff-strings` (down from 71); **12,255,232** all-code-point (`1,114,112 × 11` ops) + **1,112** curated/fuzz strings + **1,038** collation pairs + **400,680** UCD `NormalizationTest.txt` assertions + **206,297** CLDR `CollationTest_CLDR` pairs = **0 diffs**; test262 String Unicode/locale 9 dirs **152 / 156 (97.4%)** (up from 105/156), full `built-ins/String` **1,199 / 1,223 (98.0%)** | `make diff-strings`, `make verify-string-unicode`, `tools/conformance/run_test262.py` |
 | Worker MIME/static-module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, a `{type:"module"}` static import graph, classic `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
-| WebSocket TLS, Fetch policy & RFC 6455 | 29 end-to-end checks against OpenSSL 3 CA/SAN/IP/expired TLS peers, Fetch `Origin` & mixed-content policy across `https:`/`http:`/`file:`/Worker/sandboxed `iframe`, relative URLs, WHATWG validation/close semantics, and 60/60 concurrent 4x `wss://` exit runs (Phase 90, finding 96) | `make security-websocket`; `make test` |
+| WebSocket TLS, Fetch policy, RFC 6455 & upgrade cookies | 32 end-to-end checks against OpenSSL 3 CA/SAN/IP/expired TLS peers, Fetch `Origin` & mixed-content policy across `https:`/`http:`/`file:`/Worker/sandboxed `iframe`, relative URLs, WHATWG validation/close semantics, 60/60 concurrent 4x `wss://` exit runs, and the upgrade's `Cookie`/`Set-Cookie` through `new WebSocket()` in an `http:` and an `https:` page (Phase 90, finding 96; Phase 117, finding 122) | `make security-websocket`; `make test` |
 | CSS Color 4/5 oracle & fuzzing | 180/180 15-space conversions vs exact-rational Python W3C §17 oracle (`max err 5.04e-08`), 13/13 §13.2 OKLCH gamut map, 133/133 valid & 61/61 invalid WPT vectors (4,860/4,860 live upstream WPT `color-computed-*.html`), 5,008 adversarial fuzz inputs (0 crashes) | `make verify-color`, `make fuzz-color` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 27 lossless WebP checks bit-exact vs libwebp (plus refusals), 26 lossy WebP (`VP8`) checks — every pixel of 11 streams equal to libwebp's, the loop filter and the `ALPH` plane checked separately — 16 animated WebP checks (metadata, four composited frames, an opaque animation against ImageMagick `-coalesce`, a six-frame transparency/blending/disposal animation, the first frame, the frame cap, determinism, six refusals), 7 SVG checks (including positioned text and tspan); 2,400 mutated fuzz cases (0 findings). The compositor itself was compared with libwebp 1.5's animation decoder over 658 files and 2,262 frames, every one byte-identical (Phase 79) | `make verify-media`, `make fuzz-media` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 2,400 mutated JPEG/GIF/WebP/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
@@ -78,7 +78,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 276<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 277<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
 make gc-oracle       # the collector's invariants through the CLI: cycles reclaimed, the live set flat, reached data intact
 make check-numbers   # the numbers above still divide and still count, and every marked figure and floor agrees (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
@@ -762,7 +762,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 276<!--metrics:unit_suites/int--> engine test suites
+# Run the 277<!--metrics:unit_suites/int--> engine test suites
 make test
 
 # Check the collector's invariants through the CLI
@@ -833,14 +833,14 @@ make gc-oracle
 make test
 ```
 
-Output (276<!--metrics:unit_suites/int--> suites; the first and last lines shown):
+Output (277<!--metrics:unit_suites/int--> suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 276<!--metrics:unit_suites/int--> engine test suites passed successfully!
+All 277<!--metrics:unit_suites/int--> engine test suites passed successfully!
 ```
 
 ```bash
@@ -1000,7 +1000,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 276/276<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 277/277<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -1557,11 +1557,18 @@ Worker, `file:`, and sandboxed `iframe` contexts, relative URL resolution,
 WHATWG synchronous constructor/`send`/`close` validation and live accessors,
 CSPRNG keys/masking, full RFC 6455/3629 framing/UTF-8 validation, non-blocking
 `poll()` + wake-pipe I/O, and deterministic `atexit` shutdown joining.
-`make security-websocket` runs 29 end-to-end TLS/policy checks (including
+`make security-websocket` runs 32 end-to-end TLS/policy checks (including
 60/60 concurrent 4x `wss://` exit runs), and `make test` covers the loopback
-unit suite. `ArrayBuffer`/`Blob` binary frame exposure awaits Wave 2 typed
-arrays. See [Phase 90](docs/phases/90-websocket-tls-fetch-policy-and-frames.md)
-and [finding 96](docs/findings/96-websocket-tls-origin-and-framing.md).
+unit suite. The upgrade is an ordinary cookie-bearing `GET` since Phase 117: it
+sends what `CookieJar` holds for the URL (`ws` matched as `http`, `wss` as
+`https`, which is what `Secure` turns on) with the page URL as the site for
+cookies, and stores a `Set-Cookie` from the `101` — three of those checks go
+through `new WebSocket()` in an `http:` and an `https:` page. `ArrayBuffer`/
+`Blob` binary frame exposure awaits Wave 2 typed arrays. See
+[Phase 90](docs/phases/90-websocket-tls-fetch-policy-and-frames.md),
+[finding 96](docs/findings/96-websocket-tls-origin-and-framing.md),
+[Phase 117](docs/phases/117-cookies-on-the-websocket-upgrade.md) and
+[finding 122](docs/findings/122-a-websocket-had-no-cookies.md).
 
 ### OpenType `GDEF` and `GPOS` kerning and mark positioning (Phase 99)
 

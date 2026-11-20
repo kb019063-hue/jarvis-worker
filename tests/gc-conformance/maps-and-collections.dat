@@ -1,0 +1,67 @@
+#name Map entries survive a collection
+#code
+var m = new Map();
+for (var i = 0; i < 300; i++) m.set("k" + i, { i: i });
+var total = 0;
+var count = 0;
+m.forEach(function (v) { total += v.i; count += 1; });
+console.log(count, total, m.size);
+#expect
+300 44850 300
+
+#name two live Map iterators across insertion and clear
+#code
+var m = new Map();
+for (var i = 0; i < 50; i++) m.set(i, i * 3);
+var it1 = m.entries();
+var it2 = m.values();
+var a = it1.next().value;
+var b = it2.next().value;
+for (var j = 50; j < 80; j++) m.set(j, j * 3);
+var rest = 0;
+var step = it2.next();
+while (!step.done) { rest += step.value; step = it2.next(); }
+m.clear();
+console.log(a[0], a[1], b, rest, m.size);
+#expect
+0 0 0 9480 0
+
+#name objects stay alive while a Map keys them
+#code
+var m = new Map();
+var keys = [];
+for (var i = 0; i < 100; i++) {
+  var k = { id: i };
+  keys.push(k);
+  m.set(k, "v" + i);
+}
+var hits = 0;
+for (var j = 0; j < keys.length; j++) if (m.get(keys[j]) === "v" + j) hits += 1;
+console.log(hits, m.size);
+#expect
+100 100
+
+#name a Set deduplicates objects by identity
+#code
+var s = new Set();
+var a = { name: "a" };
+var b = { name: "a" };
+for (var i = 0; i < 100; i++) { s.add(a); s.add(b); }
+s.add({ name: "a" });
+console.log(s.size, s.has(a), s.has(b), s.has({ name: "a" }));
+#expect
+3 true true false
+
+#name an array with holes reads through the prototype
+#code
+var a = [1, 2, 3];
+a.length = 6;
+var seen = [];
+for (var i = 0; i < a.length; i++) seen.push(String(a[i]));
+console.log(seen.join(","), a.length);
+var holes = 0;
+for (var j = 0; j < a.length; j++) if (j in a) holes += 1;
+console.log(holes);
+#expect
+1,2,3,undefined,undefined,undefined 6
+3

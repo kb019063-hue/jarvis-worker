@@ -485,7 +485,8 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    `new Array(n)`, a grown `length` and an elision in a literal all make holes.
    Details and the approximate
    corners are in Phase 23, section 10. Around classes: there is
-   no `Symbol.species` and `instanceof` does not ask `Symbol.hasInstance`,
+   no `Symbol.species` (`instanceof` does ask `Symbol.hasInstance` since
+   Phase 114, finding 119),
    nothing tells a built-in that is a constructor from one that is not
    (Phase 34, section 9), `this` can be used before `super()` has run, `let`
    and `const` have no dead zone, `eval` inside a function is global code,

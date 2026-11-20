@@ -803,3 +803,29 @@ function t(f) { try { return String(f()); } catch (e) { return e.name; } }
 console.log(t(function () { return Array.from({ [Symbol.iterator]: 5 }); }), t(function () { return Array.from({ [Symbol.iterator]: null, length: 2 }).length; }), t(function () { return Array.from(1, 2); }));
 #expect
 TypeError 2 TypeError
+
+#name a pattern follows a string's iterator by code point, surrogate pairs and lone halves
+#code
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+var [a, b, c] = '\u{1F600}z';
+var [half, letter] = '\uD83D' + 'q';
+var [one] = '\u{1F600}';
+var [] = 'x';
+console.log([a.length, b, c, half.length, letter, one.length, t(function () { var [q] = 5; return q; })].join(' | '));
+#expect
+2 | z |  | 1 | q | 2 | TypeError
+
+#name IteratorClose: what return must be, and what a pattern does with it
+#code
+function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+function source(ret) { var o = {}; o[Symbol.iterator] = function () { return { next: function () { return { value: 1, done: false }; }, return: ret }; }; return o; }
+var log = [];
+var missing = {}; missing[Symbol.iterator] = function () { var i = 0; return { next: function () { return i < 4 ? { value: i++, done: false } : { done: true }; } }; };
+var [a, b] = missing;
+var nul = {}; nul[Symbol.iterator] = function () { return { next: function () { return { value: 1, done: false }; }, return: null }; };
+var r = [t(function () { var [q] = source(5); return q; }), t(function () { var [q] = source(function () { return 5; }); return q; }),
+         t(function () { var [q] = source(function () { return {}; }); return q; }), t(function () { var [q] = source(function () { throw new RangeError('x'); }); return q; }),
+         t(function () { var [q] = nul; return q; }), a, b, t(function () { var [] = missing; return 'drained'; })];
+console.log(r.join());
+#expect
+TypeError,TypeError,1,RangeError,1,0,1,drained

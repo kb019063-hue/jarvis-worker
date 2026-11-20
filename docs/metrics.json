@@ -26,10 +26,10 @@
       "derived": "RUN_TEST lines of tests/test_suite.cpp"
     },
     "js_conformance": {
-      "pass": 1142,
+      "pass": 1143,
       "command": "make js-conformance",
       "date": "2026-11-20",
-      "note": "the total is the corpus on disk; only the pass count needs a run. 1137 before Phase 102, which fixed the two cases iteration.dat records for array destructuring; 1142 since Phase 106 (ArrayBuffer and the typed arrays), whose Uint8Array case of collections-iterators.dat was waiting for it, measured on this branch after merging main"
+      "note": "the total is the corpus on disk; only the pass count needs a run. 1137 before Phase 102, which fixed the two cases iteration.dat records for array destructuring; 1141 before Phase 114, which made `instanceof` ask Symbol.hasInstance and stopped prototypes.dat aborting on the case that asks for it"
     },
     "dom_conformance": {
       "pass": 678,

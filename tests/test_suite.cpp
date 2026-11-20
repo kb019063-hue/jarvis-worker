@@ -3777,6 +3777,56 @@ TEST(garbage_collector_and_cycles) {
     assert(gc_info.get_property("total_cells").to_number() >= 1.0);
 }
 
+TEST(collection_stress_asks_at_a_seeded_allocation_count) {
+    using namespace litebird;
+    // A heap of its own: the default heap's counters are the process's.
+    Heap heap;
+
+    // Not armed, nothing asks, however much is allocated.
+    for (int i = 0; i < 1000; ++i) heap.allocate_object();
+    assert(!heap.take_gc_stress_request());
+    assert(!heap.gc_stress_enabled());
+
+    // Armed at interval 1, the request is raised by the first allocation and
+    // taken once: taking it re-arms the countdown rather than repeating.
+    heap.set_gc_stress(1, 1);
+    assert(heap.gc_stress_enabled());
+    assert(!heap.take_gc_stress_request());
+    heap.allocate_object();
+    assert(heap.take_gc_stress_request());
+    assert(!heap.take_gc_stress_request());
+    heap.allocate_object();
+    assert(heap.take_gc_stress_request());
+    assert(heap.gc_stress_collections() == 2);
+
+    // The same seed raises the same number of requests at the same counts as
+    // itself, and two seeds differ. Without this a "stress" run that never
+    // fired and a run that fired everywhere print the same thing: nothing.
+    auto requests = [](uint64_t seed, uint32_t interval, int allocations) {
+        Heap h;
+        h.set_gc_stress(seed, interval);
+        int raised = 0;
+        for (int i = 0; i < allocations; ++i) {
+            h.allocate_object();
+            if (h.take_gc_stress_request()) ++raised;
+        }
+        return raised;
+    };
+    assert(requests(7, 16, 4000) == requests(7, 16, 4000));
+    assert(requests(7, 16, 4000) != requests(8, 16, 4000));
+    // Every request is served once, so the count a run reports is the count
+    // it collected.
+    assert(requests(3, 4, 400) > 0);
+    assert(requests(3, 1, 400) >= requests(3, 4, 400));
+
+    // Interval 0 would divide by zero if it were taken at face value; it means
+    // "every allocation", which is what --gc-stress=SEED:0 must not crash.
+    Heap tight;
+    tight.set_gc_stress(1, 0);
+    tight.allocate_object();
+    assert(tight.take_gc_stress_request());
+}
+
 TEST(dom_event_target_and_bubbling) {
     using namespace litebird;
 
@@ -6142,6 +6192,124 @@ TEST(websocket_handshake_security_and_secure_transport) {
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     assert(js.eval("wsEvents.join(',')").to_string() == "error,listener:error,close:1006:false");
+}
+
+// RFC 6265 with RFC 6455 §4.1: the upgrade is a GET, so it carries the cookies
+// the jar holds for that URL, and it stores what the 101 response sets. `ws`
+// behaves as `http` and `wss` as `https`, which is the whole of the scheme
+// question, because `Secure` is the only scheme-dependent cookie attribute.
+TEST(websocket_upgrade_sends_and_stores_cookies) {
+    using namespace litebird;
+
+    int listener = ::socket(AF_INET, SOCK_STREAM, 0);
+    assert(listener >= 0);
+    int opt = 1;
+    ::setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    assert(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
+    assert(::listen(listener, 1) == 0);
+    socklen_t addr_len = sizeof(addr);
+    assert(::getsockname(listener, reinterpret_cast<sockaddr*>(&addr), &addr_len) == 0);
+    const int port = ntohs(addr.sin_port);
+
+    std::string request;
+    std::mutex request_mutex;
+    std::atomic<bool> release{false};
+    std::thread server([&] {
+        pollfd fd{listener, POLLIN, 0};
+        if (::poll(&fd, 1, 2000) <= 0) return;
+        int client = ::accept(listener, nullptr, nullptr);
+        if (client < 0) return;
+        timeval timeout{2, 0};
+        ::setsockopt(client, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+        std::string got;
+        char c;
+        while (got.size() < 16384 && ::recv(client, &c, 1, 0) == 1) {
+            got += c;
+            if (got.size() >= 4 && got.compare(got.size() - 4, 4, "\r\n\r\n") == 0) break;
+        }
+        {
+            std::lock_guard<std::mutex> lock(request_mutex);
+            request = got;
+        }
+        const std::string header = "Sec-WebSocket-Key: ";
+        size_t k = got.find(header);
+        std::string key = k == std::string::npos ? "" : got.substr(k + header.size(), got.find("\r\n", k) - k - header.size());
+        std::string accept = WebSocketObject::calculate_accept_key(key);
+        std::string response =
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: " + accept + "\r\n"
+            "Set-Cookie: ws_session=abc; Path=/chat\r\n"
+            "Set-Cookie: ws_elsewhere=1; Path=/other\r\n"
+            "\r\n";
+        ::send(client, response.data(), response.size(), MSG_NOSIGNAL);
+        auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!release && std::chrono::steady_clock::now() < until)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        ::shutdown(client, SHUT_RDWR);
+        ::close(client);
+    });
+
+    const std::string site = "http://127.0.0.1:" + std::to_string(port) + "/index.html";
+    const std::string secure_site = "https://127.0.0.1:" + std::to_string(port) + "/index.html";
+    CookieJar& jar = CookieJar::default_jar();
+    jar.set_cookie_from_header("ws_pre=1; Path=/", site);
+    jar.set_cookie_from_header("ws_same_site=1; Path=/; SameSite=Strict", site);
+    jar.set_cookie_from_header("ws_cross_site=1; Path=/; SameSite=Strict", "http://other.example/");
+    jar.set_cookie_from_header("ws_secure=1; Path=/; Secure", secure_site);
+    jar.set_cookie_from_header("ws_other_path=1; Path=/other", site);
+
+    WebSocketContext context;
+    context.document_url = site;
+    context.base_url = site;
+    context.opaque_origin = false;
+    auto ws = std::make_shared<WebSocketObject>(
+        "ws://127.0.0.1:" + std::to_string(port) + "/chat", std::string(), context);
+    ws->connect();
+    auto until = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+    while (ws->ready_state() == WebSocketReadyState::Connecting && std::chrono::steady_clock::now() < until)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    assert(ws->ready_state() == WebSocketReadyState::Open);
+
+    std::string seen;
+    {
+        std::lock_guard<std::mutex> lock(request_mutex);
+        seen = request;
+    }
+    if (ws->ready_state() == WebSocketReadyState::Open) ws->close();
+    release = true;
+    server.join();
+    ::close(listener);
+    ws.reset();
+
+    assert(seen.rfind("GET /chat HTTP/1.1\r\n", 0) == 0);
+    const std::string cookie_header = "Cookie: ";
+    const size_t cookie_pos = seen.find(cookie_header);
+    assert(cookie_pos != std::string::npos);
+    const size_t cookie_end = seen.find("\r\n", cookie_pos);
+    assert(cookie_end != std::string::npos);
+    const std::string cookies = seen.substr(cookie_pos + cookie_header.size(), cookie_end - cookie_pos - cookie_header.size());
+    assert(cookies.find("ws_pre=1") != std::string::npos);
+    // SameSite=Strict for the page's own site is a subresource request from
+    // that site, so it goes; the same attribute from another site does not.
+    assert(cookies.find("ws_same_site=1") != std::string::npos);
+    assert(cookies.find("ws_cross_site=1") == std::string::npos);
+    // `ws` is an `https`-free request: `Secure` cookies stay behind.
+    assert(cookies.find("ws_secure=1") == std::string::npos);
+    // Path matching is the URL's, not the origin's.
+    assert(cookies.find("ws_other_path=1") == std::string::npos);
+
+    // The 101 response's cookies land in the jar under the upgrade's URL.
+    const std::string chat_cookies = jar.get_cookie_header("http://127.0.0.1:" + std::to_string(port) + "/chat");
+    assert(chat_cookies.find("ws_session=abc") != std::string::npos);
+    const std::string other_cookies = jar.get_cookie_header("http://127.0.0.1:" + std::to_string(port) + "/other");
+    assert(other_cookies.find("ws_elsewhere=1") != std::string::npos);
+    assert(other_cookies.find("ws_session=abc") == std::string::npos);
 }
 
 TEST(websocket_tls_origin_mixed_content_and_framing) {
@@ -23694,6 +23862,180 @@ TEST(http11_keep_alive_socket_pooling_and_tls_reuse) {
     ResourceLoader::clear_http_cache();
 }
 
+// ---------------------------------------------------------------------------
+// Phase 113: HTTP authentication challenges — RFC 7617 Basic, RFC 7616 Digest
+// ---------------------------------------------------------------------------
+
+TEST(http_authentication_basic_and_digest_challenges) {
+    using namespace litebird;
+
+    // 1. The digests against the vectors the RFCs publish — not against
+    //    themselves. RFC 1321 §A.5 and FIPS 180-4 §B.1/B.2 for the hashes,
+    //    RFC 4648 §10 for base64.
+    assert(ResourceLoader::auth_md5_hex("") == "d41d8cd98f00b204e9800998ecf8427e");
+    assert(ResourceLoader::auth_md5_hex("abc") == "900150983cd24fb0d6963f7d28e17f72");
+    assert(ResourceLoader::auth_md5_hex("message digest") == "f96b697d7cb7938d525a2f31aaf161d0");
+    assert(ResourceLoader::auth_sha256_hex("") ==
+           "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    assert(ResourceLoader::auth_sha256_hex("abc") ==
+           "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    assert(ResourceLoader::auth_sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+           "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    assert(ResourceLoader::auth_base64("") == "");
+    assert(ResourceLoader::auth_base64("f") == "Zg==");
+    assert(ResourceLoader::auth_base64("fo") == "Zm8=");
+    assert(ResourceLoader::auth_base64("foo") == "Zm9v");
+    assert(ResourceLoader::auth_base64("foob") == "Zm9vYg==");
+    assert(ResourceLoader::auth_base64("Aladdin:open sesame") == "QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
+
+    // 2. RFC 7616 §3.9.1's example, reproduced field for field: the RFC's own
+    //    cnonce and nc, so the expected hex is the RFC's and not this code's.
+    {
+        std::string hex;
+        assert(ResourceLoader::auth_Digest_response(
+            "MD5", "Mufasa", "Circle of Life", "http-auth@example.org",
+            "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v", "GET", "/dir/index.html",
+            "auth", "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ", "00000001", hex));
+        assert(hex == "8ca523f5e9506fed4657c9700eebdbec");
+
+        // RFC 7616 §3.9.2: the same request with SHA-256.
+        assert(ResourceLoader::auth_Digest_response(
+            "SHA-256", "Mufasa", "Circle of Life", "http-auth@example.org",
+            "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v", "GET", "/dir/index.html",
+            "auth", "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ", "00000001", hex));
+        assert(hex == "753927fa0e85d155564e2e272a28d1802ca10daf4496794697cf8db5856cb6c1");
+
+        // An algorithm this client cannot compute is refused, not guessed.
+        assert(!ResourceLoader::auth_Digest_response(
+            "SHA-512-256", "u", "p", "r", "n", "GET", "/", "auth", "c", "00000001", hex));
+    }
+
+    // 3. Basic is offered only when nothing better is, and never for a realm or
+    //    an origin with no credentials.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::set_auth_credentials("http://127.0.0.1:1", "simple", "Aladdin", "open sesame");
+        assert(ResourceLoader::has_credentials("http://127.0.0.1:1", "simple"));
+        assert(!ResourceLoader::has_credentials("http://127.0.0.1:1", "other"));
+        assert(!ResourceLoader::has_credentials("http://127.0.0.1:9", "simple"));
+        assert(ResourceLoader::auth_credential_count() == 1);
+        ResourceLoader::clear_auth_credentials();
+        assert(ResourceLoader::auth_credential_count() == 0);
+    }
+
+    // 4. The wire, which is the part a unit test cannot fake: a loopback
+    //    server answers 401 and then 200, and the two requests are kept so the
+    //    exchange can be read back. The first must offer nothing (RFC 7617
+    //    §2.2), the second must carry the Basic value for the credentials.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 4) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::vector<std::string> requested;
+        std::thread server_thread([server, &requested]() {
+            for (int i = 0; i < 2; ++i) {
+                const int client = accept(server, nullptr, nullptr);
+                if (client < 0) return;
+                std::string request;
+                char buffer[4096];
+                while (request.find("\r\n\r\n") == std::string::npos) {
+                    const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+                    if (count <= 0) break;
+                    request.append(buffer, static_cast<std::size_t>(count));
+                }
+                requested.push_back(request);
+                const bool has_auth = request.find("\r\nAuthorization:") != std::string::npos;
+                const std::string reply =
+                    has_auth
+                        ? std::string("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                                      "Content-Type: text/plain\r\nConnection: close\r\n\r\nok")
+                        : std::string("HTTP/1.1 401 Unauthorized\r\n"
+                                      "WWW-Authenticate: Basic realm=\"simple\"\r\n"
+                                      "Content-Length: 0\r\nConnection: close\r\n\r\n");
+                (void)::send(client, reply.data(), reply.size(), 0);
+                ::close(client);
+            }
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceLoader::set_auth_credentials(base, "simple", "Aladdin", "open sesame");
+        ResourceResponse resp = ResourceLoader::load_http(base + "/", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(resp.success);
+        assert(resp.status_code == 200);
+        assert(resp.body == "ok");
+        assert(requested.size() == 2);
+        assert(requested[0].find("\r\nAuthorization:") == std::string::npos);
+        assert(requested[1].find("\r\nAuthorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==") !=
+               std::string::npos);
+        ResourceLoader::clear_auth_credentials();
+    }
+
+    // 5. A 401 with no credentials held is left alone: no retry, and what the
+    //    server asked for is reported rather than swallowed.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 1) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::thread server_thread([server]() {
+            const int client = accept(server, nullptr, nullptr);
+            if (client < 0) return;
+            char buffer[4096];
+            (void)recv(client, buffer, sizeof(buffer), 0);
+            const std::string reply =
+                "HTTP/1.1 401 Unauthorized\r\n"
+                "WWW-Authenticate: Digest realm=\"locked\", qop=\"auth\", "
+                "nonce=\"deadbeef\", algorithm=SHA-256\r\n"
+                "Content-Length: 0\r\nConnection: close\r\n\r\n";
+            (void)::send(client, reply.data(), reply.size(), 0);
+            ::close(client);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceResponse resp = ResourceLoader::load_http(base + "/", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(!resp.success);
+        assert(resp.status_code == 401);
+        assert(resp.auth_schemes.size() == 1);
+        assert(resp.auth_schemes[0] == "Digest");
+        assert(resp.auth_realm == "locked");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 108: an accessor defined on an array index is that index's property.
+// ---------------------------------------------------------------------------
+
 TEST(an_accessor_on_an_array_index_is_its_property) {
     using namespace litebird;
     // Phase 108, finding 114. An accessor defined on an index of an array went
@@ -24355,6 +24697,172 @@ TEST(bidi_reorders_hebrew_and_arabic_runs) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 114: `instanceof` asks Symbol.hasInstance.
+// ---------------------------------------------------------------------------
+
+TEST(instanceof_asks_symbol_has_instance) {
+    using namespace litebird;
+    // Phase 114, finding 119. `js_instance_of` asked only that the right-hand
+    // side be callable and then walked its `prototype`: `Symbol.hasInstance`
+    // was never read, so a class that defines one was ignored, a plain object
+    // that defines one threw "not callable", a bound function (which has no
+    // `prototype` of its own) answered false, and an arrow function answered
+    // false where the language throws.
+    //
+    // The operator is now §13.10.2: GetMethod(rhs, @@hasInstance) and a call.
+    // `Function.prototype[@@hasInstance]` exists — non-writable and
+    // non-configurable, doing OrdinaryHasInstance — and the operator compares
+    // it by identity, so the ordinary case still walks the chain without
+    // calling through a property. A bound function delegates the whole
+    // operator to its target, which is what makes `7 instanceof A.bind(null)`
+    // ask A's own method.
+    //
+    // Every expected string below is what Node.js printed for the same script.
+    // What is still not so: six of the host's constructors (`Response`,
+    // `Headers`, `Worker`, `WebSocket`, `IntersectionObserver`,
+    // `ResizeObserver`) are installed without a `prototype`, so
+    // `r instanceof Response` answers false where the language says true; the
+    // operator does not throw for them, because a native function with no
+    // `prototype` is left answering false (AGENTS.md).
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body><div id=\"d\"></div></body>");
+    js.notify_document_loaded();
+    auto none_failed = [&]() {
+        const std::string failed = js.eval("failures.join('\\n')").to_string();
+        if (!failed.empty()) std::cerr << failed << "\n";
+        return failed.empty();
+    };
+
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function describe(o, k) {
+            var d = Object.getOwnPropertyDescriptor(o, k);
+            if (!d) return 'none';
+            return [d.writable, d.enumerable, d.configurable, typeof d.value].join(' ');
+        }
+        check('the method the language defines', function () {
+            return [typeof Function.prototype[Symbol.hasInstance],
+                    Function.prototype[Symbol.hasInstance].name,
+                    Function.prototype[Symbol.hasInstance].length,
+                    describe(Function.prototype, Symbol.hasInstance),
+                    (function () {}).hasOwnProperty(Symbol.hasInstance),
+                    Object[Symbol.hasInstance] === Function.prototype[Symbol.hasInstance]];
+        }, '["function","[Symbol.hasInstance]",1,"false false false function",false,true]');
+        check('the language makes it non-writable', function () {
+            var saved = Function.prototype[Symbol.hasInstance];
+            Function.prototype[Symbol.hasInstance] = 1;
+            return [typeof Function.prototype[Symbol.hasInstance],
+                    Function.prototype[Symbol.hasInstance] === saved];
+        }, '["function",true]');
+        check('a class answers for its instances', function () {
+            class A { static [Symbol.hasInstance](x) { return x === 1; } }
+            return [1 instanceof A, 2 instanceof A];
+        }, '[true,false]');
+        check('a plain object answers for its instances', function () {
+            var o = { [Symbol.hasInstance](x) { return x === 5; } };
+            return [5 instanceof o, 6 instanceof o];
+        }, '[true,false]');
+        check('a subclass inherits the answer', function () {
+            class A { static [Symbol.hasInstance](x) { return x === 3; } }
+            class B extends A {}
+            return [3 instanceof B, 4 instanceof B, B[Symbol.hasInstance] === A[Symbol.hasInstance]];
+        }, '[true,false,true]');
+        check('a function may answer for itself', function () {
+            var f = function () {};
+            Object.defineProperty(f, Symbol.hasInstance, { value: function (x) { return x === 42; } });
+            return [42 instanceof f, 1 instanceof f, ({}) instanceof f];
+        }, '[true,false,false]');
+        check('a getter that is not the installed method is read', function () {
+            var f = function () {};
+            Object.defineProperty(f, Symbol.hasInstance, { get: function () { return function () { return true; }; } });
+            return [1 instanceof f];
+        }, '[true]');
+        check('a bound function asks what it was bound from', function () {
+            class A { static [Symbol.hasInstance](x) { return x === 7; } }
+            function F() {}
+            return [7 instanceof A.bind(null), 8 instanceof A.bind(null),
+                    new F() instanceof F.bind(null), new F() instanceof F.bind(null).bind(null)];
+        }, '[true,false,true,true]');
+        check('what the method throws reaches the operator', function () {
+            var o = { [Symbol.hasInstance]() { throw new RangeError('nope'); } };
+            var caught = 'none';
+            try { 1 instanceof o; } catch (e) { caught = e.name + ': ' + e.message; }
+            return caught;
+        }, '"RangeError: nope"');
+        check('the answer is read once per operator', function () {
+            var hits = 0;
+            var o = {};
+            Object.defineProperty(o, Symbol.hasInstance, { get() { hits++; return function () { return true; }; } });
+            var answer = 1 instanceof o;
+            return [answer, hits];
+        }, '[true,1]');
+        check('null means the ordinary walk', function () {
+            function F() {}
+            F[Symbol.hasInstance] = null;
+            var o = new F();
+            return [o instanceof F, ({}) instanceof F];
+        }, '[true,false]');
+        check('a non-callable answer is a TypeError', function () {
+            var o = { [Symbol.hasInstance]: 5 };
+            var caught = 'none';
+            try { 1 instanceof o; } catch (e) { caught = e.name; }
+            return caught;
+        }, '"TypeError"');
+        check('the ordinary walk, unchanged', function () {
+            function F() {}
+            var o = {};
+            F.prototype = o;
+            return [Object.create(o) instanceof F, new F() instanceof F, [] instanceof Array,
+                    ({}) instanceof Object, Object.create(null) instanceof Object,
+                    'a' instanceof String, new String('a') instanceof String,
+                    (function () {}) instanceof Function, (() => {}) instanceof Function];
+        }, '[true,true,true,true,false,false,true,true,true]');
+        check('a right-hand side with no prototype to walk', function () {
+            var caught = [];
+            try { ({}) instanceof (() => {}); } catch (e) { caught.push(e.name + ': ' + e.message); }
+            try { 1 instanceof 1; } catch (e) { caught.push(e.name + ': ' + e.message); }
+            try { 1 instanceof {}; } catch (e) { caught.push(e.name + ': ' + e.message); }
+            return caught;
+        }, '["TypeError: Function has non-object prototype \'undefined\' in instanceof check","TypeError: Right-hand side of \'instanceof\' is not an object","TypeError: Right-hand side of \'instanceof\' is not callable"]');
+        check('a primitive is not an instance before prototype is read', function () {
+            var caught = 'none';
+            try { 1 instanceof (() => {}); } catch (e) { caught = e.name; }
+            return caught;
+        }, '"none"');
+    )JS");
+    assert(none_failed());
+
+    // A host constructor with a `prototype` is walked as before, and the ones
+    // that have none still answer rather than throw.
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got = String(f());
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        check('a host prototype is walked', function () {
+            return [document.body instanceof HTMLElement, document.body instanceof Node,
+                    document.getElementById('d') instanceof HTMLDivElement,
+                    new Event('x') instanceof Event, new MouseEvent('click') instanceof Event].join(' ');
+        }, 'true true true true true');
+        check('a host constructor with no prototype answers', function () {
+            var caught = 'none';
+            var answer;
+            try { answer = document.body instanceof Response; } catch (e) { caught = e.name; }
+            return answer + ' ' + caught;
+        }, 'false none');
+    )JS");
+    assert(none_failed());
+}
+
 // Phase 106: ArrayBuffer and the typed arrays.
 //
 // The oracle is the standard's conversions, not an implementation: an element
@@ -24504,6 +25012,7 @@ int main() {
     RUN_TEST(the_font_shorthand_resets_font_kerning);
     RUN_TEST(the_painter_honours_font_kerning_none);
     RUN_TEST(garbage_collector_and_cycles);
+    RUN_TEST(collection_stress_asks_at_a_seeded_allocation_count);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);
     RUN_TEST(resource_loader_and_url_resolution);
@@ -24539,6 +25048,7 @@ int main() {
     RUN_TEST(css_flexbox_and_grid_modern_refinements);
     RUN_TEST(websocket_rfc6455_client_and_handshake);
     RUN_TEST(websocket_handshake_security_and_secure_transport);
+    RUN_TEST(websocket_upgrade_sends_and_stores_cookies);
     RUN_TEST(mutation_observer_api);
     RUN_TEST(node_connected_state_tracks_attach_detach_and_shadow_hosts);
     RUN_TEST(custom_elements_api);
@@ -24802,6 +25312,9 @@ int main() {
     // Phase 90: WebSocket wss:// TLS, Fetch Origin/mixed-content policy, and RFC 6455 framing.
     RUN_TEST(websocket_tls_origin_mixed_content_and_framing);
 
+    // Phase 113: HTTP authentication challenges (RFC 7617 Basic, RFC 7616 Digest).
+    RUN_TEST(http_authentication_basic_and_digest_challenges);
+
     // Phase 99: OpenType GDEF and GPOS positioning (SinglePos, PairPos, MarkToBase, MarkToLig, MarkToMark).
     RUN_TEST(gpos_pair_and_single_positioning_without_kern_table);
     RUN_TEST(gpos_mark_to_base_and_mark_to_mark_anchoring);
@@ -24814,6 +25327,9 @@ int main() {
 
     // Phase 109: UAX #9 -- Hebrew and Arabic reordered, and not painted left to right.
     RUN_TEST(bidi_reorders_hebrew_and_arabic_runs);
+
+    // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
+    RUN_TEST(instanceof_asks_symbol_has_instance);
 
     // Phase 106: ArrayBuffer and the typed arrays.
     RUN_TEST(arraybuffer_and_typed_arrays);

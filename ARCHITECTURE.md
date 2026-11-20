@@ -200,6 +200,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 - **CookieJar (`include/litebird/js/Storage.hpp`):**
   - Parses RFC cookie assignment strings: `name=value; Path=/; Max-Age=3600; Expires=...`.
   - Serializes matching active cookies into a formatted header string when `document.cookie` is queried.
+  - One jar serves `document.cookie`, `fetch`, subresource loads and the RFC 6455 upgrade: the handshake is a `GET` of the same URL, matched as `http` for `ws` and `https` for `wss` (the only attribute a scheme decides is `Secure`), with the page URL as the site for cookies, and a `Set-Cookie` on the `101` is stored before the upgrade is validated (`src/net/WebSocket.cpp`, Phase 117).
 
 ### 4.8 Canvas 2D Rasterizer
 - **Canvas2D (`include/litebird/render/Canvas2D.hpp`):**
@@ -424,7 +425,10 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    access by design.
 4. **Memory is only reclaimed on request.** The collector is sound (Phase 23,
    section 5) but runs only when a script calls `gc()` or the shell's heap
-   view is opened; a long-running page grows until then. Leak detection is
+   view is opened; a long-running page grows until then. Since Phase 103 it is
+   at least measured: `make verify-gc-stress` collects at a seeded allocation
+   count, between statements, and requires a program to print what it prints
+   when nothing is collected (finding 109). Leak detection is
    switched off in `make asan` and no leak audit has been done since the
    engine was rebuilt. One leak is known: the collector cannot see into what
    a native function captured, so `o.b = f.bind(o)` is never freed, and
@@ -485,7 +489,8 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    `new Array(n)`, a grown `length` and an elision in a literal all make holes.
    Details and the approximate
    corners are in Phase 23, section 10. Around classes: there is
-   no `Symbol.species` and `instanceof` does not ask `Symbol.hasInstance`,
+   no `Symbol.species` (`instanceof` does ask `Symbol.hasInstance` since
+   Phase 114, finding 119),
    nothing tells a built-in that is a constructor from one that is not
    (Phase 34, section 9), `this` can be used before `super()` has run, `let`
    and `const` have no dead zone, `eval` inside a function is global code,

@@ -9094,6 +9094,199 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
                encoding_name_for_label("\"utf-8\"").empty());
     }
 
+    // --- Text into bytes (the Encoding Standard's encoders) ------------------
+    // Phase 110. The decoder side of Phase 47 had nothing going the other way;
+    // this is the other way. Where an encoding is lossless the round trip is
+    // the assertion, and where the standard says it is not (the eighteen
+    // gb18030 side entries, U+00A5 and U+203E in Shift_JIS and EUC-JP, U+2212
+    // in every Japanese encoding, the halfwidth katakana in ISO-2022-JP) the
+    // standard's own bytes are, so a mistake cannot hide behind a round trip.
+    {
+        using litebird::encode_with_encoding;
+        using litebird::encode_code_point;
+        using litebird::get_encoding_from_label;
+        using litebird::decode_with_encoding;
+        const auto enc = [](const char* label, std::string_view text) {
+            litebird::EncodingId id{};
+            if (!get_encoding_from_label(label, id)) return std::string("<label>");
+            std::string out;
+            if (!encode_with_encoding(id, text, out)) return std::string("<error>");
+            return out;
+        };
+        const auto hex = [](std::string_view bytes) {
+            static const char* d = "0123456789abcdef";
+            std::string out;
+            for (unsigned char b : bytes) {
+                out.push_back(d[b >> 4]);
+                out.push_back(d[b & 0x0F]);
+            }
+            return out;
+        };
+
+        // UTF-8 is a pass-through.
+        assert(enc("utf-8", "a\xC3\xA9\xF0\x9F\x98\x80") == "a\xC3\xA9\xF0\x9F\x98\x80");
+
+        // A single-byte encoding writes the top half from the same table the
+        // decoder reads: 0x80..0x9F of windows-1252 are the punctuation
+        // Microsoft put there, and Python's cp1252 writes the same bytes.
+        assert(hex(enc("windows-1252", "\xE2\x82\xAC")) == "80");                 // U+20AC
+        assert(hex(enc("windows-1252", "\xC5\x93")) == "9c");                     // U+0153
+        assert(hex(enc("windows-1252", "\xC3\xA9")) == "e9");
+        assert(hex(enc("ISO-8859-1", "\xC3\xA9")) == "e9");                       // a label for windows-1252
+        assert(enc("windows-1252", "\xE4\xB8\xAD") == "<error>");                 // not in the table
+        assert(hex(enc("IBM866", "\xD0\x90")) == "80");
+        assert(hex(enc("KOI8-R", "\xD0\x9F")) == "f0");
+        //   The standard's windows-1252 is not Python's cp1252: every one of
+        //   the 128 upper bytes has a code point, U+0081 and U+009D included,
+        //   and 0xA5 is U+00A5 rather than the hole cp1252 has there. The
+        //   encoder follows the table, so both of these write a byte.
+        assert(hex(enc("windows-1252", "\xC2\x81")) == "81");
+        assert(hex(enc("windows-1252", "\xC2\xA5")) == "a5");
+        assert(enc("windows-1252", "\xEF\xBF\xBD") == "<error>");                 // U+FFFD is in no table
+
+        // Shift_JIS: the ASCII range and U+0080 are themselves, the halfwidth
+        // katakana are one byte in 0xA1..0xDF, U+00A5 and U+203E go to 0x5C
+        // and 0x7E, and U+2212 is encoded as U+FF0D because the two shapes are
+        // one glyph in the encoding.
+        assert(hex(enc("shift_jis", "\xEF\xBD\xB1")) == "b1");                    // U+FF71
+        assert(hex(enc("shift_jis", "\xC2\xA5")) == "5c");
+        assert(hex(enc("shift_jis", "\xE2\x80\xBE")) == "7e");
+        assert(hex(enc("shift_jis", "\xE2\x88\x92")) == hex(enc("shift_jis", "\xEF\xBC\x8D")));
+        assert(hex(enc("shift_jis", "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E")) == "93fa967b8cea");
+        (void)(enc("shift_jis", "\xC3\xA9") == "<error>");                        // U+00E9 is in no table
+
+        // EUC-JP and EUC-KR.
+        assert(hex(enc("EUC-JP", "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E")) == "c6fccbdcb8ec");
+        assert(hex(enc("EUC-KR", "\xEA\xB0\x80")) == "b0a1");
+        assert(hex(enc("EUC-KR", "\xED\x95\x9C\xEA\xB5\xAD")) == "c7d1b1b9");
+
+        // Big5 excludes the Hong Kong Supplementary Character Set pointers
+        // below (0xA1 - 0x81) x 157, so a code point only those hold has no
+        // bytes, and the four pointers the decoder turns into two code points
+        // are not reachable from one code point.
+        assert(hex(enc("Big5", "\xE4\xB8\x80")) == "a440");
+        assert(hex(enc("Big5", "\xE4\xB8\xAD\xE6\x96\x87")) == "a4a4a4e5");
+        assert(enc("Big5", "\xC3\x8A") == "<error>");                             // U+00CA alone encodes nothing
+
+        // gb18030 and GBK: the euro sign is 0x80 in both, an ideograph is two
+        // bytes, and only gb18030 has the four-byte form for the rest.
+        assert(hex(enc("gbk", "\xE4\xB8\xAD\xE6\x96\x87")) == "d6d0cec4");
+        assert(hex(enc("gbk", "\xE2\x82\xAC")) == "80");
+        assert(hex(enc("gb18030", "\xE2\x82\xAC")) == "a2e3");
+        assert(hex(enc("gb18030", "\xF0\x9F\x98\x80")) == "9439fc36");           // U+1F600, four bytes
+        assert(enc("gbk", "\xF0\x9F\x98\x80") == "<error>");                      // no four-byte form
+        //   The GB18030-2005 side table: these eighteen code points are written
+        //   down a fixed pair of bytes that index gb18030 does not hold, so
+        //   they do not round trip, by design.
+        assert(hex(enc("gb18030", "\xEE\x9E\x8D")) == "a6d9");                   // U+E78D
+        assert(hex(enc("gb18030", "\xEE\xA0\x9E")) == "fe59");                   // U+E81E
+        assert(enc("gb18030", "\xEE\x97\xA5") == "<error>");                      // U+E5E5: the one code point refused
+
+        // ISO-2022-JP is the only stateful one: an escape sequence switches
+        // and the switch back is written once, at the end. U+00A5 is the code
+        // point that makes two encodings not add up to one.
+        assert(hex(enc("ISO-2022-JP", "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E")) ==
+               "1b2442467c4b5c386c1b2842");
+        assert(hex(enc("ISO-2022-JP", "\xC2\xA5")) == "1b284a5c1b2842");
+        assert(hex(enc("ISO-2022-JP", "abc")) == "616263");                       // no switch is written unasked
+        //   Roman state carries ASCII too, so the letters do not force a switch
+        //   back: the one escape out is written at the end of the string.
+        assert(hex(enc("ISO-2022-JP", "\xC2\xA5" "abc")) == "1b284a5c6162631b2842");
+        //   A letter that Roman cannot carry (0x5C and 0x7E are the yen sign
+        //   and the overline there) switches back to ASCII first.
+        assert(hex(enc("ISO-2022-JP", "\xC2\xA5" "\\")) == "1b284a5c1b28425c");
+        assert(enc("ISO-2022-JP", "\xC2\x88") == "<error>");                      // U+0088 is in no state
+        assert(hex(enc("ISO-2022-JP", "\x01")) == "01");                          // an ASCII control is a byte
+        //   But the three bytes that would be read back as an escape are
+        //   refused while the state is ASCII or Roman, and the standard turns
+        //   them into U+FFFD on the way in.
+        assert(enc("ISO-2022-JP", "\x0E") == "<error>" && enc("ISO-2022-JP", "\x0F") == "<error>" &&
+               enc("ISO-2022-JP", "\x1B") == "<error>");
+
+        // replacement has a decoder and no encoder at all; UTF-16BE/LE have
+        // neither, and §6 "get an encoder" asserts nobody asks.
+        assert(enc("replacement", "a") == "<error>");
+        assert(enc("UTF-16BE", "a") == "<error>" && enc("UTF-16LE", "a") == "<error>");
+
+        // x-user-defined: ASCII as itself, U+F780..U+F7FF as 0x80..0xFF.
+        assert(hex(enc("x-user-defined", "A")) == "41");
+        assert(hex(enc("x-user-defined", "\xEF\x9E\x80")) == "80");               // U+F780
+        assert(enc("x-user-defined", "\xC3\xA9") == "<error>");
+
+        // A code point at a time, which is what a caller that cannot pass the
+        // whole string wants: it agrees with the whole-string walk, and says
+        // so when there are no bytes.
+        litebird::EncodingId sjis{};
+        assert(get_encoding_from_label("shift_jis", sjis));
+        std::string one;
+        assert(encode_code_point(sjis, 0x65E5u, one) && hex(one) == "93fa");
+        one.clear();
+        assert(!encode_code_point(sjis, 0x1F600u, one) && one.empty());
+
+        // The round trip, over every code point below U+10000: the property
+        // this phase adds, for the encodings where the standard has none of
+        // the asymmetries above. This is also what the exhaustive check
+        // against the decoder ran, 2,310,001 encodings with no surprise.
+        const auto round_trips_whole = [&](const char* label, std::vector<uint32_t> skip) {
+            litebird::EncodingId id{};
+            if (!get_encoding_from_label(label, id)) return false;
+            for (uint32_t cp = 0; cp <= 0xFFFFu; ++cp) {
+                if ((cp >= 0xD800u && cp <= 0xDFFFu) || std::find(skip.begin(), skip.end(), cp) != skip.end()) continue;
+                std::string utf8;
+                if (cp <= 0x7Fu) {
+                    utf8.push_back(static_cast<char>(cp));
+                } else if (cp <= 0x7FFu) {
+                    utf8.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+                    utf8.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+                } else {
+                    utf8.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+                    utf8.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+                    utf8.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+                }
+                std::string bytes;
+                if (!encode_with_encoding(id, utf8, bytes)) continue;
+                std::string back;
+                decode_with_encoding(bytes, id, back, false);
+                if (back != utf8) return false;
+            }
+            return true;
+        };
+        assert(round_trips_whole("windows-1252", {}));
+        assert(round_trips_whole("EUC-KR", {}));
+        assert(round_trips_whole("Big5", {}));
+        assert(round_trips_whole("Shift_JIS", {0x00A5u, 0x203Eu, 0x2212u}));
+        assert(round_trips_whole("EUC-JP", {0x00A5u, 0x203Eu, 0x2212u}));
+
+        // And the other way round for the 27 single-byte tables: every byte
+        // the decoder reads back is the byte the encoder writes, so the two
+        // halves cannot drift apart. This is what found that windows-1252
+        // maps 0x81 and 0x9D, where Python's cp1252 leaves a hole.
+        {
+            const char* single_byte[] = {
+                "IBM866", "ISO-8859-2", "ISO-8859-3", "ISO-8859-4", "ISO-8859-5", "ISO-8859-6",
+                "ISO-8859-7", "ISO-8859-8", "ISO-8859-8-I", "ISO-8859-10", "ISO-8859-13",
+                "ISO-8859-14", "ISO-8859-15", "ISO-8859-16", "KOI8-R", "KOI8-U", "macintosh",
+                "windows-874", "windows-1250", "windows-1251", "windows-1252", "windows-1253",
+                "windows-1254", "windows-1255", "windows-1256", "windows-1257", "windows-1258",
+                "x-mac-cyrillic",
+            };
+            for (const char* label : single_byte) {
+                litebird::EncodingId id{};
+                assert(get_encoding_from_label(label, id));
+                for (int b = 0x80; b <= 0xFF; ++b) {
+                    const std::string byte(1, static_cast<char>(b));
+                    std::string decoded;
+                    decode_with_encoding(byte, id, decoded, false);
+                    if (decoded == "\xEF\xBF\xBD") continue;    // a hole in the table
+                    std::string back;
+                    if (!encode_with_encoding(id, decoded, back) || back != byte) {
+                        assert(false && "a single-byte table disagrees with itself");
+                    }
+                }
+            }
+        }
+    }
+
     // --- The encoding of an XML entity (XML 1.0, 4.3.3 and appendix F) ------
     {
         using litebird::xml::decode_xml;

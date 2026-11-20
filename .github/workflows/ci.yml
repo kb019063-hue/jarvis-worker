@@ -158,15 +158,15 @@ jobs:
         # failed to parse, so every run reported "workflow file issue" and no job
         # ever executed. Keep it as a block scalar.
         #
-        # The floor is 1,967 of the 1,973 cases of the corpus Phase 76 vendored
+        # The floor is 1,973 of the 1,973 cases of the corpus Phase 76 vendored
         # from web-platform-tests. Since Phase 95 the dump path runs the page's
-        # scripts as the parser reaches them, so the `scripted_*.dat` cases are
-        # covered too; `scripted_ark.dat` is the one that still differs. Any
-        # case that stops passing is a regression.
+        # scripts as the parser reaches them, and since Phase 101 Noah's Ark
+        # compares the attributes on the tokens, so all six `scripted_*.dat`
+        # cases pass. Any case that stops passing is a regression.
         run: |
           set -euo pipefail
           python3 tools/conformance/run_tree_construction.py --quiet --json build/conformance.json
-          python3 -c "import json,sys; r=json.load(open('build/conformance.json')); print(f\"conformance: {r['passed']}/{r['total']} = {r['rate']:.1f}%\"); sys.exit(0 if r['passed'] >= 1972 else 1)"
+          python3 -c "import json,sys; r=json.load(open('build/conformance.json')); print(f\"conformance: {r['passed']}/{r['total']} = {r['rate']:.1f}%\"); sys.exit(0 if r['passed'] >= 1973 else 1)"
       - name: Random pages against parse5
         # The corpus is the inputs somebody wrote. This is 6,000 pages and
         # fragments nobody wrote, a few dozen misnested tags each, parsed here

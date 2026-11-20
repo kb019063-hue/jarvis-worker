@@ -37,6 +37,24 @@ const std::unordered_set<std::string>& formatting_tags() {
     return tags;
 }
 
+/// The Noah's Ark clause compares the attributes *as they were on the tokens*
+/// for which the elements were created (HTML §13.2.4.3), not the live
+/// attributes of the DOM elements. A script can edit an element while the
+/// parser is still inside it: `scripted_ark.dat` changes the `size` of a
+/// `<font>` after three of them were pushed and before a fourth arrives. The
+/// standard still counts the edited one as it was written, so the fourth makes
+/// three alike and the earliest goes. Duplicate attribute names have already
+/// been removed by the tokenizer, so sorting the (name, value) pairs is the
+/// "can be paired, order does not matter" comparison the standard asks for.
+bool same_noahs_ark_attributes(const HtmlToken& a, const HtmlToken& b) {
+    if (a.attributes.size() != b.attributes.size()) return false;
+    auto left = a.attributes;
+    auto right = b.attributes;
+    std::sort(left.begin(), left.end());
+    std::sort(right.begin(), right.end());
+    return left == right;
+}
+
 const std::unordered_set<std::string>& implied_end_tags() {
     static const std::unordered_set<std::string> tags = {
         "dd", "dt", "li", "optgroup", "option", "p", "rb", "rp", "rt", "rtc"};
@@ -946,15 +964,17 @@ void HtmlTreeBuilder::insert_comment(const HtmlToken& token) {
 
 void HtmlTreeBuilder::push_formatting_element(const std::shared_ptr<Element>& element, const HtmlToken& token) {
     // The "Noah's Ark" clause: of the entries after the last marker, at most
-    // three may have this tag name and these attributes. When a fourth
-    // arrives, the earliest of the three goes. (The entries are HTML
-    // elements, each made from its token, so comparing the elements compares
-    // what the standard says to compare.)
+    // three may have this tag name, namespace and attributes. When a fourth
+    // arrives, the earliest of the three goes. The tag name, the namespace and
+    // above all the attributes are the ones on the token the element was made
+    // from, not the live DOM node's: a script may have edited the node since
+    // (scripted_ark.dat), and §13.2.4.3 says the comparison is of the tokens.
     std::size_t after_marker = m_formatting.size();
     while (after_marker > 0 && !m_formatting[after_marker - 1].marker) --after_marker;
     auto same = [&](const FormattingEntry& entry) {
-        return entry.element->tag_name() == element->tag_name() &&
-               entry.element->attributes() == element->attributes();
+        return entry.token.name == token.name &&
+               entry.element->element_namespace() == element->element_namespace() &&
+               same_noahs_ark_attributes(entry.token, token);
     };
     std::size_t alike = 0;
     for (std::size_t i = after_marker; i < m_formatting.size(); ++i) alike += same(m_formatting[i]);

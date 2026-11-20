@@ -22,6 +22,7 @@
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/ImageDecoder.hpp"
 #include "litebird/render/FontRenderer.hpp"
+#include "litebird/text/Bidi.hpp"
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/GifDecoder.hpp"
 #include "litebird/render/WebPDecoder.hpp"
@@ -24080,6 +24081,156 @@ TEST(an_accessor_on_an_array_index_is_its_property) {
     assert(none_failed());
 }
 
+// Phase 109 / finding 115: Hebrew and Arabic are reordered by UAX #9 and not
+// painted left to right like Latin.
+//
+// Two kinds of check. The algorithm is asked for the levels and the visual
+// order of a handful of cases whose answers are Unicode's (they are lines of
+// tests/bidi/BidiCharacterTest.txt, which `make bidi-conformance` runs in
+// full). Then the layout is asked what it paints, because levels that are right
+// and a painter that ignores them is the failure this phase is about.
+TEST(bidi_reorders_hebrew_and_arabic_runs) {
+    using namespace litebird;
+
+    // שלום עולם -- "shalom olam", two Hebrew words in a left-to-right page.
+    const std::string shalom = "\u05e9\u05dc\u05d5\u05dd";
+    const std::string olam = "\u05e2\u05d5\u05dc\u05dd";
+    const std::string shalom_reversed = "\u05dd\u05d5\u05dc\u05e9";
+    const std::string olam_reversed = "\u05dd\u05dc\u05d5\u05e2";
+
+    // Bidi_Class, from the generated table.
+    assert(BidiClass::R == bidi_class(0x05D0));   // HEBREW LETTER ALEF
+    assert(BidiClass::AL == bidi_class(0x0627));  // ARABIC LETTER ALEF
+    assert(BidiClass::L == bidi_class('a'));
+    assert(BidiClass::EN == bidi_class('7'));
+    assert(BidiClass::NSM == bidi_class(0x05B0));  // HEBREW POINT SHEVA
+    assert(BidiClass::ON == bidi_class('('));
+    // An unassigned code point takes the @missing default of its block.
+    assert(BidiClass::R == bidi_class(0x0590));
+    assert(BidiClass::AL == bidi_class(0x08B5));
+
+    // L4's pairs: parentheses, and the angle brackets that have a pair.
+    assert(bidi_mirror('(') == ')');
+    assert(bidi_mirror(')') == '(');
+    assert(bidi_mirror('a') == 'a');
+    assert(bidi_is_mirrored('['));
+
+    // P2/P3: the first strong character decides, and it is Hebrew.
+    const BidiParagraph hebrew = bidi_paragraph_utf8(shalom + " " + olam);
+    assert(hebrew.size() == 9);
+    for (std::size_t i = 0; i < hebrew.size(); ++i) {
+        assert(hebrew.levels[i] == 1);  // one right-to-left run, the space included
+    }
+    // L2: the second word comes out leftmost, and each word's characters run
+    // right to left. The line is painted left to right, so the first thing
+    // drawn is the last logical word.
+    {
+        const std::vector<std::size_t> order = bidi_reorder(hebrew);
+        assert(order.size() == 9);
+        assert(order.front() == 8);  // the last letter of the last word is leftmost
+        assert(order.back() == 0);   // and the first letter of the first word is rightmost
+    }
+
+    // A left-to-right page with one Hebrew word in the middle: the Latin stays
+    // where it was, the word stays between them, and only its own characters
+    // reverse.
+    const BidiParagraph mixed = bidi_paragraph_utf8("abc " + shalom + " def");
+    assert(mixed.base_level == 0);
+    assert(mixed.levels[0] == 0);
+    assert(mixed.levels[4] == 1);   // the first Hebrew letter
+    assert(mixed.levels[7] == 1);   // the last one
+    assert(mixed.levels[8] == 0);   // the space after the word is neutral again
+    {
+        const std::vector<std::size_t> order = bidi_reorder(mixed);
+        assert(order.front() == 0);  // 'a' is still leftmost
+        assert(order.back() == 11);  // 'f' of "def" is still rightmost
+        // The Hebrew letters are in visual order 7,6,5,4.
+        const auto first_hebrew = std::find(order.begin(), order.end(), std::size_t{7});
+        assert(first_hebrew != order.end());
+        assert(*(first_hebrew + 1) == 6);
+        assert(*(first_hebrew + 2) == 5);
+        assert(*(first_hebrew + 3) == 4);
+    }
+
+    // An Arabic page: the number stays left-to-right inside a right-to-left
+    // paragraph, and the words around it swap ends (W2, W7, I2, L2).
+    const std::string arabic = "\u0627\u0644\u0639\u062f\u062f 123 \u0647\u0646\u0627";
+    const BidiParagraph numbers = bidi_paragraph_utf8(arabic);
+    assert(numbers.base_level == 1);
+    assert(numbers.levels[6] == 2);  // the first digit, even inside an odd paragraph
+    assert(numbers.levels[9] == 1);  // the space after the number
+    {
+        // The digits are at an even level inside the odd paragraph, so they are
+        // drawn left to right and the word before them is on the right.
+        const std::vector<std::size_t> order = bidi_reorder(numbers);
+        assert(order.front() == numbers.size() - 1);
+        assert(order.back() == 0);
+    }
+
+    // ------------------------------------------------------------------
+    // What the layout does with them.
+    // ------------------------------------------------------------------
+    auto layout_line = [](const std::string& inner, float width) {
+        const std::string html = "<html><body style=\"margin:0\"><p id=\"p\" style=\"margin:0;"
+                                 "width:" + std::to_string(static_cast<int>(width)) +
+                                 "px;font-size:20px\">" + inner + "</p></body></html>";
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, width, 600.0f);
+        std::shared_ptr<LayoutBox> paragraph;
+        std::function<void(const std::shared_ptr<LayoutBox>&)> walk =
+            [&](const std::shared_ptr<LayoutBox>& box) {
+                if (!box) return;
+                if (box->node && box->node->type() == NodeType::Element) {
+                    auto element = std::static_pointer_cast<Element>(box->node);
+                    if (element->get_attribute("id") == "p") paragraph = box;
+                }
+                for (const auto& child : box->children) walk(child);
+            };
+        walk(root);
+        assert(paragraph);
+        assert(!paragraph->line_boxes.empty());
+        return paragraph->line_boxes.front();
+    };
+
+    // A Hebrew sentence: two fragments, the second logical word first, each
+    // written backwards because the painter draws left to right.
+    {
+        const LineBox line = layout_line(shalom + " " + olam, 600.0f);
+        assert(line.fragments.size() >= 2);
+        const InlineFragment& left = line.fragments.front();
+        const InlineFragment& right = line.fragments.back();
+        assert(left.text == olam_reversed);
+        assert(right.text == shalom_reversed);
+        assert(left.rect.x < right.rect.x);
+        // The first logical character is drawn rightmost, which is the whole
+        // point: `ש` ends the right-hand fragment.
+        assert(right.text.size() >= 2);
+        assert(right.text.compare(right.text.size() - 2, 2, "\u05e9") == 0);
+    }
+
+    // A Latin line is untouched: same order, same text.
+    {
+        const LineBox line = layout_line("alpha beta gamma", 600.0f);
+        assert(line.fragments.size() >= 3);
+        assert(line.fragments.front().text == "alpha");
+        assert(line.fragments.back().text == "gamma");
+    }
+
+    // Parentheses around a Hebrew word in a right-to-left line: rule L4 mirrors
+    // the glyphs, so the painted text opens with the closing bracket's glyph.
+    {
+        const LineBox line = layout_line("(" + shalom + ")", 600.0f);
+        assert(!line.fragments.empty());
+        const std::string& painted = line.fragments.front().text;
+        assert(painted.front() == '(');
+        assert(painted.back() == ')');
+        // The word inside is reversed, so the last letter of `shalom` comes
+        // first, right after the bracket.
+        assert(painted.compare(1, 2, "\u05dd") == 0);
+    }
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -24427,6 +24578,10 @@ int main() {
 
     // Phase 108: an accessor on an array index is the index's property.
     RUN_TEST(an_accessor_on_an_array_index_is_its_property);
+
+    // Phase 109: UAX #9 -- Hebrew and Arabic reordered, and not painted left to right.
+    RUN_TEST(bidi_reorders_hebrew_and_arabic_runs);
+
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

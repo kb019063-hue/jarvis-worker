@@ -87,7 +87,7 @@ inventing a site.
 
 ## 3. How it was verified
 
-`make test` — **272 / 272 suites**, up from 271; the new suite is
+`make test` — **273 / 273 suites**, up from 272 on the merged `main`; the new suite is
 `websocket_upgrade_sends_and_stores_cookies`. It runs a loopback listener,
 seeds the real default jar, and keeps the request block the server received:
 
@@ -123,7 +123,7 @@ Nothing else moved:
 
 | Command | Before | After |
 | :--- | :--- | :--- |
-| `make test` | 271 / 271 | **272 / 272** |
+| `make test` | 272 / 272 | **273 / 273** |
 | `make js-conformance` | 1141 / 1158 | 1141 / 1158 |
 | `make dom-conformance` | 678 / 678 | 678 / 678 |
 | `make conformance` | 1973 / 1973 | 1973 / 1973 |

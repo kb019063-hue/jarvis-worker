@@ -200,6 +200,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 - **CookieJar (`include/litebird/js/Storage.hpp`):**
   - Parses RFC cookie assignment strings: `name=value; Path=/; Max-Age=3600; Expires=...`.
   - Serializes matching active cookies into a formatted header string when `document.cookie` is queried.
+  - One jar serves `document.cookie`, `fetch`, subresource loads and the RFC 6455 upgrade: the handshake is a `GET` of the same URL, matched as `http` for `ws` and `https` for `wss` (the only attribute a scheme decides is `Secure`), with the page URL as the site for cookies, and a `Set-Cookie` on the `101` is stored before the upgrade is validated (`src/net/WebSocket.cpp`, Phase 117).
 
 ### 4.8 Canvas 2D Rasterizer
 - **Canvas2D (`include/litebird/render/Canvas2D.hpp`):**

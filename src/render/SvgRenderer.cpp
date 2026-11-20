@@ -1848,9 +1848,12 @@ void paint_text(CanvasRenderingContext2D& ctx, const SvgDocumentContext& doc_ctx
             const auto metrics = ctx.measure_text(seg.text);
             const float ascent = metrics.font_bounding_box_ascent;
             const float descent = metrics.font_bounding_box_descent;
-            if (seg.rotated && seg.width > 0.0f) {
-                bbox.include(seg.x - descent, seg.y - seg.width);
-                bbox.include(seg.x + ascent, seg.y + ascent);
+            if (seg.rotated) {
+                // A turned glyph can reach in any direction; its own advance and
+                // height are the reach, on both axes.
+                const float reach = ascent + descent + seg.width;
+                bbox.include(seg.x - reach, seg.y - reach);
+                bbox.include(seg.x + reach, seg.y + reach);
             } else {
                 bbox.include(seg.x, seg.y - ascent);
                 bbox.include(seg.x + seg.width, seg.y + descent);

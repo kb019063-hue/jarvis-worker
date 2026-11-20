@@ -74,10 +74,11 @@ places, 99% of them holes, `for…of` went from 17 ms to 40, spread from 23 to
 `js_array_holes_read_undefined` remembers the chain whose names it last found
 clean, and a count that goes up whenever a name beginning with a digit enters
 any property map; the same chain at the same count has the same answer. The
-three are back within what two runs of one build differ by, except
-`JSON.stringify`, which takes each hole the way it takes an element now, so
-that a replacer function is asked about it (the table is in the phase
-write-up). The same timing, repeated on the merged tree, found one more of
+three take 19, 33 and 8 ms now, where `main` takes 17, 29 and 3: the iterator
+still asks the question for each hole, which is 10 to 20 ns, and
+`JSON.stringify` takes each hole the way it takes an element, so that a
+replacer function is asked about it (the table is in the phase write-up).
+The same timing, repeated on the merged tree, found one more of
 the kind: `join` of an array of holes took 37 ms against `main`'s 27, because
 `join_array` made an empty value for every place before it asked whether the
 place was a hole. It asks first now.

@@ -83,7 +83,7 @@ file.
 
 ## 3. How it is verified
 
-- `make test` → **272 / 272** suites. The new one,
+- `make test` → **273 / 273** suites (272 on `main`, plus this one). The new one,
   `instanceof_asks_symbol_has_instance`, is 19 checks compared inside the page
   against strings every one of which Node.js printed first: the method's
   presence, name, length and property descriptor, that a function does not own

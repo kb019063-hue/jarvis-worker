@@ -44,7 +44,7 @@ that asks for it did not merely fail — it aborted the file with an uncaught
 
 ## 3. Verification
 
-- `make test` → **272 / 272**, the new suite being
+- `make test` → **273 / 273** (272 on `main`), the new suite being
   `instanceof_asks_symbol_has_instance`, whose 19 in-page checks were each
   printed by Node.js first.
 - `make js-conformance` → **1142 / 1158 (98.6%)**, up from 1141;

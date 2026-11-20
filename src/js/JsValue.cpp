@@ -133,6 +133,14 @@ const std::shared_ptr<GeneratorData>& JsValue::generator_value() const {
     return empty;
 }
 
+const JsValue& JsValue::bound_target() const {
+    static const JsValue kEmpty;
+    if (!m_extra || !m_extra->bound_target) return kEmpty;
+    return *m_extra->bound_target;
+}
+
+void JsValue::set_bound_target(const JsValue& target) { mutable_extra().bound_target = std::make_shared<JsValue>(target); }
+
 void JsValue::set_function_params(std::vector<std::string> v) { mutable_function_data().params = std::move(v); }
 void JsValue::add_function_default_value(std::shared_ptr<AstNode> v) { mutable_function_data().default_values.push_back(std::move(v)); }
 void JsValue::set_function_default_values(std::vector<std::shared_ptr<AstNode>> v) { mutable_function_data().default_values = std::move(v); }

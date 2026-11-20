@@ -46,9 +46,9 @@ standard now makes, which is 1,967 of the 1,973.
 | **`instanceof` and `Symbol.hasInstance`** | The operator is ECMAScript §13.10.2 rather than a walk: `GetMethod(rhs, @@hasInstance)` is read and called, so a class's `static [Symbol.hasInstance]` and a plain object's own method both decide, a subclass inherits the answer, and a getter is read once. `Function.prototype[Symbol.hasInstance]` exists — `[Symbol.hasInstance]`, length 1, non-writable, non-configurable — and does OrdinaryHasInstance; the operator recognizes it by identity, so the ordinary `a instanceof Array` still walks the chain without a call. A bound function delegates the whole operator to what it was bound from (`new F() instanceof F.bind(null)` is `true`, and `7 instanceof A.bind(null)` asks `A`'s own method), which needed a bound target on the function value. An arrow function, a method or `Math.max` on the right now throws the language's `TypeError` where it answered `false` (Phase 114, finding 119). Still open: `Symbol.species` and the statics that should construct a subclass, and six host constructors with no `prototype` | `make test`, suite `instanceof_asks_symbol_has_instance`; `prototypes.dat` 69/76 |
 | **Collection at a safe point** | A collection is taken at a seeded allocation count, between statements (and between bytecode instructions), and the program must print exactly what it prints when nothing is collected — **1,186 JS cases agree at interval 1 and 678 DOM pages at interval 2, 254,174 collections served, no case differing**. The negative control runs first: two cases the harness must be seen to catch (a count only a collection can change; a case that already fails) and one it must refuse to count (an interval the program never reaches) | `make verify-gc-stress`, `make verify-gc-stress-full` |
 | **`delete` in strict code** | The operator is ECMAScript `DeletePropertyOrThrow`: a property that is not configurable answers `false` in sloppy code and is a `TypeError` in strict code, with V8's words (`Cannot delete property 'x' of #<Object>`, `of [object Array]`, `of #<Map>`, …). An array's `length` is now refused at all — it is computed, not stored, and used to answer `true` without removing anything. `delete name` is answered rather than always `false`: a `var` is not deletable, a configurable property of the global object goes, a name that resolves to nothing is `true`, and `this` is `true`; in strict code it is the language's early `SyntaxError`. `Reflect.deleteProperty` keeps answering `false` in both modes (Phase 123, finding 128). Still open: an array index defined by a descriptor keeps no attributes of its own, so deleting one does not throw | `make test`, suite `a_strict_delete_refuses_what_it_cannot_remove` |
-| Engine unit tests | 286<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 287<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Collection's answer, invariants checked** | The collector's answer is checked in-process and through the CLI: unreachable cycles of every shape are reclaimed (self, mutual, closure, self-containing array), a global-kept thread of a graph is untouched while the cyclic pile around it is reclaimed, and the live set stays flat across 24 churn rounds within 16 cells | `make test`, suites `gc_oracle_cycles_are_reclaimed`, `gc_oracle_retention_is_exact`, `gc_oracle_repeated_churn_stays_flat`; `make gc-oracle` |
-| Engine unit tests | 286<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 287<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
@@ -83,8 +83,8 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 286<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
-make test            # 286<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 287<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 287<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
 make gc-oracle       # the collector's invariants through the CLI: cycles reclaimed, the live set flat, reached data intact
 make check-numbers   # the numbers above still divide and still count, and every marked figure and floor agrees (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
@@ -775,8 +775,8 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 286<!--metrics:unit_suites/int--> engine test suites
-# Run the 286<!--metrics:unit_suites/int--> engine test suites
+# Run the 287<!--metrics:unit_suites/int--> engine test suites
+# Run the 287<!--metrics:unit_suites/int--> engine test suites
 make test
 
 # Check the collector's invariants through the CLI
@@ -847,16 +847,16 @@ make gc-oracle
 make test
 ```
 
-Output (286<!--metrics:unit_suites/int--> suites; the first and last lines shown):
-Output (286<!--metrics:unit_suites/int--> suites; the first and last lines shown):
+Output (287<!--metrics:unit_suites/int--> suites; the first and last lines shown):
+Output (287<!--metrics:unit_suites/int--> suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 286<!--metrics:unit_suites/int--> engine test suites passed successfully!
-All 286<!--metrics:unit_suites/int--> engine test suites passed successfully!
+All 287<!--metrics:unit_suites/int--> engine test suites passed successfully!
+All 287<!--metrics:unit_suites/int--> engine test suites passed successfully!
 ```
 
 ```bash
@@ -1016,8 +1016,8 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 286/286<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
-ASan+UBSan, `make test` passes 286/286<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 287/287<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 287/287<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++

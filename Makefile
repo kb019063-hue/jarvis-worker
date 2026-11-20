@@ -97,7 +97,9 @@ SRCS = src/common/Color.cpp \
        src/net/WebSocket.cpp \
        src/net/AbortController.cpp \
        src/shell/BrowserShell.cpp \
-       src/shell/WebBrowserServer.cpp
+       src/shell/WebBrowserServer.cpp \
+       src/text/Bidi.cpp \
+       src/text/BidiTables.cpp
 
 OBJS = $(SRCS:src/%.cpp=$(BUILD_DIR)/%.o)
 
@@ -107,6 +109,7 @@ CROSS_ORIGIN_TARGET = $(BUILD_DIR)/cross_origin_test
 MEDIA_CHECK_TARGET = $(BUILD_DIR)/media_check
 COLOR_CHECK_TARGET = $(BUILD_DIR)/color_check
 BROTLI_CHECK_TARGET = $(BUILD_DIR)/brotli_check
+BIDI_CHECK_TARGET = $(BUILD_DIR)/bidi_check
 CONFORMANCE = python3 tools/conformance/run_tree_construction.py
 JS_CONFORMANCE = python3 tools/conformance/run_js_conformance.py
 DOM_CONFORMANCE = python3 tools/conformance/run_dom_conformance.py
@@ -162,7 +165,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket help
 
 all: $(TARGET)
 
@@ -196,6 +199,12 @@ $(MEDIA_CHECK_TARGET): $(OBJS) tools/media_check.cpp
 $(COLOR_CHECK_TARGET): $(BUILD_DIR)/common/Color.o tools/color_check.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/common/Color.o tools/color_check.cpp -o $@
+
+## The Unicode Bidirectional Algorithm's conformance suites (tests/bidi), run
+## against the two generated tables and the algorithm alone.
+$(BIDI_CHECK_TARGET): $(BUILD_DIR)/text/Bidi.o $(BUILD_DIR)/text/BidiTables.o tools/conformance/bidi_check.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(BUILD_DIR)/text/Bidi.o $(BUILD_DIR)/text/BidiTables.o tools/conformance/bidi_check.cpp -o $@
 
 $(BROTLI_CHECK_TARGET): $(BUILD_DIR)/net/Brotli.o $(BUILD_DIR)/net/BrotliTables.o tools/brotli_check.cpp
 	@mkdir -p $(BUILD_DIR)
@@ -289,6 +298,20 @@ url-conformance: $(TARGET)
 ## the suite not run.
 xml-conformance: $(TARGET)
 	@$(XML_CONFORMANCE) --min-pass $(XML_FLOOR)
+
+## The Unicode Bidirectional Algorithm against Unicode's own conformance
+## suites: BidiTest.txt (sequences of Bidi_Class values, 770,241 cases over
+## the paragraph directions each line allows) and BidiCharacterTest.txt (code
+## points, so bracket pairs and mirroring too, 91,707 cases). Both are
+## vendored gzipped in tests/bidi, byte for byte as the Unicode Consortium
+## publishes them; tests/bidi/README.md records where from. This target needs
+## the algorithm and the two generated tables, not the engine.
+.PHONY: bidi-conformance
+bidi-conformance: $(BIDI_CHECK_TARGET)
+	@mkdir -p $(BUILD_DIR)/bidi
+	@gzip -dc tests/bidi/BidiTest.txt.gz > $(BUILD_DIR)/bidi/BidiTest.txt
+	@gzip -dc tests/bidi/BidiCharacterTest.txt.gz > $(BUILD_DIR)/bidi/BidiCharacterTest.txt
+	@$(BIDI_CHECK_TARGET) $(BUILD_DIR)/bidi/BidiTest.txt $(BUILD_DIR)/bidi/BidiCharacterTest.txt
 
 ## The web-platform-tests in tests/wpt (the DOM suites, and the CSS Grid and
 ## Flexbox parsing suites), the tests browsers are tested with, run with their
@@ -421,6 +444,7 @@ asan-verify:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-brotli BROTLI_VERIFY_FLAGS=--skip-node
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_regexp.py --binary build-asan/litebird --fuzz-count 200 --skip-node
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_string_unicode.py --binary build-asan/litebird --fuzz 400 --skip-node --skip-full-sweep
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" bidi-conformance
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_https.py --binary build-asan/litebird
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_worker_policy.py --binary build-asan/litebird --stress-runs 20
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/security/verify_websocket.py --binary build-asan/litebird --stress-runs 20
@@ -557,6 +581,23 @@ fuzz-color: $(COLOR_CHECK_TARGET)
 verify-brotli: $(BROTLI_CHECK_TARGET)
 	@python3 tools/conformance/verify_brotli.py --binary $(BROTLI_CHECK_TARGET) --fuzz 0 $(BROTLI_VERIFY_FLAGS)
 
+## Collection stress: every case must print what it prints when nothing is
+## collected. The negative control runs first (a harness that cannot fail is
+## not evidence), then the corpus written for this check, then the DOM corpus,
+## where a binding that holds a raw node pointer across a collection shows up.
+verify-gc-stress: $(BINARY)
+	@python3 tools/conformance/verify_gc_stress.py --self-test
+	@python3 tools/conformance/verify_gc_stress.py --seeds 1,2,3
+	@python3 tools/conformance/verify_gc_stress.py --dom --interval 2 --seeds 1,2 --jobs 4
+
+## The same at interval 1, over the whole JavaScript corpus and the DOM corpus.
+## Slow (a collection is O(heap)) and not in CI; run it when the collector or
+## the bindings change.
+verify-gc-stress-full: $(BINARY)
+	@python3 tools/conformance/verify_gc_stress.py --self-test
+	@python3 tools/conformance/verify_gc_stress.py --full --interval 1 --seeds 1 --jobs 4
+	@python3 tools/conformance/verify_gc_stress.py --dom --interval 1 --seeds 1 --jobs 4
+
 ## Seeded truncation, bit-flip, random-byte, and bomb-cap fuzzing of Brotli.
 fuzz-brotli: $(BROTLI_CHECK_TARGET)
 	@python3 tools/conformance/verify_brotli.py --binary $(BROTLI_CHECK_TARGET) --fuzz 2000 $(BROTLI_VERIFY_FLAGS)
@@ -566,5 +607,5 @@ clean:
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, verify-brotli, fuzz-brotli, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, clean"
+	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, verify-brotli, fuzz-brotli, verify-gc-stress (verify-gc-stress-full), deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, clean"
 	@echo "Parts of asan-core, which CI runs as jobs side by side: asan-build, asan-unit, asan-verify, asan-js, asan-dom, asan-xml, asan-wpt, asan-xml-generated, asan-fuzz"

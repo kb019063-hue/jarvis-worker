@@ -681,8 +681,12 @@ JsValue js_add(const JsValue& a, const JsValue& b) {
     return JsValue::make_number(js_to_number(pa) + js_to_number(pb));
 }
 
-bool js_instance_of(const JsValue& value, const JsValue& constructor) {
-    if (!constructor.is_function()) js_throw_type_error("Right-hand side of 'instanceof' is not callable");
+bool js_ordinary_has_instance(const JsValue& function, const JsValue& value) {
+    if (!function.is_function()) return false;
+    // A bound function has no `prototype`: the language asks what it was bound
+    // from, and the walk goes on from the target's.
+    const JsValue& target = function.bound_target();
+    if (target.is_function()) return js_ordinary_has_instance(target, value);
     if (!value.is_object_like()) return false;
     {
         // A cross-origin WindowProxy or Location has no prototype (HTML
@@ -690,27 +694,89 @@ bool js_instance_of(const JsValue& value, const JsValue& constructor) {
         std::vector<std::string> exposed;
         if (litebird::dom::cross_origin_own_keys(value, true, exposed)) return false;
     }
-    JsValue proto = constructor.get_property("prototype");
+    JsValue proto = function.get_property("prototype");
     // A `prototype` that is there and is not an object is a TypeError, as the
-    // language has it. One that is not there at all still answers false. The
-    // language throws for that too, but two kinds of function here have none
-    // and must not start to throw: a bound function, which should be asked
-    // for its target's and cannot be told from another built-in, and some of
-    // the host's constructors (`r instanceof Response`).
+    // language has it. One that is not there at all is a TypeError too — an
+    // arrow function and a method have none — but a host constructor of this
+    // engine may have none either, and `r instanceof Response` must answer
+    // rather than throw.
     if (!proto.is_object_like()) {
-        if (proto.type == JsType::Undefined) return false;
+        // A script function with no `prototype` — an arrow function, a method,
+        // an async or generator function — is a TypeError, as the language has
+        // it. A native function with none is left answering false: six of the
+        // host's constructors (`Response`, `Headers`, `Worker`, `WebSocket`,
+        // `IntersectionObserver`, `ResizeObserver`) are installed without one,
+        // and `r instanceof Response` must not start to throw.
+        if (proto.type == JsType::Undefined && !function.function_data()) return false;
         js_throw_type_error("Function has non-object prototype '" + js_describe_thrown(proto) +
                             "' in instanceof check");
     }
     // The cell of an object, or of a function (`C.prototype = someFunction`).
     // A function with no cell is in nobody's chain.
-    const JsObject* target = proto.property_cell();
-    if (!target) return false;
+    const JsObject* target_cell = proto.property_cell();
+    if (!target_cell) return false;
     int guard = 0;
-    for (JsObject* obj = value.prototype_object(); obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
-        if (obj == target) return true;
+    for (JsObject* obj = value.prototype_object(); obj && guard < kMaxPrototypeChain;
+         obj = obj->prototype, ++guard) {
+        if (obj == target_cell) return true;
     }
     return false;
+}
+
+namespace {
+
+/// Whether `function` still has, and only has, the `@@hasInstance` that
+/// `Function.prototype` installs. That is every function in the language, so
+/// the common `instanceof` never has to call through a property.
+bool holds_installed_has_instance(const JsValue& function) {
+    // Only a function inherits Function.prototype's; a plain object has no
+    // method of its own, and `1 instanceof {}` is a TypeError.
+    if (!function.is_function()) return false;
+    const JsIntrinsics& realm = JsIntrinsics::get();
+    if (!realm.function_has_instance_method.is_function()) return false;
+    // Anything between the function and Function.prototype — a class's own
+    // `static [Symbol.hasInstance]`, a subclass that inherits it — may answer
+    // instead, so the ordinary case is only the function whose prototype is
+    // Function.prototype itself.
+    if (!realm.function_proto || function.prototype_object() != realm.function_proto) return false;
+    const JsObject* cell = function.property_cell();
+    if (cell) {
+        if (cell->exotic || cell->has_legacy_getters) return false;
+        if (cell->properties.find("@@hasInstance") != cell->properties.end()) return false;
+    }
+    auto it = realm.function_proto->properties.find("@@hasInstance");
+    return it != realm.function_proto->properties.end() && !(it->flags & PropertyMap::Accessor) &&
+           it->second.is_function() && it->second.identity() == realm.function_has_instance_method.identity();
+}
+
+} // namespace
+
+bool js_instance_of(const JsValue& value, const JsValue& constructor) {
+    // `instanceof` is GetMethod(rhs, @@hasInstance) and a call: an object may
+    // answer for itself, and a class may define the answer for its instances.
+    if (!constructor.is_object_like()) {
+        js_throw_type_error("Right-hand side of 'instanceof' is not an object");
+    }
+    // A bound function is the whole operator delegated to what it was bound
+    // from: `7 instanceof A.bind(null)` asks A's own `[Symbol.hasInstance]`,
+    // where OrdinaryHasInstance would only have asked for A.prototype.
+    if (constructor.is_function() && constructor.bound_target().is_function()) {
+        return js_instance_of(value, constructor.bound_target());
+    }
+    if (holds_installed_has_instance(constructor)) return js_ordinary_has_instance(constructor, value);
+    JsValue method = constructor.get_property("@@hasInstance");
+    if (method.is_nullish()) {
+        // No method anywhere: an object that is not a function cannot be the
+        // right-hand side of `instanceof`.
+        if (!constructor.is_function()) {
+            js_throw_type_error("Right-hand side of 'instanceof' is not callable");
+        }
+        return js_ordinary_has_instance(constructor, value);
+    }
+    if (!method.is_function()) {
+        js_throw_type_error("Right-hand side of 'instanceof' is not callable");
+    }
+    return method.call_with_this(constructor, {value}).is_truthy();
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,9 +1219,11 @@ const std::string& iterator_name() {
 /// iterator reads it the same way.
 void visit_elements(const JsValue& array, const std::function<bool(const JsValue&)>& visit) {
     for (size_t i = 0; i < array.object_val->array_elements.size(); ++i) {
-        // The array iterator reads every place, so a hole is yielded as
-        // `undefined`: `[...a]` and `for (x of a)` see an element there.
-        JsValue item = array.array_element(i);
+        // The array iterator reads every place, so a hole is yielded too:
+        // `[...a]` and `for (x of a)` see a value there. It is what `a[i]`
+        // reads, which is `undefined` unless the index has an accessor of
+        // its own or the prototype has the index.
+        JsValue item = js_array_get(array, i);
         if (!visit(item)) return;
     }
 }

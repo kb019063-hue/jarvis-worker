@@ -2202,7 +2202,7 @@ struct SheetRule;
 using SheetRulePtr = std::shared_ptr<SheetRule>;
 
 struct SheetRule {
-    enum class Kind { Style, Media };
+    enum class Kind { Style, Media, Keyframes, Keyframe };
 
     Kind kind{Kind::Style};
     /// A style rule: what `selectorText` reads, and the rule the cascade
@@ -2214,6 +2214,11 @@ struct SheetRule {
     /// A `CSSMediaRule`: its query, as written, and the rules inside it.
     /// The cascade applies those only when the query matches the window.
     std::string media_text;
+    /// A `CSSKeyframesRule`: the name it declares. A `CSSKeyframeRule`: the
+    /// selectors it was written with, `0%` or `50%, 100%`.
+    std::string keyframes_name;
+    std::string key_text;
+    /// A `CSSKeyframesRule`: its frames, as `children`. Nothing else has any.
     std::vector<SheetRulePtr> children;
     /// The rule's identity: `cssRules[0] === cssRules.item(0)` holds because
     /// the object is the one made for this number, wherever the rule now is
@@ -2232,6 +2237,13 @@ struct SheetRule {
     mutable float cached_height{0.0f};
 
     bool is_media() const { return kind == Kind::Media; }
+    bool is_keyframes() const { return kind == Kind::Keyframes; }
+    bool is_keyframe() const { return kind == Kind::Keyframe; }
+    /// Whether the cascade has anything to say about the rule: a style rule,
+    /// or the block of a `@media` rule that is looked into. A `@keyframes`
+    /// rule and its frames are for the animation engine and the CSSOM, not
+    /// for matching selectors against an element.
+    bool is_style_or_media() const { return kind == Kind::Style || kind == Kind::Media; }
 
     void forget_media_answer() {
         cached_match = -1;
@@ -2280,6 +2292,10 @@ void touch_sheet(const std::shared_ptr<ParsedSheet>& sheet) {
     ++s_style_generation;
 }
 
+/// The frames of a `@keyframes` block: `0%, 50% { … }` each, until the brace
+/// that ends the block. `at` is on the `{` that opened it.
+void parse_keyframe_blocks(const std::string& css, std::size_t& at, std::vector<SheetRulePtr>& out);
+
 void parse_rules(const std::string& css, std::size_t& at, std::vector<SheetRulePtr>& out, bool nested) {
     while (at < css.size()) {
         // The prelude: up to "{", ";" or the "}" that ends the block we are in.
@@ -2316,8 +2332,27 @@ void parse_rules(const std::string& css, std::size_t& at, std::vector<SheetRuleP
         const std::string lower = ascii_lower(prelude);
         if (!prelude.empty() && prelude[0] == '@') {
             const bool is_media = lower.compare(0, 6, "@media") == 0;
+            const bool is_keyframes = lower.compare(0, 10, "@keyframes") == 0 ||
+                                      lower.compare(0, 18, "@-webkit-keyframes") == 0;
             const bool applies = lower.compare(0, 9, "@supports") == 0 || lower.compare(0, 6, "@layer") == 0;
-            if (is_media) {
+            if (is_keyframes) {
+                // A `@keyframes` block is a rule of the sheet, as it is in the
+                // language: `cssRules` lists it, `rule.name` reads the name, and
+                // its frames are a `CSSRuleList` of their own. The cascade never
+                // matches an element against it.
+                auto rule = std::make_shared<SheetRule>();
+                rule->kind = SheetRule::Kind::Keyframes;
+                const std::size_t keyword_end = prelude.find_first_of(" \t\r\n\f");
+                std::string name =
+                    keyword_end == std::string::npos ? std::string() : trim(prelude.substr(keyword_end));
+                if (name.size() >= 2 && (name.front() == '"' || name.front() == '\'') &&
+                    name.back() == name.front()) {
+                    name = name.substr(1, name.size() - 2);
+                }
+                rule->keyframes_name = name;
+                parse_keyframe_blocks(css, at, rule->children);
+                if (!name.empty()) out.push_back(std::move(rule));
+            } else if (is_media) {
                 // A `@media` block is a rule of the sheet now, whether its
                 // query matches or not: `cssRules` lists it, and the cascade
                 // asks the query. `@supports` and `@layer` hold rules
@@ -2354,6 +2389,51 @@ void parse_rules(const std::string& css, std::size_t& at, std::vector<SheetRuleP
         rule->selector_text = prelude;
         rule->declarations = parse_declarations(body);
         out.push_back(std::move(rule));
+    }
+}
+
+void parse_keyframe_blocks(const std::string& css, std::size_t& at, std::vector<SheetRulePtr>& out) {
+    while (at < css.size()) {
+        std::string prelude;
+        bool opened = false;
+        while (at < css.size()) {
+            const char c = css[at];
+            if (c == '/' && at + 1 < css.size() && css[at + 1] == '*') {
+                const auto end = css.find("*/", at + 2);
+                at = end == std::string::npos ? css.size() : end + 2;
+                continue;
+            }
+            if (c == '{') {
+                opened = true;
+                ++at;
+                break;
+            }
+            if (c == '}') {
+                ++at;
+                return;
+            }
+            if (c == ';') {
+                ++at;
+                prelude.clear();
+                continue;
+            }
+            prelude += c;
+            ++at;
+        }
+        if (!opened) return;
+        std::string body;
+        int depth = 1;
+        while (at < css.size()) {
+            const char c = css[at++];
+            if (c == '{') ++depth;
+            else if (c == '}' && --depth == 0) break;
+            body += c;
+        }
+        auto frame = std::make_shared<SheetRule>();
+        frame->kind = SheetRule::Kind::Keyframe;
+        frame->key_text = trim(prelude);
+        frame->declarations = parse_declarations(body);
+        if (!frame->key_text.empty()) out.push_back(std::move(frame));
     }
 }
 
@@ -3443,6 +3523,10 @@ void compute_block(Realm& realm, const Element& element, Block& block, const Nod
                     if (media_rule_matches(*rule, viewport_width, viewport_height)) walk(rule->children, layer);
                     continue;
                 }
+                // A `@keyframes` rule and its frames declare no selector: they
+                // are the animation engine's and the CSSOM's, and matching an
+                // element against them would be matching it against nothing.
+                if (!rule->is_style_or_media()) continue;
                 const long specificity = rule->selector.matching_specificity(element);
                 if (specificity < 0) continue;
                 for (const auto& declaration : rule->declarations) {
@@ -4454,6 +4538,24 @@ std::string rule_block_text(Realm& realm, RuleState& state) {
 /// rule with its query and the rules inside it.
 std::string rule_css_text(Realm& realm, RuleState& state) {
     if (!state.rule) return std::string();
+    if (state.rule->is_keyframes()) {
+        std::string inner;
+        for (const auto& frame : state.rule->children) {
+            if (!frame) continue;
+            RuleState frame_state;
+            frame_state.sheet = state.sheet;
+            frame_state.rule = frame;
+            frame_state.parent = state.rule;
+            if (!inner.empty()) inner += ' ';
+            inner += rule_css_text(realm, frame_state);
+        }
+        return "@keyframes " + state.rule->keyframes_name + " { " + inner + " }";
+    }
+    if (state.rule->is_keyframe()) {
+        std::string block;
+        if (rule_declarations(static_cast<const RuleState&>(state))) block = rule_block_text(realm, state);
+        return state.rule->key_text + " { " + block + " }";
+    }
     if (!state.rule->is_media()) {
         std::string block;
         if (rule_declarations(static_cast<const RuleState&>(state))) block = rule_block_text(realm, state);
@@ -4490,7 +4592,12 @@ bool parse_inserted_rule(const std::string& text, SheetRulePtr& out) {
     // The at-rule a sheet holds is `@media`; the rest are not rules it can
     // put a block in yet (a `@supports` block is flattened when the text is
     // read, and `insertRule` does not take that as one rule).
-    if (trimmed.front() == '@' && ascii_lower(trimmed).compare(0, 6, "@media") != 0) return false;
+    if (trimmed.front() == '@') {
+        const std::string lower = ascii_lower(trimmed);
+        const bool keyframes = lower.compare(0, 10, "@keyframes") == 0 ||
+                               lower.compare(0, 18, "@-webkit-keyframes") == 0;
+        if (!keyframes && lower.compare(0, 6, "@media") != 0) return false;
+    }
     // One block, and nothing after it: "a { b { c {} } }" is not a style rule.
     int depth = 0;
     std::size_t closed_at = std::string::npos;
@@ -4518,7 +4625,11 @@ bool parse_inserted_rule(const std::string& text, SheetRulePtr& out) {
     const SheetRulePtr& rule = rules.front();
     if (!rule) return false;
     // A style rule needs a selector; an `@media` rule needs a query.
-    if (rule->is_media()) {
+    if (rule->is_keyframes()) {
+        // A `@keyframes` rule with no name declares nothing, and one with no
+        // frames is still the rule a script asked for.
+        if (rule->keyframes_name.empty()) return false;
+    } else if (rule->is_media()) {
         if (rule->media_text.empty()) return false;
     } else if (rule->selector.empty() || rule->selector_text.empty()) {
         return false;
@@ -4589,7 +4700,11 @@ JsValue make_rule(Realm& realm, std::shared_ptr<ParsedSheet> sheet, SheetRulePtr
         if (cached_state && cached_state->rule == rule) return cached;
     }
     auto shared_state = std::make_shared<RuleState>(state);
-    JsValue object = realm.make(rule->is_media() ? "CSSMediaRule" : "CSSStyleRule", shared_state);
+    const char* interface_name = rule->is_media()            ? "CSSMediaRule"
+                                 : rule->is_keyframes()      ? "CSSKeyframesRule"
+                                 : rule->is_keyframe()       ? "CSSKeyframeRule"
+                                                             : "CSSStyleRule";
+    JsValue object = realm.make(interface_name, shared_state);
     objects[rule->id] = RuleObjectEntry{sheet, object};
     return object;
 }
@@ -4805,6 +4920,116 @@ void setup_media_rule(Iface& I) {
     });
     I.getter("cssText", [](Realm& realm) {
         RuleState& state = this_state<RuleState>("CSSMediaRule");
+        return str(rule_css_text(realm, state));
+    });
+}
+
+// `CSSKeyframesRule`: the name a `@keyframes` block declares and the frames
+// inside it. The frames are a `CSSRuleList` like any other block's rules, so
+// `cssRules[0] === cssRules.item(0)` and `insertRule`/`deleteRule` work on it;
+// `appendRule`, `findRule` and `deleteRule` address a frame by its selector,
+// as the API has them.
+void setup_keyframes_rule(Iface& I) {
+    I.getter("type", [](Realm&) {
+        this_state<RuleState>("CSSKeyframesRule");
+        return num(7); // CSSRule.KEYFRAMES_RULE
+    });
+    I.accessor("name",
+        [](Realm&) {
+            RuleState& state = this_state<RuleState>("CSSKeyframesRule");
+            if (!state.rule) return str("");
+            return str(state.rule->keyframes_name);
+        },
+        [](Realm& realm, const JsValue& value) {
+            RuleState& state = this_state<RuleState>("CSSKeyframesRule");
+            if (!state.rule) return;
+            state.rule->keyframes_name = trim(to_str(value));
+            touch_sheet(state.sheet);
+            (void)realm;
+        });
+    I.getter("cssRules", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSKeyframesRule");
+        return make_rule_list(realm, state.sheet, state.rule);
+    });
+    I.alias("rules", "cssRules");
+    I.method("appendRule", 1, [](Realm& realm, Args args) {
+        require_args(args, 1, "CSSKeyframesRule.appendRule");
+        RuleState& state = this_state<RuleState>("CSSKeyframesRule");
+        if (!state.rule) return undefined();
+        const std::string text = trim(to_str(args[0]));
+        std::vector<SheetRulePtr> frames;
+        std::size_t at = 0;
+        parse_keyframe_blocks(text, at, frames);
+        while (at < text.size() && is_ascii_space(text[at])) ++at;
+        if (frames.size() != 1 || at != text.size()) {
+            throw_dom(realm, "SyntaxError",
+                      "Failed to execute 'appendRule' on 'CSSKeyframesRule': the rule '" + text +
+                          "' is not a valid keyframe rule.");
+        }
+        if (state.sheet) {
+            std::vector<SheetRulePtr> one{frames.front()};
+            number_inserted_rules(*state.sheet, one);
+        }
+        state.rule->children.push_back(std::move(frames.front()));
+        touch_sheet(state.sheet);
+        return undefined();
+    });
+    I.method("deleteRule", 1, [](Realm&, Args args) {
+        require_args(args, 1, "CSSKeyframesRule.deleteRule");
+        RuleState& state = this_state<RuleState>("CSSKeyframesRule");
+        if (!state.rule) return undefined();
+        const std::string select = trim(to_str(args[0]));
+        auto& frames = state.rule->children;
+        for (auto it = frames.begin(); it != frames.end(); ++it) {
+            if (*it && (*it)->key_text == select) {
+                frames.erase(it);
+                touch_sheet(state.sheet);
+                return undefined();
+            }
+        }
+        return undefined();       // No frame by that name: the call does nothing.
+    });
+    I.method("findRule", 1, [](Realm& realm, Args args) {
+        require_args(args, 1, "CSSKeyframesRule.findRule");
+        RuleState& state = this_state<RuleState>("CSSKeyframesRule");
+        if (!state.rule) return null();
+        const std::string select = trim(to_str(args[0]));
+        for (const auto& frame : state.rule->children) {
+            if (frame && frame->key_text == select) return make_rule(realm, state.sheet, state.rule, frame);
+        }
+        return null();
+    });
+    I.getter("cssText", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSKeyframesRule");
+        return str(rule_css_text(realm, state));
+    });
+}
+
+// `CSSKeyframeRule`: one frame of a `@keyframes` block, `0% { … }`, with the
+// `style` a rule of any kind has.
+void setup_keyframe_rule(Iface& I) {
+    I.getter("type", [](Realm&) {
+        this_state<RuleState>("CSSKeyframeRule");
+        return num(8); // CSSRule.KEYFRAME_RULE
+    });
+    I.accessor("keyText",
+        [](Realm&) {
+            RuleState& state = this_state<RuleState>("CSSKeyframeRule");
+            if (!state.rule) return str("");
+            return str(state.rule->key_text);
+        },
+        [](Realm&, const JsValue& value) {
+            RuleState& state = this_state<RuleState>("CSSKeyframeRule");
+            if (!state.rule) return;
+            state.rule->key_text = trim(to_str(value));
+            touch_sheet(state.sheet);
+        });
+    I.getter("style", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSKeyframeRule");
+        return make_rule_style(realm, std::make_shared<RuleState>(state));
+    });
+    I.getter("cssText", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSKeyframeRule");
         return str(rule_css_text(realm, state));
     });
 }
@@ -5060,6 +5285,8 @@ void register_style_interfaces() {
     register_interface({"CSSRule", nullptr, setup_rule, nullptr, 0, nullptr});
     register_interface({"CSSStyleRule", "CSSRule", setup_style_rule, nullptr, 0, nullptr});
     register_interface({"CSSMediaRule", "CSSRule", setup_media_rule, nullptr, 0, nullptr});
+    register_interface({"CSSKeyframesRule", "CSSRule", setup_keyframes_rule, nullptr, 0, nullptr});
+    register_interface({"CSSKeyframeRule", "CSSRule", setup_keyframe_rule, nullptr, 0, nullptr});
     register_interface({"CSSRuleList", nullptr, setup_rule_list, nullptr, 0, nullptr});
     register_interface({"MediaList", nullptr, setup_media_list, nullptr, 0, nullptr});
     register_interface({"CSSStyleSheet", nullptr, setup_style_sheet, construct_style_sheet, 0, nullptr});

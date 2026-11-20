@@ -1,0 +1,70 @@
+#name sort's comparator allocates while the array is sorted
+#code
+var items = [];
+for (var i = 0; i < 120; i++) items.push({ k: (i * 37) % 120, pad: "x" + i });
+items.sort(function (a, b) {
+  var tag = { a: a.k, b: b.k };
+  return tag.a - tag.b;
+});
+var ordered = true;
+for (var j = 1; j < items.length; j++) if (items[j - 1].k > items[j].k) ordered = false;
+console.log(ordered, items.length, items[0].k, items[items.length - 1].k);
+#expect
+true 120 0 119
+
+#name forEach's callback allocates while the array is iterated
+#code
+var src = [];
+for (var i = 0; i < 150; i++) src.push(i);
+var total = 0;
+src.forEach(function (v) {
+  var box = { v: v, junk: new Array(4).join(".") };
+  total += box.v;
+});
+console.log(total, src.length);
+#expect
+11175 150
+
+#name map builds its result while the callback allocates
+#code
+var src = [];
+for (var i = 0; i < 100; i++) src.push(i);
+var out = src.map(function (v) { return { doubled: v * 2 }; });
+var sum = 0;
+for (var j = 0; j < out.length; j++) sum += out[j].doubled;
+console.log(out.length, sum);
+#expect
+100 9900
+
+#name a getter allocates during a property read
+#code
+var log = [];
+var obj = {
+  get value() { log.push("read"); return { n: log.length }; }
+};
+var a = obj.value;
+var b = obj.value;
+console.log(a.n, b.n, log.length);
+#expect
+1 2 2
+
+#name a filter's predicate allocates while the array is filtered
+#code
+var src = [];
+for (var i = 0; i < 200; i++) src.push(i);
+var evens = src.filter(function (v) { return { ok: v % 2 === 0 }.ok; });
+console.log(evens.length, evens[0], evens[evens.length - 1]);
+#expect
+100 0 198
+
+#name JSON round-trips a deep structure
+#code
+var data = { rows: [] };
+for (var i = 0; i < 120; i++) data.rows.push({ i: i, label: "r" + i, tags: ["a", "b"] });
+var text = JSON.stringify(data);
+var back = JSON.parse(text);
+var sum = 0;
+for (var j = 0; j < back.rows.length; j++) sum += back.rows[j].i;
+console.log(text.length > 0, back.rows.length, sum, back.rows[5].tags.join(""));
+#expect
+true 120 7140 ab

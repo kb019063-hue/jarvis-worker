@@ -1,0 +1,87 @@
+#name a suspended generator keeps its locals
+#code
+function* g() {
+  var keep = [];
+  for (var i = 0; i < 50; i++) keep.push({ i: i });
+  var first = keep[0].i;
+  yield "ready";
+  yield keep.length + ":" + first;
+  yield keep[49].i;
+}
+var it = g();
+var seen = [];
+seen.push(it.next().value);
+seen.push(it.next().value);
+seen.push(it.next().value);
+console.log(seen.join("|"));
+#expect
+ready|50:0|49
+
+#name a generator is stepped through a for-of
+#code
+function* squares(n) {
+  for (var i = 1; i <= n; i++) {
+    var box = { v: i * i };
+    yield box.v;
+  }
+}
+var out = [];
+for (var v of squares(6)) out.push(v);
+console.log(out.join(","));
+#expect
+1,4,9,16,25,36
+
+#name an abandoned generator is collected and its siblings are not
+#code
+function* count(name) {
+  var held = [];
+  for (var i = 0; i < 40; i++) held.push({ n: name + i });
+  yield name + ":first";
+  yield name + ":" + held.length;
+}
+var a = count("a");
+var b = count("b");
+console.log(a.next().value);
+console.log(b.next().value);
+console.log(b.next().value);
+a = null;
+console.log(b.next().value);
+#expect
+a:first
+b:first
+b:40
+undefined
+
+#name yield-star keeps the delegate alive
+#code
+function* inner() { yield 1; yield 2; yield 3; }
+function* outer() {
+  var tag = "outer";
+  yield tag;
+  yield* inner();
+  yield tag + ":done";
+}
+var seen = [];
+for (var v of outer()) seen.push(String(v));
+console.log(seen.join(","));
+#expect
+outer,1,2,3,outer:done
+
+#name a custom iterator protocol survives collections
+#code
+var obj = {};
+obj[Symbol.iterator] = function () {
+  var i = 0;
+  var data = [10, 20, 30, 40];
+  return {
+    next: function () {
+      if (i < data.length) { return { value: data[i++], done: false }; }
+      return { value: undefined, done: true };
+    }
+  };
+};
+var total = 0;
+for (var v of obj) total += v;
+console.log(total);
+#expect
+100

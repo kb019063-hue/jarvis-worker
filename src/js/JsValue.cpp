@@ -133,6 +133,14 @@ const std::shared_ptr<GeneratorData>& JsValue::generator_value() const {
     return empty;
 }
 
+const JsValue& JsValue::bound_target() const {
+    static const JsValue kEmpty;
+    if (!m_extra || !m_extra->bound_target) return kEmpty;
+    return *m_extra->bound_target;
+}
+
+void JsValue::set_bound_target(const JsValue& target) { mutable_extra().bound_target = std::make_shared<JsValue>(target); }
+
 void JsValue::set_function_params(std::vector<std::string> v) { mutable_function_data().params = std::move(v); }
 void JsValue::add_function_default_value(std::shared_ptr<AstNode> v) { mutable_function_data().default_values.push_back(std::move(v)); }
 void JsValue::set_function_default_values(std::vector<std::shared_ptr<AstNode>> v) { mutable_function_data().default_values = std::move(v); }
@@ -189,6 +197,14 @@ PropertyMap::const_iterator PropertyMap::find(const std::string& key) const {
     return m_entries.end();
 }
 
+/// How many times a property whose name begins with a digit has entered a
+/// property map, any map. This is the one place a key enters a map, so an
+/// object comes to have an index in its map only when this goes up, and what
+/// js_array_holes_read_undefined worked out about a prototype chain at one
+/// count holds for that chain while the count stands. Atomic because a worker
+/// runs on a thread of its own; the answers are remembered per thread.
+static std::atomic<uint64_t> g_index_named_keys{0};
+
 PropertyMap::Entry& PropertyMap::entry(const std::string& key) {
     if (auto it = m_index_built ? m_index.find(key) : m_index.end(); it != m_index.end()) return *it->second;
     if (!m_index_built) {
@@ -196,6 +212,7 @@ PropertyMap::Entry& PropertyMap::entry(const std::string& key) {
             if (it->first == key) return *it;
         }
     }
+    if (!key.empty() && key[0] >= '0' && key[0] <= '9') g_index_named_keys.fetch_add(1, std::memory_order_relaxed);
     m_entries.emplace_back();
     m_entries.back().first = key;
     auto back = std::prev(m_entries.end());
@@ -755,11 +772,84 @@ JsValue JsValue::array_element(size_t index) const {
     return object_val->array_elements[index];
 }
 
+JsValue js_array_get(const JsValue& array, size_t index) {
+    const JsObject* cell = array.object_val.get();
+    if (!cell || !cell->is_array) return JsValue::make_undefined();
+    if (index < cell->array_elements.size() && !(cell->array_holes && cell->array_holes->empty_slot(index))) {
+        return cell->array_elements[index];
+    }
+    // A hole, or a place past the end. Nearly always nothing answers for it,
+    // and that is known without looking the index up by name; otherwise the
+    // long way, which finds what `Object.defineProperty` made of the index
+    // and what the prototype has.
+    if (js_array_holes_read_undefined(array)) return JsValue::make_undefined();
+    return array.get_property(std::to_string(index));
+}
+
+bool js_array_holes_read_undefined(const JsValue& array) {
+    const JsObject* cell = array.object_val.get();
+    if (!cell || !cell->is_array) return true;
+    // Its own: an index is in the property map only after define_accessor.
+    if (cell->has_accessors || cell->exotic || cell->has_legacy_getters || cell->lookup_fallback) return false;
+    // The chain: an array with elements, or a property whose name is a
+    // number. What an object is and whether an array has elements is looked
+    // at every time, and costs nothing. The names are the long part
+    // (Array.prototype and Object.prototype have some sixty between them, and
+    // none begins with a digit), so the chain whose names were last found
+    // clean is remembered with the count of g_index_named_keys it was found
+    // at: the same objects at the same count have the same answer. An object
+    // that takes the address of one that is gone starts with no names, and
+    // gets every one of them through PropertyMap::entry, which counts.
+    struct Clean {
+        uint64_t count = 0;
+        int length = -1;
+        const JsObject* chain[4] = {nullptr, nullptr, nullptr, nullptr};
+    };
+    static thread_local Clean clean;
+    const uint64_t count = g_index_named_keys.load(std::memory_order_relaxed);
+    const int remembered = clean.count == count ? clean.length : -1;
+    bool same = remembered >= 0;
+    const JsObject* chain[4] = {nullptr, nullptr, nullptr, nullptr};
+    int length = 0;
+    for (const JsObject* proto = cell->prototype; proto; proto = proto->prototype, ++length) {
+        if (length >= kMaxPrototypeChain) return false;
+        if (proto->exotic || proto->has_legacy_getters || proto->lookup_fallback) return false;
+        if (proto->is_array && !proto->array_elements.empty()) return false;
+        if (length < 4) {
+            chain[length] = proto;
+            if (same && (length >= remembered || clean.chain[length] != proto)) same = false;
+        } else {
+            same = false;
+        }
+    }
+    if (same && length == remembered) return true;
+    for (const JsObject* proto = cell->prototype; proto; proto = proto->prototype) {
+        for (const auto& entry : proto->properties) {
+            if (!entry.first.empty() && entry.first[0] >= '0' && entry.first[0] <= '9') return false;
+        }
+    }
+    if (length <= 4) {
+        clean.count = count;
+        clean.length = length;
+        for (int i = 0; i < 4; ++i) clean.chain[i] = chain[i];
+    }
+    return true;
+}
+
 std::vector<JsValue> JsValue::array_snapshot() const {
     std::vector<JsValue> out;
     if (!object_val || !object_val->is_array) return out;
     out.reserve(object_val->array_elements.size());
-    for (size_t i = 0; i < object_val->array_elements.size(); ++i) out.push_back(array_element(i));
+    // The iterator reads each place as `a[i]` reads it. When no hole can
+    // read as anything, nothing runs between the first place and the last
+    // and the storage is the answer; otherwise each place is read in turn,
+    // and the length is looked at again each time, because a getter can
+    // change it.
+    if (js_array_holes_read_undefined(*this)) {
+        for (size_t i = 0; i < object_val->array_elements.size(); ++i) out.push_back(array_element(i));
+    } else {
+        for (size_t i = 0; i < object_val->array_elements.size(); ++i) out.push_back(js_array_get(*this, i));
+    }
     return out;
 }
 
@@ -904,8 +994,17 @@ bool JsValue::has_own_property(const std::string& name) const {
         if (cell->is_array) {
             if (name == "length") return true;
             if (parse_array_index(name, index)) {
-                // A hole is not an own property: this is the whole of `1 in a`.
-                return index < cell->array_elements.size() && !is_array_hole(index);
+                // An element is an own property, and a place past the end is
+                // none. A hole is not one either, which is the whole of
+                // `1 in a`, unless `Object.defineProperty` has made
+                // something of the index: an accessor, or a data property
+                // written over one. Those are kept in the property map, with
+                // the place left a hole (define_accessor), so a hole asks the
+                // map. Only an array that has had an accessor defined on it
+                // can have one, and no other pays for the lookup.
+                if (index >= cell->array_elements.size()) return false;
+                if (!is_array_hole(index)) return true;
+                return cell->has_accessors && cell->properties.find(name) != cell->properties.end();
             }
         }
         if (is_wrapped_string_index(cell, name)) return true;
@@ -1010,11 +1109,42 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
         if (include_non_enumerable) cell->exotic->own_keys(cell, keys);
         else cell->exotic->keys(cell, keys);
     }
-    if (cell && cell->is_array) {
-        for (size_t i = 0; i < cell->array_elements.size(); ++i) {
-            if (is_array_hole(i)) continue;   // a hole is not a key
-            keys.push_back(std::to_string(i));
+    // The keys of the property map: the ones that are an index in ascending
+    // order, then the rest in the order they were made.
+    const PropertyMap* map = cell ? &cell->properties : loose_properties();
+    std::vector<std::pair<size_t, const std::string*>> index_keys;
+    std::vector<const std::string*> named_keys;
+    if (map) {
+        for (const auto& entry : *map) {
+            if (is_hidden_key(entry.first)) continue;
+            if (!include_non_enumerable && !(entry.flags & PropertyMap::Enumerable)) continue;
+            size_t index = 0;
+            if (parse_array_index(entry.first, index)) index_keys.emplace_back(index, &entry.first);
+            else named_keys.push_back(&entry.first);
         }
+        std::sort(index_keys.begin(), index_keys.end(),
+                  [](const auto& a, const auto& b) { return a.first < b.first; });
+    }
+
+    if (cell && cell->is_array) {
+        // A hole is not a key, unless the map has the index (has_own_property
+        // says how it comes to): then it is a key where its number puts it,
+        // among the elements, and is not listed a second time below. An
+        // index the map has where an element is is not listed at all: the
+        // element is the property.
+        const size_t length = cell->array_elements.size();
+        size_t mapped = 0;
+        for (size_t i = 0; i < length; ++i) {
+            if (!is_array_hole(i)) {
+                keys.push_back(std::to_string(i));
+                continue;
+            }
+            while (mapped < index_keys.size() && index_keys[mapped].first < i) ++mapped;
+            if (mapped < index_keys.size() && index_keys[mapped].first == i) keys.push_back(*index_keys[mapped].second);
+        }
+        index_keys.erase(std::remove_if(index_keys.begin(), index_keys.end(),
+                                        [&](const auto& key) { return key.first < length; }),
+                         index_keys.end());
         if (include_non_enumerable) keys.emplace_back("length");
     }
     if (cell && cell->klass == ObjectClass::String) {
@@ -1026,20 +1156,6 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
         }
     }
 
-    const PropertyMap* map = cell ? &cell->properties : loose_properties();
-    if (!map) return keys;
-
-    std::vector<std::pair<size_t, const std::string*>> index_keys;
-    std::vector<const std::string*> named_keys;
-    for (const auto& entry : *map) {
-        if (is_hidden_key(entry.first)) continue;
-        if (!include_non_enumerable && !(entry.flags & PropertyMap::Enumerable)) continue;
-        size_t index = 0;
-        if (parse_array_index(entry.first, index)) index_keys.emplace_back(index, &entry.first);
-        else named_keys.push_back(&entry.first);
-    }
-    std::sort(index_keys.begin(), index_keys.end(),
-              [](const auto& a, const auto& b) { return a.first < b.first; });
     for (const auto& [index, key] : index_keys) { (void)index; keys.push_back(*key); }
     for (const auto* key : named_keys) keys.push_back(*key);
     return keys;
@@ -1068,6 +1184,29 @@ void JsValue::define_accessor(const std::string& name, const JsValue& getter, co
     if (JsObject* cell = property_cell(true)) {
         map = &cell->properties;
         cell->has_accessors = true;
+        size_t index = 0;
+        if (cell->is_array && parse_array_index(name, index)) {
+            // An accessor on an index of an array. The elements hold values
+            // and nothing else, so the accessor goes into the property map
+            // like any other, and the place is made a hole: every read of an
+            // index answers with the element when there is one and goes on
+            // to the map when there is a hole (has_own_property,
+            // get_property, set_property), so the hole is what makes the
+            // accessor the index's property. Before this the element stayed
+            // and was the answer, and the accessor was never called.
+            //
+            // An index at or past the end makes the array that long, as
+            // defining any index does; the places in between are holes.
+            auto& elements = cell->array_elements;
+            if (index > elements.size() + (1u << 24)) {
+                js_throw_range_error("Array index too far past the end of the array");
+            }
+            if (!cell->array_holes) cell->array_holes = std::make_unique<JsObject::Holes>();
+            const size_t previous = elements.size();
+            if (index >= previous) elements.resize(index + 1, JsValue::make_undefined());
+            else elements[index] = JsValue::make_undefined();
+            for (size_t i = std::min(previous, index); i <= index; ++i) cell->array_holes->set(i);
+        }
     } else {
         map = loose_properties(true);
         if (!map) {
@@ -1231,6 +1370,9 @@ JsValue JsValue::get_property(const std::string& name) const {
                 if (index < obj->array_elements.size() && !is_array_hole(index)) {
                     return obj->array_elements[index];
                 }
+                // What `Object.defineProperty` made of a hole (an accessor,
+                // see define_accessor) is in the property map, and is read
+                // below with the other own properties.
             }
         }
 
@@ -1358,7 +1500,29 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                     js_throw_range_error("Invalid array length");
                 }
                 const size_t previous = obj->array_elements.size();
-                const size_t next = static_cast<size_t>(requested);
+                size_t next = static_cast<size_t>(requested);
+                // What `Object.defineProperty` made of an index is in the
+                // property map (has_own_property). A shorter array has lost
+                // the indices past its new end, those included; and one of
+                // them that is not configurable cannot be lost, so the array
+                // ends just after the last such one and the write is refused,
+                // as the standard's ArraySetLength has it.
+                bool refused = false;
+                if (obj->has_accessors && next < previous) {
+                    std::vector<std::string> lost;
+                    for (const auto& entry : obj->properties) {
+                        size_t at = 0;
+                        if (!parse_array_index(entry.first, at) || at < next || at >= previous || !is_array_hole(at)) continue;
+                        if (entry.flags & PropertyMap::Configurable) continue;
+                        next = at + 1;
+                        refused = true;
+                    }
+                    for (const auto& entry : obj->properties) {
+                        size_t at = 0;
+                        if (parse_array_index(entry.first, at) && at >= next && at < previous) lost.push_back(entry.first);
+                    }
+                    for (const auto& key : lost) obj->properties.erase(key);
+                }
                 obj->array_elements.resize(next, JsValue::make_undefined());
                 // Growing an array adds places that are not properties: holes.
                 if (obj->array_holes) {
@@ -1368,11 +1532,30 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                     obj->array_holes = std::make_unique<JsObject::Holes>();
                     for (size_t i = previous; i < next; ++i) obj->array_holes->set(i);
                 }
-                return true;
+                return !refused;
             }
             size_t index = 0;
             if (parse_array_index(name, index)) {
                 if (obj->frozen) return false;
+                // A hole that `Object.defineProperty` has made something of
+                // (has_own_property): the write goes to that, a setter or a
+                // data property with attributes of its own, and the place
+                // stays a hole. Writing the element here would hide it.
+                if (obj->has_accessors && index < obj->array_elements.size() && is_array_hole(index)) {
+                    auto mapped = obj->properties.find(name);
+                    if (mapped != obj->properties.end()) {
+                        if (mapped->flags & PropertyMap::Accessor) {
+                            // Held here: the setter may delete the property it is.
+                            const std::shared_ptr<JsValue> setter = mapped->setter;
+                            if (!setter || !setter->is_function()) return false;
+                            setter->call_with_this(*this, {val});
+                            return true;
+                        }
+                        if (!(mapped->flags & PropertyMap::Writable)) return false;
+                        mapped->second = std::move(val);
+                        return true;
+                    }
+                }
                 if (index >= obj->array_elements.size()) {
                     if (!obj->extensible) return false;
                     // A stray huge index would otherwise allocate gigabytes.

@@ -16,21 +16,20 @@
     "A figure here is not a promise: it is what a command printed on the date beside",
     "it. When the command no longer prints it, re-run the command, not the number.",
     "",
-    "Not in this ledger, and why: the web-platform-tests, URL and XML scores need a",
-    "corpus that is downloaded on first use (tests/xml/README.md), so `make wpt`,",
-    "`make url-conformance` and `make xml-conformance` are the authority for those and",
-    "their floors live in the Makefile. The ASan floors are the same scores under",
-    "sanitizers and are written by `make asan`, not here."
+    "Not in this ledger, and why: the XML score needs a corpus that is downloaded",
+    "on first use (tests/xml/README.md), so `make xml-conformance` is the authority",
+    "for it and XML_FLOOR stays in the Makefile by hand. The two ASan floors are the",
+    "same scores under sanitizers and are written by `make asan`, not here."
   ],
   "measured": {
     "unit_suites": {
       "derived": "RUN_TEST lines of tests/test_suite.cpp"
     },
     "js_conformance": {
-      "pass": 1141,
+      "pass": 1142,
       "command": "make js-conformance",
       "date": "2026-11-20",
-      "note": "the total is the corpus on disk; only the pass count needs a run. 1137 before Phase 102, which fixed the two cases iteration.dat records for array destructuring"
+      "note": "the total is the corpus on disk; only the pass count needs a run. 1137 before Phase 102, which fixed the two cases iteration.dat records for array destructuring; 1141 before Phase 114, which made `instanceof` ask Symbol.hasInstance and stopped prototypes.dat aborting on the case that asks for it"
     },
     "dom_conformance": {
       "pass": 678,
@@ -69,6 +68,20 @@
       "command": "python3 tools/conformance/run_test262.py built-ins language annexB",
       "date": "2026-11-20",
       "note": "modules are skipped by the runner; built-ins, language and annexB only"
+    },
+    "url_conformance": {
+      "pass": 1188,
+      "of": 1188,
+      "command": "make url-conformance",
+      "date": "2026-11-20",
+      "note": "the web-platform-tests url resources in tests/url: 904 parsing cases and 284 setter cases"
+    },
+    "wpt": {
+      "pass": 9567,
+      "of": 9824,
+      "command": "make wpt",
+      "date": "2026-11-20",
+      "note": "dom/nodes, domparsing, encoding, css-flexbox and css-grid subtests; the 257 that fail are listed with a reason in tests/wpt"
     }
   }
 }

@@ -177,6 +177,11 @@ int js_less_than(const JsValue& a, const JsValue& b);
 JsValue js_add(const JsValue& a, const JsValue& b);
 bool js_instance_of(const JsValue& value, const JsValue& constructor);
 
+/// OrdinaryHasInstance: the walk `instanceof` makes when the right-hand side
+/// has no method of its own, which is what `Function.prototype[@@hasInstance]`
+/// runs. A bound function is asked for its target.
+bool js_ordinary_has_instance(const JsValue& function, const JsValue& value);
+
 // ---------------------------------------------------------------------------
 // Calls
 // ---------------------------------------------------------------------------
@@ -232,6 +237,23 @@ void js_append_code_point(std::string& out, uint32_t code_point);
 /// js_iterates_as_builtin().
 void js_iterate(const JsValue& iterable, const std::function<bool(const JsValue&)>& visit);
 std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable);
+
+/// What `array[index]` reads, which is what the standard's `Get` gives and
+/// what the iterator, `join`, `includes`, `at` and `JSON.stringify` are
+/// defined by: the element when there is one, and for a hole whatever the
+/// index has otherwise, an accessor that `Object.defineProperty` put on it
+/// or a property of the prototype, and `undefined` when it has nothing.
+/// (`JsValue::array_element` is the array's own storage and nothing else.)
+/// An element costs what array_element costs. A hole can run a getter, so
+/// the caller holds nothing of the array across the call.
+JsValue js_array_get(const JsValue& array, size_t index);
+
+/// True when every hole of `array` reads `undefined`: it has no accessor on
+/// an index of its own, and nothing on its prototype chain has an index.
+/// Then js_array_get is `array_element` and runs no script, and a loop over
+/// many holes asks this once instead of looking each one up by name. The
+/// answer holds only as long as no script runs.
+bool js_array_holes_read_undefined(const JsValue& array);
 
 /// GetMethod(value, @@iterator) (ECMA-262 7.3.11): the function `value` hands
 /// out its iterator with, looked up once, so a getter for it runs once. False,
@@ -362,6 +384,12 @@ struct JsIntrinsics {
     /// are still there.
     JsValue array_iterator_next;
     JsValue string_iterator_next;
+
+    /// `Function.prototype[Symbol.hasInstance]` as install() left it. Every
+    /// function inherits it, and it is what `instanceof` runs for the ones
+    /// that do not define one of their own; the operator compares identity so
+    /// that the common case does not have to call through script.
+    JsValue function_has_instance_method;
 
     /// Name/value pairs the interpreter defines in its global scope.
     std::vector<std::pair<std::string, JsValue>> globals;

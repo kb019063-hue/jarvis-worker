@@ -116,7 +116,7 @@ that simply had not been noticed yet.
 
 ## 3. How it was verified
 
-`make test` — **286 / 286 suites**, up from 285 on the merged `main`; the new
+`make test` — **287 / 287 suites**, up from 286 on the merged `main`; the new
 suite is `dataview_and_the_iterating_typed_array_methods`.
 
 The byte order is checked against the **bytes**, not against the getter that
@@ -166,7 +166,7 @@ Nothing else moved:
 
 | Command | Before | After |
 | :--- | :--- | :--- |
-| `make test` | 285 / 285 | **286 / 286** |
+| `make test` | 286 / 286 | **287 / 287** |
 | `make js-conformance` | 1143 / 1158 | 1143 / 1158 |
 | `make dom-conformance` | 678 / 678 | 678 / 678 |
 | `make conformance` | 1973 / 1973 | 1973 / 1973 |

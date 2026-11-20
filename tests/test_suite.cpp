@@ -27444,6 +27444,104 @@ TEST(dataview_and_the_iterating_typed_array_methods) {
     assert(text("class L extends Int16Array {}; var l = new L([3, 1]); l.toSorted() instanceof L") == "true");
 }
 
+TEST(class_bodies_reject_what_the_grammar_does_not_allow) {
+    using namespace litebird;
+
+    // Phase 128, finding 133. A class body's early errors were three: a second
+    // constructor, a duplicate private name, and `#constructor`. The six
+    // regular grammar rules of §15.7 were not checked at all, so code the
+    // language refuses to parse ran, and either worked or threw at runtime —
+    // test262 rejects these at `phase: parse`, which is why 364 of its class
+    // cases failed with "expected SyntaxError" and no other way to pass.
+    //
+    //   FieldDefinition / ClassStaticBlockBody: Contains SuperCall -> `super()`
+    //   MethodDefinition: an instance element named "constructor" that is an
+    //                     accessor, async or a generator
+    //   Static Semantics: the PropName of a static element may not be "prototype"
+    //   FieldDefinition may not be named "constructor"
+    //
+    // Every expected answer below is what Node.js 22 printed for the same
+    // source. The last group is the point of the phase: the rules are narrow,
+    // and the methods that are legal must stay legal — a first cut of this
+    // change refused every instance method, which the engine's own suites
+    // caught, and this suite now would too.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function rejects(what, src) {
+            try {
+                new Function(src);
+                failures.push(what + ': accepted, expected SyntaxError');
+            } catch (e) {
+                if (!(e instanceof SyntaxError)) failures.push(what + ': threw ' + e.name);
+            }
+        }
+        function accepts(what, src) {
+            try { new Function(src); }
+            catch (e) { failures.push(what + ': threw ' + e.name + ' ' + e.message); }
+        }
+
+        // ---- a super call is legal only in a derived constructor ----------
+        rejects('a super call in a method', 'class C extends Object { m() { super(); } }');
+        rejects('a super call in a method of a class with no heritage', 'class C { m() { super(); } }');
+        rejects('a super call in an arrow nested in a method', 'class C extends Object { m() { var f = () => super(); } }');
+        rejects('a super call in a field initialiser', 'class C extends Object { x = super(); }');
+        rejects('a super call in an arrow in a field initialiser', 'class C extends Object { x = () => super(); }');
+        rejects('a super call in a static block', 'class C extends Object { static { super(); } }');
+        rejects('a super call in a constructor of a class with no heritage', 'class C { constructor() { super(); } }');
+        accepts('a super call in a derived constructor', 'class C extends Object { constructor() { super(); } }');
+        accepts('a super call in an arrow in a derived constructor', 'class C extends Object { constructor() { var f = () => super(); } }');
+        accepts('a super call through a nested class in a derived constructor', 'class C extends Object { constructor() { super(); class D { m() { return 1; } } } }');
+        // `super.x` is a different question: a field initialiser and a static
+        // block have a home object, so it stays allowed there.
+        accepts('super.x in a field initialiser', 'class C extends Object { x = super.toString; }');
+        accepts('super.x in a static block', 'class C extends Object { static { super.toString; } }');
+        accepts('super.x in a method', 'class C extends Object { m() { return super.toString; } }');
+
+        // ---- the name "constructor", on the instance side ------------------
+        rejects('a getter named constructor', 'class C { get constructor() {} }');
+        rejects('a setter named constructor', 'class C { set constructor(v) {} }');
+        rejects('an async method named constructor', 'class C { async constructor() {} }');
+        rejects('a generator named constructor', 'class C { *constructor() {} }');
+        rejects('an async generator named constructor', 'class C { async *constructor() {} }');
+        rejects('a field named constructor', 'class C { constructor; }');
+        rejects('a field named constructor with an initialiser', 'class C { constructor = 1; }');
+        accepts('a method named constructor', 'class C { constructor() {} }');
+        accepts('a static method named constructor', 'class C { static constructor() {} }');
+        accepts('a static getter named constructor', 'class C { static get constructor() { return 1; } }');
+        accepts('a static async method named constructor', 'class C { static async constructor() {} }');
+        accepts('a computed getter named constructor', 'class C { get ["constructor"]() { return 1; } }');
+        accepts('a computed field named constructor', 'class C { ["constructor"] = 1; }');
+
+        // ---- the name "prototype", on the static side ----------------------
+        rejects('a static field named prototype', 'class C { static prototype; }');
+        rejects('a static field named prototype with an initialiser', 'class C { static prototype = 1; }');
+        rejects('a static method named prototype', 'class C { static prototype() {} }');
+        rejects('a static getter named prototype', 'class C { static get prototype() { return 1; } }');
+        rejects('a static setter named prototype', 'class C { static set prototype(v) {} }');
+        rejects('a static async method named prototype', 'class C { static async prototype() {} }');
+        rejects('a static generator named prototype', 'class C { static *prototype() {} }');
+        accepts('an instance field named prototype', 'class C { prototype = 1; }');
+        accepts('an instance method named prototype', 'class C { prototype() {} }');
+        accepts('a computed static named prototype', 'class C { static ["prototype"] = 1; }');
+        accepts('a static block that writes prototype', 'class C { static { this.prototype = 1; } }');
+
+        // ---- a private name is exempt from the two name rules --------------
+        accepts('a private static field named prototype', 'class C { static #prototype = 1; }');
+        // `#constructor` is refused by a rule that was already there.
+        rejects('a private field named constructor', 'class C { #constructor = 1; }');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+
+    // ---- the class still works: parsing is not all that changed ----------
+    assert(js.eval("new (class { static tag = 'c'; m() { return 7; } })().m()").to_string() == "7");
+    assert(js.eval("new (class extends Object { x = 1; constructor() { super(); } })().x").to_string() == "1");
+}
+
 TEST(reflect_describes_and_answers_extensibility) {
     using namespace litebird;
     // Phase 124, finding 129. `Reflect` had ten of its thirteen functions;
@@ -28004,6 +28102,9 @@ int main() {
     // Phase 106: ArrayBuffer and the typed arrays.
     RUN_TEST(arraybuffer_and_typed_arrays);
     RUN_TEST(dataview_and_the_iterating_typed_array_methods);
+
+    // Phase 128: the six regular grammar rules of a class body.
+    RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);

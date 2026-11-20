@@ -406,8 +406,11 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    outer border merge in
    the collapsed model, `empty-cells`, `caption-side`, `table-layout: fixed`,
    per-element scrollable `overflow: auto` containers (the viewport scrolls, inner
-   boxes clip), and rounded-corner clipping. The DOM is trustworthy; the box tree
-   handles everyday layouts but not full CSS2.2/CSS3 edge cases.
+   boxes clip), and `overflow` clipping to a rounded corner — a rounded
+   **background and border** paint correctly, anti-aliased at the arcs (Phase
+   122, finding 127), but the **clip** is the square `padding_box`. The DOM is
+   trustworthy; the box tree handles everyday layouts but not full
+   CSS2.2/CSS3 edge cases.
 2. **JavaScript is interpreted, and catastrophic-backtracking limits remain.**
    Scripts run on a tree-walking interpreter: 50 to 100 times slower than V8
    on loops and calls. Long strings are no longer quadratic (Phase 24), and

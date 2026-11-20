@@ -1501,6 +1501,14 @@ std::unique_ptr<Expr> JsParser::parse_unary() {
                 static_cast<const MemberExpr*>(operand.get())->private_name) {
                 fail("Private fields can not be deleted");
             }
+            // `delete name` is an early error in strict code: a binding is not
+            // a property, and the language refuses to look as if it were.
+            // `this` is not an identifier here (the parser keeps it as one
+            // node kind), and is not a reference to delete either.
+            if (op == JsTokenType::Delete && operand->kind == NodeKind::Identifier) {
+                const std::string& name = static_cast<const IdentifierExpr*>(operand.get())->name;
+                if (name != "this" && is_strict()) fail("Delete of an unqualified identifier in strict mode.");
+            }
             return std::make_unique<UnaryExpr>(op, std::move(operand));
         }
         // Prefix increment/decrement: `++i` yields the value *after* the change.

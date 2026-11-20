@@ -14,7 +14,16 @@
     "",
     "Coordinates are CSS pixels from the top left of the 800x600 viewport.",
     "Exact equality is the default on purpose: box edges here are not",
-    "anti-aliased, so an off-by-one is a bug rather than a rounding."
+    "anti-aliased, so an off-by-one is a bug rather than a rounding.",
+    "",
+    "A test may carry `known_failure`: a sentence saying what the spec requires",
+    "and the engine does not do yet. The run prints KNOWN with the reason, and",
+    "counts it as neither a pass nor a failure. The entry is a debt, not a",
+    "silence: if the page starts passing, the run prints FIXED and exits 1, so",
+    "the reason has to come out in the same commit that fixes the bug.",
+    "Six pages carry one since Phase 122 (finding 127): paint order for floats",
+    "and transformed elements, cross-axis alignment in flex and grid, and a clip",
+    "that is square where the radius is round."
   ],
   "tests": [
     {
@@ -322,6 +331,635 @@
           "describe": "the second box is clipped at the viewport edge, not scrolled into view"
         }
       ]
+    },
+    {
+      "name": "flex_space_between_puts_the_outer_items_at_the_edges",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; width: 200px; height: 60px; justify-content: space-between }.i { width: 40px; height: 60px }\n</style></head><body><div class=\"c\"><div class=\"i\" style=\"background:#ff0000\"></div><div class=\"i\" style=\"background:#00ff00\"></div><div class=\"i\" style=\"background:#0000ff\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 60,
+          "colour": "#ff0000",
+          "describe": "the first item is flush with the left edge"
+        },
+        {
+          "kind": "pixel",
+          "x": 79,
+          "y": 30,
+          "colour": "#ffffff",
+          "describe": "the first gap is empty"
+        },
+        {
+          "kind": "pixel",
+          "x": 80,
+          "y": 30,
+          "colour": "#00ff00",
+          "describe": "the second starts at 80"
+        },
+        {
+          "kind": "pixel",
+          "x": 119,
+          "y": 30,
+          "colour": "#00ff00",
+          "describe": "and ends at 119"
+        },
+        {
+          "kind": "pixel",
+          "x": 120,
+          "y": 30,
+          "colour": "#ffffff",
+          "describe": "the second gap is empty"
+        },
+        {
+          "kind": "pixel",
+          "x": 160,
+          "y": 30,
+          "colour": "#0000ff",
+          "describe": "the third starts at 160"
+        },
+        {
+          "kind": "rect",
+          "x": 160,
+          "y": 0,
+          "width": 40,
+          "height": 60,
+          "colour": "#0000ff",
+          "describe": "and is flush with the right edge"
+        },
+        {
+          "kind": "pixel",
+          "x": 200,
+          "y": 30,
+          "colour": "#ffffff",
+          "describe": "nothing is painted past 200"
+        }
+      ]
+    },
+    {
+      "name": "flex_column_stacks_items_downward",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; flex-direction: column; width: 100px; height: 100px }.a { height: 30px; background: #ff0000 } .b { height: 20px; background: #0000ff }\n</style></head><body><div class=\"c\"><div class=\"a\"></div><div class=\"b\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 100,
+          "height": 30,
+          "colour": "#ff0000",
+          "describe": "the first item is 30 tall"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 30,
+          "colour": "#0000ff",
+          "describe": "the second begins at y=30"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 30,
+          "width": 100,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "and is 20 tall"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 50,
+          "colour": "#ffffff",
+          "describe": "nothing is painted below it"
+        }
+      ]
+    },
+    {
+      "name": "flex_wrap_puts_an_overflowing_item_on_the_next_line",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; flex-wrap: wrap; width: 100px; height: 100px }.i { width: 60px; height: 20px }\n</style></head><body><div class=\"c\"><div class=\"i\" style=\"background:#ff0000\"></div><div class=\"i\" style=\"background:#00ff00\"></div><div class=\"i\" style=\"background:#0000ff\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "the first line holds one item"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 30,
+          "colour": "#00ff00",
+          "describe": "the second wrapped to y=20"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 50,
+          "colour": "#0000ff",
+          "describe": "the third wrapped to y=40"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 70,
+          "colour": "#ffffff",
+          "describe": "and the container is not filled"
+        }
+      ]
+    },
+    {
+      "name": "flex_justify_content_flex_end_packs_to_the_end",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; justify-content: flex-end; width: 200px; height: 20px }.a { width: 50px; height: 20px; background: #ff0000 }\n</style></head><body><div class=\"c\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 149,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "nothing is painted before the packed item"
+        },
+        {
+          "kind": "rect",
+          "x": 150,
+          "y": 0,
+          "width": 50,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "the item sits at 200-50 = 150"
+        }
+      ]
+    },
+    {
+      "name": "flex_justify_content_center_centres_the_line",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; justify-content: center; width: 200px; height: 20px }.a { width: 60px; height: 20px; background: #0000ff }\n</style></head><body><div class=\"c\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 69,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "nothing before the centred item"
+        },
+        {
+          "kind": "rect",
+          "x": 70,
+          "y": 0,
+          "width": 60,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "the line sits at (200-60)/2 = 70"
+        },
+        {
+          "kind": "pixel",
+          "x": 130,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "and nothing after it"
+        }
+      ]
+    },
+    {
+      "name": "flex_items_stretch_to_the_container_height",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; width: 100px; height: 40px; background: #eeeeee }.a { width: 40px; background: #ff0000 }\n</style></head><body><div class=\"c\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 40,
+          "colour": "#ff0000",
+          "describe": "align-items: stretch (the default) makes the item 40 tall"
+        },
+        {
+          "kind": "pixel",
+          "x": 40,
+          "y": 0,
+          "colour": "#eeeeee",
+          "describe": "and no wider than its 40px"
+        }
+      ],
+      "known_failure": "cross-axis alignment is not implemented: align-items is ignored, so an item with no height of its own is 0 tall and paints nothing"
+    },
+    {
+      "name": "flex_align_items_center_centres_a_shorter_item",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; align-items: center; width: 100px; height: 100px; background: #eeeeee }.a { width: 50px; height: 20px; background: #ff0000 }\n</style></head><body><div class=\"c\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 39,
+          "colour": "#eeeeee",
+          "describe": "above the item the container shows through"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 50,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "the item sits at (100-20)/2 = 40"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 60,
+          "colour": "#eeeeee",
+          "describe": "and below it the container shows through"
+        }
+      ],
+      "known_failure": "align-items: center is ignored; the item is placed at the top of the line"
+    },
+    {
+      "name": "grid_items_stretch_to_their_area",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.g { display: grid; grid-template-columns: 60px 40px; grid-template-rows: 30px 20px }.a { background: #ff0000 } .b { background: #0000ff }\n</style></head><body><div class=\"g\"><div class=\"a\"></div><div class=\"b\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 30,
+          "colour": "#ff0000",
+          "describe": "the first cell is 60x30 and its item fills it"
+        },
+        {
+          "kind": "rect",
+          "x": 60,
+          "y": 0,
+          "width": 40,
+          "height": 30,
+          "colour": "#0000ff",
+          "describe": "the second cell is 40x30"
+        }
+      ],
+      "known_failure": "grid items are not stretched to their area either: same missing cross-axis alignment, so an item with no height is 0 tall"
+    },
+    {
+      "name": "grid_places_cells_on_its_tracks_and_honours_the_gap",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.g { display: grid; grid-template-columns: 60px 40px; grid-template-rows: 30px 20px; gap: 10px }.a { height: 30px; background: #ff0000 } .b { height: 30px; background: #00ff00 }\n  .c { height: 20px; background: #0000ff } .d { height: 20px; background: #ff00ff }\n</style></head><body><div class=\"g\"><div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div><div class=\"d\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 30,
+          "colour": "#ff0000",
+          "describe": "cell 1: first column, first row"
+        },
+        {
+          "kind": "pixel",
+          "x": 59,
+          "y": 29,
+          "colour": "#ff0000",
+          "describe": "up to its last pixel"
+        },
+        {
+          "kind": "pixel",
+          "x": 60,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "the column gap is 10 wide and unpainted"
+        },
+        {
+          "kind": "rect",
+          "x": 70,
+          "y": 0,
+          "width": 40,
+          "height": 30,
+          "colour": "#00ff00",
+          "describe": "cell 2 starts after the gap"
+        },
+        {
+          "kind": "pixel",
+          "x": 110,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "nothing is painted past the tracks"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 39,
+          "colour": "#ffffff",
+          "describe": "the row gap is 10 tall"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 60,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "cell 3: first column, second row"
+        },
+        {
+          "kind": "rect",
+          "x": 70,
+          "y": 40,
+          "width": 40,
+          "height": 20,
+          "colour": "#ff00ff",
+          "describe": "cell 4: second column, second row"
+        }
+      ]
+    },
+    {
+      "name": "a_float_is_painted_above_the_block_that_follows_it",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.f { float: left; width: 50px; height: 50px; background: #ff0000 }.b { width: 100px; height: 40px; background: #0000ff }.k { clear: both; width: 100px; height: 10px; background: #00ff00 }\n</style></head><body><div class=\"f\"></div><div class=\"b\"></div><div class=\"k\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 10,
+          "colour": "#ff0000",
+          "describe": "CSS 2.1 Appendix E paints floats above in-flow block backgrounds"
+        },
+        {
+          "kind": "pixel",
+          "x": 60,
+          "y": 10,
+          "colour": "#0000ff",
+          "describe": "the block's background shows where the float is not"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 45,
+          "colour": "#ff0000",
+          "describe": "the float is 50 tall and the block 40, so its last 10 rows are the float's"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 45,
+          "colour": "#ff0000",
+          "describe": "the float is 50 tall and the block 40, so its last 10 rows are the float's"
+        },
+        {
+          "kind": "pixel",
+          "x": 60,
+          "y": 45,
+          "colour": "#ffffff",
+          "describe": "and the block has ended by then, so nothing of it shows to the right of the float"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 50,
+          "width": 100,
+          "height": 10,
+          "colour": "#00ff00",
+          "describe": "clear: both puts the next block below the float"
+        }
+      ],
+      "known_failure": "the float is painted in document order, under the background of the block that follows it; CSS 2.1 Appendix E paints float backgrounds (step 5) after in-flow block backgrounds (step 4). The float's position and `clear: both` are correct"
+    },
+    {
+      "name": "an_absolutely_positioned_child_is_placed_against_its_containing_block",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.rel { position: relative; width: 200px; height: 100px; background: #eeeeee }.abs { position: absolute; left: 40px; top: 20px; width: 30px; height: 30px; background: #ff0000 }\n</style></head><body><div class=\"rel\"><div class=\"abs\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 39,
+          "y": 20,
+          "colour": "#eeeeee",
+          "describe": "nothing one pixel left of it"
+        },
+        {
+          "kind": "rect",
+          "x": 40,
+          "y": 20,
+          "width": 30,
+          "height": 30,
+          "colour": "#ff0000",
+          "describe": "the child is at (40, 20)"
+        },
+        {
+          "kind": "pixel",
+          "x": 70,
+          "y": 20,
+          "colour": "#eeeeee",
+          "describe": "and ends at x=69"
+        },
+        {
+          "kind": "pixel",
+          "x": 40,
+          "y": 50,
+          "colour": "#eeeeee",
+          "describe": "and at y=49"
+        }
+      ]
+    },
+    {
+      "name": "overflow_hidden_clips_a_child_to_the_parent",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.p { width: 100px; height: 50px; overflow: hidden; background: #eeeeee }.c { width: 300px; height: 300px; background: #ff0000 }\n</style></head><body><div class=\"p\"><div class=\"c\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 100,
+          "height": 50,
+          "colour": "#ff0000",
+          "describe": "the child fills the parent's content box"
+        },
+        {
+          "kind": "pixel",
+          "x": 100,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "and is clipped at its right edge"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 50,
+          "colour": "#ffffff",
+          "describe": "and at its bottom edge"
+        }
+      ]
+    },
+    {
+      "name": "a_solid_image_paints_across_the_box_it_is_given",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\nimg { width: 40px; height: 40px; display: block }\n</style></head><body><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 40,
+          "colour": "#ff0000",
+          "describe": "a 1x1 red image scaled to 40x40 is red throughout"
+        },
+        {
+          "kind": "pixel",
+          "x": 40,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "and no wider than the box"
+        }
+      ]
+    },
+    {
+      "name": "border_radius_rounds_the_corner",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.b { width: 40px; height: 40px; border-radius: 12px; background: #ff0000 }\n</style></head><body><div class=\"b\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "not-colour",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "the corner pixel is not the box's colour: the radius removed it"
+        },
+        {
+          "kind": "not-colour",
+          "x": 39,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "the second corner"
+        },
+        {
+          "kind": "not-colour",
+          "x": 0,
+          "y": 39,
+          "colour": "#ff0000",
+          "describe": "the third"
+        },
+        {
+          "kind": "not-colour",
+          "x": 39,
+          "y": 39,
+          "colour": "#ff0000",
+          "describe": "the fourth"
+        },
+        {
+          "kind": "pixel",
+          "x": 19,
+          "y": 19,
+          "colour": "#ff0000",
+          "describe": "the middle is"
+        },
+        {
+          "kind": "pixel",
+          "x": 19,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "and the straight part of the top edge, between the two 12px arcs, is"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 19,
+          "colour": "#ff0000",
+          "describe": "as is the straight part of the left edge"
+        }
+      ]
+    },
+    {
+      "name": "transform_translate_moves_the_ink_and_not_the_layout",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.t { width: 40px; height: 40px; background: #ff0000; transform: translate(20px, 10px) }.n { width: 100px; height: 10px; background: #0000ff }\n</style></head><body><div class=\"t\"></div><div class=\"n\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "the box's layout place is empty: a transform is painted, not laid out"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 10,
+          "width": 40,
+          "height": 40,
+          "colour": "#ff0000",
+          "describe": "the ink is moved by (20, 10)"
+        },
+        {
+          "kind": "pixel",
+          "x": 19,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "and not one pixel further left"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 100,
+          "height": 10,
+          "colour": "#0000ff",
+          "describe": "the next block still starts at y=40: layout did not move"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 45,
+          "colour": "#ff0000",
+          "describe": "and where the two overlap, the transformed box is painted over it"
+        }
+      ],
+      "known_failure": "the ink moves and layout does not, but the transformed box is painted in document order, so a later in-flow block covers it where they overlap; a transform creates a stacking context (CSS Transforms 1 §3), which Appendix E paints in the positioned layer"
+    },
+    {
+      "name": "overflow_hidden_clips_to_the_rounded_corner",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.p { width: 40px; height: 40px; overflow: hidden; border-radius: 16px }\n  .c { width: 40px; height: 40px; background: #ff0000 }\n</style></head><body><div class=\"p\"><div class=\"c\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "a 16px radius on a 40px box takes (0, 0) out of the clip"
+        },
+        {
+          "kind": "pixel",
+          "x": 39,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "and the second corner"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 39,
+          "colour": "#ffffff",
+          "describe": "and the third"
+        },
+        {
+          "kind": "pixel",
+          "x": 39,
+          "y": 39,
+          "colour": "#ffffff",
+          "describe": "and the fourth"
+        },
+        {
+          "kind": "rect",
+          "x": 10,
+          "y": 10,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "the middle of the child shows through"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "and so does the straight part of the top edge"
+        }
+      ],
+      "known_failure": "`overflow: hidden` clips to a rectangle: the clip command carries `border_radius`, and the corner is not removed, so the child's ink reaches the box's square corner"
     }
   ]
 }

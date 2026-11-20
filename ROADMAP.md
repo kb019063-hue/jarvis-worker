@@ -40,7 +40,7 @@ a terminal/ANSI renderer; `http://` **and `https://`** (OpenSSL loaded at run
 time, certificate and hostname verified); `fetch()` and `XMLHttpRequest` over
 HTTP/HTTPS with CORS; `ws://` and `wss://` WebSockets (OpenSSL TLS verified,
 Fetch `Origin` and mixed-content policy enforced); no typed arrays, `Proxy`, BigInt or ES
-modules; pixels are **unmeasured** by any scoreboard.
+modules; pixels are measured by one scoreboard since Phase 120, over 26 pages.
 The long honest form of the list: `ARCHITECTURE.md` → *Known gaps*.
 
 *(This baseline was allowed to go stale once: it still said "no TLS at all"
@@ -64,7 +64,7 @@ with. This does. **Tier 1 is the difference between an engine and a browser.**
 | 5 | **Automatic GC** | 11 | Collection runs only on `gc()`. A long-running page grows. **Both halves are oracle-checked now: the timing (Phase 103, finding 109)** — `make verify-gc-stress` collects at a seeded allocation count between statements and requires a program to print what it prints with nothing collected — 254,174 collections over 1,186 JavaScript programs and 11,176 over 678 DOM pages, no case differing, negative control first — **and the answer** (`make gc-oracle`, three `gc_oracle_*` suites): self/mutual/closure/self-containing-array cycles reclaimed, a global-kept thread untouched while its cyclic pile is reclaimed, and a flat live set across churn. The policy is still open: nothing calls the collector on its own (finding 109). |
 | 6 | **Typed arrays + ES modules** | 8 | `ArrayBuffer` is **not exposed to script**. Blocks `fetch()` bodies, WebSocket binary frames, Canvas `ImageData`. |
 | 7 | **HTTP/1.1 complete + cache** | 21, 35 | **Done (Phases 36, 73, 85):** RFC 6265bis `CookieJar` wired to HTTP `Set-Cookie`/`Cookie` across redirects, bounded RFC 9111 HTTP cache (`Cache-Control`, `ETag`/`If-None-Match`, `Last-Modified`/`If-Modified-Since`, `304`, `Vary`, unsafe invalidation), CORS `OPTIONS` preflight + `Max-Age` cache, mixed-content blocking, chunked + `gzip`/`deflate` + **RFC 7932 Brotli (`br`)** `Content-Encoding`, and **HTTP/1.1 + HTTPS (`SSL*`) `keep-alive` socket pooling** (Phase 85, finding 91). **HTTP authentication challenges done (Phase 113, finding 117):** RFC 7617 `Basic` and RFC 7616 `Digest` (MD5, SHA-256, `-sess`, `qop=auth`), nothing sent pre-emptively, one retry with credentials for that origin and realm, and the challenge reported on the response. Still open: `auth-int`, `SHA-512-256`, `userhash`, `Authentication-Info`/`nextnonce`, `407`/`Proxy-Authenticate`. |
-| 8 | **Render conformance** | 38 | **Pixels are measured since Phase 120** (finding 121): `make render-conformance` renders 10 pages and compares 30 assertions against the pixels, read back by a PNG decoder that shares no code with the engine's writer, and the harness is shown to fail (a one-column bug in `fill_rect` reddens 9 of 10). **Still open:** flexbox, grid, floats, `transform`, SVG, canvas, border radius and images are unmeasured, no WPT reftests are vendored, glyph shape is not compared, and there is no two-build pixel diff. |
+| 8 | **Render conformance** | 38 | **Pixels are measured since Phase 120** (finding 121), extended in Phase 122 (finding 127): `make render-conformance` renders **26 pages** and compares **100 assertions** against the pixels, read back by a PNG decoder that shares no code with the engine's writer, and the harness is shown to fail (a one-column bug in `fill_rect` reddens 9 of 10). Flex, grid, floats, `clear`, absolute positioning, `overflow`, images, `border-radius` and `transform` are among the measured pages; six of them fail with a recorded reason and the harness refuses a reason attached to a page that passes. **Still open:** inline formatting and line breaking, table cell backgrounds, SVG and canvas are unmeasured, no WPT reftests are vendored, glyph shape is not compared, and there is no two-build pixel diff. |
 
 ### Tier 2 — real pages work
 
@@ -94,9 +94,11 @@ Count the oracles in Tier 1. Typed arrays has test262. Shaping has WPT
 collector fires, and `make gc-oracle` with the `gc_oracle_*` suites says the
 collector's answer is right — unreachable cycles reclaimed, a retained
 subgraph untouched, the live set flat across churn. **A windowed shell has
-none. An HTTP cache has none.** Two of the eight items that make it a browser
-are the ones with nothing to check the answer against — and that is where the
-speed goes. (What Automatic GC still lacks is a policy for collecting on its
+none.** (That line used to count an HTTP cache among them. It should not:
+Phase 73's suite counts requests on a loopback server, so freshness,
+`ETag`/`304`, `Vary` and invalidation are all measured against the engine's own
+wire.) Two of the eight items that make it a browser are the ones with nothing
+to check the answer against — and that is where the speed goes. (What Automatic GC still lacks is a policy for collecting on its
 own; finding 109 tracks that.)
 
 Tier 1 is roughly 15–25 phases of work. At the rate phases have been landing
@@ -176,7 +178,7 @@ because the last third of it has no oracle to converge on.
 | # | Phase | Size |
 | :--- | :--- | :--- |
 | 37 | **WPT everywhere** — extend the vendored runner beyond `dom/nodes`+`domparsing` to `html/`, `url/`, `fetch/`, `encoding/`, `css-*`, same "listed failures" protocol. **`encoding/` landed in Phase 47** (16 files, 2,543 subtests). | M |
-| 38 | **Render conformance** — reftest / screenshot-diff harness against a reference engine; today *pixels* are unmeasured. | L |
+| 38 | **Render conformance** — reftest / screenshot-diff harness against a reference engine. A home-grown pixel oracle exists and measures 26 pages (Phase 120, Phase 122); what is missing is the *reference engine*, vendored WPT reftests, glyph shape and a two-build pixel diff. | L |
 | 39 | **Interop dashboard + CI benches** — extend `bench-css`: JS, layout, memory, network fixtures. | M |
 | 40 | **Fuzzing expansion** — layout/render fuzzers (parser/XML ones exist) + a mock-server network fuzzer. | M |
 

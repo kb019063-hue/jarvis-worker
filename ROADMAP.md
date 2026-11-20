@@ -59,7 +59,7 @@ with. This does. **Tier 1 is the difference between an engine and a browser.**
 | 2 | **Shaping** — `GPOS` kerning and marks, complex scripts | 1 | Every non-Latin script is wrong. (`kern` pairs are read and applied as of Phase 91, and `GSUB`'s `liga`/`rlig` ligatures as of Phase 93 — `ff`/`fi`/`fl`/`ffi`/`ffl` are one glyph each now, measured and painted as one. `GPOS`, which most modern fonts prefer for kerning, and marks are not read, and no script shaping exists, so a font that kerns only in `GPOS` gets no kerning at all.) |
 | 3 | **Bidi** (UAX #9) | 1 | Arabic and Hebrew come out reversed. |
 | 4 | **A windowed shell** | 3 | `BrowserShell` renders to a terminal. No window, no mouse, no scrolling. |
-| 5 | **Automatic GC** | 11 | Collection runs only on `gc()`. A long-running page grows. |
+| 5 | **Automatic GC** | 11 | Collection runs only on `gc()`. A long-running page grows. The collector's *answer* is oracle-checked now: the `gc_oracle_*` suites in `make test` and `make gc-oracle` through the shell — every shape of unreachable cycle is reclaimed, the live set flattens across churn, what a global names stays intact. The collector deciding *when* to run unasked — sizing, incrementality — has no oracle; that half remains open. |
 | 6 | **Typed arrays + ES modules** | 8 | `ArrayBuffer` is **not exposed to script**. Blocks `fetch()` bodies, WebSocket binary frames, Canvas `ImageData`. |
 | 7 | **HTTP/1.1 complete + cache** | 21, 35 | **Done (Phases 36, 73, 85):** RFC 6265bis `CookieJar` wired to HTTP `Set-Cookie`/`Cookie` across redirects, bounded RFC 9111 HTTP cache (`Cache-Control`, `ETag`/`If-None-Match`, `Last-Modified`/`If-Modified-Since`, `304`, `Vary`, unsafe invalidation), CORS `OPTIONS` preflight + `Max-Age` cache, mixed-content blocking, chunked + `gzip`/`deflate` + **RFC 7932 Brotli (`br`)** `Content-Encoding`, and **HTTP/1.1 + HTTPS (`SSL*`) `keep-alive` socket pooling** (Phase 85, finding 91). Still open: HTTP authentication challenges (`WWW-Authenticate`/`401`). |
 | 8 | **Render conformance** | 38 | **Nothing measures a pixel.** Every layout and font claim on this page is unverified. |
@@ -87,10 +87,14 @@ already existed: WPT, html5lib, the W3C XML suite, test262, the CSS Color
 rational oracle. That is the shape of problem the agents are fastest at.
 
 Count the oracles in Tier 1. Typed arrays has test262. Shaping has WPT
-`css-text`, partly. **A windowed shell has none. Automatic GC has almost
-none. An HTTP cache has none.** Three of the eight items that make it a
-browser are the ones with nothing to check the answer against — and that is
-where the speed goes.
+`css-text`, partly. Automatic GC now has an invariant oracle — `make gc-oracle`
+and the `gc_oracle_*` suites say whether the collector's answer is right:
+unreachable cycles of every shape are reclaimed, the live set stays flat as
+churn repeats, and a retained subgraph is untouched. **A windowed shell has
+none. An HTTP cache has none.** Two of the eight items that make it a browser
+are the ones with nothing to check the answer against — and that is where the
+speed goes. (What Automatic GC still lacks is an oracle for *when* to collect;
+no scoreboard can supply that.)
 
 Tier 1 is roughly 15–25 phases of work. At the rate phases have been landing
 that is arithmetically a few days and realistically two to four weeks,
@@ -115,7 +119,7 @@ because the last third of it has no oracle to converge on.
 | 8 | **Language tier 1** — `ArrayBuffer` + typed arrays + `DataView` (unblocks everything), BigInt. (Array-hole semantics landed in Phase 81: `delete a[1]`, `new Array(3)`, a grown `length` and an elision in a literal all make holes, and every built-in treats an index as an own property or a hole. Iterative heap-stack RegExp bytecode VM landed in Phase 37; complete RegExp flags `d`/`u`/`v`, ES2025 modifiers `(?ims-ims:...)`, duplicate named capturing groups, `RegExp.escape()`, and `Symbol.{match,matchAll,replace,search,split,species}` landed in Phase 55.) | M |
 | 9 | **Language tier 2** — Proxy, generators/async generators at the top level, ES modules + import maps + dynamic `import()`. Async-generator delegation and return resumption landed in Phase 77; other generator and job-order gaps remain. | M |
 | 10 | **Unicode / `Intl`** — ICU-grade data (the IDNA approach, generalized): `DateTimeFormat`/`NumberFormat`/`Segmenter`/`Intl.Collator` and locale-specific collation tailorings. (Unicode 17.0 RegExp property escapes — General_Category, Binary Properties, Script, Script_Extensions, Properties of Strings — and Unicode/legacy RegExp case folding landed in Phase 55; Unicode 17.0 `String.prototype.normalize()`, full + locale-sensitive `tr`/`az`/`lt`/`el` case mapping, CLDR 48 / UCA 17.0 root `localeCompare()` with ECMA-402 validation landed in Phase 60, taking `make diff-strings` to **50,580 / 50,580 = 0 diffs**.) | L |
-| 11 | **Automatic GC + leak audit** — collection only runs on `gc()` today; incremental sizing, CI memory benchmarks. | M–L |
+| 11 | **Automatic GC + leak audit** — collection only runs on `gc()` today; incremental sizing, CI memory benchmarks. The GC invariant oracle landed (`make gc-oracle`, three `gc_oracle_*` suites): reclamation of cycles, retention of what is named, a flat live set — all checked. Open: the collector triggering itself, and the leak audit. | M–L |
 
 ## Wave 3 — Real pages (layout & CSS)
 

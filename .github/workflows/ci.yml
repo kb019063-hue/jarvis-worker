@@ -27,6 +27,12 @@ jobs:
         run: make -j"$(nproc)"
       - name: Engine test suites
         run: make test
+      - name: GC invariants hold through the shell
+        # Unreachable cycles and closure captures must be reclaimed, churn
+        # must not grow the live set, what a global names must stay intact.
+        # `make test` checks the same in-process; this checks the path the
+        # shell takes. Seconds.
+        run: make gc-oracle
       - name: Sized-float index keeps placements fast
         # Full CLI parse + layout + dump of packed, mixed-side, and cleared
         # 1k/10k floats. The old repeated band sweep takes 5-12 seconds at

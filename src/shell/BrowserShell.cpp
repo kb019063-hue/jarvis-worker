@@ -423,13 +423,20 @@ std::shared_ptr<Element> BrowserShell::element_at(float x, float y) const {
                 }
             }
 
+            // The painter emits these line fragments *instead of* painting
+            // their backing child boxes. The latter have unfragmented bounds
+            // and can steal a hit from a neighbouring, visibly painted link.
+            if (!box->line_boxes.empty()) return;
+
             for (const auto& ch : box->children) {
                 search(ch);
             }
         } else {
-            // Out-of-flow positioned descendants can sit outside their parent's box.
+            // Table layout flattens row groups: their painted rows and
+            // cells have bounds, but the group itself may have none.
+            // Out-of-flow children can also escape their parent box.
             for (const auto& ch : box->children) {
-                if (ch && ch->style->is_out_of_flow()) {
+                if (ch && (box->style->is_table_row_group() || ch->style->is_out_of_flow())) {
                     search(ch);
                 }
             }

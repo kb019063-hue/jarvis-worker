@@ -4,6 +4,10 @@
 
 Five Python proposals, five Git manuals, eight Mothereff text tools and two games. This is deliberately a **clustered diagnostic sample**, not 20 independent sites or an estimate of web coverage. Repeated templates make shared regressions easy to see. The source archives are the publishers’ public HTML/assets, not rewritten toy pages. Third-party fonts, ads and analytics aren't replayed. Fonts may differ between engines. Both see an 800×600 viewport at 1× and the same source tree for a page under `http://snapshot.test`. Games have nondeterministic starting boards; don't score them by pixel equality.
 
+## Rerun 01: Git manuals
+
+[PDF: results and five screenshot pairs](rerun-01/git-manuals.pdf) · [All 20 outcomes](rerun-01/litebird.json). 12 completed (previously 7); all five manual links reached readable destination headings. The five PEP tasks remain incomplete; three input tasks are untested. No process exited prematurely. Same source revisions, human tasks, selectors and expectations; no changes to the original report.
+
 ## Rerun on Linux (from repository root)
 
 Use an empty or trusted local scratch directory. Pinned snapshots, browsers, logs and full-resolution PNGs belong outside Git. Use an isolated disposable environment, not a machine with personal browser data. The network restriction in the probe is for repeatability, not a general-purpose security sandbox.
@@ -27,6 +31,6 @@ python3 "$T/run.py" "$R/sites" "$R/results" "$R/probe"
 
 Reference: fresh browser context per task, real mouse/keyboard, intercept requests to replay only the pinned tree. `reference.json` must validate the task before the probe attempts it. The initial oracle was calibrated **in Chromium**: open the collapsed PEP contents before following its link, allow scrolling to settle, and preserve the binary converter’s trailing separator. The human tasks did not change.
 
-Litebird: fresh native process per task, origin mapped to the same tree, new sockets disabled before navigation. Scroll/hit-test/click/type through `BrowserShell`; inspect DOM only to locate a control or read the result. The probe uses the second textarea directly where necessary, so a test-selector bug isn't mistaken for a user-visible conversion failure. The shell has no page keydown/mousedown adapter or contenteditable editor; do not substitute calls to a page’s handlers. Treat an exit before the first frame separately from an untestable input. Each task has a 45-second wall budget (not a speed benchmark).
+Litebird: fresh native process per task, origin mapped to the same tree, new sockets disabled before navigation. Scroll/hit-test/click/type through `BrowserShell`; inspect DOM only to locate a control or read the result. The probe locates targets using Litebird’s script-facing selector engine, not the native simple-name helper. It does not navigate directly to the expected result. The shell has no page keydown/mousedown adapter or contenteditable editor; do not substitute calls to a page’s handlers. Treat an exit before the first frame separately from an untestable input. Each task has a 45-second wall budget (not a speed benchmark).
 
 `litebird.json` contains **candidate** interaction outcomes. Review the before/after PNGs for readability and visible results before publishing the count. A readable output with broken layout can pass interaction but not visual fidelity. Record missing frames, incomplete actions, crashes and blocked reference cases separately. Never drop them from the 20-row table. Keep v1 fixed when tuning the engine; use fresh holdout sites for broader claims.

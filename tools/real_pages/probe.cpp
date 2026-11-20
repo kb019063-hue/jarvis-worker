@@ -1,5 +1,6 @@
 // A thin driver for the same click/key/paint path as Litebird's interactive shell.
 #include "litebird/shell/BrowserShell.hpp"
+#include "litebird/dom/Selector.hpp"
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -37,8 +38,17 @@ int main(int argc, char** argv) {
         file.write(reinterpret_cast<const char*>(png.data()), png.size());
         if (!file) throw std::runtime_error("cannot save screenshot");
     };
+    // The native convenience query only handles simple names. Use the
+    // script-facing selector engine to locate the manifest's actual target.
+    // Activation still goes through the viewport's hit test.
+    auto locate=[&](const std::string& css) -> std::shared_ptr<Element> {
+        SelectorList list;
+        if (!SelectorList::parse(css, list)) throw std::runtime_error("invalid benchmark selector: "+css);
+        auto matches=list.select(*shell.document(), true);
+        return matches.empty()?nullptr:matches.front();
+    };
     auto click=[&](const std::string& css) {
-        auto el=shell.document()->query_selector(css);
+        auto el=locate(css);
         if (!el) return false;
         auto r=el->bounding_box();
         if (r.width<=0 || r.height<=0) return false;
@@ -55,7 +65,7 @@ int main(int argc, char** argv) {
     bool pass=false;
     std::string note;
     if (mode=="heading") {
-        auto link=shell.document()->query_selector(selector);
+        auto link=locate(selector);
         if (!link || link->bounding_box().height<=0) click("#contents summary");
         click(selector);
         auto section=shell.document()->get_element_by_id(target);
@@ -66,25 +76,19 @@ int main(int argc, char** argv) {
         note=shell.status_message()+"; heading y="+std::to_string(y);
     } else if (mode=="manual") {
         click(selector);
-        auto h=shell.document()->query_selector("h1");
+        auto h=locate("h1");
         pass=shell.current_url()==origin+"/"+target+".html" && h && h->text_content().find(target+"(1)")!=std::string::npos;
         note=shell.current_url();
     } else if (mode=="type" && selector=="#decoded") {
         std::cout<<"BENCH not-tested: shell cannot edit contenteditable text\n"; return 0;
     } else if (mode=="type") {
-        auto el=shell.document()->query_selector(selector);
+        auto el=locate(selector);
         click(selector);
         if (el && shell.document()->focused_element()==el) {
             for(size_t n=el->value().size(); n>0; --n) shell.handle_key("Backspace");
             shell.type_text(typed);
         }
-        auto result=shell.document()->query_selector(read);
-        // CSS selector conformance is not the user's task; observe the
-        // second field directly even on engines without :nth-of-type.
-        if (read=="textarea:nth-of-type(2)") {
-            auto fields=shell.document()->get_elements_by_tag_name("textarea");
-            if(fields.size()>=2) result=fields[1];
-        }
+        auto result=locate(read);
         std::string value=result?(result->tag_name()=="textarea"?result->value():result->text_content()):"(missing)";
         pass=el && el->value()==typed && result && result->bounding_box().height>0 &&
              (read=="#valid"?value.find(expect)!=std::string::npos:value==expect);

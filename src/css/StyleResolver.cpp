@@ -1094,7 +1094,7 @@ bool StyleResolver::match_selector_impl(const std::shared_ptr<Element>& element,
                 for (auto sib = prev_element_sibling(*f.el); sib; sib = prev_element_sibling(*sib)) {
                     if (!failed.count({sib.get(), next_idx})) {
                         if (matches_simple_selector(sib, selector.parts[next_idx])) {
-                            candidates.push_back(std::move(sib));
+                            candidates.push_back(sib);  // the loop still advances from sib
                         } else {
                             failed.insert({sib.get(), next_idx});
                         }
@@ -1116,7 +1116,7 @@ bool StyleResolver::match_selector_impl(const std::shared_ptr<Element>& element,
                 for (auto anc = parent_element(*f.el); anc; anc = parent_element(*anc)) {
                     if (!failed.count({anc.get(), next_idx})) {
                         if (matches_simple_selector(anc, selector.parts[next_idx])) {
-                            candidates.push_back(std::move(anc));
+                            candidates.push_back(anc);  // the loop still advances from anc
                         } else {
                             failed.insert({anc.get(), next_idx});
                         }

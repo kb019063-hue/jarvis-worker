@@ -13539,6 +13539,127 @@ TEST(array_holes_are_not_elements) {
     assert(js.eval("failures.join('; ')").to_string().empty());
 }
 
+TEST(destructuring_asks_the_value_for_its_iterator) {
+    using namespace litebird;
+    // Phase 102, finding 108. `IterationCursor` chose its array mode by
+    // `is_array()` alone, so a pattern read the elements of an array and never
+    // asked it for `Symbol.iterator`: a replaced method was ignored, deleting
+    // the one on `Array.prototype` did not stop `var [x] = [1]`, and an object
+    // that only has `next` — not iterable in the language — was accepted.
+    // It asks js_iterates_as_builtin() now, the question for...of, spread and
+    // Array.from already asked, and follows the protocol for everything that
+    // question does not settle.
+    //
+    // Every assertion is a comparison made in the page. The whole script was
+    // run under Node.js first and prints the same lines there; where this
+    // engine must differ it is said so.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><html><body></body></html>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+
+        // A method on the array itself is the one a pattern must use.
+        var a = [1, 2]; a[Symbol.iterator] = function* () { yield 9; yield 8; };
+        var [x, y] = a;
+        ok('an array with its own iterator binds what it yields', x + ',' + y, '9,8');
+        var [h, ...rest] = a;
+        ok('and so does a rest pattern', h + ':' + rest.join(), '9:8');
+        function f([p, q]) { return p + ':' + q; }
+        ok('a parameter goes the same way', f(a), '9:8');
+        var assigned; [assigned] = a;
+        ok('an assignment pattern too', assigned, 9);
+
+        // The default: the elements, and a hole handed on as undefined.
+        var plain = [1, , 3];
+        var [p1, p2, p3] = plain;
+        ok('a hole binds undefined', p2, undefined);
+        ok('and the length is not consulted', [p1, p2, p3].length, 3);
+
+        // An object that only has `next` is not iterable in the language, and
+        // is not iterable here any more. Node.js refuses it as well; this
+        // engine's for...of takes it, which is an open row of AGENTS.md, so
+        // nothing is said about for...of here.
+        var bare = { i: 0, next: function () { return this.i < 2 ? { value: this.i++, done: false } : { done: true }; } };
+        ok('an object with only next is a TypeError', t(function () { var [q] = bare; return q; }), 'TypeError');
+
+        // No method on Array.prototype: an array is not iterable any more.
+        var saved = Array.prototype[Symbol.iterator];
+        delete Array.prototype[Symbol.iterator];
+        ok('no method on Array.prototype is a TypeError', t(function () { var [q] = [1]; return q; }), 'TypeError');
+        ok('even with nothing bound', t(function () { var [] = [1]; return 'no'; }), 'TypeError');
+        ok('and spread says so too', t(function () { return [...[1], 2].join(); }), 'TypeError');
+        Array.prototype[Symbol.iterator] = saved;
+
+        // A string is iterated by code point, which a pattern now shares with
+        // every other loop: one JsString walk, no vector of the whole text.
+        var [s1, s2, s3] = 'a\u{1F600}b';
+        ok('a string binds code points', s1 + s2 + s3, 'a\u{1F600}b');
+        ok('so the pair is one place', [s1, s2, s3].length, 3);
+        var [only] = '\u{1F600}';
+        ok('and the whole of it is one value', only.length, 2);
+        ok('a lone high half is one code point', t(function () { var [v] = '\uD83D'; return v.length; }), '1');
+        var half = '\uD83D' + 'x';
+        ok('and does not swallow the letter after it', t(function () { var [u, w] = half; return u.length + ':' + w; }), '1:x');
+
+        // IteratorClose: a pattern that binds fewer names than the iterator
+        // holds closes it, and a `return` that is not callable is a TypeError.
+        var log = [];
+        function make(n) {
+            var o = {}; o[Symbol.iterator] = function () {
+                var i = 0;
+                return { next: function () { return i < n ? { value: i++, done: false } : { value: undefined, done: true }; },
+                         return: function () { log.push('closed at ' + i); return {}; } };
+            };
+            return o;
+        }
+        var [c1, c2] = make(5);
+        ok('an unfinished iterator is closed', log.join(), 'closed at 2');
+        ok('and what it did bind', c1 + ',' + c2, '0,1');
+        log.length = 0;
+        function bad(kind) {
+            var o = {}; o[Symbol.iterator] = function () {
+                return { next: function () { return { value: 1, done: false }; },
+                         return: kind === 'not-a-function' ? 5 : function () { return kind === 'primitive' ? 5 : {}; } };
+            };
+            return o;
+        }
+        ok('a return that is not callable is a TypeError', t(function () { var [q] = bad('not-a-function'); return q; }), 'TypeError');
+        ok('a return that gives a primitive is one', t(function () { var [q] = bad('primitive'); return q; }), 'TypeError');
+        ok('and one that gives an object is fine', t(function () { var [q] = bad('object'); return q; }), '1');
+        // A return that throws is the error the script sees; nothing swallows it.
+        var thrower = {}; thrower[Symbol.iterator] = function () {
+            return { next: function () { return { value: 1, done: false }; }, return: function () { throw new RangeError('stop'); } };
+        };
+        ok('a return that throws is thrown', t(function () { var [q] = thrower; return q; }), 'RangeError');
+        // A missing or null return is not an error, only an unfinished end.
+        var bare2 = {}; bare2[Symbol.iterator] = function () { var i = 0; return { next: function () { return { value: i++, done: false }; } }; };
+        ok('no return at all is fine', t(function () { var [q] = bare2; return q; }), '0');
+
+        // What a pattern must still do: null and undefined are TypeErrors.
+        ok('null is not iterable', t(function () { var [q] = null; return q; }), 'TypeError');
+        ok('undefined too', t(function () { var [q] = undefined; return q; }), 'TypeError');
+        ok('a number is not', t(function () { var [q] = 5; return q; }), 'TypeError');
+
+        // A method replaced on Array.prototype is the one every array has, and
+        // a pattern follows it where it used to read the elements.
+        var oa = Array.prototype[Symbol.iterator];
+        Array.prototype[Symbol.iterator] = function* () { yield 'substituted'; };
+        ok('a replaced prototype method is used', t(function () { var [q] = [1]; return q; }), 'substituted');
+        Array.prototype[Symbol.iterator] = oa;
+        ok('and the installed one is back', t(function () { var [q] = [1]; return q; }), '1');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
 TEST(html5_date_time_inputs_validation_and_stepping) {
     using namespace litebird;
     auto doc = std::make_shared<Document>();
@@ -22412,6 +22533,10 @@ int main() {
 
     // Phase 81: an index of an array is either an element or a hole.
     RUN_TEST(array_holes_are_not_elements);
+
+    // Phase 102: a pattern asks the value for its iterator, as every other
+    // loop does, instead of reading an array's elements by is_array().
+    RUN_TEST(destructuring_asks_the_value_for_its_iterator);
 
     // Per-glyph font fallback: a codepoint the primary face does not cover is
     // drawn from another face instead of painting nothing.

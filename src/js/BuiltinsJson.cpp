@@ -346,9 +346,13 @@ public:
                 for (size_t i = 0; i < length; ++i) {
                     if (i) out += ',';
                     newline(out, m_indent);
-                    // A hole, like undefined, has nothing to write and becomes null.
-                    JsValue element = value.array_element(i);
-                    if (value.is_array_hole(i) || !write_value(value, std::to_string(i), element, out)) out += "null";
+                    // Each place is read as `a[i]` reads it, which is the
+                    // standard's `Get`. A hole reads `undefined` unless the
+                    // index has an accessor of its own or the prototype has
+                    // the index, and `undefined` has nothing to write and
+                    // becomes null.
+                    JsValue element = js_array_get(value, i);
+                    if (!write_value(value, std::to_string(i), element, out)) out += "null";
                 }
                 newline(out, outer_indent);
                 out += ']';

@@ -177,11 +177,13 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
     if (cell && cell->is_array) {
         if (key == "length") return data(JsValue::make_number(static_cast<double>(cell->array_elements.size())), true, false, false);
         if (parse_index(key, index)) {
-            // A hole has no descriptor: getOwnPropertyDescriptor(a, '1') is undefined.
-            if (index < cell->array_elements.size() && !object.is_array_hole(index)) {
-                return data(cell->array_elements[index], true, true, true);
-            }
-            return JsValue::make_undefined();
+            if (index >= cell->array_elements.size()) return JsValue::make_undefined();
+            if (!object.is_array_hole(index)) return data(cell->array_elements[index], true, true, true);
+            // A hole has no descriptor: getOwnPropertyDescriptor(a, '1') is
+            // undefined. Unless `Object.defineProperty` has made something of
+            // the index, which is then in the property map and described
+            // below like any other property (JsValue::has_own_property).
+            if (!cell->has_accessors) return JsValue::make_undefined();
         }
     }
     PropertyMap* table = own_table(object, false);
@@ -275,15 +277,29 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     // be lost (`Array.prototype[0]` gets this: a setter-only accessor, then a
     // value — `[, ][0]` read `undefined`). Only take the shortcut when the
     // map has no accessor on the key.
+    //
+    // The same holds for a data property that was written over such an
+    // accessor: it is in the map too, with attributes, and a new descriptor
+    // for it is checked against them below rather than written through.
+    //
+    // What the map has under an index is the index's property only where the
+    // place is a hole (JsValue::define_accessor makes it one). Under an
+    // element or past the end it is not looked at.
     size_t index = 0;
-    if (cell && cell->is_array && !wants_accessor && (parse_index(key, index) || key == "length")) {
-        const bool accessor_there = cell->properties.find(key) != cell->properties.end()
-            && (cell->properties.find(key)->flags & PropertyMap::Accessor);
-        if (!accessor_there) {
-            if (value.present) object.set_property(key, value.value);
-            return true;
-        }
+    const bool array_index = cell && cell->is_array && parse_index(key, index);
+    const bool in_range = array_index && index < cell->array_elements.size();
+    const bool element_there = in_range && !object.is_array_hole(index);
+    const bool mapped_hole = in_range && !element_there && cell->properties.find(key) != cell->properties.end();
+    if (cell && cell->is_array && !wants_accessor && (array_index || key == "length") && !mapped_hole) {
+        if (value.present) object.set_property(key, value.value);
+        return true;
     }
+    // An accessor asked for on an index that is an element. The element is a
+    // property that exists, though the map does not have it: writable,
+    // enumerable and configurable, unless the array is sealed or frozen. So
+    // it may become an accessor on an array that takes no new properties,
+    // and it keeps being enumerable, as a data property that is turned into
+    // an accessor keeps the two attributes they share.
 
     auto refuse = [&](const std::string& message) {
         if (should_throw) js_throw_type_error(message);
@@ -293,8 +309,9 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     PropertyMap* table = own_table(object, true);
     if (!table) js_throw_type_error("Object.defineProperty called on non-object");
     auto existing = table->find(key);
-    const bool exists = existing != table->end();
-    if (!exists && cell && !cell->extensible) {
+    const bool exists = existing != table->end() && (!array_index || mapped_hole);
+    if (element_there && (cell->sealed || cell->frozen)) return refuse("Cannot redefine property: " + key);
+    if (!exists && !element_there && cell && !cell->extensible) {
         return refuse("Cannot define property " + key + ", object is not extensible");
     }
     if (exists) {
@@ -331,7 +348,8 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         }
     }
 
-    uint8_t flags = exists ? existing->flags : 0;
+    uint8_t flags = exists ? existing->flags
+                  : element_there ? static_cast<uint8_t>(PropertyMap::Enumerable | PropertyMap::Configurable) : 0;
     auto apply = [&](const Field& field, uint8_t bit) {
         if (!field.present) return;
         if (field.value.is_truthy()) flags = static_cast<uint8_t>(flags | bit);

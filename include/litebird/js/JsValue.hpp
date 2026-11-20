@@ -204,6 +204,12 @@ public:
         /// comes back is finished, whichever object it is: js_construct() and
         /// `super(...)` give it neither a prototype nor a state to take over.
         bool forwards_construct{false};
+        /// The function a bound function was made from. A bound function has
+        /// no `prototype`, so `instanceof` has nothing to walk to; the
+        /// language asks the target instead (OrdinaryHasInstance, step 3).
+        /// A shared reference, because this class is declared inside JsValue
+        /// itself.
+        std::shared_ptr<JsValue> bound_target;
         using Payload = std::variant<std::monostate, FunctionData, NativeFn,
                                      std::shared_ptr<Node>,
                                      std::shared_ptr<CanvasRenderingContext2D>,
@@ -233,6 +239,9 @@ public:
     /// before the value is copied.
     bool forwards_construct() const { return m_extra && m_extra->forwards_construct; }
     void set_forwards_construct() { mutable_extra().forwards_construct = true; }
+    /// The function a bound function was made from; empty for anything else.
+    const JsValue& bound_target() const;
+    void set_bound_target(const JsValue& target);
     /// The node this value is the script object of; empty for anything else.
     const std::shared_ptr<Node>& dom_node_value() const;
     const std::shared_ptr<CanvasRenderingContext2D>& canvas_context() const;

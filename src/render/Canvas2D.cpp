@@ -503,28 +503,40 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
             ? FontRenderer::instance().shape_text(text, size_px, parsed.weight, parsed.family, italic)
             : std::vector<FontRenderer::ShapedGlyph>{};
     float advance = 0.0f;
+    float min_x = 0.0f;
+    float max_x = 0.0f;
     float max_y_up = 0.0f;
     float max_y_down = 0.0f;
     for (const FontRenderer::ShapedGlyph& sg : shaped) {
+        const float gx_pos = advance + sg.x_offset;
+        min_x = std::min(min_x, gx_pos);
+        max_x = std::max(max_x, gx_pos + std::max(0.0f, sg.advance));
+        if (sg.x_offset > 0.0f && sg.advance == 0.0f) {
+            max_x = std::max(max_x, gx_pos + size_px);
+        }
         advance += sg.advance;
         if (sg.y_offset > max_y_up) max_y_up = sg.y_offset;
         if (-sg.y_offset > max_y_down) max_y_down = -sg.y_offset;
     }
+    max_x = std::max(max_x, advance);
     layout.advance = advance;
     const float condensable = (max_width > 0.0f && layout.advance > max_width && layout.advance > 0.0f)
                                   ? std::clamp(max_width / layout.advance, 0.02f, 1.0f)
                                   : 1.0f;
     layout.condense = condensable;
 
+    layout.pad_x = (min_x < 0.0f)
+                       ? std::clamp(static_cast<float>(std::ceil(-min_x)) + 1.0f, 1.0f, 1024.0f)
+                       : 1.0f;
     layout.baseline_px = static_cast<int>(std::ceil(layout.ascent + max_y_up)) + 1;
     const int below_px = static_cast<int>(std::ceil(layout.descent + max_y_down)) + 1;
     layout.height = std::clamp(layout.baseline_px + below_px, 1, kMaxTextBufferHeight);
     layout.baseline_px = std::min(layout.baseline_px, layout.height - 1);
     const int pad = static_cast<int>(layout.pad_x);
     // Clamp before narrowing: a hostile string can advance past INT_MAX pixels.
-    const int natural_w = (layout.advance >= static_cast<float>(kMaxTextBufferWidth - pad - 2))
+    const int natural_w = (max_x >= static_cast<float>(kMaxTextBufferWidth - pad - 2))
                               ? kMaxTextBufferWidth
-                              : static_cast<int>(std::ceil(layout.advance)) + pad + 2;
+                              : static_cast<int>(std::ceil(max_x)) + pad + 2;
     layout.width = std::clamp(natural_w, 1, kMaxTextBufferWidth);
     layout.coverage.assign(static_cast<std::size_t>(layout.width) * static_cast<std::size_t>(layout.height), 0);
     if (size_px <= 0.0f || text.empty()) return layout;

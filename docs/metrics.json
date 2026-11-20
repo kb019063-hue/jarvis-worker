@@ -46,9 +46,9 @@
     "test262_default_directories": {
       "before_pass": 12657,
       "before_of": 15686,
-      "now_pass": 13654,
+      "now_pass": 13660,
       "now_of": 15686,
-      "fixed": 997,
+      "fixed": 1003,
       "command": "python3 tools/conformance/run_test262.py --binary before=<branch point> --binary now=build/litebird",
       "date": "2026-11-20",
       "note": "the 21 default directories; 'before' is the commit the phase started from"
@@ -64,7 +64,7 @@
       "note": "language/statements/class, language/expressions/class, language/expressions/in"
     },
     "test262_whole_suite": {
-      "pass": 31161,
+      "pass": 31220,
       "of": 47967,
       "command": "python3 tools/conformance/run_test262.py built-ins language annexB",
       "date": "2026-11-20",

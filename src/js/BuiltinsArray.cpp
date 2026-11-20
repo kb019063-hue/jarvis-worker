@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
 
 namespace litebird {
 
@@ -50,6 +51,22 @@ std::deque<JsValue>& elements_of(const JsValue& array) {
 /// `!is_array_hole`).
 bool hole_at(const JsValue& array, size_t index) {
     return array.is_array_hole(index);
+}
+
+/// `HasProperty(O, k)` as the callback methods ask it: the standard says a hole
+/// is not the end of the question, because an index can be inherited from
+/// `Array.prototype` (a setter-only accessor there still makes the index one
+/// that `every` must visit). `has_property` walks the chain, so asking it is
+/// the whole answer; `hole_at` is only right for the *own* half, which the
+/// copying methods ask when they are carrying holes forward.
+bool has_index(const JsValue& array, size_t index) {
+    return array.has_property(std::to_string(index));
+}
+
+/// The value `O[k]` reads, holes included: a hole is `undefined` unless the
+/// prototype has the index.
+JsValue index_value(const JsValue& array, size_t index) {
+    return array.get_property(std::to_string(index));
 }
 
 // Array iteration uses ToLength on the original receiver. In particular,
@@ -581,8 +598,8 @@ void install_array_builtins(JsIntrinsics& realm) {
         JsValue array = receiver("indexOf");
         const auto& elements = elements_of(array);
         for (size_t i = relative_index(js_arg(args, 1), elements.size(), 0); i < elements.size(); ++i) {
-            if (array.is_array_hole(i)) continue;          // indexOf asks HasProperty first
-            if (strict_equals(elements[i], js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
+            if (!has_index(array, i)) continue;            // indexOf asks HasProperty first
+            if (strict_equals(index_value(array, i), js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
         }
         return JsValue::make_number(-1);
     });
@@ -595,8 +612,8 @@ void install_array_builtins(JsIntrinsics& realm) {
         if (from < 0) return JsValue::make_number(-1);
         size_t start = static_cast<size_t>(std::min(from, static_cast<double>(elements.size()) - 1));
         for (size_t i = start + 1; i-- > 0;) {
-            if (array.is_array_hole(i)) continue;
-            if (strict_equals(elements[i], js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
+            if (!has_index(array, i)) continue;
+            if (strict_equals(index_value(array, i), js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
         }
         return JsValue::make_number(-1);
     });
@@ -625,8 +642,12 @@ void install_array_builtins(JsIntrinsics& realm) {
             for (size_t step = 0; step < length; ++step) {
                 size_t i = from_end ? length - 1 - step : step;
                 if (i >= elements_of(array).size()) continue;
-                if (hole_at(array, i)) continue;            // a hole has no element to test
-                JsValue item = elements_of(array)[i];
+                // `find` and its relatives are the one family that does *not*
+                // skip a hole: the standard reads `kValue = O[k]` for every
+                // index and calls the predicate with it, so a hole is an index
+                // the callback sees, holding `undefined` (or whatever the
+                // prototype has, once the read reaches it).
+                JsValue item = array.get_property(std::to_string(i));
                 if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
                     return what == Find::Value ? item : JsValue::make_number(static_cast<double>(i));
                 }
@@ -667,13 +688,13 @@ void install_array_builtins(JsIntrinsics& realm) {
         size_t length = elements_of(array).size();
         result.reserve(length);
         for (size_t i = 0; i < length; ++i) {
-            if (i < elements_of(array).size() && hole_at(array, i)) {
+            if (!has_index(array, i)) {
                 // map keeps the hole; the callback is never called for it.
                 result.push_back(JsValue::make_undefined());
                 holes.push_back(true);
                 continue;
             }
-            JsValue item = i < elements_of(array).size() ? elements_of(array)[i] : JsValue::make_undefined();
+            JsValue item = index_value(array, i);
             result.push_back(callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}));
             holes.push_back(false);
         }
@@ -687,8 +708,8 @@ void install_array_builtins(JsIntrinsics& realm) {
         const JsValue this_arg = js_arg(args, 1);
         std::vector<JsValue> result;
         for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (hole_at(array, i)) continue;                // filter asks HasProperty first
-            JsValue item = elements_of(array)[i];
+            if (!has_index(array, i)) continue;             // filter asks HasProperty first
+            JsValue item = index_value(array, i);
             if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
                 result.push_back(std::move(item));
             }
@@ -702,8 +723,8 @@ void install_array_builtins(JsIntrinsics& realm) {
         std::vector<JsValue> result;
         std::vector<bool> holes;
         for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (hole_at(array, i)) continue;
-            JsValue item = elements_of(array)[i];
+            if (!has_index(array, i)) continue;
+            JsValue item = index_value(array, i);
             JsValue mapped = callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array});
             if (mapped.is_array()) {
                 const auto& inner = elements_of(mapped);
@@ -723,8 +744,8 @@ void install_array_builtins(JsIntrinsics& realm) {
         JsValue callback = require_callback(js_arg(args, 0), "some");
         const JsValue this_arg = js_arg(args, 1);
         for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (hole_at(array, i)) continue;
-            JsValue item = elements_of(array)[i];
+            if (!has_index(array, i)) continue;
+            JsValue item = index_value(array, i);
             if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
                 return JsValue::make_boolean(true);
             }
@@ -736,8 +757,8 @@ void install_array_builtins(JsIntrinsics& realm) {
         JsValue callback = require_callback(js_arg(args, 0), "every");
         const JsValue this_arg = js_arg(args, 1);
         for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (hole_at(array, i)) continue;                // every skips them, so all-holes is true
-            JsValue item = elements_of(array)[i];
+            if (!has_index(array, i)) continue;             // every skips ones that are nowhere
+            JsValue item = index_value(array, i);
             if (!callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
                 return JsValue::make_boolean(false);
             }
@@ -758,8 +779,8 @@ void install_array_builtins(JsIntrinsics& realm) {
                 bool seeded = false;
                 for (; step < length; ++step) {
                     size_t i = from_end ? length - 1 - step : step;
-                    if (i >= elements_of(array).size() || hole_at(array, i)) continue;
-                    accumulator = elements_of(array)[i];
+                    if (i >= elements_of(array).size() || !has_index(array, i)) continue;
+                    accumulator = index_value(array, i);
                     seeded = true;
                     ++step;
                     break;
@@ -769,8 +790,8 @@ void install_array_builtins(JsIntrinsics& realm) {
             for (; step < length; ++step) {
                 size_t i = from_end ? length - 1 - step : step;
                 if (i >= elements_of(array).size()) continue;
-                if (hole_at(array, i)) continue;
-                JsValue item = elements_of(array)[i];
+                if (!has_index(array, i)) continue;
+                JsValue item = index_value(array, i);
                 accumulator = callback.call({accumulator, item, JsValue::make_number(static_cast<double>(i)), array});
             }
             return accumulator;

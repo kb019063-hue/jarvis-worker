@@ -41,7 +41,7 @@ standard now makes, which is 1,967 of the 1,973.
 | XML against Expat and libxml2 | 4,000 generated documents, none read otherwise than both read it; 3,000 serialized trees, all read back the same | `make diff-xml` (needs `pip install lxml`) |
 | **URL parsing and setters** | **1188 / 1188 (100%)**; 2 before Phase 27 | `tests/url`, the web-platform-tests data, run by `make url-conformance` |
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
-| Engine unit tests | 260<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 261<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
@@ -72,7 +72,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 260<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 261<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
 make check-numbers   # the numbers above still divide and still count (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
@@ -119,9 +119,9 @@ Read the number for what it is:
   strings, arrays, regular expressions, dates, JSON), not every clause of the
   specification. The official suite scores lower: of the 47,967<!--metrics:t262.full.total/num--> tests in
   its `built-ins`, `language` and `annexB` directories that are not modules,
-  31,161<!--metrics:t262.full.pass/num--> pass (65.0%<!--metrics:t262.full/pct-->; 29,450 / 61.4% last recorded before Phase 88, 27,872 /
+  31,220<!--metrics:t262.full.pass/num--> pass (65.1%<!--metrics:t262.full/pct-->; 29,450 / 61.4% last recorded before Phase 88, 27,872 /
   58.1% before Phase 55, 26,012 / 54.2% before Phase 44); of the 15,686
-  on functions, classes and objects, 13,654<!--metrics:t262.default.now/num--> pass (87.0%<!--metrics:t262.default/pct-->; 12,657<!--metrics:t262.default.before/num--> / 80.7%<!--metrics:t262.default.before_pct/pct-->
+  on functions, classes and objects, 13,660<!--metrics:t262.default.now/num--> pass (87.1%<!--metrics:t262.default/pct-->; 12,657<!--metrics:t262.default.before/num--> / 80.7%<!--metrics:t262.default.before_pct/pct-->
   before Phase 88, 12,359 / 78.8% before Phase 59, 10,835 / 69.1% before
   Phase 44). `make test262` runs the
   latter. It is used for what a change moved between two builds, not as a
@@ -751,7 +751,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 260<!--metrics:unit_suites/int--> engine test suites
+# Run the 261<!--metrics:unit_suites/int--> engine test suites
 make test
 ```
 
@@ -819,14 +819,14 @@ make test
 make test
 ```
 
-Output (260<!--metrics:unit_suites/int--> suites; the first and last lines shown):
+Output (261<!--metrics:unit_suites/int--> suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 260<!--metrics:unit_suites/int--> engine test suites passed successfully!
+All 261<!--metrics:unit_suites/int--> engine test suites passed successfully!
 ```
 
 ```bash
@@ -986,7 +986,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 260/260<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 261/261<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++

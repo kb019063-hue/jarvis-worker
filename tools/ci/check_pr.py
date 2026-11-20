@@ -745,7 +745,10 @@ def check_merge(number: int) -> int:
             report.note(f"#{other['number']} is open and names or changes {', '.join(both)}: whichever merges second merges the other")
 
     suites = len(re.findall(r"(?m)^    RUN_TEST\(", file_at("tests/test_suite.cpp", head)))
-    readme = file_at("README.md", head)
+    # The figures a document publishes may carry a `<!--metrics:key/shape-->`
+    # marker (tools/ci/check_numbers.py): an HTML comment naming the claim, which
+    # a reader does not see and which must not read as a word of prose.
+    readme = re.sub(r"<!--metrics:[^>]*-->", "", file_at("README.md", head))
     stated = {int(n) for n in re.findall(r"\| Engine unit tests \| (\d+) suites", readme)}
     stated |= {int(n) for n in re.findall(r"All (\d+) engine test suites passed", readme)}
     stated |= {int(n) for n in re.findall(r"# Run the (\d+) engine test suites", readme)}

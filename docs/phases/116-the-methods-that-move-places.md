@@ -175,7 +175,7 @@ The 39 that remain, by what they need (one test can need two things):
 The rest of the checks:
 
 ```
-make test            275/275 suites (one of them new, with 14 checks)
+make test            279/279 suites (one of them new, with 14 checks)
 make conformance     1973/1973
 make js-conformance  1142/1158 (98.6%)
 make check-numbers   0 failure(s)

@@ -25718,6 +25718,157 @@ TEST(arraybuffer_and_typed_arrays) {
     assert(text("errName(function () { new Uint16Array(new ArrayBuffer(7)); })") == "TypeError");
 }
 
+// ECMA-262 §25.3 (`DataView`) and §23.2.3 (the iterating half of
+// `%TypedArray%.prototype`): the two surfaces Phase 106's typed arrays left
+// out. The offsets, the byte order and the numeric default sort are the parts
+// a wrong implementation can get plausibly wrong, so each is asserted against
+// bytes rather than against its own output.
+TEST(dataview_and_the_iterating_typed_array_methods) {
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- construction, and the three properties --------------------------
+    assert(text("var b = new ArrayBuffer(16); var d = new DataView(b, 4, 8); d.byteOffset + '|' + d.byteLength") == "4|8");
+    assert(text("var b = new ArrayBuffer(16); new DataView(b).byteOffset + '|' + new DataView(b).byteLength") == "0|16");
+    // The `buffer` of a view is the buffer itself, not a copy of it.
+    assert(text("var b = new ArrayBuffer(8); new DataView(b).buffer === b") == "true");
+    assert(text("var b = new ArrayBuffer(8); new Uint8Array(b).buffer === b") == "true");
+    assert(text("Object.prototype.toString.call(new DataView(new ArrayBuffer(1)))") == "[object DataView]");
+    assert(text("ArrayBuffer.isView(new DataView(new ArrayBuffer(1)))") == "true");
+    assert(text("ArrayBuffer.isView(new Uint8Array(1)) + '|' + ArrayBuffer.isView(new ArrayBuffer(1))") == "true|false");
+    // A buffer above a view outlives the reference that made it: the view's
+    // own exotic keeps the one script object for the buffer alive.
+    assert(text("var v = (function () { return new Uint8Array(new ArrayBuffer(8), 2); })(); gc();"
+                "v.buffer.byteLength + '|' + v.length") == "8|6");
+
+    // ---- byte order -------------------------------------------------------
+    // `setUint16(0, 0x1234, true)` writes 34 12, which is what an ordinary
+    // Uint8Array sees — the check is the bytes, not the getter.
+    assert(text("var b = new ArrayBuffer(2); var d = new DataView(b); d.setUint16(0, 0x1234, true);"
+                "new Uint8Array(b).join()") == "52,18");
+    assert(text("var b = new ArrayBuffer(2); var d = new DataView(b); d.setUint16(0, 0x1234);"
+                "new Uint8Array(b).join()") == "18,52");
+    // Big-endian is the default, and the same four bytes read both ways.
+    assert(text("var b = new ArrayBuffer(4); var d = new DataView(b);"
+                "new Uint8Array(b).set([0x12, 0x34, 0x56, 0x78]);"
+                "d.getUint32(0).toString(16) + '|' + d.getUint32(0, true).toString(16)") == "12345678|78563412");
+    assert(text("var b = new ArrayBuffer(4); var d = new DataView(b);"
+                "new Uint8Array(b).set([0x12, 0x34, 0x56, 0x78]); d.getUint16(1).toString(16)") == "3456");
+    assert(text("var b = new ArrayBuffer(2); var d = new DataView(b); d.setInt16(0, -2); d.getInt16(0)") == "-2");
+    assert(text("var b = new ArrayBuffer(2); var d = new DataView(b); d.setInt16(0, -2); d.getInt16(0, true)") == "-257");
+
+    // ---- every width, and the conversions a typed array would make -------
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setInt8(0, 200); d.getInt8(0)") == "-56");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setUint8(0, 258); d.getUint8(0)") == "2");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setUint32(0, -1, true); d.getUint32(0, true)") == "4294967295");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setInt32(0, -7); d.getInt32(0) + '|' + d.getInt32(0, true)") ==
+           "-7|-100663297");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setFloat64(0, 1.5, true); d.getFloat64(0, true)") == "1.5");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setFloat64(0, -0.25); d.getFloat64(0)") == "-0.25");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setFloat32(0, 0.1, true);"
+                "d.getFloat32(0, true) === Math.fround(0.1)") == "true");
+
+    // ---- the two views of one buffer see each other ----------------------
+    assert(text("var b = new ArrayBuffer(4); var d = new DataView(b); var u = new Uint8Array(b);"
+                "u[0] = 1; d.setUint8(1, 2); u[0] + '|' + d.getUint8(1)") == "1|2");
+    assert(text("var b = new ArrayBuffer(4); var d = new DataView(b); var u = new Uint32Array(b);"
+                "d.setUint32(0, 0x01020304, true); u[0].toString(16)") == "1020304");
+
+    // ---- bounds ----------------------------------------------------------
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8)).getUint32(5); })") == "RangeError");
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8)).getInt8(8); })") == "RangeError");
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8)).setFloat64(1, 1); })") == "RangeError");
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8)).getUint16(-1); })") == "RangeError");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setUint32(4, 7); d.getUint32(4)") == "7");
+    assert(text("errName(function () { new DataView({}); })") == "TypeError");
+    assert(text("errName(function () { new DataView(new Uint8Array(8)); })") == "TypeError");
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8), 9); })") == "RangeError");
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8), 6, 4); })") == "RangeError");
+    assert(text("errName(function () { DataView.prototype.getUint8.call({}, 0); })") == "TypeError");
+
+    // ---- the iterating methods, all of them ------------------------------
+    assert(text("new Uint8Array([1, 2, 3]).map(function (v) { return v * 2; }).join()") == "2,4,6");
+    assert(text("new Uint8Array([1, 2, 3]).map(function (v) { return v * 2; }).constructor === Uint8Array") == "true");
+    assert(text("new Int8Array([300, -1]).map(function (v) { return v; }).constructor.name") == "Int8Array");
+    // The callback sees (value, index, the typed array itself), in order.
+    assert(text("var seen = []; new Uint8Array([7, 8]).map(function (v, i, a) { seen.push(v + '@' + i + '/' + a.length);"
+                "return v; }); seen.join()") == "7@0/2,8@1/2");
+    assert(text("new Uint8Array([1, 2, 3, 4]).filter(function (v) { return v % 2 === 0; }).join()") == "2,4");
+    assert(text("new Float32Array([1.5, 2.5]).filter(function () { return false; }).constructor.name + '|' +"
+                "new Float32Array([1, 2]).filter(function () { return false; }).length") == "Float32Array|0");
+    assert(text("var out = ''; new Uint8Array([5, 6]).forEach(function (v, i) { out += v + ':' + i + ';'; }); out") ==
+           "5:0;6:1;");
+    assert(text("var out = []; new Uint8Array([1, 2]).forEach(function (v) { out.push(this.tag + v); }, { tag: 't' });"
+                "out.join()") == "t1,t2");
+    assert(text("new Uint8Array([1, 2]).some(function (v) { return v === 2; }) + '|' +"
+                "new Uint8Array([1, 2]).some(function (v) { return v === 3; })") == "true|false");
+    assert(text("new Uint8Array([1, 2]).every(function (v) { return v > 1; }) + '|' +"
+                "new Uint8Array(0).every(function () { return false; })") == "false|true");
+    assert(text("new Uint8Array([1, 2, 3]).find(function (v) { return v > 1; }) + '|' +"
+                "String(new Uint8Array([1, 2, 3]).find(function (v) { return v > 9; }))") == "2|undefined");
+    assert(text("new Uint8Array([1, 2, 3]).findIndex(function (v) { return v > 1; }) + '|' +"
+                "new Uint8Array([1, 2, 3]).findIndex(function (v) { return v > 9; })") == "1|-1");
+    assert(text("new Uint8Array([1, 2, 3]).reduce(function (a, b) { return a + b; })") == "6");
+    assert(text("new Uint8Array([1, 2, 3]).reduce(function (a, b) { return a + b; }, 10)") == "16");
+    assert(text("new Uint8Array([1, 2, 3]).reduceRight(function (a, b) { return a - b; })") == "0");
+    assert(text("new Uint8Array(0).reduce(function (a, b) { return a; }, 5)") == "5");
+
+    // ---- the numeric sort, which is not the Array sort -------------------
+    // `[10, 9].sort()` is 10, 9 by string comparison; a typed array sorts by
+    // value, and NaN goes last.
+    assert(text("new Float64Array([10, 9, 2.5, 1]).sort().join()") == "1,2.5,9,10");
+    assert(text("var a = new Float64Array([NaN, 3, 1]).sort();"
+                "a[0] + ',' + a[1] + ',' + isNaN(a[2])") == "1,3,true");
+    assert(text("new Float32Array([NaN, 2]).join()") == "NaN,2");
+    assert(text("new Int8Array([-5, 3, -1]).sort(function (a, b) { return b - a; }).join()") == "3,-1,-5");
+    // Stability: a comparator that answers 0 keeps the order it was given.
+    assert(text("new Uint8Array([3, 1, 2]).sort(function () { return 0; }).join()") == "3,1,2");
+    assert(text("var a = new Uint8Array([3, 1]); a.sort() === a") == "true");
+    assert(text("var a = new Uint8Array([3, 1]); a.sort(); a.join()") == "1,3");
+
+    // ---- the copying methods, which leave the receiver alone -------------
+    assert(text("var a = new Uint8Array([3, 1, 2]); var s = a.toSorted(); s.join() + '|' + a.join()") == "1,2,3|3,1,2");
+    assert(text("var a = new Uint8Array([3, 1, 2]); a.toSorted(function (x, y) { return y - x; }).join()") == "3,2,1");
+    assert(text("var a = new Uint8Array([3, 1, 2]); a.toReversed().join() + '|' + a.join()") == "2,1,3|3,1,2");
+    assert(text("var a = new Uint8Array([3, 1, 2]); a.with(1, 9).join() + '|' + a.join()") == "3,9,2|3,1,2");
+    assert(text("new Uint8Array([3, 1, 2]).with(-1, 9).join()") == "3,1,9");
+    assert(text("errName(function () { new Uint8Array([1]).with(1, 0); })") == "RangeError");
+    assert(text("errName(function () { new Uint8Array([1]).with(-2, 0); })") == "RangeError");
+    assert(text("new Uint8Array([1]).toSorted().constructor === Uint8Array") == "true");
+
+    // ---- at() ------------------------------------------------------------
+    assert(text("new Uint8Array([7, 8, 9]).at(0) + '|' + new Uint8Array([7, 8, 9]).at(-1)") == "7|9");
+    assert(text("String(new Uint8Array([7]).at(1)) + '|' + String(new Uint8Array([7]).at(-2))") == "undefined|undefined");
+
+    // ---- a TypeError where a callback is missing -------------------------
+    for (const char* call : {
+             "new Uint8Array([1]).map(1)",
+             "new Uint8Array([1]).filter()",
+             "new Uint8Array([1]).forEach('f')",
+             "new Uint8Array([1]).some({})",
+             "new Uint8Array([1]).every(null)",
+             "new Uint8Array([1]).find(1)",
+             "new Uint8Array([1]).findIndex()",
+             "new Uint8Array([1]).reduce(1)",
+             "new Uint8Array([1]).reduceRight()",
+             "new Uint8Array(0).reduce(function (a, b) { return a; })",
+             "new Uint8Array(0).reduceRight(function (a, b) { return a; })",
+             "new Uint8Array([1]).sort(1)",
+             "new Uint8Array([1]).toSorted('x')"}) {
+        const std::string call_name = call;
+        assert(text(("errName(function () { " + call_name + "; })").c_str()) == "TypeError");
+    }
+    assert(text("errName(function () { Uint8Array.prototype.map.call([1], function (v) { return v; }); })") == "TypeError");
+
+    // ---- a subclass keeps its own prototype ------------------------------
+    assert(text("class L extends Int16Array {}; var l = new L([1, 2]);"
+                "l.map(function (v) { return v + 1; }) instanceof L") == "true");
+    assert(text("class L extends Int16Array {}; var l = new L([3, 1]); l.toSorted() instanceof L") == "true");
+}
+
 TEST(reflect_describes_and_answers_extensibility) {
     using namespace litebird;
     // Phase 124, finding 129. `Reflect` had ten of its thirteen functions;
@@ -26267,6 +26418,7 @@ int main() {
 
     // Phase 106: ArrayBuffer and the typed arrays.
     RUN_TEST(arraybuffer_and_typed_arrays);
+    RUN_TEST(dataview_and_the_iterating_typed_array_methods);
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);

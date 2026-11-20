@@ -1518,15 +1518,22 @@ validation and frame compliance; do not use it as a secure browser boundary.
 See [Phase 83](docs/phases/83-websocket-handshake-security.md) and
 [finding 89](docs/findings/89-websocket-handshake-security.md).
 
-### HTTPS certificate identity (Phase 89)
+### HTTPS certificate identity, chains and dates (Phases 89 and 100)
 
-HTTPS now checks an IP URL against the certificate's IP SAN, not just its
-trust chain. `make security-https` runs eight ephemeral local TLS fixtures
-against Python ssl and Litebird: trusted DNS/IP, wrong DNS/IP identities,
-DNS SANs used as IP identities, and untrusted certificates. Rejected peers
-receive no HTTP request. CI runs these normally and under ASan/UBSan.
-See [Phase 89](docs/phases/89-https-certificate-identity.md) and
-[finding 95](docs/findings/95-https-ip-identity.md) for scope and remaining gaps.
+HTTPS checks an IP URL against the certificate's IP SAN, not just its trust
+chain, and `make security-https` runs **twenty** ephemeral local TLS fixtures
+against Python ssl and Litebird: trusted, wrong and untrusted DNS/IP
+identities, DNS SANs used as IP identities, a chain through an intermediate
+(present, missing, and marked not a CA), expired and not-yet-valid leaves, an
+expired intermediate, IPv6 literals in compressed and expanded form with an
+address of the wrong family written both ways, and SNI — the name a DNS host
+sends, the absence of one at a literal URL. Rejected peers receive no HTTP
+request. CI runs these normally and under ASan/UBSan.
+See [Phase 89](docs/phases/89-https-certificate-identity.md),
+[Phase 100](docs/phases/100-https-certificate-chains-dates-and-ipv6.md),
+[finding 95](docs/findings/95-https-ip-identity.md) and
+[finding 106](docs/findings/106-the-tls-fixtures-never-chained.md) for scope and
+the gaps that remain.
 
 ### WebSocket TLS, Fetch policy, and RFC 6455 framing (Phase 90)
 

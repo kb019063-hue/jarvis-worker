@@ -68,7 +68,7 @@ looked at the mode, and the other rows were answered without asking anybody.
 
 ## 3. How it is verified
 
-- `make test` → **283 / 283** suites (282 on `main`). The new one,
+- `make test` → **286 / 286** suites (285 on `main`). The new one,
   `a_strict_delete_refuses_what_it_cannot_remove`, is nine checks whose expected
   strings Node.js printed first: the sloppy answer and the property that is
   still there; six strict `TypeError`s (a plain object, a frozen one, a String

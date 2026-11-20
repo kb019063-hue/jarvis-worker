@@ -11478,6 +11478,170 @@ TEST(gc_keeps_state_reachable_only_from_listeners_and_frames) {
     }
 }
 
+// GC oracle — what an unbounded page must be able to assume about the
+// collector (ROADMAP Tier 1: "automatic GC"). The collector here runs only
+// on gc(), which these suites count on and cannot fix; what they fix is the
+// other half of the question — if it collects, is the answer right, and does
+// repeating churn grow? Each suite is a differential: what the roots cannot
+// reach must go, however it is wired; what a global still names must stay;
+// and the live set must be a plateau, not a ramp.
+
+TEST(gc_oracle_cycles_are_reclaimed) {
+    using namespace litebird;
+
+    // The handle-counting collector frees a cycle only when it works every
+    // reference — self, mutual, through a closure, through an array that
+    // holds itself. A churn built from all four shapes keeps none of what
+    // it makes, so once it returns, collecting must bring the heap back to
+    // exactly where it rested. The proof is a differential: identical work
+    // again, then larger work again, and the live set must not move either
+    // time. That check is deterministic; comparing against a heap the rest
+    // of the process shared is not, because an earlier suite's cells can be
+    // swept at any collection once the stack bits they accidentally depended
+    // on change.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            function churn(tag, n) {
+                for (var i = 0; i < n; i++) {
+                    var a = { tag: tag + i };
+                    var b = { tag: tag + i, other: a };
+                    a.other = b;            // mutual cycle
+                    a.self = a;             // self cycle
+                    var captured = { tag: tag + i };
+                    var fn = function () { return captured; };
+                    captured.fn = fn;       // cycle through a closure's scope
+                    a.fn = fn;              // and reachable from the object graph too
+                    var list = [a, b, captured];
+                    list.push(list);        // an array that holds itself
+                }
+            }
+            churn("a", 24);
+            churn("b", 24);
+        )");
+        Heap::default_heap().collect_garbage();
+        const size_t stable = Heap::default_heap().stats().alive_cells;
+        js.eval_ast("churn(\"c\", 24);");
+        Heap::default_heap().collect_garbage();
+        // Same work again: every shape the first round built and dropped
+        // must have been reclaimed, or the same survival repeats and the
+        // number grows by a round.
+        assert(Heap::default_heap().stats().alive_cells == stable);
+        js.eval_ast("churn(\"d\", 96);");
+        Heap::default_heap().collect_garbage();
+        // Larger work: a leak scales with the batch, a collector does not.
+        assert(Heap::default_heap().stats().alive_cells == stable);
+        // Collecting again is idempotent: nothing collected comes back.
+        Heap::default_heap().collect_garbage();
+        assert(Heap::default_heap().stats().alive_cells == stable);
+    }
+    // The interpreter is gone here, so everything it made is unreachable. A
+    // teardown must never grow the heap beyond what it was before the
+    // interpreter existed plus a handful of cells: what an earlier suite
+    // left reachable only through stack-bit patterns can legitimately be
+    // swept by these collections, which can only shrink the number, and a
+    // real boundary leak would show up as far more than 32 extra cells.
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t surviving = Heap::default_heap().stats().alive_cells;
+    if (surviving > permanent_cells + 32) {
+        std::printf("      [gc-oracle] %zu cells survive interpreter teardown (permanent %zu, delta %+zd)\n",
+                    surviving, permanent_cells,
+                    static_cast<ptrdiff_t>(surviving) - static_cast<ptrdiff_t>(permanent_cells));
+        std::fflush(stdout);
+    }
+    assert(surviving <= permanent_cells + 32);
+}
+
+TEST(gc_oracle_retention_is_exact) {
+    using namespace litebird;
+
+    // Reclaiming is only half right if you also reclaim what is reachable.
+    // Here one thread of the graph is kept by a global and the rest is a
+    // cyclic pile; the pile must go, the thread must not move or change.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            var keep = { name: "keep", child: { name: "child" } };
+            var pile = [];
+            for (var i = 0; i < 16; i++) {
+                var node = { name: "pile" + i };
+                node.self = node;           // a pile of cycles
+                pile.push(node);
+            }
+            pile[3].child = pile[7];
+            pile[7].child = pile[3];        // cycles across elements
+        )");
+        Heap::default_heap().collect_garbage();
+        const size_t with_pile = Heap::default_heap().stats().alive_cells;
+        js.eval_ast("pile = null;");
+        Heap::default_heap().collect_garbage();
+        const size_t without_pile = Heap::default_heap().stats().alive_cells;
+        assert(without_pile < with_pile);
+        // The retained thread answers exactly what it was given, after two
+        // collections — a handle must point at the same cell, never a copy.
+        assert(js.global_env()->get("keep").get_property("child").get_property("name").to_string() == "child");
+        js.eval_ast("keep.child.deep = { value: 42 };");
+        Heap::default_heap().collect_garbage();
+        assert(js.global_env()->get("keep").get_property("child").get_property("deep").get_property("value").to_number() == 42.0);
+    }
+    // Same boundary rule as gc_oracle_cycles_are_reclaimed: teardown may
+    // sweep older garbage down, but it must not make the heap bigger.
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t surviving = Heap::default_heap().stats().alive_cells;
+    if (surviving > permanent_cells + 32) {
+        std::printf("      [gc-oracle] %zu cells survive interpreter teardown (permanent %zu, delta %+zd)\n",
+                    surviving, permanent_cells,
+                    static_cast<ptrdiff_t>(surviving) - static_cast<ptrdiff_t>(permanent_cells));
+        std::fflush(stdout);
+    }
+    assert(surviving <= permanent_cells + 32);
+}
+
+TEST(gc_oracle_repeated_churn_stays_flat) {
+    using namespace litebird;
+
+    // A page that allocates and drops forever must not grow forever once it
+    // collects. Twenty-four identical rounds, collecting after each, and the
+    // last rounds may not hold more than the early ones by more than a
+    // handful of cells (the checkpoints array itself, the eval transient).
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            var checkpoints = [];
+            for (var round = 0; round < 24; round++) {
+                for (var i = 0; i < 150; i++) {
+                    var junk = { round: round, idx: i, pair: { value: "v" + i } };
+                    junk.self = junk;          // cycle: cell -> cell
+                    junk.pair.owner = junk;    // cycle: pair -> owner
+                }
+                checkpoints.push(gc().alive_cells);
+            }
+        )");
+        JsValue list = js.global_env()->get("checkpoints");
+        const size_t length = static_cast<size_t>(list.get_property("length").to_number());
+        assert(length == 24);
+        size_t first_max = 0, last_max = 0;
+        for (size_t i = 0; i < length; i++) {
+            const size_t alive = static_cast<size_t>(list.get_property(std::to_string(i)).to_number());
+            if (i < 6) first_max = std::max(first_max, alive);
+            if (i + 6 >= length) last_max = std::max(last_max, alive);
+        }
+        // The ramp a leak makes is not bounded; the plateau a collector
+        // makes is. Sixteen cells of slack for interpreter noise.
+        assert(last_max <= first_max + 16);
+    }
+}
+
 TEST(deep_nesting_never_exhausts_the_native_stack) {
     using namespace litebird;
 
@@ -26518,6 +26682,11 @@ int main() {
 
     // Phase 90: WebSocket wss:// TLS, Fetch Origin/mixed-content policy, and RFC 6455 framing.
     RUN_TEST(websocket_tls_origin_mixed_content_and_framing);
+
+    // GC oracle: the collector's answer, checked against itself (ROADMAP Tier 1).
+    RUN_TEST(gc_oracle_cycles_are_reclaimed);
+    RUN_TEST(gc_oracle_retention_is_exact);
+    RUN_TEST(gc_oracle_repeated_churn_stays_flat);
 
     // Phase 113: HTTP authentication challenges (RFC 7617 Basic, RFC 7616 Digest).
     RUN_TEST(http_authentication_basic_and_digest_challenges);

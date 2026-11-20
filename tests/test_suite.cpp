@@ -5217,6 +5217,323 @@ TEST(svg_text_uses_canvas_glyphs_and_svg_positioning) {
         assert(hidden->get_pixel_color(x, y).a == 0);
 }
 
+// ---------------------------------------------------------------------------
+// SVG text: the position lists, text chunks, <textPath> and paint servers of
+// Phase 107. Each test builds the image twice — once through the SVG and once
+// by asking Canvas 2D for the same glyphs at the position SVG asks for — so
+// the oracle is the geometry, not "it did not crash".
+// ---------------------------------------------------------------------------
+
+static std::shared_ptr<litebird::ImageData> svg_text_render_pixels(const std::string& content,
+                                                                   int width, int height) {
+    auto doc = litebird::HtmlParser::parse(
+        "<svg width='" + std::to_string(width) + "' height='" + std::to_string(height) +
+        "' viewBox='0 0 " + std::to_string(width) + " " + std::to_string(height) + "'>" +
+        content + "</svg>");
+    auto svgs = doc->get_elements_by_tag_name("svg");
+    assert(svgs.size() == 1);
+    auto image = litebird::SvgRenderer::render(svgs[0], static_cast<float>(width),
+                                               static_cast<float>(height));
+    assert(image && image->width == width && image->height == height);
+    return image;
+}
+
+// `tolerance` is the number of pixels allowed to differ, and it is zero for
+// everything that is not rotated: a glyph drawn at 45 degrees lands on a grid
+// that is not the pixel grid, and one unit of float rounding at the edge is
+// not a different answer. The ink is never allowed to be absent.
+static void svg_text_assert_same_pixels(const std::shared_ptr<litebird::ImageData>& actual,
+                                        const std::shared_ptr<litebird::ImageData>& expected,
+                                        int tolerance = 0) {
+    assert(actual && expected && actual->width == expected->width &&
+           actual->height == expected->height);
+    int painted = 0;
+    int differing = 0;
+    for (int y = 0; y < actual->height; ++y) {
+        for (int x = 0; x < actual->width; ++x) {
+            painted += actual->get_pixel_color(x, y).a != 0;
+            if (actual->get_pixel(x, y) != expected->get_pixel(x, y)) ++differing;
+        }
+    }
+    assert(painted > 50);
+    assert(differing <= tolerance);
+}
+
+TEST(svg_text_position_lists_place_each_glyph) {
+    using namespace litebird;
+
+    // No list: the run is still one drawn string, so the pairs a font kerns
+    // stay kerned. This is the case a per-glyph loop would have broken.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 40px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("AV", 10, 50);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='50' font-size='40' fill='red'>AV</text>", 200, 80),
+            expected.image_data());
+    }
+
+    // x list: the n-th value is the absolute x of the n-th character.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("A", 10, 32);
+        expected.fill_text("B", 30, 32);
+        expected.fill_text("C", 50, 32);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10 30 50' y='32' font-size='24' fill='red'>ABC</text>",
+                                   200, 80),
+            expected.image_data());
+    }
+
+    // y list: one absolute y per character, x carried along the run.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        expected.fill_text("A", 10, 20);
+        expected.fill_text("B", 10 + wa, 50);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='20 50' font-size='24' fill='red'>AB</text>",
+                                   200, 80),
+            expected.image_data());
+    }
+
+    // dx list: relative shifts, one per character, applied before it is drawn.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        expected.fill_text("A", 10, 32);
+        expected.fill_text("BC", 10 + wa + 5, 32);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='32' dx='0 5 0' font-size='24' fill='red'>ABC</text>",
+                                   200, 80),
+            expected.image_data());
+    }
+
+    // rotate: each glyph turns about its own origin; the last value carries on
+    // to the characters the list does not reach (SVG 1.1 §10.5).
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        const float wb = expected.measure_text("B").width;
+        expected.save();
+        expected.translate(10, 40);
+        expected.rotate(30.0f * 3.14159265358979f / 180.0f);
+        expected.fill_text("A", 0, 0);
+        expected.restore();
+        expected.save();
+        expected.translate(10 + wa, 40);
+        expected.rotate(0.0f);
+        expected.fill_text("B", 0, 0);
+        expected.restore();
+        expected.save();
+        expected.translate(10 + wa + wb, 40);
+        expected.rotate(0.0f);
+        expected.fill_text("C", 0, 0);
+        expected.restore();
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='40' rotate='30 0' font-size='24' fill='red'>ABC</text>",
+                                   200, 80),
+            expected.image_data(), 24);
+    }
+
+    // A tspan's own transform still moves its run, exactly as it did before
+    // the lists: the pen is inherited from the parent, then transformed.
+    {
+        CanvasRenderingContext2D measure(200, 80);
+        measure.font = "normal 400 24px sans-serif";
+        const float wa = measure.measure_text("A").width;
+
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("A", 10, 32);
+        expected.save();
+        expected.translate(40, 0);
+        expected.fill_text("B", 10 + wa, 32);
+        expected.restore();
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='32' font-size='24' fill='red'>A"
+                                   "<tspan transform='translate(40,0)'>B</tspan></text>", 200, 80),
+            expected.image_data());
+    }
+}
+
+TEST(svg_text_anchor_measures_the_whole_chunk) {
+    using namespace litebird;
+    // text-anchor belongs to the text chunk, not to the text node: a middle
+    // anchor over two tspans centres the run, whichever node paints it.
+    {
+        CanvasRenderingContext2D measure(200, 80);
+        measure.font = "normal 400 24px sans-serif";
+        const float wa = measure.measure_text("A").width;
+        const float wb = measure.measure_text("B").width;
+        const float start = 60.0f - (wa + wb) * 0.5f;
+
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("A", start, 32);
+        expected.fill_style = Color::parse("blue");
+        expected.fill_text("B", start + wa, 32);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='60' y='32' text-anchor='middle' font-size='24'>"
+                                   "<tspan fill='red'>A</tspan><tspan fill='blue'>B</tspan></text>",
+                                   200, 80),
+            expected.image_data());
+    }
+    // The same chunk anchored end sits to the left of x by its whole advance.
+    {
+        CanvasRenderingContext2D measure(200, 80);
+        measure.font = "normal 400 24px sans-serif";
+        const float wa = measure.measure_text("A").width;
+        const float wb = measure.measure_text("B").width;
+        const float start = 100.0f - (wa + wb);
+
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("A", start, 32);
+        expected.fill_style = Color::parse("blue");
+        expected.fill_text("B", start + wa, 32);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='100' y='32' text-anchor='end' font-size='24'>"
+                                   "<tspan fill='red'>A</tspan><tspan fill='blue'>B</tspan></text>",
+                                   200, 80),
+            expected.image_data());
+    }
+    // An absolute x on a tspan begins a new chunk, so the parent's `end` anchor
+    // applies to the first chunk and the tspan's own `start` to the second:
+    // A ends at 10, and B begins at 70.
+    {
+        CanvasRenderingContext2D measure(200, 80);
+        measure.font = "normal 400 24px sans-serif";
+        const float wa = measure.measure_text("A").width;
+
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("A", 10 - wa, 32);
+        expected.fill_style = Color::parse("blue");
+        expected.fill_text("B", 70, 32);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='32' text-anchor='end' font-size='24'"
+                                   " fill='red'>A<tspan x='70' text-anchor='start'"
+                                   " fill='blue'>B</tspan></text>", 200, 80),
+            expected.image_data());
+    }
+}
+
+TEST(svg_text_paint_servers_paint_the_glyphs) {
+    using namespace litebird;
+    CanvasRenderingContext2D expected(200, 80);
+    expected.font = "normal 400 40px sans-serif";
+    auto gradient = expected.create_linear_gradient(0, 0, 0, 50);
+    gradient->add_color_stop(0.0f, Color::parse("red"));
+    gradient->add_color_stop(1.0f, Color::parse("blue"));
+    expected.fill_gradient = gradient;
+    expected.fill_text("A", 10, 40);
+    svg_text_assert_same_pixels(
+        svg_text_render_pixels(
+            "<defs><linearGradient id='g' gradientUnits='userSpaceOnUse'"
+            " x1='0' y1='0' x2='0' y2='50'>"
+            "<stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/>"
+            "</linearGradient></defs>"
+            "<text x='10' y='40' font-size='40' fill='url(#g)'>A</text>", 200, 80),
+        expected.image_data());
+
+    // A gradient it cannot resolve falls back to the colour the same attribute
+    // names, which is what `fill="url(#missing) lime"` asks for.
+    {
+        CanvasRenderingContext2D solid(200, 80);
+        solid.font = "normal 400 40px sans-serif";
+        solid.fill_style = Color::parse("lime");
+        solid.fill_text("A", 10, 40);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='40' font-size='40'"
+                                   " fill='url(#missing) lime'>A</text>", 200, 80),
+            solid.image_data());
+    }
+}
+
+TEST(svg_text_path_lays_the_glyphs_along_a_path) {
+    using namespace litebird;
+
+    // A horizontal path: the glyphs follow it, no rotation.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        expected.fill_text("A", 10, 40);
+        expected.fill_text("B", 10 + wa, 40);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<defs><path id='p' d='M10 40 H110'/></defs>"
+                                   "<text font-size='24' fill='red'>"
+                                   "<textPath href='#p'>AB</textPath></text>", 200, 80),
+            expected.image_data());
+    }
+
+    // startOffset is a distance along the path; 50% of a 100-unit line is 50.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        expected.fill_text("A", 60, 40);
+        expected.fill_text("B", 60 + wa, 40);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<defs><path id='p' d='M10 40 H110'/></defs>"
+                                   "<text font-size='24' fill='red'>"
+                                   "<textPath href='#p' startOffset='50%'>AB</textPath></text>",
+                                   200, 80),
+            expected.image_data());
+    }
+
+    // A diagonal path: each glyph sits on the line and turns with it, which is
+    // the one thing a straight baseline cannot imitate.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        const float along = wa / std::sqrt(2.0f);
+        expected.save();
+        expected.translate(10, 10);
+        expected.rotate(45.0f * 3.14159265358979f / 180.0f);
+        expected.fill_text("A", 0, 0);
+        expected.restore();
+        expected.save();
+        expected.translate(10 + along, 10 + along);
+        expected.rotate(45.0f * 3.14159265358979f / 180.0f);
+        expected.fill_text("B", 0, 0);
+        expected.restore();
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<defs><path id='d' d='M10 10 L50 50'/></defs>"
+                                   "<text font-size='24' fill='red'>"
+                                   "<textPath href='#d'>AB</textPath></text>", 200, 80),
+            expected.image_data(), 40);
+    }
+
+    // A path that is not there paints nothing, and does not end the process.
+    {
+        auto empty = svg_text_render_pixels("<text font-size='24' fill='red'>"
+                                            "<textPath href='#nowhere'>AB</textPath></text>",
+                                            200, 80);
+        for (int y = 0; y < empty->height; ++y)
+            for (int x = 0; x < empty->width; ++x)
+                assert(empty->get_pixel_color(x, y).a == 0);
+    }
+}
+
 TEST(svg_vector_rendering) {
     using namespace litebird;
     std::string html = R"(
@@ -23888,6 +24205,18 @@ TEST(http_authentication_basic_and_digest_challenges) {
     assert(ResourceLoader::auth_base64("foob") == "Zm9vYg==");
     assert(ResourceLoader::auth_base64("Aladdin:open sesame") == "QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
 
+    //    Phase 115: FIPS 180-4 §6.7's SHA-512/256, whose answers FIPS does not
+    //    list under a separate appendix — so these are computed by an
+    //    independent implementation (Python's `hashlib.new("sha512_256")`),
+    //    and the point of the pair is that the second is *not* SHA-512 cut
+    //    short. FIPS 180-4 §5.3.6.2 gives the IV; §6.7 gives the truncation.
+    assert(ResourceLoader::auth_sha512_256_hex("") ==
+           "c672b8d1ef56ed28ab87c3622c5114069bdd3ad7b8f9737498d0c01ecef0967a");
+    assert(ResourceLoader::auth_sha512_256_hex("abc") ==
+           "53048e2681941ef99b2e29b76b4c7dabe4c2d0c634fc6d46e0e2f13107e7af23");
+    assert(ResourceLoader::auth_sha512_256_hex("abc") !=
+           "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a");    // SHA-512's first 256 bits
+
     // 2. RFC 7616 §3.9.1's example, reproduced field for field: the RFC's own
     //    cnonce and nc, so the expected hex is the RFC's and not this code's.
     {
@@ -23907,7 +24236,89 @@ TEST(http_authentication_basic_and_digest_challenges) {
 
         // An algorithm this client cannot compute is refused, not guessed.
         assert(!ResourceLoader::auth_Digest_response(
-            "SHA-512-256", "u", "p", "r", "n", "GET", "/", "auth", "c", "00000001", hex));
+            "SHA-512", "u", "p", "r", "n", "GET", "/", "auth", "c", "00000001", hex));
+        assert(!ResourceLoader::auth_Digest_response(
+            "SHA-384", "u", "p", "r", "n", "GET", "/", "auth", "c", "00000001", hex));
+
+        // RFC 7616 §3.9.2, with **erratum 4897 applied**. The RFC as published
+        // prints username=48886947… and response=ae66e67d…; those are SHA-512/256
+        // computed the wrong way (SHA-512 truncated, which the erratum's note
+        // describes as "Section 7 of FIPS 180-3/180-4" behaviour). The verified
+        // correction is the pair below, and it is exactly what an independent
+        // implementation gives. Writing the published values here would have
+        // asserted a bug.
+        {
+            std::string value;
+            assert(ResourceLoader::auth_Digest_build(
+                "SHA-512-256", "J\xC3\xA4s\xC3\xB8n Doe", "Secret, or not?", "api@example.org",
+                "5TsQWLVdgBdmrQ0XsxbDODV+57QdFR34I9HAbC/RVvkK",
+                "HRPCssKJSGjCrkzDg8OhwpzCiGPChXYjwrI2QmXDnsOS",
+                "GET", "/doe.json", "auth", "NTg6RKcb9boFIAS3KrFK9BGeh+iDa/sm6jUMp2wds69v",
+                "00000001", "", /*hash_username=*/true, value));
+            // The username field is H(username ":" realm), which is
+            // 793263caabb707a56211940d90411ea4a575adeccb7e360aeb624ed06ece9b0b —
+            // hashed with SHA-512-256, not with SHA-256 whatever the algorithm.
+            assert(value.find("username=\"793263caabb707a56211940d90411ea4a575adeccb7e360aeb624ed06ece9b0b\"") !=
+                   std::string::npos);
+            assert(value.find("response=\"3798d4131c277846293534c3edc11bd8a5e4cdcbff78b05db9d95eeb1cec68a5\"") !=
+                   std::string::npos);
+            assert(value.find(", userhash=true") != std::string::npos);
+            assert(value.find("algorithm=SHA-512-256") != std::string::npos);
+            assert(value.find("opaque=\"HRPCssKJSGjCrkzDg8OhwpzCiGPChXYjwrI2QmXDnsOS\"") != std::string::npos);
+        }
+
+        // `-sess` hashes A1 with the algorithm in use (RFC 7616 §3.4.2), which
+        // this used to do with MD5 whatever the algorithm was. Python computes
+        // the right-hand values; the SHA-256-sess one is not the MD5-sess one.
+        {
+            std::string md5_sess, sha_sess;
+            assert(ResourceLoader::auth_Digest_response(
+                "MD5-sess", "u", "p", "r", "N", "GET", "/x", "auth", "C", "00000001", md5_sess));
+            assert(ResourceLoader::auth_Digest_response(
+                "SHA-256-sess", "u", "p", "r", "N", "GET", "/x", "auth", "C", "00000001", sha_sess));
+            assert(md5_sess == "788ad15034a6ad9289524125c81f7b88");
+            assert(sha_sess == "1eba72f3eff655e53c4ad247210979d455f73e1cc7bdc5502abe54ee4cc40c98");
+            //   The value the old code gave for SHA-256-sess: it folded A1 with
+            //   MD5 whatever the algorithm said, so this is the answer it would
+            //   have sent, and it is not the one above.
+            assert(sha_sess != "1dfbe580e0d00ced3367cc3bf0a6209f94ef590bfefd2cebf3852b4040fc08eb");
+        }
+
+        // `auth-int` digests the body (RFC 7616 §3.4.3), so two bodies are two
+        // answers and the empty body is a third.
+        {
+            std::string empty_body, body_a, body_b;
+            assert(ResourceLoader::auth_Digest_build(
+                "SHA-256", "u", "p", "r", "N", "", "POST", "/x", "auth-int", "C", "00000001",
+                "", false, empty_body));
+            assert(ResourceLoader::auth_Digest_build(
+                "SHA-256", "u", "p", "r", "N", "", "POST", "/x", "auth-int", "C", "00000001",
+                "a", false, body_a));
+            assert(ResourceLoader::auth_Digest_build(
+                "SHA-256", "u", "p", "r", "N", "", "POST", "/x", "auth-int", "C", "00000001",
+                "b", false, body_b));
+            assert(empty_body != body_a && body_a != body_b);
+            //   `auth-int`'s answer is not `auth`'s, even with the same body.
+            std::string plain;
+            assert(ResourceLoader::auth_Digest_build(
+                "SHA-256", "u", "p", "r", "N", "", "POST", "/x", "auth", "C", "00000001",
+                "a", false, plain));
+            assert(plain != body_a);
+        }
+
+        // A qop this client cannot do is refused; an unknown qop name is too.
+        {
+            std::string value;
+            assert(!ResourceLoader::auth_Digest_build(
+                "MD5", "u", "p", "r", "N", "", "GET", "/x", "auth-conf", "C", "00000001",
+                "", false, value));
+            //   ...and an empty qop is the RFC 2069 form, which is still legal.
+            assert(ResourceLoader::auth_Digest_build(
+                "MD5", "u", "p", "r", "N", "", "GET", "/x", "", "", "",
+                "", false, value));
+            assert(value.find(", qop=") == std::string::npos);
+            assert(value.find(", nc=") == std::string::npos);
+        }
     }
 
     // 3. Basic is offered only when nothing better is, and never for a realm or
@@ -24029,6 +24440,206 @@ TEST(http_authentication_basic_and_digest_challenges) {
         assert(resp.auth_schemes.size() == 1);
         assert(resp.auth_schemes[0] == "Digest");
         assert(resp.auth_realm == "locked");
+    }
+
+    // 6. A credential a server refuses is forgotten, so the next load does not
+    //    replay it. Phase 115: before this, the store kept the refused pair for
+    //    the life of the process and every later load sent it again.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 4) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::vector<std::string> requested;
+        std::thread server_thread([server, &requested]() {
+            for (int i = 0; i < 2; ++i) {
+                const int client = accept(server, nullptr, nullptr);
+                if (client < 0) return;
+                std::string request;
+                char buffer[4096];
+                while (request.find("\r\n\r\n") == std::string::npos) {
+                    const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+                    if (count <= 0) break;
+                    request.append(buffer, static_cast<std::size_t>(count));
+                }
+                requested.push_back(request);
+                // Always 401: the credentials are wrong and the server says so
+                // again, which is what makes them refused rather than missing.
+                const std::string reply =
+                    "HTTP/1.1 401 Unauthorized\r\n"
+                    "WWW-Authenticate: Basic realm=\"locked\"\r\n"
+                    "Content-Length: 0\r\nConnection: close\r\n\r\n";
+                (void)::send(client, reply.data(), reply.size(), 0);
+                ::close(client);
+            }
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceLoader::set_auth_credentials(base, "locked", "Aladdin", "wrong");
+        assert(ResourceLoader::has_credentials(base, "locked"));
+        ResourceResponse resp = ResourceLoader::load_http(base + "/", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(resp.status_code == 401);
+        // The first request offered nothing, the second offered the credential,
+        // and after the second 401 the store no longer has it.
+        assert(requested.size() == 2);
+        assert(requested[0].find("\r\nAuthorization:") == std::string::npos);
+        assert(requested[1].find("\r\nAuthorization: Basic ") != std::string::npos);
+        assert(!ResourceLoader::has_credentials(base, "locked"));
+        assert(ResourceLoader::auth_credential_count() == 0);
+    }
+
+    // 7. A 407 is the proxy's challenge, not the document's: it is reported as
+    //    a proxy challenge and never answered with `Authorization`.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 1) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::string seen_request;
+        std::thread server_thread([server, &seen_request]() {
+            const int client = accept(server, nullptr, nullptr);
+            if (client < 0) return;
+            char buffer[4096];
+            const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+            if (count > 0) seen_request.assign(buffer, static_cast<std::size_t>(count));
+            const std::string reply =
+                "HTTP/1.1 407 Proxy Authentication Required\r\n"
+                "Proxy-Authenticate: Basic realm=\"gateway\"\r\n"
+                "Content-Length: 0\r\nConnection: close\r\n\r\n";
+            (void)::send(client, reply.data(), reply.size(), 0);
+            ::close(client);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        // Credentials are held for the very realm the proxy names. They must
+        // still not be sent, because they are the *document's* and this is the
+        // proxy asking.
+        ResourceLoader::set_auth_credentials(base, "gateway", "Aladdin", "open sesame");
+        ResourceResponse resp = ResourceLoader::load_http(base + "/", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(resp.status_code == 407);
+        assert(resp.proxy_auth_schemes.size() == 1 && resp.proxy_auth_schemes[0] == "Basic");
+        assert(resp.proxy_auth_realm == "gateway");
+        assert(resp.auth_schemes.empty() && resp.auth_realm.empty());
+        assert(seen_request.find("\r\nAuthorization:") == std::string::npos);
+        //   ...and a 407 is not a 401, so the credential is not thrown away.
+        assert(ResourceLoader::has_credentials(base, "gateway"));
+        ResourceLoader::clear_auth_credentials();
+    }
+
+    // 8. `Authentication-Info`'s `nextnonce` replaces the challenge's nonce on
+    //    the next request in that protection space (RFC 7616 §3.5).
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 4) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::vector<std::string> requested;
+        std::thread server_thread([server, &requested]() {
+            for (int i = 0; i < 4; ++i) {
+                const int client = accept(server, nullptr, nullptr);
+                if (client < 0) return;
+                std::string request;
+                char buffer[4096];
+                while (request.find("\r\n\r\n") == std::string::npos) {
+                    const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+                    if (count <= 0) break;
+                    request.append(buffer, static_cast<std::size_t>(count));
+                }
+                requested.push_back(request);
+                const bool has_auth = request.find("\r\nAuthorization:") != std::string::npos;
+                // The third request is the one that carries a nonce we named
+                // ("second") with a count of 1 for it, since a count is per
+                // nonce (RFC 7616 §3.4.4) and that nonce is new.
+                const bool has_nc2 = request.find("nonce=\"second\"") != std::string::npos;
+                std::string reply;
+                if (!has_auth) {
+                    reply = "HTTP/1.1 401 Unauthorized\r\n"
+                            "WWW-Authenticate: Digest realm=\"nonced\", qop=\"auth\", "
+                            "nonce=\"first\", algorithm=SHA-256\r\n"
+                            "Content-Length: 0\r\nConnection: close\r\n\r\n";
+                } else if (has_nc2) {
+                    // The third request carried the nonce we named and a count
+                    // of 2 for it, so this is the one that is accepted.
+                    reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                            "Connection: close\r\n\r\nok";
+                } else {
+                    reply = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                            "Authentication-Info: nextnonce=\"second\", qop=auth\r\n"
+                            "Connection: close\r\n\r\nok";
+                }
+                (void)::send(client, reply.data(), reply.size(), 0);
+                ::close(client);
+            }
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceLoader::set_auth_credentials(base, "nonced", "u", "p");
+        const ResourceResponse first = ResourceLoader::load_http(base + "/one", "GET", {}, "");
+        assert(first.status_code == 200);
+        // The nonce the server named is remembered against origin and realm.
+        assert(ResourceLoader::auth_next_nonce_for_testing(base, "nonced") == "second");
+        ResourceLoader::clear_http_cache();
+        const ResourceResponse second = ResourceLoader::load_http(base + "/two", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(second.status_code == 200 && second.body == "ok");
+        // Four requests, because nothing is sent pre-emptively (RFC 7617 §2.2):
+        // each load offers nothing, is challenged, and then answers.
+        assert(requested.size() == 4);
+        assert(requested[0].find("\r\nAuthorization:") == std::string::npos);
+        assert(requested[1].find("nonce=\"first\"") != std::string::npos);
+        assert(requested[2].find("\r\nAuthorization:") == std::string::npos);
+        // The later load answered with the nonce the server named last time,
+        // which is the whole point of reading Authentication-Info.
+        assert(requested[3].find("nonce=\"second\"") != std::string::npos);
+        assert(requested[3].find("nonce=\"first\"") == std::string::npos);
+        // A new nonce restarts the count (§3.4.4), so this is 1 and not 2.
+        assert(requested[3].find("nc=00000001") != std::string::npos);
+        ResourceLoader::clear_auth_credentials();
+        assert(ResourceLoader::auth_next_nonce_for_testing(base, "nonced").empty());
     }
 }
 
@@ -24863,6 +25474,114 @@ TEST(instanceof_asks_symbol_has_instance) {
     assert(none_failed());
 }
 
+// Phase 106: ArrayBuffer and the typed arrays.
+//
+// The oracle is the standard's conversions, not an implementation: an element
+// type is the function it applies to a value, so Uint8Array's 258 is 2 and
+// Int8Array's 200 is -56 whatever a browser's source says. Each case below is
+// one of those conversions, one of the indexing rules (an index past the end
+// is dropped, an element cannot be deleted, a non-index name is an ordinary
+// property), or one of the window rules (two views of one buffer are one
+// object, a subarray shares its bytes and a slice does not).
+TEST(arraybuffer_and_typed_arrays) {
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- the eleven element types, each storing its own conversion --------
+    assert(text("new Uint8Array([1, 2, 300]).join()") == "1,2,44");
+    assert(text("var a = new Uint8Array(1); a[0] = 258; a[0]") == "2");
+    assert(text("var a = new Int8Array(1); a[0] = 200; a[0]") == "-56");
+    assert(text("var a = new Int16Array(1); a[0] = 40000; a[0]") == "-25536");
+    assert(text("var a = new Uint16Array(1); a[0] = 65537; a[0]") == "1");
+    assert(text("var a = new Int32Array(1); a[0] = 2147483648; a[0]") == "-2147483648");
+    assert(text("var a = new Uint32Array(1); a[0] = -1; a[0]") == "4294967295");
+    assert(text("var a = new Float32Array(1); a[0] = 1.5; a[0]") == "1.5");
+    assert(text("var a = new Float64Array(1); a[0] = 0.1; a[0]") == "0.1");
+    // Uint8ClampedArray clamps and rounds half to even, and never wraps: this
+    // is the one type whose conversion is not modulo 2^8.
+    assert(text("var a = new Uint8ClampedArray(4); a[0] = 300; a[1] = -4; a[2] = 2.5; a[3] = 3.5; a.join()") ==
+           "255,0,2,4");
+    // A float that is not finite survives Float64Array and is widened by it.
+    assert(text("var a = new Float64Array([1, 2, 3]); a.length + '|' + a[1] + '|' + a.join('-')") == "3|2|1-2-3");
+
+    // ---- length, byteLength, byteOffset, BYTES_PER_ELEMENT ---------------
+    assert(text("var u = new Uint16Array(3); u.length + '|' + u.byteLength + '|' + u.byteOffset") == "3|6|0");
+    assert(text("Uint32Array.BYTES_PER_ELEMENT + '|' + Uint8Array.prototype.BYTES_PER_ELEMENT") == "4|1");
+
+    // ---- indexing: in range, past the end, and not an index at all -------
+    assert(text("var a = new Uint8Array(2); a[5] = 9; String(a[5])") == "undefined");
+    assert(text("var a = new Uint8Array(2); a[5] = 9; a.length") == "2");
+    assert(text("var a = new Uint8Array(2); 1 in a") == "true");
+    assert(text("var a = new Uint8Array(2); 5 in a") == "false");
+    // An element is not configurable, and `delete` of one answers false.
+    assert(text("var a = new Uint8Array(2); delete a[0]") == "false");
+    assert(text("Object.keys(new Uint8Array(3)).join()") == "0,1,2");
+    // `-1` is not a canonical index, so it is an ordinary property.
+    assert(text("var a = new Uint8Array(2); a[-1] = 9; a[-1]") == "9");
+    assert(text("var a = new Uint8Array(2); a['x'] = 5; a.x") == "5");
+
+    // ---- windows: one buffer, one object, shared bytes -------------------
+    assert(text("var b = new ArrayBuffer(8); new Uint8Array(b).buffer === new Uint16Array(b).buffer") == "true");
+    assert(text("var b = new ArrayBuffer(8); b.byteLength") == "8");
+    assert(text("var u = new Uint8Array(new ArrayBuffer(8), 4); u.length + '|' + u.byteOffset") == "4|4");
+    assert(text("var u = new Uint16Array(new ArrayBuffer(8), 4, 2); u.length + '|' + u.byteOffset") == "2|4");
+    assert(text("var b = new ArrayBuffer(4); var x = new Uint8Array(b); var y = new Uint8Array(b); "
+                "x[0] = 7; y[0]") == "7");
+    // subarray shares the bytes; slice copies them.
+    assert(text("var t = new Uint8Array([1,2,3]); var w = t.subarray(1); w[0] = 9; t[1]") == "9");
+    assert(text("var t = new Uint8Array([1,2,3]); var w = t.slice(1); w[0] = 9; t[1]") == "2");
+
+    // ---- methods ---------------------------------------------------------
+    assert(text("new Uint8Array([3,1,2]).slice(1).join()") == "1,2");
+    // A negative index counts from the end.
+    assert(text("new Uint8Array([3,1,2]).slice(-2).join()") == "1,2");
+    assert(text("new Uint8Array([3,1,2]).slice(0,-1).join()") == "3,1");
+    assert(text("new Uint8Array(3).fill(7).join()") == "7,7,7");
+    assert(text("new Uint8Array([0,0,0,0]).fill(5, 1, 3).join()") == "0,5,5,0");
+    assert(text("new Uint8Array([1,0,1]).indexOf(1)") == "0");
+    assert(text("new Uint8Array([1,0,1]).lastIndexOf(1)") == "2");
+    assert(text("new Uint8Array([1,0,1]).indexOf(9)") == "-1");
+    assert(text("new Uint8Array([1,2]).includes(2)") == "true");
+    assert(text("new Uint8Array([4,5]).join('-')") == "4-5");
+    assert(text("String(new Uint8Array([1,2]))") == "1,2");
+    assert(text("var t = new Uint8Array(4); t.set([1,2], 1); t.join()") == "0,1,2,0");
+    // A set from an overlapping window reads before it writes.
+    assert(text("var t = new Uint8Array([1,2,3,4]); t.set(t.subarray(0,3), 1); t.join()") == "1,1,2,3");
+    assert(text("new Uint8Array([1,2,3]).reverse().join()") == "3,2,1");
+    assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(0,3).join()") == "4,5,3,4,5");
+    assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(1,0,3).join()") == "1,1,2,3,5");
+    // A negative relative index counts from the end here too.
+    assert(text("new Uint8Array([1,2,3,4,5]).copyWithin(0,-2).join()") == "4,5,3,4,5");
+    assert(text("Uint8Array.from([1,2]).join()") == "1,2");
+    assert(text("Uint8Array.from([1,2], function (x) { return x * 2; }).join()") == "2,4");
+    assert(text("Uint16Array.of(1,2).join()") == "1,2");
+    assert(text("ArrayBuffer.isView(new Uint8Array(1)) + '|' + ArrayBuffer.isView({})") == "true|false");
+
+    // ---- iterators and Array.from ---------------------------------------
+    assert(text("var o = []; for (var v of new Uint8Array([4,5])) o.push(v); o.join()") == "4,5");
+    assert(text("var o = []; for (var k of new Uint8Array(2).keys()) o.push(k); o.join()") == "0,1");
+    assert(text("Array.from(new Uint8Array([1,2])).join()") == "1,2");
+
+    // ---- the chain the standard has -------------------------------------
+    assert(text("new Uint8Array(1) instanceof Uint8Array") == "true");
+    assert(text("new Uint8Array(1) instanceof Int8Array") == "false");
+    assert(text("Object.prototype.toString.call(new Float32Array(0))") == "[object Float32Array]");
+    assert(text("Object.getPrototypeOf(Uint8Array) === Object.getPrototypeOf(Int16Array)") == "true");
+    assert(text("Object.getPrototypeOf(new Uint8Array(1)) === Uint8Array.prototype") == "true");
+    // A subclass of a typed array is one: the element type follows new.target.
+    assert(text("class L extends Uint8Array {} var l = new L(2); "
+                "(l instanceof L) + '|' + (l instanceof Uint8Array) + '|' + l.length") == "true|true|2");
+
+    // ---- the errors a browser throws ------------------------------------
+    assert(text("errName(function () { new Uint8Array(-1); })") == "TypeError");
+    assert(text("errName(function () { new Uint16Array(new ArrayBuffer(8), 1); })") == "TypeError");
+    assert(text("errName(function () { new Uint32Array(new ArrayBuffer(8), 0, 3); })") == "TypeError");
+    assert(text("errName(function () { new Uint16Array(new ArrayBuffer(7)); })") == "TypeError");
+}
+
 TEST(reflect_describes_and_answers_extensibility) {
     using namespace litebird;
     // Phase 124, finding 129. `Reflect` had ten of its thirteen functions;
@@ -25045,8 +25764,6 @@ failures;
     if (!none_failed()) { std::cout << "\033[31mFAILED\033[0m"; return; }
     std::cout << "\033[32mPASSED\033[0m";
 }
-
-
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -25109,6 +25826,10 @@ int main() {
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
     RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);
+    RUN_TEST(svg_text_position_lists_place_each_glyph);
+    RUN_TEST(svg_text_anchor_measures_the_whole_chunk);
+    RUN_TEST(svg_text_paint_servers_paint_the_glyphs);
+    RUN_TEST(svg_text_path_lays_the_glyphs_along_a_path);
     RUN_TEST(svg_vector_rendering);
     RUN_TEST(es6_map_set_and_destructuring);
     RUN_TEST(css_transitions_and_animations);
@@ -25407,9 +26128,11 @@ int main() {
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
 
+    // Phase 106: ArrayBuffer and the typed arrays.
+    RUN_TEST(arraybuffer_and_typed_arrays);
+
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
-
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

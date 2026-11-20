@@ -15,11 +15,100 @@ using Args = const std::vector<JsValue>&;
 
 JsValue self() { return JsValue::current_this(); }
 
-/// The array a method operates on. Real arrays are used in place. Array-likes
-/// (`{0: "a", length: 1}`, strings) are copied into a temporary, which is
-/// enough for the methods that only read.
-JsValue receiver(const char* method, bool mutates = false) {
-    JsValue me = self();
+/// The array-like a method that is not handed a real array reads from.
+///
+/// It used to be a copy. `every` and its relatives called `receiver()`, which
+/// read every index from 0 to `length` into a vector before the method took
+/// its first step. That is wrong in the ways one mistake produces (finding
+/// 135):
+///
+///   - `Array.prototype.every.call({ 0: 9, length: Infinity }, f)` built a
+///     vector of 2^32 - 1 places and ended the process with `std::bad_alloc`,
+///     where the language reads index 0, calls `f`, and stops when `f` answers
+///     `false`;
+///   - every getter the object has ran before the callback was called once,
+///     and a write the callback made was never seen by the method;
+///   - memory was allocated in proportion to a number the page wrote.
+///
+/// So an array-like is wrapped, not filled. The wrapper holds the object and
+/// the length the standard takes once; each step asks the object
+/// `HasProperty` and `Get` when that step arrives, so a write the callback
+/// makes is seen by the next step, as the standard has it.
+///
+/// The state hangs off `internal` — a `std::shared_ptr`, which the collector
+/// already marks (`heap.mark_shared_value`) — so no header outside this file
+/// changes and no file another pull request holds is touched.
+struct ViewMarker {
+    virtual ~ViewMarker() = default;
+};
+
+struct ArrayLikeView final : ViewMarker {
+    ArrayLikeView(JsValue t, size_t n) : target(std::move(t)), length(n) {}
+    JsValue target;
+    size_t length{0};
+};
+
+/// The view `value` is, or null. A view is an array whose `internal` is an
+/// `ArrayLikeView`; nothing else in the engine makes one, and the `dynamic_cast`
+/// says so rather than trusting the pointer's type.
+ArrayLikeView* view_of(const JsValue& value) {
+    if (!value.is_array() || !value.object_val || !value.object_val->internal) return nullptr;
+    auto* view = dynamic_cast<ArrayLikeView*>(static_cast<ViewMarker*>(value.object_val->internal.get()));
+    return view;
+}
+
+JsValue make_view(const JsValue& object, size_t length) {
+    JsValue view = JsValue::make_array();
+    view.object_val->internal = std::make_shared<ArrayLikeView>(ArrayLikeView{object, length});
+    return view;
+}
+
+/// The places a view stands for; the wrapper's own vector, which never holds
+/// one, for anything else.
+size_t view_length(const JsValue& view) {
+    if (ArrayLikeView* v = view_of(view)) return v->length;
+    return view.object_val ? view.object_val->array_elements.size() : 0;
+}
+
+/// Has(O, k): asked of the object each time, so a write the callback makes is
+/// seen by the next step.
+bool view_has(const JsValue& view, size_t index) {
+    if (ArrayLikeView* v = view_of(view)) return v->target.has_property(std::to_string(index));
+    return view.has_property(std::to_string(index));
+}
+
+/// Get(O, k): the same, for values.
+JsValue view_get(const JsValue& view, size_t index) {
+    if (ArrayLikeView* v = view_of(view)) return v->target.get_property(std::to_string(index));
+    return view.get_property(std::to_string(index));
+}
+
+/// The object a callback is handed as its third argument: the object the
+/// method was called on, not the wrapper standing in for it.
+JsValue view_this(const JsValue& view) {
+    if (ArrayLikeView* v = view_of(view)) return v->target;
+    return view;
+}
+
+/// The first index at or after `from` that a view does not have, or SIZE_MAX
+/// when the search runs to the end of the view. A copy stops here instead of
+/// at a length no array can hold: `slice.call({length: Infinity})` asks
+/// `HasProperty(O, 0)`, finds nothing, and copies nothing.
+size_t view_first_absent(const JsValue& view, size_t from) {
+    ArrayLikeView* v = view_of(view);
+    if (!v) return SIZE_MAX;
+    for (size_t i = from; i < v->length; ++i) {
+        if (!v->target.has_property(std::to_string(i))) return i;
+    }
+    return SIZE_MAX;
+}
+
+/// ToObject + LengthOfArrayLike, in that order, as every Array method does.
+/// `checked` is set for the two methods that allocate a result of the length
+/// before the callback is asked for (`map`, `filter`): a length no array can
+/// hold is their `RangeError`, never a silent truncation.
+JsValue receiver_view(const char* method, bool mutates = false) {
+    JsValue me = JsValue::current_this();
     if (me.is_array()) return me;
     if (me.is_nullish()) {
         js_throw_type_error(std::string("Array.prototype.") + method + " called on null or undefined");
@@ -27,18 +116,30 @@ JsValue receiver(const char* method, bool mutates = false) {
     if (mutates) {
         js_throw_type_error(std::string("Array.prototype.") + method + " requires an array");
     }
-    std::vector<JsValue> elements;
-    if (me.type == JsType::String) {
-        const JsString& text = me.string_val;
-        elements.reserve(text.length());
-        for (size_t i = 0; i < text.length(); ++i) elements.push_back(JsValue::make_string(JsString::from_unit(text.unit_at(i))));
-    } else if (me.is_object_like()) {
-        double length = js_to_integer(js_to_number(me.get_property("length")));
-        for (double i = 0; i < length && i < 4294967295.0; ++i) {
-            elements.push_back(me.get_property(js_number_to_string(i)));
-        }
-    }
-    return JsValue::make_array(elements);
+    JsValue object = js_to_object(me);
+    const double length = js_to_integer(js_to_number(object.get_property("length")));
+    const size_t clamped = length <= 0 ? 0
+        : length > 9007199254740991.0 ? static_cast<size_t>(9007199254740991ull)
+        : static_cast<size_t>(length);
+    return make_view(object, clamped);
+}
+
+/// How many places a copying method builds from a view: up to the end asked
+/// for, unless the object stops having places first.
+size_t view_copy_length(const JsValue& view, size_t begin, size_t end) {
+    if (begin >= end) return begin;
+    const size_t stop = view_first_absent(view, begin);
+    return stop == SIZE_MAX ? end : std::min(end, stop);
+}
+
+/// A length `map`/`filter` can build a result of. The bound is the engine's
+/// own: an array that long is already unreachable by arithmetic here, and the
+/// alternative on `main` was a process that died allocating it.
+size_t checked_length(const JsValue& object, size_t length) {
+    (void)object;
+    constexpr size_t kLargestResult = static_cast<size_t>(1) << 32;
+    if (length > kLargestResult) js_throw_range_error("Invalid array length");
+    return length;
 }
 
 std::deque<JsValue>& elements_of(const JsValue& array) {
@@ -126,6 +227,7 @@ size_t to_length(const JsValue& value) {
 
 /// LengthOfArrayLike(O).
 size_t length_of(JsValue object) { return to_length(object.get_property("length")); }
+
 
 /// True when a method may keep using this engine's dense element vector: a real
 /// array, no accessor on a place, and nothing that would refuse a write.
@@ -667,7 +769,21 @@ void install_array_builtins(JsIntrinsics& realm) {
 
     // ---- Copying and slicing ----------------------------------------------
     js_define_method(ap, "slice", 2, [](Args args) {
-        JsValue array = read_through(receiver("slice"));
+        JsValue array = receiver_view("slice");
+        if (ArrayLikeView* view = view_of(array)) {
+            // Get(O, k) as the slice reaches k, and no place before. A length
+            // of 2^32 is a number the arguments are resolved against, not a
+            // number of places this allocates: the copy stops at the first
+            // place the object does not have.
+            size_t begin = relative_index(js_arg(args, 0), view->length, 0);
+            size_t end = relative_index(js_arg(args, 1), view->length, view->length);
+            const size_t stop = view_copy_length(array, begin, end);
+            std::vector<JsValue> out;
+            out.reserve(stop > begin ? stop - begin : 0);
+            for (size_t i = begin; i < stop; ++i) out.push_back(view_get(array, i));
+            return JsValue::make_array(out);
+        }
+        array = read_through(array);
         const auto& elements = elements_of(array);
         size_t begin = relative_index(js_arg(args, 0), elements.size(), 0);
         size_t end = relative_index(js_arg(args, 1), elements.size(), elements.size());
@@ -823,10 +939,21 @@ void install_array_builtins(JsIntrinsics& realm) {
         return JsValue::make_array(copy);
     });
     js_define_method(ap, "concat", 1, [](Args args) {
-        JsValue array = read_through(receiver("concat"));
-        std::vector<JsValue> values(elements_of(array).begin(), elements_of(array).end());
+        JsValue array = receiver_view("concat");
+        std::vector<JsValue> values;
         std::vector<bool> holes;
-        for (size_t i = 0; i < values.size(); ++i) holes.push_back(array.is_array_hole(i));
+        if (ArrayLikeView* view = view_of(array)) {
+            // IsConcatSpreadable: the object's places, up to the first it does
+            // not have, so `[].concat.call({length: Infinity})` is `[]`.
+            const size_t stop = view_first_absent(array, 0);
+            const size_t length = stop == SIZE_MAX ? view->length : stop;
+            values.reserve(length);
+            for (size_t i = 0; i < length; ++i) { values.push_back(view_get(array, i)); holes.push_back(false); }
+        } else {
+            array = read_through(array);
+            values.assign(elements_of(array).begin(), elements_of(array).end());
+            for (size_t i = 0; i < values.size(); ++i) holes.push_back(array.is_array_hole(i));
+        }
         for (const auto& given : args) {
             if (given.is_array()) {
                 const JsValue arg = read_through(given);
@@ -845,8 +972,23 @@ void install_array_builtins(JsIntrinsics& realm) {
         return result;
     });
     js_define_method(ap, "join", 1, [](Args args) {
-        JsValue array = receiver("join");
+        JsValue array = receiver_view("join");
         std::string separator = js_arg(args, 0).is_undefined() ? "," : js_to_string(js_arg(args, 0));
+        if (ArrayLikeView* view = view_of(array)) {
+            // The standard's form, which reads each place as the join reaches
+            // it: an array-like of `length: Infinity` joins what it has and
+            // stops at the first place that is nowhere, instead of building
+            // 2^32 string pieces first.
+            std::string out;
+            const size_t stop = view_first_absent(array, 0);
+            const size_t length = stop == SIZE_MAX ? view->length : stop;
+            for (size_t i = 0; i < length; ++i) {
+                if (i) out += separator;
+                const JsValue item = view_get(array, i);
+                if (!item.is_nullish()) out += js_to_string(item);
+            }
+            return JsValue::make_string(out);
+        }
         return JsValue::make_string(join_array(array, separator));
     });
     js_define_method(ap, "toString", 0, [](Args) {
@@ -855,7 +997,19 @@ void install_array_builtins(JsIntrinsics& realm) {
         return JsValue::make_string(join_array(me, ","));
     });
     js_define_method(ap, "toLocaleString", 0, [](Args) {
-        return JsValue::make_string(join_array(receiver("toLocaleString"), ","));
+        JsValue array = receiver_view("toLocaleString");
+        if (ArrayLikeView* view = view_of(array)) {
+            std::string out;
+            const size_t stop = view_first_absent(array, 0);
+            const size_t length = stop == SIZE_MAX ? view->length : stop;
+            for (size_t i = 0; i < length; ++i) {
+                if (i) out += ",";
+                const JsValue item = view_get(array, i);
+                if (!item.is_nullish()) out += js_to_string(item);
+            }
+            return JsValue::make_string(out);
+        }
+        return JsValue::make_string(join_array(array, ","));
     });
     js_define_method(ap, "reverse", 0, [](Args) {
         JsValue array = this_object("reverse");
@@ -1208,7 +1362,24 @@ void install_array_builtins(JsIntrinsics& realm) {
         return array;
     });
     js_define_method(ap, "flat", 0, [](Args args) {
-        JsValue array = read_through(receiver("flat"));
+        JsValue array = receiver_view("flat");
+        if (ArrayLikeView* view = view_of(array)) {
+            // Flatten(O, len, depth): every place is read as the walk reaches
+            // it, so a length no array holds costs the places that exist.
+            double depth = js_arg(args, 0).is_undefined() ? 1 : js_to_integer(js_to_number(js_arg(args, 0)));
+            std::vector<JsValue> result;
+            std::vector<bool> holes;
+            std::vector<JsValue> items;
+            const size_t stop = view_first_absent(array, 0);
+            const size_t length = stop == SIZE_MAX ? view->length : stop;
+            items.reserve(length);
+            for (size_t i = 0; i < length; ++i) items.push_back(view_get(array, i));
+            flatten_into(result, holes, JsValue::make_array(items), depth);
+            JsValue flat = JsValue::make_array(result);
+            for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) flat.set_array_hole(i);
+            return flat;
+        }
+        array = read_through(array);
         double depth = js_arg(args, 0).is_undefined() ? 1 : js_to_integer(js_to_number(js_arg(args, 0)));
         std::vector<JsValue> result;
         std::vector<bool> holes;
@@ -1218,44 +1389,42 @@ void install_array_builtins(JsIntrinsics& realm) {
         return flat;
     });
     js_define_method(ap, "at", 1, [](Args args) {
-        JsValue array = receiver("at");
-        const auto& elements = elements_of(array);
+        JsValue array = receiver_view("at");
+        const size_t length = view_length(array);
         double index = js_to_integer(js_to_number(js_arg(args, 0)));
-        if (index < 0) index += static_cast<double>(elements.size());
-        if (index < 0 || index >= static_cast<double>(elements.size())) return JsValue::make_undefined();
-        return js_array_get(array, static_cast<size_t>(index));
+        if (index < 0) index += static_cast<double>(length);
+        if (index < 0 || index >= static_cast<double>(length)) return JsValue::make_undefined();
+        return view_get(array, static_cast<size_t>(index));
     });
 
     // ---- Searching --------------------------------------------------------
     js_define_method(ap, "indexOf", 1, [](Args args) {
-        JsValue array = receiver("indexOf");
-        const auto& elements = elements_of(array);
+        JsValue array = receiver_view("indexOf");
         // The length is taken once: reading an index can call a getter now,
         // and an element it adds is not one indexOf looks at.
-        const size_t length = elements.size();
+        const size_t length = view_length(array);
         for (size_t i = relative_index(js_arg(args, 1), length, 0); i < length; ++i) {
-            if (!has_index(array, i)) continue;            // indexOf asks HasProperty first
-            if (strict_equals(index_value(array, i), js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
+            if (!view_has(array, i)) continue;             // indexOf asks HasProperty first
+            if (strict_equals(view_get(array, i), js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
         }
         return JsValue::make_number(-1);
     });
     js_define_method(ap, "lastIndexOf", 1, [](Args args) {
-        JsValue array = receiver("lastIndexOf");
-        const auto& elements = elements_of(array);
-        if (elements.empty()) return JsValue::make_number(-1);
-        double from = args.size() > 1 ? js_to_integer(js_to_number(args[1])) : static_cast<double>(elements.size()) - 1;
-        if (from < 0) from += static_cast<double>(elements.size());
+        JsValue array = receiver_view("lastIndexOf");
+        const size_t length = view_length(array);
+        if (length == 0) return JsValue::make_number(-1);
+        double from = args.size() > 1 ? js_to_integer(js_to_number(args[1])) : static_cast<double>(length) - 1;
+        if (from < 0) from += static_cast<double>(length);
         if (from < 0) return JsValue::make_number(-1);
-        size_t start = static_cast<size_t>(std::min(from, static_cast<double>(elements.size()) - 1));
+        size_t start = static_cast<size_t>(std::min(from, static_cast<double>(length) - 1));
         for (size_t i = start + 1; i-- > 0;) {
-            if (!has_index(array, i)) continue;
-            if (strict_equals(index_value(array, i), js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
+            if (!view_has(array, i)) continue;
+            if (strict_equals(view_get(array, i), js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
         }
         return JsValue::make_number(-1);
     });
     js_define_method(ap, "includes", 1, [](Args args) {
-        JsValue array = receiver("includes");
-        const auto& elements = elements_of(array);
+        JsValue array = receiver_view("includes");
         // Unlike indexOf, includes does not ask for the property: it reads
         // the place as `a[i]` does. A hole is `undefined` to it, unless the
         // index has an accessor of its own or the prototype has the index,
@@ -1263,11 +1432,14 @@ void install_array_builtins(JsIntrinsics& realm) {
         // can. It is asked after the index to start from, because turning
         // that into a number can run one; the length is taken before it, as
         // the standard takes it, and a place that is gone reads `undefined`.
-        const size_t length = elements.size();
+        const size_t length = view_length(array);
         const size_t start = relative_index(js_arg(args, 1), length, 0);
-        const bool plain = js_array_holes_read_undefined(array);
+        // A real array with no hole that reads as something has its places
+        // already; a view (or an array with a hole) has to ask.
+        const bool plain = !view_of(array) && js_array_holes_read_undefined(array);
         for (size_t i = start; i < length; ++i) {
-            if (js_same_value_zero(plain ? array.array_element(i) : js_array_get(array, i), js_arg(args, 0))) {
+            const JsValue place = plain ? array.array_element(i) : view_get(array, i);
+            if (js_same_value_zero(place, js_arg(args, 0))) {
                 return JsValue::make_boolean(true);
             }
         }
@@ -1281,20 +1453,20 @@ void install_array_builtins(JsIntrinsics& realm) {
     enum class Find { Value, Index };
     auto make_find = [](const char* name, bool from_end, Find what) {
         return [name, from_end, what](Args args) {
-            JsValue array = receiver(name);
+            JsValue array = receiver_view(name);
             JsValue callback = require_callback(js_arg(args, 0), name);
             const JsValue this_arg = js_arg(args, 1);
-            size_t length = elements_of(array).size();
+            const size_t length = view_length(array);
+            const JsValue given_to_callback = view_this(array);
             for (size_t step = 0; step < length; ++step) {
                 size_t i = from_end ? length - 1 - step : step;
-                if (i >= elements_of(array).size()) continue;
                 // `find` and its relatives are the one family that does *not*
                 // skip a hole: the standard reads `kValue = O[k]` for every
                 // index and calls the predicate with it, so a hole is an index
                 // the callback sees, holding `undefined` (or whatever the
                 // prototype has, once the read reaches it).
-                JsValue item = array.get_property(std::to_string(i));
-                if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
+                JsValue item = view_get(array, i);
+                if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), given_to_callback}).is_truthy()) {
                     return what == Find::Value ? item : JsValue::make_number(static_cast<double>(i));
                 }
             }
@@ -1326,22 +1498,25 @@ void install_array_builtins(JsIntrinsics& realm) {
         return JsValue::make_undefined();
     });
     js_define_method(ap, "map", 1, [](Args args) {
-        JsValue array = receiver("map");
+        JsValue array = receiver_view("map");
         JsValue callback = require_callback(js_arg(args, 0), "map");
         const JsValue this_arg = js_arg(args, 1);
         std::vector<JsValue> result;
         std::vector<bool> holes;
-        size_t length = elements_of(array).size();
+        // ArraySpeciesCreate(len) comes before the callback is looked at: a
+        // length no array can hold is a RangeError here, not an allocation.
+        const size_t length = checked_length(array, view_length(array));
+        const JsValue given_to_callback = view_this(array);
         result.reserve(length);
         for (size_t i = 0; i < length; ++i) {
-            if (!has_index(array, i)) {
+            if (!view_has(array, i)) {
                 // map keeps the hole; the callback is never called for it.
                 result.push_back(JsValue::make_undefined());
                 holes.push_back(true);
                 continue;
             }
-            JsValue item = index_value(array, i);
-            result.push_back(callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}));
+            JsValue item = view_get(array, i);
+            result.push_back(callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), given_to_callback}));
             holes.push_back(false);
         }
         JsValue mapped = JsValue::make_array(result);
@@ -1349,29 +1524,33 @@ void install_array_builtins(JsIntrinsics& realm) {
         return mapped;
     });
     js_define_method(ap, "filter", 1, [](Args args) {
-        JsValue array = receiver("filter");
+        JsValue array = receiver_view("filter");
         JsValue callback = require_callback(js_arg(args, 0), "filter");
         const JsValue this_arg = js_arg(args, 1);
         std::vector<JsValue> result;
-        for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (!has_index(array, i)) continue;             // filter asks HasProperty first
-            JsValue item = index_value(array, i);
-            if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
+        const size_t length = checked_length(array, view_length(array));
+        const JsValue given_to_callback = view_this(array);
+        for (size_t i = 0; i < length; ++i) {
+            if (!view_has(array, i)) continue;              // filter asks HasProperty first
+            JsValue item = view_get(array, i);
+            if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), given_to_callback}).is_truthy()) {
                 result.push_back(std::move(item));
             }
         }
         return JsValue::make_array(result);
     });
     js_define_method(ap, "flatMap", 1, [](Args args) {
-        JsValue array = receiver("flatMap");
+        JsValue array = receiver_view("flatMap");
         JsValue callback = require_callback(js_arg(args, 0), "flatMap");
         const JsValue this_arg = js_arg(args, 1);
         std::vector<JsValue> result;
         std::vector<bool> holes;
-        for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (!has_index(array, i)) continue;
-            JsValue item = index_value(array, i);
-            JsValue mapped = callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array});
+        const size_t length = checked_length(array, view_length(array));
+        const JsValue given_to_callback = view_this(array);
+        for (size_t i = 0; i < length; ++i) {
+            if (!view_has(array, i)) continue;
+            JsValue item = view_get(array, i);
+            JsValue mapped = callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), given_to_callback});
             if (mapped.is_array()) {
                 const auto& inner = elements_of(mapped);
                 result.insert(result.end(), inner.begin(), inner.end());
@@ -1386,26 +1565,36 @@ void install_array_builtins(JsIntrinsics& realm) {
         return flattened;
     });
     js_define_method(ap, "some", 1, [](Args args) {
-        JsValue array = receiver("some");
+        JsValue array = receiver_view("some");
         JsValue callback = require_callback(js_arg(args, 0), "some");
         const JsValue this_arg = js_arg(args, 1);
-        for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (!has_index(array, i)) continue;
-            JsValue item = index_value(array, i);
-            if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
+        // The length is taken once, and no place is read before the step that
+        // asks for it: `some.call({0: 9, length: Infinity}, f)` stops at the
+        // first `true` instead of building the object's 2^32 places.
+        const size_t length = view_length(array);
+        const JsValue given_to_callback = view_this(array);
+        for (size_t i = 0; i < length; ++i) {
+            if (!view_has(array, i)) continue;
+            JsValue item = view_get(array, i);
+            if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), given_to_callback}).is_truthy()) {
                 return JsValue::make_boolean(true);
             }
         }
         return JsValue::make_boolean(false);
     });
     js_define_method(ap, "every", 1, [](Args args) {
-        JsValue array = receiver("every");
+        JsValue array = receiver_view("every");
         JsValue callback = require_callback(js_arg(args, 0), "every");
         const JsValue this_arg = js_arg(args, 1);
-        for (size_t i = 0; i < elements_of(array).size(); ++i) {
-            if (!has_index(array, i)) continue;             // every skips ones that are nowhere
-            JsValue item = index_value(array, i);
-            if (!callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
+        // `every.call({ 0: 9, length: Infinity }, f)` reads index 0, calls `f`,
+        // and answers `false` when `f` does: the length is a number, not a
+        // number of reads (finding 135).
+        const size_t length = view_length(array);
+        const JsValue given_to_callback = view_this(array);
+        for (size_t i = 0; i < length; ++i) {
+            if (!view_has(array, i)) continue;              // every skips ones that are nowhere
+            JsValue item = view_get(array, i);
+            if (!callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), given_to_callback}).is_truthy()) {
                 return JsValue::make_boolean(false);
             }
         }
@@ -1413,9 +1602,10 @@ void install_array_builtins(JsIntrinsics& realm) {
     });
     auto make_reduce = [](const char* name, bool from_end) {
         return [name, from_end](Args args) {
-            JsValue array = receiver(name);
+            JsValue array = receiver_view(name);
             JsValue callback = require_callback(js_arg(args, 0), name);
-            size_t length = elements_of(array).size();
+            const size_t length = view_length(array);
+            const JsValue given_to_callback = view_this(array);
             size_t step = 0;
             JsValue accumulator;
             if (args.size() >= 2) {
@@ -1425,8 +1615,8 @@ void install_array_builtins(JsIntrinsics& realm) {
                 bool seeded = false;
                 for (; step < length; ++step) {
                     size_t i = from_end ? length - 1 - step : step;
-                    if (i >= elements_of(array).size() || !has_index(array, i)) continue;
-                    accumulator = index_value(array, i);
+                    if (!view_has(array, i)) continue;
+                    accumulator = view_get(array, i);
                     seeded = true;
                     ++step;
                     break;
@@ -1435,10 +1625,9 @@ void install_array_builtins(JsIntrinsics& realm) {
             }
             for (; step < length; ++step) {
                 size_t i = from_end ? length - 1 - step : step;
-                if (i >= elements_of(array).size()) continue;
-                if (!has_index(array, i)) continue;
-                JsValue item = index_value(array, i);
-                accumulator = callback.call({accumulator, item, JsValue::make_number(static_cast<double>(i)), array});
+                if (!view_has(array, i)) continue;
+                JsValue item = view_get(array, i);
+                accumulator = callback.call({accumulator, item, JsValue::make_number(static_cast<double>(i)), given_to_callback});
             }
             return accumulator;
         };

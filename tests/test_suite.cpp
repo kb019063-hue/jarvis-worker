@@ -26229,6 +26229,155 @@ failures;
     if (!none_failed()) { std::cout << "\033[31mFAILED\033[0m"; return; }
     std::cout << "\033[32mPASSED\033[0m";
 }
+TEST(an_array_like_is_asked_not_copied) {
+    using namespace litebird;
+    // Phase 130, finding 135. `receiver()` built a real array from an
+    // array-like by reading every index from 0 to `length` before the method
+    // took its first step. `Array.prototype.every.call({0: 9, length:
+    // Infinity}, f)` therefore ended the process with `std::bad_alloc`, where
+    // the language reads index 0, calls `f`, and stops when `f` answers
+    // `false`. Measured on `main`: `built-ins/Array/prototype` in test262 was
+    // 2355/2812 with **23 tests that crashed the binary**, and is 2551/2812
+    // with none after this.
+    //
+    // Every expected string below is what Node.js v22.22.3 printed for the
+    // same script, with one deliberate difference, argued at the assertion:
+    // `map`/`filter` over a length no array can hold. Node tries to allocate
+    // it and does not return; this engine throws a `RangeError`, which is the
+    // same answer (the call fails) that a program can survive.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body><div id=\"d\"></div></body>");
+    js.notify_document_loaded();
+    auto none_failed = [&]() {
+        const std::string failed = js.eval("failures.join('\\n')").to_string();
+        if (!failed.empty()) std::cerr << failed << "\n";
+        return failed.empty();
+    };
+
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+// A length of 2^32 - 1 used to be read place by place into a vector. Each of
+// these ran out of memory or was killed; each is now a number, not a read.
+check('every stops at the first false', function () {
+  return [1, 2, 3].every.call({ 0: 9, length: Infinity }, function () { return false; });
+}, 'false');
+check('some stops at the first true', function () {
+  return [1, 2, 3].some.call({ 0: 9, length: Infinity }, function () { return true; });
+}, 'true');
+check('find and findIndex stop at the first match', function () {
+  var o = { 0: 'a', 1: 'b', length: Infinity };
+  return [[].find.call(o, function (v) { return v === 'b'; }),
+          [].findIndex.call(o, function (v) { return v === 'b'; })];
+}, '["b",1]');
+check('indexOf, lastIndexOf and includes stop at what is there', function () {
+  var o = { 0: 'a', 1: 'b', length: Infinity };
+  return [[].indexOf.call(o, 'b'), [].includes.call(o, 'a'),
+          [].indexOf.call({0:'a',length:2}, 'zzz'), [].includes.call({0:'a',length:2}, 'zzz')];
+}, '[1,true,-1,false]');
+check('join reads the places that exist and stops', function () {
+  return [].join.call({ 0: 'a', 1: 'b', length: Infinity }, '-');
+}, '"a-b"');
+check('slice, concat and flat of a length nothing has are empty', function () {
+  return [[].slice.call({ length: Infinity }), [].concat.call({ length: Infinity }),
+          [].flat.call({ length: Infinity })];
+}, '[[],[],[]]');
+check('reduce seeds from what the object has', function () {
+  // A seed given, so the walk is over the places that exist.
+  return [].reduce.call({ 0: 5, 1: 6, length: 2 }, function (a, b) { return a + b; }, 0);
+}, '11');
+// Node.js answers this one by trying to allocate 2^32 - 1 places: it does not
+// return, and the harness kills it. So the expectation written down here is
+// this engine's, and the comment is where the two differ: a length no array
+// can hold fails fast and recoverably instead of ending the process, which is
+// the whole point of finding 135.
+check('map and filter of a length no array holds fail instead of dying', function () {
+  function name(f) { try { f(); return 'no throw'; } catch (e) { return e.name; } }
+  return [name(function () { [].map.call({ length: Infinity }, function (x) { return x; }); }),
+          name(function () { [].filter.call({ length: Infinity }, function (x) { return true; }); })];
+}, '["RangeError","RangeError"]');
+// A write the callback makes is seen by the next step: the standard calls
+// Set(O, k) and Get(O, k + 1) on the object, not on a copy of it.
+check('a write the callback makes is seen', function () {
+  var o = { 0: 1, 1: 2, length: 2 };
+  var seen = [];
+  [].forEach.call(o, function (v, i) { seen.push(v); o[1] = 99; });
+  return seen;
+}, '[1,99]');
+check('map sees the write too', function () {
+  var o = { 0: 1, 1: 2, length: 2 };
+  return [].map.call(o, function (v) { o[1] = 99; return v; });
+}, '[1,99]');
+check('the callback is handed the object, not a copy', function () {
+  // `reduce` without a seed starts at index 1 here, so it is given two places:
+  // its first callback is the only one a one-place object would see.
+  var o = { 0: 1, length: 1 };
+  var two = { 0: 1, 1: 2, length: 2 };
+  var answers = [];
+  [].map.call(o, function (v, i, given) { answers.push(given === o); return 1; });
+  [].filter.call(o, function (v, i, given) { answers.push(given === o); return 1; });
+  [].every.call(o, function (v, i, given) { answers.push(given === o); return true; });
+  [].reduce.call(two, function (a, v, i, given) { answers.push(given === two); return a; });
+  return answers;
+}, '[true,true,true,true]');
+check('an index the prototype has is visited', function () {
+  var o = Object.create({ 1: 7 });
+  o[0] = 1;
+  o.length = 2;
+  var seen = [];
+  [].forEach.call(o, function (v) { seen.push(v); });
+  return seen;
+}, '[1,7]');
+check('the length is taken once, before the callback', function () {
+  var o = { 0: 1, length: 1, get 1() { o.length = 5; return 2; } };
+  var calls = 0;
+  [].every.call(o, function () { calls++; return true; });
+  return calls;
+}, '1');
+check('a string is an array-like of its units', function () {
+  return [[].map.call('ab', function (c) { return c + '!'; }),
+          [].every.call('ab', function (c) { return typeof c === 'string'; }),
+          [].reduce.call('abc', function (a, c) { return a + c; }, '')];
+}, '[["a!","b!"],true,"abc"]');
+check('at counts from the end of an array-like', function () {
+  return [[].at.call({ 0: 'a', 1: 'b', length: 2 }, -1), [].at.call({ 0: 'a', length: 2 }, 1)];
+}, '["b",null]');
+check('a real array is still used in place', function () {
+  var a = [3, 1, 2];
+  return [a.map(function (x) { return x * 2; }), a.slice(1), a.reduce(function (x, y) { return x + y; }),
+          a.filter(function (x) { return x > 1; }), a.sort()];
+}, '[[6,2,4],[1,2],6,[3,2],[1,2,3]]');
+check('a method still refuses null or undefined', function () {
+  function name(f) { try { f(); return 'no throw'; } catch (e) { return e.name; } }
+  return [name(function () { [].every.call(null, function () {}); }),
+          name(function () { [].map.call(undefined, function () {}); })];
+}, '["TypeError","TypeError"]');
+check('push grows an array-like, as the standard has it', function () {
+  var o = { length: 0 };
+  [].push.call(o, 'a');
+  return [o[0], o.length];
+}, '["a",1]');
+check('push on an array-like still works', function () {
+  var o = { 0: 'a', length: 1 };
+  [].push.call(o, 'b');
+  return [o[1], o.length];
+}, '["b",2]');
+check('sort on an array-like asks the object for its places', function () {
+  var o = { 0: 3, 1: 1, 2: 2, length: 3 };
+  [].sort.call(o);
+  return [o[0], o[1], o[2]];
+}, '[1,2,3]');
+    )JS");
+    if (!none_failed()) { std::cout << "\033[31mFAILED\033[0m"; return; }
+    std::cout << "\033[32mPASSED\033[0m";
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -26606,6 +26755,9 @@ int main() {
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
+
+    // Phase 130: an array-like is asked for each place, not copied first.
+    RUN_TEST(an_array_like_is_asked_not_copied);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

@@ -30,7 +30,7 @@ a row from Open tasks over anything here, take that row.
 ## Where Litebird stands today (the honest baseline)
 
 WPT-grade HTML/DOM/XML parsing for the covered corpora (tree construction
-1,972/1,973; `make wpt` 9,567/9,824 subtests across 190 files); JavaScript
+1,973/1,973; `make wpt` 9,567/9,824 subtests across 190 files); JavaScript
 interpreted on a tree-walking evaluator (plus a half-finished bytecode VM),
 1,137<!--metrics:js.pass/num-->/1,156<!--metrics:js.total/num--> on its recorded corpus and 31,220<!--metrics:t262.full.pass/num-->/47,967<!--metrics:t262.full.total/num--> of test262; TrueType
 rasterization with an 8×8 bitmap fallback when no `.ttf` exists on the host;

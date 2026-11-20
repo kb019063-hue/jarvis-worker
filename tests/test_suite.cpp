@@ -25717,6 +25717,172 @@ TEST(bidi_reorders_hebrew_and_arabic_runs) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 114: `instanceof` asks Symbol.hasInstance.
+// ---------------------------------------------------------------------------
+
+TEST(instanceof_asks_symbol_has_instance) {
+    using namespace litebird;
+    // Phase 114, finding 119. `js_instance_of` asked only that the right-hand
+    // side be callable and then walked its `prototype`: `Symbol.hasInstance`
+    // was never read, so a class that defines one was ignored, a plain object
+    // that defines one threw "not callable", a bound function (which has no
+    // `prototype` of its own) answered false, and an arrow function answered
+    // false where the language throws.
+    //
+    // The operator is now §13.10.2: GetMethod(rhs, @@hasInstance) and a call.
+    // `Function.prototype[@@hasInstance]` exists — non-writable and
+    // non-configurable, doing OrdinaryHasInstance — and the operator compares
+    // it by identity, so the ordinary case still walks the chain without
+    // calling through a property. A bound function delegates the whole
+    // operator to its target, which is what makes `7 instanceof A.bind(null)`
+    // ask A's own method.
+    //
+    // Every expected string below is what Node.js printed for the same script.
+    // What is still not so: six of the host's constructors (`Response`,
+    // `Headers`, `Worker`, `WebSocket`, `IntersectionObserver`,
+    // `ResizeObserver`) are installed without a `prototype`, so
+    // `r instanceof Response` answers false where the language says true; the
+    // operator does not throw for them, because a native function with no
+    // `prototype` is left answering false (AGENTS.md).
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body><div id=\"d\"></div></body>");
+    js.notify_document_loaded();
+    auto none_failed = [&]() {
+        const std::string failed = js.eval("failures.join('\\n')").to_string();
+        if (!failed.empty()) std::cerr << failed << "\n";
+        return failed.empty();
+    };
+
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function describe(o, k) {
+            var d = Object.getOwnPropertyDescriptor(o, k);
+            if (!d) return 'none';
+            return [d.writable, d.enumerable, d.configurable, typeof d.value].join(' ');
+        }
+        check('the method the language defines', function () {
+            return [typeof Function.prototype[Symbol.hasInstance],
+                    Function.prototype[Symbol.hasInstance].name,
+                    Function.prototype[Symbol.hasInstance].length,
+                    describe(Function.prototype, Symbol.hasInstance),
+                    (function () {}).hasOwnProperty(Symbol.hasInstance),
+                    Object[Symbol.hasInstance] === Function.prototype[Symbol.hasInstance]];
+        }, '["function","[Symbol.hasInstance]",1,"false false false function",false,true]');
+        check('the language makes it non-writable', function () {
+            var saved = Function.prototype[Symbol.hasInstance];
+            Function.prototype[Symbol.hasInstance] = 1;
+            return [typeof Function.prototype[Symbol.hasInstance],
+                    Function.prototype[Symbol.hasInstance] === saved];
+        }, '["function",true]');
+        check('a class answers for its instances', function () {
+            class A { static [Symbol.hasInstance](x) { return x === 1; } }
+            return [1 instanceof A, 2 instanceof A];
+        }, '[true,false]');
+        check('a plain object answers for its instances', function () {
+            var o = { [Symbol.hasInstance](x) { return x === 5; } };
+            return [5 instanceof o, 6 instanceof o];
+        }, '[true,false]');
+        check('a subclass inherits the answer', function () {
+            class A { static [Symbol.hasInstance](x) { return x === 3; } }
+            class B extends A {}
+            return [3 instanceof B, 4 instanceof B, B[Symbol.hasInstance] === A[Symbol.hasInstance]];
+        }, '[true,false,true]');
+        check('a function may answer for itself', function () {
+            var f = function () {};
+            Object.defineProperty(f, Symbol.hasInstance, { value: function (x) { return x === 42; } });
+            return [42 instanceof f, 1 instanceof f, ({}) instanceof f];
+        }, '[true,false,false]');
+        check('a getter that is not the installed method is read', function () {
+            var f = function () {};
+            Object.defineProperty(f, Symbol.hasInstance, { get: function () { return function () { return true; }; } });
+            return [1 instanceof f];
+        }, '[true]');
+        check('a bound function asks what it was bound from', function () {
+            class A { static [Symbol.hasInstance](x) { return x === 7; } }
+            function F() {}
+            return [7 instanceof A.bind(null), 8 instanceof A.bind(null),
+                    new F() instanceof F.bind(null), new F() instanceof F.bind(null).bind(null)];
+        }, '[true,false,true,true]');
+        check('what the method throws reaches the operator', function () {
+            var o = { [Symbol.hasInstance]() { throw new RangeError('nope'); } };
+            var caught = 'none';
+            try { 1 instanceof o; } catch (e) { caught = e.name + ': ' + e.message; }
+            return caught;
+        }, '"RangeError: nope"');
+        check('the answer is read once per operator', function () {
+            var hits = 0;
+            var o = {};
+            Object.defineProperty(o, Symbol.hasInstance, { get() { hits++; return function () { return true; }; } });
+            var answer = 1 instanceof o;
+            return [answer, hits];
+        }, '[true,1]');
+        check('null means the ordinary walk', function () {
+            function F() {}
+            F[Symbol.hasInstance] = null;
+            var o = new F();
+            return [o instanceof F, ({}) instanceof F];
+        }, '[true,false]');
+        check('a non-callable answer is a TypeError', function () {
+            var o = { [Symbol.hasInstance]: 5 };
+            var caught = 'none';
+            try { 1 instanceof o; } catch (e) { caught = e.name; }
+            return caught;
+        }, '"TypeError"');
+        check('the ordinary walk, unchanged', function () {
+            function F() {}
+            var o = {};
+            F.prototype = o;
+            return [Object.create(o) instanceof F, new F() instanceof F, [] instanceof Array,
+                    ({}) instanceof Object, Object.create(null) instanceof Object,
+                    'a' instanceof String, new String('a') instanceof String,
+                    (function () {}) instanceof Function, (() => {}) instanceof Function];
+        }, '[true,true,true,true,false,false,true,true,true]');
+        check('a right-hand side with no prototype to walk', function () {
+            var caught = [];
+            try { ({}) instanceof (() => {}); } catch (e) { caught.push(e.name + ': ' + e.message); }
+            try { 1 instanceof 1; } catch (e) { caught.push(e.name + ': ' + e.message); }
+            try { 1 instanceof {}; } catch (e) { caught.push(e.name + ': ' + e.message); }
+            return caught;
+        }, '["TypeError: Function has non-object prototype \'undefined\' in instanceof check","TypeError: Right-hand side of \'instanceof\' is not an object","TypeError: Right-hand side of \'instanceof\' is not callable"]');
+        check('a primitive is not an instance before prototype is read', function () {
+            var caught = 'none';
+            try { 1 instanceof (() => {}); } catch (e) { caught = e.name; }
+            return caught;
+        }, '"none"');
+    )JS");
+    assert(none_failed());
+
+    // A host constructor with a `prototype` is walked as before, and the ones
+    // that have none still answer rather than throw.
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got = String(f());
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        check('a host prototype is walked', function () {
+            return [document.body instanceof HTMLElement, document.body instanceof Node,
+                    document.getElementById('d') instanceof HTMLDivElement,
+                    new Event('x') instanceof Event, new MouseEvent('click') instanceof Event].join(' ');
+        }, 'true true true true true');
+        check('a host constructor with no prototype answers', function () {
+            var caught = 'none';
+            var answer;
+            try { answer = document.body instanceof Response; } catch (e) { caught = e.name; }
+            return answer + ' ' + caught;
+        }, 'false none');
+    )JS");
+    assert(none_failed());
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -26072,6 +26238,9 @@ int main() {
 
     // Phase 109: UAX #9 -- Hebrew and Arabic reordered, and not painted left to right.
     RUN_TEST(bidi_reorders_hebrew_and_arabic_runs);
+
+    // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
+    RUN_TEST(instanceof_asks_symbol_has_instance);
 
     // Phase 119: Contextual GSUB (Type 1-7), Cursive GPOS (Type 3/7/8), and Arabic Shaping.
     RUN_TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions);

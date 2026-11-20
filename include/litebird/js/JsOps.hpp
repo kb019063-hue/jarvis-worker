@@ -177,6 +177,11 @@ int js_less_than(const JsValue& a, const JsValue& b);
 JsValue js_add(const JsValue& a, const JsValue& b);
 bool js_instance_of(const JsValue& value, const JsValue& constructor);
 
+/// OrdinaryHasInstance: the walk `instanceof` makes when the right-hand side
+/// has no method of its own, which is what `Function.prototype[@@hasInstance]`
+/// runs. A bound function is asked for its target.
+bool js_ordinary_has_instance(const JsValue& function, const JsValue& value);
+
 // ---------------------------------------------------------------------------
 // Calls
 // ---------------------------------------------------------------------------
@@ -379,6 +384,12 @@ struct JsIntrinsics {
     /// are still there.
     JsValue array_iterator_next;
     JsValue string_iterator_next;
+
+    /// `Function.prototype[Symbol.hasInstance]` as install() left it. Every
+    /// function inherits it, and it is what `instanceof` runs for the ones
+    /// that do not define one of their own; the operator compares identity so
+    /// that the common case does not have to call through script.
+    JsValue function_has_instance_method;
 
     /// Name/value pairs the interpreter defines in its global scope.
     std::vector<std::pair<std::string, JsValue>> globals;

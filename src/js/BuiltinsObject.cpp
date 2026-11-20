@@ -754,6 +754,9 @@ void install_object_builtins(JsIntrinsics& realm) {
             return target.call_with_this(bound_this, all);
         });
         bound.set_forwards_construct();
+        // `instanceof` has no `prototype` to walk to on a bound function: the
+        // language asks the target, and this is where the target is kept.
+        bound.set_bound_target(target);
         double length = js_to_number(target.get_property("length")) - static_cast<double>(bound_args.size());
         bound.define_property("name", JsValue::make_string("bound " + js_to_string(target.get_property("name"))),
                               PropertyMap::Configurable);
@@ -769,6 +772,19 @@ void install_object_builtins(JsIntrinsics& realm) {
         if (!fn.is_function()) js_throw_type_error("Function.prototype.toString requires that 'this' be a Function");
         return JsValue::make_string(fn.to_string());
     });
+    // `Function.prototype[Symbol.hasInstance]`: the walk `instanceof` makes,
+    // as a method a script can call and a class can inherit. It is what every
+    // function answers with, so the operator recognizes it by identity and
+    // does not go through the property at all for the ordinary case. The
+    // language makes it non-writable and non-configurable: a script cannot
+    // take it away from every function at once.
+    JsValue has_instance = js_make_native("[Symbol.hasInstance]", 1, [](Args args) {
+        const JsValue& fn = JsValue::current_this();
+        if (!fn.is_function()) return JsValue::make_boolean(false);
+        return JsValue::make_boolean(js_ordinary_has_instance(fn, js_arg(args, 0)));
+    });
+    js_object_value(fp).define_property("@@hasInstance", has_instance, 0);
+    realm.function_has_instance_method = has_instance;
 
     // ---- Boolean ----------------------------------------------------------
     JsValue boolean_ctor = js_make_native("Boolean", 1, [](Args args) {

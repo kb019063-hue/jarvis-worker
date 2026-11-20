@@ -54,11 +54,11 @@ and tracing `TrueTypeFont::shape_glyphs`, `FontRenderer::shape_text`, and
 
 ## Verified
 
-- Release `make all test`: **278 / 278** suites passing (including six new Phase
+- Release `make all test`: **279 / 279** suites passing (including six new Phase
   119 contextual/cursive/Arabic/malformed-table suites + HTML-Bidi `"سلام"`
   pixel-identity oracle across synthetic `"TestArabicSans"` and host `DejaVu Sans`) + **114 / 114** cross-origin checks +
   `make bidi-conformance` (**861,948 / 861,948**).
-- ASan+UBSan: `build-asan/test_suite` (**278 / 278** suites, **0** sanitizer
+- ASan+UBSan: `build-asan/test_suite` (**279 / 279** suites, **0** sanitizer
   findings), `build-asan/cross_origin_test` (**114 / 114**), and
   `tools/fuzz/fuzz_pipeline.py --binary build-asan/litebird` (**400** runs,
   **0** findings).

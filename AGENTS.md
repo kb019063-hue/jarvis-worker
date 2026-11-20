@@ -85,7 +85,7 @@ scoreboard — is not a phase and takes no phase or finding number.
    next free numbers, or stays out of the file, and the earlier one changes
    nothing. A pull request holds the files it has changed as well as the
    ones it names. Put `[skip ci]` in the message of the first commit: an
-   empty commit needs no 28 minutes of runner time.
+   empty commit needs no run, and a run is an hour of runner time.
 
 ## The files every pull request changes
 
@@ -131,19 +131,22 @@ frozen append targets, so their rows are not marked either.
   `make dom-conformance`, `make url-conformance`, `make xml-conformance`,
   `make wpt`, `make diff-trees`, `make diff-xml`,
   `make fuzz`, `make deep`, `make asan`. The last two take
-  about eight minutes each. CI runs all of them, and one CI run is about 28
-  minutes of runner time: run the checks here first and push when they pass,
-  not to find out whether they do. `make xml-conformance` downloads the
+  about eight minutes each. CI runs all of them, and one CI run is about 16
+  minutes and an hour of runner time: run the checks here first and push
+  when they pass, not to find out whether they do. `make xml-conformance` downloads the
   W3C suite the first time (`tests/xml/README.md`), and `make diff-xml`
   needs `pip install lxml`.
 - A unit suite that passes in the normal build can fail in the sanitizer
   build, and CI's log cannot be read from every sandbox: run `make asan`
-  here first. When CI's sanitizer job fails all the same, its last step
-  says what failed in the job's annotations, which the API itself serves:
+  here first. When one of CI's four sanitizer jobs fails all the same, its
+  last step says what failed in the job's annotations, which the API itself serves:
   `gh run view RUN --json jobs` for the job's id, then
   `gh api repos/OWNER/REPO/check-runs/JOB_ID/annotations --jq '.[].message'`.
   (`tools/ci/annotate_failure.py`; any job that keeps its output with
-  `tee` can end with the same step.)
+  `tee` can end with the same step.) The name of the step that failed is a
+  part of `make asan-core`, and `make asan-build` and then that part
+  (`make asan-unit`, say; `make help` lists the nine) runs it here without
+  the rest.
 - A floor in CI is not lowered to let a pull request pass.
   `tests/js-conformance/everyday-*.dat` and
   `tests/dom-conformance/everyday.dat` are not edited. A DOM case that
@@ -364,12 +367,52 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
 - **A push starts no CI run while the pull request conflicts with `main`.**
   It looks like a run that has not started yet. `gh pr view N --json
   mergeable` after `git fetch`, before spending a commit on CI.
-- **A run is seven jobs, about 28 minutes.** `[skip ci]` goes on every
+- **A run is eleven jobs, about 16 minutes, and an hour of runner time.**
+  `[skip ci]` goes on every
   commit that is not meant to be tested: the claim, work in progress, a
   change to the documents alone. The commit that is merged has a green run,
   or differs from one that has only in documents, and the pull request says
   so; a pull request of documents alone needs no run at all
   (`check_pr.py merge N` says which it is).
+- **A run was as long as its one sanitizer job, and that job is now four.**
+  Until 20 November `make tsan`, `make asan-core` and `make asan-deep` were
+  three steps of one job: 21 to 28 minutes, while every other job was done
+  in six. Everything after a push waited for it: the merge, the next
+  agent's merge of `main`, the look at `main` afterwards. The same checks
+  are now four jobs side by side. A run on the same engine code went from
+  31.3 minutes (run 44664786397 on `main`, 03:00 that day) to 15.6 (run
+  44672093418 on this change, an hour later); the two runs on `main` the
+  day before had taken 24.4 and 26.7. Nothing was taken out and no count,
+  floor or timeout was changed. What it costs is runner time, 46 minutes
+  of it before and 65 after: each of the four jobs makes the sanitizer
+  build for itself.
+
+  | job (`Sanitizers: …`) | what it runs, after `asan-build` (4:20 to 5:39) | the job |
+  | :--- | :--- | :--- |
+  | unit suites | `asan-unit` 5:52 | 11.6 min |
+  | XML suite and fuzzing | `asan-xml` 1:29, then `asan-fuzz` 3:06 | 9.2 min |
+  | web-platform-tests, deep and oversized pages | `asan-wpt` 3:18, `asan-deep` 3:01 | 11.8 min |
+  | script corpora, verifiers, generated XML, string stress tests | `tsan` 1:05 (before the build), `asan-js` 2:28, `asan-dom` 0:42, `asan-verify` 0:23, `asan-xml-generated` 0:51 | 11.1 min |
+
+  They start when "Build & unit tests" has passed (2.9 to 3.8 minutes), so
+  a run cannot be shorter than that job, the sanitizer build and the unit
+  suites in it: about 15 minutes. Three rules keep it the same checks:
+  - `make asan-core` is nine parts in the Makefile and runs them in the
+    order it always had; **a new check goes into the part it belongs
+    with**, and then both `make asan` and CI run it.
+  - **A part that no job runs fails the run** before anything is built:
+    `tools/ci/check_ci_parts.py`, a step of the first job, reads the recipe
+    of `asan-core` and the workflow. It also fails for a check written into
+    `asan-core` itself, for a part two jobs run, and for a job that runs a
+    part before `asan-build`. With one job none of this could happen; with
+    four, a part that is in the Makefile and in no job would be a green run
+    that did not make the check.
+  - **`asan-fuzz` runs after `asan-xml`, in the same job.** The XML fuzzer
+    mutates the documents of the W3C suite, which `asan-xml` unpacks under
+    `build/xml-conformance/`. Without them it does not fail: it mutates the
+    dozen documents written in the script, passes, and has checked far
+    less. The one job ran them in this order and nothing said that it
+    mattered; the check above now requires it.
 
 **The sandbox**
 
@@ -466,7 +509,6 @@ Rows that share files should not be in work at the same time.
 | **What an iterator still is not**: a symbol is a string in this engine, so a property key cannot be one. `Symbol.iterator` is the key `"@@iterator"`, and `"@@iterator" in []` is `true` where the case of `iteration.dat` asks for `false`; `BuiltinsArray.cpp` registers the array's iterator under `"Symbol.iterator"` as well, for the same reason. Phase 92 gave each kind a prototype between it and `%IteratorPrototype%`, with the kind's one `next` and a `Symbol.toStringTag`, so `Object.getPrototypeOf(it).next` is a function a script can replace and `Object.prototype.toString.call(it)` names the kind; the loop fast paths now ask whether that `next` is still the installed one (`holds_installed_next`) before reading elements directly, and take the long way when it is not. What is left: the symbol keys above, `%IteratorPrototype%` helpers (`map`, `filter`, `take`, `drop`), a `%GeneratorPrototype%` per kind (a generator's `next` is still its own), and `return` on `RegExp String Iterator` | `src/js/JsValue.hpp` (`PropertyMap`, the part that would become a key), `src/js/JsOps.cpp`, `src/js/Generator.cpp` | Phase 63, section 6; Phase 92, finding 98; one failing case of `iteration.dat` (`no property is named 'Symbol.iterator' or '@@iterator'`) | The one thing not to undo: `next` belongs to the prototype, and the fast path's permission to skip it is a question asked of the prototype, not an assumption made about the iterator |
 | **What the DOM corpus cannot ask**: `getComputedStyle(el).width` is still `auto` (used values are available via `getBoundingClientRect()`/`offset*`/`client*` since Phase 36), the SVG DOM (`className.baseVal`, `viewBox`, `getBBox()`: `tests/dom-conformance/open/dates-and-svg.svg`). The style sheet objects landed in Phase 72: `style.sheet`, `document.styleSheets`, `CSSStyleSheet.cssRules`/`insertRule`/`deleteRule`/`disabled`, `CSSRuleList`, `CSSRule`/`CSSStyleRule` (`selectorText`, `style`, `cssText`), and `document.fonts` — but a sheet has no `CSSMediaRule` (an `@media` block is skipped when the sheet is read, so `insertRule('@media …')` is a `SyntaxError`), no `CSSImportRule`/`CSSKeyframesRule`, and no `new CSSStyleSheet()` constructor | `src/js/Dom*Bindings.cpp`, `src/main.cpp`, `src/shell/` | docs/phases/72-cssom.md; ARCHITECTURE.md, Phase 27, section 12 & Phase 36 | jsdom does no layout, so the first needs a reference of its own before it is built; the DOM corpus cannot record the rest either, so the CSSOM is asserted in `tests/test_suite.cpp` (`cssom_sheets_rules_insert_amounts_and_fonts`) |
 | **Memory is reclaimed only when a script calls `gc()`**, and no leak audit has been done. One leak is known: a function bound to an object that holds it (`o.b = f.bind(o)`, 2,000 times: 2,000 cells left after `gc()`), and what a pending timer holds. The collector cannot see into what a native function captured. What it costs meanwhile: `for (i = 0; i < n; i++) o = { a: i }` keeps about 1 KB for each object it has dropped (433 MB of resident memory after 400,000), so a loop of three million takes more than 3 GB; a benchmark written for Phase 43 brought a 4 GB machine to a stop that way until it called `gc()` between its loops | `src/js/Heap.cpp`, and everything that allocates script objects | Known gaps, 4; ARCHITECTURE.md, Phase 34, section 9; one failing case of `tests/js-conformance/prototypes.dat` | Touches everything that makes script objects, the DOM bindings included: not beside a row that changes `src/js/Dom*Bindings.cpp` |
-| **One tree-construction case is left: `scripted_ark.dat`.** The other five `scripted_*.dat` cases pass since Phase 95, which made `--dump-dom-webplatform` run the page's scripts as the parser reaches them and gave `document.write()` the parser to write into (`Document::set_parser_write`, `HtmlTreeBuilder::write_into_parser`), and which stopped the parser inserting a second element or any text into a document (`document_refuses` in `HtmlTreeBuilder.cpp`, which is `scripted_foster01.dat`). What remains is the adoption agency: after a script rewrites the `size` of the second `<font>`, this engine reconstructs one `<font>` more than the browser does once the `<p>` closes the run, so the expected tree has the third font's copy and ours has another | `src/html/HtmlTreeBuilder.cpp` (`reconstruct_formatting_elements`, the list in the adoption agency), `src/html/HtmlTreeBuilderModes.cpp` | Phase 95, finding 101; `scripted_ark.dat` | Do not take this row for the parser's script hook or for `document.write`: both are wired, and the shell, the dump path and the shell's `load_page` all use them |
 | **HTTPS certificate test coverage remains partial.** Phase 89 fixes IP-literal identity checks and tests eight DNS/IPv4 trust/identity cases with Python ssl; expiry, intermediate chains and IPv6 fixtures remain open, as do revocation, pinning and resumption | `src/net/ResourceLoader.cpp`, `tools/security/verify_https.py` | `docs/phases/89-https-certificate-identity.md`, `docs/findings/95-https-ip-identity.md` | Python ssl is an independent client using the same OpenSSL library, not an independent TLS implementation |
 | **WebSocket `ArrayBuffer`/`Blob` binary exposure, upgrade cookies, and extensions remain open.** Phase 90 landed authenticated `wss://` TLS (OpenSSL 3 CA/SNI/DNS+IP SAN), Fetch `Origin` & mixed-content enforcement, relative URL resolution, live JS accessors, synchronous validation, CSPRNG keys/masks, RFC 6455/3629 framing/UTF-8 checks, `poll()` + wake-pipe I/O, and exit thread join (`make security-websocket`, 29/29). Open: `send(ArrayBuffer/TypedArray/Blob)` and `binaryType = "arraybuffer"` message delivery (blocked on Wave 2 `ArrayBuffer`), `Cookie`/`Set-Cookie` forwarding on upgrades, HTTP proxies, `permessage-deflate`, and standalone `CloseEvent`/`MessageEvent` constructors (`WebSocket.prototype` is tracked in the host-constructor row above) | `src/net/WebSocket.cpp`, `include/litebird/net/WebSocket.hpp` | Phase 90 / finding 96 (`docs/phases/90-websocket-tls-fetch-policy-and-frames.md`, `docs/findings/96-websocket-tls-origin-and-framing.md`) | Binary frame JS exposure should land after `ArrayBuffer`/typed arrays exist rather than inventing a custom buffer type |
 | **AVIF, and the rest of SVG text layout** | `src/render/ImageDecoder.cpp`, `src/render/SvgRenderer.cpp` | ARCHITECTURE.md, Phase 36, Phase 38 & Phase 54; [`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md), [`docs/phases/79-animated-webp-frames-on-a-canvas.md`](docs/phases/79-animated-webp-frames-on-a-canvas.md); AUDIT.md, findings 43, 44, 60 & 85; [`docs/findings/63-lossy-webp-vp8-refused.md`](docs/findings/63-lossy-webp-vp8-refused.md) | PNG, JPEG, GIF, BMP, PPM, **lossless WebP** (`VP8L`, all four transforms, meta prefix codes, colour cache), **lossy WebP** (a VP8 key frame: the boolean decoder, the 16x16/8x8/4x4 intra predictors, the 4x4 IDCT and the Walsh–Hadamard transform, the loop filter, plus the `VP8X` container and an `ALPH` plane in either compression method and all three spatial filters), **animated WebP** (`ANIM`/`ANMF`: the frame walk, the key-frame rule, blending and disposal on the canvas — `<img>` shows the first frame, and `WebPDecoder::decode_frames()` hands back every one), and SVG are wired through `ImageDecoder::decode()`. Canvas 2D text is done (Phase 46, finding 52). Phase 82/finding 88 adds basic SVG `<text>` / `<tspan>` rendering with inherited solid paint and first-run positioning, but not per-character lists, textPath, multi-run anchoring, or text gradients. What is left: AVIF and those advanced SVG text features |

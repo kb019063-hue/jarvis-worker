@@ -112,7 +112,17 @@ open rows.
 The wider reading is that the engine's integrity machinery was *sound and
 unused* — the descriptors, the extensibility flag and the property map all
 already answered §7.3.15 — and a bit was kept in front of them. The same shape
-appears in `src/js/BuiltinsArray.cpp`, where `push` tests `frozen` rather than
-`[[IsExtensible]]` and a sealed array therefore grows; that one is written up
-as an open row in `AGENTS.md` and not fixed here, because an open pull request
-owns the file.
+appeared in `src/js/BuiltinsArray.cpp`, where `push` tested `frozen` rather
+than `[[IsExtensible]]` and a sealed array therefore grew; that was found by
+this phase's probing, written up as an open row, and then closed by #146's
+rewrite of the place-moving methods, which merged while this branch was in
+flight. Re-probed against the merged tree, all eight calls throw exactly where
+Node throws, so the row is recorded as closed and no code was needed for it
+here.
+
+The lesson worth keeping is about the shape rather than either bug: an
+operation that stores the *outcome* of an earlier call and answers a later
+question from it is right only when nothing can change the answer behind its
+back. Both `isFrozen` and `push` read a bit that `freeze()` had set, and both
+were wrong for the objects `seal()` and `preventExtensions()` produced, which
+are non-extensible all the same.

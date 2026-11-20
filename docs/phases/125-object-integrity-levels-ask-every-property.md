@@ -160,28 +160,34 @@ change to two predicates.
 
 ## 4. What is still open
 
-**Arrays: the mutators do not ask `[[IsExtensible]]`.** Found while probing
-this row and deliberately *not* fixed here, because it lives in
-`src/js/BuiltinsArray.cpp`, which an open pull request owns. On the same
-range of objects, Node and this engine disagree seven times out of eight:
+**Arrays: the mutators did not ask `[[IsExtensible]]` — and this was fixed by
+somebody else while this phase was in flight.** Found while probing this row
+and deliberately *not* fixed here, because it lives in
+`src/js/BuiltinsArray.cpp`, which open pull request #146 owned at the time. On
+the same range of objects Node and the engine then disagreed seven times out
+of eight:
 
-| call | Node | this engine |
+| call | Node | engine, before #146 |
 |---|---|---|
-| `Object.seal([1,2]).push(3)` | TypeError | **succeeds, length 3** |
-| `Object.preventExtensions([1,2]).push(3)` | TypeError | **succeeds, length 3** |
-| `Object.seal([1,2]).unshift(0)` | TypeError | **succeeds** |
-| `Object.seal([1,2]).splice(1,0,9)` | TypeError | **succeeds** |
-| `Object.freeze([3,1]).sort()` | TypeError | **succeeds** (silently unsorted-back) |
-| `Object.seal([1,2]).pop()` | TypeError | **succeeds** |
-| `Object.freeze([1,2]).push(3)` | TypeError | TypeError (right, by accident: it tests `frozen`) |
+| `Object.seal([1,2]).push(3)` | TypeError | succeeds, length 3 |
+| `Object.preventExtensions([1,2]).push(3)` | TypeError | succeeds, length 3 |
+| `Object.seal([1,2]).unshift(0)` | TypeError | succeeds |
+| `Object.seal([1,2]).splice(1,0,9)` | TypeError | succeeds |
+| `Object.freeze([3,1]).sort()` | TypeError | succeeds |
+| `Object.seal([1,2]).pop()` | TypeError | succeeds |
+| `Object.freeze([1,2]).push(3)` | TypeError | TypeError (by accident: it tested `frozen`) |
 
-`push` tests `object_val->frozen`, and a sealed or `preventExtensions` array is
-not frozen by that flag — the very substitution this phase removed from the
-two builtins, in a different file. The fix is the guard this phase's helper
-suggests (`[[IsExtensible]]` for a grow, and `delete` of a configurable
-`configurable:false` element for `pop`) plus `length` write protection, which
-is its own row; it is written up in `AGENTS.md` for the phase that owns the
-file.
+`push` tested `object_val->frozen`, and a sealed or `preventExtensions` array
+is not frozen by that flag — the same substitution this phase removed from the
+two builtins, in a different file.
+
+**#146 merged mid-phase and fixed all of it.** Its rewrite of the place-moving
+methods routes them through the accessor and the extensibility question, so
+the row was written into `AGENTS.md` and then closed again in the same phase
+without a line of code: re-probed against the merged tree, all eight calls now
+throw exactly where Node v22 throws. The row stays in `AGENTS.md` struck
+through with the probe recorded, because "it was open when I looked" is worth
+knowing and "it is closed now" is what a reader needs.
 
 The two `not-a-constructor` failures above are the construction row, and the
 two `Proxy` failures are the `Proxy` row. Neither is new.

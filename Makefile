@@ -165,7 +165,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket help
 
 all: $(TARGET)
 
@@ -581,6 +581,23 @@ fuzz-color: $(COLOR_CHECK_TARGET)
 verify-brotli: $(BROTLI_CHECK_TARGET)
 	@python3 tools/conformance/verify_brotli.py --binary $(BROTLI_CHECK_TARGET) --fuzz 0 $(BROTLI_VERIFY_FLAGS)
 
+## Collection stress: every case must print what it prints when nothing is
+## collected. The negative control runs first (a harness that cannot fail is
+## not evidence), then the corpus written for this check, then the DOM corpus,
+## where a binding that holds a raw node pointer across a collection shows up.
+verify-gc-stress: $(BINARY)
+	@python3 tools/conformance/verify_gc_stress.py --self-test
+	@python3 tools/conformance/verify_gc_stress.py --seeds 1,2,3
+	@python3 tools/conformance/verify_gc_stress.py --dom --interval 2 --seeds 1,2 --jobs 4
+
+## The same at interval 1, over the whole JavaScript corpus and the DOM corpus.
+## Slow (a collection is O(heap)) and not in CI; run it when the collector or
+## the bindings change.
+verify-gc-stress-full: $(BINARY)
+	@python3 tools/conformance/verify_gc_stress.py --self-test
+	@python3 tools/conformance/verify_gc_stress.py --full --interval 1 --seeds 1 --jobs 4
+	@python3 tools/conformance/verify_gc_stress.py --dom --interval 1 --seeds 1 --jobs 4
+
 ## Seeded truncation, bit-flip, random-byte, and bomb-cap fuzzing of Brotli.
 fuzz-brotli: $(BROTLI_CHECK_TARGET)
 	@python3 tools/conformance/verify_brotli.py --binary $(BROTLI_CHECK_TARGET) --fuzz 2000 $(BROTLI_VERIFY_FLAGS)
@@ -590,5 +607,5 @@ clean:
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, verify-brotli, fuzz-brotli, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, clean"
+	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, verify-brotli, fuzz-brotli, verify-gc-stress (verify-gc-stress-full), deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, clean"
 	@echo "Parts of asan-core, which CI runs as jobs side by side: asan-build, asan-unit, asan-verify, asan-js, asan-dom, asan-xml, asan-wpt, asan-xml-generated, asan-fuzz"

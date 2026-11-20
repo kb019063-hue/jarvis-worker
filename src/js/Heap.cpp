@@ -139,7 +139,48 @@ JsObject* Heap::allocate_object() {
     m_stats.alive_cells++;
     m_stats.bytes_allocated += sizeof(JsObject);
 
+    // Collection stress: count down and raise a request at zero. The countdown
+    // is armed again when a safe point serves the request, so a request that
+    // nothing serves (native code allocating in a loop, say) does not stack up
+    // a second one behind it.
+    if (m_stress_enabled && m_stress_countdown > 0) {
+        if (--m_stress_countdown == 0) {
+            m_stress_pending.store(true, std::memory_order_relaxed);
+        }
+    }
+
     return obj;
+}
+
+uint64_t Heap::next_stress_random() {
+    // splitmix64: the seed is the whole of the state, so a seed names one
+    // sequence of collection points and nothing else does.
+    uint64_t z = (m_stress_rng += 0x9E3779B97F4A7C15ull);
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+    return z ^ (z >> 31);
+}
+
+void Heap::set_gc_stress(uint64_t seed, uint32_t interval) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_stress_enabled = true;
+    m_stress_rng = seed;
+    m_stress_interval = interval ? interval : 1;
+    m_stress_pending.store(false, std::memory_order_relaxed);
+    m_stress_collections = 0;
+    // The first request lands somewhere in the first interval rather than on
+    // allocation zero, so a seed that starts collecting immediately is one a
+    // seed can be chosen not to be.
+    m_stress_countdown = 1 + static_cast<uint32_t>(next_stress_random() % m_stress_interval);
+}
+
+bool Heap::take_gc_stress_request() {
+    if (!m_stress_enabled) return false;
+    if (!m_stress_pending.exchange(false, std::memory_order_relaxed)) return false;
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_stress_countdown = 1 + static_cast<uint32_t>(next_stress_random() % m_stress_interval);
+    ++m_stress_collections;
+    return true;
 }
 
 void Heap::mark_value(const JsValue& val) {

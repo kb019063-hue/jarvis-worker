@@ -96,11 +96,34 @@ the same time will both have changed them. So:
 
 1. Add a block of your own: a section, a group of tests. Do not re-wrap or
    reorder what is there.
-2. **Before merging, merge `main` into your branch.** Resolve, correct the
-   numbers that count things (the unit suites in README.md, the floors in
-   `ci.yml` and the Makefile), run the checks again, push, and let CI pass on
-   that commit. CI that passed on a branch behind `main` says nothing about
-   the merge.
+2. **Before merging, merge `main` into your branch.** Resolve, run
+   `make metrics` (below) rather than editing the counts by hand, run the
+   checks again, push, and let CI pass on that commit. CI that passed on a
+   branch behind `main` says nothing about the merge.
+
+### The numbers are generated, not copied
+
+The counts and scores a document publishes are not typed into it by hand any
+more, and the merge step above is one command:
+
+```bash
+make metrics     # python3 tools/ci/check_numbers.py --write
+```
+
+Every live figure in `README.md` and `ROADMAP.md` carries an invisible marker
+naming it — `**1137 / 1156 (98.4%)**<!--metrics:js/frac_pct-->` — and `make
+metrics` rewrites the text in front of each marker from `docs/metrics.json` and
+from the tree. Counted things are derived where they are checked: the suite
+count is the `RUN_TEST` list of `tests/test_suite.cpp`, the corpus totals are
+the cases on disk. Measured things are in `docs/metrics.json` with the command
+that produced them and the day it did, so a figure can be argued with instead
+of trusted. `make check-numbers` fails when any marked figure disagrees, and
+`--write` never lowers a `--min-pass` floor: a floor that would go down is a
+regression, and it is reported.
+
+A number without a marker is history — a phase write-up quoting the figure of
+its own day — and history is left alone. `ARCHITECTURE.md` and `AUDIT.md` are
+frozen append targets, so their rows are not marked either.
 
 ## What "done" means
 

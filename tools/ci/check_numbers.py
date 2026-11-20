@@ -36,20 +36,48 @@ suite count
     lines, the table and the command list. The phase write-ups quote the count
     they had when they were written, and keep it.
 
+The ledger and the markers
+--------------------------
+``docs/metrics.json`` holds what had to be *measured* — a score from running a
+corpus — with the command that produced it and the day it did. What can be
+counted is derived here instead: the suite count from `tests/test_suite.cpp`,
+the corpus totals from the corpus on disk.
+
+A document that publishes one of those figures marks it, so that no reader has
+to guess which number is the live one and no agent has to find the eight places
+that repeat it::
+
+    **1137 / 1156 (98.4%)**<!--metrics:js/frac_pct-->
+
+The marker is an HTML comment: invisible in the rendered document, and the text
+immediately before it is the claim the format names. ``--write`` rewrites that
+text from the ledger and the tree; without it, a claim that disagrees with
+either is a failure. ``make metrics`` is the write. A marker naming a figure the
+ledger does not have is a failure too — that is how a typo in a marker is caught
+rather than quietly refreshing nothing.
+
+The ``--min-pass`` floors of `.github/workflows/ci.yml` are read the same way:
+they are the score the tree currently reaches, and ``--write`` raises them to
+it. A floor is never lowered: if the tree would lower one, that is a
+regression, and it is reported instead of written.
+
 What is not checked, and why
-----------------------------
+-----------------------------
 Whether a paragraph still describes the corpus it names. `README.md` keeps its
 history, so a stale number is also a number that appears in it, and presence
 is not a test of truth. `ROADMAP.md`'s baseline was corrected by hand in the
-pull request that added this file; the next one has to be read by a person.
+pull request that added this file. Every *live* figure in `README.md` is a
+marker now; an unmarked one is history, and history is read by a person.
 
-    python3 tools/ci/check_numbers.py
+    python3 tools/ci/check_numbers.py            # check
+    python3 tools/ci/check_numbers.py --write    # refresh the marked claims
 
 It exits 0 when every check passes and 1 when any fails.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 from pathlib import Path
@@ -63,6 +91,20 @@ from run_js_conformance import parse_dat  # noqa: E402
 README = ROOT / "README.md"
 ROADMAP = ROOT / "ROADMAP.md"
 SUITE_SOURCE = ROOT / "tests" / "test_suite.cpp"
+LEDGER = ROOT / "docs" / "metrics.json"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
+
+# The documents whose marked claims are refreshed. ARCHITECTURE.md and AUDIT.md
+# are frozen append targets, and a phase row quotes the figures of its own day.
+DOCUMENTS = (README, ROADMAP)
+
+# `<!--metrics:js/frac_pct-->`: the key names a figure, the format names the
+# shape of the claim the marker follows.
+MARKER = re.compile(r"<!--metrics:([\w.]+)/(\w+)-->")
+# Anything that begins like a marker and is not one. A marker the pattern does
+# not match is a marker that refreshes nothing, silently, which is worse than a
+# figure nobody marked.
+LOOKS_LIKE_MARKER = re.compile(r"<!--metrics:[^>]*-->")
 
 # Lines of README.md that speak in the present tense. Past 120 the phase
 # write-ups begin, and they are quoting the count they had, not today's.
@@ -92,10 +134,296 @@ def line_of(text: str, offset: int) -> int:
     return text.count("\n", 0, offset) + 1
 
 
+def visible(text: str) -> str:
+    """The document as a reader sees it: markers removed.
+
+    Removed rather than replaced by a placeholder, so the patterns below see the
+    same numbers they did before the markers existed. No marker holds a newline,
+    so line numbers survive.
+    """
+    return MARKER.sub("", text)
+
+
+# ---------------------------------------------------------------------------
+# The ledger, and the figures that are derived rather than measured
+# ---------------------------------------------------------------------------
+
+class UnknownFigure(Exception):
+    """A marker names a figure the ledger does not have, or a shape it is not."""
+
+
+def figures() -> tuple[dict[str, int], set[str]]:
+    """Every figure a document may mark, by name, and which of them were measured.
+
+    Measured ones come from docs/metrics.json; counted ones are derived from the
+    tree here, so a document cannot name a count that the tree does not have.
+    """
+    ledger = json.loads(read(LEDGER))["measured"]
+    out: dict[str, int] = {}
+    measured: set[str] = set()
+
+    out["unit_suites"] = len(RUN_TEST.findall(read(SUITE_SOURCE)))
+    out["js.total"] = corpus_cases(ROOT / "tests" / "js-conformance")
+    out["js.pass"] = int(ledger["js_conformance"]["pass"])
+    out["dom.total"] = corpus_cases(ROOT / "tests" / "dom-conformance")
+    out["dom.pass"] = int(ledger["dom_conformance"]["pass"])
+    out["probe.pass"] = int(ledger["everyday_probe"]["pass"])
+    out["probe.total"] = int(ledger["everyday_probe"]["of"])
+    for prefix, key in (
+        ("t262.default", "test262_default_directories"),
+        ("t262.class", "test262_class_directories"),
+    ):
+        row = ledger[key]
+        out[f"{prefix}.before"] = int(row["before_pass"])
+        out[f"{prefix}.before_total"] = int(row["before_of"])
+        out[f"{prefix}.now"] = int(row["now_pass"])
+        out[f"{prefix}.total"] = int(row["now_of"])
+        out[f"{prefix}.fixed"] = int(row["fixed"])
+    whole = ledger["test262_whole_suite"]
+    out["t262.full.pass"] = int(whole["pass"])
+    out["t262.full.total"] = int(whole["of"])
+    measured |= {
+        "js.pass", "dom.pass", "probe.pass",
+        "t262.default.before", "t262.default.before_total", "t262.default.now", "t262.default.total", "t262.default.fixed",
+        "t262.class.before", "t262.class.before_total", "t262.class.now", "t262.class.total", "t262.class.fixed",
+        "t262.full.pass", "t262.full.total",
+    }
+    return out, measured
+
+
+def percent(passed: int, total: int) -> str:
+    """The percentage as the documents write it: one decimal, always.
+
+    `98.4%`, `87.0%`, `65.0%`: the decimal is kept when it is zero, because the
+    column is read by eye and `65%` next to `98.4%` reads as a different
+    precision rather than as the same measure.
+    """
+    return f"{round(passed / total * 100, 1):.1f}"
+
+
+def num(value: int) -> str:
+    return f"{value:,}"
+
+
+def resolve(name: str, values: dict[str, int]) -> tuple[int, int | None]:
+    """The figure a name means, and the total it is a fraction of, if any.
+
+    `js.pass` is the pass count of a corpus whose total is `js.total`, and `js`
+    is the same figure, because a bare corpus name means its score;
+    `t262.default` is the same as `t262.default.now`.
+    `t262.default.before` has a total of `t262.default.before_total`, and a
+    `_pct` suffix asks for the same figure as a percentage.
+    """
+    base = name[: -len("_pct")] if name.endswith("_pct") else name
+    # A total is a figure, not a score: `js.total` is 1,156, not 1,156/1,156.
+    if base.endswith((".total", "_total")) and base in values:
+        return values[base], None
+    candidates = [base] if base in values else []
+    if not base.endswith((".pass", ".now", ".before")):
+        candidates += [base + suffix for suffix in (".pass", ".now") if base + suffix in values]
+    for candidate in candidates:
+        if candidate.endswith(".before"):
+            total = values.get(candidate + "_total")
+        else:
+            total = values.get(candidate.rsplit(".", 1)[0] + ".total")
+        if total is not None:
+            return values[candidate], total
+    if base in values:
+        return values[base], None
+    raise UnknownFigure(f"{name!r} is not a figure: docs/metrics.json has no such key")
+
+
+def claim_text(name: str, shape: str, values: dict[str, int]) -> tuple[str, re.Pattern[str]]:
+    """The text a marker's claim should read, and the shape it replaces."""
+    try:
+        value, total = resolve(name, values)
+    except UnknownFigure:
+        raise
+    pct_of = (lambda: f"{percent(value, total)}%") if total is not None else None
+    if shape == "int":
+        return f"{value}", re.compile(r"\d[\d,]*\Z")
+    if shape == "num":
+        return num(value), re.compile(r"\d[\d,]*\Z")
+    if shape == "pct":
+        if total is None:
+            raise UnknownFigure(f"{name!r} has no total to divide by")
+        return pct_of(), re.compile(r"\d+(?:\.\d+)?%\Z")
+    if shape in ("frac", "frac_pct", "of", "of_pct"):
+        if total is None:
+            raise UnknownFigure(f"{shape!r} needs a total: {name!r} has none")
+        joiner = " / " if shape.startswith("frac") else " of "
+        # The slash fractions are four figures and are written plain
+        # (`1137 / 1156`); the `of` ones are test262 counts and carry the
+        # separators (`13,654 of 15,686`).
+        style = str if shape.startswith("frac") else num
+        body = joiner.join((style(value), style(total)))
+        pattern = r"\d[\d,]*\s*(?:/|of)\s*\d[\d,]*"
+        if shape.endswith("_pct"):
+            body += f" ({pct_of()})"
+            pattern += r"\s*\(\d+(?:\.\d+)?%\)"
+        return body, re.compile(pattern + r"\Z")
+    if shape == "pair":
+        # "260/260": the same count twice, as the sample output writes it.
+        return f"{value}/{value}", re.compile(r"\d[\d,]*/\d[\d,]*\Z")
+    raise UnknownFigure(f"{shape!r} is not a shape: use int, num, pct, frac, frac_pct, of, of_pct or pair")
+
+
+def check_markers(problems: list[str], values: dict[str, int]) -> int:
+    checked = 0
+    for path in DOCUMENTS:
+        raw = read(path)
+        for match in LOOKS_LIKE_MARKER.finditer(raw):
+            if MARKER.fullmatch(match.group(0)) is None:
+                problems.append(
+                    f"{path.name}:{line_of(raw, match.start())}: {match.group(0)} is not a"
+                    f" marker: use <!--metrics:<figure>/<shape>-->"
+                )
+        for match in MARKER.finditer(raw):
+            checked += 1
+            name, shape = match.group(1), match.group(2)
+            where = f"{path.name}:{line_of(raw, match.start())}"
+            try:
+                expected, shape_re = claim_text(name, shape, values)
+            except UnknownFigure as exc:
+                problems.append(f"{where}: {exc}")
+                continue
+            written = shape_re.search(raw[: match.start()])
+            if written is None:
+                problems.append(
+                    f"{where}: nothing shaped like {shape!r} before the marker for {name}"
+                    f" (expected {expected!r})"
+                )
+            elif written.group(0) != expected:
+                problems.append(
+                    f"{where}: {written.group(0)} but the tree says {expected}"
+                    f" ({name}, {shape})"
+                )
+    return checked
+
+
+def first_number(text: str) -> int:
+    return int(re.match(r"[\d,]+", text).group(0).replace(",", ""))
+
+
+def write_markers(values: dict[str, int], measured: set[str], problems: list[str],
+                  allow_lowering: bool) -> list[str]:
+    """Rewrite every marked claim; return what changed, as readable lines.
+
+    A measured score is only ever *raised* by this: a marked figure that would
+    go down is either a regression or a ledger that has not been re-measured,
+    and both are decisions for a person, taken with `--scores`.
+    """
+    changes: list[str] = []
+    for path in DOCUMENTS:
+        text = read(path)
+        pieces: list[tuple[int, int, str]] = []
+        for match in MARKER.finditer(text):
+            name, shape = match.group(1), match.group(2)
+            where = f"{path.name}:{line_of(text, match.start())}"
+            try:
+                expected, shape_re = claim_text(name, shape, values)
+            except UnknownFigure as exc:
+                problems.append(f"{where}: {exc}")
+                continue
+            written = shape_re.search(text[: match.start()])
+            if written is None:
+                problems.append(f"{where}: nothing shaped like {shape!r} before the marker for {name}")
+                continue
+            if written.group(0) != expected:
+                lowered = (
+                    name in measured
+                    and first_number(written.group(0)) > first_number(expected)
+                )
+                if lowered and not allow_lowering:
+                    problems.append(
+                        f"{where}: {written.group(0)} would become {expected}; that is a"
+                        f" lower score for a measured figure — re-measure it, or pass"
+                        f" --scores to record the regression"
+                    )
+                    continue
+                changes.append(f"{where}: {written.group(0)} -> {expected}")
+                pieces.append((written.start(), match.start(), expected))
+        if not pieces:
+            continue
+        out: list[str] = []
+        cursor = 0
+        for start, end, replacement in pieces:
+            out.append(text[cursor:start])
+            out.append(replacement)
+            cursor = end
+        out.append(text[cursor:])
+        path.write_text("".join(out), encoding="utf-8")
+    return changes
+
+
+# ---------------------------------------------------------------------------
+# The floors CI enforces
+# ---------------------------------------------------------------------------
+
+MIN_PASS = re.compile(r"--min-pass\s+(\d+)")
+# A floor is the score a corpus reaches today; the runner that measures it names
+# the figure. The others (wpt, url, xml) take their floor from the Makefile.
+FLOOR_RUNNERS = {
+    "run_js_conformance.py": "js.pass",
+    "run_dom_conformance.py": "dom.pass",
+}
+
+
+def floor_lines(text: str):
+    """Every `--min-pass` in the workflow, as (offset, floor, figure name)."""
+    for match in MIN_PASS.finditer(text):
+        start = text.rfind("\n", 0, match.start()) + 1
+        end = text.find("\n", match.start())
+        line = text[start:end]
+        for runner, name in FLOOR_RUNNERS.items():
+            if runner in line:
+                yield match, int(match.group(1)), name
+
+
+def check_floors(problems: list[str], values: dict[str, int]) -> int:
+    text = read(CI_WORKFLOW)
+    checked = 0
+    for _, floor, name in floor_lines(text):
+        checked += 1
+        if floor != values[name]:
+            problems.append(
+                f"ci.yml: `--min-pass {floor}` is not what the ledger says"
+                f" {values[name]} ({name}) — run `make metrics`"
+            )
+    return checked
+
+
+def write_floors(values: dict[str, int], problems: list[str]) -> list[str]:
+    text = read(CI_WORKFLOW)
+    changes: list[str] = []
+    out: list[str] = []
+    cursor = 0
+    for match, floor, name in floor_lines(text):
+        want = values[name]
+        if floor == want:
+            continue
+        if floor > want:
+            # A floor is never lowered to let a tree pass: that is a
+            # regression, and it is reported, not written.
+            problems.append(
+                f"ci.yml: `--min-pass {floor}` is above what the tree reaches"
+                f" ({want}, {name}): a regression, and a floor is not lowered"
+            )
+            continue
+        out.append(text[cursor : match.start(1)])
+        out.append(str(want))
+        cursor = match.end(1)
+        changes.append(f"ci.yml: `--min-pass {floor}` -> {want} ({name})")
+    out.append(text[cursor:])
+    if changes:
+        CI_WORKFLOW.write_text("".join(out), encoding="utf-8")
+    return changes
+
+
 def check_arithmetic(problems: list[str]) -> int:
     checked = 0
     for name in ("README.md", "ROADMAP.md"):
-        text = read(ROOT / name)
+        text = visible(read(ROOT / name))
         for match in PERCENT.finditer(text):
             checked += 1
             numerator = int(match.group(1).replace(",", ""))
@@ -115,7 +443,7 @@ def check_arithmetic(problems: list[str]) -> int:
 
 def check_denominators(problems: list[str]) -> list[tuple[Path, int, int]]:
     """The scoreboard's corpus totals, against the corpora on disk."""
-    text = read(README)
+    text = visible(read(README))
     found: list[tuple[Path, int, int]] = []
     rows = {
         "| **JavaScript corpus**": ROOT / "tests" / "js-conformance",
@@ -143,7 +471,7 @@ def check_denominators(problems: list[str]) -> list[tuple[Path, int, int]]:
 
 def check_suite_count(problems: list[str]) -> int:
     registered = len(RUN_TEST.findall(read(SUITE_SOURCE)))
-    lines = read(README).split("\n")
+    lines = visible(read(README)).split("\n")
     reported: set[int] = set()
 
     def report(number: int, text: str, digits: str) -> None:
@@ -167,7 +495,95 @@ def check_suite_count(problems: list[str]) -> int:
     return registered
 
 
-def main() -> int:
+# ---------------------------------------------------------------------------
+# The formats, and the cases they are trusted for
+# ---------------------------------------------------------------------------
+
+SELF_TEST_FIGURES = {
+    "unit_suites": 260,
+    "js.pass": 1137,
+    "js.total": 1156,
+    "dom.pass": 678,
+    "dom.total": 678,
+    "probe.pass": 90,
+    "probe.total": 90,
+    "t262.default.before": 12657,
+    "t262.default.before_total": 15686,
+    "t262.default.now": 13654,
+    "t262.default.total": 15686,
+    "t262.full.pass": 31161,
+    "t262.full.total": 47967,
+}
+
+SELF_TEST_CASES = [
+    # (figure, shape, what the claim must read)
+    ("unit_suites", "int", "260"),
+    ("unit_suites", "pair", "260/260"),
+    ("js", "frac_pct", "1137 / 1156 (98.4%)"),
+    ("js", "frac", "1137 / 1156"),
+    ("dom", "frac", "678 / 678"),
+    ("js", "pct", "98.4%"),
+    ("js.pass", "num", "1,137"),
+    ("probe.pass", "pair", "90/90"),
+    ("t262.full.pass", "num", "31,161"),
+    ("t262.full.pass", "of", "31,161 of 47,967"),
+    ("t262.full", "pct", "65.0%"),
+    ("t262.default", "pct", "87.0%"),
+    ("t262.default.before", "num", "12,657"),
+    ("t262.default.before_pct", "pct", "80.7%"),
+]
+
+
+def self_test() -> int:
+    failures = 0
+    for name, shape, expected in SELF_TEST_CASES:
+        written, _ = claim_text(name, shape, SELF_TEST_FIGURES)
+        if written != expected:
+            print(f"  FAIL  {name}/{shape}: {written!r}, not {expected!r}")
+            failures += 1
+    # The shapes that have to refuse: a figure with no total cannot be a
+    # fraction, an unknown figure cannot be anything, and neither can an
+    # unknown shape. A check that answers confidently to these is the check
+    # that would rewrite a document wrongly and leave it looking right.
+    for name, shape in (
+        ("unit_suites", "frac"),      # no total
+        ("js.total", "frac_pct"),     # a total is not a score
+        ("no_such_figure", "int"),
+        ("js", "percentage"),
+    ):
+        try:
+            claim_text(name, shape, SELF_TEST_FIGURES)
+        except UnknownFigure:
+            continue
+        print(f"  FAIL  {name}/{shape}: answered instead of refusing")
+        failures += 1
+    if first_number("1,137 / 1,156 (98.4%)") != 1137:
+        print("  FAIL  first_number does not read a thousands separator")
+        failures += 1
+    total = len(SELF_TEST_CASES) + 4 + 1
+    if failures:
+        print(f"\ncheck_numbers --self-test: {failures} failure(s)")
+        return 1
+    print(f"check_numbers --self-test: {total} case(s), 0 failure(s)")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if "--self-test" in argv:
+        return self_test()
+    write = "--write" in argv
+    allow_lowering = "--scores" in argv
+    values, measured = figures()
+    if write:
+        print("check_numbers: refreshing the figures the documents publish")
+        lowered: list[str] = []
+        changes = write_floors(values, lowered) + write_markers(values, measured, lowered, allow_lowering)
+        for change in changes:
+            print(f"  {change}")
+        for problem in lowered:
+            print(f"  not written: {problem}")
+        print()
+
     arithmetic: list[str] = []
     percentages = check_arithmetic(arithmetic)
 
@@ -176,6 +592,12 @@ def main() -> int:
 
     suites: list[str] = []
     registered = check_suite_count(suites)
+
+    marked: list[str] = []
+    marks = check_markers(marked, values)
+
+    floors: list[str] = []
+    floor_count = check_floors(floors, values)
 
     print("check_numbers: the numbers the documents publish")
     if arithmetic:
@@ -195,7 +617,16 @@ def main() -> int:
     else:
         print(f"  ok    tests/test_suite.cpp registers {registered} suites, as README.md says")
 
-    problems = arithmetic + denominators + suites
+    if marked:
+        print(f"  FAIL  {len(marked)} marked claim(s) disagree with the tree or the ledger")
+    else:
+        print(f"  ok    {marks} marked claim(s) match docs/metrics.json and the tree")
+    if floors:
+        print(f"  FAIL  {len(floors)} `--min-pass` floor(s) disagree with the ledger")
+    else:
+        print(f"  ok    ci.yml: {floor_count} `--min-pass` floor(s) match the ledger")
+
+    problems = arithmetic + denominators + suites + marked + floors
     if problems:
         print()
         for problem in problems:
@@ -207,4 +638,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(sys.argv[1:]))

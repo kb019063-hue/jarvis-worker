@@ -23737,6 +23737,9 @@ TEST(http_authentication_basic_and_digest_challenges) {
         assert(resp.auth_schemes.size() == 1);
         assert(resp.auth_schemes[0] == "Digest");
         assert(resp.auth_realm == "locked");
+    }
+}
+
 // Phase 109 / finding 115: Hebrew and Arabic are reordered by UAX #9 and not
 // painted left to right like Latin.
 //

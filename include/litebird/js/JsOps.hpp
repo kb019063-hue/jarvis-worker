@@ -371,6 +371,9 @@ struct JsIntrinsics {
     JsObject* weakmap_proto{nullptr};
     JsObject* weakset_proto{nullptr};
     JsObject* promise_proto{nullptr};
+    /// `TextDecoder.prototype` and `TextEncoder.prototype` (TextCodec.cpp).
+    JsObject* text_decoder_proto{nullptr};
+    JsObject* text_encoder_proto{nullptr};
     JsObject* error_protos[7]{};          // indexed by JsErrorKind
 
     /// `Array.prototype[Symbol.iterator]` and `String.prototype[Symbol.iterator]`

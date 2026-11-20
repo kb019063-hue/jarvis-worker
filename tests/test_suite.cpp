@@ -5217,6 +5217,323 @@ TEST(svg_text_uses_canvas_glyphs_and_svg_positioning) {
         assert(hidden->get_pixel_color(x, y).a == 0);
 }
 
+// ---------------------------------------------------------------------------
+// SVG text: the position lists, text chunks, <textPath> and paint servers of
+// Phase 107. Each test builds the image twice — once through the SVG and once
+// by asking Canvas 2D for the same glyphs at the position SVG asks for — so
+// the oracle is the geometry, not "it did not crash".
+// ---------------------------------------------------------------------------
+
+static std::shared_ptr<litebird::ImageData> svg_text_render_pixels(const std::string& content,
+                                                                   int width, int height) {
+    auto doc = litebird::HtmlParser::parse(
+        "<svg width='" + std::to_string(width) + "' height='" + std::to_string(height) +
+        "' viewBox='0 0 " + std::to_string(width) + " " + std::to_string(height) + "'>" +
+        content + "</svg>");
+    auto svgs = doc->get_elements_by_tag_name("svg");
+    assert(svgs.size() == 1);
+    auto image = litebird::SvgRenderer::render(svgs[0], static_cast<float>(width),
+                                               static_cast<float>(height));
+    assert(image && image->width == width && image->height == height);
+    return image;
+}
+
+// `tolerance` is the number of pixels allowed to differ, and it is zero for
+// everything that is not rotated: a glyph drawn at 45 degrees lands on a grid
+// that is not the pixel grid, and one unit of float rounding at the edge is
+// not a different answer. The ink is never allowed to be absent.
+static void svg_text_assert_same_pixels(const std::shared_ptr<litebird::ImageData>& actual,
+                                        const std::shared_ptr<litebird::ImageData>& expected,
+                                        int tolerance = 0) {
+    assert(actual && expected && actual->width == expected->width &&
+           actual->height == expected->height);
+    int painted = 0;
+    int differing = 0;
+    for (int y = 0; y < actual->height; ++y) {
+        for (int x = 0; x < actual->width; ++x) {
+            painted += actual->get_pixel_color(x, y).a != 0;
+            if (actual->get_pixel(x, y) != expected->get_pixel(x, y)) ++differing;
+        }
+    }
+    assert(painted > 50);
+    assert(differing <= tolerance);
+}
+
+TEST(svg_text_position_lists_place_each_glyph) {
+    using namespace litebird;
+
+    // No list: the run is still one drawn string, so the pairs a font kerns
+    // stay kerned. This is the case a per-glyph loop would have broken.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 40px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("AV", 10, 50);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='50' font-size='40' fill='red'>AV</text>", 200, 80),
+            expected.image_data());
+    }
+
+    // x list: the n-th value is the absolute x of the n-th character.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("A", 10, 32);
+        expected.fill_text("B", 30, 32);
+        expected.fill_text("C", 50, 32);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10 30 50' y='32' font-size='24' fill='red'>ABC</text>",
+                                   200, 80),
+            expected.image_data());
+    }
+
+    // y list: one absolute y per character, x carried along the run.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        expected.fill_text("A", 10, 20);
+        expected.fill_text("B", 10 + wa, 50);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='20 50' font-size='24' fill='red'>AB</text>",
+                                   200, 80),
+            expected.image_data());
+    }
+
+    // dx list: relative shifts, one per character, applied before it is drawn.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        expected.fill_text("A", 10, 32);
+        expected.fill_text("BC", 10 + wa + 5, 32);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='32' dx='0 5 0' font-size='24' fill='red'>ABC</text>",
+                                   200, 80),
+            expected.image_data());
+    }
+
+    // rotate: each glyph turns about its own origin; the last value carries on
+    // to the characters the list does not reach (SVG 1.1 §10.5).
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        const float wb = expected.measure_text("B").width;
+        expected.save();
+        expected.translate(10, 40);
+        expected.rotate(30.0f * 3.14159265358979f / 180.0f);
+        expected.fill_text("A", 0, 0);
+        expected.restore();
+        expected.save();
+        expected.translate(10 + wa, 40);
+        expected.rotate(0.0f);
+        expected.fill_text("B", 0, 0);
+        expected.restore();
+        expected.save();
+        expected.translate(10 + wa + wb, 40);
+        expected.rotate(0.0f);
+        expected.fill_text("C", 0, 0);
+        expected.restore();
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='40' rotate='30 0' font-size='24' fill='red'>ABC</text>",
+                                   200, 80),
+            expected.image_data(), 24);
+    }
+
+    // A tspan's own transform still moves its run, exactly as it did before
+    // the lists: the pen is inherited from the parent, then transformed.
+    {
+        CanvasRenderingContext2D measure(200, 80);
+        measure.font = "normal 400 24px sans-serif";
+        const float wa = measure.measure_text("A").width;
+
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("A", 10, 32);
+        expected.save();
+        expected.translate(40, 0);
+        expected.fill_text("B", 10 + wa, 32);
+        expected.restore();
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='32' font-size='24' fill='red'>A"
+                                   "<tspan transform='translate(40,0)'>B</tspan></text>", 200, 80),
+            expected.image_data());
+    }
+}
+
+TEST(svg_text_anchor_measures_the_whole_chunk) {
+    using namespace litebird;
+    // text-anchor belongs to the text chunk, not to the text node: a middle
+    // anchor over two tspans centres the run, whichever node paints it.
+    {
+        CanvasRenderingContext2D measure(200, 80);
+        measure.font = "normal 400 24px sans-serif";
+        const float wa = measure.measure_text("A").width;
+        const float wb = measure.measure_text("B").width;
+        const float start = 60.0f - (wa + wb) * 0.5f;
+
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("A", start, 32);
+        expected.fill_style = Color::parse("blue");
+        expected.fill_text("B", start + wa, 32);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='60' y='32' text-anchor='middle' font-size='24'>"
+                                   "<tspan fill='red'>A</tspan><tspan fill='blue'>B</tspan></text>",
+                                   200, 80),
+            expected.image_data());
+    }
+    // The same chunk anchored end sits to the left of x by its whole advance.
+    {
+        CanvasRenderingContext2D measure(200, 80);
+        measure.font = "normal 400 24px sans-serif";
+        const float wa = measure.measure_text("A").width;
+        const float wb = measure.measure_text("B").width;
+        const float start = 100.0f - (wa + wb);
+
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("A", start, 32);
+        expected.fill_style = Color::parse("blue");
+        expected.fill_text("B", start + wa, 32);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='100' y='32' text-anchor='end' font-size='24'>"
+                                   "<tspan fill='red'>A</tspan><tspan fill='blue'>B</tspan></text>",
+                                   200, 80),
+            expected.image_data());
+    }
+    // An absolute x on a tspan begins a new chunk, so the parent's `end` anchor
+    // applies to the first chunk and the tspan's own `start` to the second:
+    // A ends at 10, and B begins at 70.
+    {
+        CanvasRenderingContext2D measure(200, 80);
+        measure.font = "normal 400 24px sans-serif";
+        const float wa = measure.measure_text("A").width;
+
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        expected.fill_text("A", 10 - wa, 32);
+        expected.fill_style = Color::parse("blue");
+        expected.fill_text("B", 70, 32);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='32' text-anchor='end' font-size='24'"
+                                   " fill='red'>A<tspan x='70' text-anchor='start'"
+                                   " fill='blue'>B</tspan></text>", 200, 80),
+            expected.image_data());
+    }
+}
+
+TEST(svg_text_paint_servers_paint_the_glyphs) {
+    using namespace litebird;
+    CanvasRenderingContext2D expected(200, 80);
+    expected.font = "normal 400 40px sans-serif";
+    auto gradient = expected.create_linear_gradient(0, 0, 0, 50);
+    gradient->add_color_stop(0.0f, Color::parse("red"));
+    gradient->add_color_stop(1.0f, Color::parse("blue"));
+    expected.fill_gradient = gradient;
+    expected.fill_text("A", 10, 40);
+    svg_text_assert_same_pixels(
+        svg_text_render_pixels(
+            "<defs><linearGradient id='g' gradientUnits='userSpaceOnUse'"
+            " x1='0' y1='0' x2='0' y2='50'>"
+            "<stop offset='0' stop-color='red'/><stop offset='1' stop-color='blue'/>"
+            "</linearGradient></defs>"
+            "<text x='10' y='40' font-size='40' fill='url(#g)'>A</text>", 200, 80),
+        expected.image_data());
+
+    // A gradient it cannot resolve falls back to the colour the same attribute
+    // names, which is what `fill="url(#missing) lime"` asks for.
+    {
+        CanvasRenderingContext2D solid(200, 80);
+        solid.font = "normal 400 40px sans-serif";
+        solid.fill_style = Color::parse("lime");
+        solid.fill_text("A", 10, 40);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<text x='10' y='40' font-size='40'"
+                                   " fill='url(#missing) lime'>A</text>", 200, 80),
+            solid.image_data());
+    }
+}
+
+TEST(svg_text_path_lays_the_glyphs_along_a_path) {
+    using namespace litebird;
+
+    // A horizontal path: the glyphs follow it, no rotation.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        expected.fill_text("A", 10, 40);
+        expected.fill_text("B", 10 + wa, 40);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<defs><path id='p' d='M10 40 H110'/></defs>"
+                                   "<text font-size='24' fill='red'>"
+                                   "<textPath href='#p'>AB</textPath></text>", 200, 80),
+            expected.image_data());
+    }
+
+    // startOffset is a distance along the path; 50% of a 100-unit line is 50.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        expected.fill_text("A", 60, 40);
+        expected.fill_text("B", 60 + wa, 40);
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<defs><path id='p' d='M10 40 H110'/></defs>"
+                                   "<text font-size='24' fill='red'>"
+                                   "<textPath href='#p' startOffset='50%'>AB</textPath></text>",
+                                   200, 80),
+            expected.image_data());
+    }
+
+    // A diagonal path: each glyph sits on the line and turns with it, which is
+    // the one thing a straight baseline cannot imitate.
+    {
+        CanvasRenderingContext2D expected(200, 80);
+        expected.font = "normal 400 24px sans-serif";
+        expected.fill_style = Color::parse("red");
+        const float wa = expected.measure_text("A").width;
+        const float along = wa / std::sqrt(2.0f);
+        expected.save();
+        expected.translate(10, 10);
+        expected.rotate(45.0f * 3.14159265358979f / 180.0f);
+        expected.fill_text("A", 0, 0);
+        expected.restore();
+        expected.save();
+        expected.translate(10 + along, 10 + along);
+        expected.rotate(45.0f * 3.14159265358979f / 180.0f);
+        expected.fill_text("B", 0, 0);
+        expected.restore();
+        svg_text_assert_same_pixels(
+            svg_text_render_pixels("<defs><path id='d' d='M10 10 L50 50'/></defs>"
+                                   "<text font-size='24' fill='red'>"
+                                   "<textPath href='#d'>AB</textPath></text>", 200, 80),
+            expected.image_data(), 40);
+    }
+
+    // A path that is not there paints nothing, and does not end the process.
+    {
+        auto empty = svg_text_render_pixels("<text font-size='24' fill='red'>"
+                                            "<textPath href='#nowhere'>AB</textPath></text>",
+                                            200, 80);
+        for (int y = 0; y < empty->height; ++y)
+            for (int x = 0; x < empty->width; ++x)
+                assert(empty->get_pixel_color(x, y).a == 0);
+    }
+}
+
 TEST(svg_vector_rendering) {
     using namespace litebird;
     std::string html = R"(
@@ -25355,6 +25672,10 @@ int main() {
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
     RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);
+    RUN_TEST(svg_text_position_lists_place_each_glyph);
+    RUN_TEST(svg_text_anchor_measures_the_whole_chunk);
+    RUN_TEST(svg_text_paint_servers_paint_the_glyphs);
+    RUN_TEST(svg_text_path_lays_the_glyphs_along_a_path);
     RUN_TEST(svg_vector_rendering);
     RUN_TEST(es6_map_set_and_destructuring);
     RUN_TEST(css_transitions_and_animations);

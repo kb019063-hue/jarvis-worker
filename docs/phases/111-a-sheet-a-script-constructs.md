@@ -47,7 +47,7 @@ Two things fell out of adding it:
 
 ## 3. How it is verified
 
-- **`make test`** → **275 / 275** suites; the new one is
+- **`make test`** → **279 / 279** suites; the new one is
   `cssom_a_sheet_a_script_constructs`.
 - **`make js-conformance`** 1142 / 1158, **`make dom-conformance`** 678 / 678,
   **`make wpt`** 9567 / 9824 with 0 unlisted, **URL** 1188 / 1188, **XML**

@@ -44,7 +44,7 @@ argument for writing the test first.
 
 ## 3. How it is verified
 
-- `make test` → **275 / 275**; the new suite is
+- `make test` → **279 / 279**; the new suite is
   `cssom_a_sheet_a_script_constructs`, 61 assertions.
 - With `src/js/DomStyleBindings.cpp` reverted and the test kept, the suite fails
   at its first line, `Uncaught TypeError: Illegal constructor`.

@@ -160,7 +160,7 @@ because the last third of it has no oracle to converge on.
 | 29 | ~~**`Attr` is a `Node`**; one qualified name in two namespaces; `NamedNodeMap`/`HTMLCollection` own-props~~ (Phase 51). | M |
 | 30 | **Shadow DOM complete** — slots, `::part`, event retargeting, constructable stylesheets. | M–L |
 | 31 | **Selection + `contenteditable` stack** — `Selection` API, ranges, caret, input events. The authoring gap nobody notices until they try to edit rich text. | L–XL |
-| 32 | **SVG completeness + MathML** — text/gradients/viewBox transforms in render; MathML parse-only. | M |
+| 32 | **SVG completeness + MathML** — gradients and viewBox transforms in render; text is done, `<tspan>` since Phase 82 and the position lists, chunk anchors, `<textPath>` and paint servers on glyphs since Phase 107 (`docs/phases/107-svg-text-positions-chunks-textpath-and-paint.md`), which leaves filters, `textLength`/`letter-spacing`, bidi and MathML beyond parse-only. | M |
 
 ## Wave 6 — What makes Chromium Chromium
 

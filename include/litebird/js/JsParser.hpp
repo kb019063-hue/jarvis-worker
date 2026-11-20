@@ -702,6 +702,13 @@ private:
         // ordinary nested function starts with neither permission.
         bool allow_super_property{false};
         bool allow_super_call{false};
+        // True while parsing code that is written inside a class body but is
+        // not a method of it: a field initialiser or a static block. Both have
+        // a home object, so `super.x` follows allow_super_property, but the
+        // Contains-SuperCall early errors of those productions apply here and
+        // nowhere else (a method's body is a FunctionBody, which does not
+        // contain its own `super()`).
+        bool in_class_field{false};
     };
 
     const JsToken& peek(size_t offset = 0) const;

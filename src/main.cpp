@@ -13,6 +13,7 @@
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/render/ImageDecoder.hpp"
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/js/Heap.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Storage.hpp"
 #include "litebird/net/DataUrl.hpp"
@@ -76,6 +77,9 @@ void print_help(const char* prog) {
     std::cout << "  --gui [url]            Launch interactive graphical Web Browser UI server\n";
     std::cout << "  --port=PORT            TCP port for --gui (default: 8080, bound to 0.0.0.0)\n";
     std::cout << "  --run-js <code>        Execute JavaScript code directly\n";
+    std::cout << "  --gc-stress=SEED[:N]   Collect garbage at a seeded safe point every N\n";
+    std::cout << "                         allocations on average (default 16): a program's\n";
+    std::cout << "                         output must not depend on when it is collected\n";
     std::cout << "  --run-script <file>    Load the page, run <file> in it as a deferred script,\n";
     std::cout << "                         let the page finish loading and its timers run, and\n";
     std::cout << "                         exit without rendering (the DOM scoreboard uses this)\n";
@@ -163,6 +167,11 @@ int main(int argc, char* argv[]) {
     std::string cli_content_type;
     // "canonical" or "events": read the file as XML and print that form.
     std::string xml_dump;
+    // Collection stress: arm it before anything runs, and report what it did
+    // on stderr (never stdout -- stdout is what a case is compared on).
+    bool gc_stress = false;
+    uint64_t gc_stress_seed = 0;
+    uint32_t gc_stress_interval = 16;
 
     for (int i = 1; i < argc; ++i) {
         std::string arg = argv[i];
@@ -221,6 +230,22 @@ int main(int argc, char* argv[]) {
                 std::cerr << "Error: --render-bmp requires output filename\n";
                 return 1;
             }
+        } else if (arg.rfind("--gc-stress=", 0) == 0) {
+            // --gc-stress=SEED or --gc-stress=SEED:INTERVAL. See Heap::
+            // set_gc_stress and `make verify-gc-stress`.
+            const std::string spec = arg.substr(std::string("--gc-stress=").size());
+            const auto colon = spec.find(':');
+            const std::string seed_text = spec.substr(0, colon);
+            if (seed_text.empty()) {
+                std::cerr << "Error: --gc-stress needs a seed (--gc-stress=SEED[:INTERVAL])\n";
+                return 1;
+            }
+            gc_stress_seed = std::strtoull(seed_text.c_str(), nullptr, 10);
+            if (colon != std::string::npos) {
+                gc_stress_interval = static_cast<uint32_t>(
+                    std::max(1, std::atoi(spec.substr(colon + 1).c_str())));
+            }
+            gc_stress = true;
         } else if (arg == "--run-js") {
             if (i + 1 < argc) {
                 js_code = argv[++i];
@@ -255,6 +280,25 @@ int main(int argc, char* argv[]) {
             input_file = arg;
         }
     }
+
+    if (gc_stress) {
+        litebird::Heap::default_heap().set_gc_stress(gc_stress_seed, gc_stress_interval);
+    }
+    // Says how many collections the stress mode actually served. The count
+    // goes to stderr so that a case's stdout -- which is what the corpora
+    // compare -- is untouched, and a harness can tell "the program agreed
+    // under stress" from "stress never fired".
+    struct GcStressReport {
+        bool armed;
+        uint64_t seed;
+        uint32_t interval;
+        ~GcStressReport() {
+            if (!armed) return;
+            std::cerr << "[gc-stress] seed=" << seed << " interval=" << interval
+                      << " collections=" << litebird::Heap::default_heap().gc_stress_collections()
+                      << "\n";
+        }
+    } gc_stress_report{gc_stress, gc_stress_seed, gc_stress_interval};
 
     if (repl_mode) {
         run_repl();

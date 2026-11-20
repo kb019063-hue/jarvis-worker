@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <mutex>
+#include <atomic>
 
 namespace litebird {
 
@@ -221,6 +222,34 @@ public:
 
     GCStats collect_garbage(const std::vector<JsValue*>& roots = {});
 
+    // --- Collection stress ---------------------------------------------------
+    //
+    // Nothing forces a script to have its garbage collected: a page runs and
+    // the collector runs when `gc()` is called or a shell asks for it. So the
+    // question "does a collection ever free something that is still alive?"
+    // is asked by no test that runs the program the way a page runs it.
+    //
+    // Stress mode asks it. The heap counts allocations and, every `interval`
+    // allocations on average, raises a request; whoever holds the program's
+    // state at that moment -- the interpreter, the VM -- serves it at a safe
+    // point of its own choosing (a statement boundary, a bytecode boundary),
+    // where no half-built value is on the C++ stack that the collector cannot
+    // see. That is the same shape as V8's --gc-interval and HotSpot's
+    // -XX:+StressGCM: the observable behaviour of a program must not depend on
+    // when its garbage is collected, and a run that differs is a real bug.
+    //
+    // `seed` picks which allocations the requests land on, so one seed is
+    // reproducible and two seeds collect at different moments. Requests are
+    // counted per heap, and `gc_stress_collections()` says how many were
+    // served -- a harness can require that a run actually collected something
+    // rather than passing because stress mode was never armed.
+    void set_gc_stress(uint64_t seed, uint32_t interval);
+    bool gc_stress_enabled() const { return m_stress_enabled; }
+    /// True when a collection is due, and clears the request. The caller
+    /// collects; the heap does not collect inside an allocation.
+    bool take_gc_stress_request();
+    uint64_t gc_stress_collections() const { return m_stress_collections; }
+
     void register_root(JsValue* val);
     void unregister_root(JsValue* val);
 
@@ -341,6 +370,17 @@ private:
     bool m_counting{false};
     std::vector<JsValue*> m_registered_roots;
     GCStats m_stats;
+
+    // Collection stress (see set_gc_stress). The countdown is read and written
+    // only with m_mutex held; the request flag is read by a thread's own safe
+    // point, so it is atomic.
+    bool m_stress_enabled{false};
+    uint64_t m_stress_rng{0};
+    uint32_t m_stress_interval{16};
+    uint32_t m_stress_countdown{0};
+    std::atomic<bool> m_stress_pending{false};
+    uint64_t m_stress_collections{0};
+    uint64_t next_stress_random();
 };
 
 } // namespace litebird

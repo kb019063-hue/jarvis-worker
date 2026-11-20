@@ -498,15 +498,28 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
     layout.ascent = metrics.first;
     layout.descent = metrics.second;
 
-    layout.advance = FontRenderer::instance().measure_text(text, size_px, parsed.weight, parsed.family, italic);
+    const std::vector<FontRenderer::ShapedGlyph> shaped =
+        (size_px > 0.0f && !text.empty())
+            ? FontRenderer::instance().shape_text(text, size_px, parsed.weight, parsed.family, italic)
+            : std::vector<FontRenderer::ShapedGlyph>{};
+    float advance = 0.0f;
+    float max_y_up = 0.0f;
+    float max_y_down = 0.0f;
+    for (const FontRenderer::ShapedGlyph& sg : shaped) {
+        advance += sg.advance;
+        if (sg.y_offset > max_y_up) max_y_up = sg.y_offset;
+        if (-sg.y_offset > max_y_down) max_y_down = -sg.y_offset;
+    }
+    layout.advance = advance;
     const float condensable = (max_width > 0.0f && layout.advance > max_width && layout.advance > 0.0f)
                                   ? std::clamp(max_width / layout.advance, 0.02f, 1.0f)
                                   : 1.0f;
     layout.condense = condensable;
 
-    layout.baseline_px = static_cast<int>(std::ceil(layout.ascent)) + 1;
-    layout.height = layout.baseline_px + static_cast<int>(std::ceil(layout.descent)) + 1;
-    layout.height = std::clamp(layout.height, 1, kMaxTextBufferHeight);
+    layout.baseline_px = static_cast<int>(std::ceil(layout.ascent + max_y_up)) + 1;
+    const int below_px = static_cast<int>(std::ceil(layout.descent + max_y_down)) + 1;
+    layout.height = std::clamp(layout.baseline_px + below_px, 1, kMaxTextBufferHeight);
+    layout.baseline_px = std::min(layout.baseline_px, layout.height - 1);
     const int pad = static_cast<int>(layout.pad_x);
     // Clamp before narrowing: a hostile string can advance past INT_MAX pixels.
     const int natural_w = (layout.advance >= static_cast<float>(kMaxTextBufferWidth - pad - 2))
@@ -517,36 +530,25 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
     if (size_px <= 0.0f || text.empty()) return layout;
 
     const int px_size = std::clamp(static_cast<int>(std::lround(size_px)), 4, 160);
-    const bool bold = parsed.weight >= 600;
-    // Resolved once for the whole run: `get_glyph` wants an id because it runs
-    // per glyph, and `family_id_for` would answer the same thing every time.
-    const int family_id = FontRenderer::instance().family_id_for(parsed.family);
     float pen = layout.pad_x;
     float ink_l = std::numeric_limits<float>::infinity();
     float ink_r = -std::numeric_limits<float>::infinity();
     float ink_a = 0.0f;
     float ink_d = 0.0f;
 
-    // The glyphs `measureText` counted into `layout.advance`: a canvas string
-    // that walked its codepoints here would draw a ligature's width worth of
-    // letters, and the ink would end where the measurement said it would not.
-    const std::vector<FontRenderer::ShapedGlyph> shaped =
-        FontRenderer::instance().shape_text(text, size_px, parsed.weight, parsed.family, italic);
+    // The glyphs `measureText` counted into `layout.advance`: GSUB ligatures
+    // and GPOS / legacy kerning + mark offsets are already baked into each
+    // `ShapedGlyph`.
     for (std::size_t si = 0; si < shaped.size(); ++si) {
-        // The same pair adjustment `measureText` counted, applied before the
-        // second glyph is placed.
-        if (si > 0) {
-            pen += FontRenderer::instance().kerning_px_shaped(shaped[si - 1], shaped[si], size_px);
-        }
         const GlyphBitmap& g = FontRenderer::instance().get_glyph_shaped(shaped[si], px_size, parsed.weight);
-        const float pen_rel = pen - layout.pad_x;
+        const float pen_rel = pen - layout.pad_x + shaped[si].x_offset;
         if (g.width > 0 && g.height > 0) {
-            const int gx0 = static_cast<int>(std::lround(pen)) + g.bearing_x;
-            const int gy0 = layout.baseline_px - g.bearing_y;
+            const int gx0 = static_cast<int>(std::lround(pen + shaped[si].x_offset)) + g.bearing_x;
+            const int gy0 = layout.baseline_px - static_cast<int>(std::lround(shaped[si].y_offset)) - g.bearing_y;
             ink_l = std::min(ink_l, pen_rel + static_cast<float>(g.bearing_x));
             ink_r = std::max(ink_r, pen_rel + static_cast<float>(g.bearing_x) + static_cast<float>(g.width));
-            ink_a = std::max(ink_a, static_cast<float>(g.bearing_y));
-            ink_d = std::max(ink_d, static_cast<float>(g.height - g.bearing_y));
+            ink_a = std::max(ink_a, static_cast<float>(g.bearing_y) + shaped[si].y_offset);
+            ink_d = std::max(ink_d, static_cast<float>(g.height - g.bearing_y) - shaped[si].y_offset);
             for (int r = 0; r < g.height; ++r) {
                 const int dy = gy0 + r;
                 if (dy < 0 || dy >= layout.height) continue;

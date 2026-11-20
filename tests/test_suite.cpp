@@ -3777,6 +3777,56 @@ TEST(garbage_collector_and_cycles) {
     assert(gc_info.get_property("total_cells").to_number() >= 1.0);
 }
 
+TEST(collection_stress_asks_at_a_seeded_allocation_count) {
+    using namespace litebird;
+    // A heap of its own: the default heap's counters are the process's.
+    Heap heap;
+
+    // Not armed, nothing asks, however much is allocated.
+    for (int i = 0; i < 1000; ++i) heap.allocate_object();
+    assert(!heap.take_gc_stress_request());
+    assert(!heap.gc_stress_enabled());
+
+    // Armed at interval 1, the request is raised by the first allocation and
+    // taken once: taking it re-arms the countdown rather than repeating.
+    heap.set_gc_stress(1, 1);
+    assert(heap.gc_stress_enabled());
+    assert(!heap.take_gc_stress_request());
+    heap.allocate_object();
+    assert(heap.take_gc_stress_request());
+    assert(!heap.take_gc_stress_request());
+    heap.allocate_object();
+    assert(heap.take_gc_stress_request());
+    assert(heap.gc_stress_collections() == 2);
+
+    // The same seed raises the same number of requests at the same counts as
+    // itself, and two seeds differ. Without this a "stress" run that never
+    // fired and a run that fired everywhere print the same thing: nothing.
+    auto requests = [](uint64_t seed, uint32_t interval, int allocations) {
+        Heap h;
+        h.set_gc_stress(seed, interval);
+        int raised = 0;
+        for (int i = 0; i < allocations; ++i) {
+            h.allocate_object();
+            if (h.take_gc_stress_request()) ++raised;
+        }
+        return raised;
+    };
+    assert(requests(7, 16, 4000) == requests(7, 16, 4000));
+    assert(requests(7, 16, 4000) != requests(8, 16, 4000));
+    // Every request is served once, so the count a run reports is the count
+    // it collected.
+    assert(requests(3, 4, 400) > 0);
+    assert(requests(3, 1, 400) >= requests(3, 4, 400));
+
+    // Interval 0 would divide by zero if it were taken at face value; it means
+    // "every allocation", which is what --gc-stress=SEED:0 must not crash.
+    Heap tight;
+    tight.set_gc_stress(1, 0);
+    tight.allocate_object();
+    assert(tight.take_gc_stress_request());
+}
+
 TEST(dom_event_target_and_bubbling) {
     using namespace litebird;
 
@@ -24688,6 +24738,7 @@ int main() {
     RUN_TEST(the_font_shorthand_resets_font_kerning);
     RUN_TEST(the_painter_honours_font_kerning_none);
     RUN_TEST(garbage_collector_and_cycles);
+    RUN_TEST(collection_stress_asks_at_a_seeded_allocation_count);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);
     RUN_TEST(resource_loader_and_url_resolution);

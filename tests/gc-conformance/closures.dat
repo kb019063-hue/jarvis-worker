@@ -1,0 +1,81 @@
+#name a closure keeps the scope it captured
+#code
+function counter() {
+  var n = 0;
+  var label = "ticks";
+  return function () { n += 1; return label + ":" + n; };
+}
+var c = counter();
+for (var i = 0; i < 500; i++) c();
+console.log(c());
+var d = counter();
+console.log(d(), d(), c());
+#expect
+ticks:501
+ticks:1 ticks:2 ticks:502
+
+#name a closure outlives the loop that made it
+#code
+var fns = [];
+for (let i = 0; i < 200; i++) {
+  fns.push(function () { return i * 2; });
+}
+var sum = 0;
+for (var j = 0; j < fns.length; j++) sum += fns[j]();
+console.log(sum);
+#expect
+39800
+
+#name a closure survives the block it was made in
+#code
+function build() {
+  var out;
+  {
+    let secret = "kept";
+    let big = [];
+    for (let k = 0; k < 100; k++) big.push(k);
+    out = function () { return secret + ":" + big.length; };
+  }
+  return out;
+}
+var f = build();
+console.log(f(), f());
+#expect
+kept:100 kept:100
+
+#name a function's own property cell outlives the call that set it
+#code
+function tag(fn, n) {
+  fn.count = n;
+  return fn;
+}
+function make() {
+  var self = function () { return typeof self.count; };
+  return tag(self, 7);
+}
+var a = make();
+var b = make();
+console.log(a(), b(), a.count, b.count);
+#expect
+number number 7 7
+
+#name a named function expression can call itself
+#code
+var fact = function inner(n) { return n <= 1 ? 1 : n * inner(n - 1); };
+console.log(fact(10));
+var fib = function f(n) { return n < 2 ? n : f(n - 1) + f(n - 2); };
+console.log(fib(18));
+#expect
+3628800
+2584
+
+#name two hundred closures each keep their own value
+#code
+function make(i) { return function () { return i; }; }
+var fns = [];
+for (var i = 0; i < 200; i++) fns.push(make(i));
+var total = 0;
+for (var j = 0; j < fns.length; j++) total += fns[j]();
+console.log(total);
+#expect
+19900

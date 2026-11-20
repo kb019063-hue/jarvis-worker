@@ -425,7 +425,10 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    access by design.
 4. **Memory is only reclaimed on request.** The collector is sound (Phase 23,
    section 5) but runs only when a script calls `gc()` or the shell's heap
-   view is opened; a long-running page grows until then. Leak detection is
+   view is opened; a long-running page grows until then. Since Phase 103 it is
+   at least measured: `make verify-gc-stress` collects at a seeded allocation
+   count, between statements, and requires a program to print what it prints
+   when nothing is collected (finding 109). Leak detection is
    switched off in `make asan` and no leak audit has been done since the
    engine was rebuilt. One leak is known: the collector cannot see into what
    a native function captured, so `o.b = f.bind(o)` is never freed, and

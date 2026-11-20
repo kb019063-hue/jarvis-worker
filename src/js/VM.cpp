@@ -478,6 +478,13 @@ JsValue VM::run() {
     };
 
     while (true) {
+        // Collection stress, served at a bytecode boundary: the stack holds
+        // every live value the VM owns, and the heap counts those handles, so
+        // a collection here must free only what the script dropped. See
+        // Heap::set_gc_stress.
+        if (Heap::default_heap().take_gc_stress_request()) {
+            collect_garbage();
+        }
         uint8_t instruction = read_byte();
         auto op = static_cast<OpCode>(instruction);
 

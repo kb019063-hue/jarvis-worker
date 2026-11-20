@@ -534,6 +534,15 @@ private:
     JsValue call_legacy_function(const JsValue& fn, const std::vector<JsValue>& args, const JsValue* this_val);
 
     // --- Statements ---------------------------------------------------------
+    /// Serves a collection the heap's stress mode has asked for, if one is
+    /// due. Called at the statement boundary, where the statement about to run
+    /// has built nothing yet: a value an expression of the *last* statement
+    /// left in a C++ local is still held by that local's handle, which the
+    /// collector counts, and the one about to be built does not exist. The
+    /// half-built values inside a statement -- a partially built array, a
+    /// call's arguments -- are what a collection here must never see, and the
+    /// only way to be sure it does not is to collect between statements.
+    void gc_stress_point();
     Flow exec(const Stmt* stmt, const EnvPtr& env, Frame& frame);
     Flow exec_list(const std::vector<std::unique_ptr<Stmt>>& list, const EnvPtr& env, Frame& frame);
     Flow exec_block(const BlockStmt* block, const EnvPtr& env, Frame& frame);

@@ -478,14 +478,32 @@ bool TrueTypeFont::load_memory(std::vector<uint8_t> data) {
     if (!find_table("loca", m_loca_offset, m_loca_length)) return false;
     if (!find_table("glyf", m_glyf_offset, m_glyf_length)) return false;
 
-    // `kern` is optional and its absence is not a failure: a font that does not
-    // say how its pairs close up is a font whose pairs do not close up, and
-    // that is a normal state of affairs. Version 0 is the Windows table; the
-    // Apple version-1 table starts with 0x00010000 as a 32-bit number, is a
-    // different format inside, and is left out rather than guessed at.
+    // `GSUB`, `GDEF`, `GPOS`, and `kern` are all optional and their absence is
+    // not a failure: a font without them simply lays out plain advances.
     m_ligature_sets.clear();
+    m_has_gdef_glyph_class = false;
+    m_gdef_glyph_class = OtfClassDef{};
+    m_gdef_mark_attach_class = OtfClassDef{};
+    m_gdef_mark_sets.clear();
+    m_has_gpos_kern = false;
+    m_has_gpos_marks = false;
+    m_gpos_known_marks.clear();
+    m_gpos_singles.clear();
+    m_gpos_pair_fmt1.clear();
+    m_gpos_pair_fmt2.clear();
+    m_gpos_mark_base.clear();
+    m_gpos_mark_lig.clear();
+    m_gpos_mark_mark.clear();
+    m_gpos_lookups.clear();
+
+    uint32_t gdef_off = 0, gdef_len = 0;
+    if (find_table("GDEF", gdef_off, gdef_len)) load_gdef(gdef_off, gdef_len);
+
     uint32_t gsub_off = 0, gsub_len = 0;
     if (find_table("GSUB", gsub_off, gsub_len)) load_ligatures(gsub_off, gsub_len);
+
+    uint32_t gpos_off = 0, gpos_len = 0;
+    if (find_table("GPOS", gpos_off, gpos_len)) load_gpos(gpos_off, gpos_len);
 
     m_kern_pairs_offset = 0;
     m_kern_pairs = 0;
@@ -721,6 +739,8 @@ bool TrueTypeFont::load_ligatures(uint32_t gsub_offset, uint32_t gsub_length) {
         if (!within(lookup_record, 2)) continue;
         const std::size_t lookup = lookup_list + read_u16_be(m_data, lookup_record);
         if (!within(lookup, 6)) continue;
+        const uint16_t lookup_flag = read_u16_be(m_data, lookup + 2);
+        const bool ignore_marks = (lookup_flag & 0x0008u) != 0;
         const uint16_t subtable_count = read_u16_be(m_data, lookup + 4);
         for (uint16_t s = 0; s < subtable_count; ++s) {
             if (!within(lookup + 6u + 2u * s, 2)) break;
@@ -778,6 +798,7 @@ bool TrueTypeFont::load_ligatures(uint32_t gsub_offset, uint32_t gsub_length) {
                     if (!within(ligature + 4u, 2u * (components - 1))) break;
                     Ligature lig;
                     lig.glyph = produced;
+                    lig.ignore_marks = ignore_marks;
                     lig.rest.reserve(components - 1);
                     for (uint16_t c = 1; c < components; ++c) {
                         lig.rest.push_back(read_u16_be(m_data, ligature + 2u + 2u * c));
@@ -846,15 +867,1005 @@ void TrueTypeFont::apply_ligatures(std::vector<uint16_t>& glyphs) const {
     glyphs.swap(out);
 }
 
+int TrueTypeFont::OtfCoverage::index(uint16_t glyph) const {
+    if (format == 1) {
+        if (sorted) {
+            auto it = std::lower_bound(glyphs.begin(), glyphs.end(), glyph);
+            if (it != glyphs.end() && *it == glyph) {
+                return static_cast<int>(it - glyphs.begin());
+            }
+            return -1;
+        }
+        for (std::size_t i = 0; i < glyphs.size(); ++i) {
+            if (glyphs[i] == glyph) return static_cast<int>(i);
+        }
+        return -1;
+    }
+    if (format == 2) {
+        if (sorted) {
+            std::size_t lo = 0, hi = ranges.size();
+            while (lo < hi) {
+                const std::size_t mid = lo + (hi - lo) / 2;
+                if (ranges[mid].start <= glyph) lo = mid + 1;
+                else hi = mid;
+            }
+            if (lo > 0) {
+                const Range& r = ranges[lo - 1];
+                if (glyph >= r.start && glyph <= r.end) {
+                    return static_cast<int>(r.start_index + (glyph - r.start));
+                }
+            }
+            return -1;
+        }
+        for (const Range& r : ranges) {
+            if (glyph >= r.start && glyph <= r.end) {
+                return static_cast<int>(r.start_index + (glyph - r.start));
+            }
+        }
+    }
+    return -1;
+}
+
+uint16_t TrueTypeFont::OtfClassDef::class_of(uint16_t glyph) const {
+    if (format == 1) {
+        if (glyph < start_glyph) return 0;
+        const std::size_t idx = static_cast<std::size_t>(glyph - start_glyph);
+        return idx < classes.size() ? classes[idx] : 0;
+    }
+    if (format == 2) {
+        if (sorted) {
+            std::size_t lo = 0, hi = ranges.size();
+            while (lo < hi) {
+                const std::size_t mid = lo + (hi - lo) / 2;
+                if (ranges[mid].start <= glyph) lo = mid + 1;
+                else hi = mid;
+            }
+            if (lo > 0) {
+                const Range& r = ranges[lo - 1];
+                if (glyph >= r.start && glyph <= r.end) return r.cls;
+            }
+            return 0;
+        }
+        for (const Range& r : ranges) {
+            if (glyph >= r.start && glyph <= r.end) return r.cls;
+        }
+    }
+    return 0;
+}
+
+bool TrueTypeFont::parse_coverage(std::size_t cov_off, std::size_t table_end, OtfCoverage& out) const {
+    out = OtfCoverage{};
+    if (cov_off > table_end || table_end - cov_off < 4) return false;
+    const uint16_t fmt = read_u16_be(m_data, cov_off);
+    const uint16_t count = read_u16_be(m_data, cov_off + 2);
+    if (fmt == 1) {
+        if (static_cast<std::size_t>(count) * 2u > table_end - (cov_off + 4u)) return false;
+        out.format = 1;
+        out.glyphs.resize(count);
+        for (uint16_t i = 0; i < count; ++i) {
+            const uint16_t g = read_u16_be(m_data, cov_off + 4u + 2u * i);
+            out.glyphs[i] = g;
+            if (i > 0 && g <= out.glyphs[i - 1]) out.sorted = false;
+        }
+        return true;
+    }
+    if (fmt == 2) {
+        if (static_cast<std::size_t>(count) * 6u > table_end - (cov_off + 4u)) return false;
+        out.format = 2;
+        out.ranges.resize(count);
+        for (uint16_t i = 0; i < count; ++i) {
+            const std::size_t rec = cov_off + 4u + 6u * i;
+            OtfCoverage::Range r;
+            r.start = read_u16_be(m_data, rec);
+            r.end = read_u16_be(m_data, rec + 2);
+            r.start_index = read_u16_be(m_data, rec + 4);
+            if (r.end < r.start) return false;
+            if (i > 0 && r.start <= out.ranges[i - 1].end) out.sorted = false;
+            out.ranges[i] = r;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool TrueTypeFont::parse_classdef(std::size_t cd_off, std::size_t table_end, OtfClassDef& out) const {
+    out = OtfClassDef{};
+    if (cd_off > table_end || table_end - cd_off < 4) return false;
+    const uint16_t fmt = read_u16_be(m_data, cd_off);
+    if (fmt == 1) {
+        if (table_end - cd_off < 6) return false;
+        const uint16_t start_g = read_u16_be(m_data, cd_off + 2);
+        const uint16_t count = read_u16_be(m_data, cd_off + 4);
+        if (static_cast<std::size_t>(count) * 2u > table_end - (cd_off + 6u)) return false;
+        out.format = 1;
+        out.start_glyph = start_g;
+        out.classes.resize(count);
+        for (uint16_t i = 0; i < count; ++i) {
+            out.classes[i] = read_u16_be(m_data, cd_off + 6u + 2u * i);
+        }
+        return true;
+    }
+    if (fmt == 2) {
+        const uint16_t count = read_u16_be(m_data, cd_off + 2);
+        if (static_cast<std::size_t>(count) * 6u > table_end - (cd_off + 4u)) return false;
+        out.format = 2;
+        out.ranges.resize(count);
+        for (uint16_t i = 0; i < count; ++i) {
+            const std::size_t rec = cd_off + 4u + 6u * i;
+            OtfClassDef::Range r;
+            r.start = read_u16_be(m_data, rec);
+            r.end = read_u16_be(m_data, rec + 2);
+            r.cls = read_u16_be(m_data, rec + 4);
+            if (r.end < r.start) return false;
+            if (i > 0 && r.start <= out.ranges[i - 1].end) out.sorted = false;
+            out.ranges[i] = r;
+        }
+        return true;
+    }
+    return false;
+}
+
+namespace {
+
+std::size_t gpos_value_size(uint16_t vf) {
+    std::size_t count = 0;
+    for (unsigned b = 0; b < 8; ++b) {
+        if ((vf & (1u << b)) != 0) ++count;
+    }
+    return count * 2u;
+}
+
+bool gpos_value_nonzero(const auto& v) {
+    return v.x_placement != 0 || v.y_placement != 0 || v.x_advance != 0 || v.y_advance != 0;
+}
+
+}  // namespace
+
+bool TrueTypeFont::read_gpos_value(std::size_t pos, std::size_t table_end, uint16_t vf,
+                                   GposValue& out) const {
+    out = GposValue{};
+    if ((vf & 0xFF00u) != 0) return false;
+    const std::size_t sz = gpos_value_size(vf);
+    if (pos > table_end || sz > table_end - pos) return false;
+    std::size_t cur = pos;
+    if (vf & 0x0001u) { out.x_placement = read_i16_be(m_data, cur); cur += 2; }
+    if (vf & 0x0002u) { out.y_placement = read_i16_be(m_data, cur); cur += 2; }
+    if (vf & 0x0004u) { out.x_advance = read_i16_be(m_data, cur); cur += 2; }
+    if (vf & 0x0008u) { out.y_advance = read_i16_be(m_data, cur); cur += 2; }
+    return true;
+}
+
+bool TrueTypeFont::read_gpos_anchor(std::size_t pos, std::size_t table_end, GposAnchor& out) const {
+    out = GposAnchor{};
+    if (pos > table_end || table_end - pos < 6) return false;
+    const uint16_t fmt = read_u16_be(m_data, pos);
+    if (fmt != 1 && fmt != 2 && fmt != 3) return false;
+    out.present = true;
+    out.x = read_i16_be(m_data, pos + 2);
+    out.y = read_i16_be(m_data, pos + 4);
+    return true;
+}
+
+bool TrueTypeFont::is_mark_glyph(uint16_t gid) const {
+    if (m_has_gdef_glyph_class) return m_gdef_glyph_class.class_of(gid) == 3;
+    return std::binary_search(m_gpos_known_marks.begin(), m_gpos_known_marks.end(), gid);
+}
+
+bool TrueTypeFont::is_ignored_by_lookup(uint16_t gid, uint16_t flag,
+                                        uint16_t mark_filtering_set) const {
+    const uint16_t cls = m_has_gdef_glyph_class
+                             ? m_gdef_glyph_class.class_of(gid)
+                             : (is_mark_glyph(gid) ? 3u : 0u);
+    if ((flag & 0x0002u) && cls == 1) return true; // IgnoreBaseGlyphs
+    if ((flag & 0x0004u) && cls == 2) return true; // IgnoreLigatures
+    if ((flag & 0x0008u) && cls == 3) return true; // IgnoreMarks
+    if (cls == 3) {
+        const uint16_t mark_attach_type = static_cast<uint16_t>((flag >> 8) & 0xFFu);
+        if (mark_attach_type != 0 && m_gdef_mark_attach_class.class_of(gid) != mark_attach_type) {
+            return true;
+        }
+        if ((flag & 0x0010u) && mark_filtering_set < m_gdef_mark_sets.size() &&
+            m_gdef_mark_sets[mark_filtering_set].index(gid) < 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool TrueTypeFont::load_gdef(uint32_t gdef_offset, uint32_t gdef_length) {
+    if (gdef_length < 12) return false;
+    const std::size_t table_end = static_cast<std::size_t>(gdef_offset) + gdef_length;
+    if (table_end > m_data.size()) return false;
+    const uint32_t version = read_u32_be(m_data, gdef_offset);
+    if (version != 0x00010000u && version != 0x00010002u && version != 0x00010003u) return false;
+
+    const uint16_t glyph_class_off = read_u16_be(m_data, gdef_offset + 4);
+    const uint16_t mark_attach_off = read_u16_be(m_data, gdef_offset + 10);
+    if (glyph_class_off != 0) {
+        if (parse_classdef(gdef_offset + glyph_class_off, table_end, m_gdef_glyph_class)) {
+            m_has_gdef_glyph_class = true;
+        }
+    }
+    if (mark_attach_off != 0) {
+        parse_classdef(gdef_offset + mark_attach_off, table_end, m_gdef_mark_attach_class);
+    }
+    if (version >= 0x00010002u && gdef_length >= 14) {
+        const uint16_t mark_sets_off = read_u16_be(m_data, gdef_offset + 12);
+        if (mark_sets_off != 0) {
+            const std::size_t mgs = gdef_offset + mark_sets_off;
+            if (mgs + 4 <= table_end && read_u16_be(m_data, mgs) == 1) {
+                const uint16_t cnt = read_u16_be(m_data, mgs + 2);
+                if (static_cast<std::size_t>(cnt) * 4u <= table_end - (mgs + 4u)) {
+                    m_gdef_mark_sets.resize(cnt);
+                    for (uint16_t i = 0; i < cnt; ++i) {
+                        const uint32_t rel = read_u32_be(m_data, mgs + 4u + 4u * i);
+                        if (rel < table_end - mgs) {
+                            parse_coverage(mgs + rel, table_end, m_gdef_mark_sets[i]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool TrueTypeFont::load_gpos(uint32_t gpos_offset, uint32_t gpos_length) {
+    if (gpos_length < 10) return false;
+    const std::size_t table_end = static_cast<std::size_t>(gpos_offset) + gpos_length;
+    if (table_end > m_data.size()) return false;
+    const uint32_t version = read_u32_be(m_data, gpos_offset);
+    if (version != 0x00010000u && version != 0x00010001u) return false;
+
+    const auto within = [table_end](std::size_t pos, std::size_t need) {
+        return pos <= table_end && need <= table_end - pos;
+    };
+
+    const std::size_t script_list = gpos_offset + read_u16_be(m_data, gpos_offset + 4);
+    const std::size_t feature_list = gpos_offset + read_u16_be(m_data, gpos_offset + 6);
+    const std::size_t lookup_list = gpos_offset + read_u16_be(m_data, gpos_offset + 8);
+    if (!within(script_list, 2) || !within(feature_list, 2) || !within(lookup_list, 2)) return false;
+
+    // Collect desired GPOS features (`kern`, `mark`, `mkmk`) for `latn` first,
+    // falling back to `DFLT` if `latn` is absent or exposes none of them.
+    std::size_t latn_script = 0, dflt_script = 0;
+    const uint16_t script_count = read_u16_be(m_data, script_list);
+    for (uint16_t i = 0; i < script_count; ++i) {
+        const std::size_t rec = script_list + 2u + 6u * i;
+        if (!within(rec, 6)) return false;
+        const uint32_t tag = read_u32_be(m_data, rec);
+        const std::size_t script = script_list + read_u16_be(m_data, rec + 4);
+        if (tag == 0x6C61746Eu && !latn_script) latn_script = script; // 'latn'
+        if (tag == 0x44464C54u && !dflt_script) dflt_script = script; // 'DFLT'
+    }
+
+    const uint16_t total_features = read_u16_be(m_data, feature_list);
+    std::map<uint16_t, GposLookup::Feature> wanted;
+    const auto collect_from_script = [&](std::size_t script) {
+        if (!script || !within(script, 4)) return;
+        const uint16_t def_ls = read_u16_be(m_data, script);
+        if (def_ls == 0 || !within(script + def_ls, 6)) return;
+        const std::size_t lang_sys = script + def_ls;
+
+        const auto add_feature = [&](uint16_t feature_index) {
+            if (feature_index >= total_features) return;
+            const std::size_t rec = feature_list + 2u + 6u * feature_index;
+            if (!within(rec, 6)) return;
+            const uint32_t tag = read_u32_be(m_data, rec);
+            GposLookup::Feature feat{};
+            if (tag == 0x6B65726Eu) feat = GposLookup::Feature::Kern;      // 'kern'
+            else if (tag == 0x6D61726Bu) feat = GposLookup::Feature::Mark; // 'mark'
+            else if (tag == 0x6D6B6D6Bu) feat = GposLookup::Feature::Mkmk; // 'mkmk'
+            else return;
+
+            const std::size_t feat_pos = feature_list + read_u16_be(m_data, rec + 4);
+            if (!within(feat_pos, 4)) return;
+            const uint16_t lc = read_u16_be(m_data, feat_pos + 2);
+            for (uint16_t k = 0; k < lc; ++k) {
+                if (!within(feat_pos + 4u + 2u * k, 2)) break;
+                const uint16_t li = read_u16_be(m_data, feat_pos + 4u + 2u * k);
+                wanted.emplace(li, feat);
+            }
+        };
+
+        const uint16_t req = read_u16_be(m_data, lang_sys + 2);
+        if (req != 0xFFFFu) add_feature(req);
+        const uint16_t fc = read_u16_be(m_data, lang_sys + 4);
+        for (uint16_t i = 0; i < fc; ++i) {
+            if (!within(lang_sys + 6u + 2u * i, 2)) break;
+            add_feature(read_u16_be(m_data, lang_sys + 6u + 2u * i));
+        }
+    };
+
+    collect_from_script(latn_script);
+    if (wanted.empty()) collect_from_script(dflt_script);
+    if (wanted.empty()) return false;
+
+    const auto parse_mark_array = [&](std::size_t ma_pos, uint16_t expect_count,
+                                      std::vector<GposMarkRecord>& out) -> bool {
+        if (!within(ma_pos, 2)) return false;
+        const uint16_t mark_count = read_u16_be(m_data, ma_pos);
+        if (mark_count < expect_count) return false;
+        if (static_cast<std::size_t>(mark_count) * 4u > table_end - (ma_pos + 2u)) return false;
+        out.resize(expect_count);
+        for (uint16_t i = 0; i < expect_count; ++i) {
+            const uint16_t mcls = read_u16_be(m_data, ma_pos + 2u + 4u * i);
+            const uint16_t aoff = read_u16_be(m_data, ma_pos + 4u + 4u * i);
+            out[i].mark_class = mcls;
+            if (aoff != 0) read_gpos_anchor(ma_pos + aoff, table_end, out[i].anchor);
+        }
+        return true;
+    };
+
+    const auto collect_cov_glyphs = [](const OtfCoverage& cov, std::vector<uint16_t>& dst) {
+        if (cov.format == 1) {
+            dst.insert(dst.end(), cov.glyphs.begin(), cov.glyphs.end());
+        } else if (cov.format == 2) {
+            for (const auto& r : cov.ranges) {
+                for (uint32_t g = r.start; g <= r.end; ++g) dst.push_back(static_cast<uint16_t>(g));
+            }
+        }
+    };
+
+    std::vector<uint16_t> known_marks;
+    const uint16_t lookup_count = read_u16_be(m_data, lookup_list);
+    for (const auto& [lookup_index, feat] : wanted) {
+        if (lookup_index >= lookup_count) continue;
+        const std::size_t lrec = lookup_list + 2u + 2u * lookup_index;
+        if (!within(lrec, 2)) continue;
+        const std::size_t lpos = lookup_list + read_u16_be(m_data, lrec);
+        if (!within(lpos, 6)) continue;
+
+        const uint16_t raw_type = read_u16_be(m_data, lpos);
+        const uint16_t flag = read_u16_be(m_data, lpos + 2);
+        const uint16_t sub_count = read_u16_be(m_data, lpos + 4);
+        if (!within(lpos + 6u, 2u * sub_count)) continue;
+
+        uint16_t mark_filtering_set = 0;
+        if ((flag & 0x0010u) != 0) {
+            if (!within(lpos + 6u + 2u * sub_count, 2)) continue;
+            mark_filtering_set = read_u16_be(m_data, lpos + 6u + 2u * sub_count);
+        }
+
+        GposLookup parsed_lookup;
+        parsed_lookup.flag = flag;
+        parsed_lookup.mark_filtering_set = mark_filtering_set;
+        parsed_lookup.feature = feat;
+
+        for (uint16_t s = 0; s < sub_count; ++s) {
+            std::size_t sub = lpos + read_u16_be(m_data, lpos + 6u + 2u * s);
+            uint16_t ltype = raw_type;
+            if (ltype == 9) { // Extension Positioning
+                if (!within(sub, 8) || read_u16_be(m_data, sub) != 1) continue;
+                ltype = read_u16_be(m_data, sub + 2);
+                const uint32_t ext_rel = read_u32_be(m_data, sub + 4);
+                if (ext_rel > table_end - sub) continue;
+                sub += ext_rel;
+            }
+            if (!within(sub, 4)) continue;
+            if (parsed_lookup.type == 0) parsed_lookup.type = ltype;
+
+            if (ltype == 1) { // Single Adjustment
+                const uint16_t fmt = read_u16_be(m_data, sub);
+                if (!within(sub, 6)) continue;
+                const uint16_t cov_off = read_u16_be(m_data, sub + 2);
+                const uint16_t vf = read_u16_be(m_data, sub + 4);
+                if ((vf & 0xFF00u) != 0) continue;
+                GposSingleSubtable st;
+                st.format = fmt;
+                if (!parse_coverage(sub + cov_off, table_end, st.cov)) continue;
+                if (fmt == 1) {
+                    if (!read_gpos_value(sub + 6, table_end, vf, st.single_val)) continue;
+                    const uint32_t idx = static_cast<uint32_t>(m_gpos_singles.size());
+                    m_gpos_singles.push_back(std::move(st));
+                    parsed_lookup.subtables.push_back({GposSubRef::Kind::Single, idx});
+                } else if (fmt == 2) {
+                    if (!within(sub, 8)) continue;
+                    const uint16_t vcnt = read_u16_be(m_data, sub + 6);
+                    const std::size_t vsz = gpos_value_size(vf);
+                    if (static_cast<std::size_t>(vcnt) * vsz > table_end - (sub + 8u)) continue;
+                    st.vals.resize(vcnt);
+                    bool ok = true;
+                    for (uint16_t k = 0; k < vcnt; ++k) {
+                        if (!read_gpos_value(sub + 8u + static_cast<std::size_t>(k) * vsz, table_end,
+                                             vf, st.vals[k])) {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if (!ok) continue;
+                    const uint32_t idx = static_cast<uint32_t>(m_gpos_singles.size());
+                    m_gpos_singles.push_back(std::move(st));
+                    parsed_lookup.subtables.push_back({GposSubRef::Kind::Single, idx});
+                }
+            } else if (ltype == 2) { // Pair Adjustment
+                const uint16_t fmt = read_u16_be(m_data, sub);
+                if (!within(sub, 10)) continue;
+                const uint16_t cov_off = read_u16_be(m_data, sub + 2);
+                const uint16_t vf1 = read_u16_be(m_data, sub + 4);
+                const uint16_t vf2 = read_u16_be(m_data, sub + 6);
+                if ((vf1 & 0xFF00u) != 0 || (vf2 & 0xFF00u) != 0) continue;
+                const std::size_t vsz1 = gpos_value_size(vf1);
+                const std::size_t vsz2 = gpos_value_size(vf2);
+                if (fmt == 1) {
+                    const uint16_t pscnt = read_u16_be(m_data, sub + 8);
+                    if (!within(sub + 10u, 2u * pscnt)) continue;
+                    GposPairFmt1Subtable st;
+                    if (!parse_coverage(sub + cov_off, table_end, st.cov)) continue;
+                    st.has_v2 = (vf2 != 0);
+                    st.pair_sets.resize(pscnt);
+                    const std::size_t rec_sz = 2u + vsz1 + vsz2;
+                    for (uint16_t pi = 0; pi < pscnt; ++pi) {
+                        const std::size_t pset = sub + read_u16_be(m_data, sub + 10u + 2u * pi);
+                        if (!within(pset, 2)) continue;
+                        const uint16_t pvc = read_u16_be(m_data, pset);
+                        if (static_cast<std::size_t>(pvc) * rec_sz > table_end - (pset + 2u)) continue;
+                        auto& entries = st.pair_sets[pi];
+                        entries.reserve(pvc);
+                        for (uint16_t k = 0; k < pvc; ++k) {
+                            const std::size_t rec = pset + 2u + static_cast<std::size_t>(k) * rec_sz;
+                            GposPairEntry e;
+                            e.second = read_u16_be(m_data, rec);
+                            read_gpos_value(rec + 2u, table_end, vf1, e.v1);
+                            if (vf2 != 0) read_gpos_value(rec + 2u + vsz1, table_end, vf2, e.v2);
+                            entries.push_back(e);
+                        }
+                        std::stable_sort(entries.begin(), entries.end(),
+                                         [](const GposPairEntry& a, const GposPairEntry& b) {
+                                             return a.second < b.second;
+                                         });
+                    }
+                    const uint32_t idx = static_cast<uint32_t>(m_gpos_pair_fmt1.size());
+                    m_gpos_pair_fmt1.push_back(std::move(st));
+                    parsed_lookup.subtables.push_back({GposSubRef::Kind::PairFmt1, idx});
+                    if (feat == GposLookup::Feature::Kern) m_has_gpos_kern = true;
+                } else if (fmt == 2) {
+                    if (!within(sub, 16)) continue;
+                    GposPairFmt2Subtable st;
+                    if (!parse_coverage(sub + cov_off, table_end, st.cov)) continue;
+                    const uint16_t cd1_off = read_u16_be(m_data, sub + 8);
+                    const uint16_t cd2_off = read_u16_be(m_data, sub + 10);
+                    if (!parse_classdef(sub + cd1_off, table_end, st.class1)) continue;
+                    if (!parse_classdef(sub + cd2_off, table_end, st.class2)) continue;
+                    st.c1_count = read_u16_be(m_data, sub + 12);
+                    st.c2_count = read_u16_be(m_data, sub + 14);
+                    st.vf1 = vf1;
+                    st.vf2 = vf2;
+                    st.matrix_offset = static_cast<uint32_t>(sub + 16u);
+                    const std::size_t rec_sz = vsz1 + vsz2;
+                    const std::size_t total_cells = static_cast<std::size_t>(st.c1_count) * st.c2_count;
+                    if (rec_sz > 0 && st.c1_count > 0 && st.c2_count > 0 &&
+                        (total_cells / st.c1_count != st.c2_count ||
+                         total_cells > (table_end - (sub + 16u)) / rec_sz)) {
+                        continue;
+                    }
+                    const uint32_t idx = static_cast<uint32_t>(m_gpos_pair_fmt2.size());
+                    m_gpos_pair_fmt2.push_back(std::move(st));
+                    parsed_lookup.subtables.push_back({GposSubRef::Kind::PairFmt2, idx});
+                    if (feat == GposLookup::Feature::Kern) m_has_gpos_kern = true;
+                }
+            } else if (ltype == 4) { // MarkToBase
+                if (!within(sub, 12) || read_u16_be(m_data, sub) != 1) continue;
+                GposMarkBaseSubtable st;
+                if (!parse_coverage(sub + read_u16_be(m_data, sub + 2), table_end, st.mark_cov)) continue;
+                if (!parse_coverage(sub + read_u16_be(m_data, sub + 4), table_end, st.base_cov)) continue;
+                st.class_count = read_u16_be(m_data, sub + 6);
+                const std::size_t ma_pos = sub + read_u16_be(m_data, sub + 8);
+                const std::size_t ba_pos = sub + read_u16_be(m_data, sub + 10);
+                if (!within(ba_pos, 2)) continue;
+                const uint16_t base_count = read_u16_be(m_data, ba_pos);
+                const std::size_t mark_cov_count =
+                    st.mark_cov.format == 1 ? st.mark_cov.glyphs.size()
+                                            : [&]() {
+                                                  std::size_t c = 0;
+                                                  for (const auto& r : st.mark_cov.ranges) {
+                                                      c = std::max<std::size_t>(c, r.start_index + (r.end - r.start) + 1u);
+                                                  }
+                                                  return c;
+                                              }();
+                if (mark_cov_count > 0xFFFFu) continue;
+                if (!parse_mark_array(ma_pos, static_cast<uint16_t>(mark_cov_count), st.marks)) continue;
+                const std::size_t num_base_anchors =
+                    static_cast<std::size_t>(base_count) * st.class_count;
+                if (st.class_count > 0 &&
+                    (num_base_anchors / st.class_count != base_count ||
+                     num_base_anchors > (table_end - (ba_pos + 2u)) / 2u)) {
+                    continue;
+                }
+                st.base_anchors.resize(num_base_anchors);
+                for (std::size_t k = 0; k < num_base_anchors; ++k) {
+                    const uint16_t aoff = read_u16_be(m_data, ba_pos + 2u + 2u * k);
+                    if (aoff != 0) read_gpos_anchor(ba_pos + aoff, table_end, st.base_anchors[k]);
+                }
+                collect_cov_glyphs(st.mark_cov, known_marks);
+                const uint32_t idx = static_cast<uint32_t>(m_gpos_mark_base.size());
+                m_gpos_mark_base.push_back(std::move(st));
+                parsed_lookup.subtables.push_back({GposSubRef::Kind::MarkBase, idx});
+                m_has_gpos_marks = true;
+            } else if (ltype == 5) { // MarkToLig
+                if (!within(sub, 12) || read_u16_be(m_data, sub) != 1) continue;
+                GposMarkLigSubtable st;
+                if (!parse_coverage(sub + read_u16_be(m_data, sub + 2), table_end, st.mark_cov)) continue;
+                if (!parse_coverage(sub + read_u16_be(m_data, sub + 4), table_end, st.lig_cov)) continue;
+                st.class_count = read_u16_be(m_data, sub + 6);
+                const std::size_t ma_pos = sub + read_u16_be(m_data, sub + 8);
+                const std::size_t la_pos = sub + read_u16_be(m_data, sub + 10);
+                if (!within(la_pos, 2)) continue;
+                const uint16_t lig_count = read_u16_be(m_data, la_pos);
+                if (static_cast<std::size_t>(lig_count) * 2u > table_end - (la_pos + 2u)) continue;
+                const std::size_t mark_cov_count =
+                    st.mark_cov.format == 1 ? st.mark_cov.glyphs.size()
+                                            : [&]() {
+                                                  std::size_t c = 0;
+                                                  for (const auto& r : st.mark_cov.ranges) {
+                                                      c = std::max<std::size_t>(c, r.start_index + (r.end - r.start) + 1u);
+                                                  }
+                                                  return c;
+                                              }();
+                if (mark_cov_count > 0xFFFFu) continue;
+                if (!parse_mark_array(ma_pos, static_cast<uint16_t>(mark_cov_count), st.marks)) continue;
+                st.lig_attaches.resize(lig_count);
+                for (uint16_t li = 0; li < lig_count; ++li) {
+                    const uint16_t lat_off = read_u16_be(m_data, la_pos + 2u + 2u * li);
+                    if (lat_off == 0) continue;
+                    const std::size_t lat = la_pos + lat_off;
+                    if (!within(lat, 2)) continue;
+                    const uint16_t comp_cnt = read_u16_be(m_data, lat);
+                    const std::size_t tot = static_cast<std::size_t>(comp_cnt) * st.class_count;
+                    if (st.class_count > 0 &&
+                        (tot / st.class_count != comp_cnt ||
+                         tot > (table_end - (lat + 2u)) / 2u)) {
+                        continue;
+                    }
+                    auto& attach = st.lig_attaches[li];
+                    attach.component_count = comp_cnt;
+                    attach.anchors.resize(tot);
+                    for (std::size_t k = 0; k < tot; ++k) {
+                        const uint16_t aoff = read_u16_be(m_data, lat + 2u + 2u * k);
+                        if (aoff != 0) read_gpos_anchor(lat + aoff, table_end, attach.anchors[k]);
+                    }
+                }
+                collect_cov_glyphs(st.mark_cov, known_marks);
+                const uint32_t idx = static_cast<uint32_t>(m_gpos_mark_lig.size());
+                m_gpos_mark_lig.push_back(std::move(st));
+                parsed_lookup.subtables.push_back({GposSubRef::Kind::MarkLig, idx});
+                m_has_gpos_marks = true;
+            } else if (ltype == 6) { // MarkToMark
+                if (!within(sub, 12) || read_u16_be(m_data, sub) != 1) continue;
+                GposMarkMarkSubtable st;
+                if (!parse_coverage(sub + read_u16_be(m_data, sub + 2), table_end, st.mark1_cov)) continue;
+                if (!parse_coverage(sub + read_u16_be(m_data, sub + 4), table_end, st.mark2_cov)) continue;
+                st.class_count = read_u16_be(m_data, sub + 6);
+                const std::size_t m1_pos = sub + read_u16_be(m_data, sub + 8);
+                const std::size_t m2_pos = sub + read_u16_be(m_data, sub + 10);
+                if (!within(m2_pos, 2)) continue;
+                const uint16_t m2_count = read_u16_be(m_data, m2_pos);
+                const std::size_t m1_cov_count =
+                    st.mark1_cov.format == 1 ? st.mark1_cov.glyphs.size()
+                                             : [&]() {
+                                                   std::size_t c = 0;
+                                                   for (const auto& r : st.mark1_cov.ranges) {
+                                                       c = std::max<std::size_t>(c, r.start_index + (r.end - r.start) + 1u);
+                                                   }
+                                                   return c;
+                                               }();
+                if (m1_cov_count > 0xFFFFu) continue;
+                if (!parse_mark_array(m1_pos, static_cast<uint16_t>(m1_cov_count), st.mark1s)) continue;
+                const std::size_t num_m2 = static_cast<std::size_t>(m2_count) * st.class_count;
+                if (st.class_count > 0 &&
+                    (num_m2 / st.class_count != m2_count ||
+                     num_m2 > (table_end - (m2_pos + 2u)) / 2u)) {
+                    continue;
+                }
+                st.mark2_anchors.resize(num_m2);
+                for (std::size_t k = 0; k < num_m2; ++k) {
+                    const uint16_t aoff = read_u16_be(m_data, m2_pos + 2u + 2u * k);
+                    if (aoff != 0) read_gpos_anchor(m2_pos + aoff, table_end, st.mark2_anchors[k]);
+                }
+                collect_cov_glyphs(st.mark1_cov, known_marks);
+                collect_cov_glyphs(st.mark2_cov, known_marks);
+                const uint32_t idx = static_cast<uint32_t>(m_gpos_mark_mark.size());
+                m_gpos_mark_mark.push_back(std::move(st));
+                parsed_lookup.subtables.push_back({GposSubRef::Kind::MarkMark, idx});
+                m_has_gpos_marks = true;
+            }
+        }
+
+        if (!parsed_lookup.subtables.empty()) {
+            m_gpos_lookups.push_back(std::move(parsed_lookup));
+        }
+    }
+
+    if (!known_marks.empty()) {
+        std::sort(known_marks.begin(), known_marks.end());
+        known_marks.erase(std::unique(known_marks.begin(), known_marks.end()), known_marks.end());
+        m_gpos_known_marks = std::move(known_marks);
+    }
+    return !m_gpos_lookups.empty();
+}
+
+bool TrueTypeFont::match_pair_subtable(const GposSubRef& ref, uint16_t left, uint16_t right,
+                                       GposValue& v1, GposValue& v2, bool& advance_two) const {
+    v1 = GposValue{};
+    v2 = GposValue{};
+    advance_two = false;
+    if (ref.kind == GposSubRef::Kind::PairFmt1) {
+        const auto& st = m_gpos_pair_fmt1[ref.index];
+        const int cov_idx = st.cov.index(left);
+        if (cov_idx < 0 || static_cast<std::size_t>(cov_idx) >= st.pair_sets.size()) return false;
+        const auto& entries = st.pair_sets[static_cast<std::size_t>(cov_idx)];
+        auto it = std::lower_bound(entries.begin(), entries.end(), right,
+                                   [](const GposPairEntry& e, uint16_t g) { return e.second < g; });
+        if (it == entries.end() || it->second != right) return false;
+        v1 = it->v1;
+        v2 = it->v2;
+        advance_two = st.has_v2 && gpos_value_nonzero(v2);
+        return true;
+    }
+    if (ref.kind == GposSubRef::Kind::PairFmt2) {
+        const auto& st = m_gpos_pair_fmt2[ref.index];
+        if (st.cov.index(left) < 0) return false;
+        const uint16_t c1 = st.class1.class_of(left);
+        const uint16_t c2 = st.class2.class_of(right);
+        if (c1 >= st.c1_count || c2 >= st.c2_count) return false;
+        const std::size_t vsz1 = gpos_value_size(st.vf1);
+        const std::size_t vsz2 = gpos_value_size(st.vf2);
+        const std::size_t cell = static_cast<std::size_t>(st.matrix_offset) +
+                                 (static_cast<std::size_t>(c1) * st.c2_count + c2) * (vsz1 + vsz2);
+        if (st.vf1 != 0) read_gpos_value(cell, m_data.size(), st.vf1, v1);
+        if (st.vf2 != 0) read_gpos_value(cell + vsz1, m_data.size(), st.vf2, v2);
+        advance_two = (st.vf2 != 0) && gpos_value_nonzero(v2);
+        return true;
+    }
+    return false;
+}
+
+std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
+    const std::vector<uint32_t>& codepoints, bool kerning) const {
+    std::vector<PositionedGlyph> result;
+    if (!m_loaded || codepoints.empty()) return result;
+
+    struct GlyState {
+        uint16_t glyph{0};
+        uint16_t lig_id{0};
+        uint16_t lig_comp{0};
+        int32_t x_advance{0};
+        int32_t y_advance{0};
+        int32_t x_offset{0};
+        int32_t y_offset{0};
+        int32_t attach_parent{-1};
+        int32_t attach_dx{0};
+        int32_t attach_dy{0};
+    };
+
+    std::vector<uint16_t> raw;
+    raw.reserve(codepoints.size());
+    for (uint32_t cp : codepoints) raw.push_back(glyph_index(cp));
+
+    // Apply `GSUB` `liga`/`rlig` substitutions while preserving per-mark
+    // component indices when a ligature lookup ignores marks.
+    std::vector<GlyState> run;
+    run.reserve(raw.size());
+    if (m_ligature_sets.empty() || raw.size() < 2) {
+        for (uint16_t g : raw) {
+            GlyState st;
+            st.glyph = g;
+            run.push_back(st);
+        }
+    } else {
+        uint16_t next_lig_id = 1;
+        std::size_t i = 0;
+        while (i < raw.size()) {
+            std::size_t lo = 0, hi = m_ligature_sets.size();
+            while (lo < hi) {
+                const std::size_t mid = lo + (hi - lo) / 2;
+                if (m_ligature_sets[mid].first < raw[i]) lo = mid + 1;
+                else hi = mid;
+            }
+            bool matched = false;
+            if (lo < m_ligature_sets.size() && m_ligature_sets[lo].first == raw[i]) {
+                for (const Ligature& lig : m_ligature_sets[lo].ligatures) {
+                    if (!lig.ignore_marks) {
+                        if (i + 1u + lig.rest.size() > raw.size()) continue;
+                        bool same = true;
+                        for (std::size_t k = 0; k < lig.rest.size(); ++k) {
+                            if (raw[i + 1u + k] != lig.rest[k]) {
+                                same = false;
+                                break;
+                            }
+                        }
+                        if (same) {
+                            GlyState base;
+                            base.glyph = lig.glyph;
+                            base.lig_id = next_lig_id++;
+                            run.push_back(base);
+                            i += 1u + lig.rest.size();
+                            matched = true;
+                            break;
+                        }
+                    } else {
+                        std::size_t cursor = i + 1u;
+                        std::vector<std::pair<uint16_t, uint16_t>> skipped_marks;
+                        bool same = true;
+                        for (std::size_t k = 0; k < lig.rest.size(); ++k) {
+                            while (cursor < raw.size() && is_mark_glyph(raw[cursor])) {
+                                skipped_marks.emplace_back(raw[cursor], static_cast<uint16_t>(k));
+                                ++cursor;
+                            }
+                            if (cursor >= raw.size() || raw[cursor] != lig.rest[k]) {
+                                same = false;
+                                break;
+                            }
+                            ++cursor;
+                        }
+                        if (same) {
+                            const uint16_t lid = next_lig_id++;
+                            GlyState base;
+                            base.glyph = lig.glyph;
+                            base.lig_id = lid;
+                            run.push_back(base);
+                            for (const auto& [mg, comp] : skipped_marks) {
+                                GlyState ms;
+                                ms.glyph = mg;
+                                ms.lig_id = lid;
+                                ms.lig_comp = comp;
+                                run.push_back(ms);
+                            }
+                            i = cursor;
+                            matched = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!matched) {
+                GlyState st;
+                st.glyph = raw[i];
+                run.push_back(st);
+                ++i;
+            }
+        }
+    }
+
+    const std::size_t n = run.size();
+    for (std::size_t i = 0; i < n; ++i) {
+        const uint16_t g = run[i].glyph;
+        const uint16_t adv = (g < m_advance_widths.size()) ? m_advance_widths[g] : m_advance_widths[0];
+        run[i].x_advance = static_cast<int32_t>(adv);
+    }
+
+    const auto apply_value = [](const GposValue& v, GlyState& st) {
+        st.x_offset += v.x_placement;
+        st.y_offset += v.y_placement;
+        st.x_advance += v.x_advance;
+        st.y_advance += v.y_advance;
+    };
+
+    // Pass 1: SinglePos (Type 1) and PairPos (Type 2; skipped for `kern` when
+    // `font-kerning: none`). Runs in LookupList index order.
+    for (const GposLookup& lk : m_gpos_lookups) {
+        if (lk.type == 1) {
+            for (std::size_t i = 0; i < n; ++i) {
+                if (is_ignored_by_lookup(run[i].glyph, lk.flag, lk.mark_filtering_set)) continue;
+                for (const GposSubRef& ref : lk.subtables) {
+                    const auto& st = m_gpos_singles[ref.index];
+                    const int idx = st.cov.index(run[i].glyph);
+                    if (idx < 0) continue;
+                    if (st.format == 1) {
+                        apply_value(st.single_val, run[i]);
+                    } else if (st.format == 2 && static_cast<std::size_t>(idx) < st.vals.size()) {
+                        apply_value(st.vals[static_cast<std::size_t>(idx)], run[i]);
+                    }
+                    break;
+                }
+            }
+        } else if (lk.type == 2) {
+            if (!kerning && lk.feature == GposLookup::Feature::Kern) continue;
+            for (std::size_t i = 0; i + 1 < n;) {
+                if (is_ignored_by_lookup(run[i].glyph, lk.flag, lk.mark_filtering_set)) {
+                    ++i;
+                    continue;
+                }
+                std::size_t j = i + 1;
+                while (j < n && is_ignored_by_lookup(run[j].glyph, lk.flag, lk.mark_filtering_set)) {
+                    ++j;
+                }
+                if (j >= n) break;
+                bool adv2 = false;
+                for (const GposSubRef& ref : lk.subtables) {
+                    GposValue v1, v2;
+                    bool step_two = false;
+                    if (match_pair_subtable(ref, run[i].glyph, run[j].glyph, v1, v2, step_two)) {
+                        apply_value(v1, run[i]);
+                        apply_value(v2, run[j]);
+                        adv2 = step_two;
+                        break;
+                    }
+                }
+                i = adv2 ? (j + 1u) : (i + 1u);
+            }
+        }
+    }
+
+    // Legacy `kern` table fallback only when `GPOS` provides no `kern` lookups.
+    if (kerning && !m_has_gpos_kern && m_kern_pairs > 0) {
+        for (std::size_t i = 0; i + 1 < n; ++i) {
+            run[i].x_advance += kerning_units_for_glyphs(run[i].glyph, run[i + 1].glyph);
+        }
+    }
+
+    // Pass 2: Mark-to-Base (Type 4) and Mark-to-Ligature (Type 5).
+    for (const GposLookup& lk : m_gpos_lookups) {
+        if (lk.type != 4 && lk.type != 5) continue;
+        for (std::size_t i = 1; i < n; ++i) {
+            if (is_ignored_by_lookup(run[i].glyph, lk.flag, lk.mark_filtering_set)) continue;
+            // Find the preceding non-mark glyph without crossing a ligature when
+            // running MarkToBase.
+            std::size_t j = i;
+            bool found_base = false;
+            while (j > 0) {
+                --j;
+                if (is_mark_glyph(run[j].glyph)) continue;
+                found_base = true;
+                break;
+            }
+            if (!found_base) continue;
+            if (is_ignored_by_lookup(run[j].glyph, lk.flag, lk.mark_filtering_set)) continue;
+
+            if (lk.type == 4) {
+                if (m_has_gdef_glyph_class && m_gdef_glyph_class.class_of(run[j].glyph) == 2) {
+                    continue; // do not jump past a ligature onto an earlier base
+                }
+                for (const GposSubRef& ref : lk.subtables) {
+                    const auto& st = m_gpos_mark_base[ref.index];
+                    const int mi = st.mark_cov.index(run[i].glyph);
+                    if (mi < 0 || static_cast<std::size_t>(mi) >= st.marks.size()) continue;
+                    const int bi = st.base_cov.index(run[j].glyph);
+                    if (bi < 0) continue;
+                    const GposMarkRecord& mrec = st.marks[static_cast<std::size_t>(mi)];
+                    if (!mrec.anchor.present || mrec.mark_class >= st.class_count) continue;
+                    const std::size_t bidx =
+                        static_cast<std::size_t>(bi) * st.class_count + mrec.mark_class;
+                    if (bidx >= st.base_anchors.size() || !st.base_anchors[bidx].present) continue;
+                    run[i].attach_parent = static_cast<int32_t>(j);
+                    run[i].attach_dx = static_cast<int32_t>(st.base_anchors[bidx].x) - mrec.anchor.x;
+                    run[i].attach_dy = static_cast<int32_t>(st.base_anchors[bidx].y) - mrec.anchor.y;
+                    break;
+                }
+            } else { // Type 5: MarkToLig
+                for (const GposSubRef& ref : lk.subtables) {
+                    const auto& st = m_gpos_mark_lig[ref.index];
+                    const int mi = st.mark_cov.index(run[i].glyph);
+                    if (mi < 0 || static_cast<std::size_t>(mi) >= st.marks.size()) continue;
+                    const int li = st.lig_cov.index(run[j].glyph);
+                    if (li < 0 || static_cast<std::size_t>(li) >= st.lig_attaches.size()) continue;
+                    const GposMarkRecord& mrec = st.marks[static_cast<std::size_t>(mi)];
+                    if (!mrec.anchor.present || mrec.mark_class >= st.class_count) continue;
+                    const auto& attach = st.lig_attaches[static_cast<std::size_t>(li)];
+                    if (attach.component_count == 0) continue;
+
+                    GposAnchor lanc;
+                    if (run[j].lig_id != 0 && run[i].lig_id == run[j].lig_id) {
+                        const uint16_t comp =
+                            std::min<uint16_t>(run[i].lig_comp, attach.component_count - 1u);
+                        const std::size_t idx =
+                            static_cast<std::size_t>(comp) * st.class_count + mrec.mark_class;
+                        if (idx < attach.anchors.size()) lanc = attach.anchors[idx];
+                    } else {
+                        for (int comp = static_cast<int>(attach.component_count) - 1; comp >= 0; --comp) {
+                            const std::size_t idx =
+                                static_cast<std::size_t>(comp) * st.class_count + mrec.mark_class;
+                            if (idx < attach.anchors.size() && attach.anchors[idx].present) {
+                                lanc = attach.anchors[idx];
+                                break;
+                            }
+                        }
+                    }
+                    if (!lanc.present) continue;
+                    run[i].attach_parent = static_cast<int32_t>(j);
+                    run[i].attach_dx = static_cast<int32_t>(lanc.x) - mrec.anchor.x;
+                    run[i].attach_dy = static_cast<int32_t>(lanc.y) - mrec.anchor.y;
+                    break;
+                }
+            }
+        }
+    }
+
+    // Pass 3: Mark-to-Mark (Type 6). Run after MarkToBase/MarkToLig so stacked
+    // marks always anchor onto their preceding mark even in fonts (such as
+    // DejaVu Sans and DejaVu Serif) where `mkmk` carries a lower LookupIndex.
+    for (const GposLookup& lk : m_gpos_lookups) {
+        if (lk.type != 6) continue;
+        for (std::size_t i = 1; i < n; ++i) {
+            if (is_ignored_by_lookup(run[i].glyph, lk.flag, lk.mark_filtering_set)) continue;
+            std::size_t j = i;
+            bool found_prev = false;
+            while (j > 0) {
+                --j;
+                if (is_ignored_by_lookup(run[j].glyph, lk.flag, lk.mark_filtering_set)) continue;
+                found_prev = true;
+                break;
+            }
+            if (!found_prev) continue;
+            if (!is_mark_glyph(run[j].glyph)) continue;
+            if (run[i].lig_id != 0 && run[j].lig_id == run[i].lig_id &&
+                run[i].lig_comp != run[j].lig_comp) {
+                continue;
+            }
+
+            for (const GposSubRef& ref : lk.subtables) {
+                const auto& st = m_gpos_mark_mark[ref.index];
+                const int m1i = st.mark1_cov.index(run[i].glyph);
+                if (m1i < 0 || static_cast<std::size_t>(m1i) >= st.mark1s.size()) continue;
+                const int m2i = st.mark2_cov.index(run[j].glyph);
+                if (m2i < 0) continue;
+                const GposMarkRecord& mrec = st.mark1s[static_cast<std::size_t>(m1i)];
+                if (!mrec.anchor.present || mrec.mark_class >= st.class_count) continue;
+                const std::size_t m2idx =
+                    static_cast<std::size_t>(m2i) * st.class_count + mrec.mark_class;
+                if (m2idx >= st.mark2_anchors.size() || !st.mark2_anchors[m2idx].present) continue;
+                run[i].attach_parent = static_cast<int32_t>(j);
+                run[i].attach_dx = static_cast<int32_t>(st.mark2_anchors[m2idx].x) - mrec.anchor.x;
+                run[i].attach_dy = static_cast<int32_t>(st.mark2_anchors[m2idx].y) - mrec.anchor.y;
+                break;
+            }
+        }
+    }
+
+    // Pass 4: Resolve anchor attachment chains left to right (`parent < i`).
+    for (std::size_t i = 0; i < n; ++i) {
+        const int32_t j = run[i].attach_parent;
+        if (j >= 0 && static_cast<std::size_t>(j) < i) {
+            int32_t sum_adv_x = 0;
+            int32_t sum_adv_y = 0;
+            for (std::size_t k = static_cast<std::size_t>(j); k < i; ++k) {
+                sum_adv_x += run[k].x_advance;
+                sum_adv_y += run[k].y_advance;
+            }
+            run[i].x_offset += run[static_cast<std::size_t>(j)].x_offset + run[i].attach_dx - sum_adv_x;
+            run[i].y_offset += run[static_cast<std::size_t>(j)].y_offset + run[i].attach_dy - sum_adv_y;
+        }
+    }
+
+    result.reserve(n);
+    for (const GlyState& st : run) {
+        PositionedGlyph pg;
+        pg.glyph = st.glyph;
+        pg.x_advance = st.x_advance;
+        pg.y_advance = st.y_advance;
+        pg.x_offset = st.x_offset;
+        pg.y_offset = st.y_offset;
+        result.push_back(pg);
+    }
+    return result;
+}
+
 int16_t TrueTypeFont::kerning_units(uint32_t left, uint32_t right) const {
     return kerning_units_for_glyphs(glyph_index(left), glyph_index(right));
 }
 
 int16_t TrueTypeFont::kerning_units_for_glyphs(uint16_t left_glyph, uint16_t right_glyph) const {
-    if (m_kern_pairs == 0) return 0;
     // A `.notdef` box does not kern against anything: the font has no opinion
     // about a glyph it does not have.
     if (left_glyph == 0 || right_glyph == 0) return 0;
+
+    if (m_has_gpos_kern) {
+        int32_t total = 0;
+        for (const GposLookup& lk : m_gpos_lookups) {
+            if (lk.type != 2 || lk.feature != GposLookup::Feature::Kern) continue;
+            for (const GposSubRef& ref : lk.subtables) {
+                GposValue v1, v2;
+                bool adv2 = false;
+                if (match_pair_subtable(ref, left_glyph, right_glyph, v1, v2, adv2)) {
+                    total += static_cast<int32_t>(v1.x_advance) + v2.x_advance;
+                    break;
+                }
+            }
+        }
+        return static_cast<int16_t>(std::clamp<int32_t>(total, -32768, 32767));
+    }
+
+    if (m_kern_pairs == 0) return 0;
 
     const uint32_t wanted = (static_cast<uint32_t>(left_glyph) << 16) | right_glyph;
     // The pairs are sorted by that key, so this is a binary search over the
@@ -1910,34 +2921,47 @@ bool FontRenderer::font_kerning(std::string_view css_family, int font_weight, bo
 
 std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view utf8_text,
                                                                 float font_size, int font_weight,
-                                                                int family_id, bool italic) const {
+                                                                int family_id, bool italic,
+                                                                bool kerning) const {
     std::vector<ShapedGlyph> out;
     if (utf8_text.empty()) return out;
 
-    // A run is the stretch of text one face draws. Ligatures are applied inside
-    // a run and never across one, which is also true of the fonts: `latn`'s
-    // table has an opinion about `f` followed by `i`, not about whichever face
-    // happens to supply the `i`.
+    // A run is the stretch of text one face draws. Ligatures and GPOS lookups
+    // apply inside a run and never across a face boundary: a mark or ligature
+    // rule belongs to one face's coordinate space and tables.
     std::vector<uint32_t> run;
     const TrueTypeFont* run_face = nullptr;
     bool run_shear = false;
 
     const auto flush = [&]() {
         if (run.empty()) return;
-        std::vector<uint16_t> glyphs;
-        glyphs.reserve(run.size());
-        for (uint32_t cp : run) {
-            glyphs.push_back(run_face ? run_face->glyph_index(cp) : 0);
-        }
-        if (run_face) run_face->apply_ligatures(glyphs);
-        for (uint16_t glyph : glyphs) {
-            ShapedGlyph shaped;
-            shaped.glyph = glyph;
-            shaped.face = run_face;
-            shaped.shear = run_shear;
-            shaped.advance = run_face ? run_face->glyph_advance_by_index(glyph, font_size)
-                                      : std::max(1.0f, font_size * 0.55f);
-            out.push_back(shaped);
+        if (run_face) {
+            const float upem = static_cast<float>(run_face->units_per_em());
+            const float scale = (upem > 0.0f) ? (font_size / upem) : 0.0f;
+            const std::vector<TrueTypeFont::PositionedGlyph> positioned =
+                run_face->shape_glyphs(run, kerning);
+            for (const TrueTypeFont::PositionedGlyph& pg : positioned) {
+                ShapedGlyph shaped;
+                shaped.glyph = pg.glyph;
+                shaped.face = run_face;
+                shaped.shear = run_shear;
+                shaped.advance = static_cast<float>(pg.x_advance) * scale;
+                shaped.x_offset = static_cast<float>(pg.x_offset) * scale;
+                shaped.y_offset = static_cast<float>(pg.y_offset) * scale;
+                if (run_shear && shaped.y_offset != 0.0f) {
+                    shaped.x_offset += kSyntheticObliqueSkew * shaped.y_offset;
+                }
+                out.push_back(shaped);
+            }
+        } else {
+            for (uint32_t cp : run) {
+                ShapedGlyph shaped;
+                shaped.glyph = static_cast<uint16_t>(cp <= 0xFFFFu ? cp : '?');
+                shaped.face = nullptr;
+                shaped.shear = run_shear;
+                shaped.advance = std::max(1.0f, font_size * 0.55f);
+                out.push_back(shaped);
+            }
         }
         run.clear();
     };
@@ -1959,9 +2983,9 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
 std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view utf8_text,
                                                                float font_size, int font_weight,
                                                                std::string_view css_family,
-                                                               bool italic) const {
+                                                               bool italic, bool kerning) const {
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
-    return shape_text(utf8_text, font_size, font_weight, family_id, italic);
+    return shape_text(utf8_text, font_size, font_weight, family_id, italic, kerning);
 }
 
 float FontRenderer::kerning_px_shaped(const ShapedGlyph& left, const ShapedGlyph& right,
@@ -2018,17 +3042,11 @@ float FontRenderer::measure_text(std::string_view utf8_text, float font_size, in
                                  std::string_view css_family, bool italic, bool kerning) {
     if (utf8_text.empty() || font_size <= 0.0f) return 0.0f;
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
-    const std::vector<ShapedGlyph> shaped = shape_text(utf8_text, font_size, font_weight, family_id, italic);
+    const std::vector<ShapedGlyph> shaped =
+        shape_text(utf8_text, font_size, font_weight, family_id, italic, kerning);
     float total = 0.0f;
-    for (std::size_t i = 0; i < shaped.size(); ++i) {
-        total += shaped[i].advance;
-        // Kerning is a property of a pair, so the first glyph has nothing to
-        // kern against. It is asked of the shaped glyphs and not of the
-        // codepoints: after a ligature, `ff` is one glyph, and the `kern` table
-        // has an opinion about that glyph only if it names it. `font-kerning:
-        // none` is the page deciding not to ask at all, so the pair is skipped
-        // rather than asked and ignored.
-        if (kerning && i > 0) total += kerning_px_shaped(shaped[i - 1], shaped[i], font_size);
+    for (const ShapedGlyph& sg : shaped) {
+        total += sg.advance;
     }
     return total;
 }
@@ -2116,19 +3134,16 @@ void FontRenderer::draw_text(
     const int baseline_y = static_cast<int>(std::lround(top_y + baseline_offset));
 
     // The same list `measure_text` summed, glyph for glyph: painting walks what
-    // shaping produced, so a ligature is drawn as the glyph it is and the pen
-    // moves by the advance that was counted.
-    const std::vector<ShapedGlyph> shaped = shape_text(utf8_text, font_size, font_weight, family_id, italic);
+    // shaping produced (`GSUB` ligatures and `GPOS`/legacy-`kern` positioning
+    // already baked into `advance`, `x_offset`, `y_offset`), so measurement and
+    // ink agree to the pixel.
+    const std::vector<ShapedGlyph> shaped =
+        shape_text(utf8_text, font_size, font_weight, family_id, italic, kerning);
     for (std::size_t i = 0; i < shaped.size(); ++i) {
-        // The pair closes up *before* its second glyph is placed: kerning is
-        // the gap between two glyphs, so adding it after drawing the second one
-        // would move the gap and leave the glyph where it was.
-        // ...and it is skipped entirely when `font-kerning` says so.
-        if (kerning && i > 0) pen_x += kerning_px_shaped(shaped[i - 1], shaped[i], font_size);
         const GlyphBitmap& g = get_glyph_shaped(shaped[i], px_size, font_weight);
         if (g.width > 0 && g.height > 0) {
-            const int gx0 = static_cast<int>(std::lround(pen_x)) + g.bearing_x;
-            const int gy0 = baseline_y - g.bearing_y;
+            const int gx0 = static_cast<int>(std::lround(pen_x + shaped[i].x_offset)) + g.bearing_x;
+            const int gy0 = baseline_y - static_cast<int>(std::lround(shaped[i].y_offset)) - g.bearing_y;
             for (int r = 0; r < g.height; ++r) {
                 for (int c = 0; c < g.width; ++c) {
                     const uint8_t cov = g.coverage[static_cast<std::size_t>(r * g.width + c)];
@@ -2141,11 +3156,6 @@ void FontRenderer::draw_text(
                 }
             }
         }
-        // The pen advances by the advance shaping resolved for this glyph --
-        // the same number layout measured, from the same face. Advancing with
-        // the primary is how a `<pre>` measured monospace and drew
-        // proportional: every glyph in the right order, packed to the width of
-        // a font nobody asked for.
         pen_x += shaped[i].advance;
     }
 }

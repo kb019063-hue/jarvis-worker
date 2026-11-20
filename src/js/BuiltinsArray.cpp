@@ -368,21 +368,29 @@ template <typename Visit>
 static bool walk_present_indices(const JsValue& object, size_t limit, bool chain_has_index, Visit visit) {
     if (limit == 0) return true;
     const bool sparse = object.is_array() && !object.object_val->has_accessors && !chain_has_index;
+    if (!sparse) {
+        // Ask each index as it is reached, because a callback can make a place
+        // appear or a getter can throw — but only while the length is short
+        // enough for that to be a walk rather than a wait. A length of 2^53
+        // with one place on it takes the places that are there, in order, and
+        // asks about each of them as it reaches it. That is the same answer for
+        // every place the list names, and it is the only affordable one for a
+        // length that cannot be counted.
+        if (limit > kMaxWalkedIndices) {
+            for (size_t index : present_indices(object, limit).indices) {
+                if (!has_index_property(object, index)) continue;
+                if (!visit(index)) return false;
+            }
+            return true;
+        }
+        for (size_t index = 0; index < limit; ++index) {
+            if (!has_index_property(object, index)) continue;
+            if (!visit(index)) return false;
+        }
+        return true;
+    }
     size_t index = 0;
     while (index < limit) {
-        if (!sparse) {
-            if (!has_index_property(object, index)) {
-                // One at a time, because a place can appear under anything the
-                // chain holds. Only a length short enough to ask about takes
-                // this path: test262's receivers here have a few places.
-                ++index;
-                if (index > kMaxWalkedIndices && !chain_has_index) break;
-                continue;
-            }
-            if (!visit(index)) return false;
-            ++index;
-            continue;
-        }
         // A real array with no accessor and no prototype index: the hole bit
         // is the answer, and the first index past the elements is not there.
         for (const auto& elements = object.object_val->array_elements; index < limit; ++index) {

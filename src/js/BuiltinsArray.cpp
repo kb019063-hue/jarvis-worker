@@ -287,21 +287,14 @@ static IndexWalk present_indices(const JsValue& object, size_t limit) {
             if (!object.is_array_hole(i)) found.push_back(i);
         }
     }
-    JsObject* cell = object.property_cell();
-    if (cell) {
-        for (const auto& entry : cell->properties) {
-            if (hidden_key(entry.first)) continue;
-            size_t index = 0;
-            if (!as_array_index(entry.first, index) || index >= limit) continue;
-            // An own element already answered for this index above: the map
-            // holds it only as the place it became, and the element is the
-            // property.
-            if (object.is_array() && index < object.object_val->array_elements.size() &&
-                !object.is_array_hole(index)) {
-                continue;
-            }
-            found.push_back(index);
-        }
+    // The receiver's own integer keys, through `own_keys`: an exotic object
+    // (`NodeList`, a typed array) keeps its indices outside the property map,
+    // and only the object knows they are there. A real array's elements are
+    // already in `found`, and `own_keys` repeats them, so the duplicates are
+    // removed by the sort below.
+    for (const std::string& key : object.own_keys(true)) {
+        size_t index = 0;
+        if (as_array_index(key, index) && index < limit) found.push_back(index);
     }
     // The chain's own indices, bounded by the length like everything else: an
     // index the prototype has past the length is not visited, because the loop

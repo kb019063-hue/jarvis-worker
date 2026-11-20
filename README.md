@@ -33,7 +33,7 @@ standard now makes, which is 1,967 of the 1,973.
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1973 / 1973 (100.0%)** | the corpus as web-platform-tests publishes it (`html/syntax/parsing/resources/`, vendored at `37cfee8`, 62 files), run by `make conformance`. All six `scripted_*.dat` cases, where a script must edit the document while the page is parsed, pass since Phase 101 |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **1142 / 1158 (98.6%)<!--metrics:js/frac_pct-->**; of the 17 that fail, eight are what a function or a class still lacks (Phase 34), four are iteration gaps (Phases 63, 94 and 102), and one each is typed arrays, `Proxy`, `BigInt`, `typeof` and `Symbol` | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **1143 / 1158 (98.7%)<!--metrics:js/frac_pct-->**; of the 17 that fail, eight are what a function or a class still lacks (Phase 34), four are iteration gaps (Phases 63, 94 and 102), and one each is typed arrays, `Proxy`, `BigInt`, `typeof` and `Symbol` | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **678 / 678<!--metrics:dom/frac-->**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9567 / 9824<!--metrics:wpt.pass/frac--> subtests** across 190 files; the 257 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing, 9550 before the CSS Object Model of Phase 72 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
@@ -43,13 +43,13 @@ standard now makes, which is 1,967 of the 1,973.
 | Character/entity table | 2231 named references (complete) | generated from the WHATWG table |
 | **Bidirectional text (UAX #9)** | **861,948 / 861,948 (100.0%)** of Unicode's own conformance suites: `BidiTest.txt` 770,241 cases of `Bidi_Class` sequences, and `BidiCharacterTest.txt` 91,707 cases of code points, which is where bracket pairs and mirroring are exercised (Phase 109) | `tests/bidi`, vendored as Unicode publishes them, ungzipped and run by `make bidi-conformance` |
 | **Pixels measured** | **10 reftests, 30 assertions** comparing a rendered page with what it must look like: a 50x50 block red inside and white one pixel outside on all four sides, `margin-left` leaving its margin blank, 4px borders on the padding box, padding not painted, a `display:none` box occupying no pixels, `50%` of an 800px viewport covering x=399 and stopping at x=400, and a wide box clipped at the viewport edge. Exact equality, no tolerance: box edges here are not anti-aliased, so an off-by-one is a bug. The PNG is decoded by `render_check.py`'s own reader (all five scanline filters, per-chunk CRC), because an engine asked to grade its own writer grades its own bugs. The harness self-tests before it is trusted, and it was made to fail: a one-column bug in `BitmapRenderer::fill_rect` reddened 9 of 10 reftests and failed the build (Phase 120, finding 121) | `make render-conformance`, `python3 tools/conformance/render_check.py --self-test` |
-| Engine unit tests | 280<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **`instanceof` and `Symbol.hasInstance`** | The operator is ECMAScript §13.10.2 rather than a walk: `GetMethod(rhs, @@hasInstance)` is read and called, so a class's `static [Symbol.hasInstance]` and a plain object's own method both decide, a subclass inherits the answer, and a getter is read once. `Function.prototype[Symbol.hasInstance]` exists — `[Symbol.hasInstance]`, length 1, non-writable, non-configurable — and does OrdinaryHasInstance; the operator recognizes it by identity, so the ordinary `a instanceof Array` still walks the chain without a call. A bound function delegates the whole operator to what it was bound from (`new F() instanceof F.bind(null)` is `true`, and `7 instanceof A.bind(null)` asks `A`'s own method), which needed a bound target on the function value. An arrow function, a method or `Math.max` on the right now throws the language's `TypeError` where it answered `false` (Phase 114, finding 119). Still open: `Symbol.species` and the statics that should construct a subclass, and six host constructors with no `prototype` | `make test`, suite `instanceof_asks_symbol_has_instance`; `prototypes.dat` 69/76 |
 | **Collection at a safe point** | A collection is taken at a seeded allocation count, between statements (and between bytecode instructions), and the program must print exactly what it prints when nothing is collected — **1,186 JS cases agree at interval 1 and 678 DOM pages at interval 2, 254,174 collections served, no case differing**. The negative control runs first: two cases the harness must be seen to catch (a count only a collection can change; a case that already fails) and one it must refuse to count (an interval the program never reaches) | `make verify-gc-stress`, `make verify-gc-stress-full` |
-| Engine unit tests | 280<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 288<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
+| **`ArrayBuffer` and the typed arrays** | All nine views — `Int8Array`, `Uint8Array`, `Uint8ClampedArray`, `Int16Array`, `Uint16Array`, `Int32Array`, `Uint32Array`, `Float32Array`, `Float64Array` — over a real `ArrayBuffer`, so the four interfaces that were blocked on it can be written (Phase 106). Each write stores the element type's conversion: `Uint8Array`'s 258 is `2`, `Int8Array`'s 200 is `-56`, and `Uint8ClampedArray`'s 300 is `255` where the others wrap, because clamps-and-rounds is that type's whole definition. An index past the end is dropped (`a[5] = 9` leaves `a[5]` `undefined`), an element cannot be deleted (`delete a[0]` is `false`), `-1` is an ordinary property and not an index, and `Object.keys` gives the indices in order. One buffer has one script object, so `new Uint8Array(b).buffer === new Uint16Array(b).buffer`; `subarray` shares its bytes and `slice` copies them; `set` from an overlapping window reads before it writes. `Object.getPrototypeOf(Uint8Array)` is `%TypedArray%`, the abstract class that throws when constructed, and a subclass of a view is one, because the element type is read from `new.target`: `class L extends Uint8Array {}` makes an `Int8Array`-length-2 `L` | `make test`, suite `arraybuffer_and_typed_arrays`; and the `Uint8Array` case of `collections-iterators.dat`, which `make js-conformance` had been failing for want of this (1138/1156, up from 1137) |
 | **`font-family` selection** | A CSS family list is resolved against the face names the host's own fonts declare, per element, and the winning face is loaded lazily and used to measure and draw (Phase 67). The oracle is absolute rather than a comparison: every glyph in the vendored Ahem is exactly 1em wide, so four characters at 16 px measure 64.0 px in it and in nothing else. `monospace` is checked by measurement too — `'i'` and `'W'` advance the same there and not in a proportional face | `make test`, suites `font_family_selects_a_face`, `font_family_reaches_layout_from_css` |
 | **`@font-face`** | A page brings its own typeface: the rule's `font-family` names a family the host may never have heard of, and the `src` list is fetched lazily, in order, until a source parses (Phase 74). The oracle is the vendored Ahem served through a `data:` URL, so the bytes arrive the way a browser's would — every glyph in it is exactly 1em wide, so four characters at 16 px lay out at 64.0 px or the rule did not take. A webfont outranks a host family of the same name, `format()` skips what the engine cannot read, and `local()` answers out of the host's own fonts | `make test`, suites `font_face_declares_the_family_the_page_names`, `font_face_brings_the_family_the_page_names` |
 | **HTTP/1.1 cookies, RFC 9111 cache & CORS preflight** | Thread-safe RFC 6265bis `CookieJar` (`Domain`/host-only, `Path`, wall-clock `Max-Age`/`Expires`, `Secure`, `HttpOnly` script isolation, `SameSite`, `__Secure-`/`__Host-`) wired to HTTP `Set-Cookie`/`Cookie` across redirects after CORS checks; bounded LRU HTTP cache (`Cache-Control`, `ETag`/`If-None-Match`, `Last-Modified`/`If-Modified-Since`, `304` merge, `Vary`, unsafe invalidation); WHATWG Fetch CORS `OPTIONS` preflight + `Max-Age` cache, W3C mixed-content blocking, and `HeadersExotic` `fetch()` options (Phase 73) | `make test`, 4 loopback HTTP/1.1 & Fetch suites |
@@ -68,6 +68,7 @@ standard now makes, which is 1,967 of the 1,973.
 | WebSocket TLS, Fetch policy, RFC 6455 & upgrade cookies | 32 end-to-end checks against OpenSSL 3 CA/SAN/IP/expired TLS peers, Fetch `Origin` & mixed-content policy across `https:`/`http:`/`file:`/Worker/sandboxed `iframe`, relative URLs, WHATWG validation/close semantics, 60/60 concurrent 4x `wss://` exit runs, and the upgrade's `Cookie`/`Set-Cookie` through `new WebSocket()` in an `http:` and an `https:` page (Phase 90, finding 96; Phase 117, finding 122) | `make security-websocket`; `make test` |
 | CSS Color 4/5 oracle & fuzzing | 180/180 15-space conversions vs exact-rational Python W3C §17 oracle (`max err 5.04e-08`), 13/13 §13.2 OKLCH gamut map, 133/133 valid & 61/61 invalid WPT vectors (4,860/4,860 live upstream WPT `color-computed-*.html`), 5,008 adversarial fuzz inputs (0 crashes) | `make verify-color`, `make fuzz-color` |
 | Media & vector oracle | 21 JPEG variants vs libjpeg (52–99 dB PSNR), 9 GIF variants (bit-exact `max_diff=0` vs ImageMagick `-coalesce`), 27 lossless WebP checks bit-exact vs libwebp (plus refusals), 26 lossy WebP (`VP8`) checks — every pixel of 11 streams equal to libwebp's, the loop filter and the `ALPH` plane checked separately — 16 animated WebP checks (metadata, four composited frames, an opaque animation against ImageMagick `-coalesce`, a six-frame transparency/blending/disposal animation, the first frame, the frame cap, determinism, six refusals), 7 SVG checks (including positioned text and tspan); 2,400 mutated fuzz cases (0 findings). The compositor itself was compared with libwebp 1.5's animation decoder over 658 files and 2,262 frames, every one byte-identical (Phase 79) | `make verify-media`, `make fuzz-media` |
+| **SVG text** | `x`/`y`/`dx`/`dy`/`rotate` as one value per character, `text-anchor` measured over the whole text chunk across `<tspan>`s, `<textPath>` with `startOffset` and per-glyph tangent rotation, and gradient (or fallback-colour) paint on glyph fill and stroke (Phase 107). Verified by four suites that build the same 200×80 image twice — once through `SvgRenderer`, once by asking Canvas 2D for the same glyphs at the position SVG asks for — and compare the pixels: `AV` at 40 px still kerns as one run (637 ink pixels), a `middle`/`end` anchor over two tspans lands where the pair's advance puts it (354 ink pixels, x 43–74), a gradient on `<text>` is pixel-identical to the same gradient on a Canvas context (334), and a 45° `<textPath>` puts the glyphs on the line, turned with the tangent (330, x 10–42) | `make test`, suites `svg_text_position_lists_place_each_glyph`, `svg_text_anchor_measures_the_whole_chunk`, `svg_text_paint_servers_paint_the_glyphs`, `svg_text_path_lays_the_glyphs_along_a_path` |
 | Fuzz robustness | 400 parser mutations, 400 layout/render/image runs, 600 mutated XML documents, 1,927 whole XML roundtrips, and 2,400 mutated JPEG/GIF/WebP/SVG inputs: 0 findings | `make asan` (ASan + UBSan) |
 | Deep and oversized pages | 165 pages that nest or repeat one thing up to 200,000 times + 300 random pages at the parser's nesting limit: 1,332 runs, 0 failed | `make deep` (8 MB stack, 2 GB, 60 s a run) |
 
@@ -80,7 +81,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 280<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 288<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
 make check-numbers   # the numbers above still divide and still count, and every marked figure and floor agrees (tools/ci/check_numbers.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
@@ -637,7 +638,7 @@ Litebird implements the complete modern browser rendering pipeline:
   - `viewBox` + `preserveAspectRatio` (`meet`/`slice`/`none`), full `transform` stacks (`matrix`, `translate`, `scale`, `rotate`, `skewX`, `skewY`), and nested `<svg>`.
   - Shape & path rasterization: `<rect>` (including `rx`/`ry`), `<circle>`, `<ellipse>`, `<line>`, `<polyline>`, `<polygon>`, and full SVG `<path>` grammar (`M/m`, `L/l`, `H/h`, `V/v`, `C/c`, `S/s`, `Q/q`, `T/t`, W3C F.6.5/F.6.6 `A/a` elliptical arcs, `Z/z`).
   - Paint servers, styling, reuse & clipping: `<defs>`, `<linearGradient>`/`<radialGradient>` (`href` inheritance, `objectBoundingBox`/`userSpaceOnUse`, `gradientTransform`, `spreadMethod`), `<use>`/`<symbol>`, `<clipPath>`, inline `style`, `rgba()`/`#RGBA`/`#RRGGBBAA`, `currentColor`, `opacity`/`fill-opacity`/`stroke-opacity`, `fill-rule="evenodd"|"nonzero"`, `display:none`/`visibility:hidden`, and dashed/capped/joined strokes.
-  - Basic SVG `<text>` / `<tspan>` in Phase 82: inherited font/solid paint, first `x`/`y` and `dx`/`dy`, simple `text-anchor`, whitespace normalization, and Canvas 2D glyph rasterization in SVG user coordinates. Per-character lists, textPath, multi-run anchoring, and text gradients remain open; see `docs/phases/82-svg-text-rendering.md`.
+  - SVG `<text>` / `<tspan>` (Phase 82), and since Phase 107 the model it stood in for: `x`/`y`/`dx`/`dy`/`rotate` are lists with one value per character (`rotate`'s last value carries on, and only its), `text-anchor` is measured over the whole *text chunk* — the run that begins at an absolute `x` or `y` — across its `<tspan>`s, `<textPath>` lays the glyphs along a referenced path at a `startOffset` (length or `%`) turned by the path's tangent, and a `url(#…)` gradient paints glyph fill and stroke. Whitespace normalization and Canvas 2D glyph rasterization in SVG user coordinates are unchanged; `textLength`, letter/word-spacing, baselines below `alphabetic`, `<tref>` and bidi remain open. See `docs/phases/107-svg-text-positions-chunks-textpath-and-paint.md`.
 - **HTML5 `<canvas>` 2D Context API (`CanvasRenderingContext2D`):**
   - 2D CTM stack (`save`/`restore`, `translate`, `rotate`, `scale`, `transform`, `setTransform`, `resetTransform`), `globalAlpha`, and `clip()`.
   - 4× vertical + analytical horizontal anti-aliased scanline rasterization (`nonzero` and `evenodd` winding rules) and polygon-ribbon thick stroking (`lineWidth`, `lineCap`, `lineJoin`, `miterLimit`, `setLineDash`/`getLineDash`/`lineDashOffset`, `strokeGradient`).
@@ -680,7 +681,14 @@ twice.
   modifiers, duplicate named groups, `RegExp.escape()`, and `Symbol.*`
   dispatch), `Map`, `Set`, `WeakMap`, `WeakSet`, `Reflect`, the `Error` family,
   `structuredClone`, `globalThis`, `eval` and `Function`. Methods live on
-  shared prototypes; each interpreter has its own set (a realm).
+  shared prototypes; each interpreter has its own set (a realm). The
+  `Array.prototype` methods that move or copy places inside an array —
+  `reverse`, `sort`, `splice`, `copyWithin`, `fill`, `shift`, `unshift`,
+  `push`, `pop`, `toReversed`, `toSorted`, `toSpliced`, `with` — ask each place
+  as a property, so a getter or setter defined on an index runs, a frozen array
+  refuses the write with a `TypeError`, and an array-like object or a boxed
+  primitive is a receiver; a plain array still takes the dense path
+  (Phase 116, `docs/phases/116-the-methods-that-move-places.md`).
 - **Event loop:** tasks, microtasks and timers, with a microtask checkpoint
   whenever the script stack empties. `setTimeout`/`setInterval` (with extra
   arguments), `queueMicrotask`, `requestAnimationFrame`, `performance.now()`.
@@ -763,7 +771,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 280<!--metrics:unit_suites/int--> engine test suites
+# Run the 288<!--metrics:unit_suites/int--> engine test suites
 make test
 ```
 
@@ -831,14 +839,14 @@ make test
 make test
 ```
 
-Output (280<!--metrics:unit_suites/int--> suites; the first and last lines shown):
+Output (288<!--metrics:unit_suites/int--> suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 280<!--metrics:unit_suites/int--> engine test suites passed successfully!
+All 288<!--metrics:unit_suites/int--> engine test suites passed successfully!
 ```
 
 ```bash
@@ -998,7 +1006,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 280/280<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 288/288<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++

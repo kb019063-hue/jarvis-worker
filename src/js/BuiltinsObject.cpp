@@ -907,6 +907,58 @@ void install_object_builtins(JsIntrinsics& realm) {
         return JsValue::make_boolean(define_from_descriptor(require_object(js_arg(args, 0), "Reflect.defineProperty"),
                                                             js_to_property_key(js_arg(args, 1)), js_arg(args, 2), false));
     });
+    /// Reflect's three integrity calls are the strict half of the Object
+    /// ones: a primitive has no [[GetOwnProperty]] or [[IsExtensible]] to
+    /// ask, and the language throws a TypeError rather than wrapping it.
+    /// (`Object.getOwnPropertyDescriptor("ab", "1")` answers, because it
+    /// ToObjects first; `Reflect.getOwnPropertyDescriptor("ab", "1")` throws.)
+    auto require_reflect_target = [](const JsValue& value, const char* where) -> const JsValue& {
+        if (!value.is_object_like()) {
+            js_throw_type_error(std::string(where) + " called on non-object");
+        }
+        return value;
+    };
+    js_define_method(reflect, "getOwnPropertyDescriptor", 2, [require_reflect_target](Args args) {
+        // ECMA-262 §28.1.6. The descriptor is the receiver's own, by the same
+        // descriptor_for Object.getOwnPropertyDescriptor uses, so an array's
+        // indices and `length`, a string object's indices, a function's
+        // `prototype` and an accessor all describe themselves here as there.
+        const JsValue& object = require_reflect_target(js_arg(args, 0), "Reflect.getOwnPropertyDescriptor");
+        return descriptor_for(object, js_to_property_key(js_arg(args, 1)));
+    });
+    js_define_method(reflect, "isExtensible", 1, [require_reflect_target](Args args) {
+        // §28.1.7. A cross-origin Window or Location is never extensible
+        // (HTML §7.2.3.4, §7.2.4.4): Object.isExtensible reports false on it,
+        // and so does this, rather than throwing as the integrity-level
+        // Object calls do.
+        const JsValue& object = require_reflect_target(js_arg(args, 0), "Reflect.isExtensible");
+        {
+            std::vector<std::string> exposed;
+            if (litebird::dom::cross_origin_own_keys(object, true, exposed)) return JsValue::make_boolean(false);
+        }
+        // A script function with no cell yet has one made for it here: it is
+        // extensible until something asks, and the answer must not depend on
+        // whether a cell happened to exist.
+        JsObject* cell = object.property_cell(object.is_function());
+        return JsValue::make_boolean(cell && cell->extensible);
+    });
+    js_define_method(reflect, "preventExtensions", 1, [require_reflect_target](Args args) {
+        // §28.1.8. Reports where Object.preventExtensions throws: `true` when
+        // the object became non-extensible (or already was — the call is
+        // idempotent), `false` on a cross-origin Window or Location, whose
+        // [[PreventExtensions]] refuses and which changes nothing.
+        const JsValue& object = require_reflect_target(js_arg(args, 0), "Reflect.preventExtensions");
+        {
+            std::vector<std::string> exposed;
+            if (litebird::dom::cross_origin_own_keys(object, true, exposed)) return JsValue::make_boolean(false);
+        }
+        // A native function with no cell keeps its properties in a table; a
+        // cell is what has the extensible bit, so one is made for it. (The
+        // properties it had are carried over by function_cell().)
+        JsObject* cell = object.property_cell(object.is_function());
+        if (cell) cell->extensible = false;
+        return JsValue::make_boolean(true);
+    });
     js_define_method(reflect, "apply", 3, [](Args args) {
         return js_call(js_arg(args, 0), js_arg(args, 1), array_like_to_vector(js_arg(args, 2)));
     });

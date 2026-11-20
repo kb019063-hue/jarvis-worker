@@ -325,6 +325,10 @@ class DualProtocolServer:
         )
         if selected_proto:
             resp += f"Sec-WebSocket-Protocol: {selected_proto}\r\n"
+        # Cookies set on an upgrade response: an ordinary Set-Cookie header on
+        # the one response the handshake ever gets.
+        if path == "/ws-cookie":
+            resp += "Set-Cookie: harness_after=1; Path=/\r\n"
         resp += "\r\n"
         conn.sendall(resp.encode("ascii"))
 
@@ -336,6 +340,7 @@ class DualProtocolServer:
             "key": sec_key,
             "offered": offered,
             "selected": selected_proto,
+            "cookie": headers.get("cookie"),
             "messages": [],
             "masks_ok": True,
             "close_code": None,
@@ -504,6 +509,15 @@ wsIp.onclose = function(e) {{
   pending--;
 }};
 
+// A Secure cookie on an https page goes out on a wss:// upgrade: `wss` is
+// matched as `https`, which is the only reason a `Secure` cookie can ever be
+// sent on a WebSocket at all.
+pending++;
+document.cookie = 'wss_secure=1; Path=/; Secure';
+var wsCookie = new WebSocket('wss://localhost:{wss_valid.port}/wss-cookie');
+wsCookie.onopen = function() {{ log('wss_cookie_page', document.cookie); wsCookie.close(1000); }};
+wsCookie.onclose = function(e) {{ log('wss_cookie_close', e.code + ':' + e.wasClean); pending--; }};
+
 // wss:// to localhost (DNS SAN + SNI)
 pending++;
 var wsDns = new WebSocket('wss://localhost:{wss_valid.port}/dns');
@@ -625,6 +639,12 @@ setTimeout(pump, 1);
             with plain_srv.lock:
                 plain_upgrades = list(plain_srv.upgrades)
 
+            wss_cookie_up = next((u for u in wss_upgrades if u["path"] == "/wss-cookie"), None)
+            check("wss:// upgrade sends the page's Secure cookie (wss matched as https)",
+                  wss_cookie_up is not None and "wss_secure=1" in (wss_cookie_up["cookie"] or "")
+                  and r1.get("wss_cookie_close") == "1000:true",
+                  f"cookie={wss_cookie_up and wss_cookie_up['cookie']} close={r1.get('wss_cookie_close')}")
+
             keys = [u["key"] for u in wss_upgrades + https_upgrades + plain_upgrades]
             decoded_key_lens = [len(base64.b64decode(k)) for k in keys if k]
             check("Sec-WebSocket-Key is 16 random bytes & distinct across connections",
@@ -662,8 +682,14 @@ rws.onmessage = function(e) {{ parent.postMessage('sbx_msg:' + e.data, '*'); rws
 </script>"></iframe>
 <iframe id="sbx_data" sandbox="allow-scripts" src="{data_iframe_src}"></iframe>
 <script>
-var pending = 5;
+var pending = 6;
 function log(k, v) {{ console.log('WSCHECK:' + k + '=' + v); }}
+// The upgrade is a GET of this document's own URL space, so it carries the
+// cookies the page set and keeps what the 101 response sets.
+document.cookie = 'harness_pre=1; Path=/';
+var cws = new WebSocket('/ws-cookie');
+cws.onopen = function() {{ log('ws_cookie_page', document.cookie); cws.close(1000); pending--; }};
+cws.onerror = function() {{ log('ws_cookie_page', 'ERR'); pending--; }};
 window.addEventListener('message', function(e) {{
   var idx = String(e.data).indexOf(':');
   log(String(e.data).slice(0, idx), String(e.data).slice(idx + 1));
@@ -717,6 +743,14 @@ setTimeout(pump, 1);
                   and r2.get("data_msg") == "echo:from-data"
                   and data_up is not None and data_up["origin"] == "null",
                   f"{r2.get('data_rel')} / {r2.get('data_msg')} / origin={data_up and data_up['origin']}")
+
+            cookie_up = next((u for u in p2_upgrades if u["path"] == "/ws-cookie"), None)
+            check("ws:// upgrade from a page carries document.cookie",
+                  cookie_up is not None and "harness_pre=1" in (cookie_up["cookie"] or ""),
+                  f"cookie={cookie_up and cookie_up['cookie']}")
+            check("Set-Cookie on the 101 reaches the page's document.cookie",
+                  "harness_after=1" in r2.get("ws_cookie_page", ""),
+                  f"ws_cookie_page={r2.get('ws_cookie_page')}")
 
             # 3. file:// document sends Origin: null and rejects relative WebSocket URL
             file_html = f"""<!doctype html><meta charset="utf-8"><script>

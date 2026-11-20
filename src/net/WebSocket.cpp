@@ -4,6 +4,7 @@
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/JsOps.hpp"
+#include "litebird/js/Storage.hpp"
 #include "litebird/net/UrlParser.hpp"
 
 #include <arpa/inet.h>
@@ -914,6 +915,13 @@ void WebSocketObject::init_parsed_request(std::vector<std::string> protocols,
         return;
     }
 
+    // Cookies for the upgrade. The jar only understands http(s) URLs, and a
+    // `ws` request carries the same cookies as the `http` one, `wss` as `https`.
+    m_cookie_url = (m_secure ? "https://" : "http://") + m_host_header + m_path;
+    if (!context.opaque_origin && have_doc && (doc_url.scheme == "http" || doc_url.scheme == "https")) {
+        m_cookie_site = context.document_url;
+    }
+
     m_url = parsed.href(true);
     m_event_origin = parsed.origin();
 
@@ -1515,6 +1523,13 @@ void WebSocketObject::receiver_thread_loop() {
         "Origin: " + m_origin_header + "\r\n"
         "Sec-WebSocket-Key: " + sec_key + "\r\n"
         "Sec-WebSocket-Version: 13\r\n";
+    if (!m_cookie_url.empty()) {
+        const std::string cookie_val =
+            CookieJar::default_jar().get_cookie_header(m_cookie_url, m_cookie_site, false, "GET");
+        if (!cookie_val.empty() && cookie_val.find_first_of("\r\n") == std::string::npos) {
+            handshake_req += "Cookie: " + cookie_val + "\r\n";
+        }
+    }
     if (!m_offered_protocols.empty()) {
         handshake_req += "Sec-WebSocket-Protocol: ";
         for (size_t i = 0; i < m_offered_protocols.size(); ++i) {
@@ -1630,6 +1645,7 @@ void WebSocketObject::receiver_thread_loop() {
     int protocol_count = 0;
     std::string selected_protocol;
     int ext_count = 0;
+    std::vector<std::string> set_cookies;
 
     if (line_end != std::string::npos) {
         size_t pos = line_end + 2;
@@ -1658,9 +1674,20 @@ void WebSocketObject::receiver_thread_loop() {
                 selected_protocol = std::move(val);
             } else if (name == "sec-websocket-extensions") {
                 ++ext_count;
+            } else if (name == "set-cookie") {
+                set_cookies.push_back(std::move(val));
             }
             if (next == std::string::npos) break;
             pos = next + 2;
+        }
+    }
+
+    // Cookies the server set on the upgrade. They arrive on an ordinary HTTP
+    // response and are stored whether or not the upgrade itself is accepted,
+    // as an HTTP client would do with any other response.
+    if (!set_cookies.empty() && !m_cookie_url.empty()) {
+        for (const std::string& set_cookie : set_cookies) {
+            CookieJar::default_jar().set_cookie_from_header(set_cookie, m_cookie_url);
         }
     }
 

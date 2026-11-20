@@ -260,7 +260,10 @@ Four things about the number:
   objects (`sheet.cssRules`, `insertRule`) are in since Phase 72; the corpus
   still cannot record them, because jsdom does not implement them either, so
   `cssom_sheets_rules_insert_amounts_and_fonts` in `tests/test_suite.cpp`
-  holds them.
+  holds them. Phase 84 made `@media` a `CSSMediaRule` and Phase 112 made
+  `@keyframes` a `CSSKeyframesRule` whose frames are `CSSKeyframeRule`s — so
+  `cssRules` now lists every rule the sheet holds, in the order it was
+  written, and `insertRule('@keyframes …')` is a rule like any other.
 - **jsdom is the reference, not the authority.** Where it differs from the
   standards, the corpus stays away and a unit test asserts the standard's
   answer (`tests/dom-conformance/README.md` names the places).

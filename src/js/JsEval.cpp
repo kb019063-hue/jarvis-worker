@@ -2830,12 +2830,16 @@ JsValue JsInterpreter::eval_index(const IndexExpr* index, const EnvPtr& env) {
         return JsValue::make_undefined();
     }
     JsValue key = evaluate(index->index.get(), env);
-    // Fast path: array[number].
+    // Fast path: array[number]. A hole is not one of the array's properties,
+    // so it is not an answer here: `[, ][0]` has to reach the prototype with
+    // `get_member`, as `HasProperty` says it does. An element still answers
+    // without the call, which is the case this path exists for.
     if (key.type == JsType::Number && base.is_array()) {
         double n = key.number_val;
         const auto& elements = base.object_val->array_elements;
         if (n >= 0 && n < static_cast<double>(elements.size()) && n == std::floor(n)) {
-            return elements[static_cast<size_t>(n)];
+            const size_t i = static_cast<size_t>(n);
+            if (!base.is_array_hole(i)) return elements[i];
         }
     }
     return get_member(base, js_to_property_key(key));

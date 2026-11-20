@@ -392,9 +392,11 @@ static bool walk_present_indices(const JsValue& object, size_t limit, bool chain
         }
         // A real array with no accessor and no prototype index: the hole bit
         // is the answer, and the first index past the elements is not there.
-        const auto& elements = object.object_val->array_elements;
-        const size_t count = std::min(elements.size(), limit);
-        for (; index < count; ++index) {
+        for (const auto& elements = object.object_val->array_elements; index < limit; ++index) {
+            // The length is read again each step: a callback can shorten the
+            // array (`arr.length = 3` inside a forEach stops the loop there),
+            // and templating the size once ran the old one to the end.
+            if (index >= elements.size()) return true;
             if (object.is_array_hole(index)) continue;
             if (!visit(index)) return false;
         }
@@ -615,13 +617,20 @@ std::string join_array(const JsValue& array, const std::string& separator) {
         else if (!item.is_nullish()) out += js_to_string(item);
     }
     // The places after the last one that is there are empty but still
-    // separated: one separator each, and nothing to read for any of them.
+    // separated: a separator before each of them, and nothing to read.
+    // `place` has already been counted, so every remaining place owes one
+    // separator, not one fewer — `{length:4, 1:1}` is ",1,,": two places
+    // after the last that is there, and two separators.
     if (place < length) {
-        const size_t tail = length - 1 - place;
+        // Every place after the first owes one separator, whether or not it
+        // has a value: the first of these owes one only if something was
+        // already written, and the rest owe one each.
+        size_t owed = length - place;
+        if (place == 0) --owed;              // the leading place owes none
         if (separator.empty()) {
-            out.append(tail, ',');
+            out.append(owed, ',');
         } else {
-            for (size_t k = 0; k < tail; ++k) out += separator;
+            for (size_t k = 0; k < owed; ++k) out += separator;
         }
     }
     return out;
@@ -1157,11 +1166,6 @@ void install_array_builtins(JsIntrinsics& realm) {
         std::string separator = js_arg(args, 0).is_undefined() ? "," : js_to_string(js_arg(args, 0));
         return JsValue::make_string(join_array(array, separator));
     });
-    js_define_method(ap, "toString", 0, [](Args) {
-        JsValue me = self();
-        if (!me.is_array()) return JsValue::make_string("[object Object]");
-        return JsValue::make_string(join_array(me, ","));
-    });
     // Array.prototype.toString is the standard's generic form: `join`, looked
     // up **on this** by name, not this engine's join called directly. Without
     // it an array fell through to Object.prototype.toString and
@@ -1581,9 +1585,14 @@ void install_array_builtins(JsIntrinsics& realm) {
         // Backwards without counting backwards: the places that are there are
         // a finite list, and the answer is its last member at or below `start`.
         const IndexWalk walk = present_indices(array, length);
-        for (size_t k = walk.indices.size(); k-- > 0;) {
-            const size_t i = walk.indices[k];
-            if (i > start) continue;
+        // Descending, asking about each place as it is reached: a getter at a
+        // higher index can define a lower one that was a hole when the walk
+        // started, and `lastIndexOf` must find it.
+        size_t k = walk.indices.size();
+        for (size_t i = start + 1; i-- > 0;) {
+            while (k > 0 && walk.indices[k - 1] > i) --k;
+            const bool in_walk = k > 0 && walk.indices[k - 1] == i;
+            if (!in_walk && !has_index_property(array, i)) continue;
             if (!has_index_property(array, i)) continue;
             if (strict_equals(get_index(array, i), js_arg(args, 0))) return JsValue::make_number(static_cast<double>(i));
         }
@@ -1598,19 +1607,22 @@ void install_array_builtins(JsIntrinsics& realm) {
         const size_t length = array_like_length(array, "includes");
         const size_t start = relative_index(js_arg(args, 1), length, 0);
         if (start >= length) return JsValue::make_boolean(false);
-        const bool chain = prototype_holds_an_index(array);
-        const IndexWalk walk = present_indices(array, length);
-        size_t next = 0;
+        const bool sparse = array.is_array() && !array.object_val->has_accessors &&
+                            !prototype_holds_an_index(array);
         for (size_t i = start; i < length; ++i) {
-            while (next < walk.indices.size() && walk.indices[next] < i) ++next;
-            if (next < walk.indices.size() && walk.indices[next] == i && has_index_property(array, i)) {
-                if (js_same_value_zero(get_index(array, i), js_arg(args, 0))) return JsValue::make_boolean(true);
+            if (sparse) {
+                // A real array with no accessor and no prototype index: a hole
+                // reads `undefined`, and past the elements so does every index.
+                const auto& elements = array.object_val->array_elements;
+                const JsValue item = i < elements.size() && !array.is_array_hole(i)
+                                         ? elements[i] : JsValue::make_undefined();
+                if (js_same_value_zero(item, js_arg(args, 0))) return JsValue::make_boolean(true);
+                if (i >= elements.size()) break;   // nothing more to read
                 continue;
             }
-            // Not there. `a[i]` is `undefined` unless the chain answers.
-            JsValue absent = get_index(array, i);
-            if (js_same_value_zero(absent, js_arg(args, 0))) return JsValue::make_boolean(true);
-            if (!chain) break;   // every remaining place reads the same
+            // Read the place as `a[i]` does, one at a time: an index can be a
+            // getter that throws, and `includes` must let it.
+            if (js_same_value_zero(get_index(array, i), js_arg(args, 0))) return JsValue::make_boolean(true);
         }
         return JsValue::make_boolean(false);
     });

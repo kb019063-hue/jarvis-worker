@@ -162,7 +162,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli deep asan asan-core asan-build asan-unit asan-verify asan-js asan-dom asan-xml asan-wpt asan-xml-generated asan-fuzz asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket help
 
 all: $(TARGET)
 
@@ -206,10 +206,19 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@./$(CROSS_ORIGIN_TARGET)
 
 ## The numbers the documents publish: every "A / B (P%)" must divide, the two
-## corpus totals must equal the cases on disk, and "214 suites" must be the
-## suites tests/test_suite.cpp registers. See tools/ci/check_numbers.py.
+## corpus totals must equal the cases on disk, "214 suites" must be the suites
+## tests/test_suite.cpp registers, and every figure a document marks with
+## `<!--metrics:key/shape-->` must equal docs/metrics.json or the tree.
+## See tools/ci/check_numbers.py.
 check-numbers:
 	@python3 tools/ci/check_numbers.py
+
+## Refresh every marked figure from docs/metrics.json and the tree, and raise the
+## `--min-pass` floors in ci.yml to the scores the tree reaches. This is what to
+## run after merging main, instead of editing the counts by hand in six files.
+## It never lowers a floor: that is a regression, and it is reported instead.
+metrics:
+	@python3 tools/ci/check_numbers.py --write
 
 ## Float-index speed guard: the old sweep needs >5 s for 10k packed floats
 ## and >12 s for mixed sides; the new index needs ~0.1 s per page locally.
@@ -378,6 +387,11 @@ asan: asan-core
 ## A new check goes into the part it belongs with, and then CI runs it. A new
 ## part goes into this recipe and into a job: tools/ci/check_ci_parts.py,
 ## which CI runs before anything is built, fails for a part that no job runs.
+##
+## (The parts are declared here and not on the long .PHONY line above, which
+## every pull request that adds a target changes, and which two of them then
+## change at once.)
+.PHONY: asan-build asan-unit asan-verify asan-js asan-dom asan-xml asan-wpt asan-xml-generated asan-fuzz
 asan-core:
 	$(MAKE) asan-build
 	$(MAKE) asan-unit
@@ -552,4 +566,5 @@ clean:
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, verify-brotli, fuzz-brotli, deep, asan (asan-core, asan-deep; the parts of asan-core are asan-build, asan-unit, asan-verify, asan-js, asan-dom, asan-xml, asan-wpt, asan-xml-generated, asan-fuzz), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, clean"
+	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, verify-brotli, fuzz-brotli, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, clean"
+	@echo "Parts of asan-core, which CI runs as jobs side by side: asan-build, asan-unit, asan-verify, asan-js, asan-dom, asan-xml, asan-wpt, asan-xml-generated, asan-fuzz"

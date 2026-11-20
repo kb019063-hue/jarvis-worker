@@ -44,6 +44,16 @@ struct ResourceResponse {
     std::string error_message;
     /// The final address actually loaded (after any redirects), without a fragment.
     std::string url;
+
+    /// For a `401`, what the server asked for: the schemes it offered in
+    /// `WWW-Authenticate`, in the order it wrote them ("Basic", "Digest").
+    /// Empty for every other status, and for a 401 whose header is missing or
+    /// unreadable. A page cannot read this; it is for the embedder, which is
+    /// what decides whether to fill the credential store.
+    std::vector<std::string> auth_schemes;
+    /// The `realm` parameter of the first challenge that has one. Empty when
+    /// none did.
+    std::string auth_realm;
 };
 
 /// Where a page-initiated request comes from. `document_url` decides what
@@ -114,6 +124,25 @@ public:
         const std::string& body = ""
     );
 
+    /// Credentials for an HTTP authentication realm (RFC 7617 §2.2).
+    ///
+    /// Nothing is sent until a server asks: the first request for an origin
+    /// carries no `Authorization`, a `401` is read for its challenges, and the
+    /// request is tried once more with credentials for that origin *and* that
+    /// realm. A credential set for one realm is never offered to another, which
+    /// is what keeps a page from collecting a password meant for elsewhere.
+    static void set_auth_credentials(const std::string& origin, const std::string& realm,
+                                     const std::string& username, const std::string& password);
+
+    /// The credentials held for an origin and realm, if any. False when none
+    /// are held; `has_credentials` is the question, not an error.
+    static bool has_credentials(const std::string& origin, const std::string& realm);
+
+    /// Forgets every credential held, for every origin and realm.
+    static void clear_auth_credentials();
+    /// How many (origin, realm) pairs are held. For tests.
+    static std::size_t auth_credential_count();
+
     /// Clears both the RFC 9111 HTTP response cache and the CORS preflight cache.
     static void clear_http_cache();
     static std::size_t http_cache_size();
@@ -133,6 +162,26 @@ public:
     static void clear_origin_roots_for_testing();
 
     static std::string detect_mime_type(std::string_view path_or_url);
+
+    // --- HTTP authentication, for tests and for embedders that fill the store --
+    //
+    // The digests are RFC 1321 MD5 and FIPS 180-4 SHA-256, and RFC 7616 §3.9.1
+    // publishes the answers, so these are exposed rather than hidden: a test
+    // can hold the implementation to a value it did not compute. They are the
+    // same functions the loader uses, not a second copy.
+    static std::string auth_md5_hex(std::string_view data);
+    static std::string auth_sha256_hex(std::string_view data);
+    static std::string auth_base64(std::string_view bytes);
+    /// The value a client sends, or false when the challenge cannot be
+    /// answered (an unknown algorithm, `auth-int` only, no credentials held).
+    /// `cnonce` is an argument so that a test can reproduce RFC 7616 §3.9.1
+    /// exactly; the loader generates a fresh one.
+    static bool auth_Digest_response(const std::string& algorithm,
+                                     const std::string& username, const std::string& password,
+                                     const std::string& realm, const std::string& nonce,
+                                     const std::string& method, const std::string& request_target,
+                                     const std::string& qop, const std::string& cnonce,
+                                     const std::string& nc, std::string& out_hex);
 };
 
 } // namespace litebird

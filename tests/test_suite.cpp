@@ -23569,6 +23569,176 @@ TEST(http11_keep_alive_socket_pooling_and_tls_reuse) {
     ResourceLoader::clear_http_cache();
 }
 
+// ---------------------------------------------------------------------------
+// Phase 113: HTTP authentication challenges — RFC 7617 Basic, RFC 7616 Digest
+// ---------------------------------------------------------------------------
+
+TEST(http_authentication_basic_and_digest_challenges) {
+    using namespace litebird;
+
+    // 1. The digests against the vectors the RFCs publish — not against
+    //    themselves. RFC 1321 §A.5 and FIPS 180-4 §B.1/B.2 for the hashes,
+    //    RFC 4648 §10 for base64.
+    assert(ResourceLoader::auth_md5_hex("") == "d41d8cd98f00b204e9800998ecf8427e");
+    assert(ResourceLoader::auth_md5_hex("abc") == "900150983cd24fb0d6963f7d28e17f72");
+    assert(ResourceLoader::auth_md5_hex("message digest") == "f96b697d7cb7938d525a2f31aaf161d0");
+    assert(ResourceLoader::auth_sha256_hex("") ==
+           "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    assert(ResourceLoader::auth_sha256_hex("abc") ==
+           "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    assert(ResourceLoader::auth_sha256_hex("abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq") ==
+           "248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1");
+    assert(ResourceLoader::auth_base64("") == "");
+    assert(ResourceLoader::auth_base64("f") == "Zg==");
+    assert(ResourceLoader::auth_base64("fo") == "Zm8=");
+    assert(ResourceLoader::auth_base64("foo") == "Zm9v");
+    assert(ResourceLoader::auth_base64("foob") == "Zm9vYg==");
+    assert(ResourceLoader::auth_base64("Aladdin:open sesame") == "QWxhZGRpbjpvcGVuIHNlc2FtZQ==");
+
+    // 2. RFC 7616 §3.9.1's example, reproduced field for field: the RFC's own
+    //    cnonce and nc, so the expected hex is the RFC's and not this code's.
+    {
+        std::string hex;
+        assert(ResourceLoader::auth_Digest_response(
+            "MD5", "Mufasa", "Circle of Life", "http-auth@example.org",
+            "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v", "GET", "/dir/index.html",
+            "auth", "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ", "00000001", hex));
+        assert(hex == "8ca523f5e9506fed4657c9700eebdbec");
+
+        // RFC 7616 §3.9.2: the same request with SHA-256.
+        assert(ResourceLoader::auth_Digest_response(
+            "SHA-256", "Mufasa", "Circle of Life", "http-auth@example.org",
+            "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v", "GET", "/dir/index.html",
+            "auth", "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ", "00000001", hex));
+        assert(hex == "753927fa0e85d155564e2e272a28d1802ca10daf4496794697cf8db5856cb6c1");
+
+        // An algorithm this client cannot compute is refused, not guessed.
+        assert(!ResourceLoader::auth_Digest_response(
+            "SHA-512-256", "u", "p", "r", "n", "GET", "/", "auth", "c", "00000001", hex));
+    }
+
+    // 3. Basic is offered only when nothing better is, and never for a realm or
+    //    an origin with no credentials.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::set_auth_credentials("http://127.0.0.1:1", "simple", "Aladdin", "open sesame");
+        assert(ResourceLoader::has_credentials("http://127.0.0.1:1", "simple"));
+        assert(!ResourceLoader::has_credentials("http://127.0.0.1:1", "other"));
+        assert(!ResourceLoader::has_credentials("http://127.0.0.1:9", "simple"));
+        assert(ResourceLoader::auth_credential_count() == 1);
+        ResourceLoader::clear_auth_credentials();
+        assert(ResourceLoader::auth_credential_count() == 0);
+    }
+
+    // 4. The wire, which is the part a unit test cannot fake: a loopback
+    //    server answers 401 and then 200, and the two requests are kept so the
+    //    exchange can be read back. The first must offer nothing (RFC 7617
+    //    §2.2), the second must carry the Basic value for the credentials.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 4) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::vector<std::string> requested;
+        std::thread server_thread([server, &requested]() {
+            for (int i = 0; i < 2; ++i) {
+                const int client = accept(server, nullptr, nullptr);
+                if (client < 0) return;
+                std::string request;
+                char buffer[4096];
+                while (request.find("\r\n\r\n") == std::string::npos) {
+                    const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+                    if (count <= 0) break;
+                    request.append(buffer, static_cast<std::size_t>(count));
+                }
+                requested.push_back(request);
+                const bool has_auth = request.find("\r\nAuthorization:") != std::string::npos;
+                const std::string reply =
+                    has_auth
+                        ? std::string("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                                      "Content-Type: text/plain\r\nConnection: close\r\n\r\nok")
+                        : std::string("HTTP/1.1 401 Unauthorized\r\n"
+                                      "WWW-Authenticate: Basic realm=\"simple\"\r\n"
+                                      "Content-Length: 0\r\nConnection: close\r\n\r\n");
+                (void)::send(client, reply.data(), reply.size(), 0);
+                ::close(client);
+            }
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceLoader::set_auth_credentials(base, "simple", "Aladdin", "open sesame");
+        ResourceResponse resp = ResourceLoader::load_http(base + "/", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(resp.success);
+        assert(resp.status_code == 200);
+        assert(resp.body == "ok");
+        assert(requested.size() == 2);
+        assert(requested[0].find("\r\nAuthorization:") == std::string::npos);
+        assert(requested[1].find("\r\nAuthorization: Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==") !=
+               std::string::npos);
+        ResourceLoader::clear_auth_credentials();
+    }
+
+    // 5. A 401 with no credentials held is left alone: no retry, and what the
+    //    server asked for is reported rather than swallowed.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 1) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::thread server_thread([server]() {
+            const int client = accept(server, nullptr, nullptr);
+            if (client < 0) return;
+            char buffer[4096];
+            (void)recv(client, buffer, sizeof(buffer), 0);
+            const std::string reply =
+                "HTTP/1.1 401 Unauthorized\r\n"
+                "WWW-Authenticate: Digest realm=\"locked\", qop=\"auth\", "
+                "nonce=\"deadbeef\", algorithm=SHA-256\r\n"
+                "Content-Length: 0\r\nConnection: close\r\n\r\n";
+            (void)::send(client, reply.data(), reply.size(), 0);
+            ::close(client);
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceResponse resp = ResourceLoader::load_http(base + "/", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(!resp.success);
+        assert(resp.status_code == 401);
+        assert(resp.auth_schemes.size() == 1);
+        assert(resp.auth_schemes[0] == "Digest");
+        assert(resp.auth_realm == "locked");
+    }
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -23906,6 +24076,9 @@ int main() {
 
     // Phase 90: WebSocket wss:// TLS, Fetch Origin/mixed-content policy, and RFC 6455 framing.
     RUN_TEST(websocket_tls_origin_mixed_content_and_framing);
+
+    // Phase 113: HTTP authentication challenges (RFC 7617 Basic, RFC 7616 Digest).
+    RUN_TEST(http_authentication_basic_and_digest_challenges);
 
     // Phase 99: OpenType GDEF and GPOS positioning (SinglePos, PairPos, MarkToBase, MarkToLig, MarkToMark).
     RUN_TEST(gpos_pair_and_single_positioning_without_kern_table);

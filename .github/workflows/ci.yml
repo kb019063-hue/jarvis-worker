@@ -36,6 +36,12 @@ jobs:
         run: make -j"$(nproc)"
       - name: Engine test suites
         run: make test
+      - name: GC invariants hold through the shell
+        # Unreachable cycles and closure captures must be reclaimed, churn
+        # must not grow the live set, what a global names must stay intact.
+        # `make test` checks the same in-process; this checks the path the
+        # shell takes. Seconds.
+        run: make gc-oracle
       - name: Bidi conformance (Unicode's own two suites)
         run: make bidi-conformance
       - name: Sized-float index keeps placements fast

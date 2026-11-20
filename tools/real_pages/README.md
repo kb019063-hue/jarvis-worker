@@ -1,0 +1,32 @@
+# Twenty frozen browsing tasks • v1
+
+[First run: results and screenshot pairs](baseline.html) · [Fixed pages, actions and source revisions](pages.json)
+
+Five Python proposals, five Git manuals, eight Mothereff text tools and two games. This is deliberately a **clustered diagnostic sample**, not 20 independent sites or an estimate of web coverage. Repeated templates make shared regressions easy to see. The source archives are the publishers’ public HTML/assets, not rewritten toy pages. Third-party fonts, ads and analytics aren't replayed. Fonts may differ between engines. Both see an 800×600 viewport at 1× and the same source tree for a page under `http://snapshot.test`. Games have nondeterministic starting boards; don't score them by pixel equality.
+
+## Rerun on Linux (from repository root)
+
+Use an empty or trusted local scratch directory. Pinned snapshots, browsers, logs and full-resolution PNGs belong outside Git. Use an isolated disposable environment, not a machine with personal browser data. The network restriction in the probe is for repeatability, not a general-purpose security sandbox.
+
+```sh
+R=$(mktemp -d)
+T=tools/real_pages
+python3 "$T/capture.py" "$R/sites"
+npm install --prefix "$R/node" @sparticuz/chromium@131.0.1 puppeteer-core@23.11.1
+export NODE_PATH="$R/node/node_modules"
+# Minimal Linux images without NSS: extract the browser package's bundled libraries.
+mkdir "$R/runtime"
+node -e "require('fs').createReadStream(process.argv[1]).pipe(require('zlib').createBrotliDecompress()).pipe(process.stdout)" \
+  "$NODE_PATH/@sparticuz/chromium/bin/al2023.tar.br" | tar x -C "$R/runtime"
+LD_LIBRARY_PATH="$R/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" node "$T/reference.cjs" "$R/sites" "$R/results"
+make -j2 build/litebird
+# Link the production shell and engine; no second input implementation.
+g++ -std=c++20 -Iinclude "$T/probe.cpp" $(find build -mindepth 2 -name '*.o') -o "$R/probe"
+python3 "$T/run.py" "$R/sites" "$R/results" "$R/probe"
+```
+
+Reference: fresh browser context per task, real mouse/keyboard, intercept requests to replay only the pinned tree. `reference.json` must validate the task before the probe attempts it. The initial oracle was calibrated **in Chromium**: open the collapsed PEP contents before following its link, allow scrolling to settle, and preserve the binary converter’s trailing separator. The human tasks did not change.
+
+Litebird: fresh native process per task, origin mapped to the same tree, new sockets disabled before navigation. Scroll/hit-test/click/type through `BrowserShell`; inspect DOM only to locate a control or read the result. The probe uses the second textarea directly where necessary, so a test-selector bug isn't mistaken for a user-visible conversion failure. The shell has no page keydown/mousedown adapter or contenteditable editor; do not substitute calls to a page’s handlers. Treat an exit before the first frame separately from an untestable input. Each task has a 45-second wall budget (not a speed benchmark).
+
+`litebird.json` contains **candidate** interaction outcomes. Review the before/after PNGs for readability and visible results before publishing the count. A readable output with broken layout can pass interaction but not visual fidelity. Record missing frames, incomplete actions, crashes and blocked reference cases separately. Never drop them from the 20-row table. Keep v1 fixed when tuning the engine; use fresh holdout sites for broader claims.

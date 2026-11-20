@@ -83,6 +83,30 @@ extern const uint16_t kIndexEucKr[23940];
 
 } // namespace encoding_tables
 
+/// WHATWG Encoding Standard §5, the encoder half: the bytes `encoding` gives
+/// `code_point`, or none when that encoding cannot carry it. The standard
+/// encodes through an "output" of bytes and a numeric "code point" state; the
+/// cases below are the ones that state machine has. A code point the encoding
+/// has no entry for has no bytes, and this returns false: the caller decides
+/// whether that is U+FFFD (the encoder interface's default) or a count of what
+/// was written (`encodeInto`).
+///
+/// A few encodings are not one code point to a run of bytes:
+/// ISO-2022-JP switches state (so its bytes depend on the ones before them and
+/// are produced by encode_iso2022_jp, below), and `replacement` cannot encode
+/// anything at all. `x-user-defined` carries U+0000..U+007F as themselves and
+/// U+F780..U+F7FF as 0x80..0xFF.
+bool encode_code_point(EncodingId encoding, uint32_t code_point, std::string& out);
+
+/// The whole of `text` in `encoding`. Returns false at the first code point the
+/// encoding cannot carry, with `out` holding what was encoded before it: what
+/// `TextEncoder` reports as an error and `encodeInto` reports as `read`.
+///
+/// ISO-2022-JP is stateful, so it is encoded in one pass here rather than a
+/// code point at a time: the escape sequence that switches back to ASCII is
+/// written once, at the end, and not after every character.
+bool encode_with_encoding(EncodingId encoding, std::string_view utf8_text, std::string& out);
+
 /// WHATWG Encoding Standard §4.2 "get an encoding": strips leading/trailing
 /// ASCII whitespace, ASCII-lowercases, and resolves any of the 228 standard
 /// labels to its `EncodingId`. Returns false when `label` is not a recognized

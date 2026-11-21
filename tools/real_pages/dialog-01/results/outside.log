@@ -1,0 +1,9 @@
+stage: open
+HIT	#updateDetails @ 58.168,10 -> button#updateDetails
+Dialog open
+READ	updateDetails
+HIT	#updateDetails @ 58.168,86 -> button#updateDetails
+Uncaught InvalidStateError: The dialog is already open.
+READ	true
+READ	updateDetails
+END

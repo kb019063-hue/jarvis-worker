@@ -2869,6 +2869,12 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
     }
 
     ComputedStyle style;
+    // HTML rendering default, not an unconditional layout-tree exclusion:
+    // author display declarations can override it, and an SVG element named
+    // dialog is not an HTML dialog. Presence (even open="false") means open.
+    if (element && !element->is_foreign() && element->tag_name() == "dialog") {
+        style.display = element->has_attribute("open") ? Display::Block : Display::None;
+    }
     // Relative (em/ex/ch) lengths resolve against the inherited font size.
     m_em_base = parent_style ? parent_style->font_size : 16.0f;
 

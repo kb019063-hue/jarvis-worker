@@ -1,0 +1,18 @@
+<!doctype html><meta charset="utf-8"><title>Nonmodal dialog display probe</title>
+<style>
+  #outside { display:block; margin-bottom:8px }
+  #marker { width:32px; height:24px; background:#13c975 }
+  #author-visible { display:block }
+  #author-hidden { display:none }
+</style>
+<button id="outside">Toggle nonmodal dialog</button>
+<dialog id="probe"><div id="marker"></div></dialog>
+<dialog id="boolean" open="false">Boolean attribute is present</dialog>
+<dialog id="author-visible">Author shows closed dialog</dialog>
+<dialog id="author-hidden" open>Author hides open dialog</dialog>
+<script>
+  const dialog = document.getElementById('probe');
+  document.getElementById('outside').addEventListener('click', function () {
+    if (dialog.open) dialog.close(); else dialog.show();
+  });
+</script>

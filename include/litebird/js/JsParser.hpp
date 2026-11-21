@@ -182,6 +182,15 @@ public:
 class SpreadExpr : public Expr {
 public:
     std::unique_ptr<Expr> argument;
+    /// True when the parser wrote this spread itself, as the implicit
+    /// `constructor(...args) { super(...args); }` of a derived class.
+    ///
+    /// A spread a script writes asks the value for its iterator; this one must
+    /// not, because the language defines the default constructor as forwarding
+    /// the arguments list, not as iterating it (ECMA-262 15.7.14). The mark is
+    /// carried on the node rather than re-inferred from the constructor's shape,
+    /// so a constructor a script wrote with the same text keeps asking.
+    bool synthesised{false};
     explicit SpreadExpr(std::unique_ptr<Expr> a) : Expr(NodeKind::Spread), argument(std::move(a)) {}
 };
 

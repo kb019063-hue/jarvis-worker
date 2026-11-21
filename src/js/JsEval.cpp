@@ -2274,11 +2274,23 @@ std::vector<JsValue> JsInterpreter::eval_arguments(const std::vector<std::unique
     values.reserve(args.size());
     for (const auto& arg : args) {
         if (arg->kind == NodeKind::Spread) {
-            JsValue iterable = evaluate(static_cast<const SpreadExpr*>(arg.get())->argument.get(), env);
-            js_iterate(iterable, [&](const JsValue& item) {
-                values.push_back(item);
-                return true;
-            });
+            const auto* spread = static_cast<const SpreadExpr*>(arg.get());
+            JsValue iterable = evaluate(spread->argument.get(), env);
+            if (spread->synthesised && iterable.is_array()) {
+                // The implicit `constructor(...args) { super(...args); }` of a
+                // derived class forwards the arguments list; the language does
+                // not iterate it (ECMA-262 15.7.14), so a script that patched
+                // `Array.prototype[Symbol.iterator]` is not called by `new
+                // Derived(1, 2)`. Copying the elements is what the arguments
+                // list already holds. A spread a script wrote keeps the
+                // js_iterate path below, whatever the constructor looks like.
+                for (const JsValue& item : iterable.array_elements()) values.push_back(item);
+            } else {
+                js_iterate(iterable, [&](const JsValue& item) {
+                    values.push_back(item);
+                    return true;
+                });
+            }
         } else {
             values.push_back(evaluate(arg.get(), env));
         }

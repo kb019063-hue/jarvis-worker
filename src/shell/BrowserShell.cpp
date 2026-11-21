@@ -704,11 +704,10 @@ std::vector<uint8_t> BrowserShell::render_png_frame() {
     const int h = std::clamp(static_cast<int>(std::lround(m_viewport_h)), 1, 4096);
 
     BitmapRenderer renderer(w, h);
-    Color canvas_bg = Color::white();
-    if (m_layout_root && !m_layout_root->style->background_color.is_transparent()) {
-        canvas_bg = m_layout_root->style->background_color;
-    }
-    renderer.clear(canvas_bg);
+    // A document canvas is a paint command, not the body box's raw color:
+    // clearing with the body used to ignore root precedence and blend alpha
+    // twice (and could leave the output itself translucent).
+    renderer.clear(Color::white());
 
     DisplayList scrolled;
     if (m_scroll_x != 0.0f || m_scroll_y != 0.0f) {

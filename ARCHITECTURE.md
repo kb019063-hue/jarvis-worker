@@ -494,9 +494,10 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    index is an own property or a hole, and every built-in agrees — `delete`,
    `new Array(n)`, a grown `length` and an elision in a literal all make holes.
    Details and the approximate
-   corners are in Phase 23, section 10. Around classes: there is
-   no `Symbol.species` (`instanceof` does ask `Symbol.hasInstance` since
-   Phase 114, finding 119),
+   corners are in Phase 23, section 10. Around classes: `Symbol.species` is
+   read by the array methods and the RegExp ones since Phase 140 (finding 145)
+   but not by `Promise`, whose subclass instances are not promises internally
+   (`instanceof` does ask `Symbol.hasInstance` since Phase 114, finding 119),
    nothing tells a built-in that is a constructor from one that is not
    (Phase 34, section 9), `this` can be used before `super()` has run, `let`
    and `const` have no dead zone, `eval` inside a function is global code,

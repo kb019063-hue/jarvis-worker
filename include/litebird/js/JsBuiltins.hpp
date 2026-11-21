@@ -52,7 +52,14 @@ inline constexpr const char* kSymbolSearchKey   = "@@search";
 inline constexpr const char* kSymbolSplitKey    = "@@split";
 inline constexpr const char* kSymbolSpeciesKey  = "@@species";
 
+/// `SpeciesConstructor(O, defaultConstructor)` — ECMA-262 §7.3.21: the
+/// constructor an object names through `Symbol.species`, or the default when
+/// it names none. What `Array.prototype.map` and `RegExp.prototype[@@split]`
+/// both need, so that a subclass of either makes instances of itself.
+JsValue species_constructor(const JsValue& obj, const JsValue& default_ctor);
+
 bool js_is_regexp(const JsValue& value);
+/// Validates a RegExp pattern and flags at parse time (no JS heap allocation).
 /// Validates a RegExp pattern and flags at parse time (no JS heap allocation).
 /// Returns true if valid; otherwise writes the SyntaxError reason into `error_out`.
 bool js_regexp_validate(const std::string& pattern, const std::string& flags, std::string& error_out);

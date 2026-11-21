@@ -27667,6 +27667,78 @@ TEST(class_bodies_reject_what_the_grammar_does_not_allow) {
     assert(js.eval("new (class extends Object { x = 1; constructor() { super(); } })().x").to_string() == "1");
 }
 
+TEST(an_anonymous_class_expression_takes_its_bindings_name) {
+    using namespace litebird;
+
+    // Phase 135, finding 140. `make_function` names an anonymous function
+    // from the binding it is evaluated for — `var f = function () {}` is `f` —
+    // and the `Class` arm of `evaluate_named` did the same for a function and
+    // nothing at all for a class, so an anonymous class expression's `name`
+    // was `""` in every position, while Node answers with the binding. 121 of
+    // test262's failures were that one string.
+    //
+    // The subtlety is that an inferred name is a *name*, not a *binding*. A
+    // class that spells a name can see it inside its own body; one that is
+    // merely inferred cannot, and the body reads whatever the binding means
+    // where it was written. Getting that wrong is invisible in `name` and
+    // breaks `for (...) C = class extends C {}`, which is why the two cases at
+    // the end are here. Every expected string is what Node.js 22 printed.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            if (got !== want) failures.push(what + ': got ' + JSON.stringify(got) + ', expected ' + JSON.stringify(want));
+        }
+
+        // ---- the five positions a class expression takes a name from -----
+        var a = class {};                          same('var', a.name, 'a');
+        var o = { p: class {} };                   same('property', o.p.name, 'p');
+        var { q = class {} } = {};                 same('object pattern', q.name, 'q');
+        var [w = class {}] = [];                   same('array pattern', w.name, 'w');
+        (function () {
+            function f(x = class {}) { return x.name; }
+            same('parameter default', f(), 'x');
+        })();
+        (function () { var k; k = class {}; same('assignment', k.name, 'k'); })();
+
+        // ---- and the positions where nothing names it --------------------
+        same('a plain class expression', (class {}).name, '');
+        same('a constructor argument', (function (v) { return v.name; })(class {}), '');
+        same('a returned class', (function () { return class {}; })().name, '');
+        same('an element of an array literal', [class {}][0].name, '');
+
+        // ---- a spelled name always wins --------------------------------
+        var z = class Named {};                    same('spelled name', z.name, 'Named');
+        var p = { k: class Named {} };             same('spelled name in a property', p.k.name, 'Named');
+
+        // ---- a spelled name is a binding; an inferred one is not ---------
+        var self = class { static f() { return self; } };
+        same('the body sees a spelled name', self.f() === self, true);
+        var outer = 'outer';
+        same('the body sees the outer binding, not a copy',
+             (class { static f() { return outer; } }).f(), 'outer');
+
+        // The case that caught the first version of this phase: the heritage
+        // has to be the *previous* value, and `this === C` has to answer
+        // against the outer binding, not against an inner copy of the class.
+        var C = class { static s() { return 'base'; } static get who() { return this === C; } };
+        var first = C.who;
+        for (var i = 0; i < 20000; i++) C = class extends C {};
+        same('the first class knows itself', first, true);
+        same('the last class still answers against the outer binding', C.who, true);
+        same('and the chain is 20001 deep', (function () {
+            var d = 0, x = C;
+            while (x !== Function.prototype) { d++; x = Object.getPrototypeOf(x); }
+            return d;
+        })(), 20001);
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(reflect_describes_and_answers_extensibility) {
     using namespace litebird;
     // Phase 124, finding 129. `Reflect` had ten of its thirteen functions;
@@ -28239,6 +28311,200 @@ TEST(object_prototype_legacy_accessor_reflection) {
     assert(failed.empty());
 }
 
+TEST(image_data_is_an_interface) {
+    using namespace litebird;
+    // Phase 139, finding 144. HTML §4.12.5: `ImageData` is an interface whose
+    // `data` is a Uint8ClampedArray, `createImageData` and `getImageData`
+    // refuse a zero dimension with IndexSizeError, and `putImageData` writes
+    // the dirty rectangle it is given and nothing else. Every expectation
+    // below is the standard's; where the standard leaves a choice (the exact
+    // message) it is not asserted.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        var canvas = document.createElement('canvas');
+        canvas.width = 4;
+        canvas.height = 4;
+        var ctx = canvas.getContext('2d');
+
+        check('the interface exists', function () { return [typeof ImageData, ImageData.length, ImageData.name]; },
+              '["function",2,"ImageData"]');
+        check('the constructor makes transparent black pixels', function () {
+            var image = new ImageData(2, 2);
+            var sum = 0;
+            for (var i = 0; i < image.data.length; ++i) sum += image.data[i];
+            return [image.width, image.height, image.data.length, sum, image.data instanceof Uint8ClampedArray];
+        }, '[2,2,16,0,true]');
+        check('the prototype is the interface prototype', function () {
+            return Object.getPrototypeOf(new ImageData(1, 1)) === ImageData.prototype;
+        }, 'true');
+        check('the pixels given are the pixels held, not a copy', function () {
+            var bytes = new Uint8ClampedArray(8);
+            bytes[0] = 250;
+            var image = new ImageData(bytes, 2);
+            return [image.width, image.height, image.data === bytes, image.data[0]];
+        }, '[2,1,true,250]');
+        check('the data must be a Uint8ClampedArray', function () {
+            return [new ImageData([1, 2, 3, 4], 1, 1), new ImageData(new Uint8Array(4), 1, 1)];
+        }, 'throws TypeError');
+        check('the data must be whole pixels', function () {
+            return new ImageData(new Uint8ClampedArray(6), 1);
+        }, 'throws IndexSizeError');
+        check('the size must match the data', function () {
+            return new ImageData(new Uint8ClampedArray(16), 2, 3);
+        }, 'throws IndexSizeError');
+        check('width and height are required and must not be zero', function () {
+            return [new ImageData(1), new ImageData(0, 1), new ImageData(1, 0)];
+        }, 'throws TypeError');
+        check('a zero dimension alone is an IndexSizeError', function () {
+            return [new ImageData(0, 1), new ImageData(1, 0)];
+        }, 'throws IndexSizeError');
+        check('width and height are read-only', function () {
+            var image = new ImageData(2, 3);
+            image.width = 9;
+            image.height = 9;
+            var descriptor = Object.getOwnPropertyDescriptor(ImageData.prototype, 'width');
+            return [image.width, image.height, descriptor.set === undefined];
+        }, '[2,3,true]');
+
+        check('the colour space is sRGB, and the other one is refused', function () {
+            var image = new ImageData(1, 1);
+            image.colorSpace = 'display-p3';
+            return [image.colorSpace, new ImageData(1, 1, { colorSpace: 'srgb' }).colorSpace,
+                    ctx.getImageData(0, 0, 1, 1).colorSpace];
+        }, '["srgb","srgb","srgb"]');
+        check('a colour space this engine cannot make is a TypeError', function () {
+            return new ImageData(1, 1, { colorSpace: 'display-p3' });
+        }, 'throws TypeError');
+
+        check('createImageData gives an ImageData', function () {
+            var image = ctx.createImageData(2, 3);
+            return [image instanceof ImageData, image.width, image.height,
+                    image.data instanceof Uint8ClampedArray, image.data.length];
+        }, '[true,2,3,true,24]');
+        check('createImageData from an ImageData copies the size, not the pixels', function () {
+            var source = new ImageData(2, 2);
+            source.data[0] = 200;
+            var copy = ctx.createImageData(source);
+            return [copy === source, copy.width, copy.height, copy.data[0]];
+        }, '[false,2,2,0]');
+        check('createImageData refuses a zero dimension', function () {
+            return ctx.createImageData(0, 2);
+        }, 'throws IndexSizeError');
+
+        ctx.fillStyle = 'rgb(255, 0, 0)';
+        ctx.fillRect(0, 0, 2, 2);
+        check('getImageData reads the pixels as unpremultiplied bytes', function () {
+            var image = ctx.getImageData(0, 0, 4, 4);
+            return [image instanceof ImageData, image.width, image.height,
+                    image.data[0], image.data[1], image.data[2], image.data[3]];
+        }, '[true,4,4,255,0,0,255]');
+        check('a pixel outside the canvas is transparent black', function () {
+            var image = ctx.getImageData(3, 3, 4, 4);
+            return [image.width, image.height, image.data[12], image.data[15]];
+        }, '[4,4,0,0]');
+        check('a negative width runs left from the right edge', function () {
+            ctx.fillStyle = 'rgb(255, 0, 0)';
+            ctx.fillRect(0, 0, 2, 1);
+            ctx.fillStyle = 'rgb(0, 0, 255)';
+            ctx.fillRect(2, 0, 2, 1);
+            var image = ctx.getImageData(3, 0, -2, 1);
+            return [image.width, image.data[0], image.data[4], image.data[6]];
+        }, '[2,255,0,255]');
+        check('getImageData refuses a zero dimension', function () {
+            return ctx.getImageData(0, 0, 0, 0);
+        }, 'throws IndexSizeError');
+
+        function filled(width, height, r, g, b) {
+            var image = ctx.createImageData(width, height);
+            for (var i = 0; i < image.data.length; i += 4) {
+                image.data[i] = r;
+                image.data[i + 1] = g;
+                image.data[i + 2] = b;
+                image.data[i + 3] = 255;
+            }
+            return image;
+        }
+        check('putImageData writes the dirty rectangle and nothing else', function () {
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = 'rgb(255, 0, 0)';
+            ctx.fillRect(0, 0, 4, 4);
+            ctx.putImageData(filled(2, 2, 0, 255, 0), 0, 0, 0, 0, 1, 1);
+            var image = ctx.getImageData(0, 0, 4, 4);
+            return [image.data[0], image.data[1], image.data[20], image.data[21]];
+        }, '[0,255,255,0]');
+        check('a negative dirty width counts left from the origin of the rectangle', function () {
+            ctx.fillStyle = 'rgb(255, 0, 0)';
+            ctx.fillRect(0, 0, 4, 1);
+            ctx.putImageData(filled(2, 1, 0, 0, 255), 0, 0, 1, 0, -1, 1);
+            var image = ctx.getImageData(0, 0, 4, 1);
+            return [image.data[0], image.data[2], image.data[4], image.data[6]];
+        }, '[0,255,255,0]');
+        check('a dirty rectangle outside the image writes nothing', function () {
+            ctx.fillStyle = 'rgb(255, 0, 0)';
+            ctx.fillRect(0, 0, 4, 4);
+            ctx.putImageData(filled(1, 1, 0, 0, 255), 0, 0, 9, 9, 4, 4);
+            var image = ctx.getImageData(0, 0, 1, 1);
+            return [image.data[0], image.data[2]];
+        }, '[255,0]');
+        check('putImageData ignores the transform, globalAlpha and the clip', function () {
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = 'rgb(255, 0, 0)';
+            ctx.fillRect(0, 0, 4, 4);
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 20, 20);
+            ctx.globalAlpha = 0.25;
+            ctx.beginPath();
+            ctx.rect(0, 0, 1, 1);
+            ctx.clip();
+            ctx.putImageData(filled(2, 2, 0, 0, 255), 1, 1);
+            ctx.restore();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalAlpha = 1;
+            var image = ctx.getImageData(1, 1, 2, 2);
+            return [image.data[0], image.data[2], image.data[3], image.data[12], image.data[14]];
+        }, '[0,255,255,0,255]');
+        check('putImageData takes an ImageData and nothing else', function () {
+            return ctx.putImageData({ width: 1, height: 1, data: [0, 0, 0, 0] }, 0, 0);
+        }, 'throws TypeError');
+        check('the prototype getter refuses another receiver', function () {
+            return Object.getOwnPropertyDescriptor(ImageData.prototype, 'data').get.call({});
+        }, 'throws TypeError');
+        check('a subclass is an ImageData', function () {
+            class Mine extends ImageData {}
+            var image = new Mine(2, 3);
+            return [image.width, image.height, image.data.length, image instanceof ImageData, image instanceof Mine];
+        }, '[2,3,24,true,true]');
+        check('a round trip through putImageData and getImageData is exact', function () {
+            var image = ctx.getImageData(0, 0, 4, 4);
+            for (var i = 0; i < image.data.length; i += 4) {
+                image.data[i] = i % 200;
+                image.data[i + 3] = 128;
+            }
+            ctx.putImageData(image, 0, 0);
+            var back = ctx.getImageData(0, 0, 4, 4);
+            var same = true;
+            for (var j = 0; j < image.data.length; ++j) if (image.data[j] !== back.data[j]) same = false;
+            return [same, back.data[60], back.data[63]];
+        }, '[true,60,128]');
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -28623,6 +28889,9 @@ int main() {
     // Phase 128: the six regular grammar rules of a class body.
     RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);
 
+    // Phase 135: an anonymous class expression takes the name it is bound to.
+    RUN_TEST(an_anonymous_class_expression_takes_its_bindings_name);
+
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
     RUN_TEST(object_integrity_levels_ask_every_property);
@@ -28632,6 +28901,9 @@ int main() {
 
     // Phase 136: Object.prototype's Annex B legacy accessor methods.
     RUN_TEST(object_prototype_legacy_accessor_reflection);
+
+    // Phase 139: ImageData is an interface, and putImageData takes a rectangle.
+    RUN_TEST(image_data_is_an_interface);
 
     // Phase 119: Contextual GSUB (Type 1-7), Cursive GPOS (Type 3/7/8), and Arabic Shaping.
     RUN_TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions);

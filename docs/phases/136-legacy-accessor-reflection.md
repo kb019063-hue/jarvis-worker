@@ -53,7 +53,7 @@ data property, data-to-accessor conversion, return values and descriptor
 attributes, key conversion order, non-callable and non-configurable errors,
 a null receiver, and inherited setter lookup.
 
-- `make test`: **300 engine suites passed** after the latest `main` sync, including the new suite.
+- `make test`: **302 engine suites passed** after the latest `main` sync, including the new suite.
 - test262's four directories for these methods: **44/54 pass**. The ten
   remaining tests all fail because the engine has no `Proxy` global; they do
   not reach the methods under test.

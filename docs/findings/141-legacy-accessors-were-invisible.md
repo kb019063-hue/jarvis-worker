@@ -30,5 +30,5 @@ own property, whether it is an accessor or data property.
 
 The eleven new suite checks were run under Node.js v22.22.3 before they were
 asserted in the engine. The same script passed in both. `make test` passed all
-300 engine suites after syncing current `main`. The relevant test262 directories report 44/54; all ten
+302 engine suites after syncing current `main`. The relevant test262 directories report 44/54; all ten
 remaining failures require `Proxy`, which is not defined in the engine.

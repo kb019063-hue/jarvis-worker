@@ -521,7 +521,11 @@ private:
                                                       const EnvPtr& env, bool is_coroutine);
     void bind_parameters(const FunctionNode& node, const EnvPtr& env, const std::vector<JsValue>& args);
     void hoist_functions(const std::vector<const FunctionDeclStmt*>& functions, const EnvPtr& env);
-    JsValue define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env);
+    /// `name_hint` is the binding a `ClassExpression` is being evaluated for
+    /// (`var A = class {}`), which names an anonymous class the way NamedEvaluation
+    /// names an anonymous function; empty when nothing names it.
+    JsValue define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env,
+                         const std::string& name_hint = std::string());
     void initialize_fields(const JsValue& ctor, const JsValue& instance);
     /// The slot a private name stands for in the class that declared it, looked
     /// up the way the language scopes it: from the code that mentions it, out

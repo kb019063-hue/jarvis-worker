@@ -162,7 +162,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
   ```
 - **Formatting Contexts:**
   - **Block Formatting:** Vertical flow, auto margins, collapsing vertical margins.
-  - **Flexbox (`display: flex`):** Main-axis distribution for rows (`justify-content`) and cross-axis alignment for rows and columns (`align-items`, `stretch` included), `flex-grow`, `flex-shrink`, `flex-basis`, `flex-wrap: wrap`, and `gap`. `align-self`, `align-content` and `justify-content` on a column's main axis are not read yet (`docs/phases/133-cross-axis-alignment.md`).
+  - **Flexbox (`display: flex`):** Main-axis distribution for rows (`justify-content`) and cross-axis alignment for rows and columns (`align-items`, `stretch` included), `flex-grow`, `flex-shrink`, `flex-basis`, `flex-wrap: wrap`, and `gap`. `align-self`, `align-content` and `justify-content` on a column's main axis are not read yet (`docs/phases/134-cross-axis-alignment.md`).
   - **Grid (`display: grid`):** Track dimension resolution (`grid-template-columns: 1fr 2fr 1fr`), cell placement, track gaps, and `align-items` in the block axis — an item with no height of its own fills the area its rows give it.
   - **Inline Formatting Context (IFC):** Continuous inline flowing across text and elements (`<span>`, `<b>`, `<a>`), line breaking into `LineBox`es, and word wrapping.
   - **Positioning:** `static`, `relative`, `absolute`, `fixed`, coordinate offsets (`top`, `right`, `bottom`, `left`), and `z-index` stacking context sorting.

@@ -1,6 +1,6 @@
-# Finding 138 — the line was as tall as its tallest item
+# Finding 139 — the line was as tall as its tallest item
 
-Phase 133. Status: **found and fixed** for `align-items` in flex rows, flex
+Phase 134. Status: **found and fixed** for `align-items` in flex rows, flex
 columns and grid; found and **left open** for `justify-content` on a column's
 main axis and for `align-self`/`align-content`, which are now rows of
 `AGENTS.md` with a recorded page each.
@@ -91,7 +91,7 @@ it is what makes the other three branches mean something.
 Three recorded pages lost their `known_failure` entries; six new pages assert
 what the three did not (including a 3 px border and 5 px padding coming out of
 the stretch); five of the six were red on the old binary. Details and the
-before/after runs are in `docs/phases/133-cross-axis-alignment.md`.
+before/after runs are in `docs/phases/134-cross-axis-alignment.md`.
 
 ## 3. What is still wrong, and is now written down
 

@@ -1,7 +1,7 @@
-# Phase 133 — a line is as tall as its container
+# Phase 134 — a line is as tall as its container
 
 Task row: **Cross-axis alignment is not implemented** (`align-items` ignored in
-flex, grid items not stretched to their area). Finding 138.
+flex, grid items not stretched to their area). Finding 139.
 
 Phase 122 put a pixel oracle against flexbox and grid and found four bugs. One
 of them was this: `align-items` was ignored, so an item with no height of its

@@ -27844,7 +27844,7 @@ TEST(object_integrity_levels_ask_every_property) {
 
 TEST(cross_axis_alignment_places_flex_and_grid_items) {
     using namespace litebird;
-    // Phase 133, finding 138. `align-items` was parsed and then never asked:
+    // Phase 134, finding 139. `align-items` was parsed and then never asked:
     // the flex line was as tall as its tallest item, so `center` and `flex-end`
     // had nothing to move against, and the default `stretch` had nothing to
     // stretch to — an item with no height of its own stayed 0 tall and painted
@@ -28334,7 +28334,7 @@ int main() {
     RUN_TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs);
     RUN_TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely);
 
-    // Phase 133: `align-items` places items on the cross axis, in flex and in grid.
+    // Phase 134: `align-items` places items on the cross axis, in flex and in grid.
     RUN_TEST(cross_axis_alignment_places_flex_and_grid_items);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run

@@ -21,7 +21,7 @@
     "counts it as neither a pass nor a failure. The entry is a debt, not a",
     "silence: if the page starts passing, the run prints FIXED and exits 1, so",
     "the reason has to come out in the same commit that fixes the bug.",
-    "Five pages carry one since Phase 133 (finding 138): paint order for floats and for transformed elements, a clip that is square where the radius is round, and two found while fixing cross-axis alignment \u2014 `justify-content` in a column container and `align-self`. The three alignment pages recorded by Phase 122 (finding 127) lost their reasons here, which is the ledger working in the direction that matters.",
+    "Five pages carry one since Phase 134 (finding 139): paint order for floats and for transformed elements, a clip that is square where the radius is round, and two found while fixing cross-axis alignment \u2014 `justify-content` in a column container and `align-self`. The three alignment pages recorded by Phase 122 (finding 127) lost their reasons here, which is the ledger working in the direction that matters.",
     "and transformed elements, cross-axis alignment in flex and grid, and a clip",
     "that is square where the radius is round."
   ],

@@ -13,7 +13,7 @@
   "history": [
     {
       "date": "2026-11-21",
-      "what": "Phase 133 and finding 138 documented cross-axis alignment: a flex line now takes the container's inner cross size when it is alone in a container of definite height (CSS Flexbox \u00a79.4, with `align-content: stretch` as the default), so `align-items` finally has a size to align in and to stretch into; a column container's cross axis is the width; and a grid item is given the height of the rows it spans. Six reftests were added and three recorded ones lost their `known_failure` entries (34 pages, 121 assertions). Two neighbouring gaps found on the way were left as rows, each with a failing page: `justify-content` in a column container, and `align-self`/`align-content`. The floors are unchanged."
+      "what": "Phase 134 and finding 139 documented cross-axis alignment: a flex line now takes the container's inner cross size when it is alone in a container of definite height (CSS Flexbox \u00a79.4, with `align-content: stretch` as the default), so `align-items` finally has a size to align in and to stretch into; a column container's cross axis is the width; and a grid item is given the height of the rows it spans. Six reftests were added and three recorded ones lost their `known_failure` entries (34 pages, 121 assertions). Two neighbouring gaps found on the way were left as rows, each with a failing page: `justify-content` in a column container, and `align-self`/`align-content`. The floors are unchanged."
     },
     {
       "date": "2026-11-20",

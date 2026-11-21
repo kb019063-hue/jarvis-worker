@@ -28136,10 +28136,6 @@ failures;
     if (!none_failed()) { std::cout << "\033[31mFAILED\033[0m"; return; }
     std::cout << "\033[32mPASSED\033[0m";
 }
-// ---------------------------------------------------------------------------
-// Phase 125: Object.isFrozen and Object.isSealed ask the properties
-// ---------------------------------------------------------------------------
-
 TEST(object_integrity_levels_ask_every_property) {
     using namespace litebird;
     // Phase 125, finding 130. Both answered from a bit that only `freeze()`
@@ -28608,6 +28604,154 @@ TEST(image_data_is_an_interface) {
     if (!failed.empty()) std::cerr << failed << "\n";
     assert(failed.empty());
 }
+TEST(text_codec_a_decoder_and_an_encoder_in_script) {
+    using namespace litebird;
+    // Phase 127. The WHATWG Encoding Standard's tables were in this engine since
+    // Phase 47 and both directions since Phase 110, but script could reach
+    // neither: `TextDecoder` and `TextEncoder` were undefined globals, so every
+    // page that reads bytes had to be handed a string already decoded. That was
+    // the row in AGENTS.md, and it waited on typed arrays because the interface
+    // is defined in terms of them: `encode()` returns a `Uint8Array`,
+    // `encodeInto()` writes into one, `decode()` takes a view. Phase 113 (the
+    // TypedArray constructors) is what unblocked it.
+    //
+    // So this file is mostly interface, not new decoding: the 40 decoders and
+    // 26 encoders are the ones Phase 47 and Phase 110 already had. The things
+    // that had to be *got right* rather than merely wired were the canonical
+    // label ("utf-8", not the table's "UTF-8"), the `read`/`written` pair from
+    // `encodeInto()`, and walking UTF-16 code units rather than UTF-8 bytes,
+    // which is where a lone surrogate becomes U+FFFD instead of being dropped.
+    //
+    // Every assertion below was run through Node first, as a standalone script;
+    // its output is identical there and here.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function throws(what, fn, name) {
+            try { fn(); failures.push(what + ': did not throw, expected ' + name); }
+            catch (e) { if (!(e instanceof globalThis[name])) failures.push(what + ': threw ' + e.constructor.name + ', expected ' + name); }
+        }
+
+function ok(what, got, want) {
+  if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+}
+function throws(what, fn, name) {
+  try { fn(); failures.push(what + ': did not throw, expected ' + name); }
+  catch (e) { if (!(e instanceof globalThis[name])) failures.push(what + ': threw ' + e.constructor.name + ', expected ' + name); }
+}
+
+// --- construction and options ---
+var d = new TextDecoder();
+ok('default encoding', d.encoding, 'utf-8');
+ok('default fatal', d.fatal, false);
+ok('default ignoreBOM', d.ignoreBOM, false);
+ok('instanceof', d instanceof TextDecoder, true);
+ok('toStringTag', Object.prototype.toString.call(d), '[object TextDecoder]');
+ok('label is case-insensitive', new TextDecoder('UTF-8').encoding, 'utf-8');
+ok('whitespace in label', new TextDecoder('  utf-8  ').encoding, 'utf-8');
+ok('latin1 is windows-1252', new TextDecoder('latin1').encoding, 'windows-1252');
+ok('ascii is windows-1252', new TextDecoder('ascii').encoding, 'windows-1252');
+ok('iso-8859-1 is windows-1252', new TextDecoder('iso-8859-1').encoding, 'windows-1252');
+ok('shift_jis canonical', new TextDecoder('shift-jis').encoding, 'shift_jis');
+ok('utf-16le canonical', new TextDecoder('utf-16').encoding, 'utf-16le');
+ok('gb18030 canonical', new TextDecoder('gb18030').encoding, 'gb18030');
+ok('fatal option', new TextDecoder('utf-8', {fatal: true}).fatal, true);
+ok('ignoreBOM option', new TextDecoder('utf-8', {ignoreBOM: true}).ignoreBOM, true);
+ok('options coerced to boolean', new TextDecoder('utf-8', {fatal: 1}).fatal, true);
+ok('undefined label', new TextDecoder(undefined).encoding, 'utf-8');
+throws('unknown label', function() { new TextDecoder('nope'); }, 'RangeError');
+throws('replacement is not decodable', function() { new TextDecoder('replacement'); }, 'RangeError');
+throws('no construct', function() { TextDecoder(); }, 'TypeError');
+
+// --- decode: the input forms ---
+ok('decode Uint8Array', d.decode(new Uint8Array([104, 105])), 'hi');
+ok('decode a buffer', d.decode(new Uint8Array([104, 105]).buffer), 'hi');
+ok('decode a subarray view', d.decode(new Uint8Array([120, 104, 105, 120]).subarray(1, 3)), 'hi');
+ok('decode with nothing', d.decode(), '');
+ok('decode empty', d.decode(new Uint8Array(0)), '');
+throws('decode a plain array', function() { d.decode([104, 105]); }, 'TypeError');
+throws('decode a number', function() { d.decode(5); }, 'TypeError');
+
+// --- the encodings themselves ---
+ok('utf-8 multibyte', new TextDecoder().decode(new Uint8Array([195, 169])), '\u00e9');
+ok('windows-1252', new TextDecoder('windows-1252').decode(new Uint8Array([233])), '\u00e9');
+ok('latin1 0x80 is euro', new TextDecoder('latin1').decode(new Uint8Array([128])), '\u20ac');
+ok('utf-16le', new TextDecoder('utf-16le').decode(new Uint8Array([104, 0, 105, 0])), 'hi');
+ok('utf-16be', new TextDecoder('utf-16be').decode(new Uint8Array([0, 104, 0, 105])), 'hi');
+ok('iso-8859-2', new TextDecoder('iso-8859-2').decode(new Uint8Array([161])), '\u0104');
+ok('windows-1251', new TextDecoder('windows-1251').decode(new Uint8Array([192])), '\u0410');
+ok('koi8-r', new TextDecoder('koi8-r').decode(new Uint8Array([193])), '\u0430');
+ok('gb18030 two byte', new TextDecoder('gb18030').decode(new Uint8Array([196, 227])), '\u4f60');
+ok('big5', new TextDecoder('big5').decode(new Uint8Array([167, 65])), '\u4f60');
+ok('shift_jis', new TextDecoder('shift_jis').decode(new Uint8Array([130, 160])), '\u3042');
+ok('euc-jp', new TextDecoder('euc-jp').decode(new Uint8Array([164, 162])), '\u3042');
+ok('euc-kr', new TextDecoder('euc-kr').decode(new Uint8Array([176, 161])), '\uac00');
+ok('iso-2022-jp', new TextDecoder('iso-2022-jp').decode(new Uint8Array([27, 36, 66, 36, 34, 27, 40, 66])), '\u3042');
+
+// --- errors: replaces by default, throws when fatal ---
+ok('invalid byte is U+FFFD', new TextDecoder().decode(new Uint8Array([0xff])), '\ufffd');
+ok('truncated sequence', new TextDecoder().decode(new Uint8Array([226, 130])), '\ufffd');
+ok('fatal throws on invalid', (function() {
+  try { new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array([0xff])); return 'no throw'; }
+  catch (e) { return e instanceof TypeError ? 'TypeError' : 'other'; }
+})(), 'TypeError');
+ok('fatal is silent on valid', new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array([104])), 'h');
+
+// --- the BOM ---
+ok('BOM stripped by default', new TextDecoder().decode(new Uint8Array([239, 187, 191, 104])), 'h');
+ok('ignoreBOM keeps it', new TextDecoder('utf-8', {ignoreBOM: true}).decode(new Uint8Array([239, 187, 191, 104])), '\ufeffh');
+ok('utf-16le BOM stripped', new TextDecoder('utf-16le').decode(new Uint8Array([255, 254, 104, 0])), 'h');
+
+// --- reentrancy: one decoder decodes twice ---
+var twice = new TextDecoder();
+ok('first decode', twice.decode(new Uint8Array([104, 105])), 'hi');
+ok('second decode', twice.decode(new Uint8Array([104, 105])), 'hi');
+
+// --- TextEncoder ---
+var e = new TextEncoder();
+ok('encoder encoding', e.encoding, 'utf-8');
+ok('encoder instanceof', e instanceof TextEncoder, true);
+ok('encoder toStringTag', Object.prototype.toString.call(e), '[object TextEncoder]');
+throws('encoder no construct', function() { TextEncoder(); }, 'TypeError');
+ok('encode ascii', Array.prototype.join.call(e.encode('hi'), ','), '104,105');
+ok('encode multibyte', Array.prototype.join.call(e.encode('\u00e9'), ','), '195,169');
+ok('encode empty', e.encode('').length, 0);
+ok('encode returns Uint8Array', e.encode('hi') instanceof Uint8Array, true);
+ok('encode a number', Array.prototype.join.call(e.encode(65), ','), '54,53');
+ok('encode with no argument', e.encode().length, 0);
+ok('encode undefined is the default', e.encode(undefined).length, 0);
+ok('encode null is "null"', Array.prototype.join.call(e.encode(null), ','), '110,117,108,108');
+ok('encode a surrogate pair', Array.prototype.join.call(e.encode('\ud83d\ude00'), ','), '240,159,152,128');
+ok('encode a lone surrogate', Array.prototype.join.call(e.encode('\ud800'), ','), '239,191,189');
+
+var into = new Uint8Array(8);
+var r = e.encodeInto('h\u00e9', into);
+ok('encodeInto read', r.read, 2);
+ok('encodeInto written', r.written, 3);
+ok('encodeInto bytes', Array.prototype.join.call(into.subarray(0, 3), ','), '104,195,169');
+ok('encodeInto leaves the rest', into[3], 0);
+var small = new Uint8Array(2);
+var r2 = e.encodeInto('h\u00e9', small);
+ok('encodeInto short read', r2.read, 1);
+ok('encodeInto short written', r2.written, 1);
+var tiny = new Uint8Array(1);
+var r3 = e.encodeInto('\u00e9', tiny);
+ok('encodeInto no room read', r3.read, 0);
+ok('encodeInto no room written', r3.written, 0);
+ok('encodeInto empty source', e.encodeInto('', new Uint8Array(4)).written, 0);
+throws('encodeInto needs a view', function() { e.encodeInto('hi', [104, 105]); }, 'TypeError');
+
+if (failures.length) throw new Error(failures.join('\n'));
+    )JS");
+}
 
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
@@ -29017,6 +29161,9 @@ int main() {
     RUN_TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs);
     RUN_TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs);
     RUN_TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely);
+
+    // Phase 127: TextDecoder and TextEncoder reachable from script.
+    RUN_TEST(text_codec_a_decoder_and_an_encoder_in_script);
 
     // Phase 134: `align-items` places items on the cross axis, in flex and in grid.
     RUN_TEST(cross_axis_alignment_places_flex_and_grid_items);

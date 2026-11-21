@@ -21,7 +21,7 @@
     "counts it as neither a pass nor a failure. The entry is a debt, not a",
     "silence: if the page starts passing, the run prints FIXED and exits 1, so",
     "the reason has to come out in the same commit that fixes the bug.",
-    "Five pages carry one since Phase 134 (finding 139): paint order for floats and for transformed elements, a clip that is square where the radius is round, and two found while fixing cross-axis alignment \u2014 `justify-content` in a column container and `align-self`. The three alignment pages recorded by Phase 122 (finding 127) lost their reasons here, which is the ledger working in the direction that matters.",
+    "Five pages carry one since Phase 134 (finding 139): paint order for floats and for transformed elements, a clip that is square where the radius is round, and two found while fixing cross-axis alignment — `justify-content` in a column container and `align-self`. The three alignment pages recorded by Phase 122 (finding 127) lost their reasons here, which is the ledger working in the direction that matters.",
     "and transformed elements, cross-axis alignment in flex and grid, and a clip",
     "that is square where the radius is round."
   ],
@@ -716,8 +716,7 @@
           "colour": "#00ff00",
           "describe": "clear: both puts the next block below the float"
         }
-      ],
-      "known_failure": "the float is painted in document order, under the background of the block that follows it; CSS 2.1 Appendix E paints float backgrounds (step 5) after in-flow block backgrounds (step 4). The float's position and `clear: both` are correct"
+      ]
     },
     {
       "name": "an_absolutely_positioned_child_is_placed_against_its_containing_block",
@@ -873,39 +872,69 @@
           "describe": "the box's layout place is empty: a transform is painted, not laid out"
         },
         {
-          "kind": "rect",
+          "kind": "pixel",
+          "x": 19,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "nothing one pixel left of the moved ink"
+        },
+        {
+          "kind": "pixel",
           "x": 20,
           "y": 10,
-          "width": 40,
-          "height": 40,
           "colour": "#ff0000",
           "describe": "the ink is moved by (20, 10)"
         },
         {
           "kind": "pixel",
-          "x": 19,
-          "y": 10,
-          "colour": "#ffffff",
-          "describe": "and not one pixel further left"
+          "x": 59,
+          "y": 49,
+          "colour": "#ff0000",
+          "describe": "and its far corner is at 20+40-1, 10+40-1"
         },
         {
-          "kind": "rect",
-          "x": 0,
+          "kind": "pixel",
+          "x": 60,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "one pixel past its right edge"
+        },
+        {
+          "kind": "pixel",
+          "x": 5,
+          "y": 39,
+          "colour": "#ffffff",
+          "describe": "nothing is painted above the next block"
+        },
+        {
+          "kind": "pixel",
+          "x": 5,
           "y": 40,
-          "width": 100,
-          "height": 10,
           "colour": "#0000ff",
           "describe": "the next block still starts at y=40: layout did not move"
+        },
+        {
+          "kind": "pixel",
+          "x": 5,
+          "y": 49,
+          "colour": "#0000ff",
+          "describe": "and is 10 tall"
+        },
+        {
+          "kind": "pixel",
+          "x": 99,
+          "y": 40,
+          "colour": "#0000ff",
+          "describe": "and 100 wide"
         },
         {
           "kind": "pixel",
           "x": 20,
           "y": 45,
           "colour": "#ff0000",
-          "describe": "and where the two overlap, the transformed box is painted over it"
+          "describe": "where the two overlap the transformed box is on top: it is a stacking context"
         }
-      ],
-      "known_failure": "the ink moves and layout does not, but the transformed box is painted in document order, so a later in-flow block covers it where they overlap; a transform creates a stacking context (CSS Transforms 1 \u00a73), which Appendix E paints in the positioned layer"
+      ]
     },
     {
       "name": "overflow_hidden_clips_to_the_rounded_corner",
@@ -1170,6 +1199,69 @@
         }
       ],
       "known_failure": "`align-self` is not read: the item follows the container's `align-items: flex-start` and sits at the top. `align-content` is not read either"
+    },
+    {
+      "name": "a_blocks_background_does_not_cover_earlier_inline_ink",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .p { width: 100px; height: 40px }\n  img { width: 40px; height: 40px }\n  .b { width: 100px; height: 20px; background: #0000ff; margin-top: -20px }\n</style></head><body><div class=\"p\"><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"></div><div class=\"b\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 5,
+          "colour": "#ff0000",
+          "describe": "the image is inline ink and paints at the line start"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 25,
+          "colour": "#ff0000",
+          "describe": "and stays above the background of a later block pulled up over it (step 7 over step 3)"
+        },
+        {
+          "kind": "pixel",
+          "x": 60,
+          "y": 25,
+          "colour": "#0000ff",
+          "describe": "outside the image that background shows"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 45,
+          "colour": "#ffffff",
+          "describe": "and nothing is painted past it"
+        }
+      ]
+    },
+    {
+      "name": "a_clip_does_not_leak_past_the_block_that_set_it",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .p { width: 100px; height: 30px; overflow: hidden }\n  .q { width: 100px; height: 30px; background: #ff0000 }\n</style></head><body><div class=\"p\">text</div><div class=\"q\"></div></body></html>\n",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 5,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "the clipped block shows the page colour, no background set"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 30,
+          "width": 100,
+          "height": 30,
+          "colour": "#ff0000",
+          "describe": "the next block is not clipped: its background fills it (a clip left pushed by an inline formatting context would swallow it)"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 60,
+          "colour": "#ffffff",
+          "describe": "and nothing is painted below it"
+        }
+      ]
     }
   ]
 }

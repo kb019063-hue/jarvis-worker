@@ -174,6 +174,17 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
         }
         return JsValue::make_undefined();
     }
+    // String wrapper objects have the same own, read-only character
+    // properties as the primitive's ToObject result. They are exotic rather
+    // than entries in the ordinary property map, so ask the wrapped string
+    // before that map just as the array path asks its elements first.
+    if (cell && cell->klass == ObjectClass::String) {
+        const JsValue* wrapped = js_wrapped_primitive(object);
+        if (wrapped && wrapped->type == JsType::String &&
+            parse_index(key, index) && index < wrapped->string_val.length()) {
+            return data(object.get_property(key), false, true, false);
+        }
+    }
     if (cell && cell->is_array) {
         if (key == "length") return data(JsValue::make_number(static_cast<double>(cell->array_elements.size())), true, false, false);
         if (parse_index(key, index)) {

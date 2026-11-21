@@ -21,7 +21,12 @@ tree out into a scratch directory and remove it again; no branch moves.
     moment, the later one moves);
   - a file it names or has changed belongs to an open pull request with a
     lower number. The files every pull request changes (AGENTS.md lists
-    them) do not count.
+    them) do not count;
+  - it is behind `main` and no longer merges into it. This was not asked
+    until a "Land #N" was opened from a base 39 commits old: every question
+    above answered "correct claim", and GitHub was the first thing to say
+    CONFLICTING. A branch that is behind but still merges is a note, not a
+    refusal, because most pull requests are behind by the time they land.
 
 `merge N` fails when
   - the title still begins with `WIP:`;
@@ -452,6 +457,61 @@ def show_claims() -> int:
     return 0
 
 
+def staleness(head: str, main_sha: str) -> tuple[int, str]:
+    """(how many commits of `main` the head does not have, why it cannot merge, or "").
+
+    A pull request opened from a `main` that has since moved is not wrong by
+    itself -- most are, and merging it is the point. What went wrong once is a
+    "Land #N" opened from a base 39 commits old that no longer merged at all:
+    it read as a correct claim from every angle this file looked at, because
+    `claim N` only ever asked about numbers and file overlap. GitHub was the
+    first thing to say CONFLICTING, and by then the session had spent the work.
+
+    So `claim N` now asks the one question that would have caught it: would
+    this merge? `git merge-tree` answers the way GitHub does, in the clone,
+    with no checkout and no branch moved.
+    """
+    behind = 0
+    counted = git("rev-list", "--count", f"{head}..{main_sha}")
+    if counted.returncode == 0:
+        try:
+            behind = int(counted.stdout.strip() or "0")
+        except ValueError:
+            behind = 0
+    if behind == 0:
+        return 0, ""
+    for _ in range(4):      # a sandbox's clone is shallow: go back until the two share an ancestor
+        if git("merge-base", main_sha, head).returncode == 0:
+            break
+        if git("rev-parse", "--is-shallow-repository").stdout.strip() != "true":
+            break
+        git("fetch", "--quiet", "--deepen=500", "origin", "main")
+    merged = git("merge-tree", "--write-tree", main_sha, head)
+    if merged.returncode == 1:
+        conflicting = sorted({line.split("\t")[-1] for line in merged.stdout.split("\n") if "\t" in line})
+        named = ", ".join(conflicting[:4]) + (" and more" if len(conflicting) > 4 else "")
+        return behind, (f"it does not merge with main any more ({named})" if named
+                        else "it does not merge with main any more")
+    return behind, ""
+
+
+def staleness_problems(claim: dict, main_sha: str) -> list[tuple[bool, str]]:
+    """Whether the branch still merges into `main`: (blocking, what).
+
+    Kept apart from `claim_problems`, which is about numbers and files and is
+    tested on claims that have no head and no `main`: this one asks git.
+    """
+    if not claim.get("head"):
+        return []
+    behind, why = staleness(claim["head"], main_sha)
+    if behind == 0:
+        return [(False, f"main is in the head commit {claim['head'][:7]}")]
+    if why:
+        return [(True, f"{why}: it is {behind} commit(s) behind main. Merge main in, "
+                       f"or close it if what it was for has landed")]
+    return [(False, f"{behind} commit(s) behind main, and it still merges")]
+
+
 def check_claim(number: int) -> int:
     claims = open_claims()
     mine = next((c for c in claims if c["number"] == number), None)
@@ -461,6 +521,8 @@ def check_claim(number: int) -> int:
     report = Report()
     for blocking, problem in claim_problems(mine, claims, main):
         (report.no if blocking else report.note)(problem)
+    for blocking, problem in staleness_problems(mine, main_commit()):
+        (report.no if blocking else report.ok)(problem)
     if not report.failed:
         report.ok(f"#{number}: {numbers_of(mine)}; no earlier open pull request has its numbers or its files")
     else:
@@ -809,6 +871,18 @@ def self_test() -> int:
     around = claim("Task: a row\nFiles: new `src/a.cpp`, `src/b.cpp` -- the helper; `src/c.cpp` (half (the `g()` half, not `h()`))\nPhase 5, finding 7\n")
     unpaired = claim("Task: a row\nFiles: `src/a.cpp` (new, `src/b.cpp`\nPhase 5, finding 7\n")
 
+    # `staleness` asks git, and this self-test needs no network. What is pinned
+    # here is what a claim says about each of the three answers it can give,
+    # which is the thing the session that opened a 39-commit-old landing never saw.
+    stale = [(0, ""), (39, "it does not merge with main any more (tests/test_suite.cpp)"),
+             (39, "")]
+    wanted_stale = [
+        [(False, "main is in the head commit abc1234")],
+        [(True, "it does not merge with main any more (tests/test_suite.cpp): it is 39 commit(s) "
+                "behind main. Merge main in, or close it if what it was for has landed")],
+        [(False, "39 commit(s) behind main, and it still merges")],
+    ]
+
     cases = [
         ("the three lines: the numbers", (numbered["phase"], numbered["finding"]), (5, 7)),
         ("the three lines: the files, over two lines, without what is in brackets",
@@ -932,6 +1006,18 @@ def self_test() -> int:
          verdict(**moved, **no_run, ran_state="failed", main_files=["src/js/JsEval.cpp"], since=[], same_tree=True),
          ([False, False], False)),
     ]
+
+    names_stale = ["a head with main in it: quiet",
+                   "39 commits behind and it does not merge: blocking, and it names the file",
+                   "39 commits behind and it still merges: a note, not a refusal"]
+    for name, (behind, why), wanted in zip(names_stale, stale, wanted_stale):
+        real = globals()["staleness"]
+        globals()["staleness"] = lambda head, sha, _b=behind, _w=why: (_b, _w)
+        try:
+            got = staleness_problems({"head": "abc1234"}, "deadbee")
+        finally:
+            globals()["staleness"] = real
+        cases.append((name, got, wanted))
 
     failed = 0
     for name, got, wanted in cases:

@@ -914,6 +914,9 @@ void JsInterpreter::init_builtins() {
     // ArrayBuffer and the typed arrays (Wave 2 #8): the bytes a fetch() body,
     // a binary WebSocket frame and an ImageData are made of.
     install_typed_array_builtins(*m_global_env);
+    // TextDecoder and TextEncoder need the typed arrays: `encode()` answers a
+    // Uint8Array and `decode()` takes an ArrayBufferView.
+    install_text_codec_builtins(*m_global_env);
 
     m_global_env->define("Headers", HeadersObject::create_constructor());
     m_global_env->define("Response", ResponseObject::create_constructor());

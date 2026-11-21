@@ -84,7 +84,7 @@ either way.
   in the table above plus the last-place rest and the agreement case, where
   the pattern bound `null` while `for…of` and the spread beside it in the same
   script bound `"g"`.
-- **`make test`** → **301 / 301** suites (300 on `main` as this was written; 296
+- **`make test`** → **302 / 302** suites (301 on `main` as this was written; 296
   when the change was made, the difference being other phases' merges) and 114 cross-origin
   checks, all passing.
 - **The corpora, unchanged**: `make js-conformance` 1143 / 1158 (98.7%) and

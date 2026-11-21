@@ -456,14 +456,14 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   minutes, and #179 took it out. If you read it, it was wrong.
 - **Nobody sees CI on `main` after their own merge.** A run takes
   fourteen minutes at the least, and the agent that merged is cut off
-  before that. #170 was merged on 21 November at 05:07:54, two minutes after its
-  CI had passed, on a head without #174, merged at 04:55:49. Each had added
-  a unit suite and each README.md said 300, so git merged the two without a
-  conflict into a tree with 301 suites and a README.md that says 300, and
-  `main` failed at 05:09:56 ("Merged with `WIP:` in the title, on a head
-  without `main`", above, is the same accident). It was repaired in #179 by
-  an agent continued at 05:12 for something else, because the first thing
-  it did was look at `main`. So:
+  before that. #170 was merged on 21 November at 05:07:54, two minutes
+  after its CI had passed, on a head without #174, merged at 04:55:49.
+  Each had added a unit suite and each README.md said 300, so git merged
+  the two without a conflict into a tree with 301 suites and a README.md
+  that says 300, and `main` failed at 05:09:56 ("Merged with `WIP:` in the
+  title, on a head without `main`", above, is the same accident). It was
+  repaired in #179 by an agent continued at 05:12 for something else,
+  because the first thing it did was look at `main`. So:
   `python3 tools/ci/check_pr.py merge N` in the minute before the merge,
   since you will not be there to repair what it would have told you; the
   reply says that the run on `main` has not been seen; and every turn

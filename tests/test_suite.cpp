@@ -31853,6 +31853,149 @@ TEST(object_assign_boxes_throws_and_copies_every_own_key) {
     assert(failed.empty());
 }
 
+TEST(an_abrupt_completion_in_a_pattern_closes_the_iterator) {
+    using namespace litebird;
+
+    // Phase 176, finding 180. Two ways an assignment jumps out before it is
+    // finished, and the standard orders both of them:
+    //
+    //   base.prop = count += 1      with `base` null
+    //     The reference is resolved *first* (§13.15.2), but a null or
+    //     undefined base is only an error once the right-hand side has run,
+    //     so `count` is 1. This engine reported the TypeError first and left
+    //     `count` at 0: the RHS was never evaluated. (Node 22 prints 1.)
+    //
+    //   [ {}[thrower()] ] = iterable
+    //     A pattern that fails part way through must still close the
+    //     iterator (7.4.11) — and must discard whatever that `return` says,
+    //     because the pattern's own throw is what the script sees. A `next`
+    //     that throws is the one case that does *not* close (7.4.8 step 7),
+    //     which is why `[ , ] = throwingNext` calls `return` zero times while
+    //     the same pattern with a throwing target calls it once.
+    //
+    // Every expected value was printed by Node.js 22 for the same source.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throws(what, kind, f) {
+            try { f(); failures.push(what + ': did not throw'); }
+            catch (e) { if (!(e instanceof kind)) failures.push(what + ': threw ' + e); }
+        }
+
+        // ---- the right-hand side runs before a nullish base is reported ----
+        var count = 0, nullBase = null;
+        throws('a write to a member of null', TypeError, function () { nullBase.prop = count += 1; });
+        same('the right-hand side still ran', count, 1);
+
+        var undef = 0, undefinedBase;
+        throws('a write to a member of undefined', TypeError, function () { undefinedBase.prop = undef += 1; });
+        same('and for undefined too', undef, 1);
+
+        var plain = 0;
+        throws('a literal null base', TypeError, function () { null.p = (plain += 1); });
+        same('a literal null base runs it as well', plain, 1);
+
+        // The write itself is unchanged for a base that is there.
+        var target = {}; var v = 0;
+        target.p = v += 1;
+        same('an ordinary write', [target.p, v], [1, 1]);
+        throws('an index of null', TypeError, function () { var n = null; n[0] = 1; });
+
+        // ---- IteratorClose on an abrupt completion -------------------------
+        function iterableThatCounts(nextBody, returnBody) {
+            var counts = { next: 0, ret: 0 };
+            var iterator = {
+                next: function () { counts.next += 1; return nextBody(); },
+                return: function () { counts.ret += 1; return returnBody(); }
+            };
+            var source = {};
+            source[Symbol.iterator] = function () { return iterator; };
+            return { counts: counts, source: source };
+        }
+        var thrower = function () { throw new RangeError('stop'); };
+
+        // a target that throws while the pattern is being bound
+        var a = iterableThatCounts(function () { return { done: false, value: undefined }; },
+                                   function () { return {}; });
+        throws('a throwing target', RangeError, function () {
+            var out; [ out = 0, {}[thrower()] ] = a.source;
+        });
+        same('the iterator was closed once', a.counts, { next: 2, ret: 1 });
+
+        // a default value that throws
+        var b = iterableThatCounts(function () { return { done: false, value: undefined }; },
+                                   function () { return {}; });
+        throws('a throwing default', RangeError, function () {
+            var x; [ x = thrower() ] = b.source;
+        });
+        same('a throwing default closes it too', b.counts, { next: 1, ret: 1 });
+
+        // a `return` that throws is discarded: the pattern's throw wins
+        var c = iterableThatCounts(function () { return { done: false, value: undefined }; },
+                                   function () { throw new SyntaxError('from return'); });
+        throws('the pattern keeps its own throw', RangeError, function () {
+            var y; [ y = thrower() ] = c.source;
+        });
+        same('the throwing return was still called', c.counts, { next: 1, ret: 1 });
+
+        // ...and so is a `return` that is not callable
+        var notCallable = {};
+        notCallable[Symbol.iterator] = function () {
+            return { next: function () { return { done: false }; }, return: 42 };
+        };
+        throws('a return that is not callable is discarded', RangeError, function () {
+            var z; [ z = thrower() ] = notCallable;
+        });
+
+        // a `next` that throws is *not* closed (7.4.8 step 7)
+        var d = iterableThatCounts(thrower, function () { return {}; });
+        throws('a throwing next', RangeError, function () { var w; [ , ] = d.source; });
+        same('a throwing next does not close the iterator', d.counts, { next: 1, ret: 0 });
+
+        // A pattern that finds the iterator already done does not close it:
+        // there is nothing left to tell. The `return` is only called for an
+        // iterator that still had values in it when the pattern stopped.
+        var e = iterableThatCounts(function () { return { done: true }; }, function () { return {}; });
+        var q; [ q ] = e.source;
+        same('an exhausted iterator is not closed', e.counts, { next: 1, ret: 0 });
+
+        // A pattern that stops early on an iterator that is *not* done does
+        // close — here the second element is never pulled.
+        var g = iterableThatCounts(function () { return { done: false, value: 1 }; },
+                                   function () { return {}; });
+        var first; [ first ] = g.source;
+        same('a pattern that stops early closes it', g.counts, { next: 1, ret: 1 });
+
+        // A drained iterator is not told anything (it said it was done).
+        var f = iterableThatCounts(function () { return { done: true }; }, function () { return {}; });
+        var rest; [...rest] = f.source;
+        same('a drained iterator is not closed', f.counts, { next: 1, ret: 0 });
+
+        // A `return` that answers a primitive is an error on the plain
+        // close — that is what `iterator-return-is-not-an-object` asserts,
+        // and it is a TypeError rather than silence.
+        // The iterator still has values (done: false), so the pattern's own
+        // close runs and reports the bad answer.
+        var bad = {};
+        bad[Symbol.iterator] = function () {
+            return { next: function () { return { done: false, value: 1 }; },
+                     return: function () { return 1; } };
+        };
+        throws('a return that answers a primitive is an error', TypeError, function () {
+            var t; [ t ] = bad;
+        });
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(fetch_request_constructor_validation_body_clone_and_signal) {
     using namespace litebird;
 
@@ -32594,6 +32737,10 @@ int main() {
     // Phase 167: Object.assign boxes its target, throws on a refused Set, and
     // copies the symbols.
     RUN_TEST(object_assign_boxes_throws_and_copies_every_own_key);
+
+    // Phase 176: an abrupt completion closes the iterator, and the RHS of an
+    // assignment runs before a nullish base is reported.
+    RUN_TEST(an_abrupt_completion_in_a_pattern_closes_the_iterator);
 
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.

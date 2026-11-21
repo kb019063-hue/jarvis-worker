@@ -91,6 +91,19 @@ SharedComputedStyle resolve_element_style(
             }
         }
     }
+    // CSS Overflow: with visible overflow on the HTML root, the first
+    // body's overflow applies to the viewport, not to its own padding box.
+    // An absolutely positioned canvas can fill the viewport even if almost
+    // nothing contributes to the body's in-flow height. Keep ordinary clips
+    // and containment intact; the framebuffer itself bounds viewport paint.
+    if (tag == "body" && !element->is_foreign() && computed.overflow != Overflow::Visible && !computed.containment) {
+        auto doc = element->owner_document();
+        auto html = doc ? doc->document_element() : nullptr;
+        if (html && !html->is_foreign() && html->tag_name() == "html" && element->parent() == html && doc->body() == element) {
+            const auto root_style = resolver.resolve_style(html, nullptr);
+            if (root_style.overflow == Overflow::Visible && !root_style.containment) computed.overflow = Overflow::Visible;
+        }
+    }
     if (computed.is_none()) return nullptr;
     return pool.intern(std::move(computed));
 }
@@ -101,7 +114,8 @@ void normalize_block_children(
     ComputedStylePool& pool
 ) {
     if (!box) return;
-    if (box->box_type != BoxType::BlockNode && box->box_type != BoxType::AnonymousBlock) return;
+    if (box->box_type != BoxType::BlockNode && box->box_type != BoxType::AnonymousBlock &&
+        box->box_type != BoxType::TableCellNode) return;
     if (box->children.empty()) return;
 
     bool has_block = false;
@@ -145,6 +159,51 @@ void normalize_block_children(
     for (auto& ch : box->children) {
         ch->parent = box;
     }
+}
+
+// CSS 2.1 §17.2.1. Ordinary children of a CSS table still need to enter
+// its grid. Generate layout-only rows/cells for consecutive improper boxes;
+// never invent a DOM node or split adjacent content into separate columns.
+void normalize_table_children(const std::shared_ptr<LayoutBox>& box, ComputedStylePool& pool) {
+    const bool table = box->style->is_table();
+    const bool row = box->style->is_table_row();
+    if (!table && !row && !box->style->is_table_row_group()) return;
+    auto children = std::move(box->children);
+    box->children.clear();
+    std::shared_ptr<LayoutBox> implicit_row, implicit_cell;
+    for (const auto& child : children) {
+        if (!row && (child->style->is_table_row() ||
+                (table && (child->style->is_table_caption() || child->style->is_table_row_group())))) {
+            implicit_row.reset();
+            implicit_cell.reset();
+            box->append_child(child);
+            continue;
+        }
+        if (!row && !implicit_row) {
+            implicit_row = LayoutBox::create_table_row(nullptr, pool.inherited_only(box->style, Display::TableRow));
+            box->append_child(implicit_row);
+        }
+        const auto& parent = row ? box : implicit_row;
+        if (child->style->is_table_cell()) {
+            implicit_cell.reset();
+            parent->append_child(child);
+        } else {
+            if (!implicit_cell) {
+                implicit_cell = LayoutBox::create_table_cell(nullptr, pool.inherited_only(parent->style, Display::TableCell));
+                parent->append_child(implicit_cell);
+            }
+            implicit_cell->append_child(child);
+        }
+    }
+    // A generated cell wasn't visited by build_boxes; normalize its mixed
+    // block/inline content just as for a DOM-backed cell.
+    auto finish_cells = [&](const auto& r) {
+        for (const auto& c : r->children) {
+            if (!c->node && c->box_type == BoxType::TableCellNode) normalize_block_children(c, c->style, pool);
+        }
+    };
+    if (row) finish_cells(box);
+    else for (const auto& r : box->children) if (!r->node && r->box_type == BoxType::TableRowNode) finish_cells(r);
 }
 
 // Origin-safe `<img src>` loader with per-document subresource caching.
@@ -444,6 +503,10 @@ void LayoutTree::build_boxes(
     if (node->is_element()) {
         auto element = std::static_pointer_cast<Element>(node);
         const std::string& tag = element->tag_name();
+        if (tag == "noscript" && !element->is_foreign()) {
+            auto doc = element->owner_document();
+            if (doc && doc->scripting_enabled()) return;
+        }
         if (tag == "head" || tag == "style" || tag == "script" || tag == "meta" ||
             tag == "link" || tag == "base" || tag == "title" || tag == "template") {
             return;
@@ -534,7 +597,19 @@ void LayoutTree::build_boxes(
             const auto& children_to_process =
                 element->shadow_root() ? element->shadow_root()->children() : element->children();
             std::vector<std::shared_ptr<LayoutBox>> child_boxes;
+            // With an explicit summary, a closed disclosure lays out only
+            // its first summary child. The DOM and its listeners stay intact.
+            const Node* closed_summary = nullptr;
+            if (!element->is_foreign() && tag == "details" && !element->has_attribute("open")) {
+                for (const auto& ch : children_to_process) {
+                    if (ch->is_element() && !ch->as_element()->is_foreign() && ch->as_element()->tag_name() == "summary") {
+                        closed_summary = ch.get();
+                        break;
+                    }
+                }
+            }
             for (const auto& ch : children_to_process) {
+                if (closed_summary && ch.get() != closed_summary) continue;
                 child_boxes.clear();
                 if (ch->is_element() && ch->as_element()->tag_name() == "slot") {
                     auto slot_el = std::static_pointer_cast<Element>(ch);
@@ -557,9 +632,8 @@ void LayoutTree::build_boxes(
             }
         }
 
-        if (box->box_type == BoxType::BlockNode) {
-            normalize_block_children(box, box->style, pool);
-        }
+        normalize_table_children(box, pool);
+        normalize_block_children(box, box->style, pool);
 
         if (tag == "img" || tag == "canvas" || tag == "svg" || (!element->is_foreign() && tag == "iframe")) {
             populate_special_element_box(element, box, pool);

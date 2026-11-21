@@ -1,0 +1,10 @@
+{
+  "protocol": "holdout-01", "engine": "771fb6f8f1eba0b103b0cfa60d565e5a0b3850c2", "viewport": [800,600], "native_wall_seconds": 45,
+  "policy": "Fresh context/process per task, saved local assets only. No DOM mutation or handler calls by driver. Scroll to locate controls, then use real click/key input. Require initial state, observed transition, readable visible outcome, no crash. Seek no replacement pages. Keep reference failures and timeouts. Visual match is separate: post-action RGBA equality, no tolerance. No engine edits before results. Do not pool with the original 20.",
+  "pages": [
+    {"id":"H1","name":"Rust Book · Next chapter","repo":"rust-lang/book","sha":"5f5c30341e253651144a6195a17f8c209867e1cd","path":"ch01-00-getting-started.html","task":"From Getting Started click a visible Next chapter link. Reach ch01-01-installation.html with the Installation heading visible."},
+    {"id":"H2","name":"W3C APG · Automatic tabs","repo":"w3c/aria-practices","sha":"f14b2490a6728cda85fd7feafbd148b3c3eaf038","path":"content/patterns/tabs/examples/tabs-automatic.html","task":"Click the initially selected first tab, then press ArrowRight once. Carl Andersen (tab-2) must be focused and selected, panel 1 hidden, and panel 2 visibly display his biography."},
+    {"id":"H3","name":"MDN · Modal dialog","repo":"mdn/dom-examples","sha":"a2c57197c219bd1c87d48aa901f4c2a24b249658","path":"htmldialogelement-basic/index.html","task":"From the closed dialog click Update details. See Favorite animal and Cancel in the open modal. Click Cancel; require closed/hidden dialog, returnValue animalNotChosen and focus restored to Update details. Capture the open state too."},
+    {"id":"H4","name":"TodoMVC · Add and complete","repo":"tastejs/todomvc","sha":"07f3c4bcbd38e2a10c996493e9a541755f042f1b","path":"examples/javascript-es5/index.html","task":"From an empty list click the new-todo input, type Buy mangoes and press Enter. Require one visible item of that exact name and an empty input. Click that item's completion toggle; require the item completed and zero items left visible."}
+  ]
+}

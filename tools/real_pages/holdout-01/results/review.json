@@ -1,0 +1,30 @@
+[
+  {
+    "id": "H1",
+    "reviewed_user_action": "blocked",
+    "raw_different_post_pixels": 199650,
+    "pixels": 480000,
+    "visual_verdict": "not comparable: different end state"
+  },
+  {
+    "id": "H2",
+    "reviewed_user_action": "completed with geometry defect",
+    "raw_different_post_pixels": 259542,
+    "pixels": 480000,
+    "visual_verdict": "fail: nonidentical at equivalent task outcome"
+  },
+  {
+    "id": "H3",
+    "reviewed_user_action": "incomplete",
+    "raw_different_post_pixels": 4057,
+    "pixels": 480000,
+    "visual_verdict": "not comparable: different end state"
+  },
+  {
+    "id": "H4",
+    "reviewed_user_action": "incomplete",
+    "raw_different_post_pixels": 163860,
+    "pixels": 480000,
+    "visual_verdict": "not comparable: different end state"
+  }
+]

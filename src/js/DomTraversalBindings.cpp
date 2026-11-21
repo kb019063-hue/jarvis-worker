@@ -3,6 +3,7 @@
 
 #include "litebird/js/DomBindings.hpp"
 #include "litebird/js/DomLive.hpp"
+#include "litebird/js/DomEditing.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 
 #include <algorithm>
@@ -950,6 +951,77 @@ void setup_selection(Iface& I) {
 JsValue selection_object(Realm& realm) {
     if (!realm.window.is_object()) return null();
     return cached(realm.window, "selection", [&]() { return realm.make("Selection", std::make_shared<SelectionState>()); });
+}
+
+bool plain_editable(const Element& host) {
+    const auto* attr = host.attribute("contenteditable");
+    const auto& tag = host.tag_name();
+    if (!attr || host.is_foreign() || tag == "input" || tag == "textarea" || tag == "select" || tag == "button") return false;
+    const auto value = ascii_lower(*attr);
+    return (value.empty() || value == "true" || value == "plaintext-only") &&
+           (host.children().empty() || (host.children().size() == 1 && host.first_child()->is_text()));
+}
+
+bool select_edit_text(Element& host, bool all) {
+    Realm* r = realm_if_any(host);
+    if (!r || !plain_editable(host)) return false;
+    JsIntrinsics::set_current(r->intrinsics);
+    JsScriptScope scope;
+    auto* selection = state_of<SelectionState>(selection_object(*r));
+    if (!selection) return false;
+    auto node = host.first_child();
+    if (!node) node = host.shared_from_this();
+    size_t end = node_length(*node);
+    selection->range = new_range(*r, {node, all ? 0 : end}, {node, end});
+    return true;
+}
+
+bool edit_selected_text(Element& host, const std::string& inserted, bool backspace) {
+    Realm* r = realm_if_any(host);
+    if (!r || !plain_editable(host)) return false;
+    JsIntrinsics::set_current(r->intrinsics);
+    JsScriptScope scope;
+    auto send = [&](const char* type, bool cancelable) {
+        auto ev = make_event(*r, "InputEvent", type, true, cancelable, {
+            {"inputType", str(backspace ? "deleteContentBackward" : "insertText")},
+            {"data", backspace ? null() : str(inserted)}}, true);
+        return dispatch(*r, wrap(*r, host), ev, true);
+    };
+    if (!send("beforeinput", true)) return true;
+    // A beforeinput listener can cancel, move focus/selection or replace nodes.
+    if (!plain_editable(host) || !host.is_connected() || host.owner_document()->focused_element().get()!=&host) return false;
+    auto* selection = state_of<SelectionState>(selection_object(*r));
+    if (!selection) return false;
+    auto* range = selection->state();
+    auto node = host.first_child();
+    auto units = node ? units_of(*node) : std::u16string();
+    auto offset = [&](const Boundary& b) -> std::optional<size_t> {
+        if (node && b.node == node && b.offset <= units.size()) return b.offset;
+        if (b.node.get() == &host && b.offset <= host.children().size()) return b.offset ? units.size() : 0;
+        return {}; // never edit a range outside the focused host
+    };
+    if (!range) return false;
+    auto start = offset(range->start), end = offset(range->end);
+    if (!start || !end || *start > *end) return false;
+    if (backspace && *start == *end) {
+        if (!*start) return true;
+        --*start;
+        if (*start && units[*start]>=0xdc00 && units[*start]<=0xdfff &&
+            units[*start-1]>=0xd800 && units[*start-1]<=0xdbff) --*start;
+    }
+    auto addition = js_utf8_to_utf16(inserted);
+    units.replace(*start, *end-*start, addition);
+    if (node) {
+        live_note_data_replaced(*node, *start, *end-*start, addition.size());
+        store_character_data(*node, js_utf16_to_utf8(units));
+    } else {
+        set_text_content(host, inserted);
+        node = host.first_child();
+    }
+    Boundary caret{node ? node : host.shared_from_this(), *start+addition.size()};
+    selection->range = new_range(*r, caret, caret);
+    send("input", false);
+    return true;
 }
 
 /// document.createRange(), createTreeWalker() and createNodeIterator().

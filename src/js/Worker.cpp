@@ -1593,10 +1593,13 @@ void WorkerObject::worker_thread_main(std::string script_source) {
         [worker_context](const std::vector<JsValue>& args) {
             return FetchAPI::fetch(args, worker_context);
         });
+    JsValue request_ctor = RequestObject::create_constructor(
+        [worker_context]() { return worker_context; });
     JsValue nested_worker_ctor = WorkerObject::create_constructor(
         [worker_context]() { return worker_context; });
 
     env->define("fetch", fetch_fn);
+    env->define("Request", request_ctor);
     env->define("Worker", nested_worker_ctor);
 
     WebSocketContext ws_context;
@@ -1626,6 +1629,7 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     JsValue location_obj = make_worker_location(m_resolved_url);
     self_obj.set_property("location", location_obj);
     self_obj.set_property("fetch", fetch_fn);
+    self_obj.set_property("Request", request_ctor);
     self_obj.set_property("Worker", nested_worker_ctor);
     self_obj.set_property("WebSocket", ws_ctor);
     self_obj.set_property("onmessage", JsValue::make_null());

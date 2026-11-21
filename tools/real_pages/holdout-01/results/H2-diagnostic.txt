@@ -1,0 +1,28 @@
+q('#tabpanel-2 p').textContent.trim().slice(0,75)
+q('#tabpanel-2 p').getBoundingClientRect().top
+q('#tabpanel-2 p').getBoundingClientRect().bottom
+window.scrollY
+getComputedStyle(q('#tabpanel-2 p')).visibility
+q('#tabpanel-2 p').getBoundingClientRect().width
+q('#tabpanel-2 p').getBoundingClientRect().height
+getComputedStyle(q('#tabpanel-1')).display
+getComputedStyle(q('#tabpanel-2')).display
+document.activeElement.id
+attr('#tab-2','aria-selected')
+attr('#tab-1','aria-selected')
+stage: open
+HIT	#tab-1 @ 84.96,300 -> span#
+READ	Carl Joachim Andersen (29 April 1847 – 7 May 1909) was a Danish flutist, co
+READ	2061.39990234375
+READ	2161.39990234375
+READ	0
+READ	visible
+READ	736
+READ	100
+READ	block
+READ	block
+READ	tab-2
+READ	true
+READ	false
+END
+Uncaught SyntaxError: Unexpected token 'import' (line 52)

@@ -321,6 +321,12 @@ struct ComputedStyle {
     float right{0.0f};
     float bottom{0.0f};
     float left{0.0f};
+    // Keep the signed percentage component until the containing block is known.
+    EdgeSizes inset_percent{};
+    EdgeSizes used_insets(float width, float height) const {
+        return {top + height * inset_percent.top / 100, right + width * inset_percent.right / 100,
+                bottom + height * inset_percent.bottom / 100, left + width * inset_percent.left / 100};
+    }
     bool has_top{false};
     bool has_right{false};
     bool has_bottom{false};

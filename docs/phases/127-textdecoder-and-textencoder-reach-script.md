@@ -109,7 +109,7 @@ those tables have decoders only.
   `decode` of a plain array is a `TypeError` (a union type, not a sequence),
   and euc-kr `가` is the bytes `176,161`, not `190,200` — the latter decodes to
   `안`, which is what the engine said before the fix.
-- `make test` → **297 / 297** (296 on `main`), the new suite being
+- `make test` → **298 / 298** (297 on `main`), the new suite being
   `text_codec_a_decoder_and_an_encoder_in_script`, 74 assertions.
 - `make js-conformance` → **1143 / 1158 (98.7%)**, from 1142 on `main`.
 - `make dom-conformance` → **678 / 678**; `make wpt` → **9567 / 9824, 257

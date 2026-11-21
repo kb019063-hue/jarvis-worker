@@ -21,7 +21,7 @@
     "counts it as neither a pass nor a failure. The entry is a debt, not a",
     "silence: if the page starts passing, the run prints FIXED and exits 1, so",
     "the reason has to come out in the same commit that fixes the bug.",
-    "Six pages carry one since Phase 122 (finding 127): paint order for floats",
+    "Five pages carry one since Phase 134 (finding 139): paint order for floats and for transformed elements, a clip that is square where the radius is round, and two found while fixing cross-axis alignment \u2014 `justify-content` in a column container and `align-self`. The three alignment pages recorded by Phase 122 (finding 127) lost their reasons here, which is the ledger working in the direction that matters.",
     "and transformed elements, cross-axis alignment in flex and grid, and a clip",
     "that is square where the radius is round."
   ],
@@ -543,8 +543,7 @@
           "colour": "#eeeeee",
           "describe": "and no wider than its 40px"
         }
-      ],
-      "known_failure": "cross-axis alignment is not implemented: align-items is ignored, so an item with no height of its own is 0 tall and paints nothing"
+      ]
     },
     {
       "name": "flex_align_items_center_centres_a_shorter_item",
@@ -573,8 +572,7 @@
           "colour": "#eeeeee",
           "describe": "and below it the container shows through"
         }
-      ],
-      "known_failure": "align-items: center is ignored; the item is placed at the top of the line"
+      ]
     },
     {
       "name": "grid_items_stretch_to_their_area",
@@ -598,8 +596,7 @@
           "colour": "#0000ff",
           "describe": "the second cell is 40x30"
         }
-      ],
-      "known_failure": "grid items are not stretched to their area either: same missing cross-axis alignment, so an item with no height is 0 tall"
+      ]
     },
     {
       "name": "grid_places_cells_on_its_tracks_and_honours_the_gap",
@@ -908,7 +905,7 @@
           "describe": "and where the two overlap, the transformed box is painted over it"
         }
       ],
-      "known_failure": "the ink moves and layout does not, but the transformed box is painted in document order, so a later in-flow block covers it where they overlap; a transform creates a stacking context (CSS Transforms 1 §3), which Appendix E paints in the positioned layer"
+      "known_failure": "the ink moves and layout does not, but the transformed box is painted in document order, so a later in-flow block covers it where they overlap; a transform creates a stacking context (CSS Transforms 1 \u00a73), which Appendix E paints in the positioned layer"
     },
     {
       "name": "overflow_hidden_clips_to_the_rounded_corner",
@@ -960,6 +957,219 @@
         }
       ],
       "known_failure": "`overflow: hidden` clips to a rectangle: the clip command carries `border_radius`, and the corner is not removed, so the child's ink reaches the box's square corner"
+    },
+    {
+      "name": "flex_align_items_flex_end_puts_the_item_at_the_cross_end",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; align-items: flex-end; width: 100px; height: 100px; background: #eeeeee }.a { width: 50px; height: 20px; background: #ff0000 }\n</style></head><body><div class=\"c\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 79,
+          "colour": "#eeeeee",
+          "describe": "above it the container shows through"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 50,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "`flex-end` puts the item's margin box at the cross end: 100-20 = 80"
+        }
+      ]
+    },
+    {
+      "name": "flex_align_items_stretch_leaves_a_definite_height_alone",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; align-items: stretch; width: 100px; height: 100px; background: #eeeeee }.a { width: 50px; height: 20px; background: #ff0000 }\n</style></head><body><div class=\"c\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 50,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "an item that states a height keeps it under `stretch`"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 20,
+          "colour": "#eeeeee",
+          "describe": "so the container shows through below it"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 99,
+          "colour": "#eeeeee",
+          "describe": "all the way down"
+        }
+      ]
+    },
+    {
+      "name": "flex_column_align_items_center_centres_the_item_across",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; flex-direction: column; align-items: center; width: 100px; height: 100px; background: #eeeeee }.a { width: 40px; height: 20px; background: #ff0000 }\n</style></head><body><div class=\"c\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 29,
+          "y": 10,
+          "colour": "#eeeeee",
+          "describe": "left of the item the container shows through"
+        },
+        {
+          "kind": "rect",
+          "x": 30,
+          "y": 0,
+          "width": 40,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "the cross axis of a column container is the width: (100-40)/2 = 30"
+        },
+        {
+          "kind": "pixel",
+          "x": 70,
+          "y": 10,
+          "colour": "#eeeeee",
+          "describe": "and right of it the container shows through"
+        }
+      ]
+    },
+    {
+      "name": "flex_column_align_items_flex_end_pushes_the_item_to_the_right",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; flex-direction: column; align-items: flex-end; width: 100px; height: 60px; background: #eeeeee }.a { width: 40px; height: 20px; background: #ff0000 }\n</style></head><body><div class=\"c\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 59,
+          "y": 10,
+          "colour": "#eeeeee",
+          "describe": "the item does not start at the block start"
+        },
+        {
+          "kind": "rect",
+          "x": 60,
+          "y": 0,
+          "width": 40,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "`flex-end` across a column: 100-40 = 60"
+        }
+      ]
+    },
+    {
+      "name": "grid_align_items_center_centres_an_item_in_its_row",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.g { display: grid; align-items: center; grid-template-columns: 60px; grid-template-rows: 40px; height: 40px }.a { height: 20px; background: #ff0000 }\n</style></head><body><div class=\"g\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 9,
+          "colour": "#ffffff",
+          "describe": "above the item nothing is painted"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 10,
+          "width": 60,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "`align-items: center` in a grid is the block axis: (40-20)/2 = 10"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 30,
+          "colour": "#ffffff",
+          "describe": "and the rest of the row is empty"
+        }
+      ]
+    },
+    {
+      "name": "flex_stretch_subtracts_the_padding_and_the_border",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; width: 100px; height: 40px; background: #eeeeee }.a { width: 40px; border-top: 3px solid #0000ff; padding-top: 5px; background: #ff0000 }\n</style></head><body><div class=\"c\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 3,
+          "colour": "#0000ff",
+          "describe": "the border is at the top and is not red"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 3,
+          "colour": "#ff0000",
+          "describe": "the background starts under the border"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 8,
+          "colour": "#ff0000",
+          "describe": "padding is part of the box the background paints"
+        },
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 39,
+          "colour": "#ff0000",
+          "describe": "and the stretch reached the container's 40px: 3 border + 5 padding + 32 content"
+        },
+        {
+          "kind": "pixel",
+          "x": 40,
+          "y": 39,
+          "colour": "#eeeeee",
+          "describe": "without growing wider"
+        }
+      ]
+    },
+    {
+      "name": "flex_column_justify_content_flex_end",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; flex-direction: column; justify-content: flex-end; width: 100px; height: 100px; background: #eeeeee }.a { width: 40px; height: 20px; background: #ff0000 }\n</style></head><body><div class=\"c\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 10,
+          "colour": "#eeeeee",
+          "describe": "above the item the container shows through"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 40,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "`justify-content: flex-end` packs the main axis: 100-20 = 80"
+        }
+      ],
+      "known_failure": "`justify-content` is ignored in a column flex container: the items are stacked from the top whatever it says. Rows distribute; the column branch has no main-axis step at all"
+    },
+    {
+      "name": "flex_align_self_overrides_align_items",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; align-items: flex-start; width: 100px; height: 100px; background: #eeeeee }.a { width: 50px; height: 20px; align-self: flex-end; background: #ff0000 }\n</style></head><body><div class=\"c\"><div class=\"a\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 50,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "`align-self` overrides the container's `align-items`: 100-20 = 80"
+        }
+      ],
+      "known_failure": "`align-self` is not read: the item follows the container's `align-items: flex-start` and sits at the top. `align-content` is not read either"
     }
   ]
 }

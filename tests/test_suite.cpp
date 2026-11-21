@@ -26961,6 +26961,139 @@ TEST(bidi_reorders_hebrew_and_arabic_runs) {
     }
 }
 
+TEST(array_destructuring_reads_the_place_not_the_vector) {
+    using namespace litebird;
+    // Phase 136, finding 141. `IterationCursor` is what a pattern asks for its
+    // source (Phase 102): a string it walks by code point, an array whose
+    // iterator is still the installed one it reads straight out of
+    // `array_elements`, and anything else by the protocol. Reading the vector
+    // is reading the storage, not the array: since Phase 108 a place can be an
+    // accessor that `Object.defineProperty` put there, and since Phase 98 a
+    // place nothing is written in can be a property of `Array.prototype`. So
+    // `var [x] = a` bound `undefined` where `for (x of a)` and `[...a]` bound
+    // what the getter answered in the same engine.
+    //
+    // The element path now reads each place as `a[i]` does (`js_array_get`),
+    // which is what the array's own iterator yields for the place. An element
+    // costs what it did; a hole asks the array's own map and then the chain,
+    // and `js_array_holes_read_undefined` answers for a chain with no index on
+    // it without looking anything up.
+    //
+    // Every case was run through Node.js first, and the expected text of each
+    // is what it printed.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    auto none_failed = [&]() {
+        const std::string failed = js.eval("failures.join('\\n')").to_string();
+        if (!failed.empty()) std::cerr << failed << "\n";
+        return failed.empty();
+    };
+    js.eval(R"JS(
+var failures = [];
+function check(what, f, want) {
+    var got;
+    try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+    if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+}
+check('an accessor at the first place is asked, and once per read', function () {
+    var a = [1, 2, 3];
+    var hits = 0;
+    Object.defineProperty(a, '0', { get: function () { hits++; return 'g'; }, configurable: true });
+    var [x, y, z] = a;
+    return [x, y, z, hits];
+}, '["g",2,3,1]');
+check('the rest of a pattern asks the accessor too', function () {
+    var a = [1, 2, 3];
+    Object.defineProperty(a, '1', { get: function () { return 'g'; }, configurable: true });
+    var [x, ...rest] = a;
+    return [x, rest];
+}, '[1,["g",3]]');
+check('an accessor at the last place of a rest element', function () {
+    var a = [1, 2, 3];
+    var hits = 0;
+    Object.defineProperty(a, '2', { get: function () { hits++; return 'g'; }, configurable: true });
+    var [x, ...rest] = a;
+    var [p, q, r] = a;
+    return [x, rest, p, q, r, hits];
+}, '[1,[2,"g"],1,2,"g",2]');
+check('Array.prototype fills an elided place', function () {
+    var saved = Array.prototype[1];
+    Array.prototype[1] = 'p';
+    var [x, y, z] = [1, , 3];
+    Array.prototype[1] = saved;
+    return [x, y, z];
+}, '[1,"p",3]');
+check('the prototype getter is asked once per place', function () {
+    var hits = 0;
+    Object.defineProperty(Array.prototype, '1', { get: function () { hits++; return 'p'; }, configurable: true });
+    var [x, y, z] = [1, , 3];
+    var [p, q] = [1, , 3];
+    delete Array.prototype[1];
+    return [x, y, z, p, q, hits];
+}, '[1,"p",3,1,"p",2]');
+check('a place nothing answers for is undefined, and not there', function () {
+    var a = [1, , 3];
+    var [x, y, z] = a;
+    return [x, y, z, y === undefined, 1 in a, a.length];
+}, '[1,null,3,true,false,3]');
+check('a place past the end is undefined', function () {
+    var a = [1, 2];
+    a.length = 4;
+    var [p, q, r, s] = a;
+    return [p, q, r, s];
+}, '[1,2,null,null]');
+check('a nested pattern in an accessor place', function () {
+    var a = [[1], [2]];
+    Object.defineProperty(a, '1', { get: function () { return [9, 8]; }, configurable: true });
+    var [[p], [q, r]] = a;
+    return [p, q, r];
+}, '[1,9,8]');
+check('defaults see what the place reads', function () {
+    var a = [, 2];
+    Object.defineProperty(a, '0', { get: function () { return undefined; }, configurable: true });
+    var [x = 'd', y = 'd'] = a;
+    var [u = 'd', v = 'd'] = [, 2];
+    return [x, y, u, v];
+}, '["d",2,"d",2]');
+check('the pattern, for-of and the spread agree', function () {
+    var a = [1, 2, 3];
+    var hits = 0;
+    Object.defineProperty(a, '0', { get: function () { hits++; return 'g'; }, configurable: true });
+    var [x] = a;
+    var seen = [];
+    for (var v of a) seen.push(v);
+    var spread = [...a];
+    return [x, seen, spread, hits];
+}, '["g",["g",2,3],["g",2,3],3]');
+check('a replaced Symbol.iterator is still the one asked', function () {
+    var a = [1, 2];
+    a[Symbol.iterator] = function () {
+        var i = 0;
+        return { next: function () { return { value: 'v' + (i++), done: i > 2 }; } };
+    };
+    var [p, q] = a;
+    return [p, q];
+}, '["v0","v1"]');
+check('a getter that throws stops the pattern', function () {
+    var a = [1, 2];
+    Object.defineProperty(a, '0', { get: function () { throw new RangeError('boom'); }, configurable: true });
+    var [x] = a;
+    return x;
+}, 'throws RangeError');
+check('an accessor is asked, and no setter is called by a declaration', function () {
+    var store = null;
+    var a = [1];
+    Object.defineProperty(a, '0', { set: function (v) { store = v; }, get: function () { return 'from getter'; }, configurable: true });
+    var [x] = a;
+    return [x, store];
+}, '["from getter",null]');
+)JS");
+    assert(none_failed());
+}
+
 TEST(array_methods_over_an_exotic_receiver_ask_it_for_its_indices) {
     using namespace litebird;
     // Phase 129. A NodeList keeps its indices outside the object's property
@@ -29386,6 +29519,9 @@ int main() {
 
     // Phase 109: UAX #9 -- Hebrew and Arabic reordered, and not painted left to right.
     RUN_TEST(bidi_reorders_hebrew_and_arabic_runs);
+
+    // Phase 136: a pattern reads a place of an array as `a[i]` does.
+    RUN_TEST(array_destructuring_reads_the_place_not_the_vector);
 
     // Phase 116: the methods that move elements ask the places for what they are.
     RUN_TEST(array_methods_over_an_exotic_receiver_ask_it_for_its_indices);

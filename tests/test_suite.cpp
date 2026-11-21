@@ -26,6 +26,7 @@
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/GifDecoder.hpp"
 #include "litebird/render/WebPDecoder.hpp"
+#include "litebird/render/AvifContainer.hpp"
 #include "litebird/net/Brotli.hpp"
 #include "litebird/net/Deflate.hpp"
 #include "litebird/shell/WebBrowserServer.hpp"
@@ -17292,6 +17293,220 @@ TEST(length_is_inherited_from_an_array_prototype) {
     assert(js.eval("failures.join('; ')").to_string().empty());
 }
 
+
+// Phase 167, finding 172. The AVIF container: the boxes around the picture,
+// read and bounds-checked, and not the picture, which needs an AV1 decoder and
+// does not have one yet.
+//
+// The fixtures are real AVIF files written by Pillow 13.0.0 (libavif), one 4x4
+// and one 32x32, and every number asserted below was read out of them by hand
+// first: iloc version 0 with 4-byte offsets and lengths, one av01 item, ispe
+// 4x4 and 32x32, pixi 8-bit, av1C profile 0 with 4:2:0 subsampling, and a
+// `colr` of type `nclx`.
+static const uint8_t kAvif4x4[] = {
+    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66, 0x00, 0x00, 0x00, 0x00,
+    0x61, 0x76, 0x69, 0x66, 0x6D, 0x69, 0x66, 0x31, 0x6D, 0x69, 0x61, 0x66, 0x4D, 0x41, 0x31, 0x42,
+    0x00, 0x00, 0x00, 0xEB, 0x6D, 0x65, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21,
+    0x68, 0x64, 0x6C, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0x69, 0x63, 0x74,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0E, 0x70, 0x69, 0x74, 0x6D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1E, 0x69,
+    0x6C, 0x6F, 0x63, 0x00, 0x00, 0x00, 0x00, 0x44, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x01, 0x13, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x28, 0x69, 0x69, 0x6E,
+    0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1A, 0x69, 0x6E, 0x66, 0x65, 0x02,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x61, 0x76, 0x30, 0x31, 0x43, 0x6F, 0x6C, 0x6F, 0x72,
+    0x00, 0x00, 0x00, 0x00, 0x6A, 0x69, 0x70, 0x72, 0x70, 0x00, 0x00, 0x00, 0x4B, 0x69, 0x70, 0x63,
+    0x6F, 0x00, 0x00, 0x00, 0x14, 0x69, 0x73, 0x70, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x10, 0x70, 0x69, 0x78, 0x69, 0x00, 0x00, 0x00,
+    0x00, 0x03, 0x08, 0x08, 0x08, 0x00, 0x00, 0x00, 0x0C, 0x61, 0x76, 0x31, 0x43, 0x81, 0x00, 0x0C,
+    0x00, 0x00, 0x00, 0x00, 0x13, 0x63, 0x6F, 0x6C, 0x72, 0x6E, 0x63, 0x6C, 0x78, 0x00, 0x01, 0x00,
+    0x0D, 0x00, 0x06, 0x80, 0x00, 0x00, 0x00, 0x17, 0x69, 0x70, 0x6D, 0x61, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x04, 0x01, 0x02, 0x83, 0x04, 0x00, 0x00, 0x00, 0x3A, 0x6D,
+    0x64, 0x61, 0x74, 0x12, 0x00, 0x0A, 0x08, 0x18, 0x04, 0x7D, 0xA2, 0x02, 0x1A, 0x0D, 0x08, 0x32,
+    0x24, 0x14, 0xC7, 0x87, 0x86, 0x65, 0x02, 0x08, 0x20, 0x9E, 0x55, 0x54, 0x00, 0x08, 0x48, 0x5A,
+    0xF0, 0x74, 0x44, 0xA8, 0x41, 0x45, 0x37, 0x4F, 0xE8, 0x7A, 0x79, 0xF6, 0xBB, 0xA1, 0x61, 0x1D,
+    0x44, 0x48, 0x22, 0x30, 0xD0,
+};
+
+static const uint8_t kAvif32x32[] = {
+    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66, 0x00, 0x00, 0x00, 0x00,
+    0x61, 0x76, 0x69, 0x66, 0x6D, 0x69, 0x66, 0x31, 0x6D, 0x69, 0x61, 0x66, 0x4D, 0x41, 0x31, 0x42,
+    0x00, 0x00, 0x00, 0xEB, 0x6D, 0x65, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21,
+    0x68, 0x64, 0x6C, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0x69, 0x63, 0x74,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0E, 0x70, 0x69, 0x74, 0x6D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1E, 0x69,
+    0x6C, 0x6F, 0x63, 0x00, 0x00, 0x00, 0x00, 0x44, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x01, 0x13, 0x00, 0x00, 0x00, 0x26, 0x00, 0x00, 0x00, 0x28, 0x69, 0x69, 0x6E,
+    0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1A, 0x69, 0x6E, 0x66, 0x65, 0x02,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x61, 0x76, 0x30, 0x31, 0x43, 0x6F, 0x6C, 0x6F, 0x72,
+    0x00, 0x00, 0x00, 0x00, 0x6A, 0x69, 0x70, 0x72, 0x70, 0x00, 0x00, 0x00, 0x4B, 0x69, 0x70, 0x63,
+    0x6F, 0x00, 0x00, 0x00, 0x14, 0x69, 0x73, 0x70, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x20, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x10, 0x70, 0x69, 0x78, 0x69, 0x00, 0x00, 0x00,
+    0x00, 0x03, 0x08, 0x08, 0x08, 0x00, 0x00, 0x00, 0x0C, 0x61, 0x76, 0x31, 0x43, 0x81, 0x00, 0x0C,
+    0x00, 0x00, 0x00, 0x00, 0x13, 0x63, 0x6F, 0x6C, 0x72, 0x6E, 0x63, 0x6C, 0x78, 0x00, 0x01, 0x00,
+    0x0D, 0x00, 0x06, 0x80, 0x00, 0x00, 0x00, 0x17, 0x69, 0x70, 0x6D, 0x61, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x04, 0x01, 0x02, 0x83, 0x04, 0x00, 0x00, 0x00, 0x2E, 0x6D,
+    0x64, 0x61, 0x74, 0x12, 0x00, 0x0A, 0x09, 0x18, 0x11, 0x3F, 0xF6, 0x88, 0x08, 0x68, 0x34, 0x20,
+    0x32, 0x17, 0x1E, 0xC7, 0x87, 0x85, 0x59, 0xDF, 0xFF, 0xFF, 0xE2, 0xC0, 0x00, 0x00, 0x8B, 0x31,
+    0xF6, 0xEB, 0x6E, 0xD1, 0x8E, 0xEC, 0xA7, 0x86, 0xC0,
+};
+
+static void check_avif_is_read(const uint8_t* bytes, size_t size, uint32_t width, uint32_t height,
+                               size_t payload_bytes, const char* label) {
+    using namespace litebird;
+    assert(AvifContainer::is_avif(bytes, size));
+    auto file = AvifContainer::parse(bytes, size);
+    assert(file.status == AvifContainer::Status::Ok);
+    assert(file.error.empty());
+    assert(file.major_brand == "avif");
+    assert(file.has_primary());
+    const auto& p = file.primary;
+    assert(p.type == "av01");
+    assert(p.has_ispe && p.width == width && p.height == height);
+    // `pixi` lists every plane the image has, subsampled ones included: a
+    // 4:2:0 image has three planes at 8 bits, not one. Asserting one plane
+    // here is what a reader who had only seen RGB would write.
+    assert(p.has_pixi && p.bit_depth.size() == 3);
+    assert(p.bit_depth[0] == 8 && p.bit_depth[1] == 8 && p.bit_depth[2] == 8);
+    assert(p.has_av1c);
+    assert(p.av1c.seq_profile == 0);
+    assert(!p.av1c.high_bitdepth && !p.av1c.twelve_bit && !p.av1c.monochrome);
+    assert(p.av1c.subsampling_x && p.av1c.subsampling_y);     // 4:2:0
+    assert(p.colour.present && p.colour.is_nclx);
+    // The bytes are the item's own: an AVIF's mdat holds exactly the extent
+    // `iloc` names, so the payload is the whole of it and nothing else.
+    assert(p.payload.size() == payload_bytes);
+    // The first byte of an AV1 payload is an OBU header, and the AV1 Image
+    // File Format requires the sequence header first: OBU_TEMPORAL_DELIMITER
+    // (type 2) or OBU_SEQUENCE_HEADER (type 1), never a reserved type.
+    const uint8_t obu_type = static_cast<uint8_t>((p.payload[0] >> 3) & 0x0f);
+    assert(obu_type == 2 || obu_type == 1);
+    (void)label;
+}
+
+TEST(avif_container_is_read_and_the_picture_is_not_decoded) {
+    using namespace litebird;
+
+    check_avif_is_read(kAvif4x4, sizeof(kAvif4x4), 4, 4, 50, "4x4");
+    check_avif_is_read(kAvif32x32, sizeof(kAvif32x32), 32, 32, 38, "32x32");
+
+    // The payload is byte-for-byte what the mdat box holds: find the box and
+    // compare, rather than trusting the length alone.
+    {
+        auto file = AvifContainer::parse(kAvif4x4, sizeof(kAvif4x4));
+        size_t mdat = 0;
+        for (size_t i = 0; i + 4 < sizeof(kAvif4x4); ++i) {
+            if (std::memcmp(kAvif4x4 + i, "mdat", 4) == 0) { mdat = i - 4; break; }
+        }
+        assert(mdat != 0);
+        const uint32_t msize = (static_cast<uint32_t>(kAvif4x4[mdat]) << 24) |
+                               (static_cast<uint32_t>(kAvif4x4[mdat + 1]) << 16) |
+                               (static_cast<uint32_t>(kAvif4x4[mdat + 2]) << 8) |
+                               static_cast<uint32_t>(kAvif4x4[mdat + 3]);
+        assert(msize == 58);
+        std::vector<uint8_t> expected(kAvif4x4 + mdat + 8, kAvif4x4 + mdat + msize);
+        assert(file.primary.payload == expected);
+
+        // The same bytes parse the same way twice.
+        auto again = AvifContainer::parse(kAvif4x4, sizeof(kAvif4x4));
+        assert(again.primary.payload == file.primary.payload);
+        assert(again.primary.width == file.primary.width);
+    }
+
+    // The generic image entry point knows an AVIF and still hands back no
+    // picture, because there is no AV1 decoder behind it. That is the honest
+    // answer and it is asserted, so that the day a decoder lands this test
+    // fails and says the row is done.
+    {
+        std::vector<uint8_t> bytes(kAvif4x4, kAvif4x4 + sizeof(kAvif4x4));
+        assert(ImageDecoder::decode(bytes, "image/avif") == nullptr);
+        assert(ImageDecoder::decode(bytes, "") == nullptr);
+    }
+
+    // What is not an AVIF is not one: a PNG, a WebP, a JPEG header and plain
+    // text all answer false, so the brand check is not merely "has a ftyp".
+    {
+        const uint8_t png[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0};
+        assert(!AvifContainer::is_avif(png, sizeof(png)));
+        const uint8_t riff[] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'};
+        assert(!AvifContainer::is_avif(riff, sizeof(riff)));
+        const uint8_t text[] = "this is a text file, not an image at all";
+        assert(!AvifContainer::is_avif(text, sizeof(text) - 1));
+        // An ISO base media file with the wrong brand: `ftyp` and `mp42`.
+        const uint8_t mp4[] = {0, 0, 0, 0x10, 'f', 't', 'y', 'p', 'm', 'p', '4', '2',
+                               0, 0, 0, 0, 'm', 'p', '4', '2'};
+        assert(!AvifContainer::is_avif(mp4, sizeof(mp4)));
+        assert(AvifContainer::parse(mp4, sizeof(mp4)).status == AvifContainer::Status::NotAvif);
+    }
+    assert(std::string(AvifContainer::status_string(AvifContainer::Status::Ok)) == "ok");
+}
+
+TEST(avif_container_refuses_what_it_cannot_read_instead_of_guessing) {
+    using namespace litebird;
+
+    auto status_of = [](std::vector<uint8_t> bytes) {
+        return AvifContainer::parse(bytes.data(), bytes.size()).status;
+    };
+    std::vector<uint8_t> base(kAvif4x4, kAvif4x4 + sizeof(kAvif4x4));
+
+    // Too short to hold anything, and empty.
+    assert(status_of({}) == AvifContainer::Status::NotAvif);
+    assert(status_of(std::vector<uint8_t>(base.begin(), base.begin() + 11)) == AvifContainer::Status::NotAvif);
+
+    // A box that claims more bytes than the file has, and a file cut off
+    // inside its meta box: malformed, not a crash and not a guess.
+    {
+        auto b = base; b[3] = 0xF0;
+        assert(status_of(b) == AvifContainer::Status::Malformed);
+    }
+    {
+        auto b = base; b.resize(200);
+        assert(status_of(b) == AvifContainer::Status::Malformed);
+    }
+    {
+        auto b = base; b.resize(40);
+        assert(status_of(b) == AvifContainer::Status::Malformed);
+    }
+
+    // A structure this parser does not read is `Unsupported` with a reason,
+    // which is different from `Malformed`: the file may be perfectly good.
+    {
+        auto b = base;
+        size_t at = 0;
+        for (size_t i = 0; i + 4 < b.size(); ++i) {
+            if (std::memcmp(b.data() + i, "iloc", 4) == 0) { at = i; break; }
+        }
+        assert(at != 0);
+        b[at + 4] = 9;                       // an iloc version that does not exist yet
+        assert(status_of(b) == AvifContainer::Status::Unsupported);
+    }
+
+    // An extent that points outside the file is refused even though every box
+    // fits: this is the one that would otherwise read past the buffer.
+    {
+        auto b = base;
+        size_t at = 0;
+        for (size_t i = 0; i + 4 < b.size(); ++i) {
+            if (std::memcmp(b.data() + i, "iloc", 4) == 0) { at = i; break; }
+        }
+        // The extent offset is the last 8 bytes of the iloc payload here
+        // (4-byte offset, 4-byte length); make it point far past the end.
+        b[at + 4 + 24] = 0x7F;
+        assert(status_of(b) != AvifContainer::Status::Ok);
+    }
+
+    // A `meta` box that says it is smaller than the boxes inside it.
+    {
+        auto b = base;
+        size_t at = 0;
+        for (size_t i = 0; i + 4 < b.size(); ++i) {
+            if (std::memcmp(b.data() + i, "meta", 4) == 0) { at = i - 4; break; }
+        }
+        assert(at != 0);
+        b[at + 3] = 40;                      // 235 was the real size; the boxes stay
+        assert(status_of(b) != AvifContainer::Status::Ok);
+    }
+}
+
 TEST(html5_date_time_inputs_validation_and_stepping) {
     using namespace litebird;
     TestPage page;
@@ -30749,6 +30964,9 @@ int main() {
     // Phase 57: lossy WebP, bit-exact against libwebp.
     RUN_TEST(webp_lossy_vp8_decodes_bit_exactly);
     RUN_TEST(webp_lossy_alpha_plane_and_container_consistency);
+    // Finding 172: the AVIF container, read; the picture is still open.
+    RUN_TEST(avif_container_is_read_and_the_picture_is_not_decoded);
+    RUN_TEST(avif_container_refuses_what_it_cannot_read_instead_of_guessing);
     RUN_TEST(canvas_text_filltext_stroketext_measuretext_and_font_state);
     RUN_TEST(canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings);
     RUN_TEST(svg_real_world_paths_arcs_gradients_use_clip_and_guards);

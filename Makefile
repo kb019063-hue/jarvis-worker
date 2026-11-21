@@ -33,6 +33,7 @@ SRCS = src/common/Color.cpp \
        src/layout/FloatTableLayout.cpp \
        src/render/PaintCommand.cpp \
        src/render/ImageDecoder.cpp \
+       src/render/AvifContainer.cpp \
        src/render/FontRenderer.cpp \
        src/render/JpegDecoder.cpp \
        src/render/GifDecoder.cpp \

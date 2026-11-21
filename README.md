@@ -49,7 +49,7 @@ standard now makes, which is 1,967 of the 1,973.
 | **`delete` in strict code** | The operator is ECMAScript `DeletePropertyOrThrow`: a property that is not configurable answers `false` in sloppy code and is a `TypeError` in strict code, with V8's words (`Cannot delete property 'x' of #<Object>`, `of [object Array]`, `of #<Map>`, …). An array's `length` is now refused at all — it is computed, not stored, and used to answer `true` without removing anything. `delete name` is answered rather than always `false`: a `var` is not deletable, a configurable property of the global object goes, a name that resolves to nothing is `true`, and `this` is `true`; in strict code it is the language's early `SyntaxError`. `Reflect.deleteProperty` keeps answering `false` in both modes (Phase 123, finding 128). Still open: an array index defined by a descriptor keeps no attributes of its own, so deleting one does not throw | `make test`, suite `a_strict_delete_refuses_what_it_cannot_remove` |
 | **Collection's answer, invariants checked** | The collector's answer is checked in-process and through the CLI: unreachable cycles of every shape are reclaimed (self, mutual, closure, self-containing array), a global-kept thread of a graph is untouched while the cyclic pile around it is reclaimed, and the live set stays flat across 24 churn rounds within 16 cells | `make test`, suites `gc_oracle_cycles_are_reclaimed`, `gc_oracle_retention_is_exact`, `gc_oracle_repeated_churn_stays_flat`; `make gc-oracle` |
 | **Automatic GC at safe points** | Per-agent allocation threshold (`kDefaultAutoGcMinThreshold = 8192` cells, growing geometrically as `max(min_threshold, surviving_agent_cells)` after each collection) triggers collection automatically at the existing statement and bytecode safe points without calling `gc()` (Phase 145, finding 150). Peak RSS on `for (var i = 0; i < 400000; i++) o = { a: i }` drops **412.4 → 18.1 MiB** (-95.6%) and 3,000,000 iterations finishes in **2.16 s at 18.0 MiB** (previously >3 GB). Still open: native-capture leaks (`o.b = f.bind(o)`, pending timers), event-loop turn safe points, and incremental/generational collection | `make test`, suites `automatic_gc_threshold_and_geometric_growth`, `automatic_gc_reclaims_churn_without_calling_gc`; `make gc-oracle`; `make verify-gc-stress` |
-| Engine unit tests | 319<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 321<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
@@ -87,7 +87,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 319<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 321<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
 make gc-oracle       # the collector's invariants through the CLI: cycles reclaimed, the live set flat, reached data intact
 make check-numbers   # the numbers above still divide and still count, and every marked figure and floor agrees (tools/ci/check_numbers.py)
 make check-suites    # every suite that runs script begins through TestPage, so two new ones merge cleanly (tools/ci/check_suites.py)
@@ -656,7 +656,7 @@ Litebird implements the complete modern browser rendering pipeline:
 - **Native Image Decoders (`JpegDecoder`, `GifDecoder`, `WebPDecoder`, `Vp8Decoder`, `ImageDecoder`):**
   - Standalone ITU-T T.81 Baseline/Extended/Progressive JPEG decoder (`JpegDecoder`: 4:4:4/4:2:2/4:2:0/4:4:0, Grayscale/YCbCr/RGB/CMYK/YCCK, restart markers, multi-scan progressive refinement).
   - Standalone GIF87a/GIF89a single-frame & animated multi-frame decoder (`GifDecoder`: 2..8-bit LZW, GCT/LCT, 4-pass interlacing, transparency, all 4 disposal methods, loop count).
-  - Standalone lossless WebP decoder (`WebPDecoder`: the RIFF container including `VP8X`, `VP8L`'s Huffman-coded LZ77, meta prefix codes, colour cache, and all four transforms) and, since Phase 57, a standalone lossy decoder (`Vp8Decoder`: a VP8 key frame — boolean coder, token partitions, 16x16/8x8/4x4 intra prediction, IDCT and Walsh–Hadamard, the whole-frame loop filter, fancy chroma upsampling — with the `ALPH` plane in both compression methods and all three spatial filters). Animated WebP is composited too, since Phase 79 (`WebPDecoder::decode_frames()`: `VP8X` canvas, `ANIM` loop count and background, one `ANMF` per frame with its own rectangle, duration, blending and disposal method, every frame handed back whole — `<img>` shows the first, as it does for a GIF). AVIF is still reported by status, not drawn.
+  - Standalone lossless WebP decoder (`WebPDecoder`: the RIFF container including `VP8X`, `VP8L`'s Huffman-coded LZ77, meta prefix codes, colour cache, and all four transforms) and, since Phase 57, a standalone lossy decoder (`Vp8Decoder`: a VP8 key frame — boolean coder, token partitions, 16x16/8x8/4x4 intra prediction, IDCT and Walsh–Hadamard, the whole-frame loop filter, fancy chroma upsampling — with the `ALPH` plane in both compression methods and all three spatial filters). Animated WebP is composited too, since Phase 79 (`WebPDecoder::decode_frames()`: `VP8X` canvas, `ANIM` loop count and background, one `ANMF` per frame with its own rectangle, duration, blending and disposal method, every frame handed back whole — `<img>` shows the first, as it does for a GIF). AVIF is still not drawn, but its container is read since Phase 167 ([`docs/phases/167-the-avif-container-read-and-the-picture-still-open.md`](docs/phases/167-the-avif-container-read-and-the-picture-still-open.md), finding 172): `AvifContainer` walks the ISO base media boxes — `ftyp`, `pitm`, `iloc`, `iinf`, `iprp`/`ipco`/`ipma`, `ispe`, `pixi`, `av1C`, `colr` — bounds-checks every length and offset against its parent, and hands back the primary `av01` item's bytes with its size, bit depths and decoder configuration. The picture itself needs an AV1 decoder, which is not there.
   - `ImageDecoder` for PNG (DEFLATE / uncompressed), Netpbm PPM, BMP, JPEG, GIF and WebP.
 - **Terminal Renderer:** Renders web pages and images directly inside your terminal using 24-bit ANSI Truecolor half-block characters and ASCII borders.
 - **Bitmap Renderer:** Exports 24-bit uncompressed `.bmp` images using an embedded font with anti-aliasing. Zero external GUI or graphics libraries required.
@@ -783,7 +783,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 319<!--metrics:unit_suites/int--> engine test suites
+# Run the 321<!--metrics:unit_suites/int--> engine test suites
 make test
 
 # Check the collector's invariants through the CLI
@@ -854,14 +854,14 @@ make gc-oracle
 make test
 ```
 
-Output (319<!--metrics:unit_suites/int--> suites; the first and last lines shown):
+Output (321<!--metrics:unit_suites/int--> suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 319<!--metrics:unit_suites/int--> engine test suites passed successfully!
+All 321<!--metrics:unit_suites/int--> engine test suites passed successfully!
 ```
 
 ```bash
@@ -1021,7 +1021,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 319/319<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 321/321<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++
@@ -1133,7 +1133,7 @@ dependencies:
 ./build/litebird --gui --port=8080
 ```
 
-Still open: `<iframe>` nested documents, lossy `VP8` and AVIF images,
+Still open: `<iframe>` nested documents, the AV1 decoder an AVIF picture needs,
 `@font-face`/WOFF2 and HarfBuzz/bidi shaping, CORS preflight `OPTIONS`, and
 `ArrayBuffer`. Full details are in `ARCHITECTURE.md`, Phase 36, and `AUDIT.md`,
 finding 44.
@@ -1448,8 +1448,8 @@ one `.rgba` per composited frame:
 [`docs/phases/79-animated-webp-frames-on-a-canvas.md`](docs/phases/79-animated-webp-frames-on-a-canvas.md)
 says how the compositor decides what to blend over what, and
 [`docs/findings/85-animated-webp-was-refused-by-a-decoder-that-could-have-drawn-it.md`](docs/findings/85-animated-webp-was-refused-by-a-decoder-that-could-have-drawn-it.md)
-what it cost to get right. AVIF is still refused with a status rather than
-approximated: [`docs/findings/63-lossy-webp-vp8-refused.md`](docs/findings/63-lossy-webp-vp8-refused.md)
+what it cost to get right. AVIF's structure is read since Phase 167 and its
+picture is still refused rather than approximated: [`docs/findings/63-lossy-webp-vp8-refused.md`](docs/findings/63-lossy-webp-vp8-refused.md)
 says what was found there and
 [`docs/phases/57-lossy-webp-vp8-key-frame.md`](docs/phases/57-lossy-webp-vp8-key-frame.md)
 how the lossy decoder is built.

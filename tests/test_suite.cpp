@@ -6169,6 +6169,121 @@ void test_html5_canvas_2d_context() {
     assert(canvas_box->image == img);
 }
 
+// --- Phase 144: HTMLCanvasElement.toDataURL() -----------------------------
+
+std::string canvas_test_base64_decode(const std::string& text) {
+    static const std::string kAlphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    unsigned accumulator = 0;
+    int bits = 0;
+    for (char c : text) {
+        if (c == '=') break;
+        const std::size_t index = kAlphabet.find(c);
+        if (index == std::string::npos) continue;
+        accumulator = (accumulator << 6) | static_cast<unsigned>(index);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out += static_cast<char>((accumulator >> bits) & 0xFFu);
+        }
+    }
+    return out;
+}
+
+std::shared_ptr<ImageData> canvas_test_decode_data_url(const std::string& url, const char* prefix) {
+    const std::string head(prefix);
+    if (url.rfind(head, 0) != 0) return nullptr;
+    const std::string bytes = canvas_test_base64_decode(url.substr(head.size()));
+    return ImageDecoder::decode_png(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+}
+
+TEST(canvas_to_data_url_is_the_png_it_painted) {
+    using namespace litebird;
+    const std::string html = R"(
+        <body>
+            <canvas id="c" width="3" height="2"></canvas>
+            <canvas id="blank" width="2" height="1"></canvas>
+            <canvas id="zero" width="0" height="4"></canvas>
+        </body>
+    )";
+    auto doc = HtmlParser::parse(html);
+    JsInterpreter interp(doc);
+
+    interp.eval(R"JS(
+        var c = document.getElementById('c');
+        var g = c.getContext('2d');
+        g.fillStyle = '#ff0000'; g.fillRect(0, 0, 1, 1);
+        g.fillStyle = '#00ff00'; g.fillRect(1, 0, 1, 1);
+        g.fillStyle = '#0000ff'; g.fillRect(2, 1, 1, 1);
+        var png = c.toDataURL();
+    )JS");
+
+    const std::string prefix = "data:image/png;base64,";
+    const std::string url = interp.eval("png").to_string();
+    assert(url.rfind(prefix, 0) == 0);
+
+    // The PNG signature, and the PNG's own header, before any decoder is asked.
+    const std::string bytes = canvas_test_base64_decode(url.substr(prefix.size()));
+    assert(bytes.size() > 33);
+    assert(bytes.compare(0, 8, std::string("\x89PNG\r\n\x1a\n", 8)) == 0);
+    assert(bytes.compare(12, 4, "IHDR") == 0);
+    assert(static_cast<unsigned char>(bytes[16]) == 0 && static_cast<unsigned char>(bytes[17]) == 0 &&
+           static_cast<unsigned char>(bytes[18]) == 0 && static_cast<unsigned char>(bytes[19]) == 3);   // width 3
+    assert(static_cast<unsigned char>(bytes[20]) == 0 && static_cast<unsigned char>(bytes[21]) == 0 &&
+           static_cast<unsigned char>(bytes[22]) == 0 && static_cast<unsigned char>(bytes[23]) == 2);   // height 2
+    assert(static_cast<unsigned char>(bytes[24]) == 8);   // 8 bits a channel
+    assert(static_cast<unsigned char>(bytes[25]) == 6);   // RGBA
+
+    // The pixels are the pixels the canvas painted, exactly: three opaque and
+    // three transparent, none of them a resampling of the others.
+    auto image = ImageDecoder::decode_png(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+    assert(image && image->width == 3 && image->height == 2);
+    assert(image->get_pixel(0, 0) == 0xFFFF0000u);
+    assert(image->get_pixel(1, 0) == 0xFF00FF00u);
+    assert(image->get_pixel(2, 0) == 0x00000000u);
+    assert(image->get_pixel(0, 1) == 0x00000000u);
+    assert(image->get_pixel(1, 1) == 0x00000000u);
+    assert(image->get_pixel(2, 1) == 0xFF0000FFu);
+
+    // The same bitmap twice is the same URL; the quality argument does not
+    // reach a PNG, and the type's essence is case-insensitive.
+    assert(interp.eval("c.toDataURL() === png").is_truthy());
+    assert(interp.eval("c.toDataURL('image/png') === png").is_truthy());
+    assert(interp.eval("c.toDataURL('image/png', 0.2) === png").is_truthy());
+    assert(interp.eval("c.toDataURL('IMAGE/PNG') === png").is_truthy());
+    assert(interp.eval("c.toDataURL(' image/png ') === png").is_truthy());
+
+    // The types this engine cannot encode say so, as the standard asks.
+    for (const char* type : {"image/jpeg", "image/webp", "image/gif", "image", "not a mime type", ""}) {
+        const JsValue answer = interp.eval(std::string("c.toDataURL('") + type + "')");
+        assert(answer.to_string() == "data:,");
+    }
+    assert(interp.eval("c.toDataURL(null)").to_string() == "data:,");
+
+    // A canvas that never had a context still has the bitmap the standard
+    // gives it: its size, transparent, with no context created by asking.
+    const std::string blank_url = interp.eval("document.getElementById('blank').toDataURL()").to_string();
+    auto blank = canvas_test_decode_data_url(blank_url, prefix.c_str());
+    assert(blank && blank->width == 2 && blank->height == 1 && blank->get_pixel(0, 0) == 0u);
+    assert(doc->get_element_by_id("blank")->canvas_context() == nullptr);
+
+    // A zero dimension is not an image, and is not silently made 1 pixel.
+    assert(interp.eval("document.getElementById('zero').toDataURL()").to_string() == "data:,");
+
+    // Over the raster budget a canvas keeps a one-pixel store that drawing
+    // does nothing to (RasterBudget.hpp). That is not the image the element
+    // says it is, and serializing it as a 1x1 PNG would be a lie.
+    interp.eval("var big = document.createElement('canvas'); big.width = 20000; big.height = 2; big.getContext('2d');");
+    assert(interp.eval("big.toDataURL()").to_string() == "data:,");
+
+    // Serializing reads the bitmap; it does not clear it.
+    assert(doc->get_element_by_id("c")->canvas_context()->image_data()->get_pixel(0, 0) == 0xFFFF0000u);
+
+    std::printf("      [canvas] toDataURL: 3x2 PNG, %zu bytes, six pixels exact; "
+                "jpeg/webp/gif/malformed answer data:,\n", bytes.size());
+}
+
 void test_css_media_queries() {
     using namespace litebird;
     std::string css = R"(
@@ -29062,6 +29177,7 @@ int main() {
     RUN_TEST(js_template_literals_and_arrow_functions);
     RUN_TEST(web_storage_and_cookies);
     RUN_TEST(html5_canvas_2d_context);
+    RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
     RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);

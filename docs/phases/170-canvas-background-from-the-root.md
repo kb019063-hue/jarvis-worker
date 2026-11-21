@@ -41,8 +41,14 @@ An iframe renders to its own transparent bitmap and is composited as an image,
 so its color and the parent's color meet once and cannot escape the frame.
 Bitmap source-over blending now preserves destination alpha, and rounds opaque
 composites to the nearest channel value instead of truncating them. The terminal
-also composites translucent colors, and no longer clamps a wholly scrolled-off
-rectangle back onto an edge cell.
+also composites translucent colors, respects clips on rectangles and images,
+no longer clamps a wholly scrolled-off rectangle or iframe onto an edge cell,
+and treats right and bottom edges as exclusive: a 20×20 body on a 10×20 cell
+grid paints two cells over the root canvas instead of six. A partially scrolled
+image is sampled from the visible part rather than its original left edge.
+On this compiler, `sizeof(LayoutBox)` rises
+from 344 to 352 bytes for the canvas metadata; the existing `<400` byte unit
+assertion remains in force.
 
 The user-agent correction is deliberately at **UA origin**, not an author rule
 or a computed-color heuristic. `StyleResolver` appends a transparent body
@@ -55,11 +61,11 @@ the normalizer together rather than retaining two contradictory UA rules.
 ## 3. How it was verified
 
 The base binary was built from `5f30f48`. The after tree includes main through
-#207; its extra `Object.assign` suite is not a result of this phase.
+#202; its `Object.assign` and `TextDecoder` suites are not results of this phase.
 
 | Check | Before | After |
 | :--- | :--- | :--- |
-| `make test` | 319 engine suites, 114 cross-origin checks | 323 engine suites, 114 cross-origin checks |
+| `make test` | 319 engine suites, 114 cross-origin checks | 324 engine suites, 114 cross-origin checks |
 | Body-origin corpus, with **all** known markers removed | 7/40 pages | 34/40 pages; 28 newly pass, 1 formerly passed by accident and now fails |
 | `make render-conformance`, original corpus | 36/38 pages, 2 known | 36/38 pages, 2 known |
 | `make render-conformance`, body-origin corpus | 5/7 pages, 2 known on the old corpus | 34/40 pages, 6 known; none unlisted |
@@ -79,7 +85,13 @@ the two recorded failures retain their outcomes.
 The three new unit suites check the selected canvas and unchanged computed
 style, document/subtree scope, transparent-target alpha and clipping, terminal
 background and scrolling, and `BrowserShell` scrolling, relayout and resize.
-Examples, at 800×600 (all pixels are RGB):
+Other checks after merging #202: `make conformance` 1973/1973,
+`make dom-conformance` 678/678 (everyday 68/68), `make url-conformance`
+1188/1188, `make xml-conformance` 1718/1718, and `make wpt` 9567/9824
+(257 listed failures, none unlisted). `make diff-trees` agrees with corrected
+parse5 on 6,000 generated pages; `make diff-xml` reports no disagreement on
+4,000 generated documents and 3,000 round trips. Examples, at 800×600 (all
+pixels are RGB):
 
 | Page | Outside body | Inside body |
 | :--- | :--- | :--- |

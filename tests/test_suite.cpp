@@ -30076,6 +30076,71 @@ TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
     assert(count == 12);
     assert(ansi.find("\033[48;2;255;0;0m") == std::string::npos);
 
+    // A body box over a different root canvas stops at exclusive cell edges.
+    // Before this correction a 20-by-20 box on a 10-by-20 grid colored six
+    // cells instead of two, hiding the canvas in the following row and column.
+    auto bounded_doc = HtmlParser::parse(
+        R"(<!doctype html><html style="background:#0000ff"><body style="margin:0;width:20px;height:20px;background:#ff0000"></body></html>)");
+    auto bounded_list = DisplayList::build(LayoutTree::build(bounded_doc, resolver, 40, 60));
+    TerminalRenderer bounded_terminal(4, 3, 10, 20);
+    const auto bounded_ansi = bounded_terminal.to_ansi_string(bounded_list);
+    const std::string red_bg = "\033[48;2;255;0;0m";
+    count = 0; pos = 0;
+    while ((pos = bounded_ansi.find(red_bg, pos)) != std::string::npos) { ++count; pos += red_bg.size(); }
+    assert(count == 2);
+    count = 0; pos = 0;
+    while ((pos = bounded_ansi.find(blue, pos)) != std::string::npos) { ++count; pos += blue.size(); }
+    assert(count == 10);
+
+    // A translucent iframe bitmap is a terminal image: only the two covered
+    // cells should blend with the blue canvas, and a scrolled-off image must
+    // not be clamped back onto row zero. A surrounding clip also confines it.
+    auto solid = std::make_shared<ImageData>();
+    solid->width = 20;
+    solid->height = 20;
+    solid->pixels.assign(400, Color(255, 0, 0, 128).to_argb());
+    DisplayList frame_list;
+    frame_list.add(DrawCanvasCommand{Color::blue()});
+    frame_list.add(DrawImageCommand{Rect(0, 0, 20, 20), solid});
+    const std::string purple = "\033[48;2;128;0;127m";
+    TerminalRenderer frame_terminal(4, 3, 10, 20);
+    const auto frame_ansi = frame_terminal.to_ansi_string(frame_list);
+    count = 0; pos = 0;
+    while ((pos = frame_ansi.find(purple, pos)) != std::string::npos) { ++count; pos += purple.size(); }
+    assert(count == 2);
+    TerminalRenderer scrolled_frame(4, 3, 10, 20);
+    scrolled_frame.set_scroll(0, 100);
+    const auto scrolled_frame_ansi = scrolled_frame.to_ansi_string(frame_list);
+    assert(scrolled_frame_ansi.find(purple) == std::string::npos);
+
+    auto stripes = std::make_shared<ImageData>();
+    stripes->width = 20;
+    stripes->height = 20;
+    for (int y = 0; y < 20; ++y) {
+        for (int x = 0; x < 20; ++x) {
+            stripes->pixels.push_back((x < 10 ? Color::red() : Color(0, 255, 0)).to_argb());
+        }
+    }
+    DisplayList stripe_list;
+    stripe_list.add(DrawCanvasCommand{Color::blue()});
+    stripe_list.add(DrawImageCommand{Rect(0, 0, 20, 20), stripes});
+    TerminalRenderer scrolled_stripes(4, 3, 10, 20);
+    scrolled_stripes.set_scroll(10, 0);
+    const auto stripe_ansi = scrolled_stripes.to_ansi_string(stripe_list);
+    assert(stripe_ansi.find("\033[48;2;0;255;0m") != std::string::npos);
+    assert(stripe_ansi.find(red_bg) == std::string::npos);
+
+    DisplayList clipped_frame_list;
+    clipped_frame_list.add(DrawCanvasCommand{Color::blue()});
+    clipped_frame_list.add(PushClipCommand{Rect(0, 0, 10, 20)});
+    clipped_frame_list.add(DrawImageCommand{Rect(0, 0, 20, 20), solid});
+    clipped_frame_list.add(PopClipCommand{});
+    TerminalRenderer clipped_frame(4, 3, 10, 20);
+    const auto clipped_frame_ansi = clipped_frame.to_ansi_string(clipped_frame_list);
+    count = 0; pos = 0;
+    while ((pos = clipped_frame_ansi.find(purple, pos)) != std::string::npos) { ++count; pos += purple.size(); }
+    assert(count == 1);
+
     DisplayList terminal_clip;
     terminal_clip.add(PushClipCommand{Rect(10, 20, 20, 20)});
     terminal_clip.add(DrawCanvasCommand{Color::red()});

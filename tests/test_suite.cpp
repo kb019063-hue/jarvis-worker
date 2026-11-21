@@ -30531,16 +30531,24 @@ TEST(websocket_permessage_deflate_rfc7692) {
 
     // 2. RFC 7692 §7.1 Sec-WebSocket-Extensions negotiation matrix (accept & fail-closed).
     auto test_negotiation = [](const std::string& ext_header, bool expect_open, const std::string& expect_ext) {
-        std::string observed_req;
-        std::atomic<bool> release{false};
-        auto srv = WebSocketObject::start_loopback_server([&](int fd) {
+        struct NegState {
+            std::mutex mu;
+            std::string observed_req;
+            std::atomic<bool> release{false};
+            std::atomic<bool> done{false};
+        };
+        auto st = std::make_shared<NegState>();
+        auto srv = WebSocketObject::start_loopback_server([st, ext_header](int fd) {
             std::string req;
             char ch = 0;
             while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
                 req += ch;
                 if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
             }
-            observed_req = req;
+            {
+                std::lock_guard<std::mutex> lock(st->mu);
+                st->observed_req = req;
+            }
             const std::string key_hdr = "Sec-WebSocket-Key: ";
             size_t k = req.find(key_hdr);
             std::string key = k == std::string::npos ? "" : req.substr(k + key_hdr.size(), req.find("\r\n", k) - k - key_hdr.size());
@@ -30555,9 +30563,10 @@ TEST(websocket_permessage_deflate_rfc7692) {
             resp += "\r\n";
             (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
             auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-            while (!release.load() && std::chrono::steady_clock::now() < deadline) {
+            while (!st->release.load() && std::chrono::steady_clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(1));
             }
+            st->done.store(true);
         });
         assert(srv != nullptr);
         auto ws = std::make_shared<WebSocketObject>("ws://127.0.0.1:" + std::to_string(srv->port) + "/neg");
@@ -30570,8 +30579,17 @@ TEST(websocket_permessage_deflate_rfc7692) {
         const bool opened = ws->ready_state() == WebSocketReadyState::Open;
         const std::string got_ext = ws->extensions();
         if (opened) ws->close();
-        release.store(true);
+        st->release.store(true);
         ws->join_for_shutdown();
+        auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!st->done.load() && std::chrono::steady_clock::now() < done_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::string observed_req;
+        {
+            std::lock_guard<std::mutex> lock(st->mu);
+            observed_req = st->observed_req;
+        }
         assert(observed_req.find("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n") != std::string::npos);
         assert(opened == expect_open);
         if (expect_open) assert(got_ext == expect_ext);
@@ -30663,9 +30681,13 @@ TEST(websocket_permessage_deflate_rfc7692) {
         return true;
     };
 
-    auto test_protocol_error = [&](bool negotiate_pmd, int scenario, int expect_close_code) {
-        std::atomic<int> peer_got_code{0};
-        auto srv = WebSocketObject::start_loopback_server([&](int fd) {
+    auto test_protocol_error = [send_srv_frame, recv_client_frame](bool negotiate_pmd, int scenario, int expect_close_code) {
+        struct ErrState {
+            std::atomic<int> peer_got_code{0};
+            std::atomic<bool> done{false};
+        };
+        auto st = std::make_shared<ErrState>();
+        auto srv = WebSocketObject::start_loopback_server([st, negotiate_pmd, scenario, send_srv_frame, recv_client_frame](int fd) {
             std::string req;
             char ch = 0;
             while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
@@ -30710,9 +30732,10 @@ TEST(websocket_permessage_deflate_rfc7692) {
             bool rsv1 = false, masked = false;
             std::vector<uint8_t> pl;
             if (recv_client_frame(fd, op, rsv1, masked, pl) && op == 0x08u && pl.size() >= 2) {
-                peer_got_code.store((static_cast<int>(pl[0]) << 8) | pl[1]);
+                st->peer_got_code.store((static_cast<int>(pl[0]) << 8) | pl[1]);
                 send_srv_frame(fd, 0x08u, true, false, pl.data(), 2);
             }
+            st->done.store(true);
         });
         assert(srv != nullptr);
         auto ws = std::make_shared<WebSocketObject>("ws://127.0.0.1:" + std::to_string(srv->port) + "/err");
@@ -30723,7 +30746,11 @@ TEST(websocket_permessage_deflate_rfc7692) {
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         ws->join_for_shutdown();
-        assert(peer_got_code.load() == expect_close_code);
+        auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!st->done.load() && std::chrono::steady_clock::now() < done_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        assert(st->peer_got_code.load() == expect_close_code);
     };
 
     test_protocol_error(false, 0, 1002);
@@ -30743,10 +30770,14 @@ TEST(websocket_permessage_deflate_rfc7692) {
         size_t wire_len{0};
         std::string plain;
     };
-    std::mutex wire_mu;
-    std::vector<WireRec> wire_log;
+    struct WireState {
+        std::mutex mu;
+        std::vector<WireRec> log;
+        std::atomic<bool> done{false};
+    };
+    auto wire = std::make_shared<WireState>();
 
-    auto srv = WebSocketObject::start_loopback_server([&](int fd) {
+    auto srv = WebSocketObject::start_loopback_server([wire, send_srv_frame, recv_client_frame](int fd) {
         std::string req;
         char ch = 0;
         while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
@@ -30791,8 +30822,8 @@ TEST(websocket_permessage_deflate_rfc7692) {
             std::vector<uint8_t> pl;
             if (!recv_client_frame(fd, op, rsv1, masked, pl)) break;
             if (op == 0x0Au) { // Pong
-                std::lock_guard<std::mutex> lock(wire_mu);
-                wire_log.push_back(WireRec{op, rsv1, masked, pl.size(), std::string(pl.begin(), pl.end())});
+                std::lock_guard<std::mutex> lock(wire->mu);
+                wire->log.push_back(WireRec{op, rsv1, masked, pl.size(), std::string(pl.begin(), pl.end())});
                 continue;
             }
             if (op == 0x08u) {
@@ -30806,13 +30837,14 @@ TEST(websocket_permessage_deflate_rfc7692) {
                 plain_bytes = pl;
             }
             {
-                std::lock_guard<std::mutex> lock(wire_mu);
-                wire_log.push_back(WireRec{op, rsv1, masked, pl.size(), std::string(plain_bytes.begin(), plain_bytes.end())});
+                std::lock_guard<std::mutex> lock(wire->mu);
+                wire->log.push_back(WireRec{op, rsv1, masked, pl.size(), std::string(plain_bytes.begin(), plain_bytes.end())});
             }
             std::vector<uint8_t> reply_c;
             srv_def.compress_message(plain_bytes.data(), plain_bytes.size(), reply_c);
             send_srv_frame(fd, op, true, true, reply_c.data(), reply_c.size());
         }
+        wire->done.store(true);
     });
     assert(srv != nullptr);
 
@@ -30860,11 +30892,15 @@ TEST(websocket_permessage_deflate_rfc7692) {
            "B:12:0,255,2|"
            "C:1000:true");
 
-    std::lock_guard<std::mutex> lock(wire_mu);
+    auto wire_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!wire->done.load() && std::chrono::steady_clock::now() < wire_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::lock_guard<std::mutex> lock(wire->mu);
     // Find the 3 data frames + 1 pong frame recorded on the wire.
     std::vector<WireRec> data_recs;
     bool saw_pong_rsv0 = false;
-    for (const auto& r : wire_log) {
+    for (const auto& r : wire->log) {
         assert(r.masked);
         if (r.opcode == 0x0Au && !r.rsv1 && r.plain == "ok") saw_pong_rsv0 = true;
         if (r.opcode == 0x01u || r.opcode == 0x02u) data_recs.push_back(r);

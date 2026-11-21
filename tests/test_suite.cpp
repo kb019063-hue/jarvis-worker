@@ -6169,6 +6169,121 @@ void test_html5_canvas_2d_context() {
     assert(canvas_box->image == img);
 }
 
+// --- Phase 144: HTMLCanvasElement.toDataURL() -----------------------------
+
+std::string canvas_test_base64_decode(const std::string& text) {
+    static const std::string kAlphabet =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    unsigned accumulator = 0;
+    int bits = 0;
+    for (char c : text) {
+        if (c == '=') break;
+        const std::size_t index = kAlphabet.find(c);
+        if (index == std::string::npos) continue;
+        accumulator = (accumulator << 6) | static_cast<unsigned>(index);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out += static_cast<char>((accumulator >> bits) & 0xFFu);
+        }
+    }
+    return out;
+}
+
+std::shared_ptr<ImageData> canvas_test_decode_data_url(const std::string& url, const char* prefix) {
+    const std::string head(prefix);
+    if (url.rfind(head, 0) != 0) return nullptr;
+    const std::string bytes = canvas_test_base64_decode(url.substr(head.size()));
+    return ImageDecoder::decode_png(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+}
+
+TEST(canvas_to_data_url_is_the_png_it_painted) {
+    using namespace litebird;
+    const std::string html = R"(
+        <body>
+            <canvas id="c" width="3" height="2"></canvas>
+            <canvas id="blank" width="2" height="1"></canvas>
+            <canvas id="zero" width="0" height="4"></canvas>
+        </body>
+    )";
+    auto doc = HtmlParser::parse(html);
+    JsInterpreter interp(doc);
+
+    interp.eval(R"JS(
+        var c = document.getElementById('c');
+        var g = c.getContext('2d');
+        g.fillStyle = '#ff0000'; g.fillRect(0, 0, 1, 1);
+        g.fillStyle = '#00ff00'; g.fillRect(1, 0, 1, 1);
+        g.fillStyle = '#0000ff'; g.fillRect(2, 1, 1, 1);
+        var png = c.toDataURL();
+    )JS");
+
+    const std::string prefix = "data:image/png;base64,";
+    const std::string url = interp.eval("png").to_string();
+    assert(url.rfind(prefix, 0) == 0);
+
+    // The PNG signature, and the PNG's own header, before any decoder is asked.
+    const std::string bytes = canvas_test_base64_decode(url.substr(prefix.size()));
+    assert(bytes.size() > 33);
+    assert(bytes.compare(0, 8, std::string("\x89PNG\r\n\x1a\n", 8)) == 0);
+    assert(bytes.compare(12, 4, "IHDR") == 0);
+    assert(static_cast<unsigned char>(bytes[16]) == 0 && static_cast<unsigned char>(bytes[17]) == 0 &&
+           static_cast<unsigned char>(bytes[18]) == 0 && static_cast<unsigned char>(bytes[19]) == 3);   // width 3
+    assert(static_cast<unsigned char>(bytes[20]) == 0 && static_cast<unsigned char>(bytes[21]) == 0 &&
+           static_cast<unsigned char>(bytes[22]) == 0 && static_cast<unsigned char>(bytes[23]) == 2);   // height 2
+    assert(static_cast<unsigned char>(bytes[24]) == 8);   // 8 bits a channel
+    assert(static_cast<unsigned char>(bytes[25]) == 6);   // RGBA
+
+    // The pixels are the pixels the canvas painted, exactly: three opaque and
+    // three transparent, none of them a resampling of the others.
+    auto image = ImageDecoder::decode_png(reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+    assert(image && image->width == 3 && image->height == 2);
+    assert(image->get_pixel(0, 0) == 0xFFFF0000u);
+    assert(image->get_pixel(1, 0) == 0xFF00FF00u);
+    assert(image->get_pixel(2, 0) == 0x00000000u);
+    assert(image->get_pixel(0, 1) == 0x00000000u);
+    assert(image->get_pixel(1, 1) == 0x00000000u);
+    assert(image->get_pixel(2, 1) == 0xFF0000FFu);
+
+    // The same bitmap twice is the same URL; the quality argument does not
+    // reach a PNG, and the type's essence is case-insensitive.
+    assert(interp.eval("c.toDataURL() === png").is_truthy());
+    assert(interp.eval("c.toDataURL('image/png') === png").is_truthy());
+    assert(interp.eval("c.toDataURL('image/png', 0.2) === png").is_truthy());
+    assert(interp.eval("c.toDataURL('IMAGE/PNG') === png").is_truthy());
+    assert(interp.eval("c.toDataURL(' image/png ') === png").is_truthy());
+
+    // The types this engine cannot encode say so, as the standard asks.
+    for (const char* type : {"image/jpeg", "image/webp", "image/gif", "image", "not a mime type", ""}) {
+        const JsValue answer = interp.eval(std::string("c.toDataURL('") + type + "')");
+        assert(answer.to_string() == "data:,");
+    }
+    assert(interp.eval("c.toDataURL(null)").to_string() == "data:,");
+
+    // A canvas that never had a context still has the bitmap the standard
+    // gives it: its size, transparent, with no context created by asking.
+    const std::string blank_url = interp.eval("document.getElementById('blank').toDataURL()").to_string();
+    auto blank = canvas_test_decode_data_url(blank_url, prefix.c_str());
+    assert(blank && blank->width == 2 && blank->height == 1 && blank->get_pixel(0, 0) == 0u);
+    assert(doc->get_element_by_id("blank")->canvas_context() == nullptr);
+
+    // A zero dimension is not an image, and is not silently made 1 pixel.
+    assert(interp.eval("document.getElementById('zero').toDataURL()").to_string() == "data:,");
+
+    // Over the raster budget a canvas keeps a one-pixel store that drawing
+    // does nothing to (RasterBudget.hpp). That is not the image the element
+    // says it is, and serializing it as a 1x1 PNG would be a lie.
+    interp.eval("var big = document.createElement('canvas'); big.width = 20000; big.height = 2; big.getContext('2d');");
+    assert(interp.eval("big.toDataURL()").to_string() == "data:,");
+
+    // Serializing reads the bitmap; it does not clear it.
+    assert(doc->get_element_by_id("c")->canvas_context()->image_data()->get_pixel(0, 0) == 0xFFFF0000u);
+
+    std::printf("      [canvas] toDataURL: 3x2 PNG, %zu bytes, six pixels exact; "
+                "jpeg/webp/gif/malformed answer data:,\n", bytes.size());
+}
+
 void test_css_media_queries() {
     using namespace litebird;
     std::string css = R"(
@@ -7202,6 +7317,19 @@ TEST(fetch_api_and_headers) {
         const resStatus = resp.status;
         const resHeader = resp.headers.get("content-type");
 
+        const binaryText = "A\u0000\u00e9";
+        function binarySummary(buffer) {
+            const bytes = new Uint8Array(buffer);
+            return (buffer instanceof ArrayBuffer) + ":" + buffer.byteLength + ":" +
+                bytes[0] + "," + bytes[1] + "," + bytes[2] + "," + bytes[3];
+        }
+        let responseBinary = "";
+        let fetchedBinary = "";
+        new Response(binaryText).arrayBuffer().then((buffer) => { responseBinary = binarySummary(buffer); });
+        fetch("data:application/octet-stream;base64,QQDDqQ==")
+            .then((res) => res.arrayBuffer())
+            .then((buffer) => { fetchedBinary = binarySummary(buffer); });
+
         let fetchedJsonVal = "";
         fetch("data:application/json;base64,eyJoZWxsbyI6IndvcmxkIn0=").then((res) => {
             return res.json();
@@ -7223,6 +7351,8 @@ TEST(fetch_api_and_headers) {
     assert(js.global_env()->get("resHeader").to_string() == "application/json");
 
     assert(js.global_env()->get("fetchedJsonVal").to_string() == "world");
+    assert(js.global_env()->get("responseBinary").to_string() == "true:4:65,0,195,169");
+    assert(js.global_env()->get("fetchedBinary").to_string() == "true:4:65,0,195,169");
 }
 
 TEST(url_and_url_search_params) {
@@ -11092,8 +11222,10 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
     assert(S("try { get(secret); 'read' } catch (e) { e.name }") == "NetworkError");
     assert(S("try { get('http://127.0.0.1:9/'); 'read' } catch (e) { e.name }") == "NetworkError");
 
-    // 9. There is no ArrayBuffer in the engine: that response is null.
-    js.eval("later('arraybuffer', 'data:text/plain,abc', function (x) { x.responseType = 'arraybuffer'; }, function (x) { return String(x.response) + ' ' + x.status; });");
+    // 9. A binary response is an ArrayBuffer containing the original bytes.
+    js.eval("later('arraybuffer', 'data:text/plain,abc', function (x) { x.responseType = 'arraybuffer'; },"
+            "function (x) { return String(x.response instanceof ArrayBuffer) + ' ' + x.response.byteLength + ' ' +"
+            "new Uint8Array(x.response).join(',') + ' ' + x.status; });");
 
     // 10. The XML parser's limits hold here as they do for DOMParser: a
     //     document that expands without end gives no document, at once.
@@ -11113,7 +11245,17 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
                          "x.responseXML.documentElement.childNodes.length + ' ' + x.responseText.length + ' ' + (Date.now() - t0 < ") +
              big_xhr_budget + ")") == "200000 2800007 true");
 
+    js.eval(R"JS(
+        var blobBinary = '';
+        new Blob(["A\u0000\u00e9"]).arrayBuffer().then(function (buffer) {
+            var bytes = new Uint8Array(buffer);
+            blobBinary = (buffer instanceof ArrayBuffer) + ':' + buffer.byteLength + ':' +
+                bytes[0] + ',' + bytes[1] + ',' + bytes[2] + ',' + bytes[3];
+        });
+    )JS");
+
     settle();
+    assert(S("blobBinary") == "true:4:65,0,195,169");
     assert(S("results['text type']") == "state 1, loadstart, state 2, state 3, progress 51/0, state 4, load 51/0, loadend | 65533");
     assert(S("results.aborted + ' / ' + requests.aborted.seen.length + ' ' + requests.aborted.x.readyState") ==
            "state 1, loadstart, state 2, state 3, state 4, abort, loadend / 7 0");
@@ -11129,7 +11271,7 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
     assert(S("results.blob") == failed + "0");
     assert(S("results.about") == failed + "0");
     assert(S("results.javascript") == failed + "0 undefined");
-    assert(S("results.arraybuffer") == "state 1, loadstart, state 2, state 3, progress 3/0, state 4, load 3/0, loadend | null 200");
+    assert(S("results.arraybuffer") == "state 1, loadstart, state 2, state 3, progress 3/0, state 4, load 3/0, loadend | true 3 97,98,99 200");
     std::remove(secret_path.c_str());
 }
 
@@ -26846,6 +26988,139 @@ TEST(bidi_reorders_hebrew_and_arabic_runs) {
     }
 }
 
+TEST(array_destructuring_reads_the_place_not_the_vector) {
+    using namespace litebird;
+    // Phase 136, finding 141. `IterationCursor` is what a pattern asks for its
+    // source (Phase 102): a string it walks by code point, an array whose
+    // iterator is still the installed one it reads straight out of
+    // `array_elements`, and anything else by the protocol. Reading the vector
+    // is reading the storage, not the array: since Phase 108 a place can be an
+    // accessor that `Object.defineProperty` put there, and since Phase 98 a
+    // place nothing is written in can be a property of `Array.prototype`. So
+    // `var [x] = a` bound `undefined` where `for (x of a)` and `[...a]` bound
+    // what the getter answered in the same engine.
+    //
+    // The element path now reads each place as `a[i]` does (`js_array_get`),
+    // which is what the array's own iterator yields for the place. An element
+    // costs what it did; a hole asks the array's own map and then the chain,
+    // and `js_array_holes_read_undefined` answers for a chain with no index on
+    // it without looking anything up.
+    //
+    // Every case was run through Node.js first, and the expected text of each
+    // is what it printed.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    auto none_failed = [&]() {
+        const std::string failed = js.eval("failures.join('\\n')").to_string();
+        if (!failed.empty()) std::cerr << failed << "\n";
+        return failed.empty();
+    };
+    js.eval(R"JS(
+var failures = [];
+function check(what, f, want) {
+    var got;
+    try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+    if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+}
+check('an accessor at the first place is asked, and once per read', function () {
+    var a = [1, 2, 3];
+    var hits = 0;
+    Object.defineProperty(a, '0', { get: function () { hits++; return 'g'; }, configurable: true });
+    var [x, y, z] = a;
+    return [x, y, z, hits];
+}, '["g",2,3,1]');
+check('the rest of a pattern asks the accessor too', function () {
+    var a = [1, 2, 3];
+    Object.defineProperty(a, '1', { get: function () { return 'g'; }, configurable: true });
+    var [x, ...rest] = a;
+    return [x, rest];
+}, '[1,["g",3]]');
+check('an accessor at the last place of a rest element', function () {
+    var a = [1, 2, 3];
+    var hits = 0;
+    Object.defineProperty(a, '2', { get: function () { hits++; return 'g'; }, configurable: true });
+    var [x, ...rest] = a;
+    var [p, q, r] = a;
+    return [x, rest, p, q, r, hits];
+}, '[1,[2,"g"],1,2,"g",2]');
+check('Array.prototype fills an elided place', function () {
+    var saved = Array.prototype[1];
+    Array.prototype[1] = 'p';
+    var [x, y, z] = [1, , 3];
+    Array.prototype[1] = saved;
+    return [x, y, z];
+}, '[1,"p",3]');
+check('the prototype getter is asked once per place', function () {
+    var hits = 0;
+    Object.defineProperty(Array.prototype, '1', { get: function () { hits++; return 'p'; }, configurable: true });
+    var [x, y, z] = [1, , 3];
+    var [p, q] = [1, , 3];
+    delete Array.prototype[1];
+    return [x, y, z, p, q, hits];
+}, '[1,"p",3,1,"p",2]');
+check('a place nothing answers for is undefined, and not there', function () {
+    var a = [1, , 3];
+    var [x, y, z] = a;
+    return [x, y, z, y === undefined, 1 in a, a.length];
+}, '[1,null,3,true,false,3]');
+check('a place past the end is undefined', function () {
+    var a = [1, 2];
+    a.length = 4;
+    var [p, q, r, s] = a;
+    return [p, q, r, s];
+}, '[1,2,null,null]');
+check('a nested pattern in an accessor place', function () {
+    var a = [[1], [2]];
+    Object.defineProperty(a, '1', { get: function () { return [9, 8]; }, configurable: true });
+    var [[p], [q, r]] = a;
+    return [p, q, r];
+}, '[1,9,8]');
+check('defaults see what the place reads', function () {
+    var a = [, 2];
+    Object.defineProperty(a, '0', { get: function () { return undefined; }, configurable: true });
+    var [x = 'd', y = 'd'] = a;
+    var [u = 'd', v = 'd'] = [, 2];
+    return [x, y, u, v];
+}, '["d",2,"d",2]');
+check('the pattern, for-of and the spread agree', function () {
+    var a = [1, 2, 3];
+    var hits = 0;
+    Object.defineProperty(a, '0', { get: function () { hits++; return 'g'; }, configurable: true });
+    var [x] = a;
+    var seen = [];
+    for (var v of a) seen.push(v);
+    var spread = [...a];
+    return [x, seen, spread, hits];
+}, '["g",["g",2,3],["g",2,3],3]');
+check('a replaced Symbol.iterator is still the one asked', function () {
+    var a = [1, 2];
+    a[Symbol.iterator] = function () {
+        var i = 0;
+        return { next: function () { return { value: 'v' + (i++), done: i > 2 }; } };
+    };
+    var [p, q] = a;
+    return [p, q];
+}, '["v0","v1"]');
+check('a getter that throws stops the pattern', function () {
+    var a = [1, 2];
+    Object.defineProperty(a, '0', { get: function () { throw new RangeError('boom'); }, configurable: true });
+    var [x] = a;
+    return x;
+}, 'throws RangeError');
+check('an accessor is asked, and no setter is called by a declaration', function () {
+    var store = null;
+    var a = [1];
+    Object.defineProperty(a, '0', { set: function (v) { store = v; }, get: function () { return 'from getter'; }, configurable: true });
+    var [x] = a;
+    return [x, store];
+}, '["from getter",null]');
+)JS");
+    assert(none_failed());
+}
+
 TEST(array_methods_over_an_exotic_receiver_ask_it_for_its_indices) {
     using namespace litebird;
     // Phase 129. A NodeList keeps its indices outside the object's property
@@ -28021,10 +28296,6 @@ failures;
     if (!none_failed()) { std::cout << "\033[31mFAILED\033[0m"; return; }
     std::cout << "\033[32mPASSED\033[0m";
 }
-// ---------------------------------------------------------------------------
-// Phase 125: Object.isFrozen and Object.isSealed ask the properties
-// ---------------------------------------------------------------------------
-
 TEST(object_integrity_levels_ask_every_property) {
     using namespace litebird;
     // Phase 125, finding 130. Both answered from a bit that only `freeze()`
@@ -28300,6 +28571,117 @@ TEST(boxed_string_own_index_descriptors) {
     assert(failed.empty());
 }
 
+TEST(object_prototype_legacy_accessor_reflection) {
+    using namespace litebird;
+    // Phase 136, finding 141. Annex B.3.3 defines these four Object.prototype
+    // methods in terms of the descriptor operations this engine already has:
+    // defineGetter/Setter create or update an enumerable, configurable
+    // accessor; lookupGetter/Setter walk the prototype chain and stop at the
+    // first own property. Node.js v22.22.3 printed each expected JSON value
+    // below before it was added to the suite.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function shape(d) {
+            return d === undefined ? null : [typeof d.get, typeof d.set, d.enumerable, d.configurable];
+        }
+        var names = ['__defineGetter__', '__defineSetter__', '__lookupGetter__', '__lookupSetter__'];
+        var getter = function get() { return this.value; };
+        var setter = function set(v) { this.value = v; };
+
+        check('the four methods and their built-in descriptors', function () {
+            return names.map(function (k) {
+                var f = Object.prototype[k], d = Object.getOwnPropertyDescriptor(Object.prototype, k);
+                return [typeof f, f.name, f.length, d.writable, d.enumerable, d.configurable];
+            });
+        }, '[["function","__defineGetter__",2,true,false,true],' +
+           '["function","__defineSetter__",2,true,false,true],' +
+           '["function","__lookupGetter__",1,true,false,true],' +
+           '["function","__lookupSetter__",1,true,false,true]]');
+        check('defineGetter installs the accessor and returns undefined', function () {
+            var o = { value: 3 };
+            var r = o.__defineGetter__('x', getter);
+            var d = Object.getOwnPropertyDescriptor(o, 'x');
+            return [r, d.get === getter, d.set, d.enumerable, d.configurable,
+                    o.__lookupGetter__('x') === getter, o.__lookupSetter__('x')];
+        }, '[null,true,null,true,true,true,null]');
+        check('defineSetter preserves the existing getter', function () {
+            var o = { value: 3 };
+            o.__defineGetter__('x', getter);
+            var r = o.__defineSetter__('x', setter);
+            o.x = 8;
+            var d = Object.getOwnPropertyDescriptor(o, 'x');
+            return [r, o.value, o.x, o.__lookupGetter__('x') === getter,
+                    o.__lookupSetter__('x') === setter, d.enumerable, d.configurable];
+        }, '[null,8,8,true,true,true,true]');
+        check('lookup finds an inherited getter', function () {
+            var p = {};
+            p.__defineGetter__('x', getter);
+            var o = Object.create(p);
+            o.value = 11;
+            return [o.x, o.__lookupGetter__('x') === getter, o.__lookupSetter__('x'),
+                    o.hasOwnProperty('x')];
+        }, '[11,true,null,false]');
+        check('lookup stops at an own data property', function () {
+            var p = {};
+            p.__defineGetter__('x', getter);
+            var o = Object.create(p);
+            Object.defineProperty(o, 'x', { value: 1, writable: true, enumerable: true, configurable: true });
+            return [o.__lookupGetter__('x'), o.__lookupSetter__('x')];
+        }, '[null,null]');
+        check('defineGetter replaces a configurable data property', function () {
+            var o = { x: 1 };
+            o.__defineGetter__('x', getter);
+            return [o.x, shape(Object.getOwnPropertyDescriptor(o, 'x'))];
+        }, '[null,["function","undefined",true,true]]');
+        check('non-callable getter is rejected before key conversion', function () {
+            var calls = 0;
+            var key = { toString: function () { calls++; return 'x'; } };
+            var error = 'none';
+            try { Object.prototype.__defineGetter__.call({}, key, 1); } catch (e) { error = e.name; }
+            return [error, calls];
+        }, '["TypeError",0]');
+        check('a non-configurable property cannot become an accessor', function () {
+            var o = {};
+            Object.defineProperty(o, 'x', { value: 1, configurable: false });
+            var error = 'none';
+            try { o.__defineGetter__('x', getter); } catch (e) { error = e.name; }
+            return error;
+        }, '"TypeError"');
+        check('null is not a receiver', function () {
+            var error = 'none';
+            try { Object.prototype.__defineGetter__.call(null, 'x', getter); } catch (e) { error = e.name; }
+            return error;
+        }, '"TypeError"');
+        check('successful property-key conversion runs once', function () {
+            var calls = 0, o = {};
+            var key = { toString: function () { calls++; return 'x'; } };
+            o.__defineGetter__(key, getter);
+            return [calls, o.__lookupGetter__('x') === getter];
+        }, '[1,true]');
+        check('lookupSetter finds an inherited setter', function () {
+            var p = {};
+            p.__defineSetter__('x', setter);
+            var o = Object.create(p);
+            return [o.__lookupSetter__('x') === setter, o.__lookupGetter__('x')];
+        }, '[true,null]');
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(image_data_is_an_interface) {
     using namespace litebird;
     // Phase 139, finding 144. HTML §4.12.5: `ImageData` is an interface whose
@@ -28489,6 +28871,306 @@ TEST(image_data_is_an_interface) {
         }, '[true,60,128]');
         failures;
     )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+// ---------------------------------------------------------------------------
+// CSS 2.1 Appendix E: the display list is emitted in paint phases, not in
+// document order (Phase 135, finding 140). Six boxes, in the document order
+// that the old tree walk painted -- which is the wrong order for three of them.
+// ---------------------------------------------------------------------------
+TEST(paint_order_follows_the_appendix_e_steps) {
+    using namespace litebird;
+    const char* html =
+        "<body style=\"margin:0\">"
+        // step 2: a negative z-index stacking context, behind everything in flow
+        "<div style=\"position:absolute;left:0;top:0;width:10px;height:10px;"
+        "z-index:-1;background:#ffff00\"></div>"
+        // step 3: two in-flow blocks
+        "<div style=\"width:100px;height:20px;background:#0000ff\"></div>"
+        "<div style=\"float:left;width:10px;height:10px;background:#ff0000\"></div>"
+        "<div style=\"width:100px;height:20px;background:#ff00ff\"></div>"
+        // step 6: a transform creates a stacking context with z-index auto
+        "<div style=\"width:10px;height:10px;background:#00ff00;"
+        "transform:translate(30px,5px)\"></div>"
+        // step 7: a positive z-index stacking context, painted last
+        "<div style=\"position:absolute;left:20px;top:0;width:10px;height:10px;"
+        "z-index:3;background:#00ffff\"></div>"
+        "</body>";
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 400.0f, 300.0f);
+    assert(root);
+    const DisplayList list = DisplayList::build(root);
+
+    const std::pair<const char*, std::string> wanted[] = {
+        {"step 2: negative z-index", "#ffff00"},
+        {"step 3: first block", "#0000ff"},
+        {"step 3: second block", "#ff00ff"},
+        {"step 4: the float", "#ff0000"},
+        {"step 6: the transformed box", "#00ff00"},
+        {"step 7: positive z-index", "#00ffff"},
+    };
+    std::vector<std::string> painted;
+    for (const auto& cmd : list.commands()) {
+        std::visit([&](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, DrawRectCommand>) {
+                for (const auto& [why, colour] : wanted) {
+                    if (arg.color == Color::parse(colour)) painted.push_back(colour);
+                }
+            }
+        }, cmd);
+    }
+    std::string order;
+    for (const auto& colour : painted) order += colour + " ";
+    std::printf("      [paint order] %s\n", order.c_str());
+    std::fflush(stdout);
+    assert(painted.size() == 6);
+    for (size_t i = 0; i < 6; ++i) {
+        if (painted[i] != wanted[i].second) {
+            std::fprintf(stderr, "      paint order: %s should be %s (%s), but %s was\n",
+                         wanted[i].second.c_str(), wanted[i].first, wanted[i].first,
+                         painted[i].c_str());
+        }
+        assert(painted[i] == wanted[i].second);
+    }
+}
+TEST(text_codec_a_decoder_and_an_encoder_in_script) {
+    using namespace litebird;
+    // Phase 127. The WHATWG Encoding Standard's tables were in this engine since
+    // Phase 47 and both directions since Phase 110, but script could reach
+    // neither: `TextDecoder` and `TextEncoder` were undefined globals, so every
+    // page that reads bytes had to be handed a string already decoded. That was
+    // the row in AGENTS.md, and it waited on typed arrays because the interface
+    // is defined in terms of them: `encode()` returns a `Uint8Array`,
+    // `encodeInto()` writes into one, `decode()` takes a view. Phase 113 (the
+    // TypedArray constructors) is what unblocked it.
+    //
+    // So this file is mostly interface, not new decoding: the 40 decoders and
+    // 26 encoders are the ones Phase 47 and Phase 110 already had. The things
+    // that had to be *got right* rather than merely wired were the canonical
+    // label ("utf-8", not the table's "UTF-8"), the `read`/`written` pair from
+    // `encodeInto()`, and walking UTF-16 code units rather than UTF-8 bytes,
+    // which is where a lone surrogate becomes U+FFFD instead of being dropped.
+    //
+    // Every assertion below was run through Node first, as a standalone script;
+    // its output is identical there and here.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function throws(what, fn, name) {
+            try { fn(); failures.push(what + ': did not throw, expected ' + name); }
+            catch (e) { if (!(e instanceof globalThis[name])) failures.push(what + ': threw ' + e.constructor.name + ', expected ' + name); }
+        }
+
+function ok(what, got, want) {
+  if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+}
+function throws(what, fn, name) {
+  try { fn(); failures.push(what + ': did not throw, expected ' + name); }
+  catch (e) { if (!(e instanceof globalThis[name])) failures.push(what + ': threw ' + e.constructor.name + ', expected ' + name); }
+}
+
+// --- construction and options ---
+var d = new TextDecoder();
+ok('default encoding', d.encoding, 'utf-8');
+ok('default fatal', d.fatal, false);
+ok('default ignoreBOM', d.ignoreBOM, false);
+ok('instanceof', d instanceof TextDecoder, true);
+ok('toStringTag', Object.prototype.toString.call(d), '[object TextDecoder]');
+ok('label is case-insensitive', new TextDecoder('UTF-8').encoding, 'utf-8');
+ok('whitespace in label', new TextDecoder('  utf-8  ').encoding, 'utf-8');
+ok('latin1 is windows-1252', new TextDecoder('latin1').encoding, 'windows-1252');
+ok('ascii is windows-1252', new TextDecoder('ascii').encoding, 'windows-1252');
+ok('iso-8859-1 is windows-1252', new TextDecoder('iso-8859-1').encoding, 'windows-1252');
+ok('shift_jis canonical', new TextDecoder('shift-jis').encoding, 'shift_jis');
+ok('utf-16le canonical', new TextDecoder('utf-16').encoding, 'utf-16le');
+ok('gb18030 canonical', new TextDecoder('gb18030').encoding, 'gb18030');
+ok('fatal option', new TextDecoder('utf-8', {fatal: true}).fatal, true);
+ok('ignoreBOM option', new TextDecoder('utf-8', {ignoreBOM: true}).ignoreBOM, true);
+ok('options coerced to boolean', new TextDecoder('utf-8', {fatal: 1}).fatal, true);
+ok('undefined label', new TextDecoder(undefined).encoding, 'utf-8');
+throws('unknown label', function() { new TextDecoder('nope'); }, 'RangeError');
+throws('replacement is not decodable', function() { new TextDecoder('replacement'); }, 'RangeError');
+throws('no construct', function() { TextDecoder(); }, 'TypeError');
+
+// --- decode: the input forms ---
+ok('decode Uint8Array', d.decode(new Uint8Array([104, 105])), 'hi');
+ok('decode a buffer', d.decode(new Uint8Array([104, 105]).buffer), 'hi');
+ok('decode a subarray view', d.decode(new Uint8Array([120, 104, 105, 120]).subarray(1, 3)), 'hi');
+ok('decode with nothing', d.decode(), '');
+ok('decode empty', d.decode(new Uint8Array(0)), '');
+throws('decode a plain array', function() { d.decode([104, 105]); }, 'TypeError');
+throws('decode a number', function() { d.decode(5); }, 'TypeError');
+
+// --- the encodings themselves ---
+ok('utf-8 multibyte', new TextDecoder().decode(new Uint8Array([195, 169])), '\u00e9');
+ok('windows-1252', new TextDecoder('windows-1252').decode(new Uint8Array([233])), '\u00e9');
+ok('latin1 0x80 is euro', new TextDecoder('latin1').decode(new Uint8Array([128])), '\u20ac');
+ok('utf-16le', new TextDecoder('utf-16le').decode(new Uint8Array([104, 0, 105, 0])), 'hi');
+ok('utf-16be', new TextDecoder('utf-16be').decode(new Uint8Array([0, 104, 0, 105])), 'hi');
+ok('iso-8859-2', new TextDecoder('iso-8859-2').decode(new Uint8Array([161])), '\u0104');
+ok('windows-1251', new TextDecoder('windows-1251').decode(new Uint8Array([192])), '\u0410');
+ok('koi8-r', new TextDecoder('koi8-r').decode(new Uint8Array([193])), '\u0430');
+ok('gb18030 two byte', new TextDecoder('gb18030').decode(new Uint8Array([196, 227])), '\u4f60');
+ok('big5', new TextDecoder('big5').decode(new Uint8Array([167, 65])), '\u4f60');
+ok('shift_jis', new TextDecoder('shift_jis').decode(new Uint8Array([130, 160])), '\u3042');
+ok('euc-jp', new TextDecoder('euc-jp').decode(new Uint8Array([164, 162])), '\u3042');
+ok('euc-kr', new TextDecoder('euc-kr').decode(new Uint8Array([176, 161])), '\uac00');
+ok('iso-2022-jp', new TextDecoder('iso-2022-jp').decode(new Uint8Array([27, 36, 66, 36, 34, 27, 40, 66])), '\u3042');
+
+// --- errors: replaces by default, throws when fatal ---
+ok('invalid byte is U+FFFD', new TextDecoder().decode(new Uint8Array([0xff])), '\ufffd');
+ok('truncated sequence', new TextDecoder().decode(new Uint8Array([226, 130])), '\ufffd');
+ok('fatal throws on invalid', (function() {
+  try { new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array([0xff])); return 'no throw'; }
+  catch (e) { return e instanceof TypeError ? 'TypeError' : 'other'; }
+})(), 'TypeError');
+ok('fatal is silent on valid', new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array([104])), 'h');
+
+// --- the BOM ---
+ok('BOM stripped by default', new TextDecoder().decode(new Uint8Array([239, 187, 191, 104])), 'h');
+ok('ignoreBOM keeps it', new TextDecoder('utf-8', {ignoreBOM: true}).decode(new Uint8Array([239, 187, 191, 104])), '\ufeffh');
+ok('utf-16le BOM stripped', new TextDecoder('utf-16le').decode(new Uint8Array([255, 254, 104, 0])), 'h');
+
+// --- reentrancy: one decoder decodes twice ---
+var twice = new TextDecoder();
+ok('first decode', twice.decode(new Uint8Array([104, 105])), 'hi');
+ok('second decode', twice.decode(new Uint8Array([104, 105])), 'hi');
+
+// --- TextEncoder ---
+var e = new TextEncoder();
+ok('encoder encoding', e.encoding, 'utf-8');
+ok('encoder instanceof', e instanceof TextEncoder, true);
+ok('encoder toStringTag', Object.prototype.toString.call(e), '[object TextEncoder]');
+throws('encoder no construct', function() { TextEncoder(); }, 'TypeError');
+ok('encode ascii', Array.prototype.join.call(e.encode('hi'), ','), '104,105');
+ok('encode multibyte', Array.prototype.join.call(e.encode('\u00e9'), ','), '195,169');
+ok('encode empty', e.encode('').length, 0);
+ok('encode returns Uint8Array', e.encode('hi') instanceof Uint8Array, true);
+ok('encode a number', Array.prototype.join.call(e.encode(65), ','), '54,53');
+ok('encode with no argument', e.encode().length, 0);
+ok('encode undefined is the default', e.encode(undefined).length, 0);
+ok('encode null is "null"', Array.prototype.join.call(e.encode(null), ','), '110,117,108,108');
+ok('encode a surrogate pair', Array.prototype.join.call(e.encode('\ud83d\ude00'), ','), '240,159,152,128');
+ok('encode a lone surrogate', Array.prototype.join.call(e.encode('\ud800'), ','), '239,191,189');
+
+var into = new Uint8Array(8);
+var r = e.encodeInto('h\u00e9', into);
+ok('encodeInto read', r.read, 2);
+ok('encodeInto written', r.written, 3);
+ok('encodeInto bytes', Array.prototype.join.call(into.subarray(0, 3), ','), '104,195,169');
+ok('encodeInto leaves the rest', into[3], 0);
+var small = new Uint8Array(2);
+var r2 = e.encodeInto('h\u00e9', small);
+ok('encodeInto short read', r2.read, 1);
+ok('encodeInto short written', r2.written, 1);
+var tiny = new Uint8Array(1);
+var r3 = e.encodeInto('\u00e9', tiny);
+ok('encodeInto no room read', r3.read, 0);
+ok('encodeInto no room written', r3.written, 0);
+ok('encodeInto empty source', e.encodeInto('', new Uint8Array(4)).written, 0);
+throws('encodeInto needs a view', function() { e.encodeInto('hi', [104, 105]); }, 'TypeError');
+
+if (failures.length) throw new Error(failures.join('\n'));
+    )JS");
+}
+
+TEST(a_functions_name_and_length_are_its_own_properties) {
+    using namespace litebird;
+
+    // Phase 146, finding 151. `name` and `length` were answered out of the
+    // function payload by `function_implicit_property` and were in no property
+    // table, so four statements about a plain function were false:
+    //
+    //   Object.getOwnPropertyNames(function F(a) {})   -> []      Node: ["length","name",...]
+    //   Object.getOwnPropertyDescriptor(F, "name")     -> writable: false, then
+    //   F.name = "zz"                                  -> went through
+    //   delete G.name                                  -> true, and G.name survived
+    //
+    // They are ordinary own properties now, `{ writable: false, enumerable:
+    // false, configurable: true }` as §10.2.9/§10.2.5 say, installed when the
+    // function is made. The three that a function still has without anyone
+    // making them follow: a sloppy ordinary function's `arguments` and
+    // `caller` are `null` data properties, its `prototype` exists before the
+    // first read with the `constructor` back-link, and every other kind of
+    // function has *no* own property of those names — reading `caller` throws.
+    //
+    // Every expected string is what Node.js 22 printed for the same source.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throwsT(what, f) {
+            try { f(); failures.push(what + ': no throw'); }
+            catch (e) { if (e.constructor.name !== 'TypeError') failures.push(what + ': threw ' + e.constructor.name); }
+        }
+
+        // ---- the two properties exist, in the standard's order -----------
+        var F = function Fn(a, b) {};
+        same('own names of a function', Object.getOwnPropertyNames(F).slice(0, 2), ['length', 'name']);
+        same('name', F.name, 'Fn');
+        same('length', F.length, 2);
+        same('name descriptor', Object.getOwnPropertyDescriptor(F, 'name'),
+             { value: 'Fn', writable: false, enumerable: false, configurable: true });
+        same('length descriptor', Object.getOwnPropertyDescriptor(F, 'length'),
+             { value: 2, writable: false, enumerable: false, configurable: true });
+        same('not enumerable', Object.keys(F), []);
+
+        // ---- a non-writable property refuses a write, and delete removes it
+        F.name = 'zz';
+        same('a write is ignored', F.name, 'Fn');
+        throwsT('a strict write throws', function () { (function () { 'use strict'; F.name = 'q'; })(); });
+        F.length = 9;
+        same('a length write is ignored', F.length, 2);
+        var D = function Del() {};
+        same('delete answers true', delete D.name, true);
+        same('and the name is gone', D.name, '');
+        same('and is no longer own', D.hasOwnProperty('name'), false);
+
+        // ---- the three an ordinary function still has --------------------
+        same('arguments is null', F.arguments, null);
+        same('caller is null', F.caller, null);
+        same('arguments is own', F.hasOwnProperty('arguments'), true);
+        same('arguments is not writable', Object.getOwnPropertyDescriptor(F, 'arguments').writable, false);
+        same('arguments is not configurable', Object.getOwnPropertyDescriptor(F, 'arguments').configurable, false);
+        same('prototype exists', typeof F.prototype, 'object');
+        same('prototype is not configurable', Object.getOwnPropertyDescriptor(F, 'prototype').configurable, false);
+
+        // ---- and the kinds that must have neither ------------------------
+        var strictFn = function () { 'use strict'; };
+        same('a strict function has no own caller', strictFn.hasOwnProperty('caller'), false);
+        same('a strict function has no own arguments', strictFn.hasOwnProperty('arguments'), false);
+        throwsT('reading a strict function caller', function () { strictFn.caller; });
+        throwsT('reading a strict function arguments', function () { strictFn.arguments; });
+        var arrow = () => 1;
+        same('an arrow has only length and name', Object.getOwnPropertyNames(arrow), ['length', 'name']);
+        class A { static s() {} }
+        same('a class lists its own prototype', Object.getOwnPropertyNames(A).slice(0, 3), ['length', 'name', 'prototype']);
+        throwsT('reading a class caller', function () { A.caller; });
+
+        // ---- and the function still works -------------------------------
+        function P(n) { this.n = n; }
+        var p = new P(3);
+        same('constructed', [p.n, p instanceof P, p.constructor === P], [3, true, true]);
+        same('arguments through a call', (function (x) { return x; })(7), 7);
+    )JS");
+
     const std::string failed = js.eval("failures.join('\\n')").to_string();
     if (!failed.empty()) std::cerr << failed << "\n";
     assert(failed.empty());
@@ -28713,6 +29395,7 @@ int main() {
     RUN_TEST(js_template_literals_and_arrow_functions);
     RUN_TEST(web_storage_and_cookies);
     RUN_TEST(html5_canvas_2d_context);
+    RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
     RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);
@@ -29024,10 +29707,14 @@ int main() {
     // Phase 109: UAX #9 -- Hebrew and Arabic reordered, and not painted left to right.
     RUN_TEST(bidi_reorders_hebrew_and_arabic_runs);
 
+    // Phase 136: a pattern reads a place of an array as `a[i]` does.
+    RUN_TEST(array_destructuring_reads_the_place_not_the_vector);
+
     // Phase 116: the methods that move elements ask the places for what they are.
     RUN_TEST(array_methods_over_an_exotic_receiver_ask_it_for_its_indices);
     RUN_TEST(array_methods_survive_a_length_they_could_never_reach);
     RUN_TEST(array_methods_that_move_places_ask_the_index);
+    RUN_TEST(paint_order_follows_the_appendix_e_steps);
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
 
@@ -29044,12 +29731,19 @@ int main() {
     // Phase 135: an anonymous class expression takes the name it is bound to.
     RUN_TEST(an_anonymous_class_expression_takes_its_bindings_name);
 
+    // Phase 146: name and length are own properties, with the attributes they have.
+    RUN_TEST(a_functions_name_and_length_are_its_own_properties);
+
+
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
     RUN_TEST(object_integrity_levels_ask_every_property);
 
     // Phase 132: a boxed String exposes character indices as own descriptors.
     RUN_TEST(boxed_string_own_index_descriptors);
+
+    // Phase 136: Object.prototype's Annex B legacy accessor methods.
+    RUN_TEST(object_prototype_legacy_accessor_reflection);
 
     // Phase 139: ImageData is an interface, and putImageData takes a rectangle.
     RUN_TEST(image_data_is_an_interface);
@@ -29062,6 +29756,9 @@ int main() {
     RUN_TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs);
     RUN_TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely);
 
+    // Phase 127: TextDecoder and TextEncoder reachable from script.
+    RUN_TEST(text_codec_a_decoder_and_an_encoder_in_script);
+
     // Phase 134: `align-items` places items on the cross axis, in flex and in grid.
     RUN_TEST(cross_axis_alignment_places_flex_and_grid_items);
 
@@ -29073,3 +29770,4 @@ int main() {
               << " engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }
+

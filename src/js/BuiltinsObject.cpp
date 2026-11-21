@@ -888,15 +888,34 @@ void install_object_builtins(JsIntrinsics& realm) {
         if (!target.is_function()) js_throw_type_error("Bind must be called on a function");
         JsValue bound_this = js_arg(args, 0);
         std::vector<JsValue> bound_args(args.size() > 1 ? args.begin() + 1 : args.end(), args.end());
-        JsValue bound = JsValue::make_native_function([target, bound_this, bound_args](Args call_args) {
-            std::vector<JsValue> all = bound_args;
+        // What the entry point needs is kept where the collector can see it
+        // (see JsValue::Extra::captured). A std::function's captures are not
+        // traced: a target that lived only inside one made every copy of this
+        // bound function look like the payload's one owner, the payload became
+        // a root, and the target -- with its closure, and the variables the
+        // closure holds -- was never collected.
+        //
+        // The captures are the target, the bound `this`, then the arguments
+        // already bound, in that order.
+        JsValue bound = JsValue::make_native_function([](Args call_args) {
+            const std::vector<JsValue>& kept = JsValue::current_captured();
+            if (kept.size() < 2) return JsValue::make_undefined();
+            std::vector<JsValue> all(kept.begin() + 2, kept.end());
             all.insert(all.end(), call_args.begin(), call_args.end());
             // `new boundFn()` constructs the target and ignores the bound
             // `this`. Inside, new.target is the target, or whatever function
             // Reflect.construct or a subclass's super() named instead.
-            if (JsValue::current_is_construct()) return js_construct(target, all, JsValue::current_new_target());
-            return target.call_with_this(bound_this, all);
+            if (JsValue::current_is_construct()) {
+                return js_construct(kept[0], all, JsValue::current_new_target());
+            }
+            return kept[0].call_with_this(kept[1], all);
         });
+        std::vector<JsValue> captures;
+        captures.reserve(2 + bound_args.size());
+        captures.push_back(target);
+        captures.push_back(bound_this);
+        captures.insert(captures.end(), bound_args.begin(), bound_args.end());
+        bound.set_payload_captured(std::move(captures));
         bound.set_forwards_construct();
         // `instanceof` has no `prototype` to walk to on a bound function: the
         // language asks the target, and this is where the target is kept.

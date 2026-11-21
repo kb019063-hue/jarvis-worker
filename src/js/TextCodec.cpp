@@ -73,6 +73,14 @@ struct DecoderOptions {
     bool ignore_bom{false};
 };
 
+/// The `{ stream }` member of a `decode()` options dictionary, read with
+/// ToBoolean. An argument that is not an object is the standard's "empty
+/// dictionary", so it means false.
+bool read_stream_option(const JsValue& options) {
+    if (!options.is_object_like()) return false;
+    return options.get_property("stream").is_truthy();
+}
+
 DecoderOptions read_decoder_options(const JsValue& options) {
     DecoderOptions out;
     if (!options.is_object_like()) return out;
@@ -92,6 +100,21 @@ struct DecoderState : JsExotic {
     /// The canonical name, computed once: `encoding` is an attribute of the
     /// object and the standard gives it back as a string.
     std::string name;
+    /// Bytes held back from a `{stream: true}` decode that ended inside a
+    /// character: §11.1.1's *stream* keeps them in the decoder so the next
+    /// chunk completes them. Empty between streams, which is how a one-shot
+    /// `decode()` stays what it was.
+    std::string stream_bytes;
+    /// §11.1.1 "BOM seen": once a stream has been started, the bom sniffs it
+    /// did decide whether to strip are done, and a later chunk's leading BOM
+    /// is data rather than a byte order mark. `ignoreBOM` false is what makes
+    /// the first sniff possible at all; with it true nothing is ever stripped.
+    bool bom_decided{false};
+    /// The mode an ISO-2022-JP stream ended its last chunk in: 0 ASCII,
+    /// 1 Roman, 2 Katakana, 3 double-byte. The only decoder state that
+    /// crosses a chunk boundary (§11.1.1), because an escape sequence governs
+    /// the bytes after it and those can arrive later.
+    int iso_mode{0};
 };
 
 /// The exotic of an object, or null: the same test `state_of` makes in
@@ -134,6 +157,154 @@ JsValue construct_decoder(Args args) {
 }
 
 void setup_decoder(JsObject* proto, JsValue& constructor);
+
+// ---------------------------------------------------------------------------
+// Streaming, and the bytes a chunk ends inside of
+// ---------------------------------------------------------------------------
+//
+// The decoders in `TextEncoding.cpp` are the standard's one-shot algorithms:
+// handed a string that ends halfway through a character, they answer U+FFFD
+// (or fail, in fatal mode), because that is what §4's "process an item" says
+// at end-of-queue. A *stream* is the same decoder asked to keep the last few
+// bytes instead (§11.1.1). So a `{stream: true}` decode splits the chunk at the
+// last point where the encoding can still be mid-character, decodes the part
+// before it, and holds the rest.
+//
+// How many trailing bytes an encoding can be inside a character depends on the
+// encoding, and the rule for each is the grammar its decoder already follows:
+//
+//   UTF-8        a lead byte and up to three continuations (1..3 held)
+//   UTF-16       one byte of a code unit, or a complete high surrogate (1..3)
+//   gb18030      1..3: a lead byte, `lead 0x30-0x39`, or `lead digit lead`
+//   Big5         one lead byte (0x81..0xFE)
+//   Shift_JIS    one lead byte (0x81..0x9F, 0xE0..0xFC)
+//   EUC-JP       one lead byte, or `0x8F` and a lead byte (1..2)
+//   EUC-KR       one lead byte (0x81..0xFE)
+//   ISO-2022-JP  an escape sequence, or the second byte of a double-byte pair:
+//                the decoder's own state machine is an escape, so up to four
+//                trailing bytes are looked at (1..4)
+//   single-byte  nothing: every byte is a whole character
+//
+// Anything these rules hold back is a byte no character has yet, so holding it
+// cannot change what the decoder would have said about the bytes before it.
+
+/// How many bytes at the end of `bytes` the encoding is still inside a
+/// character after — the count a `{stream: true}` decode holds back.
+///
+/// The walk is forward, not backwards, because a trailing byte alone cannot
+/// say what it is: `0xA1` is a lead byte in EUC-JP and a trail byte in EUC-KR,
+/// and the same byte can be either in one encoding. So this reads the chunk
+/// from its start, taking one whole character at a time exactly as the decoder
+/// does, and stops at the first character the chunk does not finish. Bytes
+/// already held back from an earlier chunk are always at the front, so the
+/// boundary is never in doubt.
+std::size_t pending_tail(EncodingId encoding, std::string_view bytes) {
+    const std::size_t n = bytes.size();
+    auto byte = [&](std::size_t i) { return static_cast<unsigned char>(bytes[i]); };
+    // ISO-2022-JP is the only one that carries a mode between characters; it
+    // is scanned in the same pass, so the mode is a local.
+    enum class IsoMode { Ascii, Double } iso_mode = IsoMode::Ascii;
+    std::size_t i = 0;
+    while (i < n) {
+        std::size_t need = 1;
+        switch (encoding) {
+        case EncodingId::Utf8: {
+            const unsigned char lead = byte(i);
+            if (lead >= 0xC2u && lead <= 0xDFu) need = 2;
+            else if (lead >= 0xE0u && lead <= 0xEFu) need = 3;
+            else if (lead >= 0xF0u && lead <= 0xF4u) need = 4;
+            break;
+        }
+        case EncodingId::Utf16LE:
+        case EncodingId::Utf16BE: {
+            need = 2;
+            if (i + 2 <= n) {
+                const unsigned char a = byte(i), b = byte(i + 1);
+                const uint32_t unit = encoding == EncodingId::Utf16LE
+                    ? (static_cast<uint32_t>(b) << 8 | a)
+                    : (static_cast<uint32_t>(a) << 8 | b);
+                // A high surrogate is half a character; the low one follows.
+                if (unit >= 0xD800u && unit <= 0xDBFFu) need = 4;
+            }
+            break;
+        }
+        case EncodingId::Gb18030: {
+            const unsigned char lead = byte(i);
+            if (lead >= 0x81u && lead <= 0xFEu) {
+                need = 2;
+                if (i + 1 < n && byte(i + 1) >= 0x30u && byte(i + 1) <= 0x39u) need = 4;
+            }
+            break;
+        }
+        case EncodingId::Big5: {
+            const unsigned char lead = byte(i);
+            if (lead >= 0x81u && lead <= 0xFEu) need = 2;
+            break;
+        }
+        case EncodingId::ShiftJis: {
+            const unsigned char lead = byte(i);
+            if ((lead >= 0x81u && lead <= 0x9Fu) || (lead >= 0xE0u && lead <= 0xFCu)) need = 2;
+            break;
+        }
+        case EncodingId::EucJp: {
+            const unsigned char lead = byte(i);
+            if (lead == 0x8Fu) need = 3;
+            else if (lead == 0x8Eu) need = 2;
+            else if (lead >= 0xA1u && lead <= 0xFEu) need = 2;
+            break;
+        }
+        case EncodingId::EucKr: {
+            const unsigned char lead = byte(i);
+            if (lead >= 0x81u && lead <= 0xFEu) need = 2;
+            break;
+        }
+        case EncodingId::Iso2022Jp: {
+            const unsigned char lead = byte(i);
+            if (lead == 0x1Bu) {
+                // 1B 24 40, 1B 24 42, 1B 28 42, 1B 28 4A, 1B 28 49 — all
+                // three bytes. A shorter one is held until it is complete.
+                need = 3;
+                if (i + 2 < n && byte(i + 1) == 0x24u && (byte(i + 2) == 0x40u || byte(i + 2) == 0x42u)) {
+                    iso_mode = IsoMode::Double;
+                } else if (i + 2 < n && byte(i + 1) == 0x28u) {
+                    iso_mode = IsoMode::Ascii;
+                }
+            } else if (iso_mode == IsoMode::Double && lead >= 0x21u && lead <= 0x7Eu) {
+                need = 2;
+            }
+            break;
+        }
+        default:
+            break;     // single-byte encodings and x-user-defined: one byte, one character
+        }
+        if (i + need > n) return n - i;
+        i += need;
+    }
+    return 0;
+}
+
+/// The bom sniff for a stream: the first chunk decides, and a BOM split across
+/// chunks is waited for. Answers how many bytes of `bytes` are the BOM (0 when
+/// there is none, or when `ignoreBOM`).
+std::size_t stream_bom(DecoderState& state, std::string_view bytes) {
+    if (state.ignore_bom || state.bom_decided) return 0;
+    // The three BOMs the standard knows, longest first.
+    static const char* const kBoms[] = {"\xEF\xBB\xBF", "\xFE\xFF", "\xFF\xFE"};
+    static const std::size_t kLengths[] = {3, 2, 2};
+    for (int i = 0; i < 3; ++i) {
+        const std::size_t length = kLengths[i];
+        if (bytes.size() < length) {
+            if (std::string_view(kBoms[i], bytes.size()) == bytes) return 0;   // still could be it
+            continue;
+        }
+        if (std::string_view(kBoms[i], length) == bytes.substr(0, length)) {
+            state.bom_decided = true;
+            return length;
+        }
+    }
+    state.bom_decided = true;
+    return 0;
+}
 
 JsValue make_decoder(const DecoderState& state, const JsValue* derived) {
     (void)derived;
@@ -201,17 +372,40 @@ void setup_decoder(JsObject* proto, JsValue& constructor) {
 
     js_define_method(proto, "decode", 1, [](Args args) {
         DecoderState* state = decoder_of("decode");
+        const bool stream = read_stream_option(args.size() > 1 ? args[1] : JsValue::make_undefined());
         std::string bytes = bytes_from(args.empty() ? JsValue::make_undefined() : args[0]);
-        // `ignoreBOM` false (the default) strips one leading BOM, and an
-        // encoding the buffer itself names overrides the constructor's, which
-        // is the standard's "BOM sniff" step.
-        if (!state->ignore_bom) {
-            EncodingId bom = EncodingId::Utf8;
-            size_t bom_length = 0;
-            if (sniff_bom_encoding(bytes, bom, bom_length)) bytes.erase(0, bom_length);
+
+        // §11.1.1: the bytes a previous chunk ended inside of are this chunk's
+        // beginning, and a BOM is looked for in the first chunk of a stream
+        // (or in a one-shot call, which is a stream of one).
+        if (!state->stream_bytes.empty()) {
+            bytes = state->stream_bytes + bytes;
+            state->stream_bytes.clear();
         }
+        if (!state->bom_decided) {
+            const std::size_t bom = stream_bom(*state, bytes);
+            // A BOM that cannot be complete yet is waited for — but only in a
+            // stream. A one-shot `decode()` has all the bytes it will get, so
+            // "it might still be a BOM" is answered no, and the bytes are data.
+            if (!state->bom_decided && stream) {
+                state->stream_bytes = bytes;
+                return JsValue::make_string(std::string());
+            }
+            if (bom > 0) bytes.erase(0, bom);
+            state->bom_decided = true;
+        }
+
+        // The part the encoding is not inside of, and what is left over.
+        std::string head = bytes;
+        if (stream) {
+            const std::size_t tail = pending_tail(state->encoding, bytes);
+            head.assign(bytes, 0, bytes.size() - tail);
+            state->stream_bytes.assign(bytes, bytes.size() - tail, tail);
+        }
+
         std::string out;
-        const bool ok = decode_with_encoding(bytes, state->encoding, out, state->fatal);
+        const bool ok = decode_stream_chunk(head, state->encoding, out, state->fatal, state->iso_mode,
+                                            &state->iso_mode);
         if (!ok) {
             js_throw_type_error("Failed to execute 'decode' on 'TextDecoder': The encoded data was not valid.");
         }

@@ -133,6 +133,11 @@ struct OpenSslApi {
     int (*SSL_shutdown_fn)(SSL*) = nullptr;
     int (*SSL_get_error_fn)(const SSL*, int) = nullptr;
     long (*SSL_get_verify_result_fn)(const SSL*) = nullptr;
+    // Names a verification code ("certificate has expired"). Optional: a
+    // failure to load it costs the message's wording, not the engine's TLS.
+    // The code itself is enough to tell one refusal from another, which is
+    // what a page author and a test both need.
+    const char* (*X509_verify_cert_error_string_fn)(long) = nullptr;
 
     static const OpenSslApi& instance() {
         static const OpenSslApi api = []() {
@@ -181,6 +186,7 @@ struct OpenSslApi {
 
             (void)load(out.SSL_peek_fn, "SSL_peek");
             (void)load(out.SSL_pending_fn, "SSL_pending");
+            (void)load(out.X509_verify_cert_error_string_fn, "X509_verify_cert_error_string");
 
             out.available = ok;
             return out;
@@ -3148,9 +3154,35 @@ ResourceResponse ResourceLoader::load_http_single_hop(
             return false;
         }
 
-        if (ssl_api.SSL_connect_fn(out.ssl) != 1 || ssl_api.SSL_get_verify_result_fn(out.ssl) != 0) {
+        const int connected = ssl_api.SSL_connect_fn(out.ssl);
+        const long verify_code = ssl_api.SSL_get_verify_result_fn(out.ssl);
+        if (connected != 1 || verify_code != 0) {
+            // What went wrong, and where. A certificate can be refused for a
+            // dozen different reasons -- expired, not yet valid, wrong name,
+            // wrong address family, an issuer that is not trusted or is not a
+            // CA -- and until this line they all read the same, so neither a
+            // page author nor a test could tell them apart or check that a
+            // fixture failed for the reason it was built to fail for.
+            //
+            // The code is OpenSSL's X509_V_ERR_* value, reported as a number
+            // whatever else happens, so a reader that does not know the names
+            // loses nothing; the name is added when this build can ask OpenSSL
+            // for it. A handshake that failed for a reason other than a
+            // certificate (no shared cipher, a truncated record) has no code
+            // and says so.
+            std::string reason;
+            if (verify_code != 0) {
+                reason = "certificate verification failed (code " + std::to_string(verify_code);
+                if (ssl_api.X509_verify_cert_error_string_fn) {
+                    reason += ", ";
+                    reason += ssl_api.X509_verify_cert_error_string_fn(verify_code);
+                }
+                reason += ")";
+            } else {
+                reason = "the TLS handshake failed before a certificate was verified";
+            }
             close_http_connection(out, false);
-            err_out = "TLS handshake or certificate verification failed for " + connect_host;
+            err_out = "TLS " + reason + " for " + connect_host;
             return false;
         }
         return true;

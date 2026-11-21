@@ -369,6 +369,20 @@ bool lookup_chain(JsObject* start, const std::string& name, const JsValue& recei
         // `Array.prototype[4] = 5` would not reach `[1, 2, 3][4]`. A hole is
         // not one of them, so the walk goes on past it.
         if (obj->is_array) {
+            // `length` is the other thing an array keeps in `array_elements`
+            // rather than in the property map, so a read that falls through
+            // to an array prototype did not find it: `Object.create([7, 8, 9])
+            // .length` was `undefined` where the language has `3` (finding
+            // 138). It is not the object's own property and has no descriptor
+            // to describe (`Object.getOwnPropertyDescriptor(o, 'length')` is
+            // `undefined`), but `HasProperty(o, 'length')` is true through the
+            // chain, so a read has to reach it. The walk stops here whichever
+            // object asked, because `length` on the array is where the
+            // standard's lookup ends.
+            if (name == "length") {
+                out = JsValue::make_number(static_cast<double>(obj->array_elements.size()));
+                return true;
+            }
             size_t index = 0;
             if (parse_array_index(name, index) && index < obj->array_elements.size()
                 && !(obj->array_holes && obj->array_holes->empty_slot(index))) {
@@ -1034,6 +1048,11 @@ bool JsValue::has_property(const std::string& name) const {
     for (JsObject* obj = proto; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
         if (obj->properties.find(name) != obj->properties.end()) return true;
         if (obj->is_array) {
+            // `length` and the indices are both kept in `array_elements` and
+            // not in the property map, so `HasProperty` has to answer for
+            // both — the same two answers `lookup_chain` gives a read
+            // (finding 138).
+            if (name == "length") return true;
             size_t index = 0;
             if (parse_array_index(name, index) && index < obj->array_elements.size()
                 && !(obj->array_holes && obj->array_holes->empty_slot(index))) return true;

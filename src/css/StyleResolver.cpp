@@ -183,6 +183,7 @@ std::size_t ComputedStyle::hash() const {
         hash_combine(h, (has_top ? 1u : 0u) | (has_right ? 2u : 0u) |
                         (has_bottom ? 4u : 0u) | (has_left ? 8u : 0u) |
                         (has_z_index ? 16u : 0u));
+        hash_edges(h, inset_percent);
         hash_combine(h, hash_float(top));
         hash_combine(h, hash_float(right));
         hash_combine(h, hash_float(bottom));
@@ -391,7 +392,7 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         th { font-weight: 700; text-align: center; }
 
         html, body, div, p, h1, h2, h3, h4, h5, h6, ul, ol, li,
-        section, article, header, footer, nav, main, pre, blockquote {
+        section, article, header, footer, nav, main, pre, blockquote, details, summary {
             display: block;
         }
         span, a, strong, b, em, i, code {
@@ -800,6 +801,8 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
                         }
                     }
                 }
+            } else if (name == "has") {
+                if (!pc.compiled_arg || !pc.compiled_arg->matches(*element)) return false;
             } else if (name == "is" || name == "where" || name == "matches") {
                 if (pc.compiled_arg) {
                     if (!pc.compiled_arg->matches(*element)) return false;
@@ -1094,7 +1097,7 @@ bool StyleResolver::match_selector_impl(const std::shared_ptr<Element>& element,
                 for (auto sib = prev_element_sibling(*f.el); sib; sib = prev_element_sibling(*sib)) {
                     if (!failed.count({sib.get(), next_idx})) {
                         if (matches_simple_selector(sib, selector.parts[next_idx])) {
-                            candidates.push_back(std::move(sib));
+                            candidates.push_back(sib);  // the loop still advances from sib
                         } else {
                             failed.insert({sib.get(), next_idx});
                         }
@@ -1116,7 +1119,7 @@ bool StyleResolver::match_selector_impl(const std::shared_ptr<Element>& element,
                 for (auto anc = parent_element(*f.el); anc; anc = parent_element(*anc)) {
                     if (!failed.count({anc.get(), next_idx})) {
                         if (matches_simple_selector(anc, selector.parts[next_idx])) {
-                            candidates.push_back(std::move(anc));
+                            candidates.push_back(anc);  // the loop still advances from anc
                         } else {
                             failed.insert({anc.get(), next_idx});
                         }
@@ -1975,18 +1978,18 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else if (val == "relative") style.position = Position::Relative;
         else if (val == "absolute") style.position = Position::Absolute;
         else if (val == "fixed") style.position = Position::Fixed;
-    } else if (prop == "top") {
-        style.top = parse_length(val, 0.0f);
-        style.has_top = true;
-    } else if (prop == "right") {
-        style.right = parse_length(val, 0.0f);
-        style.has_right = true;
-    } else if (prop == "bottom") {
-        style.bottom = parse_length(val, 0.0f);
-        style.has_bottom = true;
-    } else if (prop == "left") {
-        style.left = parse_length(val, 0.0f);
-        style.has_left = true;
+    } else if (prop == "top" || prop == "right" || prop == "bottom" || prop == "left") {
+        auto inset = [&](float& px, float& percent, bool& set) {
+            const float number = parse_length(val, 0.0f);
+            const bool pct = is_percentage_value(val);
+            px = pct ? 0.0f : number;
+            percent = pct ? number : 0.0f;
+            set = val != "auto";
+        };
+        if (prop == "top") inset(style.top, style.inset_percent.top, style.has_top);
+        else if (prop == "right") inset(style.right, style.inset_percent.right, style.has_right);
+        else if (prop == "bottom") inset(style.bottom, style.inset_percent.bottom, style.has_bottom);
+        else inset(style.left, style.inset_percent.left, style.has_left);
     } else if (prop == "z-index") {
         try {
             style.z_index = std::stoi(val);
@@ -3172,10 +3175,22 @@ void StyleResolver::interpolate_styles(ComputedStyle& target, const ComputedStyl
     target.border_width.bottom = lerp_f(from.border_width.bottom, to.border_width.bottom, t);
     target.border_width.left = lerp_f(from.border_width.left, to.border_width.left, t);
 
-    if (from.has_top && to.has_top) target.top = lerp_f(from.top, to.top, t);
-    if (from.has_left && to.has_left) target.left = lerp_f(from.left, to.left, t);
-    if (from.has_right && to.has_right) target.right = lerp_f(from.right, to.right, t);
-    if (from.has_bottom && to.has_bottom) target.bottom = lerp_f(from.bottom, to.bottom, t);
+    if (from.has_top && to.has_top) {
+        target.top = lerp_f(from.top, to.top, t);
+        target.inset_percent.top = lerp_f(from.inset_percent.top, to.inset_percent.top, t);
+    }
+    if (from.has_left && to.has_left) {
+        target.left = lerp_f(from.left, to.left, t);
+        target.inset_percent.left = lerp_f(from.inset_percent.left, to.inset_percent.left, t);
+    }
+    if (from.has_right && to.has_right) {
+        target.right = lerp_f(from.right, to.right, t);
+        target.inset_percent.right = lerp_f(from.inset_percent.right, to.inset_percent.right, t);
+    }
+    if (from.has_bottom && to.has_bottom) {
+        target.bottom = lerp_f(from.bottom, to.bottom, t);
+        target.inset_percent.bottom = lerp_f(from.inset_percent.bottom, to.inset_percent.bottom, t);
+    }
 }
 
 void StyleResolver::apply_animation(ComputedStyle& style, float elapsed_seconds) const {

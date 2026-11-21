@@ -1,0 +1,177 @@
+{
+  "browser": "HeadlessChrome/131.0.6778.0",
+  "rows": [
+    {
+      "id": "H1",
+      "pass": true,
+      "trace": [
+        {
+          "check": "source heading",
+          "got": "Getting Started",
+          "want": "Getting Started"
+        },
+        {
+          "click": "a[aria-label='Next chapter']",
+          "x": 735,
+          "y": 348.390625
+        },
+        {
+          "check": "destination",
+          "got": "/ch01-01-installation.html",
+          "want": "/ch01-01-installation.html"
+        },
+        {
+          "check": "visible heading",
+          "got": "Installation",
+          "want": "Installation"
+        }
+      ],
+      "missing": [],
+      "errors": []
+    },
+    {
+      "id": "H2",
+      "pass": true,
+      "trace": [
+        {
+          "check": "initial selection",
+          "got": "true",
+          "want": "true"
+        },
+        {
+          "click": "#tab-1",
+          "x": 101.8828125,
+          "y": 298.484375
+        },
+        {
+          "check": "focused tab",
+          "got": "tab-2",
+          "want": "tab-2"
+        },
+        {
+          "check": "new selection",
+          "got": "true",
+          "want": "true"
+        },
+        {
+          "check": "old panel hidden",
+          "got": "true",
+          "want": "true"
+        },
+        {
+          "check": "visible biography",
+          "got": "true",
+          "want": "true"
+        }
+      ],
+      "missing": [],
+      "errors": []
+    },
+    {
+      "id": "H3",
+      "pass": true,
+      "trace": [
+        {
+          "check": "initially closed and hidden",
+          "got": "true",
+          "want": "true"
+        },
+        {
+          "click": "#updateDetails",
+          "x": 64.4609375,
+          "y": 18.5
+        },
+        {
+          "check": "modal open",
+          "got": "true",
+          "want": "true"
+        },
+        {
+          "check": "form visible",
+          "got": "Favorite animal:",
+          "want": "Favorite animal:"
+        },
+        {
+          "click": "#cancel",
+          "x": 302.703125,
+          "y": 326
+        },
+        {
+          "check": "closed and hidden",
+          "got": "true",
+          "want": "true"
+        },
+        {
+          "check": "return value",
+          "got": "animalNotChosen",
+          "want": "animalNotChosen"
+        },
+        {
+          "check": "restored focus",
+          "got": "updateDetails",
+          "want": "updateDetails"
+        }
+      ],
+      "missing": [],
+      "errors": []
+    },
+    {
+      "id": "H4",
+      "pass": true,
+      "trace": [
+        {
+          "check": "empty list",
+          "got": "0",
+          "want": "0"
+        },
+        {
+          "click": ".new-todo",
+          "x": 400,
+          "y": 162.5
+        },
+        {
+          "check": "input focused",
+          "got": "true",
+          "want": "true"
+        },
+        {
+          "check": "typed value",
+          "got": "Buy mangoes",
+          "want": "Buy mangoes"
+        },
+        {
+          "check": "one item",
+          "got": "1",
+          "want": "1"
+        },
+        {
+          "check": "visible item",
+          "got": "Buy mangoes",
+          "want": "Buy mangoes"
+        },
+        {
+          "check": "input cleared",
+          "got": "",
+          "want": ""
+        },
+        {
+          "click": ".todo-list .toggle",
+          "x": 145,
+          "y": 225.390625
+        },
+        {
+          "check": "completed item",
+          "got": "true",
+          "want": "true"
+        },
+        {
+          "check": "visible count",
+          "got": "0 items left",
+          "want": "0 items left"
+        }
+      ],
+      "missing": [],
+      "errors": []
+    }
+  ]
+}

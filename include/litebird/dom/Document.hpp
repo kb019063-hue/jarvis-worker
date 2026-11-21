@@ -140,6 +140,8 @@ public:
         m_is_html = m_content_type == "text/html";
     }
     /// Canonical WHATWG encoding name (`document.characterSet`), `"UTF-8"` by default.
+    bool scripting_enabled() const { return m_scripting_enabled; }
+    void set_scripting_enabled(bool enabled) { m_scripting_enabled = enabled; }
     const std::string& character_set() const { return m_character_set; }
     void set_character_set(std::string cs) { m_character_set = std::move(cs); }
     /// The DOM standard's "HTML document". In one, the names of HTML
@@ -231,6 +233,7 @@ private:
     std::string m_inherited_origin_url;
     std::string m_fallback_base_url;
     std::string m_content_type{"text/html"};
+    bool m_scripting_enabled{false};
     std::string m_character_set{"UTF-8"};
     bool m_is_html{true};
     bool m_xml_document_object{false};

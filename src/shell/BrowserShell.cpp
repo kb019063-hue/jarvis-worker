@@ -574,10 +574,35 @@ bool BrowserShell::type_text(const std::string& text) {
 
 bool BrowserShell::handle_key(const std::string& key) {
     if (!m_document) return false;
+    // A page sees an arrow before the browser performs its scrolling default.
+    // Like the GUI, this entry point receives one keydown, not a key release.
+    const int arrow = key == "ArrowLeft" ? 37 : key == "ArrowUp" ? 38 :
+                      key == "ArrowRight" ? 39 : key == "ArrowDown" ? 40 : 0;
+    if (arrow) {
+        auto target = m_document->focused_element();
+        if (!target) target = m_document->body();
+        std::shared_ptr<Node> recipient = target ? std::static_pointer_cast<Node>(target) : m_document;
+        bool allow_default = true;
+        if (auto* realm = dom::realm_if_any(*recipient)) {
+            JsIntrinsics::set_current(realm->intrinsics);
+            JsScriptScope scope;
+            const auto event = dom::make_event(*realm, "KeyboardEvent", "keydown", true, true, {
+                {"view", dom::window_of(*realm)}, {"key", JsValue::make_string(key)},
+                {"code", JsValue::make_string(key)}, {"keyCode", JsValue::make_number(arrow)}
+            }, true);
+            allow_default = dom::dispatch(*realm, dom::wrap(*realm, recipient), event, true);
+        }
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(100));
+        rebuild_layout();
+        if (allow_default && !m_document->focused_element()) {
+            if (arrow == 38) scroll_by(0.0f, -48.0f);
+            if (arrow == 40) scroll_by(0.0f, 48.0f);
+        }
+        m_dirty = true;
+        return true;
+    }
     if (key == "PageDown") { scroll_by(0.0f, m_viewport_h * 0.8f); return true; }
     if (key == "PageUp") { scroll_by(0.0f, -m_viewport_h * 0.8f); return true; }
-    if (key == "ArrowDown" && !m_document->focused_element()) { scroll_by(0.0f, 48.0f); return true; }
-    if (key == "ArrowUp" && !m_document->focused_element()) { scroll_by(0.0f, -48.0f); return true; }
     if (key == "Home" && !m_document->focused_element()) { scroll_to(0.0f, 0.0f); return true; }
     if (key == "End" && !m_document->focused_element()) { scroll_to(0.0f, m_content_height); return true; }
     if (key == "Tab") { focus_next(); return true; }

@@ -15,3 +15,9 @@ The Python template uses `display: table` on a section containing ordinary eleme
 Correct geometry wasn't enough: two post-click frames were blank. A box painting inline fragments returned without unwinding its clip/transform commands. That path now uses the same epilogue as the ordinary box path. The heading probe checks disclosure activation and an on-screen heading box; screenshot review still decides whether the text actually painted.
 
 `python3 tools/real_pages/check_article_layout.py build/litebird` prints **4/4**. Rerunning the unchanged frozen tasks produced **17/20** (reference **20/20**); see `tools/real_pages/rerun-02/`. Sidebar positioning, preformatted whitespace, visual disclosure markers and synthesized summaries are not complete. The two games and contenteditable input remain untested, not passes.
+
+### Follow-up: does the arrow reach 2048?
+
+Unmodified arrows received through the GUI key path (`BrowserShell::handle_key`) now dispatch bubbling, cancelable keyboard events before the default scroll action. The focused element (otherwise the body or document) is the target. Animation-frame callbacks are serviced before repainting. This is arrow **keydown** support, not a complete keyboard/IME implementation; terminal navigation shortcuts are unchanged.
+
+The frozen game task now reads the tile container's displayed tile values/position classes and verifies a legal directional move plus one newly spawned tile. In the scored run a left arrow moved a 4 from column 2 and a 2 from column 3 to column 1; a new 2 appeared in the first row. Both moved tiles are visible in the screenshots. The board alignment is visibly wrong: this is not a visual pass. See `tools/real_pages/rerun-03/` for frames and all rows. Chromium 20/20; Litebird 18/20, retaining the previous 17. The focused arrow check in the benchmark README reports 4/4.

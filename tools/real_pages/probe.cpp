@@ -1,6 +1,7 @@
 // A thin driver for the same click/key/paint path as Litebird's interactive shell.
 #include "litebird/shell/BrowserShell.hpp"
 #include "litebird/dom/Selector.hpp"
+#include "board2048.hpp"
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -96,9 +97,23 @@ int main(int argc, char** argv) {
         pass=el && el->value()==typed && result && result->bounding_box().height>0 &&
              (read=="#valid"?value.find(expect)!=std::string::npos:value==expect);
         note="input="+(el?el->value():"(missing)")+"; output="+value;
+    } else if (mode=="game" && target=="2048") {
+        auto tiles=locate(".tile-container");
+        auto before=tiles?board2048::read(*tiles):std::nullopt;
+        note="no valid starting tiles";
+        if (before && std::count(before->begin(), before->end(), 0)==14) {
+            for (const char* key : {"ArrowLeft", "ArrowUp", "ArrowRight", "ArrowDown"}) {
+                shell.handle_key(key);
+                auto after=board2048::read(*tiles);
+                note=std::string(key)+": "+board2048::describe(*before)+" -> "+(after?board2048::describe(*after):"invalid");
+                if (!after || *after!=*before) {
+                    pass=after && board2048::is_move(*before,*after,key);
+                    break;
+                }
+            }
+        }
     } else {
-        // BrowserShell does not deliver page keydown or mousedown. Do not
-        // replace these with script dispatch and call that a browsing pass.
+        // The shell still has no page mousedown adapter for Hextris.
         std::cout<<"BENCH not-tested: shell has no game input adapter\n"; return 0;
     }
     shot("-after");

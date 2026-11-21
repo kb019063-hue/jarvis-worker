@@ -210,6 +210,8 @@ void store_element(uint8_t* base, ElementType type, double value) {
 
 struct ArrayBufferData {
     std::vector<uint8_t> bytes;
+    std::size_t max_byte_length{0};
+    bool resizable{false};
     bool detached{false};
     /// The one script object for these bytes, once one has been made: a buffer
     /// and the `buffer` of a view of it are the same object, as they are in a
@@ -221,8 +223,9 @@ struct ArrayBufferData {
 struct TypedArrayData {
     std::shared_ptr<ArrayBufferData> buffer;
     std::size_t byte_offset{0};
-    std::size_t length{0};  // in elements
+    std::size_t length{0};  // in elements (ignored when length_tracking is true)
     ElementType type{ElementType::Uint8};
+    bool length_tracking{false};
 };
 
 /// A DataView: a window on a buffer with no element type — every read and
@@ -230,8 +233,48 @@ struct TypedArrayData {
 struct DataViewData {
     std::shared_ptr<ArrayBufferData> buffer;
     std::size_t byte_offset{0};
-    std::size_t byte_length{0};
+    std::size_t byte_length{0};  // ignored when length_tracking is true
+    bool length_tracking{false};
 };
+
+// Effective view geometry over fixed, resizable, and detached buffers
+// (ECMA-262 IsTypedArrayOutOfBounds / TypedArrayLength / IsViewOutOfBounds).
+bool is_out_of_bounds(const TypedArrayData& data) {
+    if (!data.buffer || data.buffer->detached) return true;
+    const std::size_t buf_len = data.buffer->bytes.size();
+    if (data.byte_offset > buf_len) return true;
+    if (data.length_tracking) return false;
+    const std::size_t byte_len = data.length * static_cast<std::size_t>(element_size(data.type));
+    return data.byte_offset + byte_len > buf_len;
+}
+
+std::size_t effective_length(const TypedArrayData& data) {
+    if (is_out_of_bounds(data)) return 0;
+    if (!data.length_tracking) return data.length;
+    const std::size_t remaining = data.buffer->bytes.size() - data.byte_offset;
+    return remaining / static_cast<std::size_t>(element_size(data.type));
+}
+
+std::size_t effective_byte_length(const TypedArrayData& data) {
+    return effective_length(data) * static_cast<std::size_t>(element_size(data.type));
+}
+
+std::size_t effective_byte_offset(const TypedArrayData& data) {
+    return is_out_of_bounds(data) ? 0 : data.byte_offset;
+}
+
+bool is_out_of_bounds(const DataViewData& data) {
+    if (!data.buffer || data.buffer->detached) return true;
+    const std::size_t buf_len = data.buffer->bytes.size();
+    if (data.byte_offset > buf_len) return true;
+    if (data.length_tracking) return false;
+    return data.byte_offset + data.byte_length > buf_len;
+}
+
+std::size_t effective_byte_length(const DataViewData& data) {
+    if (is_out_of_bounds(data)) return 0;
+    return data.length_tracking ? (data.buffer->bytes.size() - data.byte_offset) : data.byte_length;
+}
 
 uint8_t* elements_of(const TypedArrayData& data) {
     return data.buffer->bytes.data() + data.byte_offset;
@@ -239,6 +282,35 @@ uint8_t* elements_of(const TypedArrayData& data) {
 
 const uint8_t* elements_of_const(const TypedArrayData& data) {
     return data.buffer->bytes.data() + data.byte_offset;
+}
+
+JsValue read_live(const TypedArrayData& data, std::size_t index) {
+    if (index >= effective_length(data)) return JsValue::make_undefined();
+    return JsValue::make_number(
+        load_element(elements_of_const(data) + index * static_cast<std::size_t>(element_size(data.type)),
+                     data.type));
+}
+
+std::shared_ptr<ArrayBufferData> make_fixed_buffer(std::size_t byte_length) {
+    auto buf = std::make_shared<ArrayBufferData>();
+    buf->bytes.assign(byte_length, 0);
+    buf->max_byte_length = byte_length;
+    buf->resizable = false;
+    return buf;
+}
+
+void define_proto_accessor(JsObject* proto, const char* name, JsValue::NativeFn getter) {
+    const std::string getter_name = std::string("get ") + name;
+    JsValue fn = js_make_native(getter_name.c_str(), 0, std::move(getter));
+    if (JsObject* cell = fn.function_cell()) cell->not_constructor = true;
+    JsValue::make_object(proto).define_accessor(name, std::move(fn), JsValue::make_undefined(),
+                                                PropertyMap::Configurable);
+}
+
+void define_non_ctor_method(JsObject* proto, const char* name, int arity, JsValue::NativeFn fn) {
+    JsValue method = js_make_native(name, arity, std::move(fn));
+    if (JsObject* cell = method.function_cell()) cell->not_constructor = true;
+    js_define_hidden(proto, name, std::move(method));
 }
 
 // A canonical array index: digits only, no leading zero unless it is "0", and
@@ -283,30 +355,9 @@ public:
     bool get(JsObject* self, const std::string& name, JsValue& out) override {
         (void)self;
         if (const auto index = parse_index(name)) {
-            if (*index >= m_data->length || m_data->buffer->detached) return false;
+            if (*index >= effective_length(*m_data)) return false;
             out = JsValue::make_number(
                 load_element(elements_of_const(*m_data) + *index * element_size(m_data->type), m_data->type));
-            return true;
-        }
-        if (name == "length") {
-            out = JsValue::make_number(m_data->buffer->detached
-                                           ? 0.0
-                                           : static_cast<double>(m_data->length));
-            return true;
-        }
-        if (name == "byteLength") {
-            out = JsValue::make_number(
-                m_data->buffer->detached
-                    ? 0.0
-                    : static_cast<double>(m_data->length) * element_size(m_data->type));
-            return true;
-        }
-        if (name == "byteOffset") {
-            out = JsValue::make_number(static_cast<double>(m_data->byte_offset));
-            return true;
-        }
-        if (name == "buffer") {
-            out = buffer_object_for(m_data->buffer);
             return true;
         }
         return false;
@@ -318,41 +369,47 @@ public:
         if (!index) return SetResult::NotHandled;
         // A canonical index past the end is dealt with and dropped, as the
         // standard says: `ta[5] = 9` on a length-2 view does not make a
-        // property, so `ta[5]` stays undefined. A non-index name such as
-        // `ta[-1]` is an ordinary property and is stored.
-        if (*index >= m_data->length || m_data->buffer->detached) return SetResult::Handled;
-        store_element(elements_of(*m_data) + *index * element_size(m_data->type), m_data->type,
-                      js_to_number(value));
+        // property, so `ta[5]` stays undefined. Re-check after js_to_number
+        // because valueOf() can detach or shrink the underlying buffer.
+        if (*index >= effective_length(*m_data)) return SetResult::Handled;
+        const double numeric = js_to_number(value);
+        if (*index >= effective_length(*m_data)) return SetResult::Handled;
+        store_element(elements_of(*m_data) + *index * element_size(m_data->type), m_data->type, numeric);
         return SetResult::Handled;
     }
 
     bool has(JsObject* self, const std::string& name) override {
         (void)self;
         const auto index = parse_index(name);
-        return index && *index < m_data->length && !m_data->buffer->detached;
+        return index && *index < effective_length(*m_data);
     }
 
     bool remove(JsObject* self, const std::string& name, bool& result) override {
         (void)self;
-        (void)name;
-        // An element is not configurable: `delete ta[0]` is false, and a
-        // strict-mode delete throws on it.
+        const auto index = parse_index(name);
+        if (!index) return false;
+        if (*index >= effective_length(*m_data)) {
+            result = true;
+            return true;
+        }
+        // An in-bounds element is not configurable: `delete ta[0]` is false,
+        // and a strict-mode delete throws on it.
         result = false;
         return true;
     }
 
     void keys(JsObject* self, std::vector<std::string>& out) override {
         (void)self;
-        if (m_data->buffer->detached) return;
-        out.reserve(out.size() + m_data->length);
-        for (std::size_t i = 0; i < m_data->length; ++i) out.push_back(std::to_string(i));
+        const std::size_t len = effective_length(*m_data);
+        out.reserve(out.size() + len);
+        for (std::size_t i = 0; i < len; ++i) out.push_back(std::to_string(i));
     }
 
     bool computed_property(JsObject* self, const std::string& name, bool& enumerable,
                            bool& writable) override {
         (void)self;
         const auto index = parse_index(name);
-        if (!index || *index >= m_data->length) return false;
+        if (!index || *index >= effective_length(*m_data)) return false;
         enumerable = true;
         writable = true;
         return true;
@@ -362,9 +419,9 @@ private:
     std::shared_ptr<TypedArrayData> m_data;
 };
 
-/// The exotic an ArrayBuffer carries: `byteLength` and the bytes. It answers no
-/// index, because a script cannot read a buffer directly — that is what a view
-/// is for.
+/// The exotic an ArrayBuffer carries: the backing byte storage. `byteLength`,
+/// `maxByteLength`, `resizable`, and `detached` are prototype accessors on
+/// `ArrayBuffer.prototype`.
 class ArrayBufferHolder : public JsExotic {
 public:
     explicit ArrayBufferHolder(std::shared_ptr<ArrayBufferData> data) : m_data(std::move(data)) {}
@@ -377,11 +434,8 @@ public:
 
     bool get(JsObject* self, const std::string& name, JsValue& out) override {
         (void)self;
-        if (name == "byteLength") {
-            out = JsValue::make_number(m_data->detached ? 0.0
-                                                        : static_cast<double>(m_data->bytes.size()));
-            return true;
-        }
+        (void)name;
+        (void)out;
         return false;
     }
 
@@ -458,7 +512,8 @@ JsValue make_view_object(std::shared_ptr<TypedArrayData> data, JsObject* proto) 
 std::shared_ptr<TypedArrayData> require_view(const JsValue& value, const char* what) {
     auto data = view_of(value);
     if (!data) js_throw_type_error(std::string(what) + ": receiver is not a typed array");
-    if (data->buffer->detached) js_throw_type_error(std::string(what) + ": the buffer was detached");
+    if (is_out_of_bounds(*data))
+        js_throw_type_error(std::string(what) + ": the buffer was detached or resized out of bounds");
     return data;
 }
 
@@ -495,19 +550,21 @@ void clamp_range(Args args, std::size_t first, std::size_t length, std::size_t& 
 /// A view over a whole buffer (or a window of it), checked as the standard does.
 std::shared_ptr<TypedArrayData> make_view_data(std::shared_ptr<ArrayBufferData> buffer,
                                                std::size_t byte_offset, std::size_t length,
-                                               ElementType type, const char* what) {
+                                               bool length_tracking, ElementType type,
+                                               const char* what) {
     const std::size_t size = static_cast<std::size_t>(element_size(type));
     if (buffer->detached) js_throw_type_error(std::string(what) + ": the buffer was detached");
     if (byte_offset % size != 0)
         js_throw_type_error(std::string(what) + ": the offset is not a multiple of the element size");
     const std::size_t available = buffer->bytes.size() > byte_offset ? buffer->bytes.size() - byte_offset : 0;
-    if (buffer->bytes.size() < byte_offset || length > available / size)
+    if (buffer->bytes.size() < byte_offset || (!length_tracking && length > available / size))
         js_throw_type_error(std::string(what) + ": the view is larger than the buffer");
     auto data = std::make_shared<TypedArrayData>();
     data->buffer = std::move(buffer);
     data->byte_offset = byte_offset;
-    data->length = length;
+    data->length = length_tracking ? 0 : length;
     data->type = type;
+    data->length_tracking = length_tracking;
     return data;
 }
 
@@ -549,33 +606,53 @@ JsValue construct_view(Args args, ElementType self_type) {
 
     if (first.is_undefined()) {
         auto data = std::make_shared<TypedArrayData>();
-        data->buffer = std::make_shared<ArrayBufferData>();
+        data->buffer = make_fixed_buffer(0);
         data->type = type;
         return finish(std::move(data));
     }
     if (auto buffer = buffer_of(first)) {
         const std::size_t size = static_cast<std::size_t>(element_size(type));
         const double offset_number = args.size() > 1 ? require_count(args[1], what) : 0;
+        if (std::isinf(offset_number) || offset_number > 9007199254740991.0)
+            js_throw_range_error(std::string(what) + ": the byteOffset is out of range");
         const std::size_t offset = static_cast<std::size_t>(offset_number);
+        const bool has_length = args.size() > 2 && !args[2].is_undefined();
         std::size_t length = 0;
-        if (args.size() > 2 && !args[2].is_undefined()) {
-            length = static_cast<std::size_t>(require_count(args[2], what));
-        } else {
-            if (buffer->bytes.size() < offset || (buffer->bytes.size() - offset) % size != 0)
-                js_throw_type_error(std::string(what) +
-                                    ": the buffer length is not a multiple of the element size");
-            length = (buffer->bytes.size() - offset) / size;
+        if (has_length) {
+            const double len_num = require_count(args[2], what);
+            if (std::isinf(len_num) || len_num > 9007199254740991.0)
+                js_throw_range_error(std::string(what) + ": the length is out of range");
+            length = static_cast<std::size_t>(len_num);
         }
-        return finish(make_view_data(std::move(buffer), offset, length, type, what));
+        if (buffer->detached)
+            js_throw_type_error(std::string(what) + ": the buffer was detached");
+        if (offset % size != 0)
+            js_throw_type_error(std::string(what) + ": the offset is not a multiple of the element size");
+        bool length_tracking = false;
+        if (!has_length) {
+            if (buffer->resizable) {
+                if (buffer->bytes.size() < offset)
+                    js_throw_type_error(std::string(what) + ": the offset is past the end of the buffer");
+                length_tracking = true;
+            } else {
+                if (buffer->bytes.size() < offset || (buffer->bytes.size() - offset) % size != 0)
+                    js_throw_type_error(std::string(what) +
+                                        ": the buffer length is not a multiple of the element size");
+                length = (buffer->bytes.size() - offset) / size;
+            }
+        }
+        return finish(make_view_data(std::move(buffer), offset, length, length_tracking, type, what));
     }
     if (auto other = view_of(first)) {
-        auto data = std::make_shared<TypedArrayData>();
-        data->buffer = std::make_shared<ArrayBufferData>();
-        data->length = other->length;
-        data->type = type;
-        data->buffer->bytes.resize(other->length * static_cast<std::size_t>(element_size(type)));
+        if (is_out_of_bounds(*other))
+            js_throw_type_error(std::string(what) + ": the source buffer was detached or resized out of bounds");
+        const std::size_t count = effective_length(*other);
         const std::size_t size = static_cast<std::size_t>(element_size(type));
-        for (std::size_t i = 0; i < other->length; ++i) {
+        auto data = std::make_shared<TypedArrayData>();
+        data->buffer = make_fixed_buffer(count * size);
+        data->length = count;
+        data->type = type;
+        for (std::size_t i = 0; i < count; ++i) {
             store_element(elements_of(*data) + i * size, type,
                           load_element(elements_of_const(*other) + i * element_size(other->type),
                                        other->type));
@@ -597,10 +674,9 @@ JsValue construct_view(Args args, ElementType self_type) {
             for (double i = 0; i < count; ++i) values.push_back(js_to_number(first.get_property(js_number_to_string(i))));
         }
         auto data = std::make_shared<TypedArrayData>();
-        data->buffer = std::make_shared<ArrayBufferData>();
+        data->buffer = make_fixed_buffer(values.size() * static_cast<std::size_t>(element_size(type)));
         data->length = values.size();
         data->type = type;
-        data->buffer->bytes.resize(values.size() * static_cast<std::size_t>(element_size(type)));
         for (std::size_t i = 0; i < values.size(); ++i)
             store_element(elements_of(*data) + i * element_size(type), type, values[i]);
         return finish(std::move(data));
@@ -610,10 +686,9 @@ JsValue construct_view(Args args, ElementType self_type) {
     if (std::isinf(length_number))
         js_throw_range_error(std::string(what) + ": the length is too large");
     auto data = std::make_shared<TypedArrayData>();
-    data->buffer = std::make_shared<ArrayBufferData>();
     data->length = static_cast<std::size_t>(length_number);
     data->type = type;
-    data->buffer->bytes.assign(data->length * static_cast<std::size_t>(element_size(type)), 0);
+    data->buffer = make_fixed_buffer(data->length * static_cast<std::size_t>(element_size(type)));
     return finish(std::move(data));
 }
 
@@ -633,11 +708,22 @@ JsValue make_iterator(const std::shared_ptr<TypedArrayData>& data, int kind) {
     cell->prototype = JsIntrinsics::get().object_proto;
     JsValue iterator = JsValue::make_object(cell);
     auto position = std::make_shared<std::size_t>(0);
-    iterator.set_property("next", js_make_native("next", 0, [data, position, kind](Args) {
+    auto finished = std::make_shared<bool>(false);
+    iterator.set_property("next", js_make_native("next", 0, [data, position, finished, kind](Args) {
         JsObject* result_cell = Heap::default_heap().allocate_object();
         result_cell->prototype = JsIntrinsics::get().object_proto;
         JsValue out = JsValue::make_object(result_cell);
-        if (*position >= data->length || data->buffer->detached) {
+        if (*finished) {
+            out.set_property("value", JsValue::make_undefined());
+            out.set_property("done", JsValue::make_boolean(true));
+            return out;
+        }
+        if (is_out_of_bounds(*data)) {
+            js_throw_type_error("TypedArray iterator: the underlying buffer was detached or resized out of bounds");
+        }
+        const std::size_t len = effective_length(*data);
+        if (*position >= len) {
+            *finished = true;
             out.set_property("value", JsValue::make_undefined());
             out.set_property("done", JsValue::make_boolean(true));
             return out;
@@ -766,9 +852,8 @@ void dataview_store(std::uint8_t* base, ElementType type, double value, bool lit
     scatter(base, static_cast<std::size_t>(element_size(type)), raw, little_endian);
 }
 
-/// The exotic a DataView carries: `byteLength`, `byteOffset` and `buffer`, and
-/// no indexed access at all — a buffer is read through the methods, never by
-/// indexing the view.
+/// The exotic a DataView carries: the backing window. `buffer`, `byteLength`,
+/// and `byteOffset` are prototype accessors on `DataView.prototype`.
 class DataViewHolder : public JsExotic {
 public:
     explicit DataViewHolder(std::shared_ptr<DataViewData> data) : m_data(std::move(data)) {}
@@ -781,19 +866,8 @@ public:
 
     bool get(JsObject* self, const std::string& name, JsValue& out) override {
         (void)self;
-        const bool detached = m_data->buffer->detached;
-        if (name == "byteLength") {
-            out = JsValue::make_number(detached ? 0.0 : static_cast<double>(m_data->byte_length));
-            return true;
-        }
-        if (name == "byteOffset") {
-            out = JsValue::make_number(static_cast<double>(m_data->byte_offset));
-            return true;
-        }
-        if (name == "buffer") {
-            out = buffer_object_for(m_data->buffer);
-            return true;
-        }
+        (void)name;
+        (void)out;
         return false;
     }
 
@@ -807,23 +881,30 @@ std::shared_ptr<DataViewData> dataview_of(const JsValue& value) {
     return holder ? holder->data() : nullptr;
 }
 
-std::shared_ptr<DataViewData> require_dataview(const JsValue& value, const char* what) {
+std::shared_ptr<DataViewData> require_dataview_slot(const JsValue& value, const char* what) {
     auto data = dataview_of(value);
     if (!data) js_throw_type_error(std::string(what) + ": receiver is not a DataView");
-    if (data->buffer->detached) js_throw_type_error(std::string(what) + ": the buffer was detached");
     return data;
 }
 
-/// ToIndex for an offset: NaN is 0, a negative or an infinite value is a
-/// RangeError, and the result is a whole number of bytes.
+std::shared_ptr<DataViewData> require_dataview(const JsValue& value, const char* what) {
+    auto data = require_dataview_slot(value, what);
+    if (is_out_of_bounds(*data))
+        js_throw_type_error(std::string(what) + ": the buffer was detached or resized out of bounds");
+    return data;
+}
+
+/// ToIndex for an offset or byte length: NaN is 0, a negative or an infinite
+/// value is a RangeError, and the result is a whole number of bytes.
 std::size_t to_index(const JsValue& value, const char* what) {
+    if (value.is_undefined()) return 0;
     const double number = js_to_number(value);
-    if (std::isnan(number)) return 0;
+    if (std::isnan(number) || number == 0.0) return 0;
     const double integer = std::trunc(number);
     if (integer < 0)
-        js_throw_range_error(std::string(what) + ": the offset must not be negative");
+        js_throw_range_error(std::string(what) + ": the index must not be negative");
     if (integer > 9007199254740991.0)
-        js_throw_range_error(std::string(what) + ": the offset is out of range");
+        js_throw_range_error(std::string(what) + ": the index is out of range");
     return static_cast<std::size_t>(integer);
 }
 
@@ -837,7 +918,10 @@ uint8_t* dataview_bytes(const DataViewData& data) {
 
 void check_dataview_range(const DataViewData& data, std::size_t offset, std::size_t width,
                           const char* what) {
-    if (offset + width > data.byte_length)
+    if (is_out_of_bounds(data))
+        js_throw_type_error(std::string(what) + ": the buffer was detached or resized out of bounds");
+    const std::size_t len = effective_byte_length(data);
+    if (offset > len || width > len - offset)
         js_throw_range_error(std::string(what) + ": the offset is past the end of the view");
 }
 
@@ -847,18 +931,37 @@ JsValue construct_data_view(Args args) {
         js_throw_type_error("DataView: the first argument must be an ArrayBuffer");
     const std::size_t offset =
         args.size() > 1 && !args[1].is_undefined() ? to_index(args[1], "DataView") : 0;
-    if (offset > buffer->bytes.size())
+    if (buffer->detached)
+        js_throw_type_error("DataView: the buffer was detached");
+    std::size_t buffer_byte_length = buffer->bytes.size();
+    if (offset > buffer_byte_length)
         js_throw_range_error("DataView: the byteOffset is past the end of the buffer");
-    std::size_t length = buffer->bytes.size() - offset;
-    if (args.size() > 2 && !args[2].is_undefined()) {
+    const bool has_length = args.size() > 2 && !args[2].is_undefined();
+    std::size_t length = 0;
+    bool length_tracking = false;
+    if (has_length) {
         length = to_index(args[2], "DataView");
-        if (offset + length > buffer->bytes.size())
+        if (buffer->detached)
+            js_throw_type_error("DataView: the buffer was detached");
+        buffer_byte_length = buffer->bytes.size();
+        if (offset > buffer_byte_length || length > buffer_byte_length - offset)
             js_throw_range_error("DataView: the byteLength runs past the end of the buffer");
+    } else if (buffer->resizable) {
+        length_tracking = true;
+    } else {
+        length = buffer_byte_length - offset;
     }
     auto data = std::make_shared<DataViewData>();
     data->buffer = std::move(buffer);
     data->byte_offset = offset;
     data->byte_length = length;
+    data->length_tracking = length_tracking;
+    const JsValue* derived = JsValue::current_is_construct() ? JsValue::current_derived_this() : nullptr;
+    if (derived && derived->object_val) {
+        JsObject* cell = derived->object_val.get();
+        cell->exotic = std::make_shared<DataViewHolder>(data);
+        return JsValue::make_object(cell);
+    }
     JsObject* cell = Heap::default_heap().allocate_object();
     cell->prototype = realm().dataview_proto;
     cell->exotic = std::make_shared<DataViewHolder>(data);
@@ -871,33 +974,49 @@ void install_data_view(JsIntrinsics& intrinsics, JsEnvironment& global) {
     realm().dataview_proto = proto;
     JsValue proto_value = JsValue::make_object(proto);
 
-    JsValue constructor = js_make_native("DataView", 3, [](Args args) -> JsValue {
+    JsValue constructor = js_make_native("DataView", 1, [](Args args) -> JsValue {
         return construct_data_view(args);
     });
     constructor.define_property("prototype", proto_value, 0);
     js_define_hidden(proto, "constructor", constructor);
     js_define_hidden(proto, "@@toStringTag", JsValue::make_string("DataView"));
 
+    define_proto_accessor(proto, "buffer", [](Args) {
+        auto data = require_dataview_slot(JsValue::current_this(), "get DataView.prototype.buffer");
+        return buffer_object_for(data->buffer);
+    });
+    define_proto_accessor(proto, "byteLength", [](Args) {
+        auto data = require_dataview(JsValue::current_this(), "get DataView.prototype.byteLength");
+        return JsValue::make_number(static_cast<double>(effective_byte_length(*data)));
+    });
+    define_proto_accessor(proto, "byteOffset", [](Args) {
+        auto data = require_dataview(JsValue::current_this(), "get DataView.prototype.byteOffset");
+        return JsValue::make_number(static_cast<double>(data->byte_offset));
+    });
+
     // Sixteen getters and setter pairs, all one shape: the offset, the value
     // for a setter, and the byte order for anything wider than a byte.
+    // Re-check bounds after evaluating argument coercions because valueOf() can
+    // detach or shrink the buffer.
     auto define_get = [&](const char* name, ElementType type) {
         js_define_method(proto, name, 1, [type, name](Args args) {
-            auto data = require_dataview(JsValue::current_this(), name);
+            auto data = require_dataview_slot(JsValue::current_this(), name);
             const std::size_t offset = to_index(js_arg(args, 0), name);
             const std::size_t width = static_cast<std::size_t>(element_size(type));
-            check_dataview_range(*data, offset, width, name);
             const bool little = width > 1 && little_endian_of(args, 1);
+            check_dataview_range(*data, offset, width, name);
             return JsValue::make_number(dataview_load(dataview_bytes(*data) + offset, type, little));
         });
     };
     auto define_set = [&](const char* name, ElementType type) {
         js_define_method(proto, name, 2, [type, name](Args args) {
-            auto data = require_dataview(JsValue::current_this(), name);
+            auto data = require_dataview_slot(JsValue::current_this(), name);
             const std::size_t offset = to_index(js_arg(args, 0), name);
+            const double value = js_to_number(js_arg(args, 1));
             const std::size_t width = static_cast<std::size_t>(element_size(type));
-            check_dataview_range(*data, offset, width, name);
             const bool little = width > 1 && little_endian_of(args, 2);
-            dataview_store(dataview_bytes(*data) + offset, type, js_to_number(js_arg(args, 1)), little);
+            check_dataview_range(*data, offset, width, name);
+            dataview_store(dataview_bytes(*data) + offset, type, value, little);
             return JsValue::make_undefined();
         });
     };
@@ -926,6 +1045,39 @@ void install_data_view(JsIntrinsics& intrinsics, JsEnvironment& global) {
 // ArrayBuffer
 // ---------------------------------------------------------------------------
 
+// ECMA-262 §25.1.3.10 ArrayBufferCopyAndDetach(arrayBuffer, newLength, preserveResizability)
+JsValue array_buffer_copy_and_detach(const JsValue& receiver, Args args,
+                                     bool preserve_resizability, const char* what) {
+    auto buffer = buffer_of(receiver);
+    if (!buffer) js_throw_type_error(std::string(what) + ": receiver is not an ArrayBuffer");
+    const bool has_new_length = !args.empty() && !args[0].is_undefined();
+    const std::size_t parsed_length = has_new_length ? to_index(args[0], what) : 0;
+    if (buffer->detached)
+        js_throw_type_error(std::string(what) + ": the buffer is already detached");
+    const std::size_t new_byte_length = has_new_length ? parsed_length : buffer->bytes.size();
+    const bool new_resizable = preserve_resizability && buffer->resizable;
+    const std::size_t new_max_byte_length =
+        new_resizable ? buffer->max_byte_length : new_byte_length;
+    if (new_byte_length > new_max_byte_length)
+        js_throw_range_error(std::string(what) + ": newByteLength exceeds maxByteLength");
+
+    auto next = std::make_shared<ArrayBufferData>();
+    next->resizable = new_resizable;
+    next->max_byte_length = new_max_byte_length;
+    const std::size_t copy_len = std::min(new_byte_length, buffer->bytes.size());
+    if (new_byte_length == buffer->bytes.size()) {
+        next->bytes = std::move(buffer->bytes);
+    } else {
+        next->bytes.assign(new_byte_length, 0);
+        if (copy_len > 0) std::memcpy(next->bytes.data(), buffer->bytes.data(), copy_len);
+    }
+
+    buffer->bytes.clear();
+    buffer->bytes.shrink_to_fit();
+    buffer->detached = true;
+    return make_buffer_object(next);
+}
+
 void install_array_buffer(JsIntrinsics& intrinsics, JsEnvironment& global) {
     JsObject* proto = Heap::default_heap().allocate_object();
     proto->prototype = intrinsics.object_proto;
@@ -933,16 +1085,86 @@ void install_array_buffer(JsIntrinsics& intrinsics, JsEnvironment& global) {
     JsValue proto_value = JsValue::make_object(proto);
 
     JsValue constructor = js_make_native("ArrayBuffer", 1, [](Args args) {
-        const double length = require_count(js_arg(args, 0), "ArrayBuffer");
-        if (std::isinf(length))
-            js_throw_range_error("ArrayBuffer: the length is too large");
+        const std::size_t byte_length = to_index(js_arg(args, 0), "ArrayBuffer");
+        bool resizable = false;
+        std::size_t max_byte_length = byte_length;
+        if (args.size() > 1 && args[1].is_object_like()) {
+            JsValue max_val = args[1].get_property("maxByteLength");
+            if (!max_val.is_undefined()) {
+                max_byte_length = to_index(max_val, "ArrayBuffer");
+                if (byte_length > max_byte_length)
+                    js_throw_range_error("ArrayBuffer: byteLength exceeds maxByteLength");
+                resizable = true;
+            }
+        }
         auto bytes = std::make_shared<ArrayBufferData>();
-        bytes->bytes.assign(static_cast<std::size_t>(length), 0);
+        bytes->bytes.assign(byte_length, 0);
+        bytes->max_byte_length = max_byte_length;
+        bytes->resizable = resizable;
+        const JsValue* derived =
+            JsValue::current_is_construct() ? JsValue::current_derived_this() : nullptr;
+        if (derived && derived->object_val) {
+            JsObject* cell = derived->object_val.get();
+            bytes->owner_object = cell;
+            cell->exotic = std::make_shared<ArrayBufferHolder>(bytes);
+            return JsValue::make_object(cell);
+        }
         return make_buffer_object(bytes);
     });
     constructor.define_property("prototype", proto_value, 0);
     js_define_hidden(proto, "constructor", constructor);
     js_define_hidden(proto, "@@toStringTag", JsValue::make_string("ArrayBuffer"));
+
+    define_proto_accessor(proto, "byteLength", [](Args) {
+        auto buffer = buffer_of(JsValue::current_this());
+        if (!buffer)
+            js_throw_type_error("get ArrayBuffer.prototype.byteLength: receiver is not an ArrayBuffer");
+        return JsValue::make_number(
+            buffer->detached ? 0.0 : static_cast<double>(buffer->bytes.size()));
+    });
+    define_proto_accessor(proto, "maxByteLength", [](Args) {
+        auto buffer = buffer_of(JsValue::current_this());
+        if (!buffer)
+            js_throw_type_error("get ArrayBuffer.prototype.maxByteLength: receiver is not an ArrayBuffer");
+        return JsValue::make_number(
+            buffer->detached ? 0.0 : static_cast<double>(buffer->max_byte_length));
+    });
+    define_proto_accessor(proto, "resizable", [](Args) {
+        auto buffer = buffer_of(JsValue::current_this());
+        if (!buffer)
+            js_throw_type_error("get ArrayBuffer.prototype.resizable: receiver is not an ArrayBuffer");
+        return JsValue::make_boolean(buffer->resizable);
+    });
+    define_proto_accessor(proto, "detached", [](Args) {
+        auto buffer = buffer_of(JsValue::current_this());
+        if (!buffer)
+            js_throw_type_error("get ArrayBuffer.prototype.detached: receiver is not an ArrayBuffer");
+        return JsValue::make_boolean(buffer->detached);
+    });
+
+    define_non_ctor_method(proto, "resize", 1, [](Args args) {
+        auto buffer = buffer_of(JsValue::current_this());
+        if (!buffer) js_throw_type_error("ArrayBuffer.prototype.resize: receiver is not an ArrayBuffer");
+        if (!buffer->resizable)
+            js_throw_type_error("ArrayBuffer.prototype.resize: the buffer is not resizable");
+        const std::size_t new_byte_length = to_index(js_arg(args, 0), "ArrayBuffer.prototype.resize");
+        if (buffer->detached)
+            js_throw_type_error("ArrayBuffer.prototype.resize: the buffer was detached");
+        if (new_byte_length > buffer->max_byte_length)
+            js_throw_range_error("ArrayBuffer.prototype.resize: newByteLength exceeds maxByteLength");
+        buffer->bytes.resize(new_byte_length, 0);
+        return JsValue::make_undefined();
+    });
+
+    define_non_ctor_method(proto, "transfer", 0, [](Args args) {
+        return array_buffer_copy_and_detach(JsValue::current_this(), args, true,
+                                            "ArrayBuffer.prototype.transfer");
+    });
+
+    define_non_ctor_method(proto, "transferToFixedLength", 0, [](Args args) {
+        return array_buffer_copy_and_detach(JsValue::current_this(), args, false,
+                                            "ArrayBuffer.prototype.transferToFixedLength");
+    });
 
     js_define_method(proto, "slice", 2, [](Args args) {
         auto buffer = buffer_of(JsValue::current_this());
@@ -951,9 +1173,14 @@ void install_array_buffer(JsIntrinsics& intrinsics, JsEnvironment& global) {
         std::size_t begin = 0;
         std::size_t end = 0;
         clamp_range(args, 0, buffer->bytes.size(), begin, end);
-        auto copy = std::make_shared<ArrayBufferData>();
-        copy->bytes.assign(buffer->bytes.begin() + static_cast<ptrdiff_t>(begin),
-                           buffer->bytes.begin() + static_cast<ptrdiff_t>(end));
+        if (buffer->detached) js_throw_type_error("ArrayBuffer.prototype.slice: the buffer was detached");
+        const std::size_t cur_len = buffer->bytes.size();
+        const std::size_t copy_len = end > begin ? (end - begin) : 0;
+        auto copy = make_fixed_buffer(copy_len);
+        if (copy_len > 0 && begin < cur_len) {
+            const std::size_t avail = std::min(copy_len, cur_len - begin);
+            std::memcpy(copy->bytes.data(), buffer->bytes.data() + begin, avail);
+        }
         return make_buffer_object(copy);
     });
 
@@ -989,44 +1216,97 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
     constructor.define_property("prototype", proto_value, 0);
     js_define_hidden(proto, "constructor", constructor);
 
+    define_proto_accessor(proto, "buffer", [](Args) {
+        auto data = view_of(JsValue::current_this());
+        if (!data)
+            js_throw_type_error("get %TypedArray%.prototype.buffer: receiver is not a typed array");
+        return buffer_object_for(data->buffer);
+    });
+    define_proto_accessor(proto, "byteLength", [](Args) {
+        auto data = view_of(JsValue::current_this());
+        if (!data)
+            js_throw_type_error("get %TypedArray%.prototype.byteLength: receiver is not a typed array");
+        return JsValue::make_number(static_cast<double>(effective_byte_length(*data)));
+    });
+    define_proto_accessor(proto, "byteOffset", [](Args) {
+        auto data = view_of(JsValue::current_this());
+        if (!data)
+            js_throw_type_error("get %TypedArray%.prototype.byteOffset: receiver is not a typed array");
+        return JsValue::make_number(static_cast<double>(effective_byte_offset(*data)));
+    });
+    define_proto_accessor(proto, "length", [](Args) {
+        auto data = view_of(JsValue::current_this());
+        if (!data)
+            js_throw_type_error("get %TypedArray%.prototype.length: receiver is not a typed array");
+        return JsValue::make_number(static_cast<double>(effective_length(*data)));
+    });
+
     js_define_method(proto, "set", 1, [](Args args) {
-        auto target = require_view(JsValue::current_this(), "TypedArray.prototype.set");
-        const JsValue& source = js_arg(args, 0);
-        if (!source.is_object_like())
-            js_throw_type_error("TypedArray.prototype.set: the source is not an object");
+        auto target = view_of(JsValue::current_this());
+        if (!target) js_throw_type_error("TypedArray.prototype.set: receiver is not a typed array");
         const double offset_number = args.size() > 1 ? to_integer_or_infinity(js_to_number(args[1])) : 0;
         if (offset_number < 0)
             js_throw_range_error("TypedArray.prototype.set: the offset must not be negative");
+        if (is_out_of_bounds(*target))
+            js_throw_type_error("TypedArray.prototype.set: the target buffer was detached or resized out of bounds");
+        const std::size_t target_len = effective_length(*target);
+        if (std::isinf(offset_number))
+            js_throw_range_error("TypedArray.prototype.set: the source is larger than the space left");
         const std::size_t offset = static_cast<std::size_t>(offset_number);
+        const JsValue& source = js_arg(args, 0);
+        if (!source.is_object_like())
+            js_throw_type_error("TypedArray.prototype.set: the source is not an object");
         // A view of the same buffer is read before it is written, so an
         // overlapping copy is as if it went through a temporary.
         std::vector<double> values;
         if (auto other = view_of(source)) {
-            values.reserve(other->length);
-            for (std::size_t i = 0; i < other->length; ++i)
+            if (is_out_of_bounds(*other))
+                js_throw_type_error("TypedArray.prototype.set: the source buffer was detached or resized out of bounds");
+            const std::size_t src_len = effective_length(*other);
+            if (offset > target_len || src_len > target_len - offset)
+                js_throw_range_error("TypedArray.prototype.set: the source is larger than the space left");
+            values.reserve(src_len);
+            for (std::size_t i = 0; i < src_len; ++i)
                 values.push_back(load_element(elements_of_const(*other) + i * element_size(other->type),
                                               other->type));
         } else {
-            const double count = to_integer_or_infinity(js_to_number(source.get_property("length")));
-            for (double i = 0; i < count; ++i)
-                values.push_back(js_to_number(source.get_property(js_number_to_string(i))));
+            const double count_d = to_integer_or_infinity(js_to_number(source.get_property("length")));
+            const std::size_t count = count_d > 0 ? static_cast<std::size_t>(count_d) : 0;
+            if (offset > target_len || count > target_len - offset)
+                js_throw_range_error("TypedArray.prototype.set: the source is larger than the space left");
+            values.reserve(count);
+            for (std::size_t i = 0; i < count; ++i)
+                values.push_back(js_to_number(source.get_property(std::to_string(i))));
         }
-        if (offset + values.size() > target->length)
-            js_throw_range_error("TypedArray.prototype.set: the source is larger than the space left");
-        for (std::size_t i = 0; i < values.size(); ++i)
-            store_element(elements_of(*target) + (offset + i) * element_size(target->type),
-                          target->type, values[i]);
+        const std::size_t live_target_len = effective_length(*target);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (offset + i < live_target_len) {
+                store_element(elements_of(*target) + (offset + i) * element_size(target->type),
+                              target->type, values[i]);
+            }
+        }
         return JsValue::make_undefined();
     });
 
     js_define_method(proto, "subarray", 2, [](Args args) {
-        auto data = require_view(JsValue::current_this(), "TypedArray.prototype.subarray");
+        auto data = view_of(JsValue::current_this());
+        if (!data) js_throw_type_error("TypedArray.prototype.subarray: receiver is not a typed array");
+        if (is_out_of_bounds(*data))
+            js_throw_type_error("TypedArray.prototype.subarray: the buffer was detached or resized out of bounds");
+        const std::size_t len = effective_length(*data);
+        const bool end_omitted = args.size() <= 1 || args[1].is_undefined();
         std::size_t begin = 0;
         std::size_t end = 0;
-        clamp_range(args, 0, data->length, begin, end);
+        clamp_range(args, 0, len, begin, end);
         auto window = std::make_shared<TypedArrayData>(*data);
         window->byte_offset = data->byte_offset + begin * static_cast<std::size_t>(element_size(data->type));
-        window->length = end - begin;
+        if (data->length_tracking && end_omitted) {
+            window->length_tracking = true;
+            window->length = 0;
+        } else {
+            window->length_tracking = false;
+            window->length = end - begin;
+        }
         JsObject* self = JsValue::current_this().object_val.get();
         JsObject* proto_of = self && self->prototype ? self->prototype : realm().protos[static_cast<int>(data->type)];
         return make_view_object(std::move(window), proto_of);
@@ -1034,26 +1314,37 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
 
     js_define_method(proto, "slice", 2, [](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.slice");
+        const std::size_t len = effective_length(*data);
         std::size_t begin = 0;
         std::size_t end = 0;
-        clamp_range(args, 0, data->length, begin, end);
-        auto copy = std::make_shared<TypedArrayData>();
-        copy->buffer = std::make_shared<ArrayBufferData>();
-        copy->length = end - begin;
-        copy->type = data->type;
+        clamp_range(args, 0, len, begin, end);
+        const std::size_t count = end - begin;
+        if (count > 0 && is_out_of_bounds(*data))
+            js_throw_type_error("TypedArray.prototype.slice: the buffer was detached or resized out of bounds");
         const std::size_t size = static_cast<std::size_t>(element_size(data->type));
-        copy->buffer->bytes.assign((end - begin) * size, 0);
-        std::memcpy(elements_of(*copy), elements_of_const(*data) + begin * size, (end - begin) * size);
+        auto copy = std::make_shared<TypedArrayData>();
+        copy->buffer = make_fixed_buffer(count * size);
+        copy->length = count;
+        copy->type = data->type;
+        const std::size_t live_len = effective_length(*data);
+        if (count > 0 && begin < live_len) {
+            const std::size_t avail = std::min(count, live_len - begin);
+            std::memcpy(elements_of(*copy), elements_of_const(*data) + begin * size, avail * size);
+        }
         return make_view_object(std::move(copy), realm().protos[static_cast<int>(data->type)]);
     });
 
     js_define_method(proto, "fill", 3, [](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.fill");
+        const std::size_t len = effective_length(*data);
         const double value = js_to_number(js_arg(args, 0));
         std::size_t begin = 0;
         std::size_t end = 0;
-        clamp_range(args, 1, data->length, begin, end);
-        for (std::size_t i = begin; i < end; ++i)
+        clamp_range(args, 1, len, begin, end);
+        if (is_out_of_bounds(*data))
+            js_throw_type_error("TypedArray.prototype.fill: the buffer was detached or resized out of bounds");
+        const std::size_t live_end = std::min(end, effective_length(*data));
+        for (std::size_t i = begin; i < live_end; ++i)
             store_element(elements_of(*data) + i * element_size(data->type), data->type, value);
         return JsValue::current_this();
     });
@@ -1062,7 +1353,8 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.copyWithin");
         // A negative relative index counts from the end and is then clamped:
         // copyWithin(0, -2) copies the last two elements to the front.
-        const double length = static_cast<double>(data->length);
+        const std::size_t len = effective_length(*data);
+        const double length = static_cast<double>(len);
         auto relative = [length](const JsValue& value) {
             double index = to_integer_or_infinity(js_to_number(value));
             if (index < 0) index += length;
@@ -1073,9 +1365,17 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
         const std::size_t target_begin = args.empty() ? 0 : relative(args[0]);
         const std::size_t source_begin = args.size() > 1 ? relative(args[1]) : 0;
         const std::size_t source_end =
-            args.size() > 2 && !args[2].is_undefined() ? relative(args[2]) : data->length;
-        const std::size_t count = std::min(source_end - source_begin, data->length - target_begin);
+            args.size() > 2 && !args[2].is_undefined() ? relative(args[2]) : len;
+        if (source_end <= source_begin) return JsValue::current_this();
+        std::size_t count = std::min(source_end - source_begin, len - target_begin);
+        if (count == 0) return JsValue::current_this();
+        if (is_out_of_bounds(*data))
+            js_throw_type_error("TypedArray.prototype.copyWithin: the buffer was detached or resized out of bounds");
+        const std::size_t live_len = effective_length(*data);
+        if (target_begin >= live_len || source_begin >= live_len) return JsValue::current_this();
+        count = std::min({count, live_len - source_begin, live_len - target_begin});
         std::vector<double> values;
+        values.reserve(count);
         for (std::size_t i = 0; i < count; ++i)
             values.push_back(load_element(elements_of_const(*data) + (source_begin + i) * element_size(data->type),
                                           data->type));
@@ -1087,17 +1387,22 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
 
     js_define_method(proto, "indexOf", 1, [](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.indexOf");
-        const double wanted = js_to_number(js_arg(args, 0));
+        const std::size_t len = effective_length(*data);
+        if (len == 0) return JsValue::make_number(-1);
+        const JsValue& wanted_val = js_arg(args, 0);
         const double from = args.size() > 1 ? to_integer_or_infinity(js_to_number(args[1])) : 0;
+        if (wanted_val.type != JsType::Number) return JsValue::make_number(-1);
+        const double wanted = wanted_val.number_val;
         std::size_t start = 0;
         if (from >= 0) {
-            if (from > static_cast<double>(data->length)) return JsValue::make_number(-1);
+            if (from >= static_cast<double>(len)) return JsValue::make_number(-1);
             start = static_cast<std::size_t>(from);
         } else {
-            const double sum = static_cast<double>(data->length) + from;
+            const double sum = static_cast<double>(len) + from;
             start = sum < 0 ? 0 : static_cast<std::size_t>(sum);
         }
-        for (std::size_t i = start; i < data->length; ++i) {
+        const std::size_t live_len = std::min(len, effective_length(*data));
+        for (std::size_t i = start; i < live_len; ++i) {
             const double element = load_element(elements_of_const(*data) + i * element_size(data->type), data->type);
             if (element == wanted) return JsValue::make_number(static_cast<double>(i));
         }
@@ -1106,19 +1411,25 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
 
     js_define_method(proto, "lastIndexOf", 1, [](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.lastIndexOf");
-        const double wanted = js_to_number(js_arg(args, 0));
-        std::size_t start = data->length == 0 ? 0 : data->length - 1;
-        if (data->length == 0) return JsValue::make_number(-1);
+        const std::size_t len = effective_length(*data);
+        if (len == 0) return JsValue::make_number(-1);
+        const JsValue& wanted_val = js_arg(args, 0);
+        std::size_t start = len - 1;
         if (args.size() > 1) {
             const double from = to_integer_or_infinity(js_to_number(args[1]));
             if (from < 0) {
-                const double sum = static_cast<double>(data->length) + from;
+                const double sum = static_cast<double>(len) + from;
                 if (sum < 0) return JsValue::make_number(-1);
                 start = static_cast<std::size_t>(sum);
             } else {
-                start = static_cast<std::size_t>(std::min(from, static_cast<double>(data->length - 1)));
+                start = static_cast<std::size_t>(std::min(from, static_cast<double>(len - 1)));
             }
         }
+        if (wanted_val.type != JsType::Number) return JsValue::make_number(-1);
+        const double wanted = wanted_val.number_val;
+        const std::size_t live_len = effective_length(*data);
+        if (live_len == 0) return JsValue::make_number(-1);
+        start = std::min(start, live_len - 1);
         for (std::size_t i = start + 1; i-- > 0;) {
             const double element = load_element(elements_of_const(*data) + i * element_size(data->type), data->type);
             if (element == wanted) return JsValue::make_number(static_cast<double>(i));
@@ -1128,9 +1439,26 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
 
     js_define_method(proto, "includes", 1, [](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.includes");
+        const std::size_t len = effective_length(*data);
+        if (len == 0) return JsValue::make_boolean(false);
         const JsValue& wanted = js_arg(args, 0);
-        const double wanted_number = js_to_number(wanted);
-        for (std::size_t i = 0; i < data->length; ++i) {
+        const double from = args.size() > 1 ? to_integer_or_infinity(js_to_number(args[1])) : 0;
+        std::size_t start = 0;
+        if (from >= 0) {
+            if (from >= static_cast<double>(len)) return JsValue::make_boolean(false);
+            start = static_cast<std::size_t>(from);
+        } else {
+            const double sum = static_cast<double>(len) + from;
+            start = sum < 0 ? 0 : static_cast<std::size_t>(sum);
+        }
+        if (wanted.is_undefined()) {
+            const std::size_t live_len = effective_length(*data);
+            return JsValue::make_boolean(live_len < len);
+        }
+        if (wanted.type != JsType::Number) return JsValue::make_boolean(false);
+        const double wanted_number = wanted.number_val;
+        const std::size_t live_len = std::min(len, effective_length(*data));
+        for (std::size_t i = start; i < live_len; ++i) {
             const double element = load_element(elements_of_const(*data) + i * element_size(data->type), data->type);
             // SameValueZero: NaN is found by includes, where indexOf misses it.
             if (element == wanted_number || (std::isnan(element) && std::isnan(wanted_number)))
@@ -1141,8 +1469,9 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
 
     js_define_method(proto, "toString", 0, [](Args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.toString");
+        const std::size_t len = effective_length(*data);
         std::string out;
-        for (std::size_t i = 0; i < data->length; ++i) {
+        for (std::size_t i = 0; i < len; ++i) {
             if (i) out += ",";
             const double element =
                 load_element(elements_of_const(*data) + i * element_size(data->type), data->type);
@@ -1155,23 +1484,26 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
 
     js_define_method(proto, "join", 1, [](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.join");
+        const std::size_t len = effective_length(*data);
         const std::string separator =
             args.empty() || args[0].is_undefined() ? "," : js_to_string(args[0]);
         std::string out;
-        for (std::size_t i = 0; i < data->length; ++i) {
+        for (std::size_t i = 0; i < len; ++i) {
             if (i) out += separator;
-            const double element = load_element(elements_of_const(*data) + i * element_size(data->type), data->type);
-            // A typed array has no holes, so a NaN is a value to print and
-            // not an empty slot: `new Float32Array([NaN]).join()` is "NaN".
-            out += js_number_to_string(element);
+            if (i < effective_length(*data)) {
+                const double element =
+                    load_element(elements_of_const(*data) + i * element_size(data->type), data->type);
+                out += js_number_to_string(element);
+            }
         }
         return JsValue::make_string(out);
     });
 
     js_define_method(proto, "reverse", 0, [](Args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.reverse");
+        const std::size_t len = effective_length(*data);
         const std::size_t size = static_cast<std::size_t>(element_size(data->type));
-        for (std::size_t i = 0, j = data->length ? data->length - 1 : 0; i < j; ++i, --j) {
+        for (std::size_t i = 0, j = len ? len - 1 : 0; i < j; ++i, --j) {
             std::vector<uint8_t> left(size), right(size);
             std::memcpy(left.data(), elements_of_const(*data) + i * size, size);
             std::memcpy(right.data(), elements_of_const(*data) + j * size, size);
@@ -1195,19 +1527,19 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
     auto copy_like = [](const TypedArrayData& data, const std::vector<double>& values,
                         JsObject* proto) {
         auto out = std::make_shared<TypedArrayData>();
-        out->buffer = std::make_shared<ArrayBufferData>();
+        const std::size_t size = static_cast<std::size_t>(element_size(data.type));
+        out->buffer = make_fixed_buffer(values.size() * size);
         out->type = data.type;
         out->length = values.size();
-        const std::size_t size = static_cast<std::size_t>(element_size(data.type));
-        out->buffer->bytes.assign(values.size() * size, 0);
         for (std::size_t i = 0; i < values.size(); ++i)
             store_element(elements_of(*out) + i * size, out->type, values[i]);
         return make_view_object(std::move(out), proto);
     };
     auto collect = [](const TypedArrayData& data) {
+        const std::size_t len = effective_length(data);
         std::vector<double> values;
-        values.reserve(data.length);
-        for (std::size_t i = 0; i < data.length; ++i)
+        values.reserve(len);
+        for (std::size_t i = 0; i < len; ++i)
             values.push_back(
                 load_element(elements_of_const(data) + i * element_size(data.type), data.type));
         return values;
@@ -1215,151 +1547,152 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
 
     js_define_method(proto, "at", 1, [](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.at");
+        const std::size_t len = effective_length(*data);
         const double relative = to_integer_or_infinity(js_to_number(js_arg(args, 0)));
-        const double index = relative < 0 ? relative + static_cast<double>(data->length) : relative;
-        if (index < 0 || index >= static_cast<double>(data->length))
+        const double index = relative < 0 ? relative + static_cast<double>(len) : relative;
+        if (index < 0 || index >= static_cast<double>(len))
             return JsValue::make_undefined();
-        return JsValue::make_number(
-            load_element(elements_of_const(*data) + static_cast<std::size_t>(index) * element_size(data->type),
-                         data->type));
+        return read_live(*data, static_cast<std::size_t>(index));
     });
 
-    js_define_method(proto, "map", 1, [receiver_proto, collect, copy_like](Args args) {
+    js_define_method(proto, "map", 1, [receiver_proto, copy_like](Args args) {
         const JsValue self = JsValue::current_this();
         auto data = require_view(self, "TypedArray.prototype.map");
+        const std::size_t len = effective_length(*data);
         const JsValue callback = require_callback(args, "TypedArray.prototype.map");
-        std::vector<double> values = collect(*data);
-        for (std::size_t i = 0; i < values.size(); ++i) {
-            values[i] = js_to_number(js_call(callback, js_arg(args, 1),
-                                             {JsValue::make_number(values[i]),
-                                              JsValue::make_number(static_cast<double>(i)), self}));
+        std::vector<double> out(len);
+        for (std::size_t i = 0; i < len; ++i) {
+            const JsValue current = read_live(*data, i);
+            out[i] = js_to_number(js_call(callback, js_arg(args, 1),
+                                          {current, JsValue::make_number(static_cast<double>(i)), self}));
         }
-        return copy_like(*data, values, receiver_proto(data));
+        return copy_like(*data, out, receiver_proto(data));
     });
 
-    js_define_method(proto, "filter", 1, [receiver_proto, collect, copy_like](Args args) {
+    js_define_method(proto, "filter", 1, [receiver_proto, copy_like](Args args) {
         const JsValue self = JsValue::current_this();
         auto data = require_view(self, "TypedArray.prototype.filter");
+        const std::size_t len = effective_length(*data);
         const JsValue callback = require_callback(args, "TypedArray.prototype.filter");
-        const std::vector<double> elements = collect(*data);
         std::vector<double> kept;
-        for (std::size_t i = 0; i < elements.size(); ++i) {
+        for (std::size_t i = 0; i < len; ++i) {
+            const JsValue current = read_live(*data, i);
             const JsValue decision = js_call(callback, js_arg(args, 1),
-                                             {JsValue::make_number(elements[i]),
-                                              JsValue::make_number(static_cast<double>(i)), self});
-            if (decision.is_truthy()) kept.push_back(elements[i]);
+                                             {current, JsValue::make_number(static_cast<double>(i)), self});
+            if (decision.is_truthy()) kept.push_back(js_to_number(current));
         }
         return copy_like(*data, kept, receiver_proto(data));
     });
 
-    js_define_method(proto, "forEach", 1, [collect](Args args) {
+    js_define_method(proto, "forEach", 1, [](Args args) {
         const JsValue self = JsValue::current_this();
         auto data = require_view(self, "TypedArray.prototype.forEach");
+        const std::size_t len = effective_length(*data);
         const JsValue callback = require_callback(args, "TypedArray.prototype.forEach");
-        const std::vector<double> values = collect(*data);
-        for (std::size_t i = 0; i < values.size(); ++i)
+        for (std::size_t i = 0; i < len; ++i)
             js_call(callback, js_arg(args, 1),
-                    {JsValue::make_number(values[i]), JsValue::make_number(static_cast<double>(i)), self});
+                    {read_live(*data, i), JsValue::make_number(static_cast<double>(i)), self});
         return JsValue::make_undefined();
     });
 
-    js_define_method(proto, "some", 1, [collect](Args args) {
+    js_define_method(proto, "some", 1, [](Args args) {
         const JsValue self = JsValue::current_this();
         auto data = require_view(self, "TypedArray.prototype.some");
+        const std::size_t len = effective_length(*data);
         const JsValue callback = require_callback(args, "TypedArray.prototype.some");
-        const std::vector<double> values = collect(*data);
-        for (std::size_t i = 0; i < values.size(); ++i) {
+        for (std::size_t i = 0; i < len; ++i) {
             if (js_call(callback, js_arg(args, 1),
-                        {JsValue::make_number(values[i]), JsValue::make_number(static_cast<double>(i)), self})
+                        {read_live(*data, i), JsValue::make_number(static_cast<double>(i)), self})
                     .is_truthy())
                 return JsValue::make_boolean(true);
         }
         return JsValue::make_boolean(false);
     });
 
-    js_define_method(proto, "every", 1, [collect](Args args) {
+    js_define_method(proto, "every", 1, [](Args args) {
         const JsValue self = JsValue::current_this();
         auto data = require_view(self, "TypedArray.prototype.every");
+        const std::size_t len = effective_length(*data);
         const JsValue callback = require_callback(args, "TypedArray.prototype.every");
-        const std::vector<double> values = collect(*data);
-        for (std::size_t i = 0; i < values.size(); ++i) {
+        for (std::size_t i = 0; i < len; ++i) {
             if (!js_call(callback, js_arg(args, 1),
-                         {JsValue::make_number(values[i]), JsValue::make_number(static_cast<double>(i)), self})
+                         {read_live(*data, i), JsValue::make_number(static_cast<double>(i)), self})
                      .is_truthy())
                 return JsValue::make_boolean(false);
         }
         return JsValue::make_boolean(true);
     });
 
-    js_define_method(proto, "find", 1, [collect](Args args) {
+    js_define_method(proto, "find", 1, [](Args args) {
         const JsValue self = JsValue::current_this();
         auto data = require_view(self, "TypedArray.prototype.find");
+        const std::size_t len = effective_length(*data);
         const JsValue callback = require_callback(args, "TypedArray.prototype.find");
-        const std::vector<double> values = collect(*data);
-        for (std::size_t i = 0; i < values.size(); ++i) {
+        for (std::size_t i = 0; i < len; ++i) {
+            const JsValue current = read_live(*data, i);
             if (js_call(callback, js_arg(args, 1),
-                        {JsValue::make_number(values[i]), JsValue::make_number(static_cast<double>(i)), self})
+                        {current, JsValue::make_number(static_cast<double>(i)), self})
                     .is_truthy())
-                return JsValue::make_number(values[i]);
+                return current;
         }
         return JsValue::make_undefined();
     });
 
-    js_define_method(proto, "findIndex", 1, [collect](Args args) {
+    js_define_method(proto, "findIndex", 1, [](Args args) {
         const JsValue self = JsValue::current_this();
         auto data = require_view(self, "TypedArray.prototype.findIndex");
+        const std::size_t len = effective_length(*data);
         const JsValue callback = require_callback(args, "TypedArray.prototype.findIndex");
-        const std::vector<double> values = collect(*data);
-        for (std::size_t i = 0; i < values.size(); ++i) {
+        for (std::size_t i = 0; i < len; ++i) {
             if (js_call(callback, js_arg(args, 1),
-                        {JsValue::make_number(values[i]), JsValue::make_number(static_cast<double>(i)), self})
+                        {read_live(*data, i), JsValue::make_number(static_cast<double>(i)), self})
                     .is_truthy())
                 return JsValue::make_number(static_cast<double>(i));
         }
         return JsValue::make_number(-1);
     });
 
-    js_define_method(proto, "reduce", 1, [collect](Args args) {
+    js_define_method(proto, "reduce", 1, [](Args args) {
         const JsValue self = JsValue::current_this();
         auto data = require_view(self, "TypedArray.prototype.reduce");
+        const std::size_t len = effective_length(*data);
         const JsValue callback = require_callback(args, "TypedArray.prototype.reduce");
-        const std::vector<double> values = collect(*data);
         std::size_t i = 0;
         JsValue accumulator;
         if (args.size() > 1) {
             accumulator = args[1];
         } else {
-            if (values.empty())
+            if (len == 0)
                 js_throw_type_error("TypedArray.prototype.reduce: the array is empty and no initial value was given");
-            accumulator = JsValue::make_number(values[0]);
+            accumulator = read_live(*data, 0);
             i = 1;
         }
-        for (; i < values.size(); ++i)
+        for (; i < len; ++i)
             accumulator = js_call(callback, JsValue::make_undefined(),
-                                  {accumulator, JsValue::make_number(values[i]),
+                                  {accumulator, read_live(*data, i),
                                    JsValue::make_number(static_cast<double>(i)), self});
         return accumulator;
     });
 
-    js_define_method(proto, "reduceRight", 1, [collect](Args args) {
+    js_define_method(proto, "reduceRight", 1, [](Args args) {
         const JsValue self = JsValue::current_this();
         auto data = require_view(self, "TypedArray.prototype.reduceRight");
+        const std::size_t len = effective_length(*data);
         const JsValue callback = require_callback(args, "TypedArray.prototype.reduceRight");
-        const std::vector<double> values = collect(*data);
-        if (values.empty() && args.size() <= 1)
+        if (len == 0 && args.size() <= 1)
             js_throw_type_error("TypedArray.prototype.reduceRight: the array is empty and no initial value was given");
-        std::size_t i = values.size();
+        std::size_t i = len;
         JsValue accumulator;
         if (args.size() > 1) {
             accumulator = args[1];
         } else {
             --i;
-            accumulator = JsValue::make_number(values[i]);
+            accumulator = read_live(*data, i);
         }
         while (i > 0) {
             --i;
             accumulator = js_call(callback, JsValue::make_undefined(),
-                                  {accumulator, JsValue::make_number(values[i]),
+                                  {accumulator, read_live(*data, i),
                                    JsValue::make_number(static_cast<double>(i)), self});
         }
         return accumulator;
@@ -1403,7 +1736,8 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
         std::vector<double> values = collect(*data);
         typed_sort(values, comparator);
         const std::size_t size = static_cast<std::size_t>(element_size(data->type));
-        for (std::size_t i = 0; i < values.size(); ++i)
+        const std::size_t write_len = std::min(values.size(), effective_length(*data));
+        for (std::size_t i = 0; i < write_len; ++i)
             store_element(elements_of(*data) + i * size, data->type, values[i]);
         return self;
     });
@@ -1419,14 +1753,25 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
         return copy_like(*data, values, receiver_proto(data));
     });
 
-    js_define_method(proto, "with", 2, [collect, copy_like, receiver_proto](Args args) {
+    js_define_method(proto, "with", 2, [copy_like, receiver_proto](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.with");
+        const std::size_t len = effective_length(*data);
         const double relative = to_integer_or_infinity(js_to_number(js_arg(args, 0)));
-        const double index = relative < 0 ? relative + static_cast<double>(data->length) : relative;
-        if (index < 0 || index >= static_cast<double>(data->length))
+        const double value = js_to_number(js_arg(args, 1));
+        const double index = relative < 0 ? relative + static_cast<double>(len) : relative;
+        if (index < 0 || index >= static_cast<double>(len))
             js_throw_range_error("TypedArray.prototype.with: the index is out of range");
-        std::vector<double> values = collect(*data);
-        values[static_cast<std::size_t>(index)] = js_to_number(js_arg(args, 1));
+        if (is_out_of_bounds(*data) || static_cast<std::size_t>(index) >= effective_length(*data))
+            js_throw_range_error("TypedArray.prototype.with: the index is out of range");
+        std::vector<double> values(len, 0.0);
+        const std::size_t live_len = effective_length(*data);
+        for (std::size_t i = 0; i < len; ++i) {
+            if (i == static_cast<std::size_t>(index)) {
+                values[i] = value;
+            } else if (i < live_len) {
+                values[i] = load_element(elements_of_const(*data) + i * element_size(data->type), data->type);
+            }
+        }
         return copy_like(*data, values, receiver_proto(data));
     });
 
@@ -1506,10 +1851,9 @@ void install_one(JsEnvironment& global, ElementType type) {
             }
         }
         auto data = std::make_shared<TypedArrayData>();
-        data->buffer = std::make_shared<ArrayBufferData>();
+        data->buffer = make_fixed_buffer(values.size() * static_cast<std::size_t>(element_size(type)));
         data->length = values.size();
         data->type = type;
-        data->buffer->bytes.assign(values.size() * static_cast<std::size_t>(element_size(type)), 0);
         for (std::size_t i = 0; i < values.size(); ++i)
             store_element(elements_of(*data) + i * element_size(type), type, values[i]);
         return make_view_object(std::move(data), realm().protos[static_cast<int>(type)]);
@@ -1517,10 +1861,9 @@ void install_one(JsEnvironment& global, ElementType type) {
 
     constructor.define_property("of", js_make_native("of", 0, [type](Args args) {
         auto data = std::make_shared<TypedArrayData>();
-        data->buffer = std::make_shared<ArrayBufferData>();
+        data->buffer = make_fixed_buffer(args.size() * static_cast<std::size_t>(element_size(type)));
         data->length = args.size();
         data->type = type;
-        data->buffer->bytes.assign(args.size() * static_cast<std::size_t>(element_size(type)), 0);
         for (std::size_t i = 0; i < args.size(); ++i)
             store_element(elements_of(*data) + i * element_size(type), type, js_to_number(args[i]));
         return make_view_object(std::move(data), realm().protos[static_cast<int>(type)]);
@@ -1534,11 +1877,17 @@ void install_one(JsEnvironment& global, ElementType type) {
 
 bool typed_array_bytes(const JsValue& value, std::string& out) {
     out.clear();
-    // A view: its window of the buffer, in bytes, whatever its element type.
+    // A view: its live window of the buffer, in bytes, whatever its element type.
     if (auto view = view_of(value)) {
-        if (view->buffer->detached) return false;
-        const auto size = static_cast<std::size_t>(element_size(view->type));
-        out.assign(reinterpret_cast<const char*>(elements_of_const(*view)), view->length * size);
+        if (is_out_of_bounds(*view)) return false;
+        const auto byte_len = effective_byte_length(*view);
+        out.assign(reinterpret_cast<const char*>(elements_of_const(*view)), byte_len);
+        return true;
+    }
+    if (auto dv = dataview_of(value)) {
+        if (is_out_of_bounds(*dv)) return false;
+        const auto byte_len = effective_byte_length(*dv);
+        out.assign(reinterpret_cast<const char*>(dataview_bytes(*dv)), byte_len);
         return true;
     }
     // A buffer: all of it.
@@ -1552,8 +1901,8 @@ bool typed_array_bytes(const JsValue& value, std::string& out) {
 
 bool typed_array_write(const JsValue& view, const uint8_t* bytes, std::size_t count) {
     auto data = view_of(view);
-    if (!data || data->buffer->detached) return false;
-    const auto capacity = data->length * static_cast<std::size_t>(element_size(data->type));
+    if (!data || is_out_of_bounds(*data)) return false;
+    const auto capacity = effective_byte_length(*data);
     if (count > capacity) return false;
     if (count) std::memcpy(elements_of(*data), bytes, count);
     return true;
@@ -1561,10 +1910,10 @@ bool typed_array_write(const JsValue& view, const uint8_t* bytes, std::size_t co
 
 JsValue typed_array_from_bytes(const std::string& bytes) {
     auto data = std::make_shared<TypedArrayData>();
-    data->buffer = std::make_shared<ArrayBufferData>();
+    data->buffer = make_fixed_buffer(bytes.size());
     data->length = bytes.size();
     data->type = ElementType::Uint8;
-    data->buffer->bytes.assign(bytes.begin(), bytes.end());
+    if (!bytes.empty()) std::memcpy(data->buffer->bytes.data(), bytes.data(), bytes.size());
     return make_view_object(std::move(data), realm().protos[static_cast<int>(ElementType::Uint8)]);
 }
 

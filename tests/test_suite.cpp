@@ -30018,6 +30018,158 @@ TEST(a_built_in_method_is_not_a_constructor) {
     assert(failed.empty());
 }
 
+// Phase 157, finding 162: ES2024 ArrayBuffer.prototype.transfer(),
+// transferToFixedLength(), detached, resizable, maxByteLength, resize(), and
+// length-tracking / out-of-bounds TypedArray and DataView behaviour.
+TEST(arraybuffer_transfer_detach_and_resize) {
+    using namespace litebird;
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // 1. Fixed ArrayBuffer transfer() & detached semantics.
+    assert(text(R"JS(
+        var b1 = new ArrayBuffer(8);
+        var u1 = new Uint8Array(b1, 2, 4);
+        var d1 = new DataView(b1, 2, 4);
+        u1.set([10, 20, 30, 40]);
+        var before = [b1.byteLength, b1.maxByteLength, b1.resizable, b1.detached].join(',');
+        var b2 = b1.transfer();
+        var after1 = [b1.byteLength, b1.maxByteLength, b1.resizable, b1.detached].join(',');
+        var after2 = [b2.byteLength, b2.maxByteLength, b2.resizable, b2.detached].join(',');
+        var bytes = new Uint8Array(b2).join(',');
+        before + '|' + after1 + '|' + after2 + '|' + bytes;
+    )JS") == "8,8,false,false|0,0,false,true|8,8,false,false|0,0,10,20,30,40,0,0");
+
+    // 2. Detached views: TypedArray zeroes length/byteLength/byteOffset and
+    // drops indices; DataView throws TypeError on byteLength/byteOffset/reads.
+    assert(text(R"JS(
+        [u1.length, u1.byteLength, u1.byteOffset, u1.buffer === b1,
+         String(u1[0]), 0 in u1, Object.keys(u1).length,
+         d1.buffer === b1].join(',');
+    )JS") == "0,0,0,true,undefined,false,0,true");
+    assert(text("errName(function () { return d1.byteLength; })") == "TypeError");
+    assert(text("errName(function () { return d1.byteOffset; })") == "TypeError");
+    assert(text("errName(function () { return d1.getUint8(0); })") == "TypeError");
+    assert(text("errName(function () { d1.setUint8(0, 1); })") == "TypeError");
+    assert(text("errName(function () { return new DataView(b1); })") == "TypeError");
+    assert(text("errName(function () { return new Uint8Array(b1); })") == "TypeError");
+    assert(text("errName(function () { return u1.slice(); })") == "TypeError");
+    assert(text("errName(function () { return u1.subarray(); })") == "TypeError");
+    assert(text("errName(function () { return b1.slice(0); })") == "TypeError");
+    assert(text("errName(function () { return b1.transfer(); })") == "TypeError");
+    assert(text("errName(function () { return b1.transferToFixedLength(); })") == "TypeError");
+
+    // 3. Shrink & grow (zero-fill) through transfer().
+    assert(text(R"JS(
+        var b3 = b2.transfer(4);
+        var s1 = [b2.detached, b3.byteLength, b3.maxByteLength, new Uint8Array(b3).join(',')].join('|');
+        var b4 = b3.transfer(6);
+        var s2 = [b3.detached, b4.byteLength, b4.maxByteLength, new Uint8Array(b4).join(',')].join('|');
+        s1 + '||' + s2;
+    )JS") == "true|4|4|0,0,10,20||true|6|6|0,0,10,20,0,0");
+
+    // 4. Resizable ArrayBuffer + length-tracking & fixed views + odd lengths + OOB/regrow.
+    assert(text(R"JS(
+        var rb = new ArrayBuffer(4, { maxByteLength: 12 });
+        var rt = new Uint16Array(rb);
+        var rto = new Uint16Array(rb, 2);
+        var rf = new Uint16Array(rb, 0, 2);
+        var rd = new DataView(rb);
+        var rdo = new DataView(rb, 2);
+        var rdf = new DataView(rb, 0, 4);
+        rt[0] = 0x1122; rt[1] = 0x3344;
+        rb.resize(8);
+        var g8 = [rt.length, rto.length, rf.length, rd.byteLength, rdo.byteLength, rdf.byteLength, rt.join(',')].join('|');
+        rb.resize(5);
+        var g5 = [rt.length, rt.byteLength, rto.length, rd.byteLength, rdo.byteLength, rf.length].join(',');
+        rb.resize(2);
+        var g2 = [rt.length, rto.length, rf.length, rf.byteOffset, String(rf[0]),
+                  errName(function () { return rf.slice(); }),
+                  errName(function () { return rdf.byteLength; }),
+                  errName(function () { return rdf.byteOffset; })].join(',');
+        rb.resize(1);
+        var g1 = [rto.length, rto.byteOffset, errName(function () { return rdo.byteLength; })].join(',');
+        rb.resize(6);
+        var g6 = [rt.length, rto.length, rf.length, rf.byteOffset, rdf.byteLength, new Uint8Array(rb).join(',')].join('|');
+        g8 + '||' + g5 + '||' + g2 + '||' + g1 + '||' + g6;
+    )JS") == "4|3|2|8|6|4|4386,13124,0,0||2,4,1,5,3,2||1,0,0,0,undefined,TypeError,TypeError,TypeError||0,0,TypeError||3|2|2|0|4|34,0,0,0,0,0");
+
+    // 5. subarray() preserves length-tracking when end is omitted.
+    assert(text(R"JS(
+        var x = new ArrayBuffer(4, { maxByteLength: 8 });
+        var v = new Uint8Array(x);
+        var sTrack = v.subarray(1);
+        var sFix = v.subarray(1, 3);
+        x.resize(6);
+        sTrack.length + ',' + sFix.length;
+    )JS") == "5,2");
+
+    // 6. transfer() preserves resizability; transferToFixedLength() fixes it.
+    assert(text(R"JS(
+        var rCopy = rb.transfer(10);
+        var sOrig = [rb.detached, rb.byteLength, rb.maxByteLength, rb.resizable].join(',');
+        var sCopy = [rCopy.detached, rCopy.byteLength, rCopy.maxByteLength, rCopy.resizable].join(',');
+        var rFixed = rCopy.transferToFixedLength(4);
+        var sFix = [rFixed.detached, rFixed.byteLength, rFixed.maxByteLength, rFixed.resizable,
+                    errName(function () { rFixed.resize(4); })].join(',');
+        sOrig + '|' + sCopy + '|' + sFix;
+    )JS") == "true,0,0,true|false,10,12,true|false,4,4,false,TypeError");
+
+    // 7. Re-entrancy, argument errors, iterator detach, non-constructor methods, descriptors.
+    assert(text("errName(function () { new ArrayBuffer(-1); })") == "RangeError");
+    assert(text("errName(function () { new ArrayBuffer(8, { maxByteLength: 4 }); })") == "RangeError");
+    assert(text(R"JS(
+        var y = new ArrayBuffer(4, { maxByteLength: 8 });
+        var e1 = errName(function () { y.transfer(12); });
+        e1 + ',' + y.detached + ',' + y.byteLength;
+    )JS") == "RangeError,false,4");
+    assert(text(R"JS(
+        var z = new ArrayBuffer(4);
+        errName(function () { z.transfer({ valueOf: function () { z.transfer(); return 4; } }); });
+    )JS") == "TypeError");
+    assert(text(R"JS(
+        var z2 = new ArrayBuffer(4);
+        var a2 = new Uint8Array(z2);
+        var it = a2.values();
+        z2.transfer();
+        errName(function () { it.next(); });
+    )JS") == "TypeError");
+    assert(text(R"JS(
+        var z3 = new ArrayBuffer(4);
+        var dv3 = new DataView(z3);
+        errName(function () { dv3.getUint8({ valueOf: function () { z3.transfer(); return 0; } }); });
+    )JS") == "TypeError");
+    assert(text(R"JS(
+        var z4 = new ArrayBuffer(4);
+        var a4 = new Uint8Array(z4);
+        a4.set([3, 1, 2, 0]);
+        String(a4.sort(function () { if (!z4.detached) z4.transfer(); return 0; }).length);
+    )JS") == "0");
+    assert(text(R"JS(
+        var z5 = new ArrayBuffer(3, { maxByteLength: 6 });
+        var a5 = new Uint8Array(z5);
+        a5.set([10, 20, 30]);
+        var seen = [];
+        a5.reduce(function (acc, val, idx) {
+            seen.push(String(val));
+            if (idx === 0) z5.resize(1);
+            return acc;
+        }, 0);
+        seen.join(',');
+    )JS") == "10,undefined,undefined");
+    assert(text("errName(function () { new ArrayBuffer.prototype.transfer(); })") == "TypeError");
+    assert(text("errName(function () { new ArrayBuffer.prototype.transferToFixedLength(); })") == "TypeError");
+    assert(text("errName(function () { new ArrayBuffer.prototype.resize(); })") == "TypeError");
+    assert(text(R"JS(
+        ['byteLength', 'maxByteLength', 'resizable', 'detached'].map(function (k) {
+            var d = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, k);
+            return k + ':' + (typeof d.get) + ',' + d.enumerable + ',' + d.configurable;
+        }).join('|');
+    )JS") == "byteLength:function,false,true|maxByteLength:function,false,true|resizable:function,false,true|detached:function,false,true");
+    assert(text("errName(function () { Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get.call({}); })") == "TypeError");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -30462,6 +30614,9 @@ int main() {
     // Phase 152: place the document body, its margins, and its descendants.
     RUN_TEST(document_body_margins_place_boxes_from_the_viewport);
     RUN_TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry);
+
+    // Phase 157: ArrayBuffer.prototype.transfer(), transferToFixedLength(), detached, and resize().
+    RUN_TEST(arraybuffer_transfer_detach_and_resize);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

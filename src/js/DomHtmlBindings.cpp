@@ -2,10 +2,12 @@
 // images, scripts, tables, templates, slots, media, canvas, dialog; and the
 // SVG element interfaces.
 
+#include "litebird/common/Base64.hpp"
 #include "litebird/js/DomBindings.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/render/ImageDecoder.hpp"
 
 #include <cmath>
 #include <limits>
@@ -742,6 +744,111 @@ void install_image_data_methods(Realm& r, JsValue context_object,
     }));
 }
 
+// --- HTMLCanvasElement.toDataURL() -----------------------------------------
+//
+// HTML §4.12.5.4, "serializing the bitmap": a type, the pixels encoded as that
+// type, and the bytes in a `data:` URL. The engine encodes one type,
+// `image/png` (`ImageDecoder::encode_png`), so every other valid type answers
+// `data:,` — which is what the standard asks of a type the user agent does not
+// support, and what this method answered for *every* type before it did
+// anything at all.
+//
+// Nothing here can taint a canvas yet: `drawImage`, `ImageBitmap` and
+// `Response.arrayBuffer()` are all still open, so every pixel a canvas holds
+// was put there by a script's own drawing. When one of them lands it has to set
+// the origin-clean flag this method must consult; until then there is no flag
+// to read.
+
+std::string ascii_trimmed(std::string_view text) {
+    const auto blank = [](char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+    };
+    std::size_t first = 0;
+    std::size_t last = text.size();
+    while (first < last && blank(text[first])) ++first;
+    while (last > first && blank(text[last - 1])) --last;
+    return std::string(text.substr(first, last - first));
+}
+
+bool is_mime_token_char(char c) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) return true;
+    switch (c) {
+        case '!': case '#': case '$': case '%': case '&': case '\'': case '*': case '+':
+        case '-': case '.': case '^': case '_': case '`': case '|': case '~': case '/':
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// A valid MIME type whose essence is the one type this engine encodes. The
+/// essence is ASCII-lowercased; parameters are carried into the URL unchanged.
+bool png_mime_type(const std::string& raw, std::string& canonical) {
+    const std::string trimmed = ascii_trimmed(raw);
+    if (trimmed.empty()) return false;
+    const std::size_t semicolon = trimmed.find(';');
+    const std::string essence =
+        ascii_lower(ascii_trimmed(std::string_view(trimmed).substr(0, semicolon)));
+    const std::size_t slash = essence.find('/');
+    if (slash == std::string::npos || slash == 0 || slash + 1 == essence.size()) return false;
+    for (char c : essence) {
+        if (!is_mime_token_char(c)) return false;
+    }
+    if (essence != "image/png") return false;
+    canonical = essence;
+    if (semicolon != std::string::npos) {
+        canonical += ascii_trimmed(std::string_view(trimmed).substr(semicolon));
+    }
+    return true;
+}
+
+/// The bitmap to serialize. A canvas that has never had a context still has
+/// one — the standard's canvas bitmap exists from the element — so this builds
+/// a blank one of the element's size rather than creating a context: a page
+/// that never asked for `2d` does not get one by asking for a data URL.
+std::shared_ptr<ImageData> canvas_bitmap_for_serialization(Element& el) {
+    if (auto context = el.canvas_context()) {
+        const std::shared_ptr<ImageData> image = context->image_data();
+        // Over the raster budget the backing store is a single pixel that
+        // drawing does nothing to (RasterBudget.hpp): there is no image here
+        // to serialize, and `data:,` is the honest answer.
+        if (!image || image->width != context->width() || image->height != context->height()) return nullptr;
+        return image;
+    }
+
+    unsigned long width = 300;
+    unsigned long height = 150;
+    if (const std::string* text = el.attribute("width")) {
+        if (!parse_html_non_negative_integer(*text, width)) width = 300;
+    }
+    if (const std::string* text = el.attribute("height")) {
+        if (!parse_html_non_negative_integer(*text, height)) height = 150;
+    }
+    if (width == 0 || height == 0) return nullptr;
+    if (!RasterBudget::allows(static_cast<std::int64_t>(width), static_cast<std::int64_t>(height))) return nullptr;
+
+    auto blank = std::make_shared<ImageData>();
+    blank->width = static_cast<int>(width);
+    blank->height = static_cast<int>(height);
+    blank->pixels.assign(static_cast<std::size_t>(width) * static_cast<std::size_t>(height), 0);
+    return blank;
+}
+
+JsValue canvas_to_data_url(Element& el, Args args) {
+    std::string type = "image/png";
+    if (!args.empty() && !args[0].is_undefined()) type = to_str(args[0]);
+
+    std::string canonical;
+    if (!png_mime_type(type, canonical)) return str("data:,");
+
+    const std::shared_ptr<ImageData> bitmap = canvas_bitmap_for_serialization(el);
+    if (!bitmap || !bitmap->is_valid()) return str("data:,");
+
+    std::vector<uint8_t> png;
+    if (!ImageDecoder::encode_png(*bitmap, png)) return str("data:,");
+    return str("data:" + canonical + ";base64," + base64_encode(png.data(), png.size()));
+}
+
 void setup_canvas(Iface& I) {
     ElementMembers<&is_canvas> C(I);
     for (const char* name : {"width", "height"}) {
@@ -780,7 +887,7 @@ void setup_canvas(Iface& I) {
             return object;
         });
     });
-    C.method("toDataURL", 0, [](Realm&, Element&, Args) { return str("data:,"); });
+    C.method("toDataURL", 0, [](Realm&, Element& el, Args args) { return canvas_to_data_url(el, args); });
 }
 
 void setup_media(Iface& I) {

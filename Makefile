@@ -285,6 +285,7 @@ dom-conformance: $(TARGET)
 ## it with what each reftest asserts.
 render-conformance: $(TARGET)
 	@python3 tools/conformance/render_check.py --binary $(TARGET)
+	@python3 tools/conformance/canvas_to_data_url.py --binary $(TARGET)
 
 ## Twenty-one directories of test262, the suite of the language's standard:
 ## what a change to functions, classes, prototypes or property definition

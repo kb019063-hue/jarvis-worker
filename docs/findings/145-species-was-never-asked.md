@@ -3,7 +3,7 @@
 Phase 140. Status: **found and fixed for Array** (the static and instance
 methods that make an array, and the species getters on `Array`, `Map`, `Set`,
 `Promise`). **Still open for `Promise`**, whose instances are not promises
-internally, and for the four copying methods.
+internally.
 
 ## 1. What was wrong
 
@@ -23,8 +23,8 @@ saw it: `Array.isArray(result)` is true, `result.length` is the length, and the
 elements are right. What is lost is the *identity of the constructor*, and the
 only way to notice is to ask `instanceof`.
 
-The standard's answer is one abstract operation, `SpeciesConstructor`
-(§7.3.21), plus one derived from it, `ArraySpeciesCreate` (§23.1.5.1): look at
+The standard's `ArraySpeciesCreate` (§10.4.2.3) asks a similar question
+to `SpeciesConstructor` (§7.3.21): look at
 `O.constructor`, then at that constructor's `Symbol.species`, and make the
 result with *that*. The engine had both operations written out inside
 `BuiltinsRegExp.cpp`, twice used and private to the file, because
@@ -44,14 +44,12 @@ new Plain().map(x => x) instanceof Array   // must be true
 ```
 
 That case is in the corpus (`prototypes.dat`, "methods of a built-in make the
-subclass of the object they are called on (Symbol.species)") and it was one of
-the two recorded failures this phase turned green.
+subclass of the object they are called on (Symbol.species)") and it was the recorded failure this phase turned green.
 
-### 1.2 Where the standard and the reference engine disagree
+### 1.2 Non-constructor receivers
 
-ES2023's `Array.from` throws a `TypeError` when `this` is not a constructor.
-Node v22 does not — it makes a plain array, which is the ES2015 rule that V8
-still implements:
+The standard and Node v22 both make a plain array when `Array.from` or
+`Array.of` is called with a receiver that is not a constructor:
 
 ```
 $ node -e 'console.log(JSON.stringify(Array.from.call({}, [1])))'
@@ -60,11 +58,8 @@ $ node -e 'var o = Array.from.call(function () {}, [1]); console.log(o.length, o
 1 false
 ```
 
-The corpus's expected outputs are Node's, and a divergence from the engine the
-corpus was *written from* is a bug in this tree whether or not the standard
-agrees. The first version of this phase threw the `TypeError` and the unit
-suite compared against Node and said so; the engine now follows Node, and the
-suite pins all three shapes (an object receiver, a function receiver, `null`).
+The first version of this phase threw a `TypeError`; the Node comparison
+caught it, and the suite now checks object and function receivers.
 
 ## 2. What was fixed
 
@@ -86,7 +81,7 @@ suite pins all three shapes (an object receiver, a function receiver, `null`).
 
 Measured: `prototypes.dat` 70/76, `js-conformance` 1143 → 1144 of 1158 on the
 branch (1145 on the merged tree, where main had fixed one more case), one new
-unit suite, 303 suites in total. Details in
+unit suite; 306 suites in the current merged tree. Details in
 `docs/phases/140-a-subclass-is-made-by-the-builtin-it-was-called-on.md`.
 
 ## 3. What is still wrong
@@ -98,5 +93,5 @@ unit suite, 303 suites in total. Details in
   `new.target`, so `P.resolve(1)` and `p.then(f)` cannot make a `P` until that
   function can be handed a prototype — and `NewPromiseCapability` can construct
   an arbitrary constructor.
-- **`toSorted`, `toReversed`, `toSpliced`, `with`** build plain arrays; they
-  were not on the row's list when it was written.
+- **`toSorted`, `toReversed`, `toSpliced`, `with`** build plain arrays, as
+  specified; these change-by-copy methods do not consult `Symbol.species`.

@@ -28844,17 +28844,15 @@ TEST(a_subclass_is_made_by_the_builtin_it_was_called_on) {
     // makes an array built it with `JsValue::make_array`, so a subclass of
     // Array could never be made by the built-in it was called on: `new
     // List().map(f)` was a plain Array. The standard routes all of them
-    // through ArraySpeciesCreate (ECMA-262 §23.1.5.1 over §7.3.21
-    // SpeciesConstructor), which asks the object's `constructor` for
-    // `Symbol.species` — so `class Plain extends Array { static get
+    // through ArraySpeciesCreate (ECMA-262 §10.4.2.3), which asks the
+    // object's `constructor` for `Symbol.species` — so `class Plain extends Array { static get
     // [Symbol.species]() { return Array; } }` is the case that proves the
     // property is *read* and not merely present.
     //
     // Every expected string below is what Node.js v22.22.3 printed for the
     // same script, checked line for line against a second run in Node. The
-    // two non-constructor receivers are the interesting ones: ES2015 made a
-    // plain array there and V8 still does, so `Array.from.call({}, [1])` is an
-    // Array rather than a TypeError.
+    // non-constructor receivers make a plain array, as the standard specifies:
+    // `Array.from.call({}, [1])` is an Array rather than a TypeError.
     auto doc = std::make_shared<Document>();
     doc->set_url("https://example.test/");
     JsInterpreter js(doc);
@@ -28879,7 +28877,7 @@ TEST(a_subclass_is_made_by_the_builtin_it_was_called_on) {
         check('List.of', function () { return [List.of(1, 2) instanceof List, List.of(1, 2).length]; }, '[true,2]');
         check('Array.from is still an Array', function () { return Array.from([1, 2]) instanceof Array; }, 'true');
 
-        // Every method that makes an array makes it through the species.
+        // The species-aware methods make their result through the species.
         check('map', function () { return list().map(function (x) { return x; }) instanceof List; }, 'true');
         check('filter', function () { return list().filter(Boolean) instanceof List; }, 'true');
         check('slice', function () { return list().slice(1) instanceof List; }, 'true');
@@ -28922,7 +28920,7 @@ TEST(a_subclass_is_made_by_the_builtin_it_was_called_on) {
             return [Traced.given, made.length, made instanceof Traced];
         }, '[3,3,true]');
 
-        // V8's answer for a receiver that is not a constructor: a plain array,
+        // A receiver that is not a constructor makes a plain array,
         // and a constructed object when the receiver is a constructor.
         check('a receiver that is not a constructor', function () {
             var from = Array.from.call({}, [1]);
@@ -28930,6 +28928,16 @@ TEST(a_subclass_is_made_by_the_builtin_it_was_called_on) {
             var made = Array.from.call(function () {}, [1]);
             return [from instanceof Array, from.length, of instanceof Array, made instanceof Array, made.length];
         }, '[true,1,true,false,1]');
+
+        // Change-array-by-copy methods deliberately do not consult species.
+        check('copying methods ignore species', function () {
+            class NoSpecies extends Array {
+                static get [Symbol.species]() { throw new Error('species was read'); }
+            }
+            var a = new NoSpecies(3, 1, 2);
+            return [a.toSorted().constructor === Array, a.toReversed().constructor === Array,
+                    a.toSpliced(1, 1).constructor === Array, a.with(0, 4).constructor === Array];
+        }, '[true,true,true,true]');
 
         // A species constructor that refuses the write is a TypeError, not a
         // silently lost element.
@@ -28955,8 +28963,7 @@ TEST(a_subclass_is_made_by_the_builtin_it_was_called_on) {
 
     const std::string failed = js.eval("failures.join('\\n')").to_string();
     if (!failed.empty()) std::cerr << failed << "\n";
-    if (!failed.empty()) { std::cout << "\033[31mFAILED\033[0m"; return; }
-    std::cout << "\033[32mPASSED\033[0m";
+    assert(failed.empty());
 }
 
 int main() {

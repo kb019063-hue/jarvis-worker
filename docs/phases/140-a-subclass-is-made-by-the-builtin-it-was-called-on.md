@@ -6,9 +6,9 @@ on.** Finding 145.
 `class List extends Array {}` was a class whose instances were lists and whose
 *methods* were not: `List.from([1, 2])`, `List.of(1)`, `new List().map(f)` and
 `new List().slice(0)` were all plain arrays. The standard has one operation for
-this — `SpeciesConstructor`, ECMA-262 §7.3.21, and `ArraySpeciesCreate`, §23.1.5.1
-over it — and the engine had a copy of it inside `RegExp`, used twice, private
-to that file. Every array method made its result with `JsValue::make_array`.
+this — `ArraySpeciesCreate`, ECMA-262 §10.4.2.3. The related
+`SpeciesConstructor` operation was private to the `RegExp` implementation.
+Every array method made its result with `JsValue::make_array`.
 
 ## 1. What was wrong
 
@@ -61,17 +61,11 @@ not merely present: `class Plain extends Array { static get [Symbol.species]()
   itself, each a getter with `[[Call]]` and not `[[Construct]]`. `RegExp` had
   one already.
 
-### 2.1 Where the reference engine disagreed with the standard
+### 2.1 A non-constructor receiver
 
-`Array.from` step 3 of ES2023 says a `this` that is not a constructor is a
-`TypeError`. Node v22 does not do that: `Array.from.call({}, [1])` is `[1]`
-there, and `Array.of.call({}, 1, 2)` is `[1, 2]`. That is the ES2015 rule
-("if IsConstructor(C), Construct; else ArrayCreate"), and V8 still implements
-it.
-
-The corpus is measured against Node, so the engine follows Node: a receiver
-that is not a constructor makes a plain array. The first version of this phase
-threw the `TypeError`, and the check below is what caught it:
+Both the standard and Node v22 make a plain array when the receiver of
+`Array.from` or `Array.of` is not a constructor. The first version of this
+phase threw a `TypeError`; the Node comparison caught it:
 
 ```
 $ node -e 'console.log(JSON.stringify(Array.from.call({}, [1])))'
@@ -97,14 +91,14 @@ carry that number.
 
 ```
 $ make test
-All 303 engine test suites passed successfully!
+All 306 engine test suites passed successfully!
 Cross-origin Window/Location and MessageChannel suite: 114 checks, 0 failure(s).
 ```
 
-The new suite `a_subclass_is_made_by_the_builtin_it_was_called_on` asserts
-eighteen statements; every expected string was printed by Node v22.22.3 first.
-(303 rather than 301 + 1 because main merged a new suite of its own beside
-this one.)
+The new suite `a_subclass_is_made_by_the_builtin_it_was_called_on`
+checks subclassing, species overrides, holes, failures, and the copying methods;
+expected results were compared with Node v22.22.3. The suite count reflects
+main merged into this branch.
 Everything else is unchanged: dom 678/678, url 1188/1188, xml 1718/1718,
 tree-construction 1973/1973, wpt 9567/9824, render reftests 29/34 with five
 recorded.
@@ -121,9 +115,9 @@ The row is not empty, and it is now written down as what it is:
   `p.then(f)` are therefore still plain promises — and `Promise[Symbol.species]`
   is installed but nothing reads it. This is the bigger half and it needs
   `NewPromiseCapability` to work for a constructor that is not `%Promise%`.
-- **Four copying methods do not ask the species yet**: `toSorted`,
-  `toReversed`, `toSpliced` and `with` build a plain array. They arrived after
-  this row was written and were not on its list.
+- **Copying methods deliberately do not ask species**: `toSorted`,
+  `toReversed`, `toSpliced` and `with` use `ArrayCreate` and make a plain
+  array. That is the specified behavior, not remaining subclass work.
 - **`Map` and `Set` have the getter and no user**: no method of either asks
   `Symbol.species` (`Map`/`Set` methods do not create maps), so the property is
   correct and unexercised.

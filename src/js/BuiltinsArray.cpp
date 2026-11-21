@@ -541,7 +541,7 @@ JsValue array_intrinsic() {
     return ctor ? *ctor : JsValue::make_undefined();
 }
 
-/// ArraySpeciesCreate(originalArray, length) — ECMA-262 §23.1.5.1, over §7.3.21.
+/// ArraySpeciesCreate(originalArray, length) — ECMA-262 §10.4.2.3.
 ///
 /// A receiver that is not an array makes a plain array: the standard asks
 /// `IsArray` first, so `Array.prototype.map.call({length: 2, ...})` does *not*

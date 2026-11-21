@@ -6383,6 +6383,43 @@ TEST(canvas_to_data_url_is_the_png_it_painted) {
                 "jpeg/webp/gif/malformed answer data:,\n", bytes.size());
 }
 
+TEST(offscreen_canvas_draws_and_converts_to_blob) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    assert(interp.eval("typeof OffscreenCanvas === 'function'").is_truthy());
+    assert(interp.eval("(() => { try { new OffscreenCanvas(1); return false; } catch (e) { return e instanceof TypeError; } })()").is_truthy());
+
+    interp.eval(R"(
+        var oc = new OffscreenCanvas(4, 3);
+        var ctx = oc.getContext('2d');
+        ctx.fillStyle = '#0000ff';
+        ctx.fillRect(0, 0, 4, 3);
+        var gotBlob = null;
+        oc.convertToBlob().then(function(b) { gotBlob = b; });
+    )");
+    assert(interp.eval("oc.width === 4 && oc.height === 3").is_truthy());
+    assert(interp.eval("oc.getContext('2d') === ctx").is_truthy());
+    assert(interp.eval("oc.getContext('webgl') === null").is_truthy());
+    assert(interp.eval("gotBlob instanceof Blob && gotBlob.type === 'image/png' && gotBlob.size > 8").is_truthy());
+
+    // Resize updates width/height and context.
+    interp.eval("oc.width = 6; oc.height = 5;");
+    assert(interp.eval("oc.width === 6 && oc.height === 5").is_truthy());
+
+    // Unsupported type or zero-size rejects the Promise.
+    interp.eval(R"(
+        var rejType = null;
+        oc.convertToBlob({ type: 'image/jpeg' }).catch(function(e) { rejType = e.name; });
+        var zero = new OffscreenCanvas(0, 2);
+        var rejZero = null;
+        zero.convertToBlob().catch(function(e) { rejZero = e.name; });
+    )");
+    assert(interp.eval("rejType === 'EncodingError'").is_truthy());
+    assert(interp.eval("rejZero === 'IndexSizeError'").is_truthy());
+}
+
 void test_css_media_queries() {
     using namespace litebird;
     std::string css = R"(
@@ -31621,6 +31658,7 @@ int main() {
     RUN_TEST(web_storage_and_cookies);
     RUN_TEST(html5_canvas_2d_context);
     RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
+    RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
     RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);

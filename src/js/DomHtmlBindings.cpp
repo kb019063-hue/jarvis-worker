@@ -916,6 +916,97 @@ void setup_media(Iface& I) {
     M.method("canPlayType", 1, [](Realm&, Element&, Args) { return str(""); });
 }
 
+struct OffscreenCanvasState : JsExotic {
+    int width = 0;
+    int height = 0;
+    decltype(std::declval<Element>().get_or_create_canvas_context_2d()) context;
+    JsValue context_obj = JsValue::make_undefined();
+};
+
+int clamp_offscreen_dim(const JsValue& value) {
+    const double asked = to_double(value);
+    return asked >= 1.0 ? static_cast<int>(std::min(asked, 2147483647.0)) : 0;
+}
+
+JsValue construct_offscreen_canvas(Realm& r, const InterfaceDef&, Args args, const JsValue* derived) {
+    require_args(args, 2, "OffscreenCanvas");
+    auto state = std::make_shared<OffscreenCanvasState>();
+    state->width = clamp_offscreen_dim(args[0]);
+    state->height = clamp_offscreen_dim(args[1]);
+    return r.make("OffscreenCanvas", state, derived);
+}
+
+void setup_offscreen_canvas(Iface& I) {
+    I.accessor("width",
+        [](Realm&) { return num(static_cast<double>(this_state<OffscreenCanvasState>("OffscreenCanvas").width)); },
+        [](Realm&, const JsValue& val) {
+            auto& st = this_state<OffscreenCanvasState>("OffscreenCanvas");
+            st.width = clamp_offscreen_dim(val);
+            if (st.context) st.context->resize(std::max(st.width, 1), st.context->height());
+        });
+    I.accessor("height",
+        [](Realm&) { return num(static_cast<double>(this_state<OffscreenCanvasState>("OffscreenCanvas").height)); },
+        [](Realm&, const JsValue& val) {
+            auto& st = this_state<OffscreenCanvasState>("OffscreenCanvas");
+            st.height = clamp_offscreen_dim(val);
+            if (st.context) st.context->resize(st.context->width(), std::max(st.height, 1));
+        });
+    I.method("getContext", 1, [](Realm& r, Args args) {
+        require_args(args, 1, "OffscreenCanvas.getContext");
+        auto& st = this_state<OffscreenCanvasState>("OffscreenCanvas");
+        if (ascii_lower(to_str(args[0])) != "2d") return null();
+        if (!st.context) {
+            using CtxPtr = decltype(st.context);
+            st.context = std::make_shared<CtxPtr::element_type>(std::max(st.width, 1), std::max(st.height, 1));
+            JsValue object = st.context->to_js_value(st.context);
+            install_image_data_methods(r, object, st.context);
+            st.context_obj = object;
+        }
+        return st.context_obj;
+    });
+    I.method("convertToBlob", 0, [](Realm& r, Args args) {
+        auto& st = this_state<OffscreenCanvasState>("OffscreenCanvas");
+        std::string type = "image/png";
+        if (!args.empty() && args[0].is_object_like()) {
+            JsValue t = args[0].get_property("type");
+            if (!t.is_undefined()) type = to_str(t);
+        }
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const std::string& name, const std::string& msg) {
+            JsValue err = make_dom_exception(r, name, msg);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        std::string canonical;
+        if (!png_mime_type(type, canonical)) {
+            return reject_with("EncodingError", "OffscreenCanvas.convertToBlob: unsupported type '" + type + "'.");
+        }
+        if (st.width <= 0 || st.height <= 0 ||
+            !RasterBudget::allows(static_cast<std::int64_t>(st.width), static_cast<std::int64_t>(st.height))) {
+            return reject_with("IndexSizeError", "OffscreenCanvas.convertToBlob: canvas has invalid or over-budget dimensions.");
+        }
+        std::shared_ptr<ImageData> bitmap;
+        if (st.context) {
+            bitmap = st.context->image_data();
+            if (!bitmap || bitmap->width != st.width || bitmap->height != st.height) {
+                return reject_with("IndexSizeError", "OffscreenCanvas.convertToBlob: backing store size mismatch.");
+            }
+        } else {
+            bitmap = std::make_shared<ImageData>();
+            bitmap->width = st.width;
+            bitmap->height = st.height;
+            bitmap->pixels.assign(static_cast<std::size_t>(st.width) * static_cast<std::size_t>(st.height), 0);
+        }
+        std::vector<uint8_t> png;
+        if (!ImageDecoder::encode_png(*bitmap, png)) {
+            return reject_with("EncodingError", "OffscreenCanvas.convertToBlob: PNG encoding failed.");
+        }
+        JsValue blob = make_blob(r, std::string(reinterpret_cast<const char*>(png.data()), png.size()), canonical);
+        if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {blob});
+        return undefined();
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Tables
 // ---------------------------------------------------------------------------
@@ -1424,6 +1515,7 @@ void register_html_interfaces() {
     register_interface({"HTMLImageElement", "HTMLElement", setup_image, element_ctor, 0, nullptr});
     register_interface({"HTMLScriptElement", "HTMLElement", setup_script, element_ctor, 0, nullptr});
     register_interface({"HTMLCanvasElement", "HTMLElement", setup_canvas, element_ctor, 0, nullptr});
+    register_interface({"OffscreenCanvas", nullptr, setup_offscreen_canvas, construct_offscreen_canvas, 2, nullptr});
     register_interface({"ImageData", nullptr, setup_image_data, construct_image_data, 2, nullptr});
     register_interface({"HTMLMediaElement", "HTMLElement", setup_media, element_ctor, 0, nullptr});
     register_interface({"HTMLAudioElement", "HTMLMediaElement", nullptr, element_ctor, 0, nullptr});

@@ -78,7 +78,8 @@ void prepare_document_body(LayoutBox& box) {
 // are content-box coordinates, so laying it out at (0, 0) without placing it
 // leaves the margin, border and padding above/to the left of the viewport.
 // Do this *after* layout: percentages and auto margins need the used width.
-void place_document_body(LayoutBox& box, float viewport_width, float viewport_height) {
+void place_document_body(LayoutBox& box, float viewport_width, float viewport_height,
+                         const EdgeSizes* root_margin = nullptr) {
     auto& d = box.dimensions;
     const auto& s = *box.style;
 
@@ -156,6 +157,16 @@ void place_document_body(LayoutBox& box, float viewport_width, float viewport_he
 
     float x = d.margin.left + d.border.left + d.padding.left;
     float y = body_top + d.border.top + d.padding.top;
+
+    // The `<html>` root has no box of its own here, so its margin used to be
+    // ignored entirely: `<html style="margin:30px">` moved nothing. CSS 2.1
+    // 8.3 puts the body inside the root's content box, and a margin on the root
+    // is outside it, so both edges move by the root's used margin. A root that
+    // states no margin contributes nothing and this is the previous behaviour.
+    if (root_margin) {
+        x += root_margin->left;
+        y += root_margin->top;
+    }
     const auto inset = s.used_insets(viewport_width, viewport_height);
     if (s.position == Position::Relative) {
         if (s.has_left) x += inset.left;
@@ -888,7 +899,30 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
     root_box->dimensions.content.y = 0.0f;
     if (document_body_root) prepare_document_body(*root_box);
     root_box->layout(viewport_width, viewport_height);
-    if (document_body_root) place_document_body(*root_box, viewport_width, viewport_height);
+    if (document_body_root) {
+        // The root's own used margin, for the offset place_document_body adds.
+        // Only a root that states one contributes; percentages resolve against
+        // the viewport, which is the root's containing block.
+        EdgeSizes root_margin{0.0f};
+        bool has_root_margin = false;
+        if (root_node && root_node->is_document()) {
+            auto doc = std::static_pointer_cast<Document>(root_node);
+            if (auto html = doc->document_element()) {
+                if (html->tag_name() == "html") {
+                    const ComputedStyle root_style = resolver.resolve_style(html, nullptr);
+                    root_margin.top = root_style.margin_percent.top >= 0.0f
+                                          ? root_style.margin_percent.top * viewport_width / 100.0f
+                                          : root_style.margin.top;
+                    root_margin.left = root_style.margin_percent.left >= 0.0f
+                                           ? root_style.margin_percent.left * viewport_width / 100.0f
+                                           : root_style.margin.left;
+                    has_root_margin = root_margin.top != 0.0f || root_margin.left != 0.0f;
+                }
+            }
+        }
+        place_document_body(*root_box, viewport_width, viewport_height,
+                            has_root_margin ? &root_margin : nullptr);
+    }
     LayoutBox::resolve_out_of_flow_positions(root_box, viewport_width, viewport_height);
 
     // Non-recursive box-to-DOM geometry synchronization.

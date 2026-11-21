@@ -27670,7 +27670,7 @@ TEST(class_bodies_reject_what_the_grammar_does_not_allow) {
 TEST(parser_rejects_early_syntax_errors_outside_class_bodies) {
     using namespace litebird;
 
-    // Phase 134, finding 139. Early SyntaxErrors outside class bodies across
+    // Phase 141, finding 146. Early SyntaxErrors outside class bodies across
     // object literals, function declarations/expressions/methods/arrows,
     // assignment/update targets, destructuring rest/cover grammar, directive
     // prologues, and non-method `super` property lookups. Every expectation
@@ -28845,7 +28845,7 @@ int main() {
 
     // Phase 128: the six regular grammar rules of a class body.
     RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);
-    // Phase 134: remaining early SyntaxErrors outside class bodies.
+    // Phase 141: remaining early SyntaxErrors outside class bodies.
     RUN_TEST(parser_rejects_early_syntax_errors_outside_class_bodies);
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.

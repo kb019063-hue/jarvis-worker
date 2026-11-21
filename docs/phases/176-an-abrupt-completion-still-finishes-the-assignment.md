@@ -84,8 +84,9 @@ The six: `target-member-identifier-reference-null`,
 `default-expr-throws-iterator-return-get-throws`,
 `target-assign-throws-iterator-return-get-throws` (the close fix).
 
-Everything else unchanged: `make test` **327/327** including the suite added
-here, js-conformance **1145/1158**, dom-conformance **678/678**.
+Everything else unchanged: `make test` **327/327** on the branch alone including the suite added
+here, `make test` **330/330** once main's Phase 170 landed beside it, js-conformance
+**1145/1158**, dom-conformance **678/678**.
 
 The two suite assertions I got wrong first — both about an *exhausted* iterator,
 which is never closed — were corrected against Node 22 before the test was

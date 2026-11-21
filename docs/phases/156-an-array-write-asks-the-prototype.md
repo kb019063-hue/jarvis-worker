@@ -88,7 +88,7 @@ place the chain answers for, and that nothing on the chain means the element
 is made.
 
 ```bash
-make test                     # All 312 engine test suites passed successfully!
+make test                     # All 314 engine test suites passed successfully!
 make js-conformance           # 1144/1158 (98.8%), 29 files, 0 crashes, 0 timeouts
 make conformance              # 1973/1973 (100.0%)
 make gc-oracle                # PASS — cycles reclaimed, live set flat

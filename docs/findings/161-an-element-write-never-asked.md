@@ -36,7 +36,7 @@ relaxed atomic load per element write: 3,000,000 writes to `a[0]` measured
 
 `built-ins/Array`: 2,662 → **2,664 of 3,083**, the two gained being exactly
 those cases, 0 lost. `language` 19,912/23,015 and `built-ins/Object`
-3,018/3,411 unchanged on both builds. `make test` **312/312**; js-conformance
+3,018/3,411 unchanged on both builds. `make test` **314/314**; js-conformance
 1144/1158; DOM trees 1973/1973; `make gc-oracle` PASS.
 
 ## 4. What is still open

@@ -2,6 +2,7 @@
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/JsOps.hpp"
 #include <algorithm>
+#include <unordered_set>
 
 namespace litebird {
 
@@ -240,11 +241,18 @@ void JsParser::validate_identifier(const std::string& name, bool strict_ctx) con
     }
 }
 
+void JsParser::validate_binding_identifier(const std::string& name, bool strict_ctx) const {
+    validate_identifier(name, strict_ctx);
+    if (strict_ctx && (name == "eval" || name == "arguments")) {
+        fail("Unexpected eval or arguments in strict mode");
+    }
+}
+
 std::string JsParser::consume_binding_identifier(const char* what) {
     if (check(JsTokenType::Identifier) || check(JsTokenType::Yield) ||
         check(JsTokenType::Await) || check(JsTokenType::Let)) {
         std::string name = advance().text;
-        validate_identifier(name, is_strict());
+        validate_binding_identifier(name, is_strict());
         return name;
     }
     if (is_at_end()) fail(std::string("Unexpected end of input: expected ") + what);
@@ -258,6 +266,14 @@ bool JsParser::is_property_name_token() const {
            t.type == JsTokenType::PrivateName || t.is_keyword;
 }
 
+void JsParser::clear_cover_error(const ObjectLiteralExpr* expr) {
+    if (!expr || m_pending_cover_errors.empty()) return;
+    m_pending_cover_errors.erase(
+        std::remove_if(m_pending_cover_errors.begin(), m_pending_cover_errors.end(),
+                       [expr](const PendingCoverError& entry) { return entry.expr == expr; }),
+        m_pending_cover_errors.end());
+}
+
 namespace {
 
 /// Parentheses, brackets and argument lists re-enable the `in` operator that a
@@ -268,6 +284,53 @@ struct FlagScope {
     FlagScope(bool& f, bool value) : flag(f), saved(f) { flag = value; }
     ~FlagScope() { flag = saved; }
 };
+
+bool is_directive_prologue_terminator(const JsToken& next) {
+    if (next.type == JsTokenType::Semicolon || next.type == JsTokenType::CloseBrace ||
+        next.type == JsTokenType::Eof) {
+        return true;
+    }
+    if (!next.newline_before) return false;
+    switch (next.type) {
+        case JsTokenType::Dot:
+        case JsTokenType::QuestionDot:
+        case JsTokenType::OpenBracket:
+        case JsTokenType::OpenParen:
+        case JsTokenType::Comma:
+        case JsTokenType::Question:
+        case JsTokenType::NoSubstitutionTemplate:
+        case JsTokenType::TemplateHead:
+        case JsTokenType::In:
+        case JsTokenType::InstanceOf:
+            return false;
+        case JsTokenType::Plus:
+        case JsTokenType::Minus:
+        case JsTokenType::Star:
+        case JsTokenType::Slash:
+        case JsTokenType::Percent:
+        case JsTokenType::Power:
+        case JsTokenType::EqualEqual:
+        case JsTokenType::NotEqual:
+        case JsTokenType::StrictEqual:
+        case JsTokenType::StrictNotEqual:
+        case JsTokenType::Less:
+        case JsTokenType::LessEqual:
+        case JsTokenType::Greater:
+        case JsTokenType::GreaterEqual:
+        case JsTokenType::ShiftLeft:
+        case JsTokenType::ShiftRight:
+        case JsTokenType::ShiftRightUnsigned:
+        case JsTokenType::Amp:
+        case JsTokenType::Pipe:
+        case JsTokenType::Caret:
+        case JsTokenType::AmpAmp:
+        case JsTokenType::PipePipe:
+        case JsTokenType::Nullish:
+            return false;
+        default:
+            return true;
+    }
+}
 
 } // namespace
 
@@ -287,24 +350,34 @@ std::unique_ptr<Program> JsParser::parse_program() {
     program->is_strict = m_functions.back().strict;
     m_blocks.pop_back();
     m_functions.pop_back();
+    if (!m_pending_cover_errors.empty()) {
+        throw JsSyntaxError(m_pending_cover_errors.front().message, m_pending_cover_errors.front().line);
+    }
     return program;
 }
 
-void JsParser::parse_statement_list(BlockStmt& block, bool until_close_brace) {
+bool JsParser::parse_statement_list(BlockStmt& block, bool until_close_brace) {
     // Directive prologue: "use strict" must be known before the body is parsed,
     // because nested functions inherit it.
+    bool saw_use_strict = false;
     for (size_t k = 0; peek(k).type == JsTokenType::String; ) {
-        if (peek(k).text == "use strict") m_functions.back().strict = true;
+        const JsToken& tok = peek(k);
         const JsToken& next = peek(k + 1);
+        if (!is_directive_prologue_terminator(next)) break;
+        if (tok.text == "use strict" && (tok.end == tok.start || tok.end - tok.start == 12)) {
+            saw_use_strict = true;
+        }
         if (next.type == JsTokenType::Semicolon) k += 2;
-        else if (next.newline_before) k += 1;
-        else break;
+        else if (next.type == JsTokenType::CloseBrace || next.type == JsTokenType::Eof) break;
+        else k += 1;
     }
+    if (saw_use_strict) m_functions.back().strict = true;
 
     while (!is_at_end() && !(until_close_brace && check(JsTokenType::CloseBrace))) {
         auto stmt = parse_declaration_or_statement();
         if (stmt) block.statements.push_back(std::move(stmt));
     }
+    return saw_use_strict;
 }
 
 // The parser descends once per level of nesting in the source. Each function
@@ -686,6 +759,44 @@ std::unique_ptr<BlockStmt> JsParser::parse_block() {
 // Functions and classes
 // ---------------------------------------------------------------------------
 
+void JsParser::validate_function_early_errors(const FunctionNode& fn, bool body_has_use_strict) const {
+    if (body_has_use_strict && !fn.simple_params) {
+        fail("Illegal 'use strict' directive in function with non-simple parameter list");
+    }
+    if (fn.is_strict && !fn.is_method && !fn.is_arrow && !fn.name.empty()) {
+        validate_binding_identifier(fn.name, true);
+    }
+
+    std::vector<std::string> param_names;
+    for (const auto& p : fn.params) {
+        if (p.target) p.target->collect_names(param_names);
+    }
+    if (fn.is_strict) {
+        for (const auto& name : param_names) {
+            validate_binding_identifier(name, true);
+        }
+    }
+    if ((fn.is_strict || !fn.simple_params || fn.is_arrow || fn.is_method) && param_names.size() > 1) {
+        std::unordered_set<std::string_view> seen;
+        seen.reserve(param_names.size());
+        for (const auto& name : param_names) {
+            if (!seen.insert(name).second) {
+                fail("Duplicate parameter name not allowed in this context");
+            }
+        }
+    }
+    if (fn.body && !fn.body->lexical_decls.empty() && !param_names.empty()) {
+        std::unordered_set<std::string_view> param_set;
+        param_set.reserve(param_names.size());
+        for (const auto& name : param_names) param_set.insert(name);
+        for (const auto& decl : fn.body->lexical_decls) {
+            if (param_set.count(decl.name)) {
+                fail("Identifier '" + decl.name + "' has already been declared");
+            }
+        }
+    }
+}
+
 void JsParser::finish_params(FunctionNode& fn) {
     fn.simple_params = true;
     fn.length = 0;
@@ -702,6 +813,7 @@ void JsParser::finish_params(FunctionNode& fn) {
 void JsParser::parse_params(FunctionNode& fn) {
     consume(JsTokenType::OpenParen, "Expected '(' before parameters.");
     FlagScope scope(m_no_in, false);
+    InParamsScope in_params_scope(m_functions);
     while (!check(JsTokenType::CloseParen)) {
         FunctionParam param;
         if (match(JsTokenType::Ellipsis)) {
@@ -725,11 +837,12 @@ void JsParser::parse_function_body(FunctionNode& fn) {
     auto body = std::make_shared<BlockStmt>();
     FlagScope scope(m_no_in, false);
     m_blocks.push_back(body.get());
-    parse_statement_list(*body, true);
+    const bool body_use_strict = parse_statement_list(*body, true);
     m_blocks.pop_back();
     consume(JsTokenType::CloseBrace, "Expected '}' after function body.");
     fn.body = std::move(body);
     fn.is_strict = m_functions.back().strict;
+    validate_function_early_errors(fn, body_use_strict);
 }
 
 void JsParser::parse_params_and_body(FunctionNode& fn, bool allow_super_property, bool allow_super_call) {
@@ -761,9 +874,10 @@ std::shared_ptr<FunctionNode> JsParser::parse_function(bool is_async, bool is_de
         check(JsTokenType::Let)) {
         fn->name = advance().text;
         if (is_declaration) {
-            validate_identifier(fn->name, is_strict());
+            validate_binding_identifier(fn->name, is_strict());
         } else {
-            if (is_strict() && is_strict_reserved_word(fn->name)) {
+            if (is_strict() &&
+                (is_strict_reserved_word(fn->name) || fn->name == "eval" || fn->name == "arguments")) {
                 fail("Unexpected strict mode reserved word");
             }
             if (fn->is_generator && fn->name == "yield") fail("Unexpected reserved word");
@@ -812,6 +926,7 @@ std::shared_ptr<FunctionNode> JsParser::parse_arrow_function(bool is_async) {
     if (check(JsTokenType::OpenParen)) {
         parse_params(*fn);
     } else {
+        InParamsScope in_params_scope(m_functions);
         FunctionParam param;
         param.target = std::make_unique<Pattern>();
         param.target->name = consume_binding_identifier("an arrow function parameter");
@@ -833,6 +948,7 @@ std::shared_ptr<FunctionNode> JsParser::parse_arrow_function(bool is_async) {
         body->statements.push_back(std::make_unique<ReturnStmt>(std::move(expr)));
         fn->body = std::move(body);
         fn->is_strict = m_functions.back().strict;
+        validate_function_early_errors(*fn, false);
     }
     m_functions.pop_back();
     m_closure_count++;
@@ -945,7 +1061,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
     if (check(JsTokenType::Identifier) || check(JsTokenType::Yield) ||
         check(JsTokenType::Await) || check(JsTokenType::Let)) {
         cls->name = advance().text;
-        validate_identifier(cls->name, true);
+        validate_binding_identifier(cls->name, true);
     } else if (is_declaration) {
         fail("Class declarations require a class name");
     }
@@ -1048,8 +1164,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
         if (named && member.is_static && member.key == "prototype") {
             fail("Classes may not have a static property named 'prototype'");
         }
-        if (named && !member.is_static && member.key == "constructor" &&
-            !check(JsTokenType::OpenParen)) {
+        if (named && member.key == "constructor" && !check(JsTokenType::OpenParen)) {
             fail("Classes may not have a field named 'constructor'");
         }
 
@@ -1064,8 +1179,19 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
             if (named && !member.is_static && member.key == "constructor" && !is_constructor) {
                 fail("Class constructor may not be an accessor, async or a generator");
             }
+            if ((member.kind == ClassMember::Kind::Getter || member.kind == ClassMember::Kind::Setter) &&
+                (is_async || is_generator)) {
+                fail_unexpected();
+            }
             auto fn = parse_method(is_async, is_generator, /*allow_super_property=*/true,
                                    /*allow_super_call=*/is_constructor && static_cast<bool>(cls->super_class));
+            if (member.kind == ClassMember::Kind::Getter && !fn->params.empty()) {
+                fail("Getter must not have any formal parameters.");
+            }
+            if (member.kind == ClassMember::Kind::Setter &&
+                (fn->params.size() != 1 || fn->params[0].rest)) {
+                fail("Setter must have exactly one formal parameter.");
+            }
             set_source(*fn, member_token);
             fn->name = member.key;
             if (is_constructor) {
@@ -1154,10 +1280,12 @@ std::unique_ptr<Pattern> JsParser::parse_binding_pattern() {
             if (match(JsTokenType::Ellipsis)) {
                 element.rest = true;
                 element.target = parse_binding_pattern();
-            } else {
-                element.target = parse_binding_pattern();
-                if (match(JsTokenType::Equal)) element.default_value = parse_assignment();
+                pattern->elements.push_back(std::move(element));
+                if (!check(JsTokenType::CloseBracket)) fail("Rest element must be last element");
+                break;
             }
+            element.target = parse_binding_pattern();
+            if (match(JsTokenType::Equal)) element.default_value = parse_assignment();
             pattern->elements.push_back(std::move(element));
             if (!check(JsTokenType::CloseBracket)) consume(JsTokenType::Comma, "Expected ',' in array pattern.");
         }
@@ -1172,22 +1300,24 @@ std::unique_ptr<Pattern> JsParser::parse_binding_pattern() {
                 element.rest = true;
                 element.target = std::make_unique<Pattern>();
                 element.target->name = consume_binding_identifier("a rest property name");
-            } else {
-                bool key_is_identifier = check(JsTokenType::Identifier) || check(JsTokenType::Yield) ||
-                                         check(JsTokenType::Await) || check(JsTokenType::Let);
-                std::unique_ptr<Expr> computed;
-                element.key = parse_property_name(computed);
-                element.computed_key = std::move(computed);
-                if (match(JsTokenType::Colon)) {
-                    element.target = parse_binding_pattern();
-                } else {
-                    if (!key_is_identifier || element.computed_key) fail_unexpected();
-                    validate_identifier(element.key, is_strict());
-                    element.target = std::make_unique<Pattern>();
-                    element.target->name = element.key;
-                }
-                if (match(JsTokenType::Equal)) element.default_value = parse_assignment();
+                pattern->elements.push_back(std::move(element));
+                if (!check(JsTokenType::CloseBrace)) fail("Rest element must be last element");
+                break;
             }
+            bool key_is_identifier = check(JsTokenType::Identifier) || check(JsTokenType::Yield) ||
+                                     check(JsTokenType::Await) || check(JsTokenType::Let);
+            std::unique_ptr<Expr> computed;
+            element.key = parse_property_name(computed);
+            element.computed_key = std::move(computed);
+            if (match(JsTokenType::Colon)) {
+                element.target = parse_binding_pattern();
+            } else {
+                if (!key_is_identifier || element.computed_key) fail_unexpected();
+                validate_binding_identifier(element.key, is_strict());
+                element.target = std::make_unique<Pattern>();
+                element.target->name = element.key;
+            }
+            if (match(JsTokenType::Equal)) element.default_value = parse_assignment();
             pattern->elements.push_back(std::move(element));
             if (!check(JsTokenType::CloseBrace)) consume(JsTokenType::Comma, "Expected ',' in object pattern.");
         }
@@ -1202,11 +1332,22 @@ std::unique_ptr<Pattern> JsParser::parse_binding_pattern() {
 // reinterpreted as a pattern once the `=` is seen (the "cover grammar").
 std::unique_ptr<Pattern> JsParser::expr_to_pattern(std::unique_ptr<Expr> expr) {
     js_check_stack();
+    if (expr && expr->explicitly_grouped &&
+        (expr->kind == NodeKind::ArrayLiteral || expr->kind == NodeKind::ObjectLiteral ||
+         expr->kind == NodeKind::Assign)) {
+        fail("Invalid destructuring assignment target");
+    }
     auto pattern = std::make_unique<Pattern>();
     switch (expr->kind) {
-        case NodeKind::Identifier:
-            pattern->name = static_cast<IdentifierExpr*>(expr.get())->name;
+        case NodeKind::Identifier: {
+            const std::string& name = static_cast<IdentifierExpr*>(expr.get())->name;
+            if (name == "this") fail("Invalid destructuring assignment target");
+            if (is_strict() && (name == "eval" || name == "arguments")) {
+                fail("Assignment to eval or arguments is not allowed in strict mode");
+            }
+            pattern->name = name;
             return pattern;
+        }
         case NodeKind::Member:
         case NodeKind::Index:
             pattern->kind = Pattern::Kind::Target;
@@ -1220,16 +1361,20 @@ std::unique_ptr<Pattern> JsParser::expr_to_pattern(std::unique_ptr<Expr> expr) {
         case NodeKind::ArrayLiteral: {
             pattern->kind = Pattern::Kind::Array;
             auto* array = static_cast<ArrayLiteralExpr*>(expr.get());
-            for (auto& item : array->elements) {
+            if (array->rest_trailing_comma) fail("Rest element must be last element");
+            const size_t n = array->elements.size();
+            for (size_t i = 0; i < n; ++i) {
+                auto& item = array->elements[i];
                 PatternElement element;
                 if (!item) {
                     pattern->elements.push_back(std::move(element));
                     continue;
                 }
                 if (item->kind == NodeKind::Spread) {
+                    if (i + 1 != n) fail("Rest element must be last element");
                     element.rest = true;
                     element.target = expr_to_pattern(std::move(static_cast<SpreadExpr*>(item.get())->argument));
-                } else if (item->kind == NodeKind::Assign &&
+                } else if (!item->explicitly_grouped && item->kind == NodeKind::Assign &&
                            static_cast<AssignExpr*>(item.get())->op == JsTokenType::Equal) {
                     auto* assign = static_cast<AssignExpr*>(item.get());
                     element.target = assign->pattern ? std::move(assign->pattern)
@@ -1245,9 +1390,20 @@ std::unique_ptr<Pattern> JsParser::expr_to_pattern(std::unique_ptr<Expr> expr) {
         case NodeKind::ObjectLiteral: {
             pattern->kind = Pattern::Kind::Object;
             auto* object = static_cast<ObjectLiteralExpr*>(expr.get());
-            for (auto& prop : object->properties) {
+            clear_cover_error(object);
+            if (object->rest_trailing_comma) fail("Rest element must be last element");
+            const size_t n = object->properties.size();
+            for (size_t i = 0; i < n; ++i) {
+                auto& prop = object->properties[i];
                 PatternElement element;
                 if (prop.kind == ObjectProperty::Kind::Spread) {
+                    if (i + 1 != n) fail("Rest element must be last element");
+                    if (!prop.value ||
+                        (prop.value->kind != NodeKind::Identifier &&
+                         prop.value->kind != NodeKind::Member &&
+                         prop.value->kind != NodeKind::Index)) {
+                        fail("Invalid destructuring assignment target");
+                    }
                     element.rest = true;
                     element.target = expr_to_pattern(std::move(prop.value));
                     pattern->elements.push_back(std::move(element));
@@ -1258,7 +1414,7 @@ std::unique_ptr<Pattern> JsParser::expr_to_pattern(std::unique_ptr<Expr> expr) {
                 }
                 element.key = prop.key;
                 element.computed_key = std::move(prop.computed_key);
-                if (prop.value->kind == NodeKind::Assign &&
+                if (!prop.value->explicitly_grouped && prop.value->kind == NodeKind::Assign &&
                     static_cast<AssignExpr*>(prop.value.get())->op == JsTokenType::Equal) {
                     auto* assign = static_cast<AssignExpr*>(prop.value.get());
                     element.target = assign->pattern ? std::move(assign->pattern)
@@ -1306,10 +1462,14 @@ bool JsParser::is_arrow_ahead() const {
            m_tokens[static_cast<size_t>(close) + 1].type == JsTokenType::Arrow;
 }
 
-// Valid simple assignment targets are identifiers, `a.b` and `a[b]`.
+// Valid simple assignment targets are identifiers (excluding `this`), `a.b`, `a[b]`, and `super.b`.
 bool JsParser::is_assignable(const Expr* expr) {
-    return expr && (expr->kind == NodeKind::Identifier || expr->kind == NodeKind::Member ||
-                    expr->kind == NodeKind::Index || expr->kind == NodeKind::SuperMember);
+    if (!expr) return false;
+    if (expr->kind == NodeKind::Identifier) {
+        return static_cast<const IdentifierExpr*>(expr)->name != "this";
+    }
+    return expr->kind == NodeKind::Member || expr->kind == NodeKind::Index ||
+           expr->kind == NodeKind::SuperMember;
 }
 
 std::unique_ptr<Expr> JsParser::parse_assignment() {
@@ -1343,26 +1503,32 @@ std::unique_ptr<Expr> JsParser::parse_assignment() {
         return std::make_unique<FunctionExpr>(parse_arrow_function(false));
     }
 
-    if (check(JsTokenType::Yield) && !m_functions.empty() && m_functions.back().is_generator) {
-        advance();
-        bool delegate = !peek().newline_before && match(JsTokenType::Star);
-        std::unique_ptr<Expr> argument;
-        switch (peek().type) {
-            case JsTokenType::Semicolon:
-            case JsTokenType::CloseParen:
-            case JsTokenType::CloseBrace:
-            case JsTokenType::CloseBracket:
-            case JsTokenType::Comma:
-            case JsTokenType::Colon:
-            case JsTokenType::Eof:
-            case JsTokenType::TemplateMiddle:
-            case JsTokenType::TemplateTail:
-                break;
-            default:
-                if (!peek().newline_before || delegate) argument = parse_assignment();
-                break;
+    if (check(JsTokenType::Yield) && !m_functions.empty() &&
+        (m_functions.back().is_generator || m_functions.back().forbid_yield)) {
+        if (m_functions.back().in_params) {
+            fail("Yield expression not allowed in formal parameter");
         }
-        return std::make_unique<YieldExpr>(std::move(argument), delegate);
+        if (m_functions.back().is_generator) {
+            advance();
+            bool delegate = !peek().newline_before && match(JsTokenType::Star);
+            std::unique_ptr<Expr> argument;
+            switch (peek().type) {
+                case JsTokenType::Semicolon:
+                case JsTokenType::CloseParen:
+                case JsTokenType::CloseBrace:
+                case JsTokenType::CloseBracket:
+                case JsTokenType::Comma:
+                case JsTokenType::Colon:
+                case JsTokenType::Eof:
+                case JsTokenType::TemplateMiddle:
+                case JsTokenType::TemplateTail:
+                    break;
+                default:
+                    if (!peek().newline_before || delegate) argument = parse_assignment();
+                    break;
+            }
+            return std::make_unique<YieldExpr>(std::move(argument), delegate);
+        }
     }
 
     auto left = parse_conditional();
@@ -1401,6 +1567,12 @@ std::unique_ptr<Expr> JsParser::parse_assignment() {
         return assign;
     }
     if (!is_assignable(left.get())) fail("Invalid left-hand side in assignment");
+    if (left->kind == NodeKind::Identifier && is_strict()) {
+        const std::string& name = static_cast<const IdentifierExpr*>(left.get())->name;
+        if (name == "eval" || name == "arguments") {
+            fail("Assignment to eval or arguments is not allowed in strict mode");
+        }
+    }
     auto value = parse_assignment();
     auto assign = std::make_unique<AssignExpr>(std::move(left), std::move(value), op);
     assign->line = line;
@@ -1540,16 +1712,27 @@ std::unique_ptr<Expr> JsParser::parse_unary() {
             JsTokenType op = advance().type;
             auto target = parse_unary();
             if (!is_assignable(target.get())) fail("Invalid left-hand side expression in prefix operation");
+            if (target->kind == NodeKind::Identifier && is_strict()) {
+                const std::string& name = static_cast<const IdentifierExpr*>(target.get())->name;
+                if (name == "eval" || name == "arguments") {
+                    fail("Assignment to eval or arguments is not allowed in strict mode");
+                }
+            }
             return std::make_unique<UpdateExpr>(std::move(target), op, /*prefix=*/true);
         }
         case JsTokenType::Await: {
-            if (!m_functions.empty() && m_functions.back().is_async) {
-                advance();
-                // Unlike `arguments`, await belongs to the innermost function,
-                // arrow or not.
-                if (m_functions.back().fn) m_functions.back().fn->uses_await = true;
-                auto operand = parse_unary();
-                return std::make_unique<AwaitExpr>(std::move(operand));
+            if (!m_functions.empty() && (m_functions.back().is_async || m_functions.back().forbid_await)) {
+                if (m_functions.back().in_params) {
+                    fail("Illegal await-expression in formal parameters of async function");
+                }
+                if (m_functions.back().is_async) {
+                    advance();
+                    // Unlike `arguments`, await belongs to the innermost function,
+                    // arrow or not.
+                    if (m_functions.back().fn) m_functions.back().fn->uses_await = true;
+                    auto operand = parse_unary();
+                    return std::make_unique<AwaitExpr>(std::move(operand));
+                }
             }
             return parse_postfix();
         }
@@ -1565,6 +1748,12 @@ std::unique_ptr<Expr> JsParser::parse_postfix() {
     if ((check(JsTokenType::PlusPlus) || check(JsTokenType::MinusMinus)) && !peek().newline_before) {
         JsTokenType op = advance().type;
         if (!is_assignable(expr.get())) fail("Invalid left-hand side expression in postfix operation");
+        if (expr->kind == NodeKind::Identifier && is_strict()) {
+            const std::string& name = static_cast<const IdentifierExpr*>(expr.get())->name;
+            if (name == "eval" || name == "arguments") {
+                fail("Assignment to eval or arguments is not allowed in strict mode");
+            }
+        }
         return std::make_unique<UpdateExpr>(std::move(expr), op, /*prefix=*/false);
     }
     return expr;
@@ -1742,27 +1931,40 @@ std::unique_ptr<Expr> JsParser::parse_template(std::unique_ptr<Expr> tag) {
 std::unique_ptr<Expr> JsParser::parse_array_literal() {
     FlagScope scope(m_no_in, false);
     std::vector<std::unique_ptr<Expr>> elements;
+    bool rest_trailing_comma = false;
     while (!check(JsTokenType::CloseBracket)) {
         if (check(JsTokenType::Comma)) {
             advance();
             elements.push_back(nullptr);      // hole: `[1, , 3]`
             continue;
         }
+        bool is_spread = false;
         if (match(JsTokenType::Ellipsis)) {
+            is_spread = true;
             elements.push_back(std::make_unique<SpreadExpr>(parse_assignment()));
         } else {
             elements.push_back(parse_assignment());
         }
-        if (!check(JsTokenType::CloseBracket)) consume(JsTokenType::Comma, "Expected ',' or ']' in array literal.");
+        if (!check(JsTokenType::CloseBracket)) {
+            consume(JsTokenType::Comma, "Expected ',' or ']' in array literal.");
+            if (is_spread && check(JsTokenType::CloseBracket)) rest_trailing_comma = true;
+        }
     }
     consume(JsTokenType::CloseBracket, "Expected ']' after array elements.");
-    return std::make_unique<ArrayLiteralExpr>(std::move(elements));
+    auto node = std::make_unique<ArrayLiteralExpr>(std::move(elements));
+    node->rest_trailing_comma = rest_trailing_comma;
+    return node;
 }
 
 // Called with the opening brace already consumed.
 std::unique_ptr<Expr> JsParser::parse_object_literal() {
     FlagScope scope(m_no_in, false);
     std::vector<ObjectProperty> properties;
+    bool rest_trailing_comma = false;
+    bool saw_cover_init = false;
+    int cover_init_line = 0;
+    int proto_count = 0;
+    int proto_dup_line = 0;
 
     auto can_follow_modifier = [&]() {
         const JsToken& next = peek(1);
@@ -1773,11 +1975,15 @@ std::unique_ptr<Expr> JsParser::parse_object_literal() {
 
     while (!check(JsTokenType::CloseBrace)) {
         ObjectProperty prop;
+        const int prop_line = peek().line;
         if (match(JsTokenType::Ellipsis)) {
             prop.kind = ObjectProperty::Kind::Spread;
             prop.value = parse_assignment();
             properties.push_back(std::move(prop));
-            if (!check(JsTokenType::CloseBrace)) consume(JsTokenType::Comma, "Expected ',' or '}' in object literal.");
+            if (!check(JsTokenType::CloseBrace)) {
+                consume(JsTokenType::Comma, "Expected ',' or '}' in object literal.");
+                if (check(JsTokenType::CloseBrace)) rest_trailing_comma = true;
+            }
             continue;
         }
 
@@ -1799,7 +2005,15 @@ std::unique_ptr<Expr> JsParser::parse_object_literal() {
         prop.key = parse_property_name(prop.computed_key, /*allow_private=*/false);
 
         if (prop.kind != ObjectProperty::Kind::Init) {
+            if (is_async || is_generator) fail_unexpected();
             auto fn = parse_method(false, false, /*allow_super_property=*/true);
+            if (prop.kind == ObjectProperty::Kind::Getter && !fn->params.empty()) {
+                fail("Getter must not have any formal parameters.");
+            }
+            if (prop.kind == ObjectProperty::Kind::Setter &&
+                (fn->params.size() != 1 || fn->params[0].rest)) {
+                fail("Setter must have exactly one formal parameter.");
+            }
             set_source(*fn, property_token);
             fn->name = prop.key;
             prop.value = std::make_unique<FunctionExpr>(std::move(fn));
@@ -1810,6 +2024,9 @@ std::unique_ptr<Expr> JsParser::parse_object_literal() {
             prop.is_method = true;
             prop.value = std::make_unique<FunctionExpr>(std::move(fn));
         } else if (match(JsTokenType::Colon)) {
+            if (!prop.computed_key && prop.key == "__proto__") {
+                if (++proto_count > 1 && proto_dup_line == 0) proto_dup_line = prop_line;
+            }
             prop.value = parse_assignment();
         } else {
             // Shorthand `{a}`; `{a = 1}` is only meaningful as a pattern.
@@ -1824,6 +2041,10 @@ std::unique_ptr<Expr> JsParser::parse_object_literal() {
             }
             auto ident = std::make_unique<IdentifierExpr>(prop.key);
             if (match(JsTokenType::Equal)) {
+                if (!saw_cover_init) {
+                    saw_cover_init = true;
+                    cover_init_line = prop_line;
+                }
                 prop.value = std::make_unique<AssignExpr>(std::move(ident), parse_assignment());
             } else {
                 prop.value = std::move(ident);
@@ -1833,7 +2054,16 @@ std::unique_ptr<Expr> JsParser::parse_object_literal() {
         if (!check(JsTokenType::CloseBrace)) consume(JsTokenType::Comma, "Expected ',' or '}' in object literal.");
     }
     consume(JsTokenType::CloseBrace, "Expected '}' after object literal.");
-    return std::make_unique<ObjectLiteralExpr>(std::move(properties));
+    auto node = std::make_unique<ObjectLiteralExpr>(std::move(properties));
+    node->rest_trailing_comma = rest_trailing_comma;
+    if (saw_cover_init) {
+        m_pending_cover_errors.push_back({node.get(), cover_init_line, "Invalid shorthand property initializer"});
+    }
+    if (proto_count > 1) {
+        m_pending_cover_errors.push_back(
+            {node.get(), proto_dup_line, "Duplicate __proto__ fields are not allowed in object literals"});
+    }
+    return node;
 }
 
 std::unique_ptr<Expr> JsParser::parse_primary() {
@@ -1938,21 +2168,14 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
             const bool allows_property = !m_functions.empty() && m_functions.back().allow_super_property;
             const bool allows_call = !m_functions.empty() && m_functions.back().allow_super_call;
             const bool is_call = check(JsTokenType::OpenParen);
-            // Direct eval re-parses its text with the caller's grammar
-            // parameters. In particular, an object-literal method has a home
-            // object for `super.x`, but cannot be a super constructor call.
-            if (m_context.direct_eval && (is_call ? !allows_call : !allows_property)) {
-                fail("'super' keyword unexpected here");
-            }
             // `super()` is legal in one place only: a derived constructor, so
             // that is exactly what allow_super_call is set for (§15.7.1). A
-            // method of a derived class cannot call it — Contains SuperCall is
-            // false for a FunctionBody, so a call there is not part of the
-            // grammar either. A field initialiser and a static block have a
-            // home object, so `super.x` is theirs, but they *do* contain their
-            // own `super()`, which is an early error of those productions
-            // (ClassFieldDefinition / ClassStaticBlockBody).
+            // method of a derived class or an object literal has a home object
+            // so `super.x` is allowed there, while any other function body or
+            // top-level script refuses both at parse time (unless direct eval
+            // inherited the caller's permission).
             if (is_call && !allows_call) fail("'super' keyword unexpected here");
+            if (!is_call && !allows_property) fail("'super' keyword unexpected here");
             if (auto* fn = nearest_non_arrow_function()) fn->uses_super = true;
             if (is_call) {
                 result = std::make_unique<SuperCallExpr>(parse_arguments());

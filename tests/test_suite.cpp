@@ -28042,6 +28042,146 @@ TEST(class_bodies_reject_what_the_grammar_does_not_allow) {
     assert(js.eval("new (class extends Object { x = 1; constructor() { super(); } })().x").to_string() == "1");
 }
 
+TEST(parser_rejects_early_syntax_errors_outside_class_bodies) {
+    using namespace litebird;
+
+    // Phase 141, finding 146. Early SyntaxErrors outside class bodies across
+    // object literals, function declarations/expressions/methods/arrows,
+    // assignment/update targets, destructuring rest/cover grammar, directive
+    // prologues, and non-method `super` property lookups. Every expectation
+    // below was verified against Node.js v22.22.3.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function rejects(what, src) {
+            try {
+                (0, eval)(src);
+                failures.push(what + ': accepted, expected SyntaxError');
+            } catch (e) {
+                if (!(e instanceof SyntaxError)) failures.push(what + ': threw ' + e.name);
+            }
+        }
+        function accepts(what, src) {
+            try { (0, eval)(src); }
+            catch (e) { failures.push(what + ': threw ' + e.name + ' ' + e.message); }
+        }
+
+        // ---- directive prologue & strict params / bindings ----------------
+        rejects('use strict in default-param fn', 'function f(a = 1) { "use strict"; }');
+        rejects('use strict in destructuring-param fn', 'function f({a}) { "use strict"; }');
+        rejects('use strict in rest-param fn', 'function f(...a) { "use strict"; }');
+        rejects('retroactive strict fn named eval', 'function eval() { "use strict"; }');
+        rejects('retroactive strict fn named arguments', 'function arguments() { "use strict"; }');
+        rejects('retroactive strict param eval', 'function f(eval) { "use strict"; }');
+        rejects('retroactive strict param arguments', 'function f(arguments) { "use strict"; }');
+        rejects('retroactive strict dup params', 'function f(a, a) { "use strict"; }');
+        rejects('strict fn decl named eval', '"use strict"; function eval() {}');
+        rejects('strict fn expr named eval', '"use strict"; (function eval() {})');
+        rejects('strict var eval', '"use strict"; var eval = 1;');
+        rejects('strict let arguments', '"use strict"; let arguments = 1;');
+        rejects('strict const [eval]', '"use strict"; const [eval] = [1];');
+        rejects('strict catch arguments', '"use strict"; try {} catch (arguments) {}');
+        rejects('strict class decl eval', '"use strict"; class eval {}');
+        rejects('strict class expr arguments', '"use strict"; (class arguments {})');
+        accepts('escaped use strict is not directive', 'function f(a = 1) { "\\x75se strict"; var eval = 1; return eval; } f();');
+        accepts('concatenated use strict is not directive', 'function f(a = 1) { "use strict" + ""; var eval = 1; return eval; } f();');
+        accepts('member after use strict is not directive', 'function f(a = 1) { "use strict"\n.length; var eval = 1; return eval; } f();');
+        accepts('sloppy fn duplicate params', 'function f(a, a) { return a; }');
+        accepts('sloppy fn named eval', '(function() { function eval() { return 1; } return eval(); })()');
+        accepts('sloppy fn named arguments', '(function() { function arguments() { return 1; } return arguments(); })()');
+        accepts('strict member named eval/arguments', '"use strict"; var o = {}; o.eval = 1; o.arguments = 2;');
+
+        // ---- duplicate params & param vs body lexical redeclaration -------
+        rejects('dup param before default', 'function f(a, a = 1) {}');
+        rejects('dup param after default', 'function f(a = 1, a) {}');
+        rejects('dup param with pattern', 'function f({a}, a) {}');
+        rejects('arrow dup params', 'var f = (a, a) => a;');
+        rejects('method dup params', 'var o = { m(a, a) {} };');
+        rejects('fn param shadowed by body let', 'function f(p) { let p; }');
+        rejects('fn param shadowed by body const', 'function f(p) { const p = 1; }');
+        rejects('method param shadowed by body let', 'var o = { m(p) { let p; } };');
+        rejects('arrow param shadowed by body let', 'var f = p => { let p; };');
+        rejects('fn expr param shadowed by body const', 'var f = function(a, b) { const b = 1; };');
+        accepts('param shadowed inside inner block', 'function f(p) { { let p = 2; return p; } }');
+
+        // ---- parameter default yield / await ------------------------------
+        rejects('yield expr in generator param', 'function* g(a = yield 1) {}');
+        rejects('await expr in async param', 'async function f(a = await 1) {}');
+        rejects('yield expr in method generator param', 'var o = { *m(a = yield 1) {} };');
+        rejects('await expr in async method param', 'var o = { async m(a = await 1) {} };');
+        rejects('await expr in class-ish method param', 'var o = { m(x = await 1) {} };');
+        accepts('yield inside inner arrow in generator param', 'function* g(a = () => yield) { return a; }');
+        accepts('await inside inner arrow in async param', 'async function f(a = () => await) { return a; }');
+
+        // ---- object literal, accessor & class member early errors ---------
+        rejects('duplicate __proto__ keys', 'var o = { __proto__: 1, __proto__: 2 };');
+        rejects('string + bare __proto__ keys', 'var o = { "__proto__": 1, __proto__: 2 };');
+        rejects('cover init in var initializer', 'var o = { a = 1 };');
+        rejects('standalone cover init', '({ a = 1 });');
+        rejects('object getter with param', 'var o = { get a(x) {} };');
+        rejects('object getter with default param', 'var o = { get a(x = 1) {} };');
+        rejects('object setter with 0 params', 'var o = { set a() {} };');
+        rejects('object setter with 2 params', 'var o = { set a(a, b) {} };');
+        rejects('object setter with rest param', 'var o = { set a(...a) {} };');
+        rejects('async getter on object', 'var o = { async get a() {} };');
+        rejects('generator setter on object', 'var o = { *set a(v) {} };');
+        rejects('class getter with default param', 'class C { get a(x = 1) {} }');
+        rejects('static field named constructor', 'class C { static constructor; }');
+        rejects('static string field named constructor', 'class C { static "constructor" = 1; }');
+        accepts('mixed valid __proto__ forms', 'var o = { __proto__: {}, ["__proto__"]: 2, __proto__() {} };');
+        accepts('shorthand plus explicit __proto__', 'var __proto__ = 1; var o = { __proto__, __proto__: {} };');
+        accepts('strict object methods named eval/arguments', '"use strict"; var o = { eval() {}, arguments() {} };');
+        accepts('static method named constructor', 'class C { static constructor() {} }');
+
+        // ---- rest, destructuring cover grammar & assignment targets -------
+        rejects('non-final rest in fn param pattern', 'function f([...x, y]) {}');
+        rejects('non-final rest in array decl', 'var [...x, y] = [];');
+        rejects('non-final rest in object decl', 'var {...rest, a} = {};');
+        rejects('non-final rest in array assign', 'var x, y; [...x, y] = [];');
+        rejects('trailing comma after rest in array assign', 'var x; [...x,] = [];');
+        rejects('trailing comma after rest in object assign', 'var rest; ({ ...rest, } = {});');
+        rejects('non-final rest in object assign', 'var rest, a; ({ ...rest, a } = {});');
+        rejects('default inside object rest assign', 'var a; ({ ...a = 1 } = {});');
+        rejects('grouped array target', 'var a; ([a]) = [];');
+        rejects('grouped object target', 'var a; ({ a }) = {};');
+        rejects('grouped assign inside array target', 'var a; ([(a = 1)] = []);');
+        rejects('grouped object nested target', 'var b; ({ a: ({ b = 1 }) } = {});');
+        rejects('strict assign eval', '"use strict"; eval = 1;');
+        rejects('strict grouped assign arguments', '"use strict"; (arguments) = 20;');
+        rejects('strict prefix ++eval', '"use strict"; ++eval;');
+        rejects('strict postfix arguments--', '"use strict"; arguments--;');
+        rejects('strict destructuring [arguments]', '"use strict"; [arguments] = [];');
+        rejects('strict destructuring {eval}', '"use strict"; ({ eval } = {});');
+        rejects('strict destructuring {eval=0}', '"use strict"; ({ eval = 0 } = {});');
+        rejects('assign to this', 'this = 1;');
+        rejects('grouped assign to this', '(this) = 1;');
+        rejects('prefix ++this', '++this;');
+        rejects('postfix this--', 'this--;');
+        rejects('destructuring [this]', '[this] = [];');
+        rejects('for-of this', 'for (this of [1]) {}');
+        accepts('cover init resolved to object destructuring', 'var a; ({ a = 1 } = {});');
+        accepts('duplicate __proto__ in object destructuring', 'var a, b; ({ __proto__: a, __proto__: b } = {});');
+        accepts('cover init in for-of head', 'var a; for ({ a = 1 } of [{}]) {}');
+        accepts('grouped simple ident in array pattern', 'var a; [(a) = 1] = []; [(a)] = [2];');
+
+        // ---- super property outside home-object methods -----------------
+        rejects('top-level super.x', 'super.x;');
+        rejects('plain function super.x', 'function f() { return super.x; }');
+        rejects('top-level arrow super[0]', 'var f = () => super[0];');
+        rejects('nested function inside method super.x', 'class C { m() { function inner() { return super.x; } } }');
+        accepts('arrow inside object method super.toString', 'var o = { m() { return (() => super.toString)(); } };');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+
+    // Sanity check runtime values for accepted constructs.
+    assert(js.eval("var o = { get x() { return 4; }, m() { return super.toString === Object.prototype.toString; } }; o.x + ':' + o.m()").to_string() == "4:true");
+    assert(js.eval("var a = 0, b = 0; ({ x: a = 7 } = {}); [b] = [9]; a + b").to_number() == 16.0);
+}
+
 TEST(an_anonymous_class_expression_takes_its_bindings_name) {
     using namespace litebird;
 
@@ -29278,6 +29418,143 @@ TEST(a_functions_name_and_length_are_its_own_properties) {
     assert(failed.empty());
 }
 
+TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot) {
+    using namespace litebird;
+
+    // Phase 154, finding 159. `stack` was an own data property installed by
+    // js_make_error, so every statement below was false:
+    //
+    //   Object.getOwnPropertyDescriptor(Error.prototype, 'stack')
+    //                        -> undefined      (it is an accessor)
+    //   new Error('x').hasOwnProperty('stack')
+    //                        -> true           (it is false until assigned)
+    //   Object.getOwnPropertyNames(new Error('x'))
+    //                        -> ['message','stack']  (['message'])
+    //
+    // The standard says nothing about `stack`; the de-facto shape is the one
+    // test262 pins down and V8/JavaScriptCore expose: an accessor pair on
+    // Error.prototype that reports the text from the [[ErrorData]] internal
+    // slot, and an instance that carries no own property until something
+    // assigns one. ObjectClass::Error is that slot here.
+    //
+    // The getter answers from the slot on the *receiver*, so it survives an
+    // own `stack` that shadows it, a foreign new.target that puts the
+    // instance off Error.prototype's chain, and a subclass. The setter is
+    // SetterThatIgnoresPrototypeProperties: a non-string throws, Error.prototype
+    // itself throws, and anything else gets an ordinary own data property.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throwsT(what, f) {
+            try { f(); failures.push(what + ': no throw'); }
+            catch (e) { if (e.constructor.name !== 'TypeError') failures.push(what + ': threw ' + e.constructor.name); }
+        }
+        function desc(o, k) {
+            var d = Object.getOwnPropertyDescriptor(o, k);
+            if (!d) return 'absent';
+            return [typeof d.get, typeof d.set, String(d.value), String(d.writable),
+                    String(d.enumerable), String(d.configurable)].join(',');
+        }
+
+        // ---- the property on the prototype is an accessor ----------------
+        var d = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
+        same('descriptor is an accessor', desc(Error.prototype, 'stack'),
+             'function,function,undefined,undefined,false,true');
+        same('getter name', d.get.name, 'get stack');
+        same('getter length', d.get.length, 0);
+        same('setter name', d.set.name, 'set stack');
+        same('setter length', d.set.length, 1);
+        same('getter is not a constructor', d.get.hasOwnProperty('prototype'), false);
+        throwsT('new getter', function () { new d.get(); });
+
+        // ---- an instance has no own stack --------------------------------
+        var e = new Error('x');
+        same('own names', Object.getOwnPropertyNames(e), ['message']);
+        same('hasOwnProperty before assignment', e.hasOwnProperty('stack'), false);
+        same('descriptor is undefined', Object.getOwnPropertyDescriptor(e, 'stack'), undefined);
+        same('case', Object.keys(e).indexOf('stack'), -1);
+        same('getter still reports', typeof e.stack, 'string');
+        same('the text', e.stack, 'Error: x\n    at <anonymous>');
+        same('every native error', new TypeError('t').stack, 'TypeError: t\n    at <anonymous>');
+        same('a subclass', new (class extends Error {})('s').stack, 'Error: s\n    at <anonymous>');
+        // An empty error is just its name, as toString() is.
+        same('no message', new RangeError().stack, 'RangeError\n    at <anonymous>');
+
+        // ---- the getter reads the slot, not the prototype chain ----------
+        var o = { __proto__: new Error('o') };
+        same('getter on a proxy-ish receiver', d.get.call(o), undefined);
+        same('via the chain', o.stack, undefined);
+        same('getter on Error.prototype', d.get.call(Error.prototype), undefined);
+        same('plain object', d.get.call({}), undefined);
+        same('native error prototypes', d.get.call(TypeError.prototype), undefined);
+        throwsT('getter on undefined', function () { d.get.call(undefined); });
+        throwsT('getter on a number', function () { d.get.call(1); });
+        throwsT('setter on null', function () { d.set.call(null, 'x'); });
+
+        // ---- an own data property shadows it -----------------------------
+        var shadow = new Error('m');
+        Object.defineProperty(shadow, 'stack', { value: 'sentinel', writable: true, enumerable: true, configurable: true });
+        same('shadowed read', shadow.stack, 'sentinel');
+        same('slot survives the shadow', typeof d.get.call(shadow), 'string');
+
+        // ---- the setter installs an ordinary own property ----------------
+        var s1 = new Error('m');
+        same('setter returns undefined', d.set.call(s1, 'sentinel'), undefined);
+        same('own after set', desc(s1, 'stack'), 'undefined,undefined,sentinel,true,true,true');
+        same('read back', s1.stack, 'sentinel');
+        d.set.call(s1, '');
+        same('empty string round-trips', s1.stack, '');
+        var plain = {};
+        d.set.call(plain, 'on-plain');
+        same('plain receiver', desc(plain, 'stack'), 'undefined,undefined,on-plain,true,true,true');
+        d.set.call(TypeError.prototype, 'sub');
+        same('a native error prototype', desc(TypeError.prototype, 'stack'),
+             'undefined,undefined,sub,true,true,true');
+        delete TypeError.prototype.stack;
+        same('cleaned up', Object.getOwnPropertyDescriptor(TypeError.prototype, 'stack'), undefined);
+        var viaAssignment = Object.create(Error.prototype);
+        viaAssignment.stack = 'assigned';
+        same('assignment through the accessor', desc(viaAssignment, 'stack'),
+             'undefined,undefined,assigned,true,true,true');
+
+        // ---- an existing own property keeps its attributes ---------------
+        var kept = new Error('m');
+        Object.defineProperty(kept, 'stack', { value: 'original', writable: true, enumerable: false, configurable: false });
+        d.set.call(kept, 'updated');
+        same('only the value changes', desc(kept, 'stack'), 'undefined,undefined,updated,true,false,false');
+
+        // ---- and the ways the setter refuses -----------------------------
+        throwsT('no argument', function () { d.set.call(new Error('m')); });
+        throwsT('a number', function () { d.set.call(new Error('m'), 1); });
+        throwsT('undefined', function () { d.set.call(new Error('m'), undefined); });
+        throwsT('an object with toString', function () { d.set.call(new Error('m'), { toString: function () { return 'x'; } }); });
+        throwsT('Error.prototype itself', function () { d.set.call(Error.prototype, 'x'); });
+        throwsT('assignment to Error.prototype', function () { Error.prototype.stack = 'x'; });
+        var ro = new Error('m');
+        Object.defineProperty(ro, 'stack', { value: 'ro', writable: false, enumerable: false, configurable: true });
+        throwsT('a non-writable own property', function () { d.set.call(ro, 'x'); });
+        same('and it is untouched', ro.stack, 'ro');
+        var frozen = new Error('m');
+        Object.freeze(frozen);
+        throwsT('a frozen instance', function () { d.set.call(frozen, 'x'); });
+        same('soft delete', delete new Error('m').stack, true);
+
+        // ---- the accessor survives the refusals --------------------------
+        same('still an accessor', desc(Error.prototype, 'stack'),
+             'function,function,undefined,undefined,false,true');
+        same('and still reports', new Error('after').stack, 'Error: after\n    at <anonymous>');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(automatic_gc_threshold_and_geometric_growth) {
     using namespace litebird;
 
@@ -29939,12 +30216,17 @@ int main() {
 
     // Phase 128: the six regular grammar rules of a class body.
     RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);
+    // Phase 141: remaining early SyntaxErrors outside class bodies.
+    RUN_TEST(parser_rejects_early_syntax_errors_outside_class_bodies);
 
     // Phase 135: an anonymous class expression takes the name it is bound to.
     RUN_TEST(an_anonymous_class_expression_takes_its_bindings_name);
 
     // Phase 146: name and length are own properties, with the attributes they have.
     RUN_TEST(a_functions_name_and_length_are_its_own_properties);
+
+    // Phase 154: Error.prototype.stack is an accessor over an internal slot.
+    RUN_TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot);
 
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.

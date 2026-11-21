@@ -251,6 +251,20 @@ bench-floats: $(TARGET)
 bench-collections: $(TARGET)
 	@python3 tools/bench/bench_collection_iterators.py $(TARGET) --rounds 8192 --reps 3 --max-growth 2.25 --slack-ms 40
 
+## Explicit font required; install tools/shaping/requirements.txt in a venv.
+SHAPING_PYTHON ?= python3
+SHAPING_FONT ?=
+.PHONY: shaping-oracle shaping-oracle-self-test
+$(BUILD_DIR)/shaping-probe: tools/shaping/probe.cpp src/render/FontRenderer.cpp include/litebird/render/FontRenderer.hpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) tools/shaping/probe.cpp src/render/FontRenderer.cpp -o $@
+
+shaping-oracle: $(BUILD_DIR)/shaping-probe
+	$(SHAPING_PYTHON) tools/shaping/compare.py --probe $(BUILD_DIR)/shaping-probe --font "$(SHAPING_FONT)" --output $(BUILD_DIR)/shaping-report.json
+
+shaping-oracle-self-test:
+	python3 tools/shaping/compare.py --self-test
+
 ## GC oracle: the collector's answer through the CLI, the way a page meets it.
 ## Cycles must be reclaimed, repeating churn must not grow the live set, what
 ## a global names must stay intact, and collected_cells must end above zero.

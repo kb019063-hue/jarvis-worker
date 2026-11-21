@@ -31996,6 +31996,332 @@ TEST(an_abrupt_completion_in_a_pattern_closes_the_iterator) {
     assert(failed.empty());
 }
 
+TEST(fetch_request_constructor_validation_body_clone_and_signal) {
+    using namespace litebird;
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://app.example/dir/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><head><base href='https://app.example/base/sub/'></head><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(label, cond) { if (!cond) failures.push(label); }
+        function eq(label, got, want) {
+            if (got !== want) failures.push(label + ': got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want));
+        }
+        function throwsTypeError(label, fn) {
+            try { fn(); failures.push(label + ': did not throw'); }
+            catch (e) { if (!e || e.name !== 'TypeError') failures.push(label + ': wrong error ' + String(e)); }
+        }
+
+        // Identity, prototype, defaults, relative URL against <base href>
+        var r0 = new Request('items?q=1');
+        eq('ctor name', Request.name, 'Request');
+        eq('ctor length', Request.length, 1);
+        ok('instanceof Request', r0 instanceof Request);
+        ok('instanceof Headers', r0.headers instanceof Headers);
+        ok('instanceof AbortSignal', r0.signal instanceof AbortSignal);
+        eq('toStringTag', Object.prototype.toString.call(r0), '[object Request]');
+        ok('same headers identity', r0.headers === r0.headers);
+        ok('same signal identity', r0.signal === r0.signal);
+        eq('resolved base href', r0.url, 'https://app.example/base/sub/items?q=1');
+        eq('default method', r0.method, 'GET');
+        eq('default mode', r0.mode, 'cors');
+        eq('default credentials', r0.credentials, 'same-origin');
+        eq('default cache', r0.cache, 'default');
+        eq('default redirect', r0.redirect, 'follow');
+        eq('default referrer', r0.referrer, 'about:client');
+        eq('default referrerPolicy', r0.referrerPolicy, '');
+        eq('default integrity', r0.integrity, '');
+        eq('default keepalive', r0.keepalive, false);
+        eq('default destination', r0.destination, '');
+        eq('default bodyUsed', r0.bodyUsed, false);
+        eq('default signal.aborted', r0.signal.aborted, false);
+
+        // URL object & validation errors
+        var u = new URL('https://api.example/v1/../v2?a=b#frag');
+        eq('URL input', new Request(u).url, 'https://api.example/v2?a=b#frag');
+        throwsTypeError('no new', function () { Request('https://api.example/'); });
+        throwsTypeError('no args', function () { new Request(); });
+        throwsTypeError('credentials user:pass', function () { new Request('https://u:p@api.example/'); });
+        throwsTypeError('credentials user only', function () { new Request('https://u@api.example/'); });
+        throwsTypeError('non-object init', function () { new Request('https://api.example/', 'bad'); });
+        throwsTypeError('window non-null', function () { new Request('https://api.example/', { window: {} }); });
+        throwsTypeError('mode navigate', function () { new Request('https://api.example/', { mode: 'navigate' }); });
+        throwsTypeError('mode invalid', function () { new Request('https://api.example/', { mode: 'bogus' }); });
+        throwsTypeError('credentials invalid', function () { new Request('https://api.example/', { credentials: 'bogus' }); });
+        throwsTypeError('cache invalid', function () { new Request('https://api.example/', { cache: 'bogus' }); });
+        throwsTypeError('only-if-cached cors', function () { new Request('https://api.example/', { cache: 'only-if-cached' }); });
+        throwsTypeError('redirect invalid', function () { new Request('https://api.example/', { redirect: 'bogus' }); });
+        throwsTypeError('referrerPolicy invalid', function () { new Request('https://api.example/', { referrerPolicy: 'bogus' }); });
+        throwsTypeError('forbidden CONNECT', function () { new Request('https://api.example/', { method: 'connect' }); });
+        throwsTypeError('forbidden TRACE', function () { new Request('https://api.example/', { method: 'TRACE' }); });
+        throwsTypeError('forbidden TRACK', function () { new Request('https://api.example/', { method: 'Track' }); });
+        throwsTypeError('invalid token method', function () { new Request('https://api.example/', { method: 'BAD METHOD' }); });
+        throwsTypeError('no-cors PUT', function () { new Request('https://api.example/', { mode: 'no-cors', method: 'PUT' }); });
+        throwsTypeError('GET with body', function () { new Request('https://api.example/', { method: 'GET', body: 'x' }); });
+        throwsTypeError('HEAD with body', function () { new Request('https://api.example/', { method: 'HEAD', body: 'x' }); });
+        throwsTypeError('invalid signal', function () { new Request('https://api.example/', { signal: {} }); });
+        throwsTypeError('invalid header name', function () { new Request('https://api.example/', { headers: { 'bad name': '1' } }); });
+        throwsTypeError('malformed header pair', function () { new Request('https://api.example/', { headers: [['only-one']] }); });
+        throwsTypeError('illegal getter receiver', function () { Object.getOwnPropertyDescriptor(Request.prototype, 'url').get.call({}); });
+        throwsTypeError('illegal clone receiver', function () { Request.prototype.clone.call({}); });
+
+        // Detached ArrayBuffer throws TypeError
+        var abDet = new ArrayBuffer(4);
+        abDet.transfer();
+        throwsTypeError('detached ArrayBuffer body', function () {
+            new Request('https://api.example/', { method: 'POST', body: abDet });
+        });
+
+        // Method normalization
+        eq('norm delete', new Request('https://api.example/', { method: 'delete' }).method, 'DELETE');
+        eq('norm post', new Request('https://api.example/', { method: 'post' }).method, 'POST');
+        eq('preserve patch', new Request('https://api.example/', { method: 'patch' }).method, 'patch');
+
+        // Browser forbidden request header guard & no-cors safelist guard
+        var rGuard = new Request('https://api.example/', {
+            headers: {
+                'Host': 'evil.example',
+                'Origin': 'https://evil.example',
+                'Cookie': 'sid=1',
+                'Sec-Fetch-Mode': 'cors',
+                'Proxy-Authorization': 'Basic x',
+                'X-Allowed': 'ok'
+            }
+        });
+        eq('guard strips Host', rGuard.headers.get('host'), null);
+        eq('guard strips Origin', rGuard.headers.get('origin'), null);
+        eq('guard strips Cookie', rGuard.headers.get('cookie'), null);
+        eq('guard strips Sec-*', rGuard.headers.get('sec-fetch-mode'), null);
+        eq('guard strips Proxy-*', rGuard.headers.get('proxy-authorization'), null);
+        eq('guard keeps X-Allowed', rGuard.headers.get('x-allowed'), 'ok');
+
+        var rNoCors = new Request('https://api.example/', {
+            mode: 'no-cors',
+            headers: { 'Accept': 'text/plain', 'X-Custom': 'no', 'Content-Type': 'application/json' }
+        });
+        eq('no-cors keeps Accept', rNoCors.headers.get('accept'), 'text/plain');
+        eq('no-cors drops X-Custom', rNoCors.headers.get('x-custom'), null);
+        eq('no-cors drops json CT', rNoCors.headers.get('content-type'), null);
+
+        // Request-from-Request, clone(), bodyUsed, AbortSignal linking
+        var ac = new AbortController();
+        var src = new Request('https://api.example/data', {
+            method: 'POST',
+            headers: { 'X-Tag': 'v1' },
+            body: 'body-1',
+            signal: ac.signal
+        });
+        var cloned = src.clone();
+        cloned.headers.set('X-Tag', 'v2');
+        eq('clone isolates headers', src.headers.get('x-tag'), 'v1');
+        eq('clone header updated', cloned.headers.get('x-tag'), 'v2');
+
+        var unlinked = new Request(src, { body: 'body-2', signal: null });
+        eq('override body keeps src unused', src.bodyUsed, false);
+
+        var inherited = new Request(src);
+        eq('inherit body disturbs src', src.bodyUsed, true);
+        throwsTypeError('reuse disturbed Request', function () { new Request(src); });
+        throwsTypeError('clone disturbed Request', function () { src.clone(); });
+        throwsTypeError('post Request -> GET throws', function () { new Request(cloned, { method: 'GET' }); });
+
+        ok('signal is dependent copy', src.signal !== ac.signal);
+        ac.abort('cancel-42');
+        eq('src signal aborted', src.signal.aborted, true);
+        eq('src signal reason', src.signal.reason, 'cancel-42');
+        eq('cloned signal aborted', cloned.signal.aborted, true);
+        eq('inherited signal aborted', inherited.signal.aborted, true);
+        eq('unlinked signal not aborted', unlinked.signal.aborted, false);
+
+        // Async body consumers
+        var asyncDone = false;
+        var rBin = new Request('https://api.example/', { method: 'POST', body: new Uint8Array([0, 65, 255]) });
+        var rSp = new Request('https://api.example/', { method: 'POST', body: new URLSearchParams('x=1&y=2') });
+        var rBlob = new Request('https://api.example/', { method: 'POST', body: new Blob(['csv,1'], { type: 'text/csv' }) });
+        var rJson = new Request('https://api.example/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"v":7}' });
+        eq('URLSearchParams CT', rSp.headers.get('content-type'), 'application/x-www-form-urlencoded;charset=UTF-8');
+        eq('Blob CT', rBlob.headers.get('content-type'), 'text/csv');
+        eq('Uint8Array no CT', rBin.headers.get('content-type'), null);
+        eq('explicit JSON CT', rJson.headers.get('content-type'), 'application/json');
+
+        Promise.all([
+            rBin.bytes(),
+            rSp.text(),
+            rBlob.blob(),
+            rJson.json(),
+            r0.text(),
+            cloned.text()
+        ]).then(function (vals) {
+            eq('bytes len', vals[0].length, 3);
+            eq('bytes[0]', vals[0][0], 0);
+            eq('bytes[1]', vals[0][1], 65);
+            eq('bytes[2]', vals[0][2], 255);
+            eq('sp text', vals[1], 'x=1&y=2');
+            eq('blob size', vals[2].size, 5);
+            eq('blob type', vals[2].type, 'text/csv');
+            eq('json v', vals[3].v, 7);
+            eq('empty GET text', vals[4], '');
+            eq('empty GET still unused', r0.bodyUsed, false);
+            eq('cloned text', vals[5], 'body-1');
+            return rBin.text().then(
+                function () { failures.push('second read should reject'); asyncDone = true; },
+                function (e) { eq('second read TypeError', e.name, 'TypeError'); asyncDone = true; }
+            );
+        });
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.eval("asyncDone").is_truthy());
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+
+    // GC reclamation of cyclic Request <-> Headers <-> AbortSignal graphs.
+    js.eval(R"JS(
+        for (var i = 0; i < 64; i++) {
+            var c = new AbortController();
+            var rq = new Request('https://api.example/gc/' + i, {
+                method: 'POST',
+                headers: { 'X-I': String(i) },
+                body: 'gc-body-' + i,
+                signal: c.signal
+            });
+            rq.headers.owner = rq;
+            rq.signal.owner = rq;
+        }
+    )JS");
+    Heap::default_heap().collect_garbage();
+
+    // Bytecode VM exposes Request with identical semantics.
+    VM vm(doc);
+    JsValue vm_ctor = vm.get_global("Request");
+    assert(vm_ctor.is_callable());
+    JsValue vm_req = vm_ctor.construct({
+        JsValue::make_string("https://vm.example/path"),
+        js.eval("({ method: 'post', body: 'vm' })")
+    });
+    assert(vm_req.get_property("method").to_string() == "POST");
+    assert(vm_req.get_property("url").to_string() == "https://vm.example/path");
+    assert(vm_req.get_property("headers").get_property("get")
+               .call_with_this(vm_req.get_property("headers"), {JsValue::make_string("content-type")})
+               .to_string() == "text/plain;charset=UTF-8");
+}
+
+TEST(fetch_request_loopback_http_worker_and_abort) {
+    using namespace litebird;
+    CookieJar::default_jar().clear();
+    ResourceLoader::clear_http_cache();
+
+    auto last_method = std::make_shared<std::string>();
+    auto last_body = std::make_shared<std::string>();
+    auto last_token = std::make_shared<std::string>();
+    auto hit_count = std::make_shared<std::atomic<int>>(0);
+
+    LoopbackHttpTestServer server([last_method, last_body, last_token, hit_count](
+                                      const HttpServerRequest& req, HttpServerResponse& resp) {
+        if (req.path == "/worker.js") {
+            resp.status = 200;
+            resp.content_type = "application/javascript";
+            resp.body =
+                "var wr = new Request('/api/worker', { method: 'POST', headers: { 'X-Token': 'from-worker' }, body: 'w-payload' });"
+                "fetch(wr).then(function(r) { return r.json(); }).then(function(j) {"
+                "  postMessage(JSON.stringify({ url: wr.url, used: wr.bodyUsed, method: j.method, body: j.body, token: j.token }));"
+                "}, function(e) { postMessage('ERR:' + String(e)); });";
+            return;
+        }
+        if (req.path.rfind("/api/", 0) == 0) {
+            ++(*hit_count);
+            *last_method = req.method;
+            *last_body = req.body;
+            *last_token = req.headers.count("x-token") ? req.headers.at("x-token") : "";
+            resp.status = 200;
+            resp.content_type = "application/json";
+            resp.body = "{\"method\":\"" + req.method + "\",\"path\":\"" + req.path +
+                        "\",\"body\":\"" + req.body + "\",\"token\":\"" + *last_token +
+                        "\",\"len\":" + std::to_string(req.body.size()) + "}";
+            return;
+        }
+        resp.status = 404;
+        resp.status_text = "Not Found";
+    });
+
+    const std::string base = "http://127.0.0.1:" + std::to_string(server.port);
+    auto doc = std::make_shared<Document>();
+    doc->set_url(base + "/index.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(
+        "var results = {};\n"
+        "var req1 = new Request('/api/one', { method: 'POST', headers: { 'X-Token': 't1' }, body: 'hello-1' });\n"
+        "fetch(req1).then(function(res1) {\n"
+        "  results.res1Instanceof = (res1 instanceof Response);\n"
+        "  results.req1Used = req1.bodyUsed;\n"
+        "  return res1.json();\n"
+        "}).then(function(j1) {\n"
+        "  results.j1 = j1.method + ':' + j1.path + ':' + j1.body + ':' + j1.token;\n"
+        "  return fetch(req1).then(\n"
+        "    function() { results.reuse = 'UNEXPECTED'; },\n"
+        "    function(e) { results.reuse = e.name; }\n"
+        "  );\n"
+        "}).then(function() {\n"
+        "  var req2 = new Request('/api/two', { method: 'POST', headers: { 'X-Token': 'old' }, body: 'old' });\n"
+        "  return fetch(req2, { method: 'PUT', headers: { 'X-Token': 'new' }, body: new Uint8Array([65, 66, 67]) })\n"
+        "    .then(function(r2) { results.req2Used = req2.bodyUsed; return r2.json(); });\n"
+        "}).then(function(j2) {\n"
+        "  results.j2 = j2.method + ':' + j2.path + ':' + j2.body + ':' + j2.token + ':' + j2.len;\n"
+        "  var acPre = new AbortController();\n"
+        "  var reqPre = new Request('/api/aborted', { signal: acPre.signal });\n"
+        "  acPre.abort('pre-cancel');\n"
+        "  return fetch(reqPre).then(\n"
+        "    function() { results.preAbort = 'UNEXPECTED'; },\n"
+        "    function(e) { results.preAbort = String(e); }\n"
+        "  );\n"
+        "}).then(function() {\n"
+        "  var acLate = new AbortController();\n"
+        "  var reqLate = new Request('/api/aborted2', { signal: acLate.signal });\n"
+        "  var p = fetch(reqLate);\n"
+        "  acLate.abort('late-cancel');\n"
+        "  return p.then(\n"
+        "    function() { results.lateAbort = 'UNEXPECTED'; },\n"
+        "    function(e) { results.lateAbort = String(e); }\n"
+        "  );\n"
+        "}).then(function() { results.done = true; });\n"
+        "var w = new Worker('/worker.js');\n"
+        "w.onmessage = function(e) { results.worker = String(e.data); };\n"
+        "w.onerror = function(e) { results.worker = 'ERR:' + e.message; };\n"
+    );
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+        if (js.eval("Boolean(results.done && results.worker)").is_truthy()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    js.eval("w.terminate();");
+
+    assert(js.eval("results.done").is_truthy());
+    assert(js.eval("results.res1Instanceof").is_truthy());
+    assert(js.eval("results.req1Used").is_truthy());
+    assert(js.eval("results.j1").to_string() == "POST:/api/one:hello-1:t1");
+    assert(js.eval("results.reuse").to_string() == "TypeError");
+    assert(!js.eval("results.req2Used").is_truthy());
+    assert(js.eval("results.j2").to_string() == "PUT:/api/two:ABC:new:3");
+    assert(js.eval("results.preAbort").to_string() == "pre-cancel");
+    assert(js.eval("results.lateAbort").to_string() == "late-cancel");
+    const std::string worker_out = js.eval("results.worker").to_string();
+    assert(worker_out.find("\"used\":true") != std::string::npos);
+    assert(worker_out.find("\"method\":\"POST\"") != std::string::npos);
+    assert(worker_out.find("\"body\":\"w-payload\"") != std::string::npos);
+    assert(worker_out.find("\"token\":\"from-worker\"") != std::string::npos);
+    // Aborted fetches must not hit the server: only /api/one, /api/two, /api/worker = 3 hits.
+    assert(hit_count->load() == 3);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -32475,6 +32801,10 @@ int main() {
 
     // Phase 169: WebSocket permessage-deflate (RFC 7692) & stateful DEFLATE/INFLATE codec.
     RUN_TEST(websocket_permessage_deflate_rfc7692);
+
+    // Phase 173: Fetch Request constructor, Body mixin, clone(), AbortSignal linking, and fetch(Request, init).
+    RUN_TEST(fetch_request_constructor_validation_body_clone_and_signal);
+    RUN_TEST(fetch_request_loopback_http_worker_and_abort);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

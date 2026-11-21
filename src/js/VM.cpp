@@ -274,6 +274,7 @@ void VM::init_builtins() {
     };
     set_global("Headers", HeadersObject::create_constructor());
     set_global("Response", ResponseObject::create_constructor());
+    set_global("Request", RequestObject::create_constructor(request_context));
     set_global("fetch", JsValue::make_native_function(
         [request_context](const std::vector<JsValue>& args) {
             return FetchAPI::fetch(args, request_context());

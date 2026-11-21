@@ -920,6 +920,7 @@ void JsInterpreter::init_builtins() {
 
     m_global_env->define("Headers", HeadersObject::create_constructor());
     m_global_env->define("Response", ResponseObject::create_constructor());
+    m_global_env->define("Request", RequestObject::create_constructor(request_context));
     m_global_env->define("fetch", JsValue::make_native_function(
         [request_context](const std::vector<JsValue>& args) {
             return FetchAPI::fetch(args, request_context());

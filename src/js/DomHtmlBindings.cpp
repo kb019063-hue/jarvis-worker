@@ -474,36 +474,28 @@ unsigned long to_unsigned_long(const JsValue& value) {
     return static_cast<unsigned long>(in_range);
 }
 
-
 void throw_index_size(Realm& realm, const std::string& why) {
     throw_dom(realm, "IndexSizeError", why);
 }
 
-/// The realm's `Uint8ClampedArray`, made from the bytes given.
-JsValue clamped_array(Realm& realm, const std::vector<uint8_t>& bytes) {
+/// The realm's `Uint8ClampedArray`, `length` bytes of zero.
+JsValue clamped_array(Realm& realm, std::size_t length) {
     const JsValue& global = realm.window;
     const JsValue array_ctor = global.is_object() ? global.get_property("Uint8ClampedArray") : JsValue();
     if (!array_ctor.is_function()) {
         js_throw_type_error("ImageData needs a realm with Uint8ClampedArray.");
     }
-    std::vector<JsValue> elements;
-    elements.reserve(bytes.size());
-    for (uint8_t byte : bytes) elements.push_back(JsValue::make_number(byte));
-    const JsValue source = JsValue::make_array(elements);
-    return js_call(array_ctor, array_ctor, {source});
+    return js_call(array_ctor, array_ctor, {JsValue::make_number(static_cast<double>(length))});
 }
 
-/// The `settings` argument's `colorSpace`, refused when it is not sRGB.
-std::string color_space_of(const JsValue& settings) {
-    if (settings.is_undefined() || settings.is_nullish()) return "srgb";
-    const JsValue asked = member(settings, "colorSpace");
-    if (asked.is_undefined()) return "srgb";
-    const std::string name = to_str(asked);
-    if (name != "srgb") {
-        js_throw_type_error("ImageData: this engine stores its pixels in sRGB and cannot make the '" + name +
-                            "' colour space the settings asked for.");
+/// Writes `bytes` into `array`. Through the elements rather than through an
+/// intermediate Array: a 16M-pixel image is 64 MB of bytes, and an Array of
+/// them would be two gigabytes of JsValue before the typed array was even made.
+void store_bytes(JsValue array, const std::vector<uint8_t>& bytes) {
+    for (std::size_t i = 0; i < bytes.size(); ++i) {
+        if (bytes[i] == 0) continue;
+        array.set_property(std::to_string(i), JsValue::make_number(bytes[i]));
     }
-    return "srgb";
 }
 
 /// A new ImageData carrying `data` (its own, not a copy) and the size given.
@@ -518,20 +510,33 @@ JsValue image_data_with(Realm& realm, unsigned long width, unsigned long height,
 }
 
 /// A new ImageData of `width` x `height` transparent black pixels.
-JsValue image_data_blank(Realm& realm, unsigned long width, unsigned long height) {
-    std::vector<uint8_t> bytes(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u, 0);
-    return image_data_with(realm, width, height, clamped_array(realm, bytes), nullptr);
+JsValue image_data_blank(Realm& realm, unsigned long width, unsigned long height, const JsValue* derived = nullptr,
+                         const std::string& color_space = "srgb") {
+    const std::size_t length = static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u;
+    return image_data_with(realm, width, height, clamped_array(realm, length), derived, color_space);
 }
 
-/// The bytes `data` holds, as far as `count` of them.
-std::vector<uint8_t> bytes_of_array(const JsValue& data, std::size_t count) {
-    std::vector<uint8_t> bytes(count, 0);
-    for (std::size_t i = 0; i < count; ++i) {
-        const double value = data.get_property(std::to_string(i)).to_number();
-        const long rounded = std::isfinite(value) ? std::lround(value) : 0;
-        bytes[i] = static_cast<uint8_t>(std::clamp(rounded, 0l, 255l));
+/// A new ImageData of `width` x `height` holding `bytes`.
+JsValue image_data_of_bytes(Realm& realm, unsigned long width, unsigned long height,
+                            const std::vector<uint8_t>& bytes, const JsValue* derived,
+                            const std::string& color_space) {
+    JsValue array = clamped_array(realm, bytes.size());
+    store_bytes(array, bytes);
+    return image_data_with(realm, width, height, array, derived, color_space);
+}
+
+
+/// The `settings` argument's `colorSpace`, refused when it is not sRGB.
+std::string color_space_of(const JsValue& settings) {
+    if (settings.is_undefined() || settings.is_nullish()) return "srgb";
+    const JsValue asked = member(settings, "colorSpace");
+    if (asked.is_undefined()) return "srgb";
+    const std::string name = to_str(asked);
+    if (name != "srgb") {
+        js_throw_type_error("ImageData: this engine stores its pixels in sRGB and cannot make the '" + name +
+                            "' colour space the settings asked for.");
     }
-    return bytes;
+    return "srgb";
 }
 
 /// `new ImageData(width, height)` or `new ImageData(data, sw[, sh])`.
@@ -608,8 +613,7 @@ JsValue construct_image_data(Realm& realm, const InterfaceDef&, Args args, const
                                 "ceiling this engine keeps.");
     }
     const std::string color_space = color_space_of(js_arg(args, 2));
-    std::vector<uint8_t> bytes(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u, 0);
-    return image_data_with(realm, width, height, clamped_array(realm, bytes), derived, color_space);
+    return image_data_blank(realm, width, height, derived, color_space);
 }
 
 void setup_image_data(Iface& I) {
@@ -674,11 +678,11 @@ void install_image_data_methods(Realm& r, JsValue context_object,
             static_cast<int>(std::clamp(sy, -2147483647l, 2147483647l)),
             static_cast<int>(std::clamp(sw, 0l, 2147483647l)),
             static_cast<int>(std::clamp(sh, 0l, 2147483647l)));
-        return image_data_with(realm, static_cast<unsigned long>(sw), static_cast<unsigned long>(sh),
-                               clamped_array(realm, rgba), nullptr);
+        return image_data_of_bytes(realm, static_cast<unsigned long>(sw), static_cast<unsigned long>(sh), rgba,
+                                   nullptr, "srgb");
     }));
 
-    context_object.set_property("putImageData", make_function(r, "putImageData", 3, [get_ctx](Realm& realm, Args args) {
+    context_object.set_property("putImageData", make_function(r, "putImageData", 3, [get_ctx](Realm&, Args args) {
         require_args(args, 3, "CanvasRenderingContext2D.putImageData");
         const ImageDataState* source = image_data_of(args[0]);
         if (!source) {

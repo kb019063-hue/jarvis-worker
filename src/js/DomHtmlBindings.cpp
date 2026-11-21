@@ -429,6 +429,315 @@ void setup_script(Iface& I) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// ImageData
+// ---------------------------------------------------------------------------
+//
+// HTML §4.12.5: the four-byte-per-pixel block a canvas reads out and writes
+// back. Until Phase 139 `createImageData` answered a plain object whose `data`
+// was an Array of numbers, `getImageData` did the same, `putImageData` wrote
+// the whole image whatever rectangle was asked for, and `ImageData` itself did
+// not exist — so `data instanceof Uint8ClampedArray` was false and a script
+// could not build one to hand to a canvas. The bytes now live in a real
+// `Uint8ClampedArray` (there was none to put them in before Phase 106) and the
+// interface is the one the standard describes.
+
+/// 16M pixels, the same ceiling the C++ side keeps: an area past it is refused
+/// rather than allocated.
+constexpr unsigned long long kMaxImageDataPixels = 16ull * 1024ull * 1024ull;
+
+struct ImageDataState : JsExotic {
+    unsigned long width{0};
+    unsigned long height{0};
+    /// The colour space the pixels are in. This engine has one, sRGB, and
+    /// refuses the other the standard names rather than answering for a
+    /// conversion it cannot make.
+    std::string color_space{"srgb"};
+    /// The pixels: 4 * width * height bytes of RGBA, a Uint8ClampedArray.
+    JsValue data;
+    void trace(Heap& heap) override { heap.mark_value(data); }
+};
+
+ImageDataState* image_data_of(const JsValue& value) { return state_of<ImageDataState>(value); }
+
+ImageDataState& this_image_data() { return this_state<ImageDataState>("ImageData"); }
+
+/// WebIDL `unsigned long`: any number, brought into range. A negative or a
+/// fractional one is not refused here; the size check below refuses what it
+/// makes impossible.
+unsigned long to_unsigned_long(const JsValue& value) {
+    double number = to_double(value);
+    if (!std::isfinite(number)) return 0;
+    number = std::trunc(number);
+    const double modulo = std::fmod(number, 4294967296.0);
+    const double in_range = modulo < 0 ? modulo + 4294967296.0 : modulo;
+    return static_cast<unsigned long>(in_range);
+}
+
+
+void throw_index_size(Realm& realm, const std::string& why) {
+    throw_dom(realm, "IndexSizeError", why);
+}
+
+/// The realm's `Uint8ClampedArray`, made from the bytes given.
+JsValue clamped_array(Realm& realm, const std::vector<uint8_t>& bytes) {
+    const JsValue& global = realm.window;
+    const JsValue array_ctor = global.is_object() ? global.get_property("Uint8ClampedArray") : JsValue();
+    if (!array_ctor.is_function()) {
+        js_throw_type_error("ImageData needs a realm with Uint8ClampedArray.");
+    }
+    std::vector<JsValue> elements;
+    elements.reserve(bytes.size());
+    for (uint8_t byte : bytes) elements.push_back(JsValue::make_number(byte));
+    const JsValue source = JsValue::make_array(elements);
+    return js_call(array_ctor, array_ctor, {source});
+}
+
+/// The `settings` argument's `colorSpace`, refused when it is not sRGB.
+std::string color_space_of(const JsValue& settings) {
+    if (settings.is_undefined() || settings.is_nullish()) return "srgb";
+    const JsValue asked = member(settings, "colorSpace");
+    if (asked.is_undefined()) return "srgb";
+    const std::string name = to_str(asked);
+    if (name != "srgb") {
+        js_throw_type_error("ImageData: this engine stores its pixels in sRGB and cannot make the '" + name +
+                            "' colour space the settings asked for.");
+    }
+    return "srgb";
+}
+
+/// A new ImageData carrying `data` (its own, not a copy) and the size given.
+JsValue image_data_with(Realm& realm, unsigned long width, unsigned long height, const JsValue& data,
+                        const JsValue* derived, const std::string& color_space = "srgb") {
+    auto state = std::make_shared<ImageDataState>();
+    state->width = width;
+    state->height = height;
+    state->data = data;
+    state->color_space = color_space;
+    return realm.make("ImageData", state, derived);
+}
+
+/// A new ImageData of `width` x `height` transparent black pixels.
+JsValue image_data_blank(Realm& realm, unsigned long width, unsigned long height) {
+    std::vector<uint8_t> bytes(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u, 0);
+    return image_data_with(realm, width, height, clamped_array(realm, bytes), nullptr);
+}
+
+/// The bytes `data` holds, as far as `count` of them.
+std::vector<uint8_t> bytes_of_array(const JsValue& data, std::size_t count) {
+    std::vector<uint8_t> bytes(count, 0);
+    for (std::size_t i = 0; i < count; ++i) {
+        const double value = data.get_property(std::to_string(i)).to_number();
+        const long rounded = std::isfinite(value) ? std::lround(value) : 0;
+        bytes[i] = static_cast<uint8_t>(std::clamp(rounded, 0l, 255l));
+    }
+    return bytes;
+}
+
+/// `new ImageData(width, height)` or `new ImageData(data, sw[, sh])`.
+JsValue construct_image_data(Realm& realm, const InterfaceDef&, Args args, const JsValue* derived) {
+    if (args.empty() || js_arg(args, 0).is_undefined()) {
+        js_throw_type_error("Failed to construct 'ImageData': 1 argument required, but only 0 present.");
+    }
+    const JsValue first = js_arg(args, 0);
+    const JsValue& global = realm.window;
+    const JsValue array_ctor = global.is_object() ? global.get_property("Uint8ClampedArray") : JsValue();
+    JsValue tag_of;
+    if (array_ctor.is_function() && first.is_object_like()) {
+        // `[object Uint8ClampedArray]` and nothing else: the internal slot the
+        // interface is defined over, not a shape that looks like one.
+        const JsValue object_ctor = global.get_property("Object");
+        const JsValue prototype = object_ctor.get_property("prototype");
+        tag_of = js_call(prototype.get_property("toString"), first, {});
+    }
+    if (array_ctor.is_function() && tag_of.type == JsType::String &&
+        tag_of.to_string() == "[object Uint8ClampedArray]") {
+        const double length_value = first.get_property("length").to_number();
+        const unsigned long long length =
+            std::isfinite(length_value) && length_value > 0 ? static_cast<unsigned long long>(length_value) : 0;
+        if (length == 0 || length % 4 != 0) {
+            throw_index_size(realm, "Failed to construct 'ImageData': the data must be a non-zero multiple of "
+                                    "four bytes.");
+        }
+        const JsValue second = js_arg(args, 1);
+        const JsValue third = js_arg(args, 2);
+        unsigned long width = 0;
+        unsigned long height = 0;
+        if (second.is_undefined()) {
+            throw_index_size(realm, "Failed to construct 'ImageData': the width of the data given was not "
+                                    "provided.");
+        }
+        width = to_unsigned_long(second);
+        if (width == 0 || static_cast<unsigned long long>(width) * 4ull > length) {
+            throw_index_size(realm, "Failed to construct 'ImageData': the data is shorter than the width given.");
+        }
+        if (third.is_undefined()) {
+            if (length % (static_cast<unsigned long long>(width) * 4ull) != 0) {
+                throw_index_size(realm, "Failed to construct 'ImageData': the data is not a whole number of "
+                                        "rows of the width given.");
+            }
+            height = static_cast<unsigned long>(length / (static_cast<unsigned long long>(width) * 4ull));
+        } else {
+            height = to_unsigned_long(third);
+            if (height == 0 ||
+                static_cast<unsigned long long>(width) * static_cast<unsigned long long>(height) * 4ull != length) {
+                throw_index_size(realm, "Failed to construct 'ImageData': the data is not width times height "
+                                        "pixels of four bytes.");
+            }
+        }
+        const std::string color_space = color_space_of(js_arg(args, 3));
+        return image_data_with(realm, width, height, first, derived, color_space);
+    }
+    if (first.is_object_like()) {
+        // The overload that takes pixels was asked for, and the object given is
+        // not the one it takes: WebIDL picks the overload by the argument's
+        // shape and then refuses the value (HTML §4.12.5, the ImageData(data,
+        // sw[, sh]) form).
+        js_throw_type_error("Failed to construct 'ImageData': the data must be a Uint8ClampedArray.");
+    }
+    if (args.size() < 2) {
+        js_throw_type_error("Failed to construct 'ImageData': 2 arguments required.");
+    }
+    const unsigned long width = to_unsigned_long(first);
+    const unsigned long height = to_unsigned_long(js_arg(args, 1));
+    if (width == 0 || height == 0) {
+        throw_index_size(realm, "Failed to construct 'ImageData': the width and height must not be zero.");
+    }
+    if (static_cast<unsigned long long>(width) * static_cast<unsigned long long>(height) > kMaxImageDataPixels) {
+        throw_index_size(realm, "Failed to construct 'ImageData': the area asked for is past the 16M pixel "
+                                "ceiling this engine keeps.");
+    }
+    const std::string color_space = color_space_of(js_arg(args, 2));
+    std::vector<uint8_t> bytes(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u, 0);
+    return image_data_with(realm, width, height, clamped_array(realm, bytes), derived, color_space);
+}
+
+void setup_image_data(Iface& I) {
+    I.getter("width", [](Realm&) { return num(static_cast<double>(this_image_data().width)); });
+    I.getter("height", [](Realm&) { return num(static_cast<double>(this_image_data().height)); });
+    I.getter("data", [](Realm&) { return this_image_data().data; });
+    I.getter("colorSpace", [](Realm&) { return str(this_image_data().color_space); });
+}
+
+// ---------------------------------------------------------------------------
+// The three canvas methods that speak ImageData
+// ---------------------------------------------------------------------------
+
+/// The size an ImageData must have, from the arguments given.
+void require_size(Realm& realm, unsigned long width, unsigned long height, const char* what) {
+    if (width == 0 || height == 0) {
+        throw_index_size(realm, std::string(what) + ": the width and height must not be zero.");
+    }
+    if (static_cast<unsigned long long>(width) * static_cast<unsigned long long>(height) > kMaxImageDataPixels) {
+        throw_index_size(realm, std::string(what) +
+                                    ": the area asked for is past the 16M pixel ceiling this engine keeps.");
+    }
+}
+
+/// `createImageData`, `getImageData` and `putImageData` on a fresh 2D context.
+/// They are here, and not beside the rest of the context in Canvas2D.cpp,
+/// because an ImageData's `data` is a `Uint8ClampedArray`, which only a realm
+/// can make.
+void install_image_data_methods(Realm& r, JsValue context_object,
+                                const std::shared_ptr<CanvasRenderingContext2D>& context) {
+    auto get_ctx = [context]() -> CanvasRenderingContext2D* { return context.get(); };
+
+    context_object.set_property("createImageData", make_function(r, "createImageData", 1, [](Realm& realm, Args args) {
+        if (const ImageDataState* source = image_data_of(js_arg(args, 0))) {
+            // The same size, and never the same pixels: transparent black.
+            return image_data_blank(realm, source->width, source->height);
+        }
+        const unsigned long width = to_unsigned_long(js_arg(args, 0));
+        const unsigned long height = to_unsigned_long(js_arg(args, 1));
+        require_size(realm, width, height, "Failed to execute 'createImageData' on 'CanvasRenderingContext2D'");
+        return image_data_blank(realm, width, height);
+    }));
+
+    context_object.set_property("getImageData", make_function(r, "getImageData", 4, [get_ctx](Realm& realm, Args args) {
+        require_args(args, 4, "CanvasRenderingContext2D.getImageData");
+        long sx = to_long(args[0]);
+        long sy = to_long(args[1]);
+        long sw = to_long(args[2]);
+        long sh = to_long(args[3]);
+        if (sw == 0 || sh == 0) {
+            throw_index_size(realm, "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': the width "
+                                    "and height must not be zero.");
+        }
+        if (sw < 0) { sx += sw; sw = -sw; }
+        if (sh < 0) { sy += sh; sh = -sh; }
+        if (static_cast<unsigned long long>(sw) * static_cast<unsigned long long>(sh) > kMaxImageDataPixels) {
+            throw_index_size(realm, "Failed to execute 'getImageData' on 'CanvasRenderingContext2D': the area "
+                                    "asked for is past the 16M pixel ceiling this engine keeps.");
+        }
+        const std::vector<uint8_t> rgba = get_ctx()->get_image_data_rgba(
+            static_cast<int>(std::clamp(sx, -2147483647l, 2147483647l)),
+            static_cast<int>(std::clamp(sy, -2147483647l, 2147483647l)),
+            static_cast<int>(std::clamp(sw, 0l, 2147483647l)),
+            static_cast<int>(std::clamp(sh, 0l, 2147483647l)));
+        return image_data_with(realm, static_cast<unsigned long>(sw), static_cast<unsigned long>(sh),
+                               clamped_array(realm, rgba), nullptr);
+    }));
+
+    context_object.set_property("putImageData", make_function(r, "putImageData", 3, [get_ctx](Realm& realm, Args args) {
+        require_args(args, 3, "CanvasRenderingContext2D.putImageData");
+        const ImageDataState* source = image_data_of(args[0]);
+        if (!source) {
+            js_throw_type_error("Failed to execute 'putImageData' on 'CanvasRenderingContext2D': the value "
+                                "provided is not of type 'ImageData'.");
+        }
+        const long dx = to_long(args[1]);
+        const long dy = to_long(args[2]);
+        // The dirty rectangle, and the whole image when none is given.
+        long dirty_x = 0;
+        long dirty_y = 0;
+        long dirty_width = static_cast<long>(source->width);
+        long dirty_height = static_cast<long>(source->height);
+        if (args.size() > 3) dirty_x = to_long(args[3]);
+        if (args.size() > 4) dirty_y = to_long(args[4]);
+        if (args.size() > 5) dirty_width = to_long(args[5]);
+        if (args.size() > 6) dirty_height = to_long(args[6]);
+        if (dirty_width < 0) { dirty_x += dirty_width; dirty_width = -dirty_width; }
+        if (dirty_height < 0) { dirty_y += dirty_height; dirty_height = -dirty_height; }
+        // Clip it to the image: what is outside has no pixels to write.
+        const long left = std::max(dirty_x, 0l);
+        const long top = std::max(dirty_y, 0l);
+        const long right = std::min(dirty_x + dirty_width, static_cast<long>(source->width));
+        const long bottom = std::min(dirty_y + dirty_height, static_cast<long>(source->height));
+        if (right <= left || bottom <= top) return undefined();
+
+        const long width = right - left;
+        const long height = bottom - top;
+        const std::size_t image_width = source->width;
+        std::vector<uint8_t> bytes(static_cast<std::size_t>(width) * static_cast<std::size_t>(height) * 4u, 0);
+        const JsValue& data = source->data;
+        for (long y = 0; y < height; ++y) {
+            for (long x = 0; x < width; ++x) {
+                const std::size_t source_index =
+                    (static_cast<std::size_t>(top + y) * image_width + static_cast<std::size_t>(left + x)) * 4u;
+                const double values[4] = {
+                    data.get_property(std::to_string(source_index + 0)).to_number(),
+                    data.get_property(std::to_string(source_index + 1)).to_number(),
+                    data.get_property(std::to_string(source_index + 2)).to_number(),
+                    data.get_property(std::to_string(source_index + 3)).to_number(),
+                };
+                const std::size_t target = (static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                                            static_cast<std::size_t>(x)) * 4u;
+                for (int channel = 0; channel < 4; ++channel) {
+                    const long rounded = std::isfinite(values[channel]) ? std::lround(values[channel]) : 0;
+                    bytes[target + static_cast<std::size_t>(channel)] =
+                        static_cast<uint8_t>(std::clamp(rounded, 0l, 255l));
+                }
+            }
+        }
+        // The transform, the clip and globalAlpha are not consulted: this is a
+        // write of pixels, not a drawing operation.
+        get_ctx()->put_image_data_rgba(bytes.data(), static_cast<int>(width), static_cast<int>(height),
+                                       static_cast<int>(std::clamp(dx + left, -2147483647l, 2147483647l)),
+                                       static_cast<int>(std::clamp(dy + top, -2147483647l, 2147483647l)));
+        return undefined();
+    }));
+}
+
 void setup_canvas(Iface& I) {
     ElementMembers<&is_canvas> C(I);
     for (const char* name : {"width", "height"}) {
@@ -459,7 +768,13 @@ void setup_canvas(Iface& I) {
         if (type != "2d") return null();
         auto context = el.get_or_create_canvas_context_2d();
         if (!context) return null();
-        return cached(wrap(r, el), "context2d", [&]() { return context->to_js_value(context); });
+        return cached(wrap(r, el), "context2d", [&]() {
+            JsValue object = context->to_js_value(context);
+            // ImageData needs a realm, so the three methods that speak it are
+            // added here rather than in Canvas2D.cpp.
+            install_image_data_methods(r, object, context);
+            return object;
+        });
     });
     C.method("toDataURL", 0, [](Realm&, Element&, Args) { return str("data:,"); });
 }
@@ -998,6 +1313,7 @@ void register_html_interfaces() {
     register_interface({"HTMLImageElement", "HTMLElement", setup_image, element_ctor, 0, nullptr});
     register_interface({"HTMLScriptElement", "HTMLElement", setup_script, element_ctor, 0, nullptr});
     register_interface({"HTMLCanvasElement", "HTMLElement", setup_canvas, element_ctor, 0, nullptr});
+    register_interface({"ImageData", nullptr, setup_image_data, construct_image_data, 2, nullptr});
     register_interface({"HTMLMediaElement", "HTMLElement", setup_media, element_ctor, 0, nullptr});
     register_interface({"HTMLAudioElement", "HTMLMediaElement", nullptr, element_ctor, 0, nullptr});
     register_interface({"HTMLVideoElement", "HTMLMediaElement", setup_video, element_ctor, 0, nullptr});

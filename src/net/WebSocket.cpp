@@ -104,6 +104,9 @@ struct WsOpenSslApi {
     int (*SSL_shutdown_fn)(SSL*) = nullptr;
     int (*SSL_get_error_fn)(const SSL*, int) = nullptr;
     long (*SSL_get_verify_result_fn)(const SSL*) = nullptr;
+    // Optional, as in the loader: without it the message keeps the code but
+    // loses the words. It never takes the socket's TLS layer with it.
+    const char* (*X509_verify_cert_error_string_fn)(long) = nullptr;
     int (*RAND_bytes_fn)(unsigned char*, int) = nullptr;
 
     static const WsOpenSslApi& instance() {
@@ -166,6 +169,7 @@ struct WsOpenSslApi {
 
             (void)load_ssl(out->SSL_CTX_ctrl_fn, "SSL_CTX_ctrl");
             (void)load_ssl(out->SSL_pending_fn, "SSL_pending");
+            (void)load_ssl(out->X509_verify_cert_error_string_fn, "X509_verify_cert_error_string");
             (void)load_ssl(out->RAND_bytes_fn, "RAND_bytes");
             out->available = ok;
             return out;
@@ -1503,8 +1507,26 @@ void WebSocketObject::receiver_thread_loop() {
             break;
         }
         if (!tls_ok) {
+            // Ask why, whichever way the handshake failed. A refused
+            // certificate usually fails SSL_connect itself rather than
+            // returning 1 with a non-zero verify result, so the reason is read
+            // after the loop rather than only on the rc==1 path -- and before
+            // cleanup_transport(), which may free the SSL object it needs.
+            // This is the same message the loader prints, from the same codes.
+            const long verify_code = ssl_api.SSL_get_verify_result_fn(ssl);
             cleanup_transport();
-            finish_abnormal("TLS handshake or certificate verification failed");
+            if (verify_code != 0) {
+                std::string message = "TLS certificate verification failed (code " +
+                                      std::to_string(verify_code);
+                if (ssl_api.X509_verify_cert_error_string_fn) {
+                    message += ", ";
+                    message += ssl_api.X509_verify_cert_error_string_fn(verify_code);
+                }
+                message += ")";
+                finish_abnormal(message.c_str());
+            } else {
+                finish_abnormal("TLS handshake failed for a reason other than a certificate");
+            }
             return;
         }
     }

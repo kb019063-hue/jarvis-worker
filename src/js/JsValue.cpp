@@ -205,6 +205,14 @@ PropertyMap::const_iterator PropertyMap::find(const std::string& key) const {
 /// runs on a thread of its own; the answers are remembered per thread.
 static std::atomic<uint64_t> g_index_named_keys{0};
 
+/// How many of those were *accessors*. An element write has to ask the
+/// prototype chain for a setter, and the chain is where `Array.prototype[0]`
+/// would live; that question is only worth a walk when some property whose
+/// name is an index could answer it, and only an accessor can. This is what
+/// tells an ordinary program — whose maps hold no accessor at all — that the
+/// answer is no. Atomic for the same reason as the count above.
+static std::atomic<uint64_t> g_index_named_accessors{0};
+
 PropertyMap::Entry& PropertyMap::entry(const std::string& key) {
     if (auto it = m_index_built ? m_index.find(key) : m_index.end(); it != m_index.end()) return *it->second;
     if (!m_index_built) {
@@ -1271,6 +1279,9 @@ void JsValue::define_accessor(const std::string& name, const JsValue& getter, co
             map = properties.get();
         }
     }
+    if (!name.empty() && name[0] >= '0' && name[0] <= '9') {
+        g_index_named_accessors.fetch_add(1, std::memory_order_relaxed);
+    }
     auto& entry = map->entry(name);
     entry.second = getter;
     entry.setter = setter.is_function() ? std::make_shared<JsValue>(setter) : nullptr;
@@ -1506,6 +1517,54 @@ JsValue JsValue::get_property(const std::string& name) const {
 
 // Returns false when the write was refused — nothing was stored, and a
 // strict-mode assignment must throw a TypeError, as [[Set]]'s false requires.
+namespace {
+
+/// ECMAScript §10.1.9.2 OrdinarySetWithOwnDescriptor, for the one case the
+/// element path used to skip: the array has no own property at `index`, and
+/// something up the prototype chain has one. A setter there runs with the
+/// array as `this` and the index stays a hole; a data property there is
+/// written only when it says it is writable, so a non-writable one refuses
+/// the write instead of being shadowed; and a property that is neither, or
+/// nothing at all, leaves the ordinary element write to happen.
+///
+/// `handled` says whether the chain answered. It is worth asking only when
+/// some accessor whose name is an index exists anywhere: an ordinary program
+/// has none, and then this is one relaxed load per element write.
+bool set_through_prototype(JsValue& receiver, const std::string& name, const JsValue& val,
+                           bool& handled) {
+    handled = false;
+    if (g_index_named_accessors.load(std::memory_order_relaxed) == 0) return false;
+    JsObject* cell = receiver.object_val.get();
+    if (!cell || !cell->prototype) return false;
+    int guard = 0;
+    for (JsObject* proto = cell->prototype; proto && guard < kMaxPrototypeChain;
+         proto = proto->prototype, ++guard) {
+        auto found = proto->properties.find(name);
+        if (found == proto->properties.end()) continue;
+        handled = true;
+        if (found->flags & PropertyMap::Accessor) {
+            if (found->setter && found->setter->is_function()) {
+                found->setter->call_with_this(receiver, {val});
+                return true;
+            }
+            return false;      // an accessor with no setter: refused
+        }
+        // A *data* property on the prototype answers the write with its own
+        // attributes — a writable one is written, and a non-writable one
+        // refuses — but an index's attributes are not kept here: the
+        // prototype's elements hold a value and nothing else (the row "A data
+        // property on an index of an array has no attributes of its own"), so
+        // the value cannot be told apart from its flags. Those are left to the
+        // ordinary element write, which shadows the prototype, rather than
+        // guessed at. Only an accessor, which is kept in the property map, is
+        // answered here.
+        return false;
+    }
+    return false;
+}
+
+}   // namespace
+
 bool JsValue::set_property(const std::string& name, JsValue val) {
     if (canvas_context()) {
         if (name == "fillStyle") {
@@ -1621,6 +1680,19 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                         mapped->second = std::move(val);
                         return true;
                     }
+                }
+                // An index the array does not have of its own: the prototype
+                // chain is asked before a new element is made. A setter there
+                // runs instead of the write (`Object.defineProperty(
+                // Array.prototype, 0, { set })` then `a[0] = 5` leaves the
+                // array empty), and a non-writable data property refuses it.
+                // Only a place that is a hole or past the end is asked about;
+                // an element the array already has is its own property and the
+                // chain has no say.
+                if (index >= obj->array_elements.size() || is_array_hole(index)) {
+                    bool handled = false;
+                    const bool answer = set_through_prototype(*this, name, val, handled);
+                    if (handled) return answer;
                 }
                 if (index >= obj->array_elements.size()) {
                     if (!obj->extensible) return false;

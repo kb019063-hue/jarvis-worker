@@ -29438,6 +29438,116 @@ TEST(automatic_gc_reclaims_churn_without_calling_gc) {
     heap.collect_garbage();
 }
 
+TEST(a_write_to_an_array_index_asks_the_prototype_for_a_setter) {
+    using namespace litebird;
+    // Phase 156, finding 161. ECMAScript §10.1.9.2 OrdinarySetWithOwnDescriptor:
+    // an element the array does not own is written through the prototype
+    // chain, so a setter there runs and the place stays a hole. Before this,
+    // `a[0] = 5` wrote the element and the setter was never called. Every
+    // expectation below was taken from Node.js v22 running the same script.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var failures = [];
+        function report(what, got, want) {
+            var a = JSON.stringify(got), b = JSON.stringify(want);
+            if (a !== b) failures.push(what + ': got ' + a + ', expected ' + b);
+        }
+        // A setter on Array.prototype[0]: the write runs it, the array keeps
+        // nothing, `length` stays 0 and the getter is what `a[0]` reads.
+        var log = [];
+        Object.defineProperty(Array.prototype, '0', {
+            set: function (v) { log.push(v); },
+            get: function () { return 'p'; },
+            configurable: true
+        });
+        var a = [];
+        a[0] = 5;
+        report('the setter runs and the element is not written',
+               [a[0], a.hasOwnProperty(0), a.length, log], ['p', false, 0, [5]]);
+
+        // An own element still wins: the chain is not asked.
+        var own = [1, 2, 3];
+        own[0] = 9;
+        report('an own element is written without asking', own, [9, 2, 3]);
+        delete Array.prototype[0];
+
+        // A setter on a place past the end of a long array.
+        log = [];
+        Object.defineProperty(Array.prototype, '5', {
+            set: function (v) { if (v === 0) throw new RangeError('mine'); log.push(v); },
+            get: function () { return 'g'; },
+            configurable: true
+        });
+        var long = new Array(7);
+        long[5] = 3;
+        report('past the end of a long array', [long.length, long.hasOwnProperty(5), long[5], log],
+               [7, false, 'g', [3]]);
+        // A setter that throws leaves the array untouched.
+        var threw = 'no throw';
+        try { long[5] = 0; } catch (e) { threw = e.name + ' ' + e.message; }
+        report('a throwing setter', [threw, long.hasOwnProperty(5)], ['RangeError mine', false]);
+
+        // An accessor with no setter refuses the write, and in strict code
+        // that is a TypeError.
+        delete Array.prototype[5];
+        Object.defineProperty(Array.prototype, '6', {
+            get: function () { return 1; },
+            configurable: true
+        });
+        var getter_only = [];
+        getter_only[6] = 7;
+        report('an accessor with no setter refuses', [getter_only[6], getter_only.hasOwnProperty(6),
+                                                      getter_only.length], [1, false, 0]);
+        var strict = 'no throw';
+        try { (function () { 'use strict'; var f = []; f[6] = 1; })(); }
+        catch (e) { strict = e.name; }
+        report('and a strict write is a TypeError', strict, 'TypeError');
+        delete Array.prototype[6];
+
+        // The same question of an ordinary object whose prototype answers.
+        Object.defineProperty(Object.prototype, '0', {
+            set: function (v) { log.push(v); },
+            configurable: true
+        });
+        var plain = {};
+        plain[0] = 8;
+        report('an ordinary object asks too', [plain.hasOwnProperty(0), log], [false, [3, 8]]);
+        delete Object.prototype[0];
+
+        // A prototype chain reached through Object.create, two links up.
+        var deep = Object.create(Object.create({
+            set 1(v) { log.push(v); }
+        }));
+        deep[1] = 4;
+        report('two links up', [deep.hasOwnProperty(1), log], [false, [3, 8, 4]]);
+
+        // Nothing on the chain: the element is written and no hole is left.
+        var empty = [];
+        empty[3] = 2;
+        report('nothing answers, so the element is made',
+               [empty[3], empty.hasOwnProperty(3), empty.length], [2, true, 4]);
+
+        // A hole the array already has is a place the chain may answer for.
+        var holed = [1, , 3];
+        Object.defineProperty(Array.prototype, '1', {
+            set: function (v) { log.push(v); },
+            configurable: true
+        });
+        holed[1] = 5;
+        report('a hole is answered for by the prototype', [holed.length, holed.hasOwnProperty(1), log],
+               [3, false, [3, 8, 4, 5]]);
+        delete Array.prototype[1];
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -29852,6 +29962,9 @@ int main() {
 
     // Phase 149: the Annex B String.prototype HTML methods, and the trim aliases.
     RUN_TEST(annex_b_string_html_methods);
+
+    // Phase 156: an element write asks the prototype chain for a setter.
+    RUN_TEST(a_write_to_an_array_index_asks_the_prototype_for_a_setter);
 
     // Phase 119: Contextual GSUB (Type 1-7), Cursive GPOS (Type 3/7/8), and Arabic Shaping.
     RUN_TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions);

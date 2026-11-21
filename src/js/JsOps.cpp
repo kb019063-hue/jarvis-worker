@@ -6,6 +6,7 @@
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/JsLexer.hpp"
 #include "litebird/js/Promise.hpp"
+#include "litebird/js/TypedArray.hpp"
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -1725,5 +1726,87 @@ JsIntrinsics& JsIntrinsics::get() {
     if (!realm.m_ready.load(std::memory_order_acquire)) realm.install();
     return realm;
 }
+
+/// §23.1.3.28 Array.prototype.toLocaleString, and — because §23.2.3.29 says it
+/// is the same *function object* — `%TypedArray%.prototype.toLocaleString`
+/// too.
+///
+/// It is not `join`. Each element is asked for its own `toLocaleString` and
+/// that method is called with the element as `this`, which is why
+/// `Number.prototype.toLocaleString = () => "X"` makes `[1,2].toLocaleString()`
+/// "X,X". The engine used to format the numbers itself, so both `[1,2]` and a
+/// typed array answered "1,2" and shared the same defect.
+///
+/// A hole and `undefined` are the exception the standard makes: the empty
+/// string, with nothing asked, which is why `[1,,3].toLocaleString()` is
+/// "1,,3" and not "1,undefined,3".
+/// The body both `toLocaleString`s share: comma-joined, one element at a time,
+/// each element asked for its own `toLocaleString`.
+static JsValue locale_join(const JsValue& array, std::size_t typed_length, const JsValue& length_property) {
+    std::size_t length = typed_length;
+    if (length == 0 && !length_property.is_undefined()) {
+        const double raw_length = js_to_number(length_property);
+        const double clamped = raw_length <= 0 ? 0
+            : (raw_length > 9007199254740991.0 ? 9007199254740991.0 : raw_length);
+        length = static_cast<std::size_t>(clamped);
+    }
+    std::string out;
+    for (std::size_t i = 0; i < length; ++i) {
+        if (i) out += ',';
+        JsValue element = array.get_property(std::to_string(i));
+        if (element.is_nullish()) continue;
+        // Invoke(element, "toLocaleString"): the *boxed* element is the
+        // receiver, so a method that answers `typeof this` sees "boolean" and
+        // not "object" (test262's Array/prototype/toLocaleString/
+        // primitive_this_value).
+        JsValue boxed = js_to_object(element);
+        JsValue method = boxed.get_property("toLocaleString");
+        if (!method.is_function()) {
+            js_throw_type_error("toLocaleString is not a function");
+        }
+        out += js_to_string(method.call_with_this(boxed, {}));
+    }
+    return JsValue::make_string(out);
+}
+
+JsValue array_to_locale_string(const std::vector<JsValue>& args) {
+    (void)args;
+    const JsValue array = JsValue::current_this();
+    if (array.is_nullish()) {
+        js_throw_type_error("Array.prototype.toLocaleString called on null or undefined");
+    }
+    // A bare ArrayBuffer has no indices: Node answers "" rather than walking
+    // its bytes as if they were elements.
+    if (is_buffer_source(array) && !view_is_typed_array(array)) return JsValue::make_string("");
+    if (array.is_object() && typed_array_view_is_out_of_bounds(array)) {
+        js_throw_type_error("Array.prototype.toLocaleString: the buffer was detached or the view is out of bounds");
+    }
+    // ToObject(this): a primitive is boxed, and it is the box that is walked,
+    // so `call("abc")` is "a,b,c" (a String object has index properties) and
+    // `call(42)` is "".
+    if (!array.is_object()) {
+        const JsValue boxed = js_to_object(array);
+        return locale_join(boxed, 0, boxed.get_property("length"));
+    }
+    return locale_join(array, typed_array_element_count(array), array.get_property("length"));
+}
+
+/// §23.2.3.29 %TypedArray%.prototype.toLocaleString. It is **not** the same
+/// function object as Array's, and it refuses everything Array's accepts: the
+/// receiver must be a typed array (ValidateTypedArray), so `call(42)`,
+/// `call({length:1,0:5})` and `call([])` are all TypeErrors where Array's
+/// answers "", "5" and "".
+JsValue typed_array_to_locale_string(const std::vector<JsValue>& args) {
+    (void)args;
+    const JsValue array = JsValue::current_this();
+    if (!array.is_object() || !view_is_typed_array(array)) {
+        js_throw_type_error("%TypedArray%.prototype.toLocaleString called on a receiver that is not a typed array");
+    }
+    if (typed_array_view_is_out_of_bounds(array)) {
+        js_throw_type_error("%TypedArray%.prototype.toLocaleString: the buffer was detached or the view is out of bounds");
+    }
+    return locale_join(array, typed_array_element_count(array), JsValue());
+}
+
 
 } // namespace litebird

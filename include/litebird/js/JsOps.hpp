@@ -157,6 +157,18 @@ int32_t js_to_int32(double value);
 uint32_t js_to_uint32(double value);
 /// ToString. Throws TypeError for symbols.
 std::string js_to_string(const JsValue& value);
+/// Array.prototype.toLocaleString — one function, shared by
+/// `%Array.prototype%` and `%TypedArray.prototype%` because §23.2.3.29 says a
+/// typed array's is *the same function object* as Array's. It is not `join`:
+/// every element is asked for its own `toLocaleString` and that method is
+/// called, so `Number.prototype.toLocaleString = () => "X"` makes
+/// `[1,2].toLocaleString()` "X,X" in both. A hole and `undefined` join as the
+/// empty string without asking anything.
+JsValue array_to_locale_string(const std::vector<JsValue>& args);
+/// §23.2.3.29 `%TypedArray%.prototype.toLocaleString`. A separate function from
+/// Array's — the standard gives each its own — and it refuses a receiver that
+/// is not a typed array, where Array's boxes a primitive and joins it as "".
+JsValue typed_array_to_locale_string(const std::vector<JsValue>& args);
 /// ToString, as the text of a string value. A value that is a string already
 /// passes through with nothing copied, which is what every String.prototype
 /// method wants for `this` and for its string arguments.

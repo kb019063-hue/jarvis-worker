@@ -1185,9 +1185,12 @@ void install_array_builtins(JsIntrinsics& realm) {
         }
         return join.call_with_this(array, {});
     });
-    js_define_method(ap, "toLocaleString", 0, [](Args) {
-        return JsValue::make_string(join_array(receiver("toLocaleString"), ","));
-    });
+    // §23.1.3.28: not `join` — every element is asked for its own
+    // `toLocaleString` and that method is called, so patching
+    // `Number.prototype.toLocaleString` shows in the answer. The one function
+    // is shared with `%TypedArray.prototype%`, which the standard says has
+    // this very function object (§23.2.3.29).
+    js_define_method(ap, "toLocaleString", 0, array_to_locale_string);
     js_define_method(ap, "reverse", 0, [](Args) {
         JsValue array = this_object("reverse");
         if (!dense_readable(array)) {

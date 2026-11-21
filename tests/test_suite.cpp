@@ -28197,6 +28197,84 @@ TEST(dataview_and_the_iterating_typed_array_methods) {
     assert(text("class L extends Int16Array {}; var l = new L([3, 1]); l.toSorted() instanceof L") == "true");
 }
 
+TEST(a_typed_array_to_locale_string_asks_every_element)
+{
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- the element is asked, so a patched method shows ------------------
+    // §23.1.3.28 is not `join`: every element is asked for its own
+    // `toLocaleString` and that method is called. The engine formatted the
+    // numbers itself, so this said "1,2" for two years.
+    assert(text("Number.prototype.toLocaleString = function () { return 'X'; };"
+                "[1,2].toLocaleString()") == "X,X");
+    assert(text("new Uint8Array([1,2]).toLocaleString()") == "X,X");
+    // A hole and `undefined` are the exception: the empty string, with nothing
+    // asked, which is what makes the answer "X,,X" and not "X,X,X".
+    assert(text("[1,,3].toLocaleString()") == "X,,X");
+    assert(text("[1,undefined].toLocaleString()") == "X,");
+    assert(text("delete Number.prototype.toLocaleString;"
+                "[1,2].toLocaleString() + '|' + new Uint8Array([1,2]).toLocaleString()") == "1,2|1,2");
+
+    // ---- the two are different function objects that behave differently ---
+    // §23.2.3.29 gives the typed array its own, and it validates the receiver
+    // where Array's boxes a primitive.
+    assert(text("Uint8Array.prototype.toLocaleString === Array.prototype.toLocaleString") == "false");
+    assert(text("Array.prototype.toLocaleString.call(42)") == "");
+    assert(text("Array.prototype.toLocaleString.call('abc')") == "a,b,c");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(42); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call({length:1,0:5}); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(new ArrayBuffer(4)); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(new DataView(new ArrayBuffer(4))); })") == "TypeError");
+    assert(text("Array.prototype.toLocaleString.call(new ArrayBuffer(4))") == "");
+
+    // ---- the length is the internal one, not a `length` property ----------
+    // test262's get-length-uses-internal-arraylength: a redefined `length` is
+    // not what a typed-array method reads.
+    assert(text("var v = new Uint8Array([1,2,3]); Object.defineProperty(v, 'length', {value: 9});"
+                "v.toLocaleString()") == "1,2,3");
+    assert(text("new Uint8Array(0).toLocaleString() + '|' + new Uint8Array([7]).toLocaleString()") == "|7");
+    assert(text("new Int32Array([-5]).toLocaleString()") == "-5");
+    // A typed array has no holes, so NaN is a value to print.
+    assert(text("new Float32Array([NaN]).toLocaleString()") == "NaN");
+    assert(text("Array.prototype.toLocaleString.length + '|' + Uint8Array.prototype.toLocaleString.length") == "0|0");
+}
+
+TEST(a_typed_array_toString_is_arrays_own_function)
+{
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // §23.2.3.30: the same function object, not a copy that answers the same
+    // text. `Uint8Array.prototype.toString === Array.prototype.toString` was
+    // false because the typed array had its own.
+    assert(text("Uint8Array.prototype.toString === Array.prototype.toString") == "true");
+    assert(text("Float64Array.prototype.toString === Array.prototype.toString") == "true");
+    // Every constructor's prototype is the same %TypedArray%.prototype%
+    // object, so the identity holds for all nine.
+    assert(text("Int8Array.prototype.toString === Uint16Array.prototype.toString") == "true");
+    // It asks the receiver for `join` by name, and a typed array inherits
+    // `join` from %TypedArray%.prototype%, so the text is what it was.
+    assert(text("new Uint8Array([1,2]).toString()") == "1,2");
+    assert(text("new Uint8Array([1,2]).toString() === new Uint8Array([1,2]).join()") == "true");
+    assert(text("new Float32Array([NaN]).toString()") == "NaN");
+    // A subclass inherits it through the typed-array prototype, not own.
+    assert(text("class S extends Uint8Array {};"
+                "Object.getPrototypeOf(S.prototype).toString === Array.prototype.toString") == "true");
+    assert(text("Object.prototype.hasOwnProperty.call(Uint8Array.prototype, 'toString')") == "false");
+    // And `toString` on a detached view is a TypeError, as Array's join is.
+    assert(text("var b = new ArrayBuffer(4); var v = new Uint8Array(b); b.transfer();"
+                "errName(function () { v.toString(); })") == "TypeError");
+    assert(text("var b = new ArrayBuffer(4); var v = new Uint8Array(b); b.transfer();"
+                "errName(function () { v.toLocaleString(); })") == "TypeError");
+}
+
 TEST(class_bodies_reject_what_the_grammar_does_not_allow) {
     using namespace litebird;
 
@@ -31952,6 +32030,8 @@ int main() {
     // Phase 106: ArrayBuffer and the typed arrays.
     RUN_TEST(arraybuffer_and_typed_arrays);
     RUN_TEST(dataview_and_the_iterating_typed_array_methods);
+    RUN_TEST(a_typed_array_to_locale_string_asks_every_element);
+    RUN_TEST(a_typed_array_toString_is_arrays_own_function);
 
     // Phase 128: the six regular grammar rules of a class body.
     RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);

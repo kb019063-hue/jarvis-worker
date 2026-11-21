@@ -12,8 +12,12 @@
   "finding_floor": 101,
   "history": [
     {
+      "date": "2026-11-18",
+      "what": "Phase 137 and finding 142 documented array destructuring reading an array's places: `IterationCursor` read the dense element vector, so an accessor `Object.defineProperty` put on an index (Phase 108) and a place `Array.prototype` filled (Phase 98) were `undefined` to `var [x] = a` while `for\u2026of` and the spread beside it in the same script read them, and a nested pattern over such a place was a `TypeError`. The element path is `js_array_get`, which is what `a[i]` reads; an element costs what it did and a hole asks `js_array_holes_read_undefined` first (ten-place patterns 200 \u2192 197 ms over 200,000 iterations on a dense array, 190 \u2192 201 ms where every place is a hole). The suite is 13 checks, 9 of them failing on `main` at `e1414f6`; 297/297 unit suites and no corpus moved. The floors are unchanged: the open pull requests still name the numbers above them."
+    },
+    {
       "date": "2026-11-21",
-      "what": "Phase 140 and finding 145 documented the array half of a subclass: `SpeciesConstructor` (ECMA-262 \u00a77.3.21) is one function in `src/js/JsOps.cpp` that both the array methods and the RegExp ones ask, `ArraySpeciesCreate` makes the result of `map`, `filter`, `slice`, `concat`, `flat`, `flatMap` and `splice` with the species constructor, `Array.from`/`Array.of` make `this`, and `Array`, `Map`, `Set` and `Promise` each carry their `[Symbol.species]` getter. Non-constructor receivers follow Node rather than ES2023 and make a plain array. `prototypes.dat` is 70/76 and `js-conformance` 1144/1158; the row keeps the `Promise` half, whose subclass instances are not promises internally, and the four copying methods. The floors are unchanged."
+      "what": "Phase 140 and finding 145 documented the array half of a subclass: `SpeciesConstructor` (ECMA-262 \u00a77.3.21) is one function in `src/js/JsOps.cpp` that both the array methods and the RegExp ones ask, `ArraySpeciesCreate` makes the result of `map`, `filter`, `slice`, `concat`, `flat`, `flatMap` and `splice` with the species constructor, `Array.from`/`Array.of` make `this`, and `Array`, `Map`, `Set` and `Promise` each carry their `[Symbol.species]` getter. Non-constructor receivers make a plain array, as specified. `prototypes.dat` is 70/76 and `js-conformance` 1144/1158; the row keeps the `Promise` half, whose subclass instances are not promises internally. The change-by-copy methods correctly make plain arrays. The JS conformance floor rose with the score."
     },
     {
       "date": "2026-11-21",

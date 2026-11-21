@@ -1514,12 +1514,16 @@ void install_string_builtins(JsIntrinsics& realm) {
         if (JsObject* cell = v.function_cell()) cell->not_constructor = true;
         string_ctor.define_property(name, std::move(v), PropertyMap::Hidden);
     };
-    auto define_str_method = [&](const char* name, int length, JsValue::NativeFn fn) {
-        JsValue v = js_make_native(name, length, std::move(fn));
-        if (JsObject* cell = v.function_cell()) cell->not_constructor = true;
+    auto define_str_value = [&](const char* name, JsValue v) {
         auto& entry = sp->properties.entry(name);
         entry.second = std::move(v);
         entry.flags = PropertyMap::Hidden;
+    };
+    auto define_str_method = [&](const char* name, int length, JsValue::NativeFn fn) {
+        JsValue v = js_make_native(name, length, std::move(fn));
+        if (JsObject* cell = v.function_cell()) cell->not_constructor = true;
+        define_str_value(name, v);
+        return v;
     };
     auto this_string_value = [](const char* method) -> JsString {
         const JsValue me = JsValue::current_this();
@@ -1686,8 +1690,66 @@ void install_string_builtins(JsIntrinsics& realm) {
     define_str_method("trim", 0, [](Args) { return JsValue::make_string(trim(this_string("trim"), true, true)); });
     define_str_method("trimStart", 0, [](Args) { return JsValue::make_string(trim(this_string("trimStart"), true, false)); });
     define_str_method("trimEnd", 0, [](Args) { return JsValue::make_string(trim(this_string("trimEnd"), false, true)); });
-    define_str_method("trimLeft", 0, [](Args) { return JsValue::make_string(trim(this_string("trimLeft"), true, false)); });
-    define_str_method("trimRight", 0, [](Args) { return JsValue::make_string(trim(this_string("trimRight"), false, true)); });
+    // B.2.3.13: `trimLeft` is not a second function that does the same thing,
+    // it is the same function object — so their `name` is `trimStart`, and
+    // `String.prototype.trimLeft === String.prototype.trimStart`.
+    define_str_value("trimLeft", sp->properties.entry("trimStart").second);
+    define_str_value("trimRight", sp->properties.entry("trimEnd").second);
+    // ---- Annex B: the HTML methods (B.2.3.2 - B.2.3.12) -------------------
+    //
+    // Thirteen methods that answer an HTML element around the string. They are
+    // gone from the language proper and still in every browser, because pages
+    // written before the DOM had an API used them. `B.2.3.1 CreateHTML` is the
+    // one algorithm they all call.
+    auto create_html = [](const JsString& str, const char* tag, const char* attribute, const JsValue& value) {
+        std::u16string out;
+        out += u'<';
+        for (const char* c = tag; *c; ++c) out += static_cast<char16_t>(*c);
+        if (attribute) {
+            out += u' ';
+            for (const char* c = attribute; *c; ++c) out += static_cast<char16_t>(*c);
+            out += u"=\"";
+            // The attribute is the only place a string is escaped: a quote
+            // would end the attribute, so each one becomes `&quot;`.
+            const JsString text = js_to_js_string(value);
+            for (size_t i = 0; i < text.length(); ++i) {
+                if (text.unit_at(i) == u'"') {
+                    for (const char* c = "&quot;"; *c; ++c) out += static_cast<char16_t>(*c);
+                } else {
+                    out += text.unit_at(i);
+                }
+            }
+            out += u'"';
+        }
+        out += u'>';
+        for (size_t i = 0; i < str.length(); ++i) out += str.unit_at(i);
+        for (const char* c = "</"; *c; ++c) out += static_cast<char16_t>(*c);
+        for (const char* c = tag; *c; ++c) out += static_cast<char16_t>(*c);
+        out += u'>';
+        return JsValue::make_string(JsString::from_utf16(out));
+    };
+    define_str_method("anchor", 1, [create_html](Args args) {
+        return create_html(this_string("anchor"), "a", "name", js_arg(args, 0));
+    });
+    define_str_method("link", 1, [create_html](Args args) {
+        return create_html(this_string("link"), "a", "href", js_arg(args, 0));
+    });
+    define_str_method("fontcolor", 1, [create_html](Args args) {
+        return create_html(this_string("fontcolor"), "font", "color", js_arg(args, 0));
+    });
+    define_str_method("fontsize", 1, [create_html](Args args) {
+        return create_html(this_string("fontsize"), "font", "size", js_arg(args, 0));
+    });
+    define_str_method("big", 0, [create_html](Args) { return create_html(this_string("big"), "big", nullptr, JsValue()); });
+    define_str_method("blink", 0, [create_html](Args) { return create_html(this_string("blink"), "blink", nullptr, JsValue()); });
+    define_str_method("bold", 0, [create_html](Args) { return create_html(this_string("bold"), "b", nullptr, JsValue()); });
+    define_str_method("fixed", 0, [create_html](Args) { return create_html(this_string("fixed"), "tt", nullptr, JsValue()); });
+    define_str_method("italics", 0, [create_html](Args) { return create_html(this_string("italics"), "i", nullptr, JsValue()); });
+    define_str_method("small", 0, [create_html](Args) { return create_html(this_string("small"), "small", nullptr, JsValue()); });
+    define_str_method("strike", 0, [create_html](Args) { return create_html(this_string("strike"), "strike", nullptr, JsValue()); });
+    define_str_method("sub", 0, [create_html](Args) { return create_html(this_string("sub"), "sub", nullptr, JsValue()); });
+    define_str_method("sup", 0, [create_html](Args) { return create_html(this_string("sup"), "sup", nullptr, JsValue()); });
+
     define_str_method("padStart", 1, [](Args args) { return JsValue::make_string(pad(this_string("padStart"), args, true)); });
     define_str_method("padEnd", 1, [](Args args) { return JsValue::make_string(pad(this_string("padEnd"), args, false)); });
     define_str_method("repeat", 1, [](Args args) {

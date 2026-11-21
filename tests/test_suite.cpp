@@ -29087,6 +29087,108 @@ if (failures.length) throw new Error(failures.join('\n'));
     )JS");
 }
 
+TEST(annex_b_string_html_methods) {
+    using namespace litebird;
+    // Phase 149, finding 154. ECMA-262 Annex B §B.2.3: thirteen methods that
+    // wrap the string in an HTML element, all of them `B.2.3.1 CreateHTML`,
+    // and `trimLeft`/`trimRight` as the *same function objects* as
+    // `trimStart`/`trimEnd`. The expectations are the standard's; the 86
+    // tests this phase adds to `annexB/built-ins/String` are the suite's,
+    // written by nobody who has seen this engine.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var failures = [];
+        function report(what, got, want) {
+            var a = JSON.stringify(got), b = JSON.stringify(want);
+            if (a !== b) failures.push(what + ': got ' + a + ', expected ' + b);
+        }
+        function check(what, f, want) {
+            var got;
+            try { got = f(); } catch (e) { got = 'throws ' + e.name; }
+            report(what, got, want);
+        }
+        // The same, for a function that is expected to throw.
+        function checkThrows(what, f, name) {
+            try { f(); } catch (e) { report(what, e.name, name); return; }
+            report(what, 'no throw', name);
+        }
+
+        check('anchor names the element it wraps', function () {
+            return ['_'.anchor('b'), '<'.anchor('<'), '_'.anchor(0x2A), '_'.anchor('\x22')];
+        }, ['<a name="b">_</a>', '<a name="<"><</a>', '<a name="42">_</a>', '<a name="&quot;">_</a>']);
+        check('link is an href, and its value is escaped the same way', function () {
+            return 'x'.link('a?b="c"');
+        }, '<a href="a?b=&quot;c&quot;">x</a>');
+        check('the nine element-only methods', function () {
+            return ['a'.bold(), 'a'.italics(), 'a'.fixed(), 'a'.strike(), 'a'.small(),
+                    'a'.big(), 'a'.blink(), 'a'.sub(), 'a'.sup()];
+        }, ['<b>a</b>', '<i>a</i>', '<tt>a</tt>', '<strike>a</strike>', '<small>a</small>',
+            '<big>a</big>', '<blink>a</blink>', '<sub>a</sub>', '<sup>a</sup>']);
+        check('fontcolor and fontsize are font attributes', function () {
+            return ['t'.fontcolor('red'), 't'.fontsize(12)];
+        }, ['<font color="red">t</font>', '<font size="12">t</font>']);
+        check('a missing attribute converts to the string undefined', function () {
+            return ['x'.anchor(), 'x'.fontcolor(), 'x'.fontsize(), 'x'.link()];
+        }, ['<a name="undefined">x</a>', '<font color="undefined">x</font>',
+            '<font size="undefined">x</font>', '<a href="undefined">x</a>']);
+        check('this is converted with ToString, not read as a string', function () {
+            return [String.prototype.anchor.call(0x2A, 0x2A), ''.bold()];
+        }, ['<a name="42">42</a>', '<b></b>']);
+        check('a boxed String is a this too', function () {
+            return String.prototype.bold.call(new String('ab'));
+        }, '<b>ab</b>');
+        checkThrows('a null or undefined this is a TypeError', function () {
+            return [String.prototype.anchor.call(undefined), String.prototype.anchor.call(null)];
+        }, 'TypeError');
+        check('a this whose toString throws propagates it', function () {
+            var bad = { toString: function () { throw new TypeError('mine'); } };
+            try { String.prototype.anchor.call(bad); } catch (e) { return e.message; }
+            return 'no throw';
+        }, 'mine');
+        check('an attribute whose toString throws propagates it', function () {
+            var bad = { toString: function () { throw new RangeError('mine'); } };
+            try { 'x'.anchor(bad); } catch (e) { return e.name; }
+            return 'no throw';
+        }, 'RangeError');
+        check('a surrogate pair survives on both sides', function () {
+            return '\u{1F600}'.anchor('\u{1F600}');
+        }, '<a name="\u{1F600}">\u{1F600}</a>');
+        checkThrows('the methods are not constructors', function () {
+            return new String.prototype.anchor();
+        }, 'TypeError');
+        check('length is the argument count, and name is the method', function () {
+            var names = ['anchor', 'link', 'fontcolor', 'fontsize', 'big', 'blink', 'bold',
+                         'fixed', 'italics', 'small', 'strike', 'sub', 'sup'];
+            return names.map(function (n) {
+                return n + ':' + String.prototype[n].length + ':' + String.prototype[n].name;
+            });
+        }, ['anchor:1:anchor', 'link:1:link', 'fontcolor:1:fontcolor', 'fontsize:1:fontsize',
+            'big:0:big', 'blink:0:blink', 'bold:0:bold', 'fixed:0:fixed', 'italics:0:italics',
+            'small:0:small', 'strike:0:strike', 'sub:0:sub', 'sup:0:sup']);
+        check('they are writable, not enumerable and configurable', function () {
+            var d = Object.getOwnPropertyDescriptor(String.prototype, 'bold');
+            return [d.writable, d.enumerable, d.configurable, Object.keys(String.prototype).indexOf('bold')];
+        }, [true, false, true, -1]);
+        check('trimLeft is trimStart itself', function () {
+            return [String.prototype.trimLeft === String.prototype.trimStart,
+                    String.prototype.trimLeft.name, String.prototype.trimLeft.length];
+        }, [true, 'trimStart', 0]);
+        check('trimRight is trimEnd itself', function () {
+            return [String.prototype.trimRight === String.prototype.trimEnd,
+                    String.prototype.trimRight.name, String.prototype.trimRight.length,
+                    '  a  '.trimLeft() + '|' + '  a  '.trimRight()];
+        }, [true, 'trimEnd', 0, 'a  |  a']);
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(a_functions_name_and_length_are_its_own_properties) {
     using namespace litebird;
 
@@ -29587,6 +29689,9 @@ int main() {
 
     // Phase 139: ImageData is an interface, and putImageData takes a rectangle.
     RUN_TEST(image_data_is_an_interface);
+
+    // Phase 149: the Annex B String.prototype HTML methods, and the trim aliases.
+    RUN_TEST(annex_b_string_html_methods);
 
     // Phase 119: Contextual GSUB (Type 1-7), Cursive GPOS (Type 3/7/8), and Arabic Shaping.
     RUN_TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions);

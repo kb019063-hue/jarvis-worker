@@ -174,6 +174,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
   - `DrawBorderCommand`: Individual border sides with color, width, and style.
   - `DrawTextCommand`: Text fragment at `(x, y)` with font color and style.
   - `DrawImageCommand`: Raster image blit with scaling and alpha blending.
+  - **Order:** the list is emitted in the seven steps of CSS 2.1 Appendix E, not in document order (Phase 135, finding 140): the box's own chrome and ink, then child stacking contexts with a negative `z-index`, then the backgrounds and borders of in-flow block-level descendants, then non-positioned floats, then inline content, then the box's own stacking contexts ascending by `z-index`. A box that clips, or that establishes a stacking context, is painted as one atom, because a flat list cannot interleave two phases across a clip push/pop.
 - **TerminalRenderer:** Projects display list commands onto an 80x25 character grid using ANSI 24-bit Truecolor foreground/background escape sequences (`\033[38;2;R;G;Bm`).
 - **BitmapRenderer:** Rasterizes commands into a 2D ARGB pixel buffer and outputs a standard uncompressed Windows BMP file (54-byte header + BGR pixel rows with 4-byte padding).
 

@@ -174,6 +174,17 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
         }
         return JsValue::make_undefined();
     }
+    // String wrapper objects have the same own, read-only character
+    // properties as the primitive's ToObject result. They are exotic rather
+    // than entries in the ordinary property map, so ask the wrapped string
+    // before that map just as the array path asks its elements first.
+    if (cell && cell->klass == ObjectClass::String) {
+        const JsValue* wrapped = js_wrapped_primitive(object);
+        if (wrapped && wrapped->type == JsType::String &&
+            parse_index(key, index) && index < wrapped->string_val.length()) {
+            return data(object.get_property(key), false, true, false);
+        }
+    }
     if (cell && cell->is_array) {
         if (key == "length") return data(JsValue::make_number(static_cast<double>(cell->array_elements.size())), true, false, false);
         if (parse_index(key, index)) {
@@ -219,6 +230,43 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
     }
     return JsValue::make_undefined();
 }
+
+/// ECMA-262 §7.3.15 TestIntegrityLevel, which `Object.isFrozen` (§20.1.2.13)
+/// and `Object.isSealed` (§20.1.2.15) are defined by. The answer is not a bit
+/// the engine keeps: it is `[[IsExtensible]]` false **and** every own property
+/// asked, one at a time. An object nobody froze but nobody can extend either,
+/// with no properties or with non-writable non-configurable ones, is sealed and
+/// frozen exactly as much as one that was passed to `freeze()`.
+///
+/// The two levels differ in one clause: at the frozen level a writable **data**
+/// property fails it, an accessor does not (an accessor has no write of its
+/// own to prevent), and a non-configurable property fails both.
+bool test_integrity_level(const JsValue& object, bool frozen) {
+    // `[[IsExtensible]]`, asked the same way `Object.isExtensible` asks it: an
+    // object with no cell of its own has nothing to prevent.
+    const JsObject* cell = object.property_cell();
+    const bool extensible = !cell || cell->extensible;
+    if (object.is_object_like() && !extensible) {
+        for (const std::string& key : reflected_own_keys(object, true)) {
+            // `descriptor_for` is the same account `getOwnPropertyDescriptor`
+            // gives, so a property this cannot describe is not one the level
+            // can fail on.
+            const JsValue descriptor = descriptor_for(object, key);
+            if (descriptor.is_undefined()) continue;
+            if (frozen) {
+                const JsValue writable = descriptor.get_property("writable");
+                // An accessor has no `writable` at all, which reads as
+                // undefined and is not a failure.
+                if (writable.type == JsType::Boolean && writable.bool_val) return false;
+            }
+            const JsValue configurable = descriptor.get_property("configurable");
+            if (configurable.type == JsType::Boolean && configurable.bool_val) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
 
 /// `Object.defineProperty(object, key, descriptor)`. Returns false, or throws
 /// when `should_throw` is set, where the property that is there does not
@@ -575,8 +623,7 @@ void install_object_builtins(JsIntrinsics& realm) {
     js_define_method(object_ctor, "isFrozen", 1, [](Args args) {
         const JsValue& object = js_arg(args, 0);
         if (!object.is_object_like()) return JsValue::make_boolean(true);
-        JsObject* cell = object.property_cell();
-        return JsValue::make_boolean(cell && cell->frozen);
+        return JsValue::make_boolean(test_integrity_level(object, /*frozen=*/true));
     });
     js_define_method(object_ctor, "seal", 1, [&](Args args) {
         const JsValue& object = js_arg(args, 0);
@@ -590,8 +637,7 @@ void install_object_builtins(JsIntrinsics& realm) {
     js_define_method(object_ctor, "isSealed", 1, [](Args args) {
         const JsValue& object = js_arg(args, 0);
         if (!object.is_object_like()) return JsValue::make_boolean(true);
-        JsObject* cell = object.property_cell();
-        return JsValue::make_boolean(cell && (cell->sealed || cell->frozen));
+        return JsValue::make_boolean(test_integrity_level(object, /*frozen=*/false));
     });
     js_define_method(object_ctor, "preventExtensions", 1, [&](Args args) {
         const JsValue& object = js_arg(args, 0);

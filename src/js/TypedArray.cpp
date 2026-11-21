@@ -16,6 +16,7 @@
 #include "litebird/js/JsOps.hpp"
 #include "litebird/js/Heap.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -210,6 +211,11 @@ void store_element(uint8_t* base, ElementType type, double value) {
 struct ArrayBufferData {
     std::vector<uint8_t> bytes;
     bool detached{false};
+    /// The one script object for these bytes, once one has been made: a buffer
+    /// and the `buffer` of a view of it are the same object, as they are in a
+    /// browser. Marked by every view that can still reach it, so the cell
+    /// cannot be freed while a view of this buffer is alive.
+    JsObject* owner_object{nullptr};
 };
 
 struct TypedArrayData {
@@ -217,6 +223,14 @@ struct TypedArrayData {
     std::size_t byte_offset{0};
     std::size_t length{0};  // in elements
     ElementType type{ElementType::Uint8};
+};
+
+/// A DataView: a window on a buffer with no element type — every read and
+/// write names its own width, offset and byte order.
+struct DataViewData {
+    std::shared_ptr<ArrayBufferData> buffer;
+    std::size_t byte_offset{0};
+    std::size_t byte_length{0};
 };
 
 uint8_t* elements_of(const TypedArrayData& data) {
@@ -243,6 +257,7 @@ std::optional<std::size_t> parse_index(const std::string& name) {
 
 std::shared_ptr<ArrayBufferData> buffer_of(const JsValue& value);
 std::shared_ptr<TypedArrayData> view_of(const JsValue& value);
+std::shared_ptr<DataViewData> dataview_of(const JsValue& value);
 JsValue make_buffer_object(const std::shared_ptr<ArrayBufferData>& bytes);
 /// The one script object for a buffer, so two views of it are `===`.
 JsValue buffer_object_for(const std::shared_ptr<ArrayBufferData>& bytes);
@@ -258,6 +273,12 @@ public:
     explicit TypedArrayView(std::shared_ptr<TypedArrayData> data) : m_data(std::move(data)) {}
 
     const std::shared_ptr<TypedArrayData>& data() const { return m_data; }
+
+    void trace(Heap& heap) override {
+        // The buffer's script object, if there is one, is reachable from here:
+        // `view.buffer` has to answer the same object every time.
+        if (m_data->buffer->owner_object) heap.mark_object(m_data->buffer->owner_object);
+    }
 
     bool get(JsObject* self, const std::string& name, JsValue& out) override {
         (void)self;
@@ -350,6 +371,10 @@ public:
 
     const std::shared_ptr<ArrayBufferData>& data() const { return m_data; }
 
+    void trace(Heap& heap) override {
+        if (m_data->owner_object) heap.mark_object(m_data->owner_object);
+    }
+
     bool get(JsObject* self, const std::string& name, JsValue& out) override {
         (void)self;
         if (name == "byteLength") {
@@ -382,6 +407,7 @@ std::shared_ptr<ArrayBufferData> buffer_of(const JsValue& value) {
 
 struct TypedArrayRealm {
     JsObject* array_buffer_proto{nullptr};
+    JsObject* dataview_proto{nullptr};
     JsObject* typed_array_proto{nullptr};
     JsObject* protos[kElementTypeCount]{};
     JsValue constructors[kElementTypeCount];
@@ -395,36 +421,31 @@ TypedArrayRealm& realm() {
     return instance;
 }
 
-JsValue make_buffer_object(const std::shared_ptr<ArrayBufferData>& bytes) {
+JsValue allocate_buffer_object(const std::shared_ptr<ArrayBufferData>& bytes) {
     JsObject* cell = Heap::default_heap().allocate_object();
     cell->prototype = realm().array_buffer_proto;
+    bytes->owner_object = cell;
     cell->exotic = std::make_shared<ArrayBufferHolder>(bytes);
     return JsValue::make_object(cell);
 }
 
-// A buffer has one script object however many views point at it. The registry
-// is process-lifetime, as the realm's other tables are: the cells it holds are
-// reachable from the heap, and it is never torn down mid-collection.
+// `new ArrayBuffer(4)` and the `buffer` of a view of it are the same object:
+// every path to a buffer goes through `buffer_object_for`, which is the only
+// place one is made.
+JsValue make_buffer_object(const std::shared_ptr<ArrayBufferData>& bytes);
+
+// A buffer has one script object however many views point at it, and whether
+// it was reached by `new ArrayBuffer` or by `view.buffer`. The pointer lives on
+// the buffer's own data, so there is no table to grow and nothing to prune:
+// every view marks the object while it can still reach it (`trace`), which is
+// what keeps `dv.buffer === buf` true after the caller drops `buf`.
 JsValue buffer_object_for(const std::shared_ptr<ArrayBufferData>& bytes) {
-    static std::vector<std::pair<std::weak_ptr<ArrayBufferData>, JsValue>>* registry = nullptr;
-    if (!registry) {
-        static std::vector<std::pair<std::weak_ptr<ArrayBufferData>, JsValue>> storage;
-        registry = &storage;
-    }
-    for (auto& entry : *registry) {
-        auto live = entry.first.lock();
-        if (live && live.get() == bytes.get()) return entry.second;
-    }
-    // Drop the entries whose buffer is gone, so the table is bounded by the
-    // buffers a page actually holds.
-    std::vector<std::pair<std::weak_ptr<ArrayBufferData>, JsValue>> live_entries;
-    live_entries.reserve(registry->size() + 1);
-    for (auto& entry : *registry)
-        if (!entry.first.expired()) live_entries.push_back(entry);
-    JsValue object = make_buffer_object(bytes);
-    live_entries.emplace_back(bytes, object);
-    *registry = std::move(live_entries);
-    return object;
+    if (bytes->owner_object) return JsValue::make_object(bytes->owner_object);
+    return allocate_buffer_object(bytes);
+}
+
+JsValue make_buffer_object(const std::shared_ptr<ArrayBufferData>& bytes) {
+    return buffer_object_for(bytes);
 }
 
 JsValue make_view_object(std::shared_ptr<TypedArrayData> data, JsObject* proto) {
@@ -596,6 +617,15 @@ JsValue construct_view(Args args, ElementType self_type) {
     return finish(std::move(data));
 }
 
+/// The first argument of a method that iterates: a function, or a TypeError
+/// naming the method that wanted one.
+JsValue require_callback(Args args, const char* what) {
+    const JsValue callback = js_arg(args, 0);
+    if (!callback.is_function())
+        js_throw_type_error(std::string(what) + ": the callback is not callable");
+    return callback;
+}
+
 JsValue make_iterator(const std::shared_ptr<TypedArrayData>& data, int kind) {
     // A plain object with its own `next`, as the engine's other iterators are,
     // so the loop fast paths see an ordinary iterator.
@@ -635,6 +665,264 @@ JsValue make_iterator(const std::shared_ptr<TypedArrayData>& data, int kind) {
 }
 
 // ---------------------------------------------------------------------------
+// DataView
+// ---------------------------------------------------------------------------
+
+// A typed array fixes three things at construction: its element width, its
+// offset and the fact that its bytes are little-endian. A DataView fixes none
+// of them — every call names its own offset, and anything wider than a byte
+// also names its byte order — so it is the only way to read a buffer that some
+// other program wrote big-endian, or to read a `float` at offset 3.
+
+std::uint64_t assemble(const std::uint8_t* base, std::size_t width, bool little_endian) {
+    std::uint64_t value = 0;
+    for (std::size_t i = 0; i < width; ++i) {
+        // Big-endian puts the first byte in the most significant position;
+        // little-endian puts it in the least, so it is read last.
+        const std::size_t at = little_endian ? width - 1 - i : i;
+        value = (value << 8) | base[at];
+    }
+    return value;
+}
+
+void scatter(std::uint8_t* base, std::size_t width, std::uint64_t value, bool little_endian) {
+    for (std::size_t i = 0; i < width; ++i) {
+        const std::size_t at = little_endian ? i : width - 1 - i;
+        base[at] = static_cast<std::uint8_t>((value >> (8 * i)) & 0xFF);
+    }
+}
+
+// The bytes are assembled into one unsigned integer in the order asked for,
+// and only then reinterpreted, so the two byte orders differ in one place.
+double dataview_load(const std::uint8_t* base, ElementType type, bool little_endian) {
+    const std::uint64_t raw = assemble(base, static_cast<std::size_t>(element_size(type)), little_endian);
+    switch (type) {
+        case ElementType::Int8:
+            return static_cast<double>(static_cast<std::int8_t>(raw));
+        case ElementType::Uint8:
+        case ElementType::Uint8Clamped:
+            return static_cast<double>(static_cast<std::uint8_t>(raw));
+        case ElementType::Int16:
+            return static_cast<double>(static_cast<std::int16_t>(raw));
+        case ElementType::Uint16:
+            return static_cast<double>(static_cast<std::uint16_t>(raw));
+        case ElementType::Int32:
+            return static_cast<double>(static_cast<std::int32_t>(raw));
+        case ElementType::Uint32:
+            return static_cast<double>(static_cast<std::uint32_t>(raw));
+        case ElementType::Float32: {
+            const std::uint32_t bits = static_cast<std::uint32_t>(raw);
+            float value = 0.0f;
+            std::memcpy(&value, &bits, sizeof value);
+            return static_cast<double>(value);
+        }
+        case ElementType::Float64: {
+            double value = 0.0;
+            std::memcpy(&value, &raw, sizeof value);
+            return value;
+        }
+    }
+    return 0.0;
+}
+
+// The write side uses the same conversions a typed array of that element type
+// uses, so `setUint8(0, 258)` stores 2 and `setInt8(0, 200)` stores -56: a
+// DataView has no element type, but a setter names one.
+void dataview_store(std::uint8_t* base, ElementType type, double value, bool little_endian) {
+    std::uint64_t raw = 0;
+    switch (type) {
+        case ElementType::Int8:
+            raw = static_cast<std::uint8_t>(to_int8(value));
+            break;
+        case ElementType::Uint8:
+            raw = to_uint8(value);
+            break;
+        case ElementType::Uint8Clamped:
+            raw = to_uint8_clamped(value);
+            break;
+        case ElementType::Int16:
+            raw = static_cast<std::uint16_t>(to_int16(value));
+            break;
+        case ElementType::Uint16:
+            raw = static_cast<std::uint16_t>(to_uint32(value));
+            break;
+        case ElementType::Int32:
+            raw = static_cast<std::uint32_t>(to_int32(value));
+            break;
+        case ElementType::Uint32:
+            raw = to_uint32(value);
+            break;
+        case ElementType::Float32: {
+            const float narrowed = static_cast<float>(value);
+            std::uint32_t bits = 0;
+            std::memcpy(&bits, &narrowed, sizeof bits);
+            raw = bits;
+            break;
+        }
+        case ElementType::Float64:
+            std::memcpy(&raw, &value, sizeof raw);
+            break;
+    }
+    scatter(base, static_cast<std::size_t>(element_size(type)), raw, little_endian);
+}
+
+/// The exotic a DataView carries: `byteLength`, `byteOffset` and `buffer`, and
+/// no indexed access at all — a buffer is read through the methods, never by
+/// indexing the view.
+class DataViewHolder : public JsExotic {
+public:
+    explicit DataViewHolder(std::shared_ptr<DataViewData> data) : m_data(std::move(data)) {}
+
+    const std::shared_ptr<DataViewData>& data() const { return m_data; }
+
+    void trace(Heap& heap) override {
+        if (m_data->buffer->owner_object) heap.mark_object(m_data->buffer->owner_object);
+    }
+
+    bool get(JsObject* self, const std::string& name, JsValue& out) override {
+        (void)self;
+        const bool detached = m_data->buffer->detached;
+        if (name == "byteLength") {
+            out = JsValue::make_number(detached ? 0.0 : static_cast<double>(m_data->byte_length));
+            return true;
+        }
+        if (name == "byteOffset") {
+            out = JsValue::make_number(static_cast<double>(m_data->byte_offset));
+            return true;
+        }
+        if (name == "buffer") {
+            out = buffer_object_for(m_data->buffer);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    std::shared_ptr<DataViewData> m_data;
+};
+
+std::shared_ptr<DataViewData> dataview_of(const JsValue& value) {
+    if (!value.is_object_like() || !value.object_val || !value.object_val->exotic) return nullptr;
+    auto holder = std::dynamic_pointer_cast<DataViewHolder>(value.object_val->exotic);
+    return holder ? holder->data() : nullptr;
+}
+
+std::shared_ptr<DataViewData> require_dataview(const JsValue& value, const char* what) {
+    auto data = dataview_of(value);
+    if (!data) js_throw_type_error(std::string(what) + ": receiver is not a DataView");
+    if (data->buffer->detached) js_throw_type_error(std::string(what) + ": the buffer was detached");
+    return data;
+}
+
+/// ToIndex for an offset: NaN is 0, a negative or an infinite value is a
+/// RangeError, and the result is a whole number of bytes.
+std::size_t to_index(const JsValue& value, const char* what) {
+    const double number = js_to_number(value);
+    if (std::isnan(number)) return 0;
+    const double integer = std::trunc(number);
+    if (integer < 0)
+        js_throw_range_error(std::string(what) + ": the offset must not be negative");
+    if (integer > 9007199254740991.0)
+        js_throw_range_error(std::string(what) + ": the offset is out of range");
+    return static_cast<std::size_t>(integer);
+}
+
+bool little_endian_of(Args args, std::size_t index) {
+    return args.size() > index && args[index].is_truthy();
+}
+
+uint8_t* dataview_bytes(const DataViewData& data) {
+    return data.buffer->bytes.data() + data.byte_offset;
+}
+
+void check_dataview_range(const DataViewData& data, std::size_t offset, std::size_t width,
+                          const char* what) {
+    if (offset + width > data.byte_length)
+        js_throw_range_error(std::string(what) + ": the offset is past the end of the view");
+}
+
+JsValue construct_data_view(Args args) {
+    auto buffer = buffer_of(js_arg(args, 0));
+    if (!buffer)
+        js_throw_type_error("DataView: the first argument must be an ArrayBuffer");
+    const std::size_t offset =
+        args.size() > 1 && !args[1].is_undefined() ? to_index(args[1], "DataView") : 0;
+    if (offset > buffer->bytes.size())
+        js_throw_range_error("DataView: the byteOffset is past the end of the buffer");
+    std::size_t length = buffer->bytes.size() - offset;
+    if (args.size() > 2 && !args[2].is_undefined()) {
+        length = to_index(args[2], "DataView");
+        if (offset + length > buffer->bytes.size())
+            js_throw_range_error("DataView: the byteLength runs past the end of the buffer");
+    }
+    auto data = std::make_shared<DataViewData>();
+    data->buffer = std::move(buffer);
+    data->byte_offset = offset;
+    data->byte_length = length;
+    JsObject* cell = Heap::default_heap().allocate_object();
+    cell->prototype = realm().dataview_proto;
+    cell->exotic = std::make_shared<DataViewHolder>(data);
+    return JsValue::make_object(cell);
+}
+
+void install_data_view(JsIntrinsics& intrinsics, JsEnvironment& global) {
+    JsObject* proto = Heap::default_heap().allocate_object();
+    proto->prototype = intrinsics.object_proto;
+    realm().dataview_proto = proto;
+    JsValue proto_value = JsValue::make_object(proto);
+
+    JsValue constructor = js_make_native("DataView", 3, [](Args args) -> JsValue {
+        return construct_data_view(args);
+    });
+    constructor.define_property("prototype", proto_value, 0);
+    js_define_hidden(proto, "constructor", constructor);
+    js_define_hidden(proto, "@@toStringTag", JsValue::make_string("DataView"));
+
+    // Sixteen getters and setter pairs, all one shape: the offset, the value
+    // for a setter, and the byte order for anything wider than a byte.
+    auto define_get = [&](const char* name, ElementType type) {
+        js_define_method(proto, name, 1, [type, name](Args args) {
+            auto data = require_dataview(JsValue::current_this(), name);
+            const std::size_t offset = to_index(js_arg(args, 0), name);
+            const std::size_t width = static_cast<std::size_t>(element_size(type));
+            check_dataview_range(*data, offset, width, name);
+            const bool little = width > 1 && little_endian_of(args, 1);
+            return JsValue::make_number(dataview_load(dataview_bytes(*data) + offset, type, little));
+        });
+    };
+    auto define_set = [&](const char* name, ElementType type) {
+        js_define_method(proto, name, 2, [type, name](Args args) {
+            auto data = require_dataview(JsValue::current_this(), name);
+            const std::size_t offset = to_index(js_arg(args, 0), name);
+            const std::size_t width = static_cast<std::size_t>(element_size(type));
+            check_dataview_range(*data, offset, width, name);
+            const bool little = width > 1 && little_endian_of(args, 2);
+            dataview_store(dataview_bytes(*data) + offset, type, js_to_number(js_arg(args, 1)), little);
+            return JsValue::make_undefined();
+        });
+    };
+
+    define_get("getInt8", ElementType::Int8);
+    define_get("getUint8", ElementType::Uint8);
+    define_get("getInt16", ElementType::Int16);
+    define_get("getUint16", ElementType::Uint16);
+    define_get("getInt32", ElementType::Int32);
+    define_get("getUint32", ElementType::Uint32);
+    define_get("getFloat32", ElementType::Float32);
+    define_get("getFloat64", ElementType::Float64);
+    define_set("setInt8", ElementType::Int8);
+    define_set("setUint8", ElementType::Uint8);
+    define_set("setInt16", ElementType::Int16);
+    define_set("setUint16", ElementType::Uint16);
+    define_set("setInt32", ElementType::Int32);
+    define_set("setUint32", ElementType::Uint32);
+    define_set("setFloat32", ElementType::Float32);
+    define_set("setFloat64", ElementType::Float64);
+
+    global.define("DataView", constructor);
+}
+
+// ---------------------------------------------------------------------------
 // ArrayBuffer
 // ---------------------------------------------------------------------------
 
@@ -670,7 +958,8 @@ void install_array_buffer(JsIntrinsics& intrinsics, JsEnvironment& global) {
     });
 
     constructor.define_property("isView", js_make_native("isView", 1, [](Args args) {
-        return JsValue::make_boolean(view_of(js_arg(args, 0)) != nullptr);
+        const JsValue& value = js_arg(args, 0);
+        return JsValue::make_boolean(view_of(value) != nullptr || dataview_of(value) != nullptr);
     }), 0);
 
     global.define("ArrayBuffer", constructor);
@@ -857,7 +1146,9 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
             if (i) out += ",";
             const double element =
                 load_element(elements_of_const(*data) + i * element_size(data->type), data->type);
-            if (!std::isnan(element)) out += js_number_to_string(element);
+            // A typed array has no holes, so a NaN is a value to print and
+            // not an empty slot: `new Float32Array([NaN]).join()` is "NaN".
+            out += js_number_to_string(element);
         }
         return JsValue::make_string(out);
     });
@@ -870,7 +1161,9 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
         for (std::size_t i = 0; i < data->length; ++i) {
             if (i) out += separator;
             const double element = load_element(elements_of_const(*data) + i * element_size(data->type), data->type);
-            if (!std::isnan(element)) out += js_number_to_string(element);
+            // A typed array has no holes, so a NaN is a value to print and
+            // not an empty slot: `new Float32Array([NaN]).join()` is "NaN".
+            out += js_number_to_string(element);
         }
         return JsValue::make_string(out);
     });
@@ -886,6 +1179,255 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
             std::memcpy(elements_of(*data) + j * size, left.data(), size);
         }
         return JsValue::current_this();
+    });
+
+    // The iterating half of the prototype. Every callback takes
+    // `(value, index, typedArray)`, and every one that makes a new view makes
+    // it of the receiver's own element type and prototype, so a subclass stays
+    // a subclass. There is no `Symbol.species` in the engine yet, so the
+    // receiver stands in for what a species constructor would have returned;
+    // the phase write-up records that rather than pretending otherwise.
+    auto receiver_proto = [](const std::shared_ptr<TypedArrayData>& data) -> JsObject* {
+        JsObject* self = JsValue::current_this().object_val.get();
+        if (self && self->prototype) return self->prototype;
+        return realm().protos[static_cast<int>(data->type)];
+    };
+    auto copy_like = [](const TypedArrayData& data, const std::vector<double>& values,
+                        JsObject* proto) {
+        auto out = std::make_shared<TypedArrayData>();
+        out->buffer = std::make_shared<ArrayBufferData>();
+        out->type = data.type;
+        out->length = values.size();
+        const std::size_t size = static_cast<std::size_t>(element_size(data.type));
+        out->buffer->bytes.assign(values.size() * size, 0);
+        for (std::size_t i = 0; i < values.size(); ++i)
+            store_element(elements_of(*out) + i * size, out->type, values[i]);
+        return make_view_object(std::move(out), proto);
+    };
+    auto collect = [](const TypedArrayData& data) {
+        std::vector<double> values;
+        values.reserve(data.length);
+        for (std::size_t i = 0; i < data.length; ++i)
+            values.push_back(
+                load_element(elements_of_const(data) + i * element_size(data.type), data.type));
+        return values;
+    };
+
+    js_define_method(proto, "at", 1, [](Args args) {
+        auto data = require_view(JsValue::current_this(), "TypedArray.prototype.at");
+        const double relative = to_integer_or_infinity(js_to_number(js_arg(args, 0)));
+        const double index = relative < 0 ? relative + static_cast<double>(data->length) : relative;
+        if (index < 0 || index >= static_cast<double>(data->length))
+            return JsValue::make_undefined();
+        return JsValue::make_number(
+            load_element(elements_of_const(*data) + static_cast<std::size_t>(index) * element_size(data->type),
+                         data->type));
+    });
+
+    js_define_method(proto, "map", 1, [receiver_proto, collect, copy_like](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.map");
+        const JsValue callback = require_callback(args, "TypedArray.prototype.map");
+        std::vector<double> values = collect(*data);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            values[i] = js_to_number(js_call(callback, js_arg(args, 1),
+                                             {JsValue::make_number(values[i]),
+                                              JsValue::make_number(static_cast<double>(i)), self}));
+        }
+        return copy_like(*data, values, receiver_proto(data));
+    });
+
+    js_define_method(proto, "filter", 1, [receiver_proto, collect, copy_like](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.filter");
+        const JsValue callback = require_callback(args, "TypedArray.prototype.filter");
+        const std::vector<double> elements = collect(*data);
+        std::vector<double> kept;
+        for (std::size_t i = 0; i < elements.size(); ++i) {
+            const JsValue decision = js_call(callback, js_arg(args, 1),
+                                             {JsValue::make_number(elements[i]),
+                                              JsValue::make_number(static_cast<double>(i)), self});
+            if (decision.is_truthy()) kept.push_back(elements[i]);
+        }
+        return copy_like(*data, kept, receiver_proto(data));
+    });
+
+    js_define_method(proto, "forEach", 1, [collect](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.forEach");
+        const JsValue callback = require_callback(args, "TypedArray.prototype.forEach");
+        const std::vector<double> values = collect(*data);
+        for (std::size_t i = 0; i < values.size(); ++i)
+            js_call(callback, js_arg(args, 1),
+                    {JsValue::make_number(values[i]), JsValue::make_number(static_cast<double>(i)), self});
+        return JsValue::make_undefined();
+    });
+
+    js_define_method(proto, "some", 1, [collect](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.some");
+        const JsValue callback = require_callback(args, "TypedArray.prototype.some");
+        const std::vector<double> values = collect(*data);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (js_call(callback, js_arg(args, 1),
+                        {JsValue::make_number(values[i]), JsValue::make_number(static_cast<double>(i)), self})
+                    .is_truthy())
+                return JsValue::make_boolean(true);
+        }
+        return JsValue::make_boolean(false);
+    });
+
+    js_define_method(proto, "every", 1, [collect](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.every");
+        const JsValue callback = require_callback(args, "TypedArray.prototype.every");
+        const std::vector<double> values = collect(*data);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (!js_call(callback, js_arg(args, 1),
+                         {JsValue::make_number(values[i]), JsValue::make_number(static_cast<double>(i)), self})
+                     .is_truthy())
+                return JsValue::make_boolean(false);
+        }
+        return JsValue::make_boolean(true);
+    });
+
+    js_define_method(proto, "find", 1, [collect](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.find");
+        const JsValue callback = require_callback(args, "TypedArray.prototype.find");
+        const std::vector<double> values = collect(*data);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (js_call(callback, js_arg(args, 1),
+                        {JsValue::make_number(values[i]), JsValue::make_number(static_cast<double>(i)), self})
+                    .is_truthy())
+                return JsValue::make_number(values[i]);
+        }
+        return JsValue::make_undefined();
+    });
+
+    js_define_method(proto, "findIndex", 1, [collect](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.findIndex");
+        const JsValue callback = require_callback(args, "TypedArray.prototype.findIndex");
+        const std::vector<double> values = collect(*data);
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (js_call(callback, js_arg(args, 1),
+                        {JsValue::make_number(values[i]), JsValue::make_number(static_cast<double>(i)), self})
+                    .is_truthy())
+                return JsValue::make_number(static_cast<double>(i));
+        }
+        return JsValue::make_number(-1);
+    });
+
+    js_define_method(proto, "reduce", 1, [collect](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.reduce");
+        const JsValue callback = require_callback(args, "TypedArray.prototype.reduce");
+        const std::vector<double> values = collect(*data);
+        std::size_t i = 0;
+        JsValue accumulator;
+        if (args.size() > 1) {
+            accumulator = args[1];
+        } else {
+            if (values.empty())
+                js_throw_type_error("TypedArray.prototype.reduce: the array is empty and no initial value was given");
+            accumulator = JsValue::make_number(values[0]);
+            i = 1;
+        }
+        for (; i < values.size(); ++i)
+            accumulator = js_call(callback, JsValue::make_undefined(),
+                                  {accumulator, JsValue::make_number(values[i]),
+                                   JsValue::make_number(static_cast<double>(i)), self});
+        return accumulator;
+    });
+
+    js_define_method(proto, "reduceRight", 1, [collect](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.reduceRight");
+        const JsValue callback = require_callback(args, "TypedArray.prototype.reduceRight");
+        const std::vector<double> values = collect(*data);
+        if (values.empty() && args.size() <= 1)
+            js_throw_type_error("TypedArray.prototype.reduceRight: the array is empty and no initial value was given");
+        std::size_t i = values.size();
+        JsValue accumulator;
+        if (args.size() > 1) {
+            accumulator = args[1];
+        } else {
+            --i;
+            accumulator = JsValue::make_number(values[i]);
+        }
+        while (i > 0) {
+            --i;
+            accumulator = js_call(callback, JsValue::make_undefined(),
+                                  {accumulator, JsValue::make_number(values[i]),
+                                   JsValue::make_number(static_cast<double>(i)), self});
+        }
+        return accumulator;
+    });
+
+    // The default comparison is numeric, not the string comparison an Array
+    // sort falls back to: `Float64Array.of(9, 10).sort()` is 9, 10 where
+    // `[9, 10].sort()` is 10, 9. NaN compares greater than every number, and
+    // the sort is stable either way.
+    auto typed_sort = [](std::vector<double>& values, const JsValue& comparator) {
+        if (comparator.is_function()) {
+            std::stable_sort(values.begin(), values.end(), [&comparator](double left, double right) {
+                return js_to_number(js_call(comparator, JsValue::make_undefined(),
+                                            {JsValue::make_number(left), JsValue::make_number(right)})) < 0;
+            });
+            return;
+        }
+        std::stable_sort(values.begin(), values.end(), [](double left, double right) {
+            const bool left_nan = std::isnan(left);
+            const bool right_nan = std::isnan(right);
+            if (left_nan || right_nan) return !left_nan && right_nan;
+            return left < right;
+        });
+    };
+    auto sorted_copy = [typed_sort, collect, copy_like, receiver_proto](Args args, const char* what) {
+        auto data = require_view(JsValue::current_this(), what);
+        const JsValue comparator = js_arg(args, 0);
+        if (!comparator.is_undefined() && !comparator.is_function())
+            js_throw_type_error(std::string(what) + ": the comparator is not callable");
+        std::vector<double> values = collect(*data);
+        typed_sort(values, comparator);
+        return copy_like(*data, values, receiver_proto(data));
+    };
+
+    js_define_method(proto, "sort", 1, [typed_sort, collect](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.sort");
+        const JsValue comparator = js_arg(args, 0);
+        if (!comparator.is_undefined() && !comparator.is_function())
+            js_throw_type_error("TypedArray.prototype.sort: the comparator is not callable");
+        std::vector<double> values = collect(*data);
+        typed_sort(values, comparator);
+        const std::size_t size = static_cast<std::size_t>(element_size(data->type));
+        for (std::size_t i = 0; i < values.size(); ++i)
+            store_element(elements_of(*data) + i * size, data->type, values[i]);
+        return self;
+    });
+
+    js_define_method(proto, "toSorted", 1, [sorted_copy](Args args) {
+        return sorted_copy(args, "TypedArray.prototype.toSorted");
+    });
+
+    js_define_method(proto, "toReversed", 0, [collect, copy_like, receiver_proto](Args) {
+        auto data = require_view(JsValue::current_this(), "TypedArray.prototype.toReversed");
+        std::vector<double> values = collect(*data);
+        std::reverse(values.begin(), values.end());
+        return copy_like(*data, values, receiver_proto(data));
+    });
+
+    js_define_method(proto, "with", 2, [collect, copy_like, receiver_proto](Args args) {
+        auto data = require_view(JsValue::current_this(), "TypedArray.prototype.with");
+        const double relative = to_integer_or_infinity(js_to_number(js_arg(args, 0)));
+        const double index = relative < 0 ? relative + static_cast<double>(data->length) : relative;
+        if (index < 0 || index >= static_cast<double>(data->length))
+            js_throw_range_error("TypedArray.prototype.with: the index is out of range");
+        std::vector<double> values = collect(*data);
+        values[static_cast<std::size_t>(index)] = js_to_number(js_arg(args, 1));
+        return copy_like(*data, values, receiver_proto(data));
     });
 
     js_define_method(proto, "keys", 0, [](Args) {
@@ -993,6 +1535,7 @@ void install_one(JsEnvironment& global, ElementType type) {
 void install_typed_array_builtins(JsEnvironment& global) {
     JsIntrinsics& intrinsics = JsIntrinsics::get();
     install_array_buffer(intrinsics, global);
+    install_data_view(intrinsics, global);
     install_typed_array_prototype(intrinsics, global);
     install_one(global, ElementType::Int8);
     install_one(global, ElementType::Uint8);

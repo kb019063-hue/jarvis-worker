@@ -67,11 +67,11 @@ results of this phase.
 | Check | Before | After |
 | :--- | :--- | :--- |
 | `make test` | 319 engine suites, 114 cross-origin checks | 329 engine suites, 114 cross-origin checks |
-| Body-origin corpus, with **all** known markers removed | 7/40 pages | 34/40 pages; 28 newly pass, 1 formerly passed by accident and now fails |
+| Body-origin corpus, with **all** known markers removed | 7/41 pages | 34/41 pages; 28 newly pass, 1 formerly passed by accident and now fails |
 | `make render-conformance`, original corpus | 36/38 pages, 2 known | 36/38 pages, 2 known |
-| `make render-conformance`, body-origin corpus | 5/7 pages, 2 known on the old corpus | 34/40 pages, 6 known; none unlisted |
+| `make render-conformance`, body-origin corpus | 5/7 pages, 2 known on the old corpus | 34/41 pages, 7 known; none unlisted |
 | Canvas `toDataURL` | 45016/45016 | 45016/45016 |
-| Chromium 153 vs body-origin references | original seven pages, 29/29 assertions | 40 pages, 128/128 assertions |
+| Chromium 153 vs body-origin references | original seven pages, 29/29 assertions | 41 pages, 131/131 assertions |
 | Chromium 153 vs scroll fixture | not measured | 12/12 scroll and pixel assertions |
 
 The one lost page is `display:contents`: the engine still treats that value as
@@ -114,14 +114,15 @@ node -e "require('fs').createReadStream(process.argv[1]).pipe(require('zlib').cr
   "$NODE_PATH/@sparticuz/chromium/bin/al2023.tar.br" | tar x -C build/browser-oracle/runtime
 export LD_LIBRARY_PATH="$PWD/build/browser-oracle/runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 node tools/conformance/verify_body_pixels.cjs
-# HeadlessChrome/153.0.8010.0: 128/128 assertions across 40 pages match Chromium
+# HeadlessChrome/153.0.8010.0: 131/131 assertions across 41 pages match Chromium
 node tools/conformance/verify_canvas_scroll.cjs
 # HeadlessChrome/153.0.8010.0: 12/12 scroll and pixel assertions match Chromium
 ```
 
-The first verifier accepts a corpus path. Changing the body-canvas origin's
-reference to black made it report **127/128** and exit 1. For the rounded-clip
-check, extract the one page and pass it to that same verifier:
+The first verifier accepts a corpus path. On the earlier 40-page corpus,
+changing the body-canvas origin's reference to black made it report **127/128**
+and exit 1. For the rounded-clip check, extract the one page and pass it to that
+same verifier:
 
 ```sh
 python3 - <<'PY'
@@ -137,7 +138,7 @@ node tools/conformance/verify_body_pixels.cjs build/rounded-reference.json
 For the two-binary comparison, make a source archive rather than switching the
 working branch, build it, and remove *all* known markers from a copy of the
 current corpus. Both checker invocations intentionally exit 1 because this
-exposes the six remaining failures rather than suppressing them:
+exposes the seven remaining failures rather than suppressing them:
 
 ```sh
 mkdir -p build/canvas-before-src
@@ -151,9 +152,9 @@ for test in suite['tests']:
 json.dump(suite, open('build/canvas-all-unmarked.json', 'w'))
 PY
 python3 tools/conformance/render_check.py --binary build/canvas-before-src/build/litebird \
-  --suite build/canvas-all-unmarked.json --no-self-test --verbose  # 7/40
+  --suite build/canvas-all-unmarked.json --no-self-test --verbose  # 7/41
 python3 tools/conformance/render_check.py --binary build/litebird \
-  --suite build/canvas-all-unmarked.json --no-self-test --verbose  # 34/40
+  --suite build/canvas-all-unmarked.json --no-self-test --verbose  # 34/41
 ```
 
 ## 4. What is still open
@@ -170,6 +171,10 @@ python3 tools/conformance/render_check.py --binary build/litebird \
 - An inline body's default horizontal margin starts its fragments at `x=0`
   instead of Chromium's `x=8`; the two-layer canvas behavior is tested with
   an explicit zero margin, and the default-margin failure remains recorded.
+- Nested translucent inline backgrounds need distinct paint layers. With a
+  half-red inline body and half-blue child, Chromium shows `(127,31,159)` over
+  the child; the fragment's single flattened background skips the body's layer
+  and shows `(127,63,191)` instead. The reference page records that failure.
 - Empty blocks and general sibling/bottom margin collapse remain incomplete.
   The HTML root still has no full layout box: Phase 166 handles a root margin,
   not every width, border, padding and positioning rule.

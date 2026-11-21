@@ -1472,7 +1472,9 @@ static void collect_items(
             // Chromium paints an inline body's background on its line
             // fragments as well as propagating it to the canvas. Block bodies
             // do not have this extra layer. Preserve a descendant's own
-            // background when applying the propagated inline body's color.
+            // background: fragments carry just one color, so this still loses
+            // the body layer under a translucent descendant (see the recorded
+            // inline_body_under_a_translucent_inline_child reftest).
             const bool has_bg = !bs.background_color.is_transparent();
             const bool has_rad = bs.border_radius > 0.0f;
             const bool has_dec = bs.has_text_decoration();

@@ -24,12 +24,12 @@ non-HTML roots do not acquire the HTML canvas rule.
 ## 3. Evidence
 
 `make test` passes 329 engine suites and 114 cross-origin checks.
-`make render-conformance` reports 36/38 original pages, 2 known, and 34/40
-body-origin pages, 6 known. Chromium 153 independently matches all 128
+`make render-conformance` reports 36/38 original pages, 2 known, and 34/41
+body-origin pages, 7 known. Chromium 153 independently matches all 131
 body-origin reference assertions and all 12 scroll-fixture assertions; the
 commands and optional dependencies are in the phase write-up. With all known
-markers removed, the identical current 40-page corpus scores 7/40 on the base
-binary and 34/40 now: 28 pages gained and one lost.
+markers removed, the identical current 41-page corpus scores 7/41 on the base
+binary and 34/41 now: 28 pages gained and one lost.
 
 ## 4. What is still open
 
@@ -37,7 +37,10 @@ That lost page is a real visible regression: `display:contents` is not
 implemented, so the body now incorrectly supplies a red canvas where Chromium
 has white; previously the missing propagation happened to hide it. Root
 background images, root opacity groups, hidden descendants, inline-body default
-margin placement and general empty/sibling margin collapse remain open and
-have their own known-failure pages. The UA normalizer should be removed along
-with the original UA white declaration once the claimed resolver source file is
-free. Solid-color propagation is not full CSS Backgrounds or full root layout.
+margin placement, nested translucent inline backgrounds, and general
+empty/sibling margin collapse remain open and have their own known-failure
+pages. For a half-red inline body under a half-blue child, the flattened
+fragment loses the body layer: `(127,63,191)` rather than Chromium's
+`(127,31,159)`. The UA normalizer should be removed along with the original UA
+white declaration once the claimed resolver source file is free. Solid-color
+propagation is not full CSS Backgrounds or full root layout.

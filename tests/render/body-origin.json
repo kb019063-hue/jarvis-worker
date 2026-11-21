@@ -871,6 +871,34 @@
       ]
     },
     {
+      "name": "inline_body_under_a_translucent_inline_child",
+      "html": "<!doctype html><body style=\"margin:0;display:inline;background:rgba(255,0,0,.5);font:20px/20px monospace;color:transparent\"><span style=\"background:rgba(0,0,255,.5)\">MMMMMMMM</span></body>",
+      "known_failure": "Inline painting stores one flattened background per text fragment, so a translucent descendant replaces the propagated inline body's own fragment background instead of compositing over it. Chromium paints canvas red, then the body's fragment red, then the child's blue; Litebird skips the middle layer.",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#7f1f9f",
+          "describe": "the translucent child composites over the inline body fragment and the canvas"
+        },
+        {
+          "kind": "pixel",
+          "x": 30,
+          "y": 10,
+          "colour": "#7f1f9f",
+          "describe": "the three layers persist across the child fragment"
+        },
+        {
+          "kind": "pixel",
+          "x": 200,
+          "y": 10,
+          "colour": "#ff7f7f",
+          "describe": "outside the fragment only the red canvas remains"
+        }
+      ]
+    },
+    {
       "name": "root_background_image_blocks_body_propagation",
       "html": "<!doctype html><html style=\"background-image:linear-gradient(#0000ff,#0000ff)\"><body style=\"margin:20px;background:#ff0000;height:50px\"></body></html>",
       "known_failure": "Background images are not represented by the layout style or painted. A non-none root image should prevent body propagation: Chromium paints blue outside and the red body box inside; Litebird instead propagates red everywhere.",

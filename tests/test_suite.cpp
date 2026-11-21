@@ -28210,32 +28210,37 @@ TEST(a_typed_array_to_locale_string_asks_every_element)
     // `toLocaleString` and that method is called. The engine formatted the
     // numbers itself, so this said "1,2" for two years.
     assert(text("Number.prototype.toLocaleString = function () { return 'X'; };"
-                "[1,2].toLocaleString()") == "X,X");
-    assert(text("new Uint8Array([1,2]).toLocaleString()") == "X,X");
-    // A hole and `undefined` are the exception: the empty string, with nothing
-    // asked, which is what makes the answer "X,,X" and not "X,X,X".
-    assert(text("[1,,3].toLocaleString()") == "X,,X");
-    assert(text("[1,undefined].toLocaleString()") == "X,");
+                "new Uint8Array([1,2]).toLocaleString()") == "X,X");
+    assert(text("new Float64Array([1.5, 2.5]).toLocaleString()") == "X,X");
     assert(text("delete Number.prototype.toLocaleString;"
-                "[1,2].toLocaleString() + '|' + new Uint8Array([1,2]).toLocaleString()") == "1,2|1,2");
+                "new Uint8Array([1,2]).toLocaleString()") == "1,2");
+    // A typed array has no holes: every element is a value, so every element is
+    // asked, including a NaN.
+    assert(text("Number.prototype.toLocaleString = function () { return 'X'; };"
+                "new Float32Array([NaN]).toLocaleString()") == "X");
 
     // ---- the two are different function objects that behave differently ---
     // §23.2.3.29 gives the typed array its own, and it validates the receiver
     // where Array's boxes a primitive.
     assert(text("Uint8Array.prototype.toLocaleString === Array.prototype.toLocaleString") == "false");
-    assert(text("Array.prototype.toLocaleString.call(42)") == "");
-    assert(text("Array.prototype.toLocaleString.call('abc')") == "a,b,c");
+    // The typed array's refuses everything Array's accepts: the receiver must
+    // be a typed array, so a primitive, a plain object, an ArrayBuffer and a
+    // DataView are all TypeErrors.
     assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(42); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call('1'); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(true); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(null); })") == "TypeError");
     assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call({length:1,0:5}); })") == "TypeError");
     assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(new ArrayBuffer(4)); })") == "TypeError");
     assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(new DataView(new ArrayBuffer(4))); })") == "TypeError");
-    assert(text("Array.prototype.toLocaleString.call(new ArrayBuffer(4))") == "");
 
     // ---- the length is the internal one, not a `length` property ----------
     // test262's get-length-uses-internal-arraylength: a redefined `length` is
-    // not what a typed-array method reads.
-    assert(text("var v = new Uint8Array([1,2,3]); Object.defineProperty(v, 'length', {value: 9});"
-                "v.toLocaleString()") == "1,2,3");
+    // not what a typed-array method reads. The method is put back first, so
+    // this measures [[ArrayLength]] and not the patch two lines above.
+    assert(text("delete Number.prototype.toLocaleString;"
+                "var v = new Uint8Array([1,2,3]); Object.defineProperty(v, 'length', {value: 9});"
+                "v.length + '|' + v.toLocaleString()") == "9|1,2,3");
     assert(text("new Uint8Array(0).toLocaleString() + '|' + new Uint8Array([7]).toLocaleString()") == "|7");
     assert(text("new Int32Array([-5]).toLocaleString()") == "-5");
     // A typed array has no holes, so NaN is a value to print.

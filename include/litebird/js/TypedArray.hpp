@@ -37,25 +37,6 @@ void install_text_codec_builtins(JsEnvironment& global);
 /// (even if its backing buffer is detached or the view is out of bounds).
 bool is_buffer_source(const JsValue& value);
 
-/// True when `value` is a typed-array view whose buffer has been detached, or
-/// whose window falls outside a resized buffer — the state ValidateTypedArray
-/// refuses. `Array.prototype.toLocaleString` is shared with the typed arrays,
-/// so it has to refuse it too: `Uint8Array.prototype.toLocaleString` on a
-/// detached view is a TypeError, not the empty string an empty view answers.
-bool typed_array_view_is_out_of_bounds(const JsValue& value);
-
-/// The element count of a typed-array view, from its **internal** length slot
-/// rather than a `length` property a script may have redefined — what
-/// `%TypedArray%.prototype` methods read. Zero for anything that is not a
-/// view (an ArrayPrototype, a plain array), which is why `toLocaleString`
-/// asks this first and falls back to the `length` property.
-std::size_t typed_array_element_count(const JsValue& value);
-
-/// True only for a typed-array view: `Uint8Array`, `Float64Array` and so on.
-/// False for an `ArrayBuffer` and for a `DataView`, which are buffer sources
-/// but not typed arrays, so `%TypedArray%.prototype` methods must refuse them.
-bool view_is_typed_array(const JsValue& value);
-
 /// The bytes of an `ArrayBuffer`, any typed-array view, or a `DataView`, copied
 /// out: the whole buffer for a buffer, and the view's live window of it for a
 /// view. False when `value` is none of these, or when the buffer has been

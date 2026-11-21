@@ -366,6 +366,8 @@ private:
         const JsValue::FunctionData* function{nullptr};
         const PropertyMap* properties{nullptr};
         JsObject* cell{nullptr};    // the function's cell, which the payload holds a handle to
+        const std::vector<JsValue>* captured{nullptr};  // what the entry point captures
+        const JsValue* bound_target{nullptr};           // a bound function's target
     };
     struct ScopeInfo {
         long seen{0};               // closures and child scopes found inside the heap

@@ -1,8 +1,8 @@
 {
   "_what_this_is": [
-    "Root body placement and three remaining root, margin-collapse and canvas-background gaps.",
+    "Root/body placement, solid canvas backgrounds, and the remaining general margin-collapse gap.",
     "Reference pixels were measured against Chromium 153 at 800x600.",
-    "Run by make render-conformance; kept separate while another pull request owns reftests.json."
+    "Run by make render-conformance as a separately reported root/body corpus."
   ],
   "tests": [
     {
@@ -239,7 +239,6 @@
     {
       "name": "body_background_is_propagated_to_the_canvas",
       "html": "<!doctype html><body style=\"margin:8px;background:#ff0000\"><div style=\"width:100px;height:20px\"></div></body>",
-      "known_failure": "The HTML root has no box and the body background is not propagated to the canvas. Chromium paints the whole viewport red; Litebird paints only the body. After Phase 152 the origin (0,0), which happened to be red before, is white as well.",
       "assert": [
         {
           "kind": "pixel",
@@ -261,6 +260,936 @@
           "y": 599,
           "colour": "#ff0000",
           "describe": "the canvas stays red beyond the body"
+        }
+      ]
+    },
+    {
+      "name": "html_color_reaches_the_canvas_through_the_default_body",
+      "html": "<!doctype html><html style=\"background-color:#0000ff\"><body><div style=\"width:100px;height:20px\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "the root colors the corner"
+        },
+        {
+          "kind": "pixel",
+          "x": 8,
+          "y": 8,
+          "colour": "#0000ff",
+          "describe": "the default body is transparent, not white"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#0000ff",
+          "describe": "the root colors the far corner"
+        }
+      ]
+    },
+    {
+      "name": "the_root_color_wins_and_the_body_remains_a_box",
+      "html": "<!doctype html><html style=\"background:#0000ff\"><body style=\"margin:20px;background:#ff0000;height:50px\"><div style=\"width:100px;height:50px\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "root color reaches outside the body"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 100,
+          "height": 50,
+          "colour": "#ff0000",
+          "describe": "body color is painted normally over the root"
+        },
+        {
+          "kind": "pixel",
+          "x": 19,
+          "y": 20,
+          "colour": "#0000ff",
+          "describe": "body margin does not paint"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#0000ff",
+          "describe": "root color reaches the far corner"
+        }
+      ]
+    },
+    {
+      "name": "translucent_body_color_is_used_once_for_the_canvas",
+      "html": "<!doctype html><html style=\"background-color:rgba(1,2,3,0)\"><body style=\"margin:20px;background:rgba(255,0,0,.5);height:50px\"></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff7f7f",
+          "describe": "transparent root allows one red layer"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 100,
+          "height": 50,
+          "colour": "#ff7f7f",
+          "describe": "the body is not painted a second time"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ff7f7f",
+          "describe": "the same layer reaches the far corner"
+        }
+      ]
+    },
+    {
+      "name": "translucent_root_and_body_colors_compose_in_order",
+      "html": "<!doctype html><html style=\"background-color:rgba(0,0,255,.5)\"><body style=\"margin:20px;background:rgba(255,0,0,.5);height:50px\"></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#7f7fff",
+          "describe": "the root is half blue over white"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 100,
+          "height": 50,
+          "colour": "#bf3f7f",
+          "describe": "the body is half red over the root"
+        },
+        {
+          "kind": "pixel",
+          "x": 19,
+          "y": 20,
+          "colour": "#7f7fff",
+          "describe": "the margin has only the root layer"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#7f7fff",
+          "describe": "the root reaches the far corner"
+        }
+      ]
+    },
+    {
+      "name": "empty_body_color_reaches_beyond_its_zero_height",
+      "html": "<!doctype html><body style=\"background:#ff0000\"></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "the canvas starts at the viewport origin"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ff0000",
+          "describe": "an empty body still colors the canvas"
+        }
+      ]
+    },
+    {
+      "name": "display_none_body_does_not_supply_a_canvas_color",
+      "html": "<!doctype html><body style=\"display:none;background:#ff0000\"><div style=\"width:100px;height:50px;background:#0000ff\"></div></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "no box means no propagated body color"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#ffffff",
+          "describe": "the hidden descendant does not paint"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ffffff",
+          "describe": "the rest remains white"
+        }
+      ]
+    },
+    {
+      "name": "root_color_survives_a_display_none_body",
+      "html": "<!doctype html><html style=\"background:#0000ff\"><body style=\"display:none;background:#ff0000\"></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "the root still supplies the canvas"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#0000ff",
+          "describe": "the hidden body does not replace the root"
+        }
+      ]
+    },
+    {
+      "name": "display_none_root_hides_canvas_and_body",
+      "html": "<!doctype html><html style=\"display:none;background:#0000ff\"><body style=\"background:#ff0000\"><div style=\"width:100px;height:50px\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "a hidden root has no canvas background"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#ffffff",
+          "describe": "its body is not painted either"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ffffff",
+          "describe": "the viewport remains white"
+        }
+      ]
+    },
+    {
+      "name": "a_hidden_body_still_supplies_its_canvas_color",
+      "html": "<!doctype html><body style=\"visibility:hidden;background:#ff0000\"></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "visibility does not suppress the propagated color"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ff0000",
+          "describe": "it reaches beyond the body"
+        }
+      ]
+    },
+    {
+      "name": "zero_body_opacity_does_not_change_its_canvas_color",
+      "html": "<!doctype html><body style=\"opacity:0;background:#ff0000\"></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "the propagated color is not body opacity"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ff0000",
+          "describe": "the color reaches the far corner"
+        }
+      ]
+    },
+    {
+      "name": "body_borders_do_not_bound_the_canvas_color",
+      "html": "<!doctype html><body style=\"margin:20px;background:#ff0000;border:5px solid #000000;padding:5px;border-radius:10px\"><div style=\"width:100px;height:50px\"></div></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "color extends beyond the rounded body"
+        },
+        {
+          "kind": "pixel",
+          "x": 50,
+          "y": 21,
+          "colour": "#000000",
+          "describe": "the body border still paints"
+        },
+        {
+          "kind": "pixel",
+          "x": 40,
+          "y": 40,
+          "colour": "#ff0000",
+          "describe": "the body interior keeps the canvas color"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ff0000",
+          "describe": "the rounded box does not limit the canvas"
+        }
+      ]
+    },
+    {
+      "name": "relative_body_position_does_not_move_the_canvas",
+      "html": "<!doctype html><body style=\"position:relative;left:20px;top:20px;background:#ff0000\"><div style=\"width:100px;height:50px;background:#0000ff\"></div></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "the canvas does not follow the relative offset"
+        },
+        {
+          "kind": "pixel",
+          "x": 30,
+          "y": 30,
+          "colour": "#0000ff",
+          "describe": "the child still follows the body"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ff0000",
+          "describe": "the canvas reaches the far corner"
+        }
+      ]
+    },
+    {
+      "name": "absolute_body_position_does_not_move_the_canvas",
+      "html": "<!doctype html><body style=\"position:absolute;left:20px;top:20px;background:#ff0000\"><div style=\"width:100px;height:50px;background:#0000ff\"></div></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "the canvas does not follow absolute positioning"
+        },
+        {
+          "kind": "pixel",
+          "x": 30,
+          "y": 30,
+          "colour": "#0000ff",
+          "describe": "the child is still painted over it"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ff0000",
+          "describe": "the canvas reaches the far corner"
+        }
+      ]
+    },
+    {
+      "name": "negative_z_descendants_still_paint_above_the_canvas",
+      "html": "<!doctype html><body style=\"background:#ff0000\"><div style=\"position:absolute;z-index:-1;left:20px;top:20px;width:30px;height:30px;background:#0000ff\"></div></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "canvas behind all boxes"
+        },
+        {
+          "kind": "pixel",
+          "x": 25,
+          "y": 25,
+          "colour": "#0000ff",
+          "describe": "negative-z child still paints over it"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ff0000",
+          "describe": "canvas reaches beyond the child"
+        }
+      ]
+    },
+    {
+      "name": "inline_body_also_paints_its_line_fragments",
+      "html": "<!doctype html><body style=\"display:inline;background:rgba(255,0,0,.5);color:transparent\">hello world</body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 150,
+          "y": 150,
+          "colour": "#ff7f7f",
+          "describe": "canvas is painted once"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 10,
+          "colour": "#ff3f3f",
+          "describe": "Chromium paints an inline fragment over the canvas as well"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ff7f7f",
+          "describe": "canvas reaches the far corner"
+        }
+      ]
+    },
+    {
+      "name": "split_inline_body_keeps_child_boxes_above_the_canvas",
+      "html": "<!doctype html><body style=\"display:inline;background:rgba(255,0,0,.5);color:transparent\">hello<div style=\"background:#0000ff;width:40px;height:40px\"></div>bye</body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 150,
+          "y": 150,
+          "colour": "#ff7f7f",
+          "describe": "the split body still supplies the canvas"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#0000ff",
+          "describe": "a block child still paints over it"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ff7f7f",
+          "describe": "the canvas reaches the far corner"
+        }
+      ]
+    },
+    {
+      "name": "iframe_opaque_body_paints_only_its_own_canvas",
+      "html": "<!doctype html><body style=\"margin:0;background:#0000ff\"><iframe style=\"display:block;position:absolute;left:20px;top:20px;border:0;width:100px;height:80px\" srcdoc=\"&lt;body style='background:#ff0000'&gt;&lt;/body&gt;\"></iframe></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "parent canvas stays blue"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#ff0000",
+          "describe": "child canvas starts at the frame origin"
+        },
+        {
+          "kind": "pixel",
+          "x": 119,
+          "y": 99,
+          "colour": "#ff0000",
+          "describe": "child canvas reaches the last frame pixel"
+        },
+        {
+          "kind": "pixel",
+          "x": 120,
+          "y": 100,
+          "colour": "#0000ff",
+          "describe": "child canvas does not escape the frame"
+        }
+      ]
+    },
+    {
+      "name": "iframe_translucent_body_composites_over_its_parent",
+      "html": "<!doctype html><body style=\"margin:0;background:#0000ff\"><iframe style=\"display:block;position:absolute;left:20px;top:20px;border:0;width:100px;height:80px\" srcdoc=\"&lt;body style='background:rgba(255,0,0,.5)'&gt;&lt;/body&gt;\"></iframe></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "parent canvas stays blue"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#80007f",
+          "describe": "half-red child canvas is over blue, not white"
+        },
+        {
+          "kind": "pixel",
+          "x": 119,
+          "y": 99,
+          "colour": "#80007f",
+          "describe": "alpha is preserved to the far corner"
+        },
+        {
+          "kind": "pixel",
+          "x": 120,
+          "y": 100,
+          "colour": "#0000ff",
+          "describe": "the parent resumes outside the frame"
+        }
+      ]
+    },
+    {
+      "name": "an_uncolored_iframe_is_transparent_over_its_parent",
+      "html": "<!doctype html><body style=\"margin:0;background:#0000ff\"><iframe style=\"display:block;position:absolute;left:20px;top:20px;border:0;width:100px;height:80px\" srcdoc=\"&lt;body&gt;&lt;/body&gt;\"></iframe></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "parent canvas stays blue"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#0000ff",
+          "describe": "an uncolored child does not flatten to white"
+        },
+        {
+          "kind": "pixel",
+          "x": 119,
+          "y": 99,
+          "colour": "#0000ff",
+          "describe": "the whole child remains transparent"
+        }
+      ]
+    },
+    {
+      "name": "explicit_white_body_is_still_a_box_above_the_root",
+      "html": "<!doctype html><html style=\"background:#0000ff\"><body style=\"margin:20px;background:#ffffff;height:50px\"></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "the root supplies blue"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#ffffff",
+          "describe": "explicit body white paints normally"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#0000ff",
+          "describe": "the body does not replace the root canvas"
+        }
+      ]
+    },
+    {
+      "name": "author_universal_rule_can_make_the_body_white",
+      "html": "<!doctype html><html style=\"background:#0000ff\"><head><style>* {background-color:#ffffff}</style></head><body style=\"margin:20px;height:50px\"></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "the inline root rule wins"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#ffffff",
+          "describe": "an author universal rule beats the initial body color"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#0000ff",
+          "describe": "only the body box is white"
+        }
+      ]
+    },
+    {
+      "name": "inline_body_respects_a_descendant_background",
+      "html": "<!doctype html><body style=\"display:inline;background:rgba(255,0,0,.5);color:transparent\"><span style=\"background:#0000ff\">hello</span> world</body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 150,
+          "y": 150,
+          "colour": "#ff7f7f",
+          "describe": "the canvas is translucent red"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 10,
+          "colour": "#0000ff",
+          "describe": "the inline child paints its own blue"
+        },
+        {
+          "kind": "pixel",
+          "x": 50,
+          "y": 10,
+          "colour": "#ff3f3f",
+          "describe": "the remaining inline body paints a second layer"
+        }
+      ]
+    },
+    {
+      "name": "inline_body_under_a_translucent_inline_child",
+      "html": "<!doctype html><body style=\"margin:0;display:inline;background:rgba(255,0,0,.5);font:20px/20px monospace;color:transparent\"><span style=\"background:rgba(0,0,255,.5)\">MMMMMMMM</span></body>",
+      "known_failure": "Inline painting stores one flattened background per text fragment, so a translucent descendant replaces the propagated inline body's own fragment background instead of compositing over it. Chromium paints canvas red, then the body's fragment red, then the child's blue; Litebird skips the middle layer.",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#7f1f9f",
+          "describe": "the translucent child composites over the inline body fragment and the canvas"
+        },
+        {
+          "kind": "pixel",
+          "x": 30,
+          "y": 10,
+          "colour": "#7f1f9f",
+          "describe": "the three layers persist across the child fragment"
+        },
+        {
+          "kind": "pixel",
+          "x": 200,
+          "y": 10,
+          "colour": "#ff7f7f",
+          "describe": "outside the fragment only the red canvas remains"
+        }
+      ]
+    },
+    {
+      "name": "root_background_image_blocks_body_propagation",
+      "html": "<!doctype html><html style=\"background-image:linear-gradient(#0000ff,#0000ff)\"><body style=\"margin:20px;background:#ff0000;height:50px\"></body></html>",
+      "known_failure": "Background images are not represented by the layout style or painted. A non-none root image should prevent body propagation: Chromium paints blue outside and the red body box inside; Litebird instead propagates red everywhere.",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "the root image covers the canvas"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#ff0000",
+          "describe": "the body paints only its box"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#0000ff",
+          "describe": "the root image wins at the far corner"
+        }
+      ]
+    },
+    {
+      "name": "root_opacity_applies_to_the_document_paint",
+      "html": "<!doctype html><html style=\"opacity:0;background:#0000ff\"><body style=\"background:#ff0000;height:50px\"></body></html>",
+      "known_failure": "Element opacity groups are not applied by the display-list painter. Chromium composites the zero-opacity root to white; Litebird still paints its root canvas and body.",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "a zero-opacity root contributes nothing"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#ffffff",
+          "describe": "its descendant contributes nothing"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ffffff",
+          "describe": "the far corner remains white"
+        }
+      ]
+    },
+    {
+      "name": "hidden_body_children_do_not_paint_but_canvas_does",
+      "html": "<!doctype html><body style=\"visibility:hidden;background:#ff0000\"><div style=\"width:40px;height:40px;background:#0000ff\"></div></body>",
+      "known_failure": "The painter does not implement visibility:hidden for descendants; only the separate canvas propagation behavior is implemented.",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "the body color still reaches the canvas"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#ff0000",
+          "describe": "the hidden child must not paint blue"
+        }
+      ]
+    },
+    {
+      "name": "a_body_with_display_contents_has_no_canvas_color",
+      "html": "<!doctype html><body style=\"display:contents;background:#ff0000;color:transparent\">hello</body>",
+      "known_failure": "display:contents is not represented by the layout display enum. Chromium leaves the canvas white when the body generates no box; Litebird treats it as a block and propagates red.",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "the boxless body does not supply the canvas"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ffffff",
+          "describe": "the viewport remains white"
+        }
+      ]
+    },
+    {
+      "name": "inline_body_honors_its_default_horizontal_margin",
+      "html": "<!doctype html><body style=\"display:inline;background:rgba(255,0,0,.5);color:transparent\">hello world</body>",
+      "known_failure": "The document-body placement path only handles a block-level body. Chromium starts the inline body at x=8; the anonymous layout wrapper currently starts its fragments at x=0.",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff7f7f",
+          "describe": "the inline body does not cover the viewport corner"
+        }
+      ]
+    },
+    {
+      "name": "iframe_child_box_paints_above_its_translucent_canvas",
+      "html": "<!doctype html><body style=\"margin:0;background:#0000ff\"><iframe style=\"display:block;position:absolute;left:20px;top:20px;border:0;width:100px;height:80px\" srcdoc=\"&lt;body style=&quot;margin:0;background:rgba(255,0,0,.5)&quot;&gt;&lt;div style=&quot;position:absolute;left:10px;top:10px;width:30px;height:20px;background:#00ff00&quot;&gt;&lt;/div&gt;&lt;/body&gt;\"></iframe></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#80007f",
+          "describe": "child canvas blends with the blue parent"
+        },
+        {
+          "kind": "pixel",
+          "x": 30,
+          "y": 30,
+          "colour": "#00ff00",
+          "describe": "the child box paints over its own canvas"
+        },
+        {
+          "kind": "pixel",
+          "x": 119,
+          "y": 99,
+          "colour": "#80007f",
+          "describe": "alpha reaches the child viewport edge"
+        },
+        {
+          "kind": "pixel",
+          "x": 120,
+          "y": 100,
+          "colour": "#0000ff",
+          "describe": "the child is bounded by its frame"
+        }
+      ]
+    },
+    {
+      "name": "nested_iframe_canvases_compose_without_escaping",
+      "html": "<!doctype html><body style=\"margin:0;background:#0000ff\"><iframe style=\"display:block;position:absolute;left:20px;top:20px;border:0;width:100px;height:80px\" srcdoc=\"&lt;body style=&quot;margin:0;background:rgba(255,0,0,.5)&quot;&gt;&lt;iframe style=&quot;display:block;position:absolute;left:10px;top:10px;border:0;width:40px;height:30px&quot; srcdoc=&quot;&amp;lt;body style=&amp;quot;margin:0;background:rgba(0,255,0,.5)&amp;quot;&amp;gt;&amp;lt;/body&amp;gt;&quot;&gt;&lt;/iframe&gt;&lt;/body&gt;\"></iframe></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "parent remains blue"
+        },
+        {
+          "kind": "pixel",
+          "x": 21,
+          "y": 21,
+          "colour": "#80007f",
+          "describe": "first canvas is red over blue"
+        },
+        {
+          "kind": "pixel",
+          "x": 31,
+          "y": 31,
+          "colour": "#40803f",
+          "describe": "grandchild green is over the translucent first canvas"
+        },
+        {
+          "kind": "pixel",
+          "x": 70,
+          "y": 31,
+          "colour": "#80007f",
+          "describe": "the grandchild stops at its own edge"
+        },
+        {
+          "kind": "pixel",
+          "x": 120,
+          "y": 100,
+          "colour": "#0000ff",
+          "describe": "the outer frame stops at its edge"
+        }
+      ]
+    },
+    {
+      "name": "a_third_alpha_uses_the_whole_color_not_only_red",
+      "html": "<!doctype html><body style=\"margin:20px;height:40px;background:rgba(17,64,222,.33)\"></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#b1c0f4",
+          "describe": "channels blend over white at the origin"
+        },
+        {
+          "kind": "pixel",
+          "x": 25,
+          "y": 25,
+          "colour": "#b1c0f4",
+          "describe": "the body is not blended again"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#b1c0f4",
+          "describe": "the same blend reaches the far corner"
+        }
+      ]
+    },
+    {
+      "name": "root_currentcolor_is_resolved_before_propagation",
+      "html": "<!doctype html><html style=\"color:#1140de;background-color:currentcolor\"><body style=\"background-color:transparent;height:50px\"></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#1140de",
+          "describe": "the resolved root currentcolor supplies the canvas"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#1140de",
+          "describe": "the body stays transparent"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#1140de",
+          "describe": "the resolved color covers the viewport"
+        }
+      ]
+    },
+    {
+      "name": "root_custom_property_is_resolved_before_propagation",
+      "html": "<!doctype html><html style=\"--tone:#123456;background-color:var(--tone)\"><body style=\"background-color:transparent;height:50px\"></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#123456",
+          "describe": "the root custom property supplies the canvas"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#123456",
+          "describe": "no default body background obscures it"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#123456",
+          "describe": "the resolved color covers the viewport"
+        }
+      ]
+    },
+    {
+      "name": "author_layer_can_make_the_body_white",
+      "html": "<!doctype html><html style=\"background:#0000ff\"><head><style>@layer base {body {background-color:#ffffff}}</style></head><body style=\"margin:20px;height:50px\"></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "the root still supplies blue"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#ffffff",
+          "describe": "a layered author declaration beats the UA default"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#0000ff",
+          "describe": "the white body does not replace the root canvas"
         }
       ]
     }

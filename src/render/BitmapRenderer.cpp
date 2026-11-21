@@ -159,15 +159,36 @@ void BitmapRenderer::set_pixel(int x, int y, Color color) {
     }
     if (color.a == 0) return;
 
-    if (color.a == 255) {
-        m_pixels[y * m_width + x] = color;
+    auto& dest = m_pixels[y * m_width + x];
+    if (color.a == 255 || dest.a == 0) {
+        dest = color;
+    } else if (dest.a == 255) {
+        // Source-over on the usual opaque viewport. Integer arithmetic avoids
+        // float truncation turning a half-red-on-white pixel into (255,126,126)
+        // instead of the browser's (255,127,127).
+        const unsigned a = color.a;
+        auto over = [a](unsigned src, unsigned dst) -> uint8_t {
+            return static_cast<uint8_t>((src * a + dst * (255u - a) + 127u) / 255u);
+        };
+        dest.r = over(color.r, dest.r);
+        dest.g = over(color.g, dest.g);
+        dest.b = over(color.b, dest.b);
     } else {
-        // Alpha blending
-        auto& dest = m_pixels[y * m_width + x];
-        float alpha = color.a / 255.0f;
-        dest.r = static_cast<uint8_t>(color.r * alpha + dest.r * (1.0f - alpha));
-        dest.g = static_cast<uint8_t>(color.g * alpha + dest.g * (1.0f - alpha));
-        dest.b = static_cast<uint8_t>(color.b * alpha + dest.b * (1.0f - alpha));
+        // Iframe bitmaps are initially transparent. Preserve straight alpha so
+        // their canvas and descendants can later composite over the embedding
+        // document rather than being flattened to white. alpha_n is the output
+        // alpha with denominator 255*255; each channel has the same divisor.
+        const unsigned a = color.a;
+        const unsigned remaining = 255u - a;
+        const unsigned alpha_n = a * 255u + dest.a * remaining;
+        auto over = [a, remaining, alpha_n, &dest](unsigned src, unsigned dst) -> uint8_t {
+            const unsigned value = src * a * 255u + dst * dest.a * remaining;
+            return static_cast<uint8_t>((value + alpha_n / 2u) / alpha_n);
+        };
+        dest.r = over(color.r, dest.r);
+        dest.g = over(color.g, dest.g);
+        dest.b = over(color.b, dest.b);
+        dest.a = static_cast<uint8_t>((alpha_n + 127u) / 255u);
     }
 }
 
@@ -218,7 +239,12 @@ void BitmapRenderer::draw_char(int x, int y, char c, Color color, int scale) {
 void BitmapRenderer::execute_command(const PaintCommand& cmd) {
     std::visit([this](auto&& arg) {
         using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, PushTransformCommand>) {
+        if constexpr (std::is_same_v<T, DrawCanvasCommand>) {
+            // The canvas is in viewport/device space, not in the scroll or
+            // element transform currently on the command stack. Clipping is
+            // still applied by set_pixel, allowing an enclosing target clip.
+            if (!arg.color.is_transparent()) fill_rect(0, 0, m_width, m_height, arg.color);
+        } else if constexpr (std::is_same_v<T, PushTransformCommand>) {
             auto curr = current_transform();
             m_transform_stack.push_back(curr.multiply(arg.matrix));
         } else if constexpr (std::is_same_v<T, PopTransformCommand>) {

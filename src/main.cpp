@@ -587,7 +587,9 @@ int main(int argc, char* argv[]) {
         for (const auto& cmd : display_list.commands()) {
             std::visit([](auto&& arg) {
                 using T = std::decay_t<decltype(arg)>;
-                if constexpr (std::is_same_v<T, litebird::DrawRectCommand>) {
+                if constexpr (std::is_same_v<T, litebird::DrawCanvasCommand>) {
+                    std::cout << "  DrawCanvas: Color: " << arg.color.to_hex() << "\n";
+                } else if constexpr (std::is_same_v<T, litebird::DrawRectCommand>) {
                     std::cout << "  DrawRect: [" << arg.rect.x << ", " << arg.rect.y
                               << ", " << arg.rect.width << ", " << arg.rect.height
                               << "] Color: " << arg.color.to_hex() << "\n";

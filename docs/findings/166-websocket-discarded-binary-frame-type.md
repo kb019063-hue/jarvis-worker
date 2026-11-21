@@ -1,6 +1,6 @@
-# Finding 164: WebSocket discarded `is_binary` and stringified every `send()` argument
+# Finding 166: WebSocket discarded `is_binary` and stringified every `send()` argument
 
-**Status:** Resolved in Phase 159 (`docs/phases/159-websocket-binary-frames.md`).
+**Status:** Resolved in Phase 161 (`docs/phases/161-websocket-binary-frames.md`).
 
 ## 1. What was wrong
 

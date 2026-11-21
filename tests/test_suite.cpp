@@ -30170,7 +30170,7 @@ TEST(arraybuffer_transfer_detach_and_resize) {
     assert(text("errName(function () { Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get.call({}); })") == "TypeError");
 }
 
-// Phase 159 (finding 164): WebSocket binary frames — send(ArrayBuffer |
+// Phase 161 (finding 166): WebSocket binary frames — send(ArrayBuffer |
 // TypedArray | DataView | Blob | File) and binaryType "blob" / "arraybuffer"
 // delivery (single and fragmented frames, detached/OOB rejection, synchronous
 // snapshotting, and Blob BufferSource parts).
@@ -30877,7 +30877,7 @@ int main() {
     // Phase 157: ArrayBuffer.prototype.transfer(), transferToFixedLength(), detached, and resize().
     RUN_TEST(arraybuffer_transfer_detach_and_resize);
 
-    // Phase 159: WebSocket binary frames — ArrayBuffer, TypedArray, DataView, and Blob.
+    // Phase 161: WebSocket binary frames — ArrayBuffer, TypedArray, DataView, and Blob.
     RUN_TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run

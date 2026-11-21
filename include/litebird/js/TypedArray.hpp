@@ -33,11 +33,18 @@ void install_typed_array_builtins(JsEnvironment& global);
 /// and `decode()` takes a view, so the two cannot exist apart.
 void install_text_codec_builtins(JsEnvironment& global);
 
-/// The bytes of an `ArrayBuffer` or of any typed-array view of one, copied out:
-/// the whole buffer for a buffer, and the view's window of it for a view. A
-/// `DataView` is not one of these types yet. False when `value` is neither, or
-/// when the buffer has been detached.
+/// True when `value` is an `ArrayBuffer`, a typed-array view, or a `DataView`
+/// (even if its backing buffer is detached or the view is out of bounds).
+bool is_buffer_source(const JsValue& value);
+
+/// The bytes of an `ArrayBuffer`, any typed-array view, or a `DataView`, copied
+/// out: the whole buffer for a buffer, and the view's live window of it for a
+/// view. False when `value` is none of these, or when the buffer has been
+/// detached or resized out of bounds.
 bool typed_array_bytes(const JsValue& value, std::string& out);
+
+/// A fixed-length `ArrayBuffer` holding a copy of `bytes` in the current realm.
+JsValue array_buffer_from_bytes(const std::string& bytes);
 
 /// A `Uint8Array` over a copy of `bytes`: the object `new Uint8Array([...])`
 /// makes. This is what `TextEncoder.prototype.encode` answers with, and what a

@@ -21,8 +21,10 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace litebird {
@@ -464,15 +466,25 @@ struct TypedArrayRealm {
     JsObject* dataview_proto{nullptr};
     JsObject* typed_array_proto{nullptr};
     JsObject* protos[kElementTypeCount]{};
-    JsValue constructors[kElementTypeCount];
-    JsValue typed_array_ctor;  // %TypedArray%, the abstract class
+    JsObject* typed_array_ctor_cell{nullptr};  // %TypedArray%'s function cell
 };
 
-// The realm's typed-array objects. A function-local static so it is torn down
-// before the heap it points into, in the same order the other built-ins use.
+// Per-JsIntrinsics typed-array prototypes so main pages, iframes, and Workers
+// each get their own ArrayBuffer/TypedArray prototypes without racing on one
+// process-wide struct. The map is process-lifetime (raw non-owning pointers,
+// rooted by each realm's global environment) so exit never races heap teardown.
 TypedArrayRealm& realm() {
-    static TypedArrayRealm instance;
-    return instance;
+    const JsIntrinsics* key = &JsIntrinsics::get();
+    thread_local const JsIntrinsics* cached_key = nullptr;
+    thread_local TypedArrayRealm* cached_val = nullptr;
+    if (cached_key == key && cached_val) return *cached_val;
+    static auto* mu = new std::mutex();
+    static auto* table = new std::unordered_map<const JsIntrinsics*, TypedArrayRealm>();
+    std::lock_guard<std::mutex> lock(*mu);
+    TypedArrayRealm& entry = (*table)[key];
+    cached_key = key;
+    cached_val = &entry;
+    return entry;
 }
 
 JsValue allocate_buffer_object(const std::shared_ptr<ArrayBufferData>& bytes) {
@@ -1788,7 +1800,7 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
         return make_iterator(require_view(JsValue::current_this(), "TypedArray.prototype[Symbol.iterator]"), 1);
     });
 
-    realm().typed_array_ctor = constructor;
+    realm().typed_array_ctor_cell = constructor.function_cell();
 }
 
 // ---------------------------------------------------------------------------
@@ -1810,9 +1822,9 @@ void install_one(JsEnvironment& global, ElementType type) {
     // so `Object.getPrototypeOf(Uint8Array)` is the abstract class. A native
     // function keeps its properties in a table and has no heap cell until
     // function_cell() makes one, which is what a prototype link needs.
-    if (realm().typed_array_ctor.is_function()) {
+    if (realm().typed_array_ctor_cell) {
         if (JsObject* cell = constructor.function_cell())
-            cell->prototype = realm().typed_array_ctor.function_cell();
+            cell->prototype = realm().typed_array_ctor_cell;
     }
     // `@@typedarray-kind` is how a subclass's `new.target` finds its element
     // type: `class L extends Int16Array {}` makes an Int16Array view.
@@ -1869,11 +1881,14 @@ void install_one(JsEnvironment& global, ElementType type) {
         return make_view_object(std::move(data), realm().protos[static_cast<int>(type)]);
     }), 0);
 
-    realm().constructors[index] = constructor;
     global.define(name, std::move(constructor));
 }
 
 } // namespace
+
+bool is_buffer_source(const JsValue& value) {
+    return view_of(value) || dataview_of(value) || buffer_of(value);
+}
 
 bool typed_array_bytes(const JsValue& value, std::string& out) {
     out.clear();
@@ -1906,6 +1921,12 @@ bool typed_array_write(const JsValue& view, const uint8_t* bytes, std::size_t co
     if (count > capacity) return false;
     if (count) std::memcpy(elements_of(*data), bytes, count);
     return true;
+}
+
+JsValue array_buffer_from_bytes(const std::string& bytes) {
+    auto buffer = make_fixed_buffer(bytes.size());
+    if (!bytes.empty()) std::memcpy(buffer->bytes.data(), bytes.data(), bytes.size());
+    return make_buffer_object(buffer);
 }
 
 JsValue typed_array_from_bytes(const std::string& bytes) {

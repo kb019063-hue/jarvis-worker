@@ -30170,6 +30170,265 @@ TEST(arraybuffer_transfer_detach_and_resize) {
     assert(text("errName(function () { Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get.call({}); })") == "TypeError");
 }
 
+// Phase 161 (finding 166): WebSocket binary frames — send(ArrayBuffer |
+// TypedArray | DataView | Blob | File) and binaryType "blob" / "arraybuffer"
+// delivery (single and fragmented frames, detached/OOB rejection, synchronous
+// snapshotting, and Blob BufferSource parts).
+TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob) {
+    struct WireFrame {
+        uint8_t opcode{0};
+        bool masked{false};
+        std::string payload;
+    };
+    std::mutex wire_mu;
+    std::vector<WireFrame> wire_frames;
+
+    auto read_exact = [](int fd, uint8_t* dst, size_t n) -> bool {
+        size_t got = 0;
+        while (got < n) {
+            ssize_t r = ::recv(fd, dst + got, n - got, 0);
+            if (r <= 0) return false;
+            got += static_cast<size_t>(r);
+        }
+        return true;
+    };
+    auto send_all = [](int fd, const uint8_t* src, size_t n) -> bool {
+        size_t sent = 0;
+        while (sent < n) {
+            ssize_t w = ::send(fd, src + sent, n - sent, MSG_NOSIGNAL);
+            if (w <= 0) return false;
+            sent += static_cast<size_t>(w);
+        }
+        return true;
+    };
+    auto send_ws_frame = [&](int fd, uint8_t opcode, const std::string& payload, bool fin = true) {
+        std::vector<uint8_t> out;
+        out.push_back(static_cast<uint8_t>((fin ? 0x80u : 0x00u) | (opcode & 0x0Fu)));
+        const size_t n = payload.size();
+        if (n <= 125) {
+            out.push_back(static_cast<uint8_t>(n));
+        } else if (n <= 65535) {
+            out.push_back(126u);
+            out.push_back(static_cast<uint8_t>((n >> 8) & 0xFFu));
+            out.push_back(static_cast<uint8_t>(n & 0xFFu));
+        } else {
+            out.push_back(127u);
+            for (int i = 7; i >= 0; --i) out.push_back(static_cast<uint8_t>((n >> (i * 8)) & 0xFFu));
+        }
+        out.insert(out.end(), payload.begin(), payload.end());
+        (void)send_all(fd, out.data(), out.size());
+    };
+
+    auto srv = WebSocketObject::start_loopback_server([&](int cfd) {
+        std::string req;
+        char chunk[1024];
+        while (req.find("\r\n\r\n") == std::string::npos) {
+            ssize_t n = ::recv(cfd, chunk, sizeof(chunk), 0);
+            if (n <= 0) { ::close(cfd); return; }
+            req.append(chunk, static_cast<size_t>(n));
+        }
+        const std::string key_hdr = "Sec-WebSocket-Key: ";
+        const size_t kp = req.find(key_hdr);
+        if (kp == std::string::npos) { ::close(cfd); return; }
+        const size_t ke = req.find("\r\n", kp);
+        const std::string accept = WebSocketObject::calculate_accept_key(
+            req.substr(kp + key_hdr.size(), ke - kp - key_hdr.size()));
+        const std::string resp =
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
+        (void)send_all(cfd, reinterpret_cast<const uint8_t*>(resp.data()), resp.size());
+
+        while (true) {
+            uint8_t hdr[2];
+            if (!read_exact(cfd, hdr, 2)) break;
+            const uint8_t opcode = hdr[0] & 0x0Fu;
+            const bool masked = (hdr[1] & 0x80u) != 0;
+            uint64_t plen = hdr[1] & 0x7Fu;
+            if (plen == 126) {
+                uint8_t ext[2];
+                if (!read_exact(cfd, ext, 2)) break;
+                plen = (static_cast<uint64_t>(ext[0]) << 8) | ext[1];
+            } else if (plen == 127) {
+                uint8_t ext[8];
+                if (!read_exact(cfd, ext, 8)) break;
+                plen = 0;
+                for (int i = 0; i < 8; ++i) plen = (plen << 8) | ext[i];
+            }
+            uint8_t mask[4]{};
+            if (masked && !read_exact(cfd, mask, 4)) break;
+            std::string payload(static_cast<size_t>(plen), '\0');
+            if (plen > 0 && !read_exact(cfd, reinterpret_cast<uint8_t*>(payload.data()), static_cast<size_t>(plen))) {
+                break;
+            }
+            if (masked) {
+                for (size_t i = 0; i < payload.size(); ++i) {
+                    payload[i] = static_cast<char>(static_cast<uint8_t>(payload[i]) ^ mask[i % 4]);
+                }
+            }
+            if (opcode == 0x08u) {
+                std::string close_payload(2, '\0');
+                close_payload[0] = static_cast<char>(1000 >> 8);
+                close_payload[1] = static_cast<char>(1000 & 0xFF);
+                send_ws_frame(cfd, 0x08u, close_payload, true);
+                break;
+            }
+            {
+                std::lock_guard<std::mutex> lock(wire_mu);
+                wire_frames.push_back(WireFrame{opcode, masked, payload});
+            }
+            if (opcode == 0x01u && payload == "FRAG") {
+                send_ws_frame(cfd, 0x02u, std::string("\x00\xff", 2), false);
+                send_ws_frame(cfd, 0x00u, std::string("\xfe\x80", 2), false);
+                send_ws_frame(cfd, 0x00u, std::string("\x01\x02", 2), true);
+            } else {
+                send_ws_frame(cfd, opcode, payload, true);
+            }
+        }
+        ::close(cfd);
+    });
+    assert(srv && srv->port != 0);
+
+    TestPage page;
+    auto& js = page.js;
+    js.eval(R"JS(
+        function toHex(ab) {
+            var u = new Uint8Array(ab);
+            var s = '';
+            for (var i = 0; i < u.length; i++) s += (u[i] < 16 ? '0' : '') + u[i].toString(16);
+            return s;
+        }
+        function errName(fn) {
+            try { fn(); return 'ok'; } catch (e) { return e && e.name ? e.name : String(e); }
+        }
+        var res = {};
+        var done = false;
+        var blobPromiseDone = false;
+        var detBuf = new ArrayBuffer(4);
+        detBuf.transfer();
+        res.blobDetached = errName(function () { new Blob([detBuf]); });
+
+        var ws = new WebSocket("ws://127.0.0.1:)JS" + std::to_string(srv->port) + R"JS(/bin");
+        res.initBinaryType = ws.binaryType;
+        res.connDetached = errName(function () { ws.send(detBuf); });
+
+        ws.onopen = function () {
+            res.openDetachedAB = errName(function () { ws.send(detBuf); });
+            var ab2 = new ArrayBuffer(4);
+            var view2 = new Uint8Array(ab2);
+            var dv2 = new DataView(ab2);
+            ab2.transfer();
+            res.openDetachedView = errName(function () { ws.send(view2); });
+            res.openDetachedDV = errName(function () { ws.send(dv2); });
+
+            var rab = new ArrayBuffer(8, { maxByteLength: 16 });
+            var rfixed = new Uint8Array(rab, 4, 2);
+            var rtrack = new Uint8Array(rab);
+            rtrack.set([1, 2, 3, 4, 5, 6, 7, 8]);
+            rab.resize(3);
+            res.openOobView = errName(function () { ws.send(rfixed); });
+
+            // 1. ArrayBuffer (received while binaryType === "blob") + immediate mutation
+            var b1 = new Uint8Array([0, 255, 254, 128, 65]);
+            ws.send(b1.buffer);
+            b1[0] = 99;
+            b1[1] = 99;
+
+            // 2. TypedArray subarray (non-zero byteOffset + window length)
+            var b2 = new Uint8Array([10, 20, 30, 40, 50]);
+            ws.send(b2.subarray(1, 4));
+
+            // 3. DataView (non-zero byteOffset + window length)
+            ws.send(new DataView(b2.buffer, 2, 2));
+
+            // 4. Blob composed of TypedArray subarray + DataView + NUL string
+            var blob = new Blob([b2.subarray(0, 2), new DataView(b2.buffer, 3, 2), "\x00Z"]);
+            ws.send(blob);
+
+            // 5. File (subclass of Blob)
+            var file = new File([new Uint8Array([171, 0, 205])], "sample.bin", { type: "application/octet-stream" });
+            ws.send(file);
+
+            // 6. Length-tracking view over a resized ArrayBuffer (live 3 bytes)
+            ws.send(rtrack);
+
+            // 7. Empty binary frame (0 bytes, opcode 0x02)
+            ws.send(new Uint8Array(0));
+
+            // 8. 3-fragment binary message from server
+            ws.send("FRAG");
+
+            // 9. Text frame while binaryType === "arraybuffer" (non-string coerced)
+            ws.send(null);
+        };
+
+        var count = 0;
+        ws.onmessage = function (e) {
+            count++;
+            if (count === 1) {
+                var okBlob = (e.data instanceof Blob) && e.data.size === 5 && e.data.type === "";
+                ws.binaryType = "arraybuffer";
+                e.data.arrayBuffer().then(function (ab) {
+                    res.m1 = okBlob + ":" + (ab instanceof ArrayBuffer) + ":" + toHex(ab);
+                    blobPromiseDone = true;
+                });
+            } else if (count >= 2 && count <= 8) {
+                res["m" + count] = (e.data instanceof ArrayBuffer) + ":" + e.data.resizable + ":" + e.data.byteLength + ":" + toHex(e.data);
+            } else if (count === 9) {
+                res.m9 = (typeof e.data) + ":" + e.data;
+                ws.close(1000, "bin-done");
+            }
+        };
+        ws.onclose = function (e) {
+            res.close = e.code + ":" + e.wasClean;
+            done = true;
+        };
+    )JS");
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+        if (js.eval("done && blobPromiseDone").is_truthy()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(js.eval("done && blobPromiseDone").is_truthy());
+
+    assert(js.eval("res.blobDetached").to_string() == "TypeError");
+    assert(js.eval("res.initBinaryType").to_string() == "blob");
+    assert(js.eval("res.connDetached").to_string() == "InvalidStateError");
+    assert(js.eval("res.openDetachedAB").to_string() == "TypeError");
+    assert(js.eval("res.openDetachedView").to_string() == "TypeError");
+    assert(js.eval("res.openDetachedDV").to_string() == "TypeError");
+    assert(js.eval("res.openOobView").to_string() == "TypeError");
+
+    assert(js.eval("res.m1").to_string() == "true:true:00fffe8041");
+    assert(js.eval("res.m2").to_string() == "true:false:3:141e28");
+    assert(js.eval("res.m3").to_string() == "true:false:2:1e28");
+    assert(js.eval("res.m4").to_string() == "true:false:6:0a142832005a");
+    assert(js.eval("res.m5").to_string() == "true:false:3:ab00cd");
+    assert(js.eval("res.m6").to_string() == "true:false:3:010203");
+    assert(js.eval("res.m7").to_string() == "true:false:0:");
+    assert(js.eval("res.m8").to_string() == "true:false:6:00fffe800102");
+    assert(js.eval("res.m9").to_string() == "string:null");
+    assert(js.eval("res.close").to_string() == "1000:true");
+    assert(js.eval("ws.bufferedAmount").to_number() == 0);
+
+    // Verify wire opcodes, masking, and raw payload bytes recorded by the server.
+    std::lock_guard<std::mutex> lock(wire_mu);
+    assert(wire_frames.size() == 9);
+    for (const auto& f : wire_frames) assert(f.masked);
+    assert(wire_frames[0].opcode == 0x02u && wire_frames[0].payload == std::string("\x00\xff\xfe\x80" "A", 5));
+    assert(wire_frames[1].opcode == 0x02u && wire_frames[1].payload == std::string("\x14\x1e\x28", 3));
+    assert(wire_frames[2].opcode == 0x02u && wire_frames[2].payload == std::string("\x1e\x28", 2));
+    assert(wire_frames[3].opcode == 0x02u && wire_frames[3].payload == std::string("\x0a\x14\x28\x32\x00" "Z", 6));
+    assert(wire_frames[4].opcode == 0x02u && wire_frames[4].payload == std::string("\xab\x00\xcd", 3));
+    assert(wire_frames[5].opcode == 0x02u && wire_frames[5].payload == std::string("\x01\x02\x03", 3));
+    assert(wire_frames[6].opcode == 0x02u && wire_frames[6].payload.empty());
+    assert(wire_frames[7].opcode == 0x01u && wire_frames[7].payload == "FRAG");
+    assert(wire_frames[8].opcode == 0x01u && wire_frames[8].payload == "null");
+}
+
 TEST(a_definition_names_the_function_it_makes) {
     using namespace litebird;
 
@@ -30838,6 +31097,9 @@ int main() {
 
     // Phase 157: ArrayBuffer.prototype.transfer(), transferToFixedLength(), detached, and resize().
     RUN_TEST(arraybuffer_transfer_detach_and_resize);
+
+    // Phase 161: WebSocket binary frames — ArrayBuffer, TypedArray, DataView, and Blob.
+    RUN_TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

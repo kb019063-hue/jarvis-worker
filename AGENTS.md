@@ -172,10 +172,10 @@ asan`.
 - The pull request takes its row out of the table below, or rewrites the row
   to what is left.
 - The `WIP:` comes off the title. Merged into `main` with a merge commit
-  (`gh pr merge N --merge`) once CI is green, and CI on `main` checked
-  afterwards, in the same turn: once you have merged and replied, GitHub is
-  out of reach until the person presses Continue ("The turn, and what a
-  merge does to it", below).
+  (`gh pr merge N --merge`) once CI is green, and the merge comes last:
+  minutes after it GitHub is out of reach until the person presses
+  Continue, so CI on `main` is looked at when the next turn begins, by
+  whoever has one ("The turn, and what a merge does to it", below).
 - `python3 tools/ci/check_pr.py merge N` says "ready" right before the merge.
   It asks what is easy to believe and was wrong more than once: that `main`
   is in the head commit, that CI passed on that commit, that the numbers are
@@ -358,7 +358,9 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   merged on top meanwhile. A red `main` is the next task of whoever merged
   last, before anything else, and the person we work for should hear of it.
   Look for a repair that exists (`gh pr list`, `git log origin/main`) before
-  writing one.
+  writing one. (Since 21 November the agent that merged is cut off from
+  GitHub within minutes and cannot watch: "Nobody sees CI on `main` after
+  their own merge", below, says what is left.)
 - **A page that "reported nothing" in the sanitizer job was the engine's
   real-time limit, not chance.** The job failed that way on `main` at
   `73e23a2` and on #73's first commit: the engine stops a page's callbacks
@@ -433,31 +435,57 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   day. So what has to happen is done before the reply, and the reply, which
   is all that reaches the person, says which pull request is merged, which
   is still open and why, and what they have to do before you can go on.
-- **After `gh pr merge`, GitHub still answers until the turn ends.** #171
-  was merged on 21 November at 03:05:20. Ten seconds later `git fetch` and
-  `git push --dry-run` worked, and within the minute a comment on one pull
-  request and `gh pr close` on another. A new pull request can be opened
-  from the same branch too: #164 was, a minute after #162 had been merged
-  from it, and #159 seventeen minutes after #146; thirteen branches have
-  done it. So what a merge leaves to do is done in that turn: CI on `main`
-  watched to its end, and `main` repaired if it is red ("Watch CI on
-  `main`", above); the notes in the pull requests you carried; what you
-  leave open closed, or handed over in the reply.
-- **Once that turn has ended, the branch is `pr_merged` and GitHub is out of
-  reach.** The next message came with a note from the platform: edit no
+- **The merge is the last thing an agent does with GitHub.** Minutes after
+  `gh pr merge` the platform cuts the branch off, in the middle of the
+  turn. #175 was merged on 21 November at 03:50:48. `gh` answered until
+  03:51:29, and the next command, at most four minutes later, was refused
+  before any of it ran: "Remote GitHub access is blocked for this branch
+  because its pull request was merged or closed. If the Continue button is
+  available, use it to start a new branch in this session." The turn had
+  not ended, and it had begun with the branch called `active`. After #171,
+  the same morning, everything that worked fell in the first 52 seconds,
+  and the turn ended there. It has not always come so soon: on 19 November
+  #122 was opened from the branch of #118 twenty-nine minutes after that
+  was merged, and thirteen branches have a pull request opened after one
+  of theirs was merged, the last of them on 20 November. Count on no time
+  at all. Everything that needs GitHub comes before the merge: the notes
+  in the pull requests you carried, closing what you leave open, the look
+  at CI on `main`. After it comes the reply.
+  #175 put the opposite here ("GitHub still answers until the turn ends"),
+  written from those 52 seconds; its own merge refuted it within five
+  minutes, and #179 took it out. If you read it, it was wrong.
+- **Nobody sees CI on `main` after their own merge.** A run takes
+  fourteen minutes at the least, and the agent that merged is cut off
+  before that. #170 was merged on 21 November at 05:07:54, two minutes
+  after its CI had passed, on a head without #174, merged at 04:55:49.
+  Each had added a unit suite and each README.md said 300, so git merged
+  the two without a conflict into a tree with 301 suites and a README.md
+  that says 300, and `main` failed at 05:09:56 ("Merged with `WIP:` in the
+  title, on a head without `main`", above, is the same accident). It was
+  repaired in #179 by an agent continued at 05:12 for something else,
+  because the first thing it did was look at `main`. So:
+  `python3 tools/ci/check_pr.py merge N` in the minute before the merge,
+  since you will not be there to repair what it would have told you; the
+  reply says that the run on `main` has not been seen; and every turn
+  begins with `gh run list --branch main --limit 3`. Whoever finds `main`
+  red repairs it before anything else: look for a repair that exists, and
+  open yours as a pull request at once, with "main is red" in its title,
+  so that the next agent finds it.
+- **A branch that is `pr_merged` stays so until the person presses
+  Continue.** A message to it comes with a note from the platform: edit no
   file, commit nothing, and pushes, pull requests and every `gh` call that
   reaches GitHub "will fail and must not be attempted"; files can be read
   and questions answered. (21 November, 03:40, the first message after
-  #171. Nothing was tried, as the note says; the checkout was the branch's
-  base commit.) It stays that way until the person presses Continue beside
-  the pull request's status, or starts a new session where there is no
-  such button, so that is the first thing to tell a person who writes to
-  such a branch. And an agent that has merged and stopped cannot be reached
-  through GitHub by anyone: a note on its pull request waits until it is
-  continued, and what it should do next has to be said to it by the person.
+  #171. Nothing was tried, as the note says.) It ends when the person
+  presses Continue beside the pull request's status, or starts a new
+  session where there is no such button, so that is the first thing to
+  tell a person who writes to such a branch. And an agent that has merged
+  cannot be reached through GitHub by anyone: a note on its pull request
+  waits until it is continued, and what it should do next has to be said
+  to it by the person.
 - **Continue is a new branch, cut from `main` as it is then.** It has
   another name (`arena/` and another ID), and the old one is no longer
-  yours to push to. One session has had eleven names since 15 November, so
+  yours to push to. One session has had twelve names since 15 November, so
   an ID is not an agent: two pull requests with different IDs can be one
   agent's, and GitHub does not say. A pull request still open on the old
   branch cannot be pushed to any more. It can be merged as it is, when
@@ -465,15 +493,14 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   merged into the new branch and landed from there ("A finished pull
   request whose session has gone quiet", above). #134 was opened a minute
   after #130 had been merged from the same branch, the turn ended, and it
-  was carried in #141; #164 was closed. So a pull request opened after a
-  merge is merged in the same turn, or the reply says that it is open and
-  what should become of it.
-- **Whether another task follows the merge is for the person to say.**
-  Asked for one task, an agent does what the merge leaves to do, and
-  replies. Asked for more, the next one begins before the reply, because
-  afterwards nothing can begin it: `git merge --ff-only origin/main`, a
-  claim as in "Before starting", and a pull request from the same branch,
-  to which the bullet above applies.
+  was carried in #141; #164, opened a minute after #162, was closed
+  unmerged. So no second pull request is opened from a branch whose first
+  is merged: one branch, one pull request, one merge.
+- **A second task needs a Continue.** Whether another task follows the
+  merge is for the person to say, and the agent that merged cannot claim
+  one: a claim is a push and a pull request. So the reply after a merge
+  says what is merged, and that the next task begins when they press
+  Continue.
 
 **The sandbox**
 
@@ -590,3 +617,4 @@ Rows that share files should not be in work at the same time.
 | ~~**A `String` object's own index properties are not described.**~~ **Fixed in Phase 132 (finding 137).** A String exotic object has its UTF-16 code-unit indices as own properties: non-writable, enumerable, non-configurable. `descriptor_for` handled the primitive `JsType::String` and its wrapper's `length`, but skipped the `ObjectClass::String` wrapper's virtual indices; it now asks the wrapped string before the ordinary property map. `Object.getOwnPropertyDescriptor`, `Reflect.getOwnPropertyDescriptor`, `Object.getOwnPropertyDescriptors` and `propertyIsEnumerable` agree with Node.js v22.22.3, including a surrogate-pair code unit | `src/js/BuiltinsObject.cpp` (`descriptor_for`) | ECMA-262 §10.4.3, §20.1.2.9, §28.1.6 | Closed; an index past the wrapped length remains an ordinary property |
 | ~~**An array that is sealed or non-extensible still grows.**~~ **No longer true — fixed by #146 (Phase 116, finding 125) before this row was written.** Found while probing Phase 125 on a tree that predated that merge: `push` tested `object_val->frozen` rather than `[[IsExtensible]]`, so `Object.seal([1,2]).push(3)` grew the array where the language throws, and the same held for `unshift`, a growing `splice`, `sort` and `pop` on a sealed or `preventExtensions` array. Re-probed after merging #146: all eight cases throw exactly where Node v22 throws, so the row is closed with no code change of its own. Recorded rather than deleted because the probe and the reasoning are in finding 130 §4 | — | ECMA-262 §7.3.3 Set, §7.3.4 CreateDataPropertyOrThrow | Closed by #146; verified against Node in Phase 125 |
 | **The early errors a class body still does not check.** Phase 128 (`docs/phases/128-a-class-body-only-knew-three-early-errors.md`) added the six regular rules of §15.7 — Contains SuperCall in a field initialiser and a static block, `super()` outside a derived constructor, an instance `constructor` that is an accessor, async or a generator, a field named `constructor`, a static element named `prototype` — for +173 cases of test262 and 0 lost. What is still open in that family: **136 more early-error failures** outside the class-body rules (60 in `language/expressions/object`, 64 across the two `function` directories, 12 in assignment and delete), and **`class/dstr`'s 144**, which is destructuring in parameter position and a parser area of its own. Beyond the early errors, `Proxy` (96 cases) and `$262` (53, the suite's own host object: `detachArrayBuffer`, `createRealm`, `gc`) are whole features rather than repairs | `src/js/JsParser.cpp` (`parse_class`, `SuperExpr`) | Phase 128 / finding 133 (`docs/findings/133-five-hundred-failures-one-question.md`) | The two rules that look alike are not: `super()` in a method is a *grammar* absence (a FunctionBody does not contain it, so Node refuses to parse rather than throwing), while a missed runtime `TypeError` is a different and much larger set of failures. Grading a parser change needs the two-binary run — a narrowing change can raise the pass count while widening a bug |
+| **A function's `name` and `length` are virtual, so their descriptors lie.** They are answered out of `FunctionData` (`JsValue.cpp`, the `name`/`length` cases) and are absent from the function's own property table, so `Object.getOwnPropertyNames(function (a) {})` is `""` where the language lists `length,name,arguments,caller,prototype`; `f.name = 'x'` writes through where the property is non-writable and non-enumerable; and `delete f.name` leaves the name in place where the language removes it. The same storage makes `Object.getOwnPropertyDescriptor(f, 'length')` disagree with `f.length = 9`, which does write. Found by Phase 138 (`docs/phases/138-an-anonymous-class-takes-the-name-it-is-bound-to.md`) exposing 43 test262 cases that were behind the empty-name ones: they pass `verifyProperty`, which writes then deletes to prove an attribute, and this storage cannot answer that. Not fixed there because it is one row, not a change in passing | `src/js/JsValue.cpp` (the virtual `name`/`length` lookups), `src/js/JsEval.cpp` (`make_function`) | Phase 138 / finding 143; 43 failing cases of test262 (`language/expressions/assignment/dstr/*-fn-name-*`) | Install `name` and `length` as real own properties with `PropertyMap::Configurable` when a function is made, and let the payload keep only what the language cannot see. Everything that reads `fd.name` today has to keep working — `[Symbol.match]`-style names and `Class.prototype.constructor.name` both come through it |

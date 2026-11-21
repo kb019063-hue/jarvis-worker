@@ -1,7 +1,7 @@
-# Phase 174 — an abrupt completion still finishes the assignment
+# Phase 176 — an abrupt completion still finishes the assignment
 
 Task: the `language/expressions/assignment` cluster — 50 failing cases out of
-485, of which 25 were one theme. Finding 178.
+485, of which 25 were one theme. Finding 180.
 
 The two defects here are both about what happens when an assignment **jumps
 out before it is finished**. The standard has a rule for that in each case, and

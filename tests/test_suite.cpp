@@ -31564,7 +31564,7 @@ TEST(object_assign_boxes_throws_and_copies_every_own_key) {
 TEST(an_abrupt_completion_in_a_pattern_closes_the_iterator) {
     using namespace litebird;
 
-    // Phase 174, finding 178. Two ways an assignment jumps out before it is
+    // Phase 176, finding 180. Two ways an assignment jumps out before it is
     // finished, and the standard orders both of them:
     //
     //   base.prop = count += 1      with `base` null
@@ -32120,7 +32120,7 @@ int main() {
     // copies the symbols.
     RUN_TEST(object_assign_boxes_throws_and_copies_every_own_key);
 
-    // Phase 174: an abrupt completion closes the iterator, and the RHS of an
+    // Phase 176: an abrupt completion closes the iterator, and the RHS of an
     // assignment runs before a nullish base is reported.
     RUN_TEST(an_abrupt_completion_in_a_pattern_closes_the_iterator);
 

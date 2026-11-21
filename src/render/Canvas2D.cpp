@@ -2198,66 +2198,11 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
         return JsValue::make_boolean(false);
     }));
 
-    ctx.set_property("createImageData", JsValue::make_native_function([](const std::vector<JsValue>& args) {
-        int w = args.size() >= 1 ? std::max(0, static_cast<int>(args[0].to_number())) : 0;
-        int h = args.size() >= 2 ? std::max(0, static_cast<int>(args[1].to_number())) : 0;
-        if (args.size() == 1 && args[0].is_object()) {
-            w = std::max(0, static_cast<int>(args[0].get_property("width").to_number()));
-            h = std::max(0, static_cast<int>(args[0].get_property("height").to_number()));
-        }
-        if (w <= 0 || h <= 0 || static_cast<int64_t>(w) * h > 262144) {
-            return JsValue::make_undefined();
-        }
-        JsValue out = JsValue::make_object();
-        out.set_property("width", JsValue::make_number(w));
-        out.set_property("height", JsValue::make_number(h));
-        const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
-        std::vector<JsValue> elems(n, JsValue::make_number(0));
-        out.set_property("data", JsValue::make_array(elems));
-        return out;
-    }));
-
-    ctx.set_property("getImageData", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
-        if (args.size() < 4) return JsValue::make_undefined();
-        int sx = static_cast<int>(args[0].to_number());
-        int sy = static_cast<int>(args[1].to_number());
-        int sw = static_cast<int>(args[2].to_number());
-        int sh = static_cast<int>(args[3].to_number());
-        if (sw < 0) { sx += sw; sw = -sw; }
-        if (sh < 0) { sy += sh; sh = -sh; }
-        if (sw <= 0 || sh <= 0 || static_cast<int64_t>(sw) * sh > 262144) {
-            return JsValue::make_undefined();
-        }
-        auto rgba = get_ctx()->get_image_data_rgba(sx, sy, sw, sh);
-        JsValue out = JsValue::make_object();
-        out.set_property("width", JsValue::make_number(sw));
-        out.set_property("height", JsValue::make_number(sh));
-        std::vector<JsValue> elems;
-        elems.reserve(rgba.size());
-        for (uint8_t byte : rgba) elems.push_back(JsValue::make_number(byte));
-        out.set_property("data", JsValue::make_array(elems));
-        return out;
-    }));
-
-    ctx.set_property("putImageData", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
-        if (args.size() < 3 || !args[0].is_object()) return JsValue::make_undefined();
-        const int w = static_cast<int>(args[0].get_property("width").to_number());
-        const int h = static_cast<int>(args[0].get_property("height").to_number());
-        const int dx = static_cast<int>(args[1].to_number());
-        const int dy = static_cast<int>(args[2].to_number());
-        if (w <= 0 || h <= 0 || static_cast<int64_t>(w) * h > 262144) return JsValue::make_undefined();
-        JsValue data = args[0].get_property("data");
-        if (!data.is_array()) return JsValue::make_undefined();
-        const auto& elems = data.array_elements();
-        const size_t need = static_cast<size_t>(w) * static_cast<size_t>(h) * 4u;
-        std::vector<uint8_t> rgba(need, 0);
-        for (size_t i = 0; i < need && i < elems.size(); ++i) {
-            const double v = elems[i].to_number();
-            rgba[i] = static_cast<uint8_t>(std::clamp(std::lround(std::isfinite(v) ? v : 0.0), 0l, 255l));
-        }
-        get_ctx()->put_image_data_rgba(rgba.data(), w, h, dx, dy);
-        return JsValue::make_undefined();
-    }));
+    // `createImageData`, `getImageData` and `putImageData` are not here: each
+    // hands back or takes an ImageData whose `data` is a Uint8ClampedArray, and
+    // only a realm can make one. They are installed on this object by
+    // DomHtmlBindings.cpp (Phase 139), over the pixel work in
+    // get_image_data_rgba() and put_image_data_rgba() below.
 
     // Live JS accessors for extended state properties (without modifying JsValue.cpp)
     constexpr uint8_t kAccFlags = PropertyMap::Enumerable | PropertyMap::Configurable;

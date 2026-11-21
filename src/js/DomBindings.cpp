@@ -670,8 +670,9 @@ void fill_dom_exception(JsValue& error, const std::string& name, const std::stri
     error.define_property("name", JsValue::make_string(name), PropertyMap::Hidden);
     error.define_property("message", JsValue::make_string(message), PropertyMap::Hidden);
     error.define_property("code", JsValue::make_number(legacy_code(name)), PropertyMap::Hidden);
-    error.define_property("stack", JsValue::make_string(name + ": " + message + "\n    at <anonymous>"),
-                          PropertyMap::Hidden);
+    // No own `stack`, for the reason js_make_error gives: ObjectClass::Error is
+    // the [[ErrorData]] slot the Error.prototype.stack accessor reports from,
+    // and DOMException.prototype inherits it through Error.prototype.
 }
 
 void setup_dom_exception(Iface& I) {

@@ -1123,9 +1123,14 @@ void install_error_builtins(JsIntrinsics& realm) {
             // V8-specific but called unconditionally by a lot of library code.
             js_define_method(ctor, "captureStackTrace", 1, [](Args args) {
                 JsValue target = js_arg(args, 0);
+                // Nothing to install: `stack` is the inherited accessor on
+                // Error.prototype, reported from the [[ErrorData]] slot, so a
+                // target that has the slot already answers the same text. A
+                // target that is not an error gets an ordinary own property
+                // through the same setter an assignment would use.
                 if (target.is_object_like() && !target.has_own_property("stack")) {
-                    target.define_property("stack", JsValue::make_string(js_describe_thrown(target) + "\n    at <anonymous>"),
-                                           PropertyMap::Hidden);
+                    JsValue text = JsValue::make_string(js_describe_thrown(target) + "\n    at <anonymous>");
+                    target.set_property("stack", text);
                 }
                 return JsValue::make_undefined();
             });

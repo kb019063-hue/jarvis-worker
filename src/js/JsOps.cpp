@@ -1446,9 +1446,17 @@ JsValue js_make_native(const char* name, int length, JsValue::NativeFn fn) {
     return v;
 }
 
+void js_mark_as_method(JsValue& function) {
+    // A MethodDefinition is an ordinary function object with no [[Construct]]:
+    // there is no way to write `new` in front of one in the language, and none
+    // in front of a built-in method either. `js_make_native` takes every native
+    // for a constructor unless its cell says otherwise, so a method says so.
+    if (JsObject* cell = function.function_cell()) cell->not_constructor = true;
+}
+
 JsValue js_make_method(const char* name, int length, JsValue::NativeFn fn) {
     JsValue method = js_make_native(name, length, std::move(fn));
-    if (JsObject* cell = method.function_cell()) cell->not_constructor = true;
+    js_mark_as_method(method);
     return method;
 }
 
@@ -1541,12 +1549,12 @@ void install_error_stack_accessor(JsIntrinsics& realm) {
 
 void js_define_method(JsObject* object, const char* name, int length, JsValue::NativeFn fn) {
     auto& entry = object->properties.entry(name);
-    entry.second = js_make_native(name, length, std::move(fn));
+    entry.second = js_make_method(name, length, std::move(fn));
     entry.flags = PropertyMap::Hidden;
 }
 
 void js_define_method(JsValue& object, const char* name, int length, JsValue::NativeFn fn) {
-    object.define_property(name, js_make_native(name, length, std::move(fn)), PropertyMap::Hidden);
+    object.define_property(name, js_make_method(name, length, std::move(fn)), PropertyMap::Hidden);
 }
 
 void js_define_hidden(JsObject* object, const std::string& name, JsValue value) {

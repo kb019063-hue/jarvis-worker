@@ -353,7 +353,15 @@ void install_number_builtins(JsIntrinsics& realm) {
              {"SQRT2", 1.4142135623730951}, {"SQRT1_2", 0.7071067811865476}}) {
         math.define_property(name, JsValue::make_number(value), 0);
     }
-    auto def = [&](const char* name, JsValue fn) { math.define_property(name, fn, PropertyMap::Hidden); };
+    // Math's twenty-six methods are MethodDefinitions like every other built-in
+    // method -- an ordinary function object with no [[Construct]] -- so each is
+    // marked here. They are made by math_unary or by a lambda, which keep the
+    // `name` and `length` the standard gives them, so the mark is set on the
+    // value rather than the value being rebuilt around a wrapper.
+    auto def = [&](const char* name, JsValue fn) {
+        js_mark_as_method(fn);
+        math.define_property(name, fn, PropertyMap::Hidden);
+    };
 
     def("abs", math_unary("abs", [](double x) { return std::fabs(x); }));
     def("ceil", math_unary("ceil", [](double x) { return std::ceil(x); }));

@@ -32,7 +32,7 @@ See [`docs/phases/157-arraybuffer-transfer-and-resize.md`](../phases/157-arraybu
   `1 → 0`) across `built-ins/ArrayBuffer`, `built-ins/DataView`,
   `built-ins/TypedArray`, and `built-ins/TypedArrayConstructors`.
 - 59/59 differential probes match Node.js v22.22.3 byte-for-byte.
-- `make test` (**314/314** suites, including
+- `make test` (**316/316** suites, including
   `arraybuffer_transfer_detach_and_resize`), `make js-conformance` (1144/1158),
   `make gc-oracle` (PASS).
 

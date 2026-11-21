@@ -79,7 +79,7 @@ Additional checks:
 
 - **Differential check vs Node.js v22.22.3:** 59/59 `ArrayBuffer`/`TypedArray`/`DataView`
   probes match byte-for-byte.
-- `make test`: **314 / 314** engine suites + 114 cross-origin checks (new
+- `make test`: **316 / 316** engine suites + 114 cross-origin checks (new
   suite: `arraybuffer_transfer_detach_and_resize`).
 - `make js-conformance`: 1144 / 1158 (98.8%), everyday probe 90/90, 0 crashes.
 - `make gc-oracle`: PASS.

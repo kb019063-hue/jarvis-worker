@@ -28599,6 +28599,8 @@ TEST(image_data_is_an_interface) {
     const std::string failed = js.eval("failures.join('\\n')").to_string();
     if (!failed.empty()) std::cerr << failed << "\n";
     assert(failed.empty());
+}
+
 // ---------------------------------------------------------------------------
 // CSS 2.1 Appendix E: the display list is emitted in paint phases, not in
 // document order (Phase 135, finding 140). Six boxes, in the document order

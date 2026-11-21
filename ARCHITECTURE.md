@@ -406,8 +406,11 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    outer border merge in
    the collapsed model, `empty-cells`, `caption-side`, `table-layout: fixed`,
    per-element scrollable `overflow: auto` containers (the viewport scrolls, inner
-   boxes clip), and rounded-corner clipping. The DOM is trustworthy; the box tree
-   handles everyday layouts but not full CSS2.2/CSS3 edge cases.
+   boxes clip), and `overflow` clipping to a rounded corner — a rounded
+   **background and border** paint correctly, anti-aliased at the arcs (Phase
+   122, finding 127), but the **clip** is the square `padding_box`. The DOM is
+   trustworthy; the box tree handles everyday layouts but not full
+   CSS2.2/CSS3 edge cases.
 2. **JavaScript is interpreted, and catastrophic-backtracking limits remain.**
    Scripts run on a tree-walking interpreter: 50 to 100 times slower than V8
    on loops and calls. Long strings are no longer quadratic (Phase 24), and
@@ -484,8 +487,10 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
    `MessageChannel`, XPath, Web Animations, `ElementInternals`, and what needs
    typed arrays (`ArrayBuffer`). The full lists are in Phase 27, section 12,
    Phase 28, section 10, Phase 36, section 9, and Phase 42.
-10. **JavaScript features that do not exist:** BigInt, `Proxy`, typed arrays,
-   modules, `with`, `Intl`. Holes in arrays arrived in Phase 81 (finding 87): an
+10. **JavaScript features that do not exist:** BigInt, `Proxy`, modules, `with`,
+   `Intl`. (Typed arrays and `ArrayBuffer` left this list in Phase 106, and
+   `DataView` and the iterating half of `%TypedArray%.prototype` in Phase 126 —
+   `src/js/TypedArray.cpp`, finding 131.) Holes in arrays arrived in Phase 81 (finding 87): an
    index is an own property or a hole, and every built-in agrees — `delete`,
    `new Array(n)`, a grown `length` and an elision in a literal all make holes.
    Details and the approximate

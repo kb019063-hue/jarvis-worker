@@ -66,6 +66,32 @@ std::vector<std::string> reflected_own_keys(const JsValue& object, bool include_
     return object.own_keys(include_non_enumerable);
 }
 
+/// The own keys `[[OwnPropertyKeys]]` reports for `object`: the string keys in
+/// `own_keys`' order (indices ascending, then creation order), and after every
+/// one of them the symbols, in the order they were made.
+///
+/// `own_keys` answers with strings only — the same answer a property table
+/// gives `Object.keys`, `for...in` and JSON — because most callers either
+/// cannot see a symbol key or are the very thing that must not. The ones that
+/// copy every key (`Object.assign`, spread, `Object.getOwnPropertyDescriptors`)
+/// have to add the symbols themselves; this is that list.
+std::vector<std::string> assign_keys(const JsValue& object) {
+    std::vector<std::string> keys = reflected_own_keys(object, false);
+    if (JsObject* cell = object.property_cell()) {
+        // The table is walked twice — once by `own_keys` above and once here —
+        // rather than counted first: the count a symbol key would have to be
+        // compared against is not `keys.size()`, because an array's indices
+        // are elements and not table entries.
+        for (const auto& entry : cell->properties) {
+            if (!(entry.flags & PropertyMap::Enumerable)) continue;
+            JsValue symbol;
+            if (!js_symbol_from_key(entry.first, symbol)) continue;
+            keys.push_back(entry.first);
+        }
+    }
+    return keys;
+}
+
 /// The table that holds `value`'s own named properties, if it has one.
 PropertyMap* own_table(const JsValue& value, bool create) {
     if (JsObject* cell = value.property_cell(create)) return &cell->properties;
@@ -644,12 +670,33 @@ void install_object_builtins(JsIntrinsics& realm) {
         }
         return JsValue::make_array(symbols);
     });
+    /// §20.1.2.1 `Object.assign`. Four things the signature makes look optional
+    /// are not: the target is boxed with `ToObject` (so `Object.assign(12, "ab")`
+    /// returns a Number object carrying `0` and `1`, and hands back the *box*,
+    /// never the primitive); each copy is a strict `Set` — `[[Set]]`'s `false`
+    /// throws a `TypeError` instead of dropping the value; the keys of a source
+    /// are the *own* keys `[[OwnPropertyKeys]]` gives, so the symbols come too,
+    /// after every string key and in creation order; and a source whose own key
+    /// has gone missing between the key list and the read (`Proxy`) skips it
+    /// rather than copying `undefined`.
     js_define_method(object_ctor, "assign", 2, [](Args args) {
-        JsValue target = js_arg(args, 0);
-        if (target.is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
+        JsValue target = js_to_object(js_arg(args, 0));
         for (size_t i = 1; i < args.size(); ++i) {
-            if (args[i].is_nullish()) continue;
-            for (const auto& key : reflected_own_keys(args[i], false)) target.set_property(key, args[i].get_property(key));
+            const JsValue& source = args[i];
+            if (source.is_nullish()) continue;
+            // `from` is the boxed source: a string source is read through its
+            // characters, which only a String object answers for.
+            JsValue from = js_to_object(source);
+            for (const auto& key : assign_keys(from)) {
+                // A key that was there for `[[OwnPropertyKeys]]` and is gone
+                // now — a Proxy that answers differently twice — is not copied.
+                if (!from.has_own_property(key)) continue;
+                JsValue value = from.get_property(key);
+                // `Set(target, key, value, true)`: no silent failures.
+                if (!target.set_property(key, value)) {
+                    js_throw_type_error("Cannot assign to read only property '" + key + "' of object");
+                }
+            }
         }
         return target;
     });
@@ -841,15 +888,34 @@ void install_object_builtins(JsIntrinsics& realm) {
         if (!target.is_function()) js_throw_type_error("Bind must be called on a function");
         JsValue bound_this = js_arg(args, 0);
         std::vector<JsValue> bound_args(args.size() > 1 ? args.begin() + 1 : args.end(), args.end());
-        JsValue bound = JsValue::make_native_function([target, bound_this, bound_args](Args call_args) {
-            std::vector<JsValue> all = bound_args;
+        // What the entry point needs is kept where the collector can see it
+        // (see JsValue::Extra::captured). A std::function's captures are not
+        // traced: a target that lived only inside one made every copy of this
+        // bound function look like the payload's one owner, the payload became
+        // a root, and the target -- with its closure, and the variables the
+        // closure holds -- was never collected.
+        //
+        // The captures are the target, the bound `this`, then the arguments
+        // already bound, in that order.
+        JsValue bound = JsValue::make_native_function([](Args call_args) {
+            const std::vector<JsValue>& kept = JsValue::current_captured();
+            if (kept.size() < 2) return JsValue::make_undefined();
+            std::vector<JsValue> all(kept.begin() + 2, kept.end());
             all.insert(all.end(), call_args.begin(), call_args.end());
             // `new boundFn()` constructs the target and ignores the bound
             // `this`. Inside, new.target is the target, or whatever function
             // Reflect.construct or a subclass's super() named instead.
-            if (JsValue::current_is_construct()) return js_construct(target, all, JsValue::current_new_target());
-            return target.call_with_this(bound_this, all);
+            if (JsValue::current_is_construct()) {
+                return js_construct(kept[0], all, JsValue::current_new_target());
+            }
+            return kept[0].call_with_this(kept[1], all);
         });
+        std::vector<JsValue> captures;
+        captures.reserve(2 + bound_args.size());
+        captures.push_back(target);
+        captures.push_back(bound_this);
+        captures.insert(captures.end(), bound_args.begin(), bound_args.end());
+        bound.set_payload_captured(std::move(captures));
         bound.set_forwards_construct();
         // `instanceof` has no `prototype` to walk to on a bound function: the
         // language asks the target, and this is where the target is kept.
@@ -1123,9 +1189,14 @@ void install_error_builtins(JsIntrinsics& realm) {
             // V8-specific but called unconditionally by a lot of library code.
             js_define_method(ctor, "captureStackTrace", 1, [](Args args) {
                 JsValue target = js_arg(args, 0);
+                // Nothing to install: `stack` is the inherited accessor on
+                // Error.prototype, reported from the [[ErrorData]] slot, so a
+                // target that has the slot already answers the same text. A
+                // target that is not an error gets an ordinary own property
+                // through the same setter an assignment would use.
                 if (target.is_object_like() && !target.has_own_property("stack")) {
-                    target.define_property("stack", JsValue::make_string(js_describe_thrown(target) + "\n    at <anonymous>"),
-                                           PropertyMap::Hidden);
+                    JsValue text = JsValue::make_string(js_describe_thrown(target) + "\n    at <anonymous>");
+                    target.set_property("stack", text);
                 }
                 return JsValue::make_undefined();
             });

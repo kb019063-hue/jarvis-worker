@@ -10,6 +10,7 @@
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/SvgRenderer.hpp"
 #include <cctype>
+#include <unordered_map>
 
 namespace litebird {
 
@@ -56,6 +57,173 @@ bool is_block_level_box(const LayoutBox& box) {
            box.box_type == BoxType::GridNode || box.box_type == BoxType::AnonymousBlock ||
            box.box_type == BoxType::TableNode || box.box_type == BoxType::TableRowNode ||
            box.box_type == BoxType::TableCellNode;
+}
+
+// Auto margins must be zero while calculating an auto width. Longhand
+// `margin-left:auto` can otherwise retain the user-agent body's old 8px in
+// the style's pixel field, so resolve just this root box's auto edges before
+// layout. The final horizontal auto margins depend on the used width below.
+void prepare_document_body(LayoutBox& box) {
+    const auto& s = *box.style;
+    if (!s.margin_top_auto && !s.margin_right_auto && !s.margin_bottom_auto && !s.margin_left_auto) return;
+    ComputedStyle used = s;
+    if (s.margin_top_auto) { used.margin.top = 0.0f; used.margin_percent.top = -1.0f; }
+    if (s.margin_right_auto) { used.margin.right = 0.0f; used.margin_percent.right = -1.0f; }
+    if (s.margin_bottom_auto) { used.margin.bottom = 0.0f; used.margin_percent.bottom = -1.0f; }
+    if (s.margin_left_auto) { used.margin.left = 0.0f; used.margin_percent.left = -1.0f; }
+    box.style = std::make_shared<const ComputedStyle>(std::move(used));
+}
+
+// The document tree currently starts at <body>, not <html>. Its coordinates
+// are content-box coordinates, so laying it out at (0, 0) without placing it
+// leaves the margin, border and padding above/to the left of the viewport.
+// Do this *after* layout: percentages and auto margins need the used width.
+void place_document_body(LayoutBox& box, float viewport_width, float viewport_height,
+                         const EdgeSizes* root_margin = nullptr) {
+    auto& d = box.dimensions;
+    const auto& s = *box.style;
+
+    if (s.margin_top_auto) d.margin.top = 0.0f;
+    if (s.margin_bottom_auto) d.margin.bottom = 0.0f;
+    if (!s.is_out_of_flow() && (s.margin_left_auto || s.margin_right_auto)) {
+        const float fixed = d.content.width + d.border.left + d.border.right +
+                            d.padding.left + d.padding.right +
+                            (s.margin_left_auto ? 0.0f : d.margin.left) +
+                            (s.margin_right_auto ? 0.0f : d.margin.right);
+        const float remaining = viewport_width - fixed;
+        if (s.margin_left_auto && s.margin_right_auto) {
+            // CSS 2.1 10.3.3, for the engine's left-to-right block direction.
+            d.margin.left = std::max(0.0f, remaining / 2.0f);
+            d.margin.right = remaining - d.margin.left;
+        } else if (s.margin_left_auto) {
+            d.margin.left = remaining;
+        } else {
+            d.margin.right = remaining;
+        }
+    }
+
+    // A body's top margin can collapse through a chain of first in-flow
+    // blocks. Merely adding the body margin would move common first headings
+    // and paragraphs too far. This handles nonempty first-child chains only;
+    // empty boxes, sibling-margin collapse, bottom margins and constrained
+    // heights still need the general block-formatting algorithm.
+    struct CollapsedEdge { LayoutBox* parent; float margin; float child_height_change = 0.0f; };
+    std::vector<CollapsedEdge> top_chain;
+    float largest_positive = std::max(0.0f, d.margin.top);
+    float most_negative = std::min(0.0f, d.margin.top);
+    LayoutBox* parent = &box;
+    while (parent) {
+        const auto& ps = *parent->style;
+        const auto& pd = parent->dimensions;
+        if (parent->box_type != BoxType::BlockNode || !parent->line_boxes.empty() ||
+            ps.is_out_of_flow() || ps.is_floated() || ps.overflow != Overflow::Visible ||
+            ps.contains_layout() || ps.contains_paint() || ps.min_height >= 0.0f ||
+            ps.max_height >= 0.0f || pd.border.top != 0.0f || pd.padding.top != 0.0f ||
+            parent->children.empty()) break;
+        const auto& first = parent->children.front();
+        const auto& cs = *first->style;
+        // A nonempty block can have a nonpositive *current* height when a
+        // negative child margin was incorrectly included in it. Do not mistake
+        // that for a genuinely empty box whose margins may collapse through it.
+        const bool has_in_flow_child = std::any_of(first->children.begin(), first->children.end(),
+            [](const auto& child) { return !child->style->is_out_of_flow() && !child->style->is_floated(); });
+        const bool empty_block = first->box_type == BoxType::BlockNode && !has_in_flow_child &&
+                                 first->line_boxes.empty() && first->dimensions.border_box().height <= 0.0f;
+        if ((first->box_type != BoxType::BlockNode && first->box_type != BoxType::FlexNode &&
+             first->box_type != BoxType::GridNode) ||
+            cs.is_out_of_flow() || cs.is_floated() || cs.clear_type != ClearType::None ||
+            cs.margin_top_auto || empty_block) break;
+        const float margin = first->dimensions.margin.top;
+        top_chain.push_back({parent, margin});
+        largest_positive = std::max(largest_positive, margin);
+        most_negative = std::min(most_negative, margin);
+        parent = first.get();
+    }
+    const float body_top = largest_positive + most_negative;
+
+    // Each collapsed margin used to be included in the auto height of every
+    // ancestor up to a definite-height box. Correct heights from the inside
+    // out; a fixed height stops the correction propagating through it.
+    float height_change = 0.0f;
+    for (auto it = top_chain.rbegin(); it != top_chain.rend(); ++it) {
+        it->child_height_change = height_change;
+        auto& pd = it->parent->dimensions;
+        const float old_height = pd.content.height;
+        if (it->parent->style->height < 0.0f) {
+            pd.content.height = std::max(0.0f, old_height - it->margin - height_change);
+        }
+        height_change = old_height - pd.content.height;
+    }
+
+    float x = d.margin.left + d.border.left + d.padding.left;
+    float y = body_top + d.border.top + d.padding.top;
+
+    // The `<html>` root has no box of its own here, so its margin used to be
+    // ignored entirely: `<html style="margin:30px">` moved nothing. CSS 2.1
+    // 8.3 puts the body inside the root's content box, and a margin on the root
+    // is outside it, so both edges move by the root's used margin. A root that
+    // states no margin contributes nothing and this is the previous behaviour.
+    if (root_margin) {
+        x += root_margin->left;
+        y += root_margin->top;
+    }
+    const auto inset = s.used_insets(viewport_width, viewport_height);
+    if (s.position == Position::Relative) {
+        if (s.has_left) x += inset.left;
+        else if (s.has_right) x -= inset.right;
+        if (s.has_top) y += inset.top;
+        else if (s.has_bottom) y -= inset.bottom;
+    } else if (s.is_out_of_flow()) {
+        if (s.has_left) x += inset.left;
+        else if (s.has_right) x = viewport_width - inset.right - d.margin.right -
+                                  d.border.right - d.padding.right - d.content.width;
+        if (s.has_top) y += inset.top;
+        else if (s.has_bottom) y = viewport_height - inset.bottom - d.margin.bottom -
+                                   d.border.bottom - d.padding.bottom - d.content.height;
+    }
+    // Shift each in-flow box and its line fragments once. Descendants of a
+    // collapsing parent also lose the child's margin that layout added inside
+    // the parent. A single iterative walk avoids a quadratic set of subtree
+    // shifts for a deeply nested first-child chain. The out-of-flow pass that
+    // follows places absolute and fixed descendants against their own block.
+    std::unordered_map<const LayoutBox*, CollapsedEdge> collapsed_margins;
+    for (const auto& edge : top_chain) {
+        if (edge.margin != 0.0f || edge.child_height_change != 0.0f) {
+            collapsed_margins.emplace(edge.parent, edge);
+        }
+    }
+    if (x == d.content.x && y == d.content.y && collapsed_margins.empty()) return;
+    struct Shift { LayoutBox* box; float dx; float dy; };
+    std::vector<Shift> stack{{&box, x - d.content.x, y - d.content.y}};
+    while (!stack.empty()) {
+        const auto current = stack.back();
+        stack.pop_back();
+        current.box->dimensions.content.x += current.dx;
+        current.box->dimensions.content.y += current.dy;
+        for (auto& line : current.box->line_boxes) {
+            line.rect.x += current.dx;
+            line.rect.y += current.dy;
+            for (auto& frag : line.fragments) {
+                frag.rect.x += current.dx;
+                frag.rect.y += current.dy;
+            }
+        }
+        float child_dy = current.dy;
+        float following_dy = 0.0f;
+        if (const auto found = collapsed_margins.find(current.box); found != collapsed_margins.end()) {
+            child_dy -= found->second.margin;
+            // A nested collapse may also have shortened the first child. Its
+            // following siblings must move by that height change, but the
+            // first child's own position must not.
+            following_dy = found->second.child_height_change;
+        }
+        for (std::size_t i = 0; i < current.box->children.size(); ++i) {
+            auto& child = current.box->children[i];
+            if (!child->style->is_out_of_flow()) {
+                stack.push_back({child.get(), current.dx, child_dy - (i == 0 ? 0.0f : following_dy)});
+            }
+        }
+    }
 }
 
 SharedComputedStyle resolve_element_style(
@@ -722,9 +890,39 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
         root_box = LayoutBox::create_block(nullptr, std::move(root_style));
     }
 
+    bool document_body_root = false;
+    if (root_node && root_node->is_document()) {
+        auto doc = std::static_pointer_cast<Document>(root_node);
+        if (auto body = doc->body(); body && root_box->node == body) document_body_root = true;
+    }
     root_box->dimensions.content.x = 0.0f;
     root_box->dimensions.content.y = 0.0f;
+    if (document_body_root) prepare_document_body(*root_box);
     root_box->layout(viewport_width, viewport_height);
+    if (document_body_root) {
+        // The root's own used margin, for the offset place_document_body adds.
+        // Only a root that states one contributes; percentages resolve against
+        // the viewport, which is the root's containing block.
+        EdgeSizes root_margin{0.0f};
+        bool has_root_margin = false;
+        if (root_node && root_node->is_document()) {
+            auto doc = std::static_pointer_cast<Document>(root_node);
+            if (auto html = doc->document_element()) {
+                if (html->tag_name() == "html") {
+                    const ComputedStyle root_style = resolver.resolve_style(html, nullptr);
+                    root_margin.top = root_style.margin_percent.top >= 0.0f
+                                          ? root_style.margin_percent.top * viewport_width / 100.0f
+                                          : root_style.margin.top;
+                    root_margin.left = root_style.margin_percent.left >= 0.0f
+                                           ? root_style.margin_percent.left * viewport_width / 100.0f
+                                           : root_style.margin.left;
+                    has_root_margin = root_margin.top != 0.0f || root_margin.left != 0.0f;
+                }
+            }
+        }
+        place_document_body(*root_box, viewport_width, viewport_height,
+                            has_root_margin ? &root_margin : nullptr);
+    }
     LayoutBox::resolve_out_of_flow_positions(root_box, viewport_width, viewport_height);
 
     // Non-recursive box-to-DOM geometry synchronization.

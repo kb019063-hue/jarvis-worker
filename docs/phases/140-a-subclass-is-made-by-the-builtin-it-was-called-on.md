@@ -86,12 +86,13 @@ JS conformance, full corpus: 1144/1158 (98.8%)  [29 files, 0 crashes, 0 timeouts
 rather than seven. The other case — `Array.from` *and* `Promise.resolve` in one
 script — still fails on its `Promise` half (see §4). Main was merged before this
 landed and had fixed one `iteration.dat` case of its own, so the tree this
-merges as prints **1145/1158 (98.9%)**; the ledger and the floor in `ci.yml`
-carry that number.
+first merged tree printed **1145/1158 (98.9%)**. A later merge of main
+fixed another iteration case; the current tree prints **1146/1158 (99.0%)**,
+and the ledger and CI floor carry that number.
 
 ```
 $ make test
-All 306 engine test suites passed successfully!
+All 327 engine test suites passed successfully!
 Cross-origin Window/Location and MessageChannel suite: 114 checks, 0 failure(s).
 ```
 

@@ -21,8 +21,11 @@ public:
 private:
     void execute_command(const PaintCommand& cmd);
     void set_pixel(int x, int y, Color color);
-    /// True when the device pixel survives every active overflow clip.
-    bool inside_clip(int x, int y) const;
+    /// How much of the device pixel survives every active overflow clip: 1
+    /// when all of it does, 0 when none does, and a fraction on the curve of a
+    /// rounded clip. Returns false and leaves `coverage` at 0 when the pixel
+    /// is outside.
+    bool clip_coverage(int x, int y, float& coverage) const;
     void fill_rect(int rx, int ry, int rw, int rh, Color color);
     void draw_char(int x, int y, char c, Color color, int scale = 2);
 
@@ -30,11 +33,19 @@ private:
         return m_transform_stack.empty() ? TransformMatrix2D::identity() : m_transform_stack.back();
     }
 
+    /// One overflow clip: the box that was clipped and, when it had one, the
+    /// corner radius it was clipped to. The radius is not part of `Rect`, and a
+    /// clip of a 40x40 box with `border-radius: 16px` is not a rectangle.
+    struct ClipRegion {
+        Rect rect;
+        float radius = 0.0f;
+    };
+
     int m_width;
     int m_height;
     std::vector<Color> m_pixels;
     std::vector<TransformMatrix2D> m_transform_stack;
-    std::vector<Rect> m_clip_stack;
+    std::vector<ClipRegion> m_clip_stack;
 };
 
 } // namespace litebird

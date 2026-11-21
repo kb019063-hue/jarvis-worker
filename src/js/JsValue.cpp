@@ -29,6 +29,7 @@ namespace {
 struct ExtraContents {
     std::shared_ptr<PropertyMap> props;
     JsValue::Extra::Payload payload;
+    std::shared_ptr<std::vector<JsValue>> captured;
 };
 }
 
@@ -37,14 +38,15 @@ struct ExtraContents {
 // chain as long as the loop ran, and letting each payload destroy the next in
 // place would use native stack in proportion to it.
 JsValue::Extra::~Extra() {
-    if (payload.index() == 0 && !props) return;     // owns nothing
+    if (payload.index() == 0 && !props && !captured) return;     // owns nothing
     using Queue = ReleaseQueue<ExtraContents>;
     if (Queue::busy()) {
-        Queue::defer(ExtraContents{std::move(props), std::move(payload)});
+        Queue::defer(ExtraContents{std::move(props), std::move(payload), std::move(captured)});
         return;
     }
     Queue::Drain drain;
     props.reset();
+    captured.reset();
     payload.emplace<std::monostate>();
 }
 
@@ -260,6 +262,10 @@ struct CallContext {
     bool derived_asked{false};              // current_derived_this() has answered for this call
     bool is_construct{false};
     bool fresh{false};      // set by the caller, consumed by a script function on entry
+    // What the callee captures (JsValue::Extra::captured). A native entry point
+    // reads its arguments out of here, because a capture of its own would be
+    // invisible to the collector; see Extra::captured.
+    const std::vector<JsValue>* captured{nullptr};
 };
 
 thread_local CallContext t_call_context;
@@ -276,6 +282,7 @@ struct CallContextScope {
         t_call_context.derived_asked = false;
         t_call_context.is_construct = is_construct;
         t_call_context.fresh = true;
+        t_call_context.captured = callee ? callee->payload_captured() : nullptr;
     }
     ~CallContextScope() { t_call_context = std::move(saved); }
 };
@@ -437,6 +444,19 @@ const JsValue& JsValue::current_this() {
 
 bool JsValue::current_is_construct() {
     return t_call_context.is_construct;
+}
+
+namespace {
+// An empty capture list, so a native entry point written to take one always
+// has something to index.
+const std::vector<JsValue>& no_captures() {
+    static const std::vector<JsValue> empty;
+    return empty;
+}
+}
+
+const std::vector<JsValue>& JsValue::current_captured() {
+    return t_call_context.captured ? *t_call_context.captured : no_captures();
 }
 
 // ---------------------------------------------------------------------------

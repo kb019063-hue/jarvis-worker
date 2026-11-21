@@ -115,10 +115,25 @@ JsValue js_make_error(JsErrorKind kind, const std::string& message) {
     cell->klass = ObjectClass::Error;
     JsValue error = JsValue::make_object(cell);
     error.define_property("message", JsValue::make_string(message), PropertyMap::Hidden);
-    std::string stack = std::string(error_kind_name(kind)) + (message.empty() ? "" : ": " + message) +
-                        "\n    at <anonymous>";
-    error.define_property("stack", JsValue::make_string(stack), PropertyMap::Hidden);
+    // No own `stack`. `ObjectClass::Error` is the [[ErrorData]] slot, and the
+    // accessor `Error.prototype.stack` (install_error_stack_accessor) reports
+    // the text from that slot whenever something reads it. An own `stack`
+    // here would shadow the accessor: `hasOwnProperty("stack")` would be true
+    // and `Object.keys` would list it, and neither is how an error behaves.
     return error;
+}
+
+std::string js_error_stack_text(const JsValue& error) {
+    // V8's shape: "<toString()>\n    at <anonymous>". Read through the
+    // properties, so an error whose `name` or `message` was replaced reports
+    // the replaced ones, as an engine that formats lazily does.
+    JsValue name_value = error.get_property("name");
+    JsValue message_value = error.get_property("message");
+    std::string name = name_value.is_undefined() ? "Error" : js_to_string(name_value);
+    std::string message = message_value.is_undefined() ? std::string() : js_to_string(message_value);
+    if (name.empty()) return message;
+    if (message.empty()) return name + "\n    at <anonymous>";
+    return name + ": " + message + "\n    at <anonymous>";
 }
 
 void js_throw(JsValue value) {
@@ -1447,14 +1462,115 @@ JsValue js_make_native(const char* name, int length, JsValue::NativeFn fn) {
     return v;
 }
 
+void js_mark_as_method(JsValue& function) {
+    // A MethodDefinition is an ordinary function object with no [[Construct]]:
+    // there is no way to write `new` in front of one in the language, and none
+    // in front of a built-in method either. `js_make_native` takes every native
+    // for a constructor unless its cell says otherwise, so a method says so.
+    if (JsObject* cell = function.function_cell()) cell->not_constructor = true;
+}
+
+JsValue js_make_method(const char* name, int length, JsValue::NativeFn fn) {
+    JsValue method = js_make_native(name, length, std::move(fn));
+    js_mark_as_method(method);
+    return method;
+}
+
+void install_error_stack_accessor(JsIntrinsics& realm) {
+    // The standard says nothing about `stack`; this is the de-facto shape the
+    // test262 suite pins down, and what V8 and JavaScriptCore expose. It is an
+    // accessor on Error.prototype, and an error instance carries no own `stack`
+    // until one is assigned to it.
+    //
+    // `get` answers from the [[ErrorData]] slot alone (ObjectClass::Error), so
+    // it works for an instance whose own `stack` shadows this one, for one
+    // built through a foreign new.target, and for a cross-realm instance: the
+    // slot is found on the receiver, not through the prototype chain. Anything
+    // without the slot -- a plain object, Error.prototype itself, a proxy --
+    // answers undefined; a primitive receiver throws.
+    //
+    // `set` is SetterThatIgnoresPrototypeProperties: it refuses a value that is
+    // not a string, refuses to write on Error.prototype itself (the property
+    // there is this accessor, and replacing it would break every error), and
+    // otherwise defines an ordinary own data property on the receiver. Set on
+    // the receiver rather than on the root object, so a frozen or non-writable
+    // own `stack` throws instead of silently doing nothing.
+    JsValue getter = js_make_method("get stack", 0, [](const std::vector<JsValue>&) {
+        JsValue receiver = JsValue::current_this();
+        if (!receiver.is_object_like()) {
+            js_throw_type_error("get Error.prototype.stack called on non-object");
+        }
+        JsObject* cell = receiver.object_val;
+        if (!cell || cell->klass != ObjectClass::Error) return JsValue::make_undefined();
+        return JsValue::make_string(js_error_stack_text(receiver));
+    });
+    JsValue setter = js_make_method("set stack", 1, [](const std::vector<JsValue>& args) {
+        JsValue receiver = JsValue::current_this();
+        if (!receiver.is_object_like()) {
+            js_throw_type_error("set Error.prototype.stack called on non-object");
+        }
+        const JsValue& value = js_arg(args, 0);
+        if (value.type != JsType::String) {
+            js_throw_type_error("Error.prototype.stack must be assigned a string");
+        }
+        // Step 3 of SetterThatIgnoresPrototypeProperties: the root object's
+        // `stack` is this accessor, and replacing it would take the accessor
+        // away from every error there is. An assignment to it throws, always.
+        if (receiver.object_val &&
+            receiver.object_val == JsIntrinsics::get().error_protos[static_cast<int>(JsErrorKind::Error)]) {
+            js_throw_type_error("Cannot assign to Error.prototype.stack");
+        }
+        // The rest is `? receiver.[[Set]]("stack", v, receiver)`, written out:
+        // set_property() creates the property on the receiver when the lookup
+        // finds nothing, but it answers false rather than throwing when the
+        // receiver refuses (not writable, not extensible), and the setter has
+        // to throw. Where the own `stack` already is an accessor, its setter
+        // gets the value and the descriptor is left alone.
+        if (JsObject* cell = receiver.property_cell(true)) {
+            PropertyMap* map = &cell->properties;
+            auto it = map->find("stack");
+            if (it == map->end()) {
+                if (!cell->extensible || cell->frozen) {
+                    js_throw_type_error("Cannot add property stack, object is not extensible");
+                }
+                (*map)["stack"] = value;
+                return JsValue::make_undefined();
+            }
+            if (it->flags & PropertyMap::Accessor) {
+                if (!it->setter || !it->setter->is_function()) {
+                    js_throw_type_error("Cannot set property stack which has only a getter");
+                }
+                it->setter->call_with_this(receiver, {value});
+                return JsValue::make_undefined();
+            }
+            if (cell->frozen || !(it->flags & PropertyMap::Writable)) {
+                js_throw_type_error("Cannot assign to read only property 'stack'");
+            }
+            it->second = value;
+            return JsValue::make_undefined();
+        }
+        if (!receiver.set_property("stack", value)) {
+            js_throw_type_error("Cannot set property stack");
+        }
+        return JsValue::make_undefined();
+    });
+
+    JsObject* proto = realm.error_protos[static_cast<int>(JsErrorKind::Error)];
+    auto& entry = proto->properties.entry("stack");
+    entry.second = getter;
+    entry.setter = std::make_shared<JsValue>(setter);
+    entry.flags = PropertyMap::Configurable | PropertyMap::Accessor;
+    proto->has_accessors = true;
+}
+
 void js_define_method(JsObject* object, const char* name, int length, JsValue::NativeFn fn) {
     auto& entry = object->properties.entry(name);
-    entry.second = js_make_native(name, length, std::move(fn));
+    entry.second = js_make_method(name, length, std::move(fn));
     entry.flags = PropertyMap::Hidden;
 }
 
 void js_define_method(JsValue& object, const char* name, int length, JsValue::NativeFn fn) {
-    object.define_property(name, js_make_native(name, length, std::move(fn)), PropertyMap::Hidden);
+    object.define_property(name, js_make_method(name, length, std::move(fn)), PropertyMap::Hidden);
 }
 
 void js_define_hidden(JsObject* object, const std::string& name, JsValue value) {
@@ -1591,6 +1707,8 @@ void JsIntrinsics::install() {
 
     install_object_builtins(*this);
     install_error_builtins(*this);
+    // After the constructors: the accessor needs realm.error_protos[Error].
+    install_error_stack_accessor(*this);
     install_array_builtins(*this);
     // The two kinds with no built-in interface of their own to install them:
     // RegExp String Iterator, and the one Web IDL iterators share.

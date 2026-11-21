@@ -26,6 +26,7 @@
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/GifDecoder.hpp"
 #include "litebird/render/WebPDecoder.hpp"
+#include "litebird/render/AvifContainer.hpp"
 #include "litebird/net/Brotli.hpp"
 #include "litebird/net/Deflate.hpp"
 #include "litebird/shell/WebBrowserServer.hpp"
@@ -129,6 +130,97 @@ static void give_memory_back() {}
     give_memory_back(); \
     std::cout << "\033[32mPASSED\033[0m\n"; \
 } while(0)
+
+/// A page and an interpreter over it, which is how nearly every suite that runs
+/// script begins.
+///
+/// This exists because of what a merge did, not for brevity. A suite written as
+///
+///     TEST(mine) {
+///         auto doc = std::make_shared<Document>();
+///         doc->set_url("https://example.test/");
+///         JsInterpreter js(doc);
+///         js.load_page("<!DOCTYPE html><body></body>");
+///         js.notify_document_loaded();
+///         js.eval(...);
+///     }
+///
+/// and one written the same way on `main` differ only in their two titles and
+/// their two evals. Git sees six lines of identical text between the titles and
+/// the evals, and splits that into **two** conflicts with the boilerplate left
+/// outside both — so "take mine" and "take theirs" each produce a function with
+/// another suite's body. That happened five times merging one branch, and each
+/// time the fix was to take both functions whole from their own side of the
+/// merge and write them back in order.
+///
+/// With the boilerplate behind one call the two suites have nothing in common
+/// but the title, and the same merge is one conflict enclosing the whole
+/// function: keeping both is the whole resolution. Verified with `git
+/// merge-file` on the two shapes before this was written; the test of this
+/// helper is `tools/ci/check_suites.py` (see "the merge" in README.md).
+class TestPage {
+public:
+    /// The empty page, and "loaded" so a script sees a document rather than a
+    /// tree that is still arriving.
+    TestPage() : m_doc(std::make_shared<litebird::Document>()), js(m_doc) {
+        m_doc->set_url("https://example.test/");
+        js.load_page("<!DOCTYPE html><body></body>");
+        js.notify_document_loaded();
+    }
+
+    /// An interpreter over a document that has a URL and no page in it, which is
+    /// what a suite that builds its own tree needs; `TestPage::load` puts an
+    /// empty page in after the tree is built, where a suite wants that.
+    struct WithUrl {};
+    TestPage(WithUrl) : m_doc(std::make_shared<litebird::Document>()), js(m_doc) {
+        m_doc->set_url("https://example.test/");
+    }
+
+    /// A document to build a tree in, with the interpreter made after `build`
+    /// has run over it. A suite that needs its own nodes before any script runs
+    /// (`doc->append_child(...)`, then `new JsInterpreter(doc)`) writes
+    ///
+    ///     TestPage page(TestPage::Built([](litebird::Document& d) { ... }));
+    ///
+    /// and the order that matters — document first, interpreter second — is the
+    /// constructor's rather than the suite's, so a suite cannot get it wrong.
+    struct Built {
+        std::function<void(litebird::Document&)> build;
+        explicit Built(std::function<void(litebird::Document&)> f) : build(std::move(f)) {}
+    };
+    TestPage(Built made) : m_doc(std::make_shared<litebird::Document>()), js(make_document(made)) {}
+
+private:
+    std::shared_ptr<litebird::Document> make_document(const Built& made) {
+        m_doc->set_url("https://example.test/");
+        made.build(*m_doc);
+        return m_doc;
+    }
+
+public:
+
+    /// Parse and finish `html` in this page's document, after any tree a suite
+    /// has already built. Answers the interpreter, so `page.load(...).eval(...)`
+    /// reads in one line.
+    litebird::JsInterpreter& load(const std::string& html) {
+        js.load_page(html);
+        js.notify_document_loaded();
+        return js;
+    }
+
+    litebird::Document& document() { return *m_doc; }
+
+    /// The document, declared before `js` so that it outlives it: members are
+    /// destroyed in reverse declaration order, so the interpreter is unwound
+    /// first. The other way round is a use-after-free that segfaults
+    /// `xml_serializer_writes_a_tree_that_reads_back_the_same`, the suite that
+    /// tears down the most. The boilerplate this replaces declared `doc` before
+    /// `js` for that reason, and keeping that order is the one thing about it
+    /// that had to survive the change.
+    std::shared_ptr<litebird::Document> m_doc;
+
+    litebird::JsInterpreter js;
+};
 
 TEST(color_parsing) {
     using namespace litebird;
@@ -531,17 +623,19 @@ TEST(flexbox_layout) {
     auto item2 = flex_container->children[1];
     auto item3 = flex_container->children[2];
 
-    // Item 1 at x = 0, width = 100
-    assert(item1->dimensions.content.x == 0.0f);
+    // Offsets are relative to the flex container, not the viewport: the
+    // implied body's default margin also moves the container itself.
+    const float origin_x = flex_container->dimensions.content.x;
+    assert(item1->dimensions.content.x - origin_x == 0.0f);
     assert(item1->dimensions.content.width == 100.0f);
 
     // Item 2 at x = 100 + 20(gap) = 120, width = 200
-    assert(item2->dimensions.content.x == 120.0f);
+    assert(item2->dimensions.content.x - origin_x == 120.0f);
     assert(item2->dimensions.content.width == 200.0f);
 
     // Item 3 at x = 120 + 200 + 20(gap) = 340
     // Remaining space = 600 - (100 + 200 + 40 gaps) = 260. flex-grow: 1 takes 260!
-    assert(item3->dimensions.content.x == 340.0f);
+    assert(item3->dimensions.content.x - origin_x == 340.0f);
     assert(item3->dimensions.content.width == 260.0f);
 }
 
@@ -5307,15 +5401,14 @@ TEST(css_positioning_and_stacking_contexts) {
     assert(abs_box != nullptr);
     assert(fix_box != nullptr);
 
-    // Relative positioning offset: container content.x = 20, rel child margin=0, pad=0, so x = 20 + 15 = 35, y = 20 + 10 = 30
-    assert(rel_box->dimensions.content.x == 35.0f);
-    assert(rel_box->dimensions.content.y == 30.0f);
-    assert(rel_box->dimensions.content.y == 30.0f);
+    // Relative positioning is measured from the container's content edge,
+    // which includes the implied body's default margin as well as its padding.
+    assert(rel_box->dimensions.content.x == container_box->dimensions.content.x + 15.0f);
+    assert(rel_box->dimensions.content.y == container_box->dimensions.content.y + 10.0f);
 
-    // Absolute positioning: container padding box is x=0, y=0, w=440, h=340.
-    // abs top: 30px, left: 40px -> x = 0 + 40 = 40, y = 0 + 30 = 30
-    assert(abs_box->dimensions.content.x == 40.0f);
-    assert(abs_box->dimensions.content.y == 30.0f);
+    // Absolute insets are measured from the positioned container's padding box.
+    assert(abs_box->dimensions.content.x == container_box->dimensions.padding_box().x + 40.0f);
+    assert(abs_box->dimensions.content.y == container_box->dimensions.padding_box().y + 30.0f);
 
     // Fixed positioning: viewport 800x600, bottom: 10, right: 20, w: 120, h: 40
     // x = 800 - 20 - 120 = 660, y = 600 - 10 - 40 = 550
@@ -5404,10 +5497,11 @@ TEST(box_sizing_and_constraints) {
     // Centered: the document now parses through the spec tree builder, so the
     // snippet is wrapped in the implied <html>/<body> elements and the body's
     // 8px user-agent margin applies. Containing width is therefore 800 - 16 =
-    // 784px, and centering a 200px box yields (784 - 200) / 2 = 292px.
+    // 784px, and each margin is (784 - 200) / 2 = 292px. The body's left edge
+    // is at x=8, so the centered box begins at x=300 in the viewport.
     assert(center_box->dimensions.margin.left == 292.0f);
     assert(center_box->dimensions.margin.right == 292.0f);
-    assert(center_box->dimensions.content.x == 292.0f);
+    assert(center_box->dimensions.content.x == 300.0f);
 }
 
 TEST(javascript_prototype_chain_and_arrays) {
@@ -5784,21 +5878,24 @@ TEST(css_flex_wrapping_and_grid_layout) {
     auto item2 = flex_box->children[1];
     auto item3 = flex_box->children[2];
 
+    // Coordinates are relative to the flex container, not the body margin.
+    const float flex_x = flex_box->dimensions.content.x;
+    const float flex_y = flex_box->dimensions.content.y;
     // item1 fits on line 1 at (0, 0)
-    assert(item1->dimensions.content.x == 0.0f);
-    assert(item1->dimensions.content.y == 0.0f);
+    assert(item1->dimensions.content.x - flex_x == 0.0f);
+    assert(item1->dimensions.content.y - flex_y == 0.0f);
     assert(item1->dimensions.content.width == 180.0f);
     assert(item1->dimensions.content.height == 50.0f);
 
     // item2 overflows line 1 (180 + 150 = 330 > 300), so wraps to line 2 at (0, 50)
-    assert(item2->dimensions.content.x == 0.0f);
-    assert(item2->dimensions.content.y == 50.0f);
+    assert(item2->dimensions.content.x - flex_x == 0.0f);
+    assert(item2->dimensions.content.y - flex_y == 50.0f);
     assert(item2->dimensions.content.width == 150.0f);
     assert(item2->dimensions.content.height == 60.0f);
 
     // item3 fits on line 2 (150 + 100 = 250 <= 300) at (150, 50)
-    assert(item3->dimensions.content.x == 150.0f);
-    assert(item3->dimensions.content.y == 50.0f);
+    assert(item3->dimensions.content.x - flex_x == 150.0f);
+    assert(item3->dimensions.content.y - flex_y == 50.0f);
     assert(item3->dimensions.content.width == 100.0f);
     assert(item3->dimensions.content.height == 40.0f);
 
@@ -5821,18 +5918,20 @@ TEST(css_flex_wrapping_and_grid_layout) {
     auto g4 = grid_box->children[3];
 
     // Col 0: 100px, Col 1: (360 - 40 - 100)/3 = 73.33px, Col 2: 146.67px
-    assert(std::abs(g1->dimensions.content.x - 0.0f) < 0.1f);
+    const float grid_x = grid_box->dimensions.content.x;
+    const float grid_y = grid_box->dimensions.content.y;
+    assert(std::abs(g1->dimensions.content.x - grid_x) < 0.1f);
     assert(std::abs(g1->dimensions.content.width - 100.0f) < 0.1f);
 
-    assert(std::abs(g2->dimensions.content.x - 120.0f) < 0.1f);
+    assert(std::abs(g2->dimensions.content.x - grid_x - 120.0f) < 0.1f);
     assert(std::abs(g2->dimensions.content.width - (220.0f / 3.0f)) < 0.1f);
 
-    assert(std::abs(g3->dimensions.content.x - (120.0f + 220.0f / 3.0f + 20.0f)) < 0.1f);
+    assert(std::abs(g3->dimensions.content.x - grid_x - (120.0f + 220.0f / 3.0f + 20.0f)) < 0.1f);
     assert(std::abs(g3->dimensions.content.width - (440.0f / 3.0f)) < 0.1f);
 
     // g4 wraps to next row!
-    assert(std::abs(g4->dimensions.content.x - 0.0f) < 0.1f);
-    assert(std::abs(g4->dimensions.content.y - (40.0f + 20.0f)) < 0.1f);
+    assert(std::abs(g4->dimensions.content.x - grid_x) < 0.1f);
+    assert(std::abs(g4->dimensions.content.y - grid_y - (40.0f + 20.0f)) < 0.1f);
 }
 
 TEST(dom_3phase_events_and_form_controls) {
@@ -7317,6 +7416,19 @@ TEST(fetch_api_and_headers) {
         const resStatus = resp.status;
         const resHeader = resp.headers.get("content-type");
 
+        const binaryText = "A\u0000\u00e9";
+        function binarySummary(buffer) {
+            const bytes = new Uint8Array(buffer);
+            return (buffer instanceof ArrayBuffer) + ":" + buffer.byteLength + ":" +
+                bytes[0] + "," + bytes[1] + "," + bytes[2] + "," + bytes[3];
+        }
+        let responseBinary = "";
+        let fetchedBinary = "";
+        new Response(binaryText).arrayBuffer().then((buffer) => { responseBinary = binarySummary(buffer); });
+        fetch("data:application/octet-stream;base64,QQDDqQ==")
+            .then((res) => res.arrayBuffer())
+            .then((buffer) => { fetchedBinary = binarySummary(buffer); });
+
         let fetchedJsonVal = "";
         fetch("data:application/json;base64,eyJoZWxsbyI6IndvcmxkIn0=").then((res) => {
             return res.json();
@@ -7338,6 +7450,8 @@ TEST(fetch_api_and_headers) {
     assert(js.global_env()->get("resHeader").to_string() == "application/json");
 
     assert(js.global_env()->get("fetchedJsonVal").to_string() == "world");
+    assert(js.global_env()->get("responseBinary").to_string() == "true:4:65,0,195,169");
+    assert(js.global_env()->get("fetchedBinary").to_string() == "true:4:65,0,195,169");
 }
 
 TEST(url_and_url_search_params) {
@@ -7700,7 +7814,7 @@ TEST(websocket_handshake_security_and_secure_transport) {
             std::string protocol = response_kind == 6 ? "Sec-WebSocket-Protocol: unknown\r\n" :
                                    response_kind == 7 ? "Sec-WebSocket-Protocol: chat\r\n" : "";
             std::string response = status + upgrade + connection + accept_header + protocol;
-            if (response_kind == 8) response += "Sec-WebSocket-Extensions: permessage-deflate\r\n";
+            if (response_kind == 8) response += "Sec-WebSocket-Extensions: x-unoffered-ext\r\n";
             if (response_kind == 9) response += "X-Large: " + std::string(65536, 'a') + "\r\n";
             response += "\r\n";
             ::send(client, response.data(), response.size(), MSG_NOSIGNAL);
@@ -9233,9 +9347,8 @@ TEST(page_scripts_run_by_the_rules_of_a_page_load) {
     using namespace litebird;
     // Which <script> elements are JavaScript to run, and when: each one as
     // the parser reaches its end tag, seeing the page up to itself.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><head><title>T</title>"
         "<script id=first>window.log = ['first:' + document.currentScript.id + ':' + document.readyState + ':' +"
@@ -9336,9 +9449,8 @@ TEST(get_element_by_id_answers_from_an_index) {
     // (Document::get_element_by_id), so every question here is asked twice:
     // once of the walk and once of the index, and after every kind of change
     // that must make the index forget. jsdom prints the same line.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><body><p id=\"a\" class=\"first\">x</p><span id=\"dup\" class=\"one\"></span><div id=\"b\"></div>"
         "<span id=\"dup\" class=\"two\"></span><em id=\"null\"></em><template><s id=\"intemplate\"></s></template></body>");
@@ -9393,9 +9505,8 @@ TEST(computed_style_answers_for_every_property) {
     // initial values, specificity, colours, lengths, the defaults of HTML
     // elements, shorthands, inherit and initial). Here is what those cannot
     // hold, because jsdom answers something else and CSS says this.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>"
         "#a { line-height: 200%; font-size: 20px; border: 0.6px solid; outline: 2px dotted green; word-spacing: 0.5em }"
@@ -9489,9 +9600,8 @@ TEST(ranges_follow_the_tree) {
     // cases of the DOM corpus hold the rules (tests/dom-conformance/
     // ranges.dat). Here: the two answers jsdom gets wrong, and trees and
     // numbers of ranges no person writes.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><p id=p></p><div id=d><span>one</span><span>two</span></div></body>");
     js.notify_document_loaded();
 
@@ -9558,9 +9668,8 @@ TEST(dom_follows_the_standard_where_jsdom_does_not) {
     // and the HTML and DOM standards differ, so the corpus stays away from
     // them (tests/dom-conformance/README.md) and the standard's answer is
     // asserted here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><body><div id=d tabindex='junk'></div><button id=b tabindex='junk'>b</button>"
         "<a id=a href='#x' tabindex='junk'>a</a><span id=s></span>"
@@ -10045,9 +10154,8 @@ TEST(xml_documents_in_the_dom) {
 
 TEST(xml_serializer_writes_a_tree_that_reads_back_the_same) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body></body>");
     js.notify_document_loaded();
     js.eval(R"JS(
@@ -10177,11 +10285,8 @@ TEST(xml_serializer_writes_a_tree_that_reads_back_the_same) {
 
 TEST(inner_html_of_an_xml_document_is_xml) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var P = new DOMParser();
         function xml(text) { return P.parseFromString(text, 'application/xml'); }
@@ -10233,11 +10338,8 @@ TEST(inner_html_of_an_xml_document_is_xml) {
 
 TEST(dom_names_are_checked_by_the_dom_standard) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var X = document.implementation.createDocument(null, null);
         function each(list, f) { return list.map(function (item) { try { return String(f(item)); } catch (e) { return e.name; } }).join(' '); }
@@ -10287,11 +10389,8 @@ TEST(dom_names_are_checked_by_the_dom_standard) {
 
 TEST(a_document_keeps_one_doctype_and_one_element_in_that_order) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var S = new XMLSerializer(), I = document.implementation;
         function caught(f) { try { f(); return 'ok'; } catch (e) { return e.name; } }
@@ -10338,9 +10437,8 @@ TEST(a_document_keeps_one_doctype_and_one_element_in_that_order) {
 
 TEST(foreign_attributes_from_the_html_parser_have_namespaces) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     // The HTML parser gives eleven attributes of SVG and MathML elements a
     // namespace ("adjust foreign attributes"). They used to be stored under
     // the names of the html5lib test format ("xlink href"), so no script
@@ -10382,7 +10480,7 @@ TEST(foreign_attributes_from_the_html_parser_have_namespaces) {
     assert(S("var copy = document.createElement('div'); copy.innerHTML = s.outerHTML; names(copy.querySelector('a')) === names(lnk) && copy.innerHTML === s.outerHTML") == "true");
 
     // The tree dump of the html5lib tests still writes them its way.
-    const std::string dump = dump_tree_webplatform(*doc);
+    const std::string dump = dump_tree_webplatform(page.document());
     assert(dump.find("xlink href=\"#x\"") != std::string::npos);
     assert(dump.find("xml lang=\"en\"") != std::string::npos);
     assert(dump.find("xmlns xlink=\"http://www.w3.org/1999/xlink\"") != std::string::npos);
@@ -10395,11 +10493,8 @@ TEST(xml_dom_follows_the_standard_where_jsdom_does_not) {
     // places jsdom and the standards differ, so the corpus stays away from
     // them (tests/dom-conformance/README.md) and the standard's answer is
     // asserted here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var P = new DOMParser(), S = new XMLSerializer();
         function xml(text, type) { return P.parseFromString(text, type || 'application/xml'); }
@@ -10461,9 +10556,8 @@ TEST(xml_dom_follows_the_standard_where_jsdom_does_not) {
 
 TEST(selectors_know_namespaces) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><svg><a xlink:href=\"#x\"></a></svg><a href=\"#y\"></a></body>");
     js.notify_document_loaded();
     js.eval("function count(d, selector) { try { return d.querySelectorAll(selector).length; } catch (e) { return e.name; } }"
@@ -10603,11 +10697,8 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
 
     // 3. From a script: 50,000 attributes set, read, half of them removed,
     //    and the order is still the order they were added in.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     const auto start = std::chrono::steady_clock::now();
     assert(js.eval("var e = document.createElement('div'); for (var i = 0; i < 50000; i++) e.setAttribute('a' + i, i);"
                    "var sum = 0; for (var i = 0; i < 50000; i++) sum += Number(e.getAttribute('a' + i));"
@@ -10627,9 +10718,8 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
 
 TEST(attributes_are_kept_by_namespace_and_local_name) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><div id=\"host\"></div></body>");
     js.notify_document_loaded();
     auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
@@ -11207,8 +11297,10 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
     assert(S("try { get(secret); 'read' } catch (e) { e.name }") == "NetworkError");
     assert(S("try { get('http://127.0.0.1:9/'); 'read' } catch (e) { e.name }") == "NetworkError");
 
-    // 9. There is no ArrayBuffer in the engine: that response is null.
-    js.eval("later('arraybuffer', 'data:text/plain,abc', function (x) { x.responseType = 'arraybuffer'; }, function (x) { return String(x.response) + ' ' + x.status; });");
+    // 9. A binary response is an ArrayBuffer containing the original bytes.
+    js.eval("later('arraybuffer', 'data:text/plain,abc', function (x) { x.responseType = 'arraybuffer'; },"
+            "function (x) { return String(x.response instanceof ArrayBuffer) + ' ' + x.response.byteLength + ' ' +"
+            "new Uint8Array(x.response).join(',') + ' ' + x.status; });");
 
     // 10. The XML parser's limits hold here as they do for DOMParser: a
     //     document that expands without end gives no document, at once.
@@ -11228,7 +11320,17 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
                          "x.responseXML.documentElement.childNodes.length + ' ' + x.responseText.length + ' ' + (Date.now() - t0 < ") +
              big_xhr_budget + ")") == "200000 2800007 true");
 
+    js.eval(R"JS(
+        var blobBinary = '';
+        new Blob(["A\u0000\u00e9"]).arrayBuffer().then(function (buffer) {
+            var bytes = new Uint8Array(buffer);
+            blobBinary = (buffer instanceof ArrayBuffer) + ':' + buffer.byteLength + ':' +
+                bytes[0] + ',' + bytes[1] + ',' + bytes[2] + ',' + bytes[3];
+        });
+    )JS");
+
     settle();
+    assert(S("blobBinary") == "true:4:65,0,195,169");
     assert(S("results['text type']") == "state 1, loadstart, state 2, state 3, progress 51/0, state 4, load 51/0, loadend | 65533");
     assert(S("results.aborted + ' / ' + requests.aborted.seen.length + ' ' + requests.aborted.x.readyState") ==
            "state 1, loadstart, state 2, state 3, state 4, abort, loadend / 7 0");
@@ -11244,7 +11346,7 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
     assert(S("results.blob") == failed + "0");
     assert(S("results.about") == failed + "0");
     assert(S("results.javascript") == failed + "0 undefined");
-    assert(S("results.arraybuffer") == "state 1, loadstart, state 2, state 3, progress 3/0, state 4, load 3/0, loadend | null 200");
+    assert(S("results.arraybuffer") == "state 1, loadstart, state 2, state 3, progress 3/0, state 4, load 3/0, loadend | true 3 97,98,99 200");
     std::remove(secret_path.c_str());
 }
 
@@ -13966,8 +14068,8 @@ TEST(strict_equality_does_not_coerce) {
     // one: `document` was undefined, every DOM line below silently evaluated to
     // undefined, and `undefined === undefined` made the identity assertions
     // pass without a single DOM node being involved.
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
 
     js.eval_ast(R"(
         var n_eq = (1 === 1);
@@ -16002,11 +16104,8 @@ TEST(fetch_relative_requests_use_the_document_base_url) {
 
 TEST(regexp_vm_handles_deep_nesting_and_long_inputs) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var deepNonCap = new RegExp("(?:".repeat(250) + "abc" + ")".repeat(250));
@@ -16109,11 +16208,8 @@ TEST(css_cascade_layers_supports_combinators_and_mq_l4) {
 
 TEST(inline_style_cssom_shorthands_and_aliases) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var el = document.createElement('div');
@@ -16151,9 +16247,8 @@ TEST(cssom_sheets_rules_insert_amounts_and_fonts) {
     //
     // Every assertion is a comparison made in the page (`ok(...)`), because
     // what a script sees is the thing being tested.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>#target { color: red } .gone { display: none }</style></head>"
         "<body><div id=\"target\">x</div><p class=\"gone\">y</p></body></html>");
@@ -16295,9 +16390,8 @@ TEST(cssom_media_rules_and_the_cascade_inside_them) {
     // is asked where the cascade reads it — against the window the page is in
     // (1024x768, a light screen with a mouse), which is what `matchMedia` and
     // `innerWidth` already answered with.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>"
         "#target { color: red }"
@@ -16445,9 +16539,8 @@ TEST(keyframes_are_rules_of_the_cssom) {
     // next one's index, and `insertRule('@keyframes …')` was a `SyntaxError`.
     // A browser lists the block as a `CSSKeyframesRule` whose frames are a
     // `CSSRuleList` of their own.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>"
         "@keyframes slide { 0% { left: 0px } 50%, 100% { left: 10px; opacity: .5 } }"
@@ -16573,9 +16666,8 @@ TEST(array_holes_are_not_elements) {
     // Every assertion is a comparison made in the page, and the whole set was
     // run through this engine and through Node.js first: the same text, the
     // same 38 lines. Where they must differ it is said so in a comment.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><html><body><p id=t>x</p></body></html>");
     js.notify_document_loaded();
 
@@ -16751,11 +16843,8 @@ TEST(cssom_a_sheet_a_script_constructs) {
     // rule of its own. What is new is `replace`/`replaceSync` and the
     // constructor. Every line was compared against jsdom before it was
     // written down.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var failures = [];
@@ -16888,9 +16977,8 @@ TEST(destructuring_asks_the_value_for_its_iterator) {
     // Every assertion is a comparison made in the page. The whole script was
     // run under Node.js first and prints the same lines there; where this
     // engine must differ it is said so.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><html><body></body></html>");
     js.notify_document_loaded();
 
@@ -17018,11 +17106,8 @@ TEST(a_hole_is_a_place_the_prototype_can_fill) {
     //
     // Every assertion is compared in the page, and the whole set was run
     // through this engine and through Node.js first: the same lines.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     // The find family visits every place, holes included.
     js.eval(R"JS(
@@ -17208,13 +17293,224 @@ TEST(length_is_inherited_from_an_array_prototype) {
     assert(js.eval("failures.join('; ')").to_string().empty());
 }
 
+
+// Phase 172, finding 172. The AVIF container: the boxes around the picture,
+// read and bounds-checked, and not the picture, which needs an AV1 decoder and
+// does not have one yet.
+//
+// The fixtures are real AVIF files written by Pillow 13.0.0 (libavif), one 4x4
+// and one 32x32, and every number asserted below was read out of them by hand
+// first: iloc version 0 with 4-byte offsets and lengths, one av01 item, ispe
+// 4x4 and 32x32, pixi 8-bit, av1C profile 0 with 4:2:0 subsampling, and a
+// `colr` of type `nclx`.
+static const uint8_t kAvif4x4[] = {
+    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66, 0x00, 0x00, 0x00, 0x00,
+    0x61, 0x76, 0x69, 0x66, 0x6D, 0x69, 0x66, 0x31, 0x6D, 0x69, 0x61, 0x66, 0x4D, 0x41, 0x31, 0x42,
+    0x00, 0x00, 0x00, 0xEB, 0x6D, 0x65, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21,
+    0x68, 0x64, 0x6C, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0x69, 0x63, 0x74,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0E, 0x70, 0x69, 0x74, 0x6D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1E, 0x69,
+    0x6C, 0x6F, 0x63, 0x00, 0x00, 0x00, 0x00, 0x44, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x01, 0x13, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x28, 0x69, 0x69, 0x6E,
+    0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1A, 0x69, 0x6E, 0x66, 0x65, 0x02,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x61, 0x76, 0x30, 0x31, 0x43, 0x6F, 0x6C, 0x6F, 0x72,
+    0x00, 0x00, 0x00, 0x00, 0x6A, 0x69, 0x70, 0x72, 0x70, 0x00, 0x00, 0x00, 0x4B, 0x69, 0x70, 0x63,
+    0x6F, 0x00, 0x00, 0x00, 0x14, 0x69, 0x73, 0x70, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x10, 0x70, 0x69, 0x78, 0x69, 0x00, 0x00, 0x00,
+    0x00, 0x03, 0x08, 0x08, 0x08, 0x00, 0x00, 0x00, 0x0C, 0x61, 0x76, 0x31, 0x43, 0x81, 0x00, 0x0C,
+    0x00, 0x00, 0x00, 0x00, 0x13, 0x63, 0x6F, 0x6C, 0x72, 0x6E, 0x63, 0x6C, 0x78, 0x00, 0x01, 0x00,
+    0x0D, 0x00, 0x06, 0x80, 0x00, 0x00, 0x00, 0x17, 0x69, 0x70, 0x6D, 0x61, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x04, 0x01, 0x02, 0x83, 0x04, 0x00, 0x00, 0x00, 0x3A, 0x6D,
+    0x64, 0x61, 0x74, 0x12, 0x00, 0x0A, 0x08, 0x18, 0x04, 0x7D, 0xA2, 0x02, 0x1A, 0x0D, 0x08, 0x32,
+    0x24, 0x14, 0xC7, 0x87, 0x86, 0x65, 0x02, 0x08, 0x20, 0x9E, 0x55, 0x54, 0x00, 0x08, 0x48, 0x5A,
+    0xF0, 0x74, 0x44, 0xA8, 0x41, 0x45, 0x37, 0x4F, 0xE8, 0x7A, 0x79, 0xF6, 0xBB, 0xA1, 0x61, 0x1D,
+    0x44, 0x48, 0x22, 0x30, 0xD0,
+};
+
+static const uint8_t kAvif32x32[] = {
+    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66, 0x00, 0x00, 0x00, 0x00,
+    0x61, 0x76, 0x69, 0x66, 0x6D, 0x69, 0x66, 0x31, 0x6D, 0x69, 0x61, 0x66, 0x4D, 0x41, 0x31, 0x42,
+    0x00, 0x00, 0x00, 0xEB, 0x6D, 0x65, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21,
+    0x68, 0x64, 0x6C, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0x69, 0x63, 0x74,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0E, 0x70, 0x69, 0x74, 0x6D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1E, 0x69,
+    0x6C, 0x6F, 0x63, 0x00, 0x00, 0x00, 0x00, 0x44, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x01, 0x13, 0x00, 0x00, 0x00, 0x26, 0x00, 0x00, 0x00, 0x28, 0x69, 0x69, 0x6E,
+    0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1A, 0x69, 0x6E, 0x66, 0x65, 0x02,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x61, 0x76, 0x30, 0x31, 0x43, 0x6F, 0x6C, 0x6F, 0x72,
+    0x00, 0x00, 0x00, 0x00, 0x6A, 0x69, 0x70, 0x72, 0x70, 0x00, 0x00, 0x00, 0x4B, 0x69, 0x70, 0x63,
+    0x6F, 0x00, 0x00, 0x00, 0x14, 0x69, 0x73, 0x70, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x20, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x10, 0x70, 0x69, 0x78, 0x69, 0x00, 0x00, 0x00,
+    0x00, 0x03, 0x08, 0x08, 0x08, 0x00, 0x00, 0x00, 0x0C, 0x61, 0x76, 0x31, 0x43, 0x81, 0x00, 0x0C,
+    0x00, 0x00, 0x00, 0x00, 0x13, 0x63, 0x6F, 0x6C, 0x72, 0x6E, 0x63, 0x6C, 0x78, 0x00, 0x01, 0x00,
+    0x0D, 0x00, 0x06, 0x80, 0x00, 0x00, 0x00, 0x17, 0x69, 0x70, 0x6D, 0x61, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x04, 0x01, 0x02, 0x83, 0x04, 0x00, 0x00, 0x00, 0x2E, 0x6D,
+    0x64, 0x61, 0x74, 0x12, 0x00, 0x0A, 0x09, 0x18, 0x11, 0x3F, 0xF6, 0x88, 0x08, 0x68, 0x34, 0x20,
+    0x32, 0x17, 0x1E, 0xC7, 0x87, 0x85, 0x59, 0xDF, 0xFF, 0xFF, 0xE2, 0xC0, 0x00, 0x00, 0x8B, 0x31,
+    0xF6, 0xEB, 0x6E, 0xD1, 0x8E, 0xEC, 0xA7, 0x86, 0xC0,
+};
+
+static void check_avif_is_read(const uint8_t* bytes, size_t size, uint32_t width, uint32_t height,
+                               size_t payload_bytes, const char* label) {
+    using namespace litebird;
+    assert(AvifContainer::is_avif(bytes, size));
+    auto file = AvifContainer::parse(bytes, size);
+    assert(file.status == AvifContainer::Status::Ok);
+    assert(file.error.empty());
+    assert(file.major_brand == "avif");
+    assert(file.has_primary());
+    const auto& p = file.primary;
+    assert(p.type == "av01");
+    assert(p.has_ispe && p.width == width && p.height == height);
+    // `pixi` lists every plane the image has, subsampled ones included: a
+    // 4:2:0 image has three planes at 8 bits, not one. Asserting one plane
+    // here is what a reader who had only seen RGB would write.
+    assert(p.has_pixi && p.bit_depth.size() == 3);
+    assert(p.bit_depth[0] == 8 && p.bit_depth[1] == 8 && p.bit_depth[2] == 8);
+    assert(p.has_av1c);
+    assert(p.av1c.seq_profile == 0);
+    assert(!p.av1c.high_bitdepth && !p.av1c.twelve_bit && !p.av1c.monochrome);
+    assert(p.av1c.subsampling_x && p.av1c.subsampling_y);     // 4:2:0
+    assert(p.colour.present && p.colour.is_nclx);
+    // The bytes are the item's own: an AVIF's mdat holds exactly the extent
+    // `iloc` names, so the payload is the whole of it and nothing else.
+    assert(p.payload.size() == payload_bytes);
+    // The first byte of an AV1 payload is an OBU header, and the AV1 Image
+    // File Format requires the sequence header first: OBU_TEMPORAL_DELIMITER
+    // (type 2) or OBU_SEQUENCE_HEADER (type 1), never a reserved type.
+    const uint8_t obu_type = static_cast<uint8_t>((p.payload[0] >> 3) & 0x0f);
+    assert(obu_type == 2 || obu_type == 1);
+    (void)label;
+}
+
+TEST(avif_container_is_read_and_the_picture_is_not_decoded) {
+    using namespace litebird;
+
+    check_avif_is_read(kAvif4x4, sizeof(kAvif4x4), 4, 4, 50, "4x4");
+    check_avif_is_read(kAvif32x32, sizeof(kAvif32x32), 32, 32, 38, "32x32");
+
+    // The payload is byte-for-byte what the mdat box holds: find the box and
+    // compare, rather than trusting the length alone.
+    {
+        auto file = AvifContainer::parse(kAvif4x4, sizeof(kAvif4x4));
+        size_t mdat = 0;
+        for (size_t i = 0; i + 4 < sizeof(kAvif4x4); ++i) {
+            if (std::memcmp(kAvif4x4 + i, "mdat", 4) == 0) { mdat = i - 4; break; }
+        }
+        assert(mdat != 0);
+        const uint32_t msize = (static_cast<uint32_t>(kAvif4x4[mdat]) << 24) |
+                               (static_cast<uint32_t>(kAvif4x4[mdat + 1]) << 16) |
+                               (static_cast<uint32_t>(kAvif4x4[mdat + 2]) << 8) |
+                               static_cast<uint32_t>(kAvif4x4[mdat + 3]);
+        assert(msize == 58);
+        std::vector<uint8_t> expected(kAvif4x4 + mdat + 8, kAvif4x4 + mdat + msize);
+        assert(file.primary.payload == expected);
+
+        // The same bytes parse the same way twice.
+        auto again = AvifContainer::parse(kAvif4x4, sizeof(kAvif4x4));
+        assert(again.primary.payload == file.primary.payload);
+        assert(again.primary.width == file.primary.width);
+    }
+
+    // The generic image entry point knows an AVIF and still hands back no
+    // picture, because there is no AV1 decoder behind it. That is the honest
+    // answer and it is asserted, so that the day a decoder lands this test
+    // fails and says the row is done.
+    {
+        std::vector<uint8_t> bytes(kAvif4x4, kAvif4x4 + sizeof(kAvif4x4));
+        assert(ImageDecoder::decode(bytes, "image/avif") == nullptr);
+        assert(ImageDecoder::decode(bytes, "") == nullptr);
+    }
+
+    // What is not an AVIF is not one: a PNG, a WebP, a JPEG header and plain
+    // text all answer false, so the brand check is not merely "has a ftyp".
+    {
+        const uint8_t png[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0};
+        assert(!AvifContainer::is_avif(png, sizeof(png)));
+        const uint8_t riff[] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'};
+        assert(!AvifContainer::is_avif(riff, sizeof(riff)));
+        const uint8_t text[] = "this is a text file, not an image at all";
+        assert(!AvifContainer::is_avif(text, sizeof(text) - 1));
+        // An ISO base media file with the wrong brand: `ftyp` and `mp42`.
+        const uint8_t mp4[] = {0, 0, 0, 0x10, 'f', 't', 'y', 'p', 'm', 'p', '4', '2',
+                               0, 0, 0, 0, 'm', 'p', '4', '2'};
+        assert(!AvifContainer::is_avif(mp4, sizeof(mp4)));
+        assert(AvifContainer::parse(mp4, sizeof(mp4)).status == AvifContainer::Status::NotAvif);
+    }
+    assert(std::string(AvifContainer::status_string(AvifContainer::Status::Ok)) == "ok");
+}
+
+TEST(avif_container_refuses_what_it_cannot_read_instead_of_guessing) {
+    using namespace litebird;
+
+    auto status_of = [](std::vector<uint8_t> bytes) {
+        return AvifContainer::parse(bytes.data(), bytes.size()).status;
+    };
+    std::vector<uint8_t> base(kAvif4x4, kAvif4x4 + sizeof(kAvif4x4));
+
+    // Too short to hold anything, and empty.
+    assert(status_of({}) == AvifContainer::Status::NotAvif);
+    assert(status_of(std::vector<uint8_t>(base.begin(), base.begin() + 11)) == AvifContainer::Status::NotAvif);
+
+    // A box that claims more bytes than the file has, and a file cut off
+    // inside its meta box: malformed, not a crash and not a guess.
+    {
+        auto b = base; b[3] = 0xF0;
+        assert(status_of(b) == AvifContainer::Status::Malformed);
+    }
+    {
+        auto b = base; b.resize(200);
+        assert(status_of(b) == AvifContainer::Status::Malformed);
+    }
+    {
+        auto b = base; b.resize(40);
+        assert(status_of(b) == AvifContainer::Status::Malformed);
+    }
+
+    // A structure this parser does not read is `Unsupported` with a reason,
+    // which is different from `Malformed`: the file may be perfectly good.
+    {
+        auto b = base;
+        size_t at = 0;
+        for (size_t i = 0; i + 4 < b.size(); ++i) {
+            if (std::memcmp(b.data() + i, "iloc", 4) == 0) { at = i; break; }
+        }
+        assert(at != 0);
+        b[at + 4] = 9;                       // an iloc version that does not exist yet
+        assert(status_of(b) == AvifContainer::Status::Unsupported);
+    }
+
+    // An extent that points outside the file is refused even though every box
+    // fits: this is the one that would otherwise read past the buffer.
+    {
+        auto b = base;
+        size_t at = 0;
+        for (size_t i = 0; i + 4 < b.size(); ++i) {
+            if (std::memcmp(b.data() + i, "iloc", 4) == 0) { at = i; break; }
+        }
+        // The extent offset is the last 8 bytes of the iloc payload here
+        // (4-byte offset, 4-byte length); make it point far past the end.
+        b[at + 4 + 24] = 0x7F;
+        assert(status_of(b) != AvifContainer::Status::Ok);
+    }
+
+    // A `meta` box that says it is smaller than the boxes inside it.
+    {
+        auto b = base;
+        size_t at = 0;
+        for (size_t i = 0; i + 4 < b.size(); ++i) {
+            if (std::memcmp(b.data() + i, "meta", 4) == 0) { at = i - 4; break; }
+        }
+        assert(at != 0);
+        b[at + 3] = 40;                      // 235 was the real size; the boxes stay
+        assert(status_of(b) != AvifContainer::Status::Ok);
+    }
+}
+
 TEST(html5_date_time_inputs_validation_and_stepping) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         function inp(t, v) { var e = document.createElement('input'); e.type = t; if (v !== undefined) e.value = v; return e; }
@@ -17697,8 +17993,8 @@ TEST(web_browser_server_and_http11_gzip_chunked_cors_and_gui_e2e) {
     // 2. CORS enforcement on cross-origin XHR & fetch()
     {
         auto doc = std::make_shared<Document>();
-        doc->set_url("https://webapp.example/index.html");
-        JsInterpreter js(doc);
+    doc->set_url("https://webapp.example/index.html");
+    JsInterpreter js(doc);
         js.load_page("<script>window.openRes = ''; window.closedErr = false;</script>");
         js.notify_document_loaded();
 
@@ -18029,8 +18325,8 @@ TEST(js_classes_compiled_to_es5_run) {
 TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype) {
     using namespace litebird;
 
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.eval_ast(R"(
         class MyEvent extends Event { constructor(type, extra) { super(type); this.extra = extra; } }
         class Bus extends EventTarget { emit(name) { return this.dispatchEvent(new MyEvent(name, 7)); } }
@@ -18297,11 +18593,8 @@ TEST(attribute_list_front_removal_is_linear_in_practice) {
     assert(direct.empty());
     assert(direct_seconds < 5.0);
 
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     start = std::chrono::steady_clock::now();
     assert(js.eval(
@@ -20860,8 +21153,8 @@ TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering) {
     for (int round = 0; round < 3; ++round) {
         {
             auto doc = std::make_shared<Document>();
-            doc->set_url("https://gc.example.test/root.html");
-            JsInterpreter js(doc);
+    doc->set_url("https://gc.example.test/root.html");
+    JsInterpreter js(doc);
             js.load_page(R"html(<!doctype html><html><body>
               <iframe id="child" srcdoc="<div id='item'>from-child</div><iframe srcdoc='<p>leaf</p>'></iframe><script>class CustomBox {} window.box = new CustomBox();</script>"></iframe>
             </body></html>)html", true);
@@ -22711,9 +23004,8 @@ TEST(cloning_for_selectedcontent_keeps_attribute_namespaces) {
     // `clone_node_tree`). An attribute carries its own namespace since Phase
     // 51 — there is no side table to copy — so a clone that copied only names
     // and values would lose the namespaces of `xml:lang` and `xlink:href`.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><select><button><selectedcontent></selectedcontent></button>"
                  "<option selected>x<svg xml:lang=\"en\"><use xlink:href=\"#i\"/></svg></option></select>");
     js.notify_document_loaded();
@@ -22866,8 +23158,9 @@ TEST(select_selectedcontent_cloning_and_edge_cases) {
     assert(contains(with_tpl_child, "<selectedcontent>\n|           <template>\n|             content\n|               <span>\n|                 \"T\"\n|           \"Label\"\n"));
 
     {
-        auto doc = std::make_shared<Document>();
-        JsInterpreter js(doc);
+            auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
         js.load_page(
             "<!doctype html><select><button><selectedcontent id='sc'></button>"
             "<option id='o1'>First</option>"
@@ -22963,8 +23256,8 @@ TEST(regexp_unicode17_tables_and_parse_time_validation) {
 
 TEST(regexp_unicode_sets_v_mode_case_folding_and_has_indices) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var r = new RegExp("[\\p{Decimal_Number}--[0-9]]+", "v");
         var v_checks = [
@@ -23004,8 +23297,8 @@ TEST(regexp_unicode_sets_v_mode_case_folding_and_has_indices) {
 
 TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         // ES2025 inline modifiers (?ims-ims:...)
         var mod_ok =
@@ -26323,11 +26616,8 @@ TEST(an_accessor_on_an_array_index_is_its_property) {
     // methods that move elements in place (`reverse`, `sort`, `shift`,
     // `unshift`, `splice`, `fill`, `copyWithin`) and array destructuring move
     // and read the places and not what an accessor makes of them (AGENTS.md).
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -26981,11 +27271,8 @@ TEST(array_destructuring_reads_the_place_not_the_vector) {
     //
     // Every case was run through Node.js first, and the expected text of each
     // is what it printed.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -27243,11 +27530,8 @@ TEST(array_methods_that_move_places_ask_the_index) {
     //
     // Every case was run through Node.js first, and the expected text of each
     // is what it printed.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
 var failures = [];
 function check(what, f, want) {
@@ -27412,9 +27696,8 @@ TEST(instanceof_asks_symbol_has_instance) {
     // `r instanceof Response` answers false where the language says true; the
     // operator does not throw for them, because a native function with no
     // `prototype` is left answering false (AGENTS.md).
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><div id=\"d\"></div></body>");
     js.notify_document_loaded();
     auto none_failed = [&]() {
@@ -27578,11 +27861,8 @@ TEST(a_strict_delete_refuses_what_it_cannot_remove) {
     // still be deleted; and `arguments` prints as `#<Array>` in the message
     // because its prototype is `Array.prototype` here, which is its own
     // divergence.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -28015,6 +28295,146 @@ TEST(class_bodies_reject_what_the_grammar_does_not_allow) {
     assert(js.eval("new (class extends Object { x = 1; constructor() { super(); } })().x").to_string() == "1");
 }
 
+TEST(parser_rejects_early_syntax_errors_outside_class_bodies) {
+    using namespace litebird;
+
+    // Phase 141, finding 146. Early SyntaxErrors outside class bodies across
+    // object literals, function declarations/expressions/methods/arrows,
+    // assignment/update targets, destructuring rest/cover grammar, directive
+    // prologues, and non-method `super` property lookups. Every expectation
+    // below was verified against Node.js v22.22.3.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function rejects(what, src) {
+            try {
+                (0, eval)(src);
+                failures.push(what + ': accepted, expected SyntaxError');
+            } catch (e) {
+                if (!(e instanceof SyntaxError)) failures.push(what + ': threw ' + e.name);
+            }
+        }
+        function accepts(what, src) {
+            try { (0, eval)(src); }
+            catch (e) { failures.push(what + ': threw ' + e.name + ' ' + e.message); }
+        }
+
+        // ---- directive prologue & strict params / bindings ----------------
+        rejects('use strict in default-param fn', 'function f(a = 1) { "use strict"; }');
+        rejects('use strict in destructuring-param fn', 'function f({a}) { "use strict"; }');
+        rejects('use strict in rest-param fn', 'function f(...a) { "use strict"; }');
+        rejects('retroactive strict fn named eval', 'function eval() { "use strict"; }');
+        rejects('retroactive strict fn named arguments', 'function arguments() { "use strict"; }');
+        rejects('retroactive strict param eval', 'function f(eval) { "use strict"; }');
+        rejects('retroactive strict param arguments', 'function f(arguments) { "use strict"; }');
+        rejects('retroactive strict dup params', 'function f(a, a) { "use strict"; }');
+        rejects('strict fn decl named eval', '"use strict"; function eval() {}');
+        rejects('strict fn expr named eval', '"use strict"; (function eval() {})');
+        rejects('strict var eval', '"use strict"; var eval = 1;');
+        rejects('strict let arguments', '"use strict"; let arguments = 1;');
+        rejects('strict const [eval]', '"use strict"; const [eval] = [1];');
+        rejects('strict catch arguments', '"use strict"; try {} catch (arguments) {}');
+        rejects('strict class decl eval', '"use strict"; class eval {}');
+        rejects('strict class expr arguments', '"use strict"; (class arguments {})');
+        accepts('escaped use strict is not directive', 'function f(a = 1) { "\\x75se strict"; var eval = 1; return eval; } f();');
+        accepts('concatenated use strict is not directive', 'function f(a = 1) { "use strict" + ""; var eval = 1; return eval; } f();');
+        accepts('member after use strict is not directive', 'function f(a = 1) { "use strict"\n.length; var eval = 1; return eval; } f();');
+        accepts('sloppy fn duplicate params', 'function f(a, a) { return a; }');
+        accepts('sloppy fn named eval', '(function() { function eval() { return 1; } return eval(); })()');
+        accepts('sloppy fn named arguments', '(function() { function arguments() { return 1; } return arguments(); })()');
+        accepts('strict member named eval/arguments', '"use strict"; var o = {}; o.eval = 1; o.arguments = 2;');
+
+        // ---- duplicate params & param vs body lexical redeclaration -------
+        rejects('dup param before default', 'function f(a, a = 1) {}');
+        rejects('dup param after default', 'function f(a = 1, a) {}');
+        rejects('dup param with pattern', 'function f({a}, a) {}');
+        rejects('arrow dup params', 'var f = (a, a) => a;');
+        rejects('method dup params', 'var o = { m(a, a) {} };');
+        rejects('fn param shadowed by body let', 'function f(p) { let p; }');
+        rejects('fn param shadowed by body const', 'function f(p) { const p = 1; }');
+        rejects('method param shadowed by body let', 'var o = { m(p) { let p; } };');
+        rejects('arrow param shadowed by body let', 'var f = p => { let p; };');
+        rejects('fn expr param shadowed by body const', 'var f = function(a, b) { const b = 1; };');
+        accepts('param shadowed inside inner block', 'function f(p) { { let p = 2; return p; } }');
+
+        // ---- parameter default yield / await ------------------------------
+        rejects('yield expr in generator param', 'function* g(a = yield 1) {}');
+        rejects('await expr in async param', 'async function f(a = await 1) {}');
+        rejects('yield expr in method generator param', 'var o = { *m(a = yield 1) {} };');
+        rejects('await expr in async method param', 'var o = { async m(a = await 1) {} };');
+        rejects('await expr in class-ish method param', 'var o = { m(x = await 1) {} };');
+        accepts('yield inside inner arrow in generator param', 'function* g(a = () => yield) { return a; }');
+        accepts('await inside inner arrow in async param', 'async function f(a = () => await) { return a; }');
+
+        // ---- object literal, accessor & class member early errors ---------
+        rejects('duplicate __proto__ keys', 'var o = { __proto__: 1, __proto__: 2 };');
+        rejects('string + bare __proto__ keys', 'var o = { "__proto__": 1, __proto__: 2 };');
+        rejects('cover init in var initializer', 'var o = { a = 1 };');
+        rejects('standalone cover init', '({ a = 1 });');
+        rejects('object getter with param', 'var o = { get a(x) {} };');
+        rejects('object getter with default param', 'var o = { get a(x = 1) {} };');
+        rejects('object setter with 0 params', 'var o = { set a() {} };');
+        rejects('object setter with 2 params', 'var o = { set a(a, b) {} };');
+        rejects('object setter with rest param', 'var o = { set a(...a) {} };');
+        rejects('async getter on object', 'var o = { async get a() {} };');
+        rejects('generator setter on object', 'var o = { *set a(v) {} };');
+        rejects('class getter with default param', 'class C { get a(x = 1) {} }');
+        rejects('static field named constructor', 'class C { static constructor; }');
+        rejects('static string field named constructor', 'class C { static "constructor" = 1; }');
+        accepts('mixed valid __proto__ forms', 'var o = { __proto__: {}, ["__proto__"]: 2, __proto__() {} };');
+        accepts('shorthand plus explicit __proto__', 'var __proto__ = 1; var o = { __proto__, __proto__: {} };');
+        accepts('strict object methods named eval/arguments', '"use strict"; var o = { eval() {}, arguments() {} };');
+        accepts('static method named constructor', 'class C { static constructor() {} }');
+
+        // ---- rest, destructuring cover grammar & assignment targets -------
+        rejects('non-final rest in fn param pattern', 'function f([...x, y]) {}');
+        rejects('non-final rest in array decl', 'var [...x, y] = [];');
+        rejects('non-final rest in object decl', 'var {...rest, a} = {};');
+        rejects('non-final rest in array assign', 'var x, y; [...x, y] = [];');
+        rejects('trailing comma after rest in array assign', 'var x; [...x,] = [];');
+        rejects('trailing comma after rest in object assign', 'var rest; ({ ...rest, } = {});');
+        rejects('non-final rest in object assign', 'var rest, a; ({ ...rest, a } = {});');
+        rejects('default inside object rest assign', 'var a; ({ ...a = 1 } = {});');
+        rejects('grouped array target', 'var a; ([a]) = [];');
+        rejects('grouped object target', 'var a; ({ a }) = {};');
+        rejects('grouped assign inside array target', 'var a; ([(a = 1)] = []);');
+        rejects('grouped object nested target', 'var b; ({ a: ({ b = 1 }) } = {});');
+        rejects('strict assign eval', '"use strict"; eval = 1;');
+        rejects('strict grouped assign arguments', '"use strict"; (arguments) = 20;');
+        rejects('strict prefix ++eval', '"use strict"; ++eval;');
+        rejects('strict postfix arguments--', '"use strict"; arguments--;');
+        rejects('strict destructuring [arguments]', '"use strict"; [arguments] = [];');
+        rejects('strict destructuring {eval}', '"use strict"; ({ eval } = {});');
+        rejects('strict destructuring {eval=0}', '"use strict"; ({ eval = 0 } = {});');
+        rejects('assign to this', 'this = 1;');
+        rejects('grouped assign to this', '(this) = 1;');
+        rejects('prefix ++this', '++this;');
+        rejects('postfix this--', 'this--;');
+        rejects('destructuring [this]', '[this] = [];');
+        rejects('for-of this', 'for (this of [1]) {}');
+        accepts('cover init resolved to object destructuring', 'var a; ({ a = 1 } = {});');
+        accepts('duplicate __proto__ in object destructuring', 'var a, b; ({ __proto__: a, __proto__: b } = {});');
+        accepts('cover init in for-of head', 'var a; for ({ a = 1 } of [{}]) {}');
+        accepts('grouped simple ident in array pattern', 'var a; [(a) = 1] = []; [(a)] = [2];');
+
+        // ---- super property outside home-object methods -----------------
+        rejects('top-level super.x', 'super.x;');
+        rejects('plain function super.x', 'function f() { return super.x; }');
+        rejects('top-level arrow super[0]', 'var f = () => super[0];');
+        rejects('nested function inside method super.x', 'class C { m() { function inner() { return super.x; } } }');
+        accepts('arrow inside object method super.toString', 'var o = { m() { return (() => super.toString)(); } };');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+
+    // Sanity check runtime values for accepted constructs.
+    assert(js.eval("var o = { get x() { return 4; }, m() { return super.toString === Object.prototype.toString; } }; o.x + ':' + o.m()").to_string() == "4:true");
+    assert(js.eval("var a = 0, b = 0; ({ x: a = 7 } = {}); [b] = [9]; a + b").to_number() == 16.0);
+}
+
 TEST(an_anonymous_class_expression_takes_its_bindings_name) {
     using namespace litebird;
 
@@ -28105,9 +28525,8 @@ TEST(reflect_describes_and_answers_extensibility) {
     // Object.getOwnPropertyDescriptor either. Neither is asserted here; the
     // suite would fail on the engine and pass on Node, and a test of a bug
     // that is out of the task's files is the next task, not this one.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><div id=\"d\"></div></body>");
     js.notify_document_loaded();
     auto none_failed = [&]() {
@@ -28284,11 +28703,8 @@ TEST(object_integrity_levels_ask_every_property) {
     // The suite it was found in (Phase 124) wrote this case down and did not
     // assert it, because the bug was outside that task's files; this is the
     // task that owns them.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -28417,6 +28833,7 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
         assert(item->dimensions.content.height == 32.0f);
     }
 
+    // Position assertions below are relative to the container, not the body.
     // A stated height is not stretched — `stretch` has nothing to do when the
     // cross size is definite, and overwriting it would be a different bug.
     {
@@ -28424,7 +28841,7 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
                           R"(<div style="width: 50px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
         assert(item->dimensions.content.height == 20.0f);
-        assert(item->dimensions.content.y == 0.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 0.0f);
     }
 
     // `center` and `flex-end` place the item in the line, not at its top.
@@ -28433,14 +28850,14 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
                           R"(width: 100px; height: 100px">)"
                           R"(<div style="width: 50px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.y == 40.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 40.0f);
     }
     {
         auto root = build(R"(<body><div style="display: flex; align-items: flex-end; )"
                           R"(width: 100px; height: 100px">)"
                           R"(<div style="width: 50px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.y == 80.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 80.0f);
     }
 
     // A column container's cross axis is the width.
@@ -28449,14 +28866,14 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
                           R"(align-items: center; width: 100px; height: 100px">)"
                           R"(<div style="width: 40px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.x == 30.0f);
+        assert(item->dimensions.content.x - root->children[0]->dimensions.content.x == 30.0f);
     }
     {
         auto root = build(R"(<body><div style="display: flex; flex-direction: column; )"
                           R"(align-items: flex-end; width: 100px; height: 100px">)"
                           R"(<div style="width: 40px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.x == 60.0f);
+        assert(item->dimensions.content.x - root->children[0]->dimensions.content.x == 60.0f);
     }
 
     // Grid: the item's area is its rows, and stretch fills it. Both items are
@@ -28469,14 +28886,14 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
         assert(g->children.size() == 2);
         assert(g->children[0]->dimensions.content.height == 30.0f);
         assert(g->children[1]->dimensions.content.height == 30.0f);
-        assert(g->children[1]->dimensions.content.x == 60.0f);
+        assert(g->children[1]->dimensions.content.x - g->dimensions.content.x == 60.0f);
     }
     {
         auto root = build(R"(<body><div style="display: grid; align-items: center; )"
                           R"(grid-template-columns: 60px; grid-template-rows: 40px">)"
                           R"(<div style="height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.y == 10.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 10.0f);
         assert(item->dimensions.content.height == 20.0f);
     }
 }
@@ -28489,11 +28906,8 @@ TEST(boxed_string_own_index_descriptors) {
     // exotic object own, enumerable, non-writable, non-configurable index
     // properties too. Every expected JSON value below was printed by Node.js
     // v22.22.3 before being asserted here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var failures = [];
         function check(what, f, want) {
@@ -28552,11 +28966,8 @@ TEST(object_prototype_legacy_accessor_reflection) {
     // accessor; lookupGetter/Setter walk the prototype chain and stop at the
     // first own property. Node.js v22.22.3 printed each expected JSON value
     // below before it was added to the suite.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var failures = [];
@@ -28663,11 +29074,8 @@ TEST(image_data_is_an_interface) {
     // the dirty rectangle it is given and nothing else. Every expectation
     // below is the standard's; where the standard leaves a choice (the exact
     // message) it is not asserted.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var failures = [];
         function check(what, f, want) {
@@ -28931,11 +29339,8 @@ TEST(text_codec_a_decoder_and_an_encoder_in_script) {
     //
     // Every assertion below was run through Node first, as a standalone script;
     // its output is identical there and here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var failures = [];
@@ -29060,6 +29465,108 @@ if (failures.length) throw new Error(failures.join('\n'));
     )JS");
 }
 
+TEST(annex_b_string_html_methods) {
+    using namespace litebird;
+    // Phase 149, finding 154. ECMA-262 Annex B §B.2.3: thirteen methods that
+    // wrap the string in an HTML element, all of them `B.2.3.1 CreateHTML`,
+    // and `trimLeft`/`trimRight` as the *same function objects* as
+    // `trimStart`/`trimEnd`. The expectations are the standard's; the 86
+    // tests this phase adds to `annexB/built-ins/String` are the suite's,
+    // written by nobody who has seen this engine.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var failures = [];
+        function report(what, got, want) {
+            var a = JSON.stringify(got), b = JSON.stringify(want);
+            if (a !== b) failures.push(what + ': got ' + a + ', expected ' + b);
+        }
+        function check(what, f, want) {
+            var got;
+            try { got = f(); } catch (e) { got = 'throws ' + e.name; }
+            report(what, got, want);
+        }
+        // The same, for a function that is expected to throw.
+        function checkThrows(what, f, name) {
+            try { f(); } catch (e) { report(what, e.name, name); return; }
+            report(what, 'no throw', name);
+        }
+
+        check('anchor names the element it wraps', function () {
+            return ['_'.anchor('b'), '<'.anchor('<'), '_'.anchor(0x2A), '_'.anchor('\x22')];
+        }, ['<a name="b">_</a>', '<a name="<"><</a>', '<a name="42">_</a>', '<a name="&quot;">_</a>']);
+        check('link is an href, and its value is escaped the same way', function () {
+            return 'x'.link('a?b="c"');
+        }, '<a href="a?b=&quot;c&quot;">x</a>');
+        check('the nine element-only methods', function () {
+            return ['a'.bold(), 'a'.italics(), 'a'.fixed(), 'a'.strike(), 'a'.small(),
+                    'a'.big(), 'a'.blink(), 'a'.sub(), 'a'.sup()];
+        }, ['<b>a</b>', '<i>a</i>', '<tt>a</tt>', '<strike>a</strike>', '<small>a</small>',
+            '<big>a</big>', '<blink>a</blink>', '<sub>a</sub>', '<sup>a</sup>']);
+        check('fontcolor and fontsize are font attributes', function () {
+            return ['t'.fontcolor('red'), 't'.fontsize(12)];
+        }, ['<font color="red">t</font>', '<font size="12">t</font>']);
+        check('a missing attribute converts to the string undefined', function () {
+            return ['x'.anchor(), 'x'.fontcolor(), 'x'.fontsize(), 'x'.link()];
+        }, ['<a name="undefined">x</a>', '<font color="undefined">x</font>',
+            '<font size="undefined">x</font>', '<a href="undefined">x</a>']);
+        check('this is converted with ToString, not read as a string', function () {
+            return [String.prototype.anchor.call(0x2A, 0x2A), ''.bold()];
+        }, ['<a name="42">42</a>', '<b></b>']);
+        check('a boxed String is a this too', function () {
+            return String.prototype.bold.call(new String('ab'));
+        }, '<b>ab</b>');
+        checkThrows('a null or undefined this is a TypeError', function () {
+            return [String.prototype.anchor.call(undefined), String.prototype.anchor.call(null)];
+        }, 'TypeError');
+        check('a this whose toString throws propagates it', function () {
+            var bad = { toString: function () { throw new TypeError('mine'); } };
+            try { String.prototype.anchor.call(bad); } catch (e) { return e.message; }
+            return 'no throw';
+        }, 'mine');
+        check('an attribute whose toString throws propagates it', function () {
+            var bad = { toString: function () { throw new RangeError('mine'); } };
+            try { 'x'.anchor(bad); } catch (e) { return e.name; }
+            return 'no throw';
+        }, 'RangeError');
+        check('a surrogate pair survives on both sides', function () {
+            return '\u{1F600}'.anchor('\u{1F600}');
+        }, '<a name="\u{1F600}">\u{1F600}</a>');
+        checkThrows('the methods are not constructors', function () {
+            return new String.prototype.anchor();
+        }, 'TypeError');
+        check('length is the argument count, and name is the method', function () {
+            var names = ['anchor', 'link', 'fontcolor', 'fontsize', 'big', 'blink', 'bold',
+                         'fixed', 'italics', 'small', 'strike', 'sub', 'sup'];
+            return names.map(function (n) {
+                return n + ':' + String.prototype[n].length + ':' + String.prototype[n].name;
+            });
+        }, ['anchor:1:anchor', 'link:1:link', 'fontcolor:1:fontcolor', 'fontsize:1:fontsize',
+            'big:0:big', 'blink:0:blink', 'bold:0:bold', 'fixed:0:fixed', 'italics:0:italics',
+            'small:0:small', 'strike:0:strike', 'sub:0:sub', 'sup:0:sup']);
+        check('they are writable, not enumerable and configurable', function () {
+            var d = Object.getOwnPropertyDescriptor(String.prototype, 'bold');
+            return [d.writable, d.enumerable, d.configurable, Object.keys(String.prototype).indexOf('bold')];
+        }, [true, false, true, -1]);
+        check('trimLeft is trimStart itself', function () {
+            return [String.prototype.trimLeft === String.prototype.trimStart,
+                    String.prototype.trimLeft.name, String.prototype.trimLeft.length];
+        }, [true, 'trimStart', 0]);
+        check('trimRight is trimEnd itself', function () {
+            return [String.prototype.trimRight === String.prototype.trimEnd,
+                    String.prototype.trimRight.name, String.prototype.trimRight.length,
+                    '  a  '.trimLeft() + '|' + '  a  '.trimRight()];
+        }, [true, 'trimEnd', 0, 'a  |  a']);
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(a_functions_name_and_length_are_its_own_properties) {
     using namespace litebird;
 
@@ -29164,11 +29671,8 @@ TEST(a_subclass_is_made_by_the_builtin_it_was_called_on) {
     // same script, checked line for line against a second run in Node. The
     // non-constructor receivers make a plain array, as the standard specifies:
     // `Array.from.call({}, [1])` is an Array rather than a TypeError.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var failures = [];
@@ -29270,6 +29774,1911 @@ TEST(a_subclass_is_made_by_the_builtin_it_was_called_on) {
         }, '["2,4,6","2,3","2,3","1,2,3,4","1,2,3",3]');
 
         failures;
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot) {
+    using namespace litebird;
+
+    // Phase 154, finding 159. `stack` was an own data property installed by
+    // js_make_error, so every statement below was false:
+    //
+    //   Object.getOwnPropertyDescriptor(Error.prototype, 'stack')
+    //                        -> undefined      (it is an accessor)
+    //   new Error('x').hasOwnProperty('stack')
+    //                        -> true           (it is false until assigned)
+    //   Object.getOwnPropertyNames(new Error('x'))
+    //                        -> ['message','stack']  (['message'])
+    //
+    // The standard says nothing about `stack`; the de-facto shape is the one
+    // test262 pins down and V8/JavaScriptCore expose: an accessor pair on
+    // Error.prototype that reports the text from the [[ErrorData]] internal
+    // slot, and an instance that carries no own property until something
+    // assigns one. ObjectClass::Error is that slot here.
+    //
+    // The getter answers from the slot on the *receiver*, so it survives an
+    // own `stack` that shadows it, a foreign new.target that puts the
+    // instance off Error.prototype's chain, and a subclass. The setter is
+    // SetterThatIgnoresPrototypeProperties: a non-string throws, Error.prototype
+    // itself throws, and anything else gets an ordinary own data property.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throwsT(what, f) {
+            try { f(); failures.push(what + ': no throw'); }
+            catch (e) { if (e.constructor.name !== 'TypeError') failures.push(what + ': threw ' + e.constructor.name); }
+        }
+        function desc(o, k) {
+            var d = Object.getOwnPropertyDescriptor(o, k);
+            if (!d) return 'absent';
+            return [typeof d.get, typeof d.set, String(d.value), String(d.writable),
+                    String(d.enumerable), String(d.configurable)].join(',');
+        }
+
+        // ---- the property on the prototype is an accessor ----------------
+        var d = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
+        same('descriptor is an accessor', desc(Error.prototype, 'stack'),
+             'function,function,undefined,undefined,false,true');
+        same('getter name', d.get.name, 'get stack');
+        same('getter length', d.get.length, 0);
+        same('setter name', d.set.name, 'set stack');
+        same('setter length', d.set.length, 1);
+        same('getter is not a constructor', d.get.hasOwnProperty('prototype'), false);
+        throwsT('new getter', function () { new d.get(); });
+
+        // ---- an instance has no own stack --------------------------------
+        var e = new Error('x');
+        same('own names', Object.getOwnPropertyNames(e), ['message']);
+        same('hasOwnProperty before assignment', e.hasOwnProperty('stack'), false);
+        same('descriptor is undefined', Object.getOwnPropertyDescriptor(e, 'stack'), undefined);
+        same('case', Object.keys(e).indexOf('stack'), -1);
+        same('getter still reports', typeof e.stack, 'string');
+        same('the text', e.stack, 'Error: x\n    at <anonymous>');
+        same('every native error', new TypeError('t').stack, 'TypeError: t\n    at <anonymous>');
+        same('a subclass', new (class extends Error {})('s').stack, 'Error: s\n    at <anonymous>');
+        // An empty error is just its name, as toString() is.
+        same('no message', new RangeError().stack, 'RangeError\n    at <anonymous>');
+
+        // ---- the getter reads the slot, not the prototype chain ----------
+        var o = { __proto__: new Error('o') };
+        same('getter on a proxy-ish receiver', d.get.call(o), undefined);
+        same('via the chain', o.stack, undefined);
+        same('getter on Error.prototype', d.get.call(Error.prototype), undefined);
+        same('plain object', d.get.call({}), undefined);
+        same('native error prototypes', d.get.call(TypeError.prototype), undefined);
+        throwsT('getter on undefined', function () { d.get.call(undefined); });
+        throwsT('getter on a number', function () { d.get.call(1); });
+        throwsT('setter on null', function () { d.set.call(null, 'x'); });
+
+        // ---- an own data property shadows it -----------------------------
+        var shadow = new Error('m');
+        Object.defineProperty(shadow, 'stack', { value: 'sentinel', writable: true, enumerable: true, configurable: true });
+        same('shadowed read', shadow.stack, 'sentinel');
+        same('slot survives the shadow', typeof d.get.call(shadow), 'string');
+
+        // ---- the setter installs an ordinary own property ----------------
+        var s1 = new Error('m');
+        same('setter returns undefined', d.set.call(s1, 'sentinel'), undefined);
+        same('own after set', desc(s1, 'stack'), 'undefined,undefined,sentinel,true,true,true');
+        same('read back', s1.stack, 'sentinel');
+        d.set.call(s1, '');
+        same('empty string round-trips', s1.stack, '');
+        var plain = {};
+        d.set.call(plain, 'on-plain');
+        same('plain receiver', desc(plain, 'stack'), 'undefined,undefined,on-plain,true,true,true');
+        d.set.call(TypeError.prototype, 'sub');
+        same('a native error prototype', desc(TypeError.prototype, 'stack'),
+             'undefined,undefined,sub,true,true,true');
+        delete TypeError.prototype.stack;
+        same('cleaned up', Object.getOwnPropertyDescriptor(TypeError.prototype, 'stack'), undefined);
+        var viaAssignment = Object.create(Error.prototype);
+        viaAssignment.stack = 'assigned';
+        same('assignment through the accessor', desc(viaAssignment, 'stack'),
+             'undefined,undefined,assigned,true,true,true');
+
+        // ---- an existing own property keeps its attributes ---------------
+        var kept = new Error('m');
+        Object.defineProperty(kept, 'stack', { value: 'original', writable: true, enumerable: false, configurable: false });
+        d.set.call(kept, 'updated');
+        same('only the value changes', desc(kept, 'stack'), 'undefined,undefined,updated,true,false,false');
+
+        // ---- and the ways the setter refuses -----------------------------
+        throwsT('no argument', function () { d.set.call(new Error('m')); });
+        throwsT('a number', function () { d.set.call(new Error('m'), 1); });
+        throwsT('undefined', function () { d.set.call(new Error('m'), undefined); });
+        throwsT('an object with toString', function () { d.set.call(new Error('m'), { toString: function () { return 'x'; } }); });
+        throwsT('Error.prototype itself', function () { d.set.call(Error.prototype, 'x'); });
+        throwsT('assignment to Error.prototype', function () { Error.prototype.stack = 'x'; });
+        var ro = new Error('m');
+        Object.defineProperty(ro, 'stack', { value: 'ro', writable: false, enumerable: false, configurable: true });
+        throwsT('a non-writable own property', function () { d.set.call(ro, 'x'); });
+        same('and it is untouched', ro.stack, 'ro');
+        var frozen = new Error('m');
+        Object.freeze(frozen);
+        throwsT('a frozen instance', function () { d.set.call(frozen, 'x'); });
+        same('soft delete', delete new Error('m').stack, true);
+
+        // ---- the accessor survives the refusals --------------------------
+        same('still an accessor', desc(Error.prototype, 'stack'),
+             'function,function,undefined,undefined,false,true');
+        same('and still reports', new Error('after').stack, 'Error: after\n    at <anonymous>');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+TEST(automatic_gc_threshold_and_geometric_growth) {
+    using namespace litebird;
+
+    // Isolated Heap so tests do not disturb Heap::default_heap()'s counters.
+    Heap heap;
+    assert(heap.auto_gc_enabled());
+    assert(heap.auto_gc_min_threshold() == Heap::kDefaultAutoGcMinThreshold);
+    assert(heap.auto_gc_collections() == 0);
+
+    // Lower threshold to test exact firing and geometric doubling quickly.
+    heap.set_auto_gc_min_threshold(64);
+    assert(heap.auto_gc_min_threshold() == 64);
+
+    for (int i = 0; i < 63; ++i) {
+        heap.allocate_object();
+        assert(!heap.take_gc_stress_request());
+    }
+    heap.allocate_object(); // 64th allocation arms the request.
+    assert(heap.take_gc_stress_request());
+    assert(!heap.take_gc_stress_request());
+    assert(heap.auto_gc_collections() == 1);
+    assert(heap.gc_stress_collections() == 0);
+
+    // Geometric growth: keep 200 live objects alive across a collection.
+    // The next threshold must grow to max(64, 200) = 200, keeping mark work O(N).
+    std::vector<JsValue> live;
+    std::vector<JsValue*> roots;
+    live.reserve(200);
+    roots.reserve(200);
+    for (int i = 0; i < 200; ++i) {
+        live.push_back(JsValue::make_object(heap.allocate_object()));
+    }
+    for (auto& v : live) roots.push_back(&v);
+    auto stats = heap.collect_garbage(roots);
+    assert(stats.alive_cells == 200);
+    assert(!heap.take_gc_stress_request());
+
+    for (int i = 0; i < 199; ++i) {
+        heap.allocate_object();
+        assert(!heap.take_gc_stress_request());
+    }
+    heap.allocate_object(); // 200th allocation arms the request.
+    assert(heap.take_gc_stress_request());
+    assert(!heap.take_gc_stress_request());
+    assert(heap.auto_gc_collections() == 2);
+
+    // Once the live set drops to 0, threshold shrinks back to min_threshold (64).
+    roots.clear();
+    live.clear();
+    auto after_reclaim = heap.collect_garbage({});
+    assert(after_reclaim.alive_cells == 0);
+    for (int i = 0; i < 63; ++i) {
+        heap.allocate_object();
+        assert(!heap.take_gc_stress_request());
+    }
+    heap.allocate_object();
+    assert(heap.take_gc_stress_request());
+    assert(heap.auto_gc_collections() == 3);
+
+    // Disabling automatic GC suppresses all requests; re-enabling resumes them.
+    heap.set_auto_gc_enabled(false);
+    assert(!heap.auto_gc_enabled());
+    for (int i = 0; i < 1000; ++i) {
+        heap.allocate_object();
+        assert(!heap.take_gc_stress_request());
+    }
+    heap.set_auto_gc_enabled(true);
+    for (int i = 0; i < 64; ++i) heap.allocate_object();
+    assert(heap.take_gc_stress_request());
+
+    // Per-agent isolation: a worker thread hitting its threshold arms ONLY
+    // that worker's safe point and never triggers agent 0.
+    heap.collect_garbage({});
+    std::atomic<bool> worker_ready{false};
+    std::atomic<bool> main_checked{false};
+    bool worker_fired = false;
+    bool worker_second_call = true;
+    std::thread worker([&]() {
+        Heap::enter_new_agent();
+        for (int i = 0; i < 64; ++i) heap.allocate_object();
+        worker_ready.store(true, std::memory_order_release);
+        while (!main_checked.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        worker_fired = heap.take_gc_stress_request();
+        worker_second_call = heap.take_gc_stress_request();
+        heap.collect_garbage({});
+    });
+    while (!worker_ready.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    // Main thread (agent 0) has allocated nothing since its last collection.
+    assert(!heap.take_gc_stress_request());
+    main_checked.store(true, std::memory_order_release);
+    worker.join();
+    assert(worker_fired);
+    assert(!worker_second_call);
+
+    // Stress mode overrides automatic GC cleanly.
+    heap.set_gc_stress(42, 4);
+    assert(heap.gc_stress_enabled());
+    const uint64_t auto_before_stress = heap.auto_gc_collections();
+    uint64_t stress_hits = 0;
+    for (int i = 0; i < 200; ++i) {
+        heap.allocate_object();
+        if (heap.take_gc_stress_request()) ++stress_hits;
+    }
+    assert(stress_hits > 0);
+    assert(heap.gc_stress_collections() == stress_hits);
+    assert(heap.auto_gc_collections() == auto_before_stress);
+}
+
+TEST(automatic_gc_reclaims_churn_without_calling_gc) {
+    using namespace litebird;
+
+    Heap& heap = Heap::default_heap();
+    heap.collect_garbage();
+    const uint64_t auto_before = heap.auto_gc_collections();
+    const size_t base_alive = heap.stats().alive_cells;
+
+    {
+        JsInterpreter js;
+        // Allocate >50,000 objects including mutual, closure, and array cycles
+        // without ever calling gc().
+        JsValue res = js.eval(R"JS(
+            var keep = { tag: "alive", child: { n: 42 } };
+            var makeClosure = function (v) { return function () { return v; }; };
+            var keepFn = makeClosure("retained");
+            for (var i = 0; i < 20000; i++) {
+                var a = { i: i };
+                var b = { a: a };
+                a.b = b;
+                var list = [a, b];
+                list.push(list);
+            }
+            keep.tag + "|" + keep.child.n + "|" + keepFn();
+        )JS");
+        assert(res.to_string() == "alive|42|retained");
+        const uint64_t auto_after_interp = heap.auto_gc_collections();
+        const size_t alive_without_manual_gc = heap.stats().alive_cells;
+        // Automatic GC must have fired multiple times and kept the live heap
+        // bounded far below the 60,000+ objects allocated in the loop.
+        assert(auto_after_interp > auto_before);
+        assert(alive_without_manual_gc < base_alive + 2 * Heap::kDefaultAutoGcMinThreshold);
+
+        // Bytecode VM safe point: allocate >10,000 objects in a VM loop without
+        // calling gc() and verify automatic collection fires there as well.
+        const uint64_t auto_before_vm = heap.auto_gc_collections();
+        auto fn = js.compile_to_bytecode(
+            "let i = 0; let last = 0; while (i < 12000) { let o = {}; last = i; i = i + 1; } last;");
+        assert(fn != nullptr);
+        VM vm;
+        JsValue vm_res = vm.interpret(fn);
+        assert(vm_res.to_number() == 11999.0);
+        assert(heap.auto_gc_collections() > auto_before_vm);
+    }
+
+    heap.collect_garbage();
+}
+
+TEST(gc_reclaims_a_bound_functions_target) {
+    using namespace litebird;
+
+    // A bound function held the target, the bound `this`, the bound arguments
+    // and (for `instanceof`) a second copy of the target inside the
+    // std::function the collector cannot look into. Those copies are invisible
+    // to it, so every copy of the bound function counted as the payload's one
+    // owner; the payload looked held from outside, became a root, and the
+    // target, its closure and every variable the closure held stayed alive for
+    // good. `o.b = f.bind(null)` in a loop leaked three cells an iteration and
+    // `o.b = f.bind(o)` -- the row's own example -- six.
+    //
+    // What the entry point needs now lives in the payload (Extra::captured,
+    // Extra::bound_target), which the collector counts and marks like any
+    // other reference. Every function the test calls is defined once, up
+    // front, so that a measurement is not confused with the globals an
+    // eval_ast() would add.
+    Heap& heap = Heap::default_heap();
+
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            // Nothing but a bound function's payload refers to the target: the
+            // closure's only escape is the bound function, and the object is
+            // reachable only through the bound `this`.
+            function churnCycle(n) {
+                for (var i = 0; i < n; i++) {
+                    var o = {};
+                    o.b = (function () { return i; }).bind(o);
+                }
+            }
+            // The same without a cycle: the leak did not need one.
+            function churnDetached(n) {
+                for (var i = 0; i < n; i++) { var k = {}; k.b = (function () {}).bind(null); }
+            }
+            churnCycle(200);
+        )");
+        heap.collect_garbage();
+        const size_t settled = heap.stats().alive_cells;
+
+        js.eval_ast("churnCycle(500);");
+        heap.collect_garbage();
+        // Before the fix this was +3000: six cells per iteration.
+        assert(heap.stats().alive_cells == settled);
+
+        js.eval_ast("churnDetached(500);");
+        heap.collect_garbage();
+        // Before the fix this was +1500: three cells per iteration.
+        assert(heap.stats().alive_cells == settled);
+
+        // A target the collector must still keep alive: the bound function is
+        // reachable, so it and everything it refers to survive a collection.
+        js.eval_ast(R"(
+            var boundNow = (function () { return { tag: "target-alive" }; }).bind(null);
+        )");
+        heap.collect_garbage();
+        assert(js.global_env()->get("boundNow").call({}).get_property("tag").to_string() == "target-alive");
+    }
+    heap.collect_garbage();
+}
+
+TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour) {
+    using namespace litebird;
+
+    // The values `bind` used to capture are read from the payload now, so the
+    // order they are stored in is part of the contract: target, bound `this`,
+    // then the arguments already bound. These are the answers Node.js
+    // v22.22.3 gives (checked against it directly).
+    JsInterpreter js;
+    JsValue r = js.eval(R"(
+        function greet(a, b) { return this.who + ":" + a + ":" + b; }
+        var g = greet.bind({ who: "obj" }, 1);
+
+        function three(a, b, c) {}
+        function Point(x, y) { this.x = x; this.y = y; }
+        var BP = Point.bind(null, 10);
+        var p = new BP(20);
+
+        function T() { this.nt = typeof new.target; }
+        function sum() { var s = 0; for (var i = 0; i < arguments.length; i++) s += arguments[i]; return s; }
+
+        [
+            g(2),
+            g.name,
+            g.length,
+            three.bind(null, 1).length,
+            three.bind(null, 1, 2, 3, 4).length,
+            p.x + "," + p.y,
+            p instanceof Point,
+            p instanceof BP,
+            new (T.bind(null))().nt,
+            g.bind({ who: "no" }, "x")("y"),
+            sum.bind(null, 1, 2, 3)(4, 5)
+        ].join("|");
+    )");
+    assert(r.to_string() ==
+           "obj:1:2|bound greet|1|2|0|10,20|true|true|function|obj:1:x|15");
+}
+
+TEST(document_body_margins_place_boxes_from_the_viewport) {
+    using namespace litebird;
+    // Reference rectangles were measured in Chromium 153 at 800x600. The
+    // HTML root box and general margin collapsing remain separate work; these
+    // cases deliberately include both a top-margin chain and its boundaries.
+    struct Example {
+        const char* name;
+        const char* html;
+        Rect body;
+        Rect child;
+        const char* other_id = nullptr;
+        Rect other{};
+    };
+    const Example examples[] = {
+        {"user-agent margin", R"(<body><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {8, 8, 784, 20}, {8, 8, 100, 20}},
+        {"zero margin", R"(<body style="margin:0"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {0, 0, 800, 20}, {0, 0, 100, 20}},
+        {"forty pixels", R"(<body style="margin:40px"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {40, 40, 720, 20}, {40, 40, 100, 20}},
+        {"different margins, padding and border",
+         R"(<body style="margin:11px 29px 17px 23px;padding:5px 7px 9px 13px;border:3px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {23, 11, 748, 40}, {39, 19, 100, 20}},
+        {"percentages use viewport width",
+         R"(<body style="margin:2.5% 5%;padding:1% 2%;border:2px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {40, 20, 720, 40}, {58, 30, 100, 20}},
+        {"two auto margins", R"(<body style="width:100px;margin:10px auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {350, 10, 100, 20}, {350, 10, 50, 20}},
+        {"one auto margin", R"(<body style="width:100px;margin:10px 25px 0 auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {675, 10, 100, 20}, {675, 10, 50, 20}},
+        {"auto longhands with auto width", R"(<body style="margin-left:auto;margin-right:auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {0, 8, 800, 20}, {0, 8, 50, 20}},
+        {"one auto longhand with auto width", R"(<body style="margin-left:auto;margin-right:25px"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {0, 8, 775, 20}, {0, 8, 50, 20}},
+        {"vertical auto margin", R"(<body style="margin-top:auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {8, 0, 784, 20}, {8, 0, 50, 20}},
+        {"negative margins", R"(<body style="margin:-12px 20px 5px -7px"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {-7, -12, 787, 20}, {-7, -12, 100, 20}},
+        {"flex body",
+         R"(<body style="display:flex;margin:11px 29px 17px 23px;padding:5px 7px 9px 13px;border:3px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {23, 11, 748, 40}, {39, 19, 100, 20}},
+        {"grid body",
+         R"(<body style="display:grid;margin:11px 29px 17px 23px;padding:5px 7px 9px 13px;border:3px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {23, 11, 748, 40}, {39, 19, 100, 20}},
+        {"auto margin on flex body",
+         R"(<body style="display:flex;width:100px;margin:10px 25px 0 auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {675, 10, 100, 20}, {675, 10, 50, 20}},
+        {"auto margins on grid body",
+         R"(<body style="display:grid;width:100px;margin:10px auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {350, 10, 100, 20}, {350, 10, 50, 20}},
+        {"relative body", R"(<body style="margin:40px;position:relative;left:11px;top:12px"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {51, 52, 720, 20}, {51, 52, 100, 20}},
+        {"absolute body", R"(<body style="position:absolute;left:30px;top:25px;margin:8px;width:100px"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {38, 33, 100, 20}, {38, 33, 50, 20}},
+        {"child margin larger than body", R"(<body><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 30, 784, 20}, {8, 30, 100, 20}},
+        {"body margin larger, with sibling",
+         R"(<body style="margin:40px"><div id="kid" style="margin:10px 0 0;width:100px;height:20px"></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {40, 40, 720, 30}, {40, 40, 100, 20}, "other", {40, 60, 100, 10}},
+        {"positive and negative collapse",
+         R"(<body style="margin:20px 8px 8px"><div id="kid" style="margin:-30px 0 0;width:100px;height:20px"></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, -10, 784, 30}, {8, -10, 100, 20}, "other", {8, 10, 100, 10}},
+        {"two negative margins", R"(<body style="margin:-10px 8px 8px"><div id="kid" style="margin:-20px 0 0;width:100px;height:20px"></div></body>)",
+         {8, -20, 784, 20}, {8, -20, 100, 20}},
+        {"padding prevents top collapse", R"(<body style="margin:8px;padding-top:1px"><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 8, 784, 51}, {8, 39, 100, 20}},
+        {"flex prevents top collapse", R"(<body style="display:flex;margin:8px"><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 8, 784, 50}, {8, 38, 100, 20}},
+        {"definite body height", R"(<body style="margin:8px;height:100px"><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 30, 784, 100}, {8, 30, 100, 20}},
+        {"nested first-child chain",
+         R"(<body><div id="kid" style="margin:0"><div id="other" style="margin:30px 0 0;width:100px;height:20px"></div></div></body>)",
+         {8, 30, 784, 20}, {8, 30, 784, 20}, "other", {8, 30, 100, 20}},
+        {"nested collapse moves the following sibling",
+         R"(<body><div id="kid" style="margin:0"><div style="margin:30px 0 0;width:100px;height:20px"></div></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, 30, 784, 30}, {8, 30, 784, 20}, "other", {8, 50, 100, 10}},
+        {"nested mixed margins",
+         R"(<body style="margin:10px"><div id="kid" style="margin:-20px 0 0"><div id="other" style="margin:30px 0 0;width:100px;height:20px"></div></div></body>)",
+         {10, 10, 780, 20}, {10, 10, 780, 20}, "other", {10, 10, 100, 20}},
+        {"definite height stops height propagation",
+         R"(<body><div id="kid" style="margin:20px 0 0;height:100px"><div id="other" style="margin:30px 0 0;width:100px;height:20px"></div></div></body>)",
+         {8, 30, 784, 100}, {8, 30, 784, 100}, "other", {8, 30, 100, 20}},
+        {"negative nested margin grows ancestor and moves sibling",
+         R"(<body><div id="kid" style="margin:0"><div style="margin:-30px 0 0;width:100px;height:20px"></div></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, -22, 784, 30}, {8, -22, 784, 20}, "other", {8, -2, 100, 10}},
+        {"fixed-height child keeps following sibling",
+         R"(<body><div id="kid" style="margin:20px 0 0;height:100px"><div style="margin:30px 0 0;width:100px;height:20px"></div></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, 30, 784, 110}, {8, 30, 784, 100}, "other", {8, 130, 100, 10}},
+    };
+    auto check_rect = [](const char* example, const char* what, const Rect& got, const Rect& want) {
+        const bool correct = std::fabs(got.x - want.x) < 0.001f && std::fabs(got.y - want.y) < 0.001f &&
+                             std::fabs(got.width - want.width) < 0.001f && std::fabs(got.height - want.height) < 0.001f;
+        if (!correct) {
+            std::fprintf(stderr, "      %s %s: got (%g,%g %gx%g), expected (%g,%g %gx%g)\n",
+                         example, what, got.x, got.y, got.width, got.height,
+                         want.x, want.y, want.width, want.height);
+        }
+        assert(correct);
+    };
+    for (const auto& example : examples) {
+        auto doc = HtmlParser::parse(std::string("<!doctype html>") + example.html);
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        auto child = doc->get_element_by_id("kid");
+        assert(root && doc->body() && child);
+        check_rect(example.name, "body", doc->body()->bounding_box(), example.body);
+        check_rect(example.name, "child", child->bounding_box(), example.child);
+        if (example.other_id) {
+            auto other = doc->get_element_by_id(example.other_id);
+            assert(other);
+            check_rect(example.name, "other", other->bounding_box(), example.other);
+        }
+    }
+    std::printf("      [body origin] %zu Chromium-derived geometry cases\n", std::size(examples));
+}
+
+TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(
+        R"(<!doctype html><body style="margin:40px;padding:5px;border:3px solid blue;position:relative">)"
+        R"(<div id="kid" style="width:100px;height:30px;background:red"></div>)"
+        R"(<div id="abs" style="position:absolute;left:0;top:0;width:10px;height:10px;background:green"></div>)"
+        R"(<div id="fixed" style="position:fixed;left:0;top:0;width:10px;height:10px;background:black"></div></body>)");
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    auto kid = doc->get_element_by_id("kid");
+    auto abs = doc->get_element_by_id("abs");
+    auto fixed = doc->get_element_by_id("fixed");
+    assert(root && kid && abs && fixed);
+    assert(kid->bounding_box().x == 48.0f && kid->bounding_box().y == 48.0f);
+    assert(abs->bounding_box().x == 43.0f && abs->bounding_box().y == 43.0f);
+    assert(fixed->bounding_box().x == 0.0f && fixed->bounding_box().y == 0.0f);
+
+    BitmapRenderer bmp(160, 100);
+    bmp.clear(Color::parse("#ffffff"));
+    bmp.render(DisplayList::build(root));
+    assert(bmp.get_pixel(0, 0) == Color::parse("#000000"));    // fixed at the viewport
+    assert(bmp.get_pixel(40, 40) == Color::parse("#0000ff"));  // body border
+    assert(bmp.get_pixel(43, 43) == Color::parse("#008000"));  // body's padding box
+    assert(bmp.get_pixel(60, 55) == Color::parse("#ff0000"));  // in-flow child
+    assert(bmp.get_pixel(39, 39) == Color::parse("#ffffff"));  // outside the body
+
+    // A document relayout must replace the offset, not accumulate it, and
+    // getBoundingClientRect must report the same geometry as the painter.
+    auto live_doc = std::make_shared<Document>();
+    live_doc->set_viewport_size(800.0f, 600.0f);
+    JsInterpreter js(live_doc);
+    js.load_page(R"(<!doctype html><body><div id="kid" style="width:100px;height:20px"></div></body>)");
+    js.notify_document_loaded();
+    auto geometry = [&]() {
+        return js.eval("var b=document.body.getBoundingClientRect(), k=document.getElementById('kid').getBoundingClientRect(); [b.left,b.top,b.width,k.left,k.top].join(',')").to_string();
+    };
+    assert(geometry() == "8,8,784,8,8");
+    js.eval("document.body.style.margin = '40px'");
+    assert(geometry() == "40,40,720,40,40");
+    js.eval("document.body.style.margin = '0px'");
+    assert(geometry() == "0,0,800,0,0");
+    js.eval("document.getElementById('kid').style.marginTop = '30px'");
+    assert(geometry() == "0,30,800,0,30");
+
+    // Inline fragments move with their body; their font-dependent height is
+    // not a body-margin oracle.
+    auto inline_doc = HtmlParser::parse(
+        R"(<!doctype html><body style="margin:15px;padding:5px;border:3px solid blue"><span id="kid">text</span></body>)");
+    auto inline_root = LayoutTree::build(inline_doc, resolver, 800.0f, 600.0f);
+    auto span = inline_doc->get_element_by_id("kid");
+    assert(inline_root && span && !inline_root->line_boxes.empty());
+    assert(span->bounding_box().x == 23.0f && span->bounding_box().y == 23.0f);
+}
+
+TEST(a_built_in_method_is_not_a_constructor) {
+    using namespace litebird;
+
+    // Phase 158, finding 163. Every built-in *method* was a constructor, so
+    // the question test262's isConstructor.js asks by doing
+    // `Reflect.construct(function () {}, [], f)` answered `true` for 51
+    // properties it must answer `false` for:
+    //
+    //   isConstructor(Object.defineProperty)              -> true   (false)
+    //   isConstructor(Reflect.get)                        -> true   (false)
+    //   isConstructor(Object.prototype.hasOwnProperty)    -> true   (false)
+    //   new Object.keys([])                               -> {}     (TypeError)
+    //
+    // A MethodDefinition is an ordinary function object with no [[Construct]],
+    // so `Object.keys` and `{ keys() {} }` are the same kind of function. Every
+    // built-in method is installed by js_define_method, so that helper makes
+    // them with js_make_method, and a constructor -- which is registered by
+    // hand, not through js_define_method -- still constructs.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        // The harness test262 uses: is there a [[Construct]]?
+        function isConstructor(f) {
+            try { Reflect.construct(function () {}, [], f); return true; }
+            catch (e) { return false; }
+        }
+        function newThrows(what, f) {
+            try { new f(); failures.push(what + ': new did not throw'); }
+            catch (e) { if (e.constructor.name !== 'TypeError') failures.push(what + ': threw ' + e.constructor.name); }
+        }
+
+        // ---- the methods that were the 51 failures ----------------------
+        same('Object.defineProperty', isConstructor(Object.defineProperty), false);
+        same('Object.defineProperties', isConstructor(Object.defineProperties), false);
+        same('Object.keys', isConstructor(Object.keys), false);
+        same('Object.assign', isConstructor(Object.assign), false);
+        same('Object.freeze', isConstructor(Object.freeze), false);
+        same('Object.prototype.hasOwnProperty', isConstructor(Object.prototype.hasOwnProperty), false);
+        same('Object.prototype.toString', isConstructor(Object.prototype.toString), false);
+        same('Reflect.get', isConstructor(Reflect.get), false);
+        same('Reflect.construct', isConstructor(Reflect.construct), false);
+        same('Symbol.for', isConstructor(Symbol.for), false);
+        same('Symbol.keyFor', isConstructor(Symbol.keyFor), false);
+        same('Symbol.prototype.toString', isConstructor(Symbol.prototype.toString), false);
+        same('Error.prototype.toString', isConstructor(Error.prototype.toString), false);
+        same('Function.prototype.call', isConstructor(Function.prototype.call), false);
+        same('Function.prototype.bind', isConstructor(Function.prototype.bind), false);
+        newThrows('new Object.defineProperty', function () { new Object.defineProperty({}, 'x', { value: 1 }); });
+        newThrows('new Object.keys', function () { new Object.keys([]); });
+
+        // ---- and the same is true of every built-in method, not a list ---
+        same('Array.prototype.map', isConstructor(Array.prototype.map), false);
+        same('Array.prototype.sort', isConstructor(Array.prototype.sort), false);
+        same('String.prototype.slice', isConstructor(String.prototype.slice), false);
+        same('Map.prototype.get', isConstructor(Map.prototype.get), false);
+        same('JSON.parse', isConstructor(JSON.parse), false);
+        same('Math.max', isConstructor(Math.max), false);
+        same('Date.now', isConstructor(Date.now), false);
+        same('Promise.resolve', isConstructor(Promise.resolve), false);
+        same('Symbol.iterator', isConstructor(Symbol.iterator ? Symbol.iterator : function(){}), false);
+
+        // A script's own method and getter answer the same way, which is what
+        // makes "a method is not a constructor" one rule and not two. A method
+        // *definition* is the MethodDefinition production, not a `function`
+        // expression stored as a value -- `{ m: function () {} }` is an
+        // ordinary constructible function in every engine, so the two are
+        // written differently on purpose.
+        same('an object method definition', isConstructor(({ m() {} }).m), false);
+        var shorthand = { m() { return 1; } };
+        same('a shorthand method', isConstructor(shorthand.m), false);
+        same('a getter', isConstructor(Object.getOwnPropertyDescriptor({ get x() { return 1; } }, 'x').get), false);
+        same('a setter', isConstructor(Object.getOwnPropertyDescriptor({ set x(v) {} }, 'x').set), false);
+        same('a class method', isConstructor(class { m() {} }.prototype.m), false);
+
+        // ---- the constructors still construct ---------------------------
+        same('Object', isConstructor(Object), true);
+        same('Array', isConstructor(Array), true);
+        same('Error', isConstructor(Error), true);
+        same('Function', isConstructor(Function), true);
+        same('Promise', isConstructor(Promise), true);
+        same('Map', isConstructor(Map), true);
+        same('RegExp', isConstructor(RegExp), true);
+        same('Date', isConstructor(Date), true);
+        same('Boolean', isConstructor(Boolean), true);
+        same('a bound function', isConstructor(function () {}.bind(null)), true);
+        same('a class', isConstructor(class {}), true);
+        same('a function expression', isConstructor(function () {}), true);
+        same('an arrow is not', isConstructor(function () {}.bind ? (() => 1) : null), false);
+        same('a subclass of Array', isConstructor(class extends Array {}), true);
+
+        // ---- and nothing a constructor does has changed ------------------
+        same('new Object.keys is a function', typeof Object.keys, 'function');
+        same('Object.keys still works', Object.keys({ a: 1, b: 2 }), ['a', 'b']);
+        same('Object.defineProperty still works',
+             (function () { var o = {}; Object.defineProperty(o, 'x', { value: 5, enumerable: true }); return o.x; })(), 5);
+        same('Reflect.construct still works', Reflect.construct(Array, [3]).length, 3);
+        same('a constructor still returns', new (class { constructor() { this.v = 1; } })().v, 1);
+        same('a bound constructor still returns', new (function (a) { this.a = a; }.bind(null))(9).a, 9);
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+// Phase 157, finding 162: ES2024 ArrayBuffer.prototype.transfer(),
+// transferToFixedLength(), detached, resizable, maxByteLength, resize(), and
+// length-tracking / out-of-bounds TypedArray and DataView behaviour.
+TEST(arraybuffer_transfer_detach_and_resize) {
+    using namespace litebird;
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // 1. Fixed ArrayBuffer transfer() & detached semantics.
+    assert(text(R"JS(
+        var b1 = new ArrayBuffer(8);
+        var u1 = new Uint8Array(b1, 2, 4);
+        var d1 = new DataView(b1, 2, 4);
+        u1.set([10, 20, 30, 40]);
+        var before = [b1.byteLength, b1.maxByteLength, b1.resizable, b1.detached].join(',');
+        var b2 = b1.transfer();
+        var after1 = [b1.byteLength, b1.maxByteLength, b1.resizable, b1.detached].join(',');
+        var after2 = [b2.byteLength, b2.maxByteLength, b2.resizable, b2.detached].join(',');
+        var bytes = new Uint8Array(b2).join(',');
+        before + '|' + after1 + '|' + after2 + '|' + bytes;
+    )JS") == "8,8,false,false|0,0,false,true|8,8,false,false|0,0,10,20,30,40,0,0");
+
+    // 2. Detached views: TypedArray zeroes length/byteLength/byteOffset and
+    // drops indices; DataView throws TypeError on byteLength/byteOffset/reads.
+    assert(text(R"JS(
+        [u1.length, u1.byteLength, u1.byteOffset, u1.buffer === b1,
+         String(u1[0]), 0 in u1, Object.keys(u1).length,
+         d1.buffer === b1].join(',');
+    )JS") == "0,0,0,true,undefined,false,0,true");
+    assert(text("errName(function () { return d1.byteLength; })") == "TypeError");
+    assert(text("errName(function () { return d1.byteOffset; })") == "TypeError");
+    assert(text("errName(function () { return d1.getUint8(0); })") == "TypeError");
+    assert(text("errName(function () { d1.setUint8(0, 1); })") == "TypeError");
+    assert(text("errName(function () { return new DataView(b1); })") == "TypeError");
+    assert(text("errName(function () { return new Uint8Array(b1); })") == "TypeError");
+    assert(text("errName(function () { return u1.slice(); })") == "TypeError");
+    assert(text("errName(function () { return u1.subarray(); })") == "TypeError");
+    assert(text("errName(function () { return b1.slice(0); })") == "TypeError");
+    assert(text("errName(function () { return b1.transfer(); })") == "TypeError");
+    assert(text("errName(function () { return b1.transferToFixedLength(); })") == "TypeError");
+
+    // 3. Shrink & grow (zero-fill) through transfer().
+    assert(text(R"JS(
+        var b3 = b2.transfer(4);
+        var s1 = [b2.detached, b3.byteLength, b3.maxByteLength, new Uint8Array(b3).join(',')].join('|');
+        var b4 = b3.transfer(6);
+        var s2 = [b3.detached, b4.byteLength, b4.maxByteLength, new Uint8Array(b4).join(',')].join('|');
+        s1 + '||' + s2;
+    )JS") == "true|4|4|0,0,10,20||true|6|6|0,0,10,20,0,0");
+
+    // 4. Resizable ArrayBuffer + length-tracking & fixed views + odd lengths + OOB/regrow.
+    assert(text(R"JS(
+        var rb = new ArrayBuffer(4, { maxByteLength: 12 });
+        var rt = new Uint16Array(rb);
+        var rto = new Uint16Array(rb, 2);
+        var rf = new Uint16Array(rb, 0, 2);
+        var rd = new DataView(rb);
+        var rdo = new DataView(rb, 2);
+        var rdf = new DataView(rb, 0, 4);
+        rt[0] = 0x1122; rt[1] = 0x3344;
+        rb.resize(8);
+        var g8 = [rt.length, rto.length, rf.length, rd.byteLength, rdo.byteLength, rdf.byteLength, rt.join(',')].join('|');
+        rb.resize(5);
+        var g5 = [rt.length, rt.byteLength, rto.length, rd.byteLength, rdo.byteLength, rf.length].join(',');
+        rb.resize(2);
+        var g2 = [rt.length, rto.length, rf.length, rf.byteOffset, String(rf[0]),
+                  errName(function () { return rf.slice(); }),
+                  errName(function () { return rdf.byteLength; }),
+                  errName(function () { return rdf.byteOffset; })].join(',');
+        rb.resize(1);
+        var g1 = [rto.length, rto.byteOffset, errName(function () { return rdo.byteLength; })].join(',');
+        rb.resize(6);
+        var g6 = [rt.length, rto.length, rf.length, rf.byteOffset, rdf.byteLength, new Uint8Array(rb).join(',')].join('|');
+        g8 + '||' + g5 + '||' + g2 + '||' + g1 + '||' + g6;
+    )JS") == "4|3|2|8|6|4|4386,13124,0,0||2,4,1,5,3,2||1,0,0,0,undefined,TypeError,TypeError,TypeError||0,0,TypeError||3|2|2|0|4|34,0,0,0,0,0");
+
+    // 5. subarray() preserves length-tracking when end is omitted.
+    assert(text(R"JS(
+        var x = new ArrayBuffer(4, { maxByteLength: 8 });
+        var v = new Uint8Array(x);
+        var sTrack = v.subarray(1);
+        var sFix = v.subarray(1, 3);
+        x.resize(6);
+        sTrack.length + ',' + sFix.length;
+    )JS") == "5,2");
+
+    // 6. transfer() preserves resizability; transferToFixedLength() fixes it.
+    assert(text(R"JS(
+        var rCopy = rb.transfer(10);
+        var sOrig = [rb.detached, rb.byteLength, rb.maxByteLength, rb.resizable].join(',');
+        var sCopy = [rCopy.detached, rCopy.byteLength, rCopy.maxByteLength, rCopy.resizable].join(',');
+        var rFixed = rCopy.transferToFixedLength(4);
+        var sFix = [rFixed.detached, rFixed.byteLength, rFixed.maxByteLength, rFixed.resizable,
+                    errName(function () { rFixed.resize(4); })].join(',');
+        sOrig + '|' + sCopy + '|' + sFix;
+    )JS") == "true,0,0,true|false,10,12,true|false,4,4,false,TypeError");
+
+    // 7. Re-entrancy, argument errors, iterator detach, non-constructor methods, descriptors.
+    assert(text("errName(function () { new ArrayBuffer(-1); })") == "RangeError");
+    assert(text("errName(function () { new ArrayBuffer(8, { maxByteLength: 4 }); })") == "RangeError");
+    assert(text(R"JS(
+        var y = new ArrayBuffer(4, { maxByteLength: 8 });
+        var e1 = errName(function () { y.transfer(12); });
+        e1 + ',' + y.detached + ',' + y.byteLength;
+    )JS") == "RangeError,false,4");
+    assert(text(R"JS(
+        var z = new ArrayBuffer(4);
+        errName(function () { z.transfer({ valueOf: function () { z.transfer(); return 4; } }); });
+    )JS") == "TypeError");
+    assert(text(R"JS(
+        var z2 = new ArrayBuffer(4);
+        var a2 = new Uint8Array(z2);
+        var it = a2.values();
+        z2.transfer();
+        errName(function () { it.next(); });
+    )JS") == "TypeError");
+    assert(text(R"JS(
+        var z3 = new ArrayBuffer(4);
+        var dv3 = new DataView(z3);
+        errName(function () { dv3.getUint8({ valueOf: function () { z3.transfer(); return 0; } }); });
+    )JS") == "TypeError");
+    assert(text(R"JS(
+        var z4 = new ArrayBuffer(4);
+        var a4 = new Uint8Array(z4);
+        a4.set([3, 1, 2, 0]);
+        String(a4.sort(function () { if (!z4.detached) z4.transfer(); return 0; }).length);
+    )JS") == "0");
+    assert(text(R"JS(
+        var z5 = new ArrayBuffer(3, { maxByteLength: 6 });
+        var a5 = new Uint8Array(z5);
+        a5.set([10, 20, 30]);
+        var seen = [];
+        a5.reduce(function (acc, val, idx) {
+            seen.push(String(val));
+            if (idx === 0) z5.resize(1);
+            return acc;
+        }, 0);
+        seen.join(',');
+    )JS") == "10,undefined,undefined");
+    assert(text("errName(function () { new ArrayBuffer.prototype.transfer(); })") == "TypeError");
+    assert(text("errName(function () { new ArrayBuffer.prototype.transferToFixedLength(); })") == "TypeError");
+    assert(text("errName(function () { new ArrayBuffer.prototype.resize(); })") == "TypeError");
+    assert(text(R"JS(
+        ['byteLength', 'maxByteLength', 'resizable', 'detached'].map(function (k) {
+            var d = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, k);
+            return k + ':' + (typeof d.get) + ',' + d.enumerable + ',' + d.configurable;
+        }).join('|');
+    )JS") == "byteLength:function,false,true|maxByteLength:function,false,true|resizable:function,false,true|detached:function,false,true");
+    assert(text("errName(function () { Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get.call({}); })") == "TypeError");
+}
+
+// Phase 161 (finding 166): WebSocket binary frames — send(ArrayBuffer |
+// TypedArray | DataView | Blob | File) and binaryType "blob" / "arraybuffer"
+// delivery (single and fragmented frames, detached/OOB rejection, synchronous
+// snapshotting, and Blob BufferSource parts).
+TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob) {
+    struct WireFrame {
+        uint8_t opcode{0};
+        bool masked{false};
+        std::string payload;
+    };
+    std::mutex wire_mu;
+    std::vector<WireFrame> wire_frames;
+
+    auto read_exact = [](int fd, uint8_t* dst, size_t n) -> bool {
+        size_t got = 0;
+        while (got < n) {
+            ssize_t r = ::recv(fd, dst + got, n - got, 0);
+            if (r <= 0) return false;
+            got += static_cast<size_t>(r);
+        }
+        return true;
+    };
+    auto send_all = [](int fd, const uint8_t* src, size_t n) -> bool {
+        size_t sent = 0;
+        while (sent < n) {
+            ssize_t w = ::send(fd, src + sent, n - sent, MSG_NOSIGNAL);
+            if (w <= 0) return false;
+            sent += static_cast<size_t>(w);
+        }
+        return true;
+    };
+    auto send_ws_frame = [&](int fd, uint8_t opcode, const std::string& payload, bool fin = true) {
+        std::vector<uint8_t> out;
+        out.push_back(static_cast<uint8_t>((fin ? 0x80u : 0x00u) | (opcode & 0x0Fu)));
+        const size_t n = payload.size();
+        if (n <= 125) {
+            out.push_back(static_cast<uint8_t>(n));
+        } else if (n <= 65535) {
+            out.push_back(126u);
+            out.push_back(static_cast<uint8_t>((n >> 8) & 0xFFu));
+            out.push_back(static_cast<uint8_t>(n & 0xFFu));
+        } else {
+            out.push_back(127u);
+            for (int i = 7; i >= 0; --i) out.push_back(static_cast<uint8_t>((n >> (i * 8)) & 0xFFu));
+        }
+        out.insert(out.end(), payload.begin(), payload.end());
+        (void)send_all(fd, out.data(), out.size());
+    };
+
+    auto srv = WebSocketObject::start_loopback_server([&](int cfd) {
+        std::string req;
+        char chunk[1024];
+        while (req.find("\r\n\r\n") == std::string::npos) {
+            ssize_t n = ::recv(cfd, chunk, sizeof(chunk), 0);
+            if (n <= 0) { ::close(cfd); return; }
+            req.append(chunk, static_cast<size_t>(n));
+        }
+        const std::string key_hdr = "Sec-WebSocket-Key: ";
+        const size_t kp = req.find(key_hdr);
+        if (kp == std::string::npos) { ::close(cfd); return; }
+        const size_t ke = req.find("\r\n", kp);
+        const std::string accept = WebSocketObject::calculate_accept_key(
+            req.substr(kp + key_hdr.size(), ke - kp - key_hdr.size()));
+        const std::string resp =
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
+        (void)send_all(cfd, reinterpret_cast<const uint8_t*>(resp.data()), resp.size());
+
+        while (true) {
+            uint8_t hdr[2];
+            if (!read_exact(cfd, hdr, 2)) break;
+            const uint8_t opcode = hdr[0] & 0x0Fu;
+            const bool masked = (hdr[1] & 0x80u) != 0;
+            uint64_t plen = hdr[1] & 0x7Fu;
+            if (plen == 126) {
+                uint8_t ext[2];
+                if (!read_exact(cfd, ext, 2)) break;
+                plen = (static_cast<uint64_t>(ext[0]) << 8) | ext[1];
+            } else if (plen == 127) {
+                uint8_t ext[8];
+                if (!read_exact(cfd, ext, 8)) break;
+                plen = 0;
+                for (int i = 0; i < 8; ++i) plen = (plen << 8) | ext[i];
+            }
+            uint8_t mask[4]{};
+            if (masked && !read_exact(cfd, mask, 4)) break;
+            std::string payload(static_cast<size_t>(plen), '\0');
+            if (plen > 0 && !read_exact(cfd, reinterpret_cast<uint8_t*>(payload.data()), static_cast<size_t>(plen))) {
+                break;
+            }
+            if (masked) {
+                for (size_t i = 0; i < payload.size(); ++i) {
+                    payload[i] = static_cast<char>(static_cast<uint8_t>(payload[i]) ^ mask[i % 4]);
+                }
+            }
+            if (opcode == 0x08u) {
+                std::string close_payload(2, '\0');
+                close_payload[0] = static_cast<char>(1000 >> 8);
+                close_payload[1] = static_cast<char>(1000 & 0xFF);
+                send_ws_frame(cfd, 0x08u, close_payload, true);
+                break;
+            }
+            {
+                std::lock_guard<std::mutex> lock(wire_mu);
+                wire_frames.push_back(WireFrame{opcode, masked, payload});
+            }
+            if (opcode == 0x01u && payload == "FRAG") {
+                send_ws_frame(cfd, 0x02u, std::string("\x00\xff", 2), false);
+                send_ws_frame(cfd, 0x00u, std::string("\xfe\x80", 2), false);
+                send_ws_frame(cfd, 0x00u, std::string("\x01\x02", 2), true);
+            } else {
+                send_ws_frame(cfd, opcode, payload, true);
+            }
+        }
+        ::close(cfd);
+    });
+    assert(srv && srv->port != 0);
+
+    TestPage page;
+    auto& js = page.js;
+    js.eval(R"JS(
+        function toHex(ab) {
+            var u = new Uint8Array(ab);
+            var s = '';
+            for (var i = 0; i < u.length; i++) s += (u[i] < 16 ? '0' : '') + u[i].toString(16);
+            return s;
+        }
+        function errName(fn) {
+            try { fn(); return 'ok'; } catch (e) { return e && e.name ? e.name : String(e); }
+        }
+        var res = {};
+        var done = false;
+        var blobPromiseDone = false;
+        var detBuf = new ArrayBuffer(4);
+        detBuf.transfer();
+        res.blobDetached = errName(function () { new Blob([detBuf]); });
+
+        var ws = new WebSocket("ws://127.0.0.1:)JS" + std::to_string(srv->port) + R"JS(/bin");
+        res.initBinaryType = ws.binaryType;
+        res.connDetached = errName(function () { ws.send(detBuf); });
+
+        ws.onopen = function () {
+            res.openDetachedAB = errName(function () { ws.send(detBuf); });
+            var ab2 = new ArrayBuffer(4);
+            var view2 = new Uint8Array(ab2);
+            var dv2 = new DataView(ab2);
+            ab2.transfer();
+            res.openDetachedView = errName(function () { ws.send(view2); });
+            res.openDetachedDV = errName(function () { ws.send(dv2); });
+
+            var rab = new ArrayBuffer(8, { maxByteLength: 16 });
+            var rfixed = new Uint8Array(rab, 4, 2);
+            var rtrack = new Uint8Array(rab);
+            rtrack.set([1, 2, 3, 4, 5, 6, 7, 8]);
+            rab.resize(3);
+            res.openOobView = errName(function () { ws.send(rfixed); });
+
+            // 1. ArrayBuffer (received while binaryType === "blob") + immediate mutation
+            var b1 = new Uint8Array([0, 255, 254, 128, 65]);
+            ws.send(b1.buffer);
+            b1[0] = 99;
+            b1[1] = 99;
+
+            // 2. TypedArray subarray (non-zero byteOffset + window length)
+            var b2 = new Uint8Array([10, 20, 30, 40, 50]);
+            ws.send(b2.subarray(1, 4));
+
+            // 3. DataView (non-zero byteOffset + window length)
+            ws.send(new DataView(b2.buffer, 2, 2));
+
+            // 4. Blob composed of TypedArray subarray + DataView + NUL string
+            var blob = new Blob([b2.subarray(0, 2), new DataView(b2.buffer, 3, 2), "\x00Z"]);
+            ws.send(blob);
+
+            // 5. File (subclass of Blob)
+            var file = new File([new Uint8Array([171, 0, 205])], "sample.bin", { type: "application/octet-stream" });
+            ws.send(file);
+
+            // 6. Length-tracking view over a resized ArrayBuffer (live 3 bytes)
+            ws.send(rtrack);
+
+            // 7. Empty binary frame (0 bytes, opcode 0x02)
+            ws.send(new Uint8Array(0));
+
+            // 8. 3-fragment binary message from server
+            ws.send("FRAG");
+
+            // 9. Text frame while binaryType === "arraybuffer" (non-string coerced)
+            ws.send(null);
+        };
+
+        var count = 0;
+        ws.onmessage = function (e) {
+            count++;
+            if (count === 1) {
+                var okBlob = (e.data instanceof Blob) && e.data.size === 5 && e.data.type === "";
+                ws.binaryType = "arraybuffer";
+                e.data.arrayBuffer().then(function (ab) {
+                    res.m1 = okBlob + ":" + (ab instanceof ArrayBuffer) + ":" + toHex(ab);
+                    blobPromiseDone = true;
+                });
+            } else if (count >= 2 && count <= 8) {
+                res["m" + count] = (e.data instanceof ArrayBuffer) + ":" + e.data.resizable + ":" + e.data.byteLength + ":" + toHex(e.data);
+            } else if (count === 9) {
+                res.m9 = (typeof e.data) + ":" + e.data;
+                ws.close(1000, "bin-done");
+            }
+        };
+        ws.onclose = function (e) {
+            res.close = e.code + ":" + e.wasClean;
+            done = true;
+        };
+    )JS");
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+        if (js.eval("done && blobPromiseDone").is_truthy()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(js.eval("done && blobPromiseDone").is_truthy());
+
+    assert(js.eval("res.blobDetached").to_string() == "TypeError");
+    assert(js.eval("res.initBinaryType").to_string() == "blob");
+    assert(js.eval("res.connDetached").to_string() == "InvalidStateError");
+    assert(js.eval("res.openDetachedAB").to_string() == "TypeError");
+    assert(js.eval("res.openDetachedView").to_string() == "TypeError");
+    assert(js.eval("res.openDetachedDV").to_string() == "TypeError");
+    assert(js.eval("res.openOobView").to_string() == "TypeError");
+
+    assert(js.eval("res.m1").to_string() == "true:true:00fffe8041");
+    assert(js.eval("res.m2").to_string() == "true:false:3:141e28");
+    assert(js.eval("res.m3").to_string() == "true:false:2:1e28");
+    assert(js.eval("res.m4").to_string() == "true:false:6:0a142832005a");
+    assert(js.eval("res.m5").to_string() == "true:false:3:ab00cd");
+    assert(js.eval("res.m6").to_string() == "true:false:3:010203");
+    assert(js.eval("res.m7").to_string() == "true:false:0:");
+    assert(js.eval("res.m8").to_string() == "true:false:6:00fffe800102");
+    assert(js.eval("res.m9").to_string() == "string:null");
+    assert(js.eval("res.close").to_string() == "1000:true");
+    assert(js.eval("ws.bufferedAmount").to_number() == 0);
+
+    // Verify wire opcodes, masking, and raw payload bytes recorded by the server.
+    std::lock_guard<std::mutex> lock(wire_mu);
+    assert(wire_frames.size() == 9);
+    for (const auto& f : wire_frames) assert(f.masked);
+    assert(wire_frames[0].opcode == 0x02u && wire_frames[0].payload == std::string("\x00\xff\xfe\x80" "A", 5));
+    assert(wire_frames[1].opcode == 0x02u && wire_frames[1].payload == std::string("\x14\x1e\x28", 3));
+    assert(wire_frames[2].opcode == 0x02u && wire_frames[2].payload == std::string("\x1e\x28", 2));
+    assert(wire_frames[3].opcode == 0x02u && wire_frames[3].payload == std::string("\x0a\x14\x28\x32\x00" "Z", 6));
+    assert(wire_frames[4].opcode == 0x02u && wire_frames[4].payload == std::string("\xab\x00\xcd", 3));
+    assert(wire_frames[5].opcode == 0x02u && wire_frames[5].payload == std::string("\x01\x02\x03", 3));
+    assert(wire_frames[6].opcode == 0x02u && wire_frames[6].payload.empty());
+    assert(wire_frames[7].opcode == 0x01u && wire_frames[7].payload == "FRAG");
+    assert(wire_frames[8].opcode == 0x01u && wire_frames[8].payload == "null");
+}
+
+// Phase 169 (finding 174): RFC 7692 permessage-deflate — stateful RFC 1951
+// DeflateStream/InflateStream vectors, Sec-WebSocket-Extensions negotiation &
+// fail-closed rejection, context takeover & window_bits bounds, RSV1/UTF-8
+// protocol errors, decompression bomb cap, and live JS WebSocket roundtrips.
+TEST(websocket_permessage_deflate_rfc7692) {
+    using namespace litebird;
+
+    // 1. Direct RFC 7692 §7.2.3.1 / §7.2.3.2 / §7.2.3.4 wire vectors & codec bounds.
+    {
+        Deflate::InflateStream inf(15);
+        // §7.2.3.1: single-frame "Hello"
+        const uint8_t v1[] = {0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00};
+        std::vector<uint8_t> out;
+        assert(inf.inflate_message(v1, sizeof(v1), out) == Deflate::InflateStatus::Ok);
+        assert(std::string(out.begin(), out.end()) == "Hello");
+
+        // §7.2.3.2: second "Hello" reusing sliding-window context from first
+        const uint8_t v2[] = {0xf2, 0x00, 0x11, 0x00, 0x00};
+        out.clear();
+        assert(inf.inflate_message(v2, sizeof(v2), out) == Deflate::InflateStatus::Ok);
+        assert(std::string(out.begin(), out.end()) == "Hello");
+
+        // Reset clears history, so v2 (which back-references history) now fails.
+        inf.reset();
+        out.clear();
+        assert(inf.inflate_message(v2, sizeof(v2), out) == Deflate::InflateStatus::CorruptData);
+
+        // §7.2.3.4: empty compressed message (0x00), BFINAL=0 empty fixed (0x02 0x00),
+        // BFINAL=1 empty fixed (0x03 0x00), and corrupt 0-byte payload.
+        const uint8_t empty_sync[] = {0x00};
+        assert(inf.inflate_message(empty_sync, sizeof(empty_sync), out) == Deflate::InflateStatus::Ok && out.empty());
+        const uint8_t empty_f0[] = {0x02, 0x00};
+        assert(inf.inflate_message(empty_f0, sizeof(empty_f0), out) == Deflate::InflateStatus::Ok && out.empty());
+        const uint8_t empty_f1[] = {0x03, 0x00};
+        assert(inf.inflate_message(empty_f1, sizeof(empty_f1), out) == Deflate::InflateStatus::Ok && out.empty());
+        assert(inf.inflate_message(empty_sync, 0, out) == Deflate::InflateStatus::CorruptData);
+
+        // DeflateStream context takeover, window_bits=9 enforcement, and multi-block stored fallback.
+        Deflate::DeflateStream def15(15);
+        std::vector<uint8_t> c1, c2;
+        const std::string rep = "permessage-deflate-context-takeover-sample-";
+        def15.compress_message(reinterpret_cast<const uint8_t*>(rep.data()), rep.size(), c1);
+        def15.compress_message(reinterpret_cast<const uint8_t*>(rep.data()), rep.size(), c2);
+        assert(c2.size() < c1.size()); // context takeover shrinks second identical message
+
+        Deflate::InflateStream inf15(15);
+        std::vector<uint8_t> d1, d2;
+        assert(inf15.inflate_message(c1.data(), c1.size(), d1) == Deflate::InflateStatus::Ok);
+        assert(inf15.inflate_message(c2.data(), c2.size(), d2) == Deflate::InflateStatus::Ok);
+        assert(std::string(d1.begin(), d1.end()) == rep);
+        assert(std::string(d2.begin(), d2.end()) == rep);
+
+        // Enforce server_max_window_bits=9 (512B): back-reference at distance > 512 is rejected.
+        std::string dist_msg = "UNIQUE_MARKER_ABCDEF0123456789";
+        for (int i = 0; i < 600; ++i) dist_msg.push_back(static_cast<char>('A' + (i * 7 + (i / 13)) % 26));
+        dist_msg += "UNIQUE_MARKER_ABCDEF0123456789";
+        std::vector<uint8_t> c_bigwin;
+        Deflate::DeflateStream def_big(15);
+        def_big.compress_message(reinterpret_cast<const uint8_t*>(dist_msg.data()), dist_msg.size(), c_bigwin);
+        Deflate::InflateStream inf_w9(9);
+        std::vector<uint8_t> bad_out;
+        assert(inf_w9.inflate_message(c_bigwin.data(), c_bigwin.size(), bad_out) == Deflate::InflateStatus::CorruptData);
+
+        // DeflateStream(9) stays strictly within 512B window so InflateStream(9) decodes it.
+        Deflate::DeflateStream def_w9(9);
+        std::vector<uint8_t> c_w9, d_w9;
+        def_w9.compress_message(reinterpret_cast<const uint8_t*>(dist_msg.data()), dist_msg.size(), c_w9);
+        Deflate::InflateStream inf_w9_ok(9);
+        assert(inf_w9_ok.inflate_message(c_w9.data(), c_w9.size(), d_w9) == Deflate::InflateStatus::Ok);
+        assert(std::string(d_w9.begin(), d_w9.end()) == dist_msg);
+
+        // Stored-block fallback on >70 KiB pseudo-random incompressible data (spans 2 stored blocks).
+        std::vector<uint8_t> rnd(70000);
+        uint32_t rng = 0x9E3779B9u;
+        for (size_t i = 0; i < rnd.size(); ++i) {
+            rng ^= (rng << 13);
+            rng ^= (rng >> 17);
+            rng ^= (rng << 5);
+            rnd[i] = static_cast<uint8_t>(rng & 0xFFu);
+        }
+        std::vector<uint8_t> c_rnd, d_rnd;
+        Deflate::DeflateStream def_rnd(15);
+        def_rnd.compress_message(rnd.data(), rnd.size(), c_rnd);
+        assert(c_rnd.size() <= rnd.size() + 16);
+        Deflate::InflateStream inf_rnd(15);
+        assert(inf_rnd.inflate_message(c_rnd.data(), c_rnd.size(), d_rnd) == Deflate::InflateStatus::Ok);
+        assert(d_rnd == rnd);
+
+        // Decompression bomb cap returns OutputLimitExceeded cleanly without growing `out`.
+        std::vector<uint8_t> zeros(65536, 0x41u);
+        std::vector<uint8_t> c_bomb, d_bomb;
+        Deflate::DeflateStream def_bomb(15);
+        def_bomb.compress_message(zeros.data(), zeros.size(), c_bomb);
+        assert(c_bomb.size() < 2048);
+        Deflate::InflateStream inf_bomb(15);
+        assert(inf_bomb.inflate_message(c_bomb.data(), c_bomb.size(), d_bomb, 4096) ==
+               Deflate::InflateStatus::OutputLimitExceeded);
+        assert(d_bomb.empty());
+    }
+
+    // 2. RFC 7692 §7.1 Sec-WebSocket-Extensions negotiation matrix (accept & fail-closed).
+    auto test_negotiation = [](const std::string& ext_header, bool expect_open, const std::string& expect_ext) {
+        struct NegState {
+            std::mutex mu;
+            std::string observed_req;
+            std::atomic<bool> release{false};
+            std::atomic<bool> done{false};
+        };
+        auto st = std::make_shared<NegState>();
+        auto srv = WebSocketObject::start_loopback_server([st, ext_header](int fd) {
+            std::string req;
+            char ch = 0;
+            while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
+                req += ch;
+                if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+            }
+            {
+                std::lock_guard<std::mutex> lock(st->mu);
+                st->observed_req = req;
+            }
+            const std::string key_hdr = "Sec-WebSocket-Key: ";
+            size_t k = req.find(key_hdr);
+            std::string key = k == std::string::npos ? "" : req.substr(k + key_hdr.size(), req.find("\r\n", k) - k - key_hdr.size());
+            std::string resp =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: " + WebSocketObject::calculate_accept_key(key) + "\r\n";
+            if (!ext_header.empty()) {
+                resp += ext_header;
+            }
+            resp += "\r\n";
+            (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (!st->release.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            st->done.store(true);
+        });
+        assert(srv != nullptr);
+        auto ws = std::make_shared<WebSocketObject>("ws://127.0.0.1:" + std::to_string(srv->port) + "/neg");
+        ws->connect();
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (ws->ready_state() == WebSocketReadyState::Connecting &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const bool opened = ws->ready_state() == WebSocketReadyState::Open;
+        const std::string got_ext = ws->extensions();
+        if (opened) ws->close();
+        st->release.store(true);
+        ws->join_for_shutdown();
+        auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!st->done.load() && std::chrono::steady_clock::now() < done_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::string observed_req;
+        {
+            std::lock_guard<std::mutex> lock(st->mu);
+            observed_req = st->observed_req;
+        }
+        assert(observed_req.find("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n") != std::string::npos);
+        assert(opened == expect_open);
+        if (expect_open) assert(got_ext == expect_ext);
+    };
+
+    // Valid responses
+    test_negotiation("", true, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate\r\n", true, "permessage-deflate");
+    test_negotiation(
+        "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover; server_max_window_bits=9; client_max_window_bits=10\r\n",
+        true,
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover; server_max_window_bits=9; client_max_window_bits=10");
+    test_negotiation(
+        "Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=\"12\"; client_max_window_bits=\"8\"\r\n",
+        true,
+        "permessage-deflate; server_max_window_bits=\"12\"; client_max_window_bits=\"8\"");
+
+    // Invalid responses — all MUST fail closed
+    test_negotiation("Sec-WebSocket-Extensions: x-custom-ext\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate, x-other\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate, permessage-deflate\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: Permessage-Deflate\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; unknown_param=1\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; server_no_context_takeover\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover=1\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover=1\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=7\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=16\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits=08\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate;\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=\"12\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: \r\n", false, "");
+
+    // 3. Protocol error matrix over live loopback server:
+    //    (a) RSV1=1 without negotiation -> 1002
+    //    (b) RSV1=1 on Ping control frame -> 1002
+    //    (c) RSV1=1 on Continuation frame -> 1002
+    //    (d) Corrupt DEFLATE bytes in RSV1=1 data frame -> 1002
+    //    (e) Valid DEFLATE bytes inflating to invalid UTF-8 in text frame -> 1007
+    auto send_srv_frame = [](int fd, uint8_t opcode, bool fin, bool rsv1, const uint8_t* data, size_t len) {
+        std::vector<uint8_t> out;
+        out.push_back(static_cast<uint8_t>((fin ? 0x80u : 0x00u) | (rsv1 ? 0x40u : 0x00u) | (opcode & 0x0Fu)));
+        if (len <= 125) {
+            out.push_back(static_cast<uint8_t>(len));
+        } else {
+            out.push_back(126u);
+            out.push_back(static_cast<uint8_t>((len >> 8) & 0xFFu));
+            out.push_back(static_cast<uint8_t>(len & 0xFFu));
+        }
+        if (len > 0 && data) out.insert(out.end(), data, data + len);
+        (void)::send(fd, out.data(), out.size(), MSG_NOSIGNAL);
+    };
+
+    auto recv_client_frame = [](int fd, uint8_t& opcode, bool& rsv1, bool& masked, std::vector<uint8_t>& payload) -> bool {
+        auto rx = [&](uint8_t* dst, size_t n) -> bool {
+            size_t got = 0;
+            while (got < n) {
+                ssize_t r = ::recv(fd, dst + got, n - got, 0);
+                if (r <= 0) return false;
+                got += static_cast<size_t>(r);
+            }
+            return true;
+        };
+        uint8_t hdr[2]{};
+        if (!rx(hdr, 2)) return false;
+        rsv1 = (hdr[0] & 0x40u) != 0;
+        opcode = hdr[0] & 0x0Fu;
+        masked = (hdr[1] & 0x80u) != 0;
+        uint64_t plen = hdr[1] & 0x7Fu;
+        if (plen == 126) {
+            uint8_t e[2]{};
+            if (!rx(e, 2)) return false;
+            plen = (static_cast<uint64_t>(e[0]) << 8) | e[1];
+        } else if (plen == 127) {
+            uint8_t e[8]{};
+            if (!rx(e, 8)) return false;
+            plen = 0;
+            for (int i = 0; i < 8; ++i) plen = (plen << 8) | e[i];
+        }
+        uint8_t mask[4]{};
+        if (masked && !rx(mask, 4)) return false;
+        payload.resize(static_cast<size_t>(plen));
+        if (plen > 0 && !rx(payload.data(), static_cast<size_t>(plen))) return false;
+        if (masked) {
+            for (size_t i = 0; i < payload.size(); ++i) payload[i] ^= mask[i % 4];
+        }
+        return true;
+    };
+
+    auto test_protocol_error = [send_srv_frame, recv_client_frame](bool negotiate_pmd, int scenario, int expect_close_code) {
+        struct ErrState {
+            std::atomic<int> peer_got_code{0};
+            std::atomic<bool> done{false};
+        };
+        auto st = std::make_shared<ErrState>();
+        auto srv = WebSocketObject::start_loopback_server([st, negotiate_pmd, scenario, send_srv_frame, recv_client_frame](int fd) {
+            std::string req;
+            char ch = 0;
+            while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
+                req += ch;
+                if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+            }
+            const std::string key_hdr = "Sec-WebSocket-Key: ";
+            size_t k = req.find(key_hdr);
+            std::string key = k == std::string::npos ? "" : req.substr(k + key_hdr.size(), req.find("\r\n", k) - k - key_hdr.size());
+            std::string resp =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: " + WebSocketObject::calculate_accept_key(key) + "\r\n";
+            if (negotiate_pmd) resp += "Sec-WebSocket-Extensions: permessage-deflate\r\n";
+            resp += "\r\n";
+            (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+
+            if (scenario == 0) { // RSV1=1 without negotiation
+                const uint8_t v[] = {0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00};
+                send_srv_frame(fd, 0x01u, true, true, v, sizeof(v));
+            } else if (scenario == 1) { // RSV1=1 on Ping control frame
+                const uint8_t p[] = {'p', 'i', 'n', 'g'};
+                send_srv_frame(fd, 0x09u, true, true, p, sizeof(p));
+            } else if (scenario == 2) { // RSV1=1 on Continuation frame
+                const uint8_t f1[] = {0xf2, 0x48};
+                const uint8_t f2[] = {0xcd, 0xc9, 0xc9, 0x07, 0x00};
+                send_srv_frame(fd, 0x01u, false, true, f1, sizeof(f1));
+                send_srv_frame(fd, 0x00u, true, true, f2, sizeof(f2));
+            } else if (scenario == 3) { // Corrupt DEFLATE bytes (BTYPE=3 invalid)
+                const uint8_t bad[] = {0x06u, 0xffu, 0xffu};
+                send_srv_frame(fd, 0x01u, true, true, bad, sizeof(bad));
+            } else if (scenario == 4) { // Valid DEFLATE inflating to invalid UTF-8 (0xFF 0xFE) in text frame
+                Deflate::DeflateStream ds(15);
+                const uint8_t bad_utf8[] = {0xffu, 0xfeu, 0x80u};
+                std::vector<uint8_t> comp;
+                ds.compress_message(bad_utf8, sizeof(bad_utf8), comp);
+                send_srv_frame(fd, 0x01u, true, true, comp.data(), comp.size());
+            }
+
+            uint8_t op = 0;
+            bool rsv1 = false, masked = false;
+            std::vector<uint8_t> pl;
+            if (recv_client_frame(fd, op, rsv1, masked, pl) && op == 0x08u && pl.size() >= 2) {
+                st->peer_got_code.store((static_cast<int>(pl[0]) << 8) | pl[1]);
+                send_srv_frame(fd, 0x08u, true, false, pl.data(), 2);
+            }
+            st->done.store(true);
+        });
+        assert(srv != nullptr);
+        auto ws = std::make_shared<WebSocketObject>("ws://127.0.0.1:" + std::to_string(srv->port) + "/err");
+        ws->connect();
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (ws->ready_state() != WebSocketReadyState::Closed &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        ws->join_for_shutdown();
+        auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!st->done.load() && std::chrono::steady_clock::now() < done_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        assert(st->peer_got_code.load() == expect_close_code);
+    };
+
+    test_protocol_error(false, 0, 1002);
+    test_protocol_error(true, 1, 1002);
+    test_protocol_error(true, 2, 1002);
+    test_protocol_error(true, 3, 1002);
+    test_protocol_error(true, 4, 1007);
+
+    // 4. End-to-end JS TestPage roundtrip with permessage-deflate negotiated:
+    //    verifies ws.extensions, client RSV1=1 compression + context takeover,
+    //    fragmented compressed delivery with interleaved Ping/Pong (Pong RSV1=0),
+    //    uncompressed RSV1=0 message interleaved, binary ArrayBuffer + Blob, and clean close.
+    struct WireRec {
+        uint8_t opcode{0};
+        bool rsv1{false};
+        bool masked{false};
+        size_t wire_len{0};
+        std::string plain;
+    };
+    struct WireState {
+        std::mutex mu;
+        std::vector<WireRec> log;
+        std::atomic<bool> done{false};
+    };
+    auto wire = std::make_shared<WireState>();
+
+    auto srv = WebSocketObject::start_loopback_server([wire, send_srv_frame, recv_client_frame](int fd) {
+        std::string req;
+        char ch = 0;
+        while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
+            req += ch;
+            if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+        }
+        const std::string key_hdr = "Sec-WebSocket-Key: ";
+        size_t k = req.find(key_hdr);
+        std::string key = k == std::string::npos ? "" : req.substr(k + key_hdr.size(), req.find("\r\n", k) - k - key_hdr.size());
+        std::string resp =
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: " + WebSocketObject::calculate_accept_key(key) + "\r\n"
+            "Sec-WebSocket-Extensions: permessage-deflate\r\n\r\n";
+        (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+
+        // Push RFC 7692 §7.2.3.1 + §7.2.3.2 vectors, fragmented compressed + interleaved Ping,
+        // and an uncompressed RSV1=0 message.
+        const uint8_t v1[] = {0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00};
+        const uint8_t v2[] = {0xf2, 0x00, 0x11, 0x00, 0x00};
+        send_srv_frame(fd, 0x01u, true, true, v1, sizeof(v1));
+        send_srv_frame(fd, 0x01u, true, true, v2, sizeof(v2));
+
+        Deflate::DeflateStream srv_def(15);
+        std::vector<uint8_t> frag_c;
+        const std::string frag_plain = "fragmented-compressed-message-1234567890-1234567890";
+        srv_def.compress_message(reinterpret_cast<const uint8_t*>(frag_plain.data()), frag_plain.size(), frag_c);
+        const size_t mid = frag_c.size() / 2;
+        send_srv_frame(fd, 0x01u, false, true, frag_c.data(), mid);
+        const uint8_t ping_b[] = {'o', 'k'};
+        send_srv_frame(fd, 0x09u, true, false, ping_b, sizeof(ping_b));
+        send_srv_frame(fd, 0x00u, true, false, frag_c.data() + mid, frag_c.size() - mid);
+
+        const std::string rsv0_msg = "uncompressed-interleaved";
+        send_srv_frame(fd, 0x01u, true, false, reinterpret_cast<const uint8_t*>(rsv0_msg.data()), rsv0_msg.size());
+
+        Deflate::InflateStream srv_inf(15);
+        while (true) {
+            uint8_t op = 0;
+            bool rsv1 = false, masked = false;
+            std::vector<uint8_t> pl;
+            if (!recv_client_frame(fd, op, rsv1, masked, pl)) break;
+            if (op == 0x0Au) { // Pong
+                std::lock_guard<std::mutex> lock(wire->mu);
+                wire->log.push_back(WireRec{op, rsv1, masked, pl.size(), std::string(pl.begin(), pl.end())});
+                continue;
+            }
+            if (op == 0x08u) {
+                send_srv_frame(fd, 0x08u, true, false, pl.data(), std::min<size_t>(pl.size(), 2));
+                break;
+            }
+            std::vector<uint8_t> plain_bytes;
+            if (rsv1) {
+                assert(srv_inf.inflate_message(pl.data(), pl.size(), plain_bytes) == Deflate::InflateStatus::Ok);
+            } else {
+                plain_bytes = pl;
+            }
+            {
+                std::lock_guard<std::mutex> lock(wire->mu);
+                wire->log.push_back(WireRec{op, rsv1, masked, pl.size(), std::string(plain_bytes.begin(), plain_bytes.end())});
+            }
+            std::vector<uint8_t> reply_c;
+            srv_def.compress_message(plain_bytes.data(), plain_bytes.size(), reply_c);
+            send_srv_frame(fd, op, true, true, reply_c.data(), reply_c.size());
+        }
+        wire->done.store(true);
+    });
+    assert(srv != nullptr);
+
+    TestPage page;
+    auto& js = page.js;
+    js.eval(
+        "var log = []; var done = false; var extBefore = '';\n"
+        "var ws = new WebSocket('ws://127.0.0.1:" + std::to_string(srv->port) + "/pmd');\n"
+        "extBefore = ws.extensions;\n"
+        "ws.binaryType = 'arraybuffer';\n"
+        "ws.onopen = function() {\n"
+        "  log.push('EXT:' + ws.extensions);\n"
+        "  ws.send('deflate-alpha-beta-gamma-'.repeat(40));\n"
+        "  ws.send('deflate-alpha-beta-gamma-'.repeat(40));\n"
+        "  var bin = new Uint8Array([0, 255, 1, 2, 0, 255, 1, 2, 0, 255, 1, 2]);\n"
+        "  ws.send(bin);\n"
+        "};\n"
+        "ws.onmessage = function(e) {\n"
+        "  if (typeof e.data === 'string') {\n"
+        "    log.push('S:' + e.data.length + ':' + e.data.slice(0, 14));\n"
+        "  } else {\n"
+        "    var u = new Uint8Array(e.data);\n"
+        "    log.push('B:' + u.length + ':' + u[0] + ',' + u[1] + ',' + u[11]);\n"
+        "  }\n"
+        "  if (log.length === 8) ws.close(1000, 'ok');\n"
+        "};\n"
+        "ws.onclose = function(e) { log.push('C:' + e.code + ':' + e.wasClean); done = true; };\n"
+    );
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!js.eval("done").is_truthy() && std::chrono::steady_clock::now() < deadline) {
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    assert(js.eval("done").is_truthy());
+    assert(js.eval("extBefore").to_string().empty());
+    assert(js.eval("log.join('|')").to_string() ==
+           "EXT:permessage-deflate|"
+           "S:5:Hello|"
+           "S:5:Hello|"
+           "S:51:fragmented-com|"
+           "S:24:uncompressed-i|"
+           "S:1000:deflate-alpha-|"
+           "S:1000:deflate-alpha-|"
+           "B:12:0,255,2|"
+           "C:1000:true");
+
+    auto wire_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!wire->done.load() && std::chrono::steady_clock::now() < wire_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::lock_guard<std::mutex> lock(wire->mu);
+    // Find the 3 data frames + 1 pong frame recorded on the wire.
+    std::vector<WireRec> data_recs;
+    bool saw_pong_rsv0 = false;
+    for (const auto& r : wire->log) {
+        assert(r.masked);
+        if (r.opcode == 0x0Au && !r.rsv1 && r.plain == "ok") saw_pong_rsv0 = true;
+        if (r.opcode == 0x01u || r.opcode == 0x02u) data_recs.push_back(r);
+    }
+    assert(saw_pong_rsv0);
+    assert(data_recs.size() == 3);
+    assert(data_recs[0].opcode == 0x01u && data_recs[0].rsv1 && data_recs[0].wire_len < 100 && data_recs[0].plain.size() == 1000);
+    assert(data_recs[1].opcode == 0x01u && data_recs[1].rsv1 && data_recs[1].wire_len <= data_recs[0].wire_len && data_recs[1].plain.size() == 1000);
+    assert(data_recs[2].opcode == 0x02u && data_recs[2].rsv1 && data_recs[2].plain.size() == 12);
+}
+
+TEST(a_definition_names_the_function_it_makes) {
+    using namespace litebird;
+
+    // Phase 159, finding 164. `name` inference was right for a string key and
+    // wrong for everything else a definition can be written with:
+    //
+    //   ({ [Symbol('m')]() {} })[Symbol('m')].name   -> ''   ('[m]')
+    //   Object.getOwnPropertyDescriptor({ get id() {} }, 'id').get.name
+    //                                                -> 'id' ('get id')
+    //
+    // §15.4.4/§15.4.5 (SetFunctionName) put the name in the production's hands:
+    // a property key, a symbol key as `[` + description + `]` (and nothing at
+    // all when the description is empty), and `get `/`set ` in front of it for
+    // an accessor. The parser gives a method its key as a name, which is right
+    // by default; the cases it cannot know are written down at the definition
+    // site instead, by `name_function`.
+    //
+    // Every expected string was printed by Node.js 22 for the same source.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function N(f) { return f.name; }
+        var anon = Symbol(), named = Symbol('test262'), m = Symbol('method');
+
+        // ---- a function or class written as a value -----------------------
+        var values = { id: function () {}, [anon]: function () {}, [named]: function () {}, xId: function x() {} };
+        same('a function value', N(values.id), 'id');
+        same('an unnamed symbol value', N(values[anon]), '');
+        same('a named symbol value', N(values[named]), '[test262]');
+        same('an explicit name wins', N(values.xId), 'x');
+
+        // ---- accessors take the prefix ------------------------------------
+        var g = { get id() {}, get [anon]() {}, get [named]() {}, set id(v) {}, set [named](v) {} };
+        same('a getter', N(Object.getOwnPropertyDescriptor(g, 'id').get), 'get id');
+        same('an unnamed symbol getter', N(Object.getOwnPropertyDescriptor(g, anon).get), 'get ');
+        same('a symbol getter', N(Object.getOwnPropertyDescriptor(g, named).get), 'get [test262]');
+        same('a setter', N(Object.getOwnPropertyDescriptor(g, 'id').set), 'set id');
+        same('a symbol setter', N(Object.getOwnPropertyDescriptor(g, named).set), 'set [test262]');
+
+        // ---- methods, including generators and async methods --------------
+        var methods = { [m]() {}, id() {}, [anon]() {}, *[m]() {}, *id() {}, async id() {} };
+        same('a symbol method', N(methods[m]), '[method]');
+        same('a method', N(methods.id), 'id');
+        same('an unnamed symbol method', N(methods[anon]), '');
+
+        // ---- and in a class, static and not -------------------------------
+        class C {
+            m() {}
+            static s() {}
+            get g() {}
+            set g(v) {}
+            [m]() {}
+            static [named]() {}
+            *[m]() {}
+            static #p() {}
+        }
+        same('a class method', N(C.prototype.m), 'm');
+        same('a static class method', N(C.s), 's');
+        same('a class getter', N(Object.getOwnPropertyDescriptor(C.prototype, 'g').get), 'get g');
+        same('a class setter', N(Object.getOwnPropertyDescriptor(C.prototype, 'g').set), 'set g');
+        same('a symbol class method', N(C.prototype[m]), '[method]');
+        same('a static symbol class method', N(C[named]), '[test262]');
+        // A private name is not reachable from outside the class, which is the
+        // point; the method asks its own name from inside.
+        class D { static #m() {} static n() { return D.#m.name; } static get #g() { return 1; } }
+        same('a private method is spelled as written', D.n(), '#m');
+
+        // ---- the assignment form that is *not* a named evaluation ---------
+        var plain;
+        plain = function () {};
+        same('an assignment names it after the binding', N(plain), 'plain');
+        var grouped;
+        (grouped) = function () {};
+        same('a grouped target does not', N(grouped), '');
+
+        // ---- and the values are still the same functions ------------------
+        same('a method is still callable', typeof methods.id, 'function');
+        same('a getter still runs', (function () { var o = { get v() { return 7; } }; return o.v; })(), 7);
+        same('a symbol method is still reachable', typeof methods[m], 'function');
+        same('a class still constructs', new C() instanceof C, true);
+        same('a name is still not writable', (function () {
+            var f = values.id; f.name = 'zz'; return f.name;
+        })(), 'id');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+TEST(textdecoder_reaches_script_in_pieces) {
+    using namespace litebird;
+    // Phase 163, finding 168. WHATWG Encoding §11.1.1: a `{stream: true}`
+    // decode is the same decoder as a one-shot one, asked to keep the bytes a
+    // chunk ends inside of for the next chunk instead of answering U+FFFD for
+    // them. The checks below are of three kinds, and the second is the one
+    // that cannot be satisfied by writing a second, worse decoder: a stream
+    // split anywhere must produce exactly what one call produces.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var failures = [];
+        function report(what, got, want) {
+            var a = JSON.stringify(got), b = JSON.stringify(want);
+            if (a !== b) failures.push(what + ': got ' + a + ', expected ' + b);
+        }
+        function bytes(a) { return new Uint8Array(a); }
+        function stream(enc, parts, options) {
+            var d = new TextDecoder(enc, options);
+            var out = '';
+            for (var i = 0; i < parts.length; i++) out += d.decode(bytes(parts[i]), {stream: true});
+            return out + d.decode();
+        }
+
+        // ---- one character per encoding, split at every byte --------------
+        report('UTF-8 three bytes, split after one', stream('utf-8', [[0xE2], [0x82, 0xAC]]), '\u20AC');
+        report('UTF-8 four bytes, split after two', stream('utf-8', [[0xF0, 0x9F], [0x98, 0x80]]), '\u{1F600}');
+        report('UTF-16LE one unit, split', stream('utf-16le', [[0x41], [0x00, 0x42, 0x00]]), 'AB');
+        report('UTF-16LE surrogate pair, split inside it',
+               stream('utf-16le', [[0x00, 0xD8], [0x00, 0xDC]]), '\u{10000}');
+        report('Big5 two bytes, split', stream('big5', [[0xA4], [0x40]]), '\u4E00');
+        report('Shift_JIS two bytes, split', stream('shift_jis', [[0x82], [0xA0]]), '\u3042');
+        report('EUC-JP two bytes, split', stream('euc-jp', [[0xA4], [0xA2]]), '\u3042');
+        report('EUC-JP three-byte JIS0212 form, split twice',
+               stream('euc-jp', [[0x8F], [0xA1], [0xA1]]), new TextDecoder('euc-jp').decode(bytes([0x8F, 0xA1, 0xA1])));
+        report('EUC-KR two bytes, split', stream('euc-kr', [[0xB0], [0xA1]]), '\uAC00');
+        report('gb18030 four-byte form, split twice',
+               stream('gb18030', [[0x81], [0x30], [0x81, 0x30]]),
+               new TextDecoder('gb18030').decode(bytes([0x81, 0x30, 0x81, 0x30])));
+        // ISO-2022-JP's mode is the one piece of decoder state that has to
+        // cross a chunk boundary: the escape says how to read what follows.
+        report('ISO-2022-JP escape in one chunk, its text in the next',
+               stream('iso-2022-jp', [[0x1B, 0x24, 0x42], [0x24, 0x22, 0x1B, 0x28, 0x42]]), '\u3042');
+        report('ISO-2022-JP split inside the escape',
+               stream('iso-2022-jp', [[0x1B], [0x24], [0x42, 0x24, 0x22]]), '\u3042');
+
+        // ---- a stream split anywhere answers what one call answers --------
+        // The bytes are the encodings' own, including a lead byte with no trail
+        // and a lone continuation, which a one-shot call answers U+FFFD for.
+        var cases = [
+            ['utf-8', [0x41, 0xE2, 0x82, 0xAC, 0xFF, 0xC3, 0xA9]],
+            ['utf-8', [0xE2, 0x28, 0xA1]],
+            ['utf-16le', [0x41, 0x00, 0x00, 0xD8, 0x00, 0xDC, 0x42, 0x00]],
+            ['utf-16be', [0x00, 0x41, 0xD8, 0x00, 0xDC, 0x00]],
+            ['gb18030', [0x81, 0x30, 0x81, 0x30, 0x41, 0x84, 0x31, 0xA4, 0x39]],
+            ['big5', [0xA4, 0x40, 0x41, 0x88, 0x62]],
+            ['shift_jis', [0x82, 0xA0, 0x41, 0x81, 0x60]],
+            ['euc-jp', [0xA4, 0xA2, 0x8F, 0xA1, 0xA1, 0x8E, 0xA2, 0x41]],
+            ['euc-kr', [0xB0, 0xA1, 0x41]],
+            ['iso-2022-jp', [0x1B, 0x24, 0x42, 0x24, 0x22, 0x24, 0x24, 0x1B, 0x28, 0x42, 0x41]],
+            ['windows-1252', [0xE9, 0x80, 0x41]],
+            ['koi8-r', [0xC1, 0x41]]
+        ];
+        var splits = 0, differ = 0;
+        for (var c = 0; c < cases.length; c++) {
+            var enc = cases[c][0], data = cases[c][1];
+            for (var fatal = 0; fatal < 2; fatal++) {
+                var whole;
+                try { whole = 'ok:' + new TextDecoder(enc, {fatal: !!fatal}).decode(bytes(data)); }
+                catch (e) { whole = 'throw:' + e.name; }
+                for (var cut = 0; cut <= data.length; cut++) {
+                    var got;
+                    try {
+                        var d = new TextDecoder(enc, {fatal: !!fatal});
+                        got = 'ok:' + d.decode(bytes(data.slice(0, cut)), {stream: true})
+                                            + d.decode(bytes(data.slice(cut)), {stream: true}) + d.decode();
+                    } catch (e2) { got = 'throw:' + e2.name; }
+                    ++splits;
+                    if (got !== whole) {
+                        if (differ === 0) failures.push('stream differs: ' + enc + ' ' + JSON.stringify(data) + ' cut ' + cut);
+                        ++differ;
+                    }
+                }
+            }
+        }
+        // 12 cases, two error modes, every cut from before the first byte to
+        // after the last: the sum of (length + 1) over the cases, twice.
+        report('a stream split anywhere is the one-shot answer', [splits, differ], [164, 0]);
+
+        // ---- the BOM, the fatal flag and the flush ------------------------
+        report('a one-byte BOM piece is waited for', stream('utf-8', [[0xEF], [0xBB, 0xBF, 0x41]]), 'A');
+        report('a BOM is stripped once, in a stream too',
+               stream('utf-8', [[0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF, 0x41]]), '\uFEFFA');
+        report('ignoreBOM keeps it', stream('utf-8', [[0xEF], [0xBB, 0xBF, 0x41]], {ignoreBOM: true}), '\uFEFFA');
+        var oneShot = new TextDecoder();
+        report('a one-shot call flushes what a stream would hold', oneShot.decode(bytes([0xE2])), '\uFFFD');
+        var flushing = new TextDecoder('utf-8', {fatal: true});
+        flushing.decode(bytes([0xE2]), {stream: true});
+        var threw = 'no throw';
+        try { flushing.decode(); } catch (e) { threw = e.name; }
+        report('a fatal stream that ends inside a character throws on the flush', threw, 'TypeError');
+        report('decode() with no argument flushes an empty decoder',
+               new TextDecoder().decode(undefined, {stream: false}), '');
+        // A stream restarts: a decode() with stream false ends it, and the
+        // next one sniffs its own BOM again.
+        var restart = new TextDecoder();
+        restart.decode(bytes([0x41]), {stream: true});
+        report('a decode() without stream ends the stream', restart.decode(bytes([0xEF, 0xBB, 0xBF, 0x42])), '\uFEFFB');
+        // x-user-defined carries every byte: nothing is ever held back.
+        report('x-user-defined holds nothing', stream('x-user-defined', [[0x80], [0x81]]),
+               '\uF780\uF781');
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+TEST(object_assign_boxes_throws_and_copies_every_own_key) {
+    using namespace litebird;
+
+    // Phase 167, finding 169. `Object.assign` had been three lines that did
+    // what the signature suggests and not what §20.1.2.1 says:
+    //
+    //   Object.assign('test', { a: 1 }).a   -> undefined   (the write was
+    //                                          dropped on the primitive)
+    //   Object.assign(frozen, { a: 2 })     -> no throw    (Set must throw)
+    //   Object.assign({}, { [sym]: 1 })     -> no symbol   (own *keys*, not
+    //                                          own string keys)
+    //
+    // Each part of the fix is one sentence of the spec: the target is boxed by
+    // `ToObject`; every copy is a strict `Set`, whose `false` throws; the keys
+    // are `[[OwnPropertyKeys]]` — the string keys in their order, then the
+    // symbols, which `own_keys` never reported at all.
+    //
+    // Every expected value was printed by Node.js 22 for the same source.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throws(what, f) {
+            try { f(); failures.push(what + ': did not throw'); }
+            catch (e) { if (!(e instanceof TypeError)) failures.push(what + ': threw ' + e); }
+        }
+
+        // ---- ToObject on the target ---------------------------------------
+        var fromString = Object.assign('test', { a: 1 });
+        same('a string target is boxed', typeof fromString, 'object');
+        same('and the write lands on the box', fromString.a, 1);
+        same('the box still knows its string', fromString.valueOf(), 'test');
+        same('assign of one argument boxes too', typeof Object.assign('a'), 'object');
+        same('a number target', Object.assign(12, 'aaa').valueOf(), 12);
+        same('and takes the characters', Object.getOwnPropertyNames(Object.assign(12, 'aaa')).join(','), '0,1,2');
+        same('a boolean target', Object.assign(true, { a: 1 }).valueOf(), true);
+        same('a symbol target', Object.assign(Symbol('foo'), { a: 1 }).toString(), 'Symbol(foo)');
+        same('an object target is returned as it is',
+             (function () { var o = {}; return Object.assign(o, { a: 1 }) === o; })(), true);
+        throws('a null target', function () { Object.assign(null, {}); });
+        throws('an undefined target', function () { Object.assign(undefined, {}); });
+
+        // ---- Set(target, key, value, true) ---------------------------------
+        throws('a non-writable data property', function () {
+            var o = {}; Object.defineProperty(o, 'attr', { writable: false });
+            Object.assign(o, { attr: 1 });
+        });
+        throws('a frozen data property', function () {
+            Object.assign(Object.freeze({ foo: 1 }), { foo: 2 });
+        });
+        throws('creating a property on a sealed target', function () {
+            Object.assign(Object.seal({}), { foo: 2 });
+        });
+        throws('creating a property on a non-extensible target', function () {
+            Object.assign(Object.preventExtensions({}), { foo: 2 });
+        });
+
+        // ...and a setter is still a setter, however frozen its object is.
+        var seen = [];
+        var frozenAccessor = { set foo(v) { seen.push(v); } };
+        Object.freeze(frozenAccessor);
+        Object.assign(frozenAccessor, { foo: 2 });
+        same('a frozen accessor is still called', seen, [2]);
+
+        var sym = Symbol('s'), symSeen = [];
+        var sealedAccessor = { set [sym](v) { symSeen.push(v); } };
+        Object.seal(sealedAccessor);
+        var symbolSource = {}; symbolSource[sym] = 3;
+        Object.assign(sealedAccessor, symbolSource);
+        same('a sealed symbol accessor is still called', symSeen, [3]);
+
+        // An existing property of a non-extensible target can still be set.
+        var loose = Object.preventExtensions({ foo: 1 });
+        Object.assign(loose, { foo: 2 });
+        same('an existing property of a non-extensible target', loose.foo, 2);
+        var looseSymbol = {}; looseSymbol[sym] = 1;
+        Object.preventExtensions(looseSymbol);
+        var second = {}; second[sym] = 2;
+        Object.assign(looseSymbol, second);
+        same('an existing symbol property of a non-extensible target', looseSymbol[sym], 2);
+
+        // A source that is null or undefined is skipped, not refused.
+        same('a null source', Object.assign({ a: 1 }, null, { b: 2 }).b, 2);
+
+        // ---- [[OwnPropertyKeys]]: strings first, then symbols --------------
+        var s1 = Symbol('x'), s2 = Symbol('y'), log = [];
+        var ordered = {};
+        Object.defineProperty(ordered, s1, { get: function () { log.push('sym1'); }, enumerable: true });
+        Object.defineProperty(ordered, 'a', { get: function () { log.push('a'); }, enumerable: true });
+        Object.defineProperty(ordered, s2, { get: function () { log.push('sym2'); }, enumerable: true });
+        Object.defineProperty(ordered, 'b', { get: function () { log.push('b'); }, enumerable: true });
+        Object.assign({}, ordered);
+        same('the order is strings then symbols', log, ['a', 'b', 'sym1', 'sym2']);
+
+        var copied = Object.assign({}, ordered);
+        same('the symbols were copied', Object.getOwnPropertySymbols(copied).length, 2);
+
+        // A non-enumerable key is not one, and a string source copies its
+        // characters rather than its `length`.
+        var hidden = {}; Object.defineProperty(hidden, 'h', { value: 1, enumerable: false });
+        same('a non-enumerable key is skipped', Object.keys(Object.assign({}, hidden)).length, 0);
+        same('a string source copies characters', Object.getOwnPropertyNames(Object.assign({}, 'ab')).join(','), '0,1');
+
+        // ---- and the methods that read the same key list are unchanged -----
+        same('Object.keys still reports strings only', Object.keys(ordered).join(','), 'a,b');
+        same('for-in still reports strings only', (function () {
+            var out = []; for (var k in ordered) out.push(k); return out.join(',');
+        })(), 'a,b');
     )JS");
 
     const std::string failed = js.eval("failures.join('\\n')").to_string();
@@ -29502,6 +31911,9 @@ int main() {
     // Phase 57: lossy WebP, bit-exact against libwebp.
     RUN_TEST(webp_lossy_vp8_decodes_bit_exactly);
     RUN_TEST(webp_lossy_alpha_plane_and_container_consistency);
+    // Finding 172: the AVIF container, read; the picture is still open.
+    RUN_TEST(avif_container_is_read_and_the_picture_is_not_decoded);
+    RUN_TEST(avif_container_refuses_what_it_cannot_read_instead_of_guessing);
     RUN_TEST(canvas_text_filltext_stroketext_measuretext_and_font_state);
     RUN_TEST(canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings);
     RUN_TEST(svg_real_world_paths_arcs_gradients_use_clip_and_guards);
@@ -29668,12 +32080,27 @@ int main() {
 
     // Phase 128: the six regular grammar rules of a class body.
     RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);
+    // Phase 141: remaining early SyntaxErrors outside class bodies.
+    RUN_TEST(parser_rejects_early_syntax_errors_outside_class_bodies);
 
     // Phase 135: an anonymous class expression takes the name it is bound to.
     RUN_TEST(an_anonymous_class_expression_takes_its_bindings_name);
 
     // Phase 146: name and length are own properties, with the attributes they have.
     RUN_TEST(a_functions_name_and_length_are_its_own_properties);
+
+    // Phase 154: Error.prototype.stack is an accessor over an internal slot.
+    RUN_TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot);
+
+    // Phase 158: a built-in method has no [[Construct]].
+    RUN_TEST(a_built_in_method_is_not_a_constructor);
+
+    // Phase 159: a definition names the function it makes.
+    RUN_TEST(a_definition_names_the_function_it_makes);
+
+    // Phase 167: Object.assign boxes its target, throws on a refused Set, and
+    // copies the symbols.
+    RUN_TEST(object_assign_boxes_throws_and_copies_every_own_key);
 
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
@@ -29692,6 +32119,12 @@ int main() {
     // Phase 139: ImageData is an interface, and putImageData takes a rectangle.
     RUN_TEST(image_data_is_an_interface);
 
+    // Phase 149: the Annex B String.prototype HTML methods, and the trim aliases.
+    RUN_TEST(annex_b_string_html_methods);
+
+    // Phase 163: TextDecoder's `{stream: true}`, and the bytes it holds back.
+    RUN_TEST(textdecoder_reaches_script_in_pieces);
+
     // Phase 119: Contextual GSUB (Type 1-7), Cursive GPOS (Type 3/7/8), and Arabic Shaping.
     RUN_TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions);
     RUN_TEST(arabic_joining_zwnj_zwj_lam_alef_and_mark_anchoring);
@@ -29705,6 +32138,27 @@ int main() {
 
     // Phase 134: `align-items` places items on the cross axis, in flex and in grid.
     RUN_TEST(cross_axis_alignment_places_flex_and_grid_items);
+
+    // Phase 145: automatic per-agent allocation-threshold garbage collection at safe points.
+    RUN_TEST(automatic_gc_threshold_and_geometric_growth);
+    RUN_TEST(automatic_gc_reclaims_churn_without_calling_gc);
+
+    // Phase 152: place the document body, its margins, and its descendants.
+    RUN_TEST(document_body_margins_place_boxes_from_the_viewport);
+    RUN_TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry);
+
+    // Phase 157: ArrayBuffer.prototype.transfer(), transferToFixedLength(), detached, and resize().
+    RUN_TEST(arraybuffer_transfer_detach_and_resize);
+
+    // Phase 161: WebSocket binary frames — ArrayBuffer, TypedArray, DataView, and Blob.
+    RUN_TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob);
+
+    // Phase 168: what a native entry point captures is traced by the collector.
+    RUN_TEST(gc_reclaims_a_bound_functions_target);
+    RUN_TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour);
+
+    // Phase 169: WebSocket permessage-deflate (RFC 7692) & stateful DEFLATE/INFLATE codec.
+    RUN_TEST(websocket_permessage_deflate_rfc7692);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

@@ -28,6 +28,7 @@ import base64
 import hashlib
 import os
 import pathlib
+import re
 import socket
 import ssl
 import struct
@@ -36,6 +37,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -151,10 +153,11 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
     return bytes(out)
 
 
-def read_ws_frame(sock: socket.socket) -> tuple[int, bytes, bool, bytes]:
+def read_ws_frame(sock: socket.socket) -> tuple[int, bytes, bool, bytes, bool]:
     hdr = recv_exact(sock, 2)
     b0, b1 = hdr[0], hdr[1]
     opcode = b0 & 0x0F
+    rsv1 = bool(b0 & 0x40)
     masked = bool(b1 & 0x80)
     length = b1 & 0x7F
     if length == 126:
@@ -166,11 +169,11 @@ def read_ws_frame(sock: socket.socket) -> tuple[int, bytes, bool, bytes]:
     if masked:
         for i in range(len(payload)):
             payload[i] ^= mask[i % 4]
-    return opcode, bytes(payload), masked, mask
+    return opcode, bytes(payload), masked, mask, rsv1
 
 
-def build_ws_frame(opcode: int, payload: bytes) -> bytes:
-    header = bytearray([0x80 | (opcode & 0x0F)])
+def build_ws_frame(opcode: int, payload: bytes, fin: bool = True, rsv1: bool = False) -> bytes:
+    header = bytearray([(0x80 if fin else 0) | (0x40 if rsv1 else 0) | (opcode & 0x0F)])
     n = len(payload)
     if n < 126:
         header.append(n)
@@ -325,6 +328,23 @@ class DualProtocolServer:
         )
         if selected_proto:
             resp += f"Sec-WebSocket-Protocol: {selected_proto}\r\n"
+        pmd_mode = None
+        pmd_wbits = 15
+        pmd_nct = False
+        if path == "/wss-pmd":
+            pmd_mode = "default"
+            pmd_wbits = 11
+            resp += "Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=11; client_max_window_bits=11\r\n"
+        elif path == "/wss-pmd-nct":
+            pmd_mode = "nct"
+            pmd_wbits = 9
+            pmd_nct = True
+            resp += "Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover; server_no_context_takeover; client_max_window_bits=9; server_max_window_bits=9\r\n"
+        elif path == "/wss-pmd-bad":
+            resp += "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits=7\r\n"
+        elif path == "/wss-pmd-bomb":
+            pmd_mode = "bomb"
+            resp += "Sec-WebSocket-Extensions: permessage-deflate\r\n"
         # Cookies set on an upgrade response: an ordinary Set-Cookie header on
         # the one response the handshake ever gets.
         if path == "/ws-cookie":
@@ -340,38 +360,86 @@ class DualProtocolServer:
             "key": sec_key,
             "offered": offered,
             "selected": selected_proto,
+            "offered_ext": headers.get("sec-websocket-extensions", ""),
             "cookie": headers.get("cookie"),
             "messages": [],
+            "binary_messages": [],
+            "compressed_wire_lens": [],
+            "rsv1_flags": [],
             "masks_ok": True,
             "close_code": None,
             "close_reason": None,
         }
 
+        def pmd_compress(comp_obj, data: bytes) -> bytes:
+            raw = comp_obj.compress(data) + comp_obj.flush(zlib.Z_SYNC_FLUSH)
+            assert raw.endswith(b"\x00\x00\xff\xff")
+            return raw[:-4]
+
+        comp = zlib.compressobj(6, zlib.DEFLATED, -pmd_wbits) if pmd_mode in ("default", "nct") else None
+        decomp = zlib.decompressobj(-pmd_wbits) if pmd_mode in ("default", "nct") else None
+
         # Worker endpoints proactively push a greeting then close cleanly.
-        if path.startswith("/worker"):
+        if path == "/worker-ok":
             conn.sendall(build_ws_frame(0x01, b"wss-worker-ok"))
+        elif path == "/worker-bin":
+            conn.sendall(build_ws_frame(0x02, b"\x00\xfe\xff\x80"))
+        elif pmd_mode == "bomb":
+            bcomp = zlib.compressobj(9, zlib.DEFLATED, -15)
+            bomb = pmd_compress(bcomp, b"\x00" * (20 * 1024 * 1024))
+            conn.sendall(build_ws_frame(0x02, bomb, fin=True, rsv1=True))
 
         conn.settimeout(2.5)
         try:
             while True:
-                opcode, payload, masked, mask = read_ws_frame(conn)
+                opcode, payload, masked, mask, rsv1 = read_ws_frame(conn)
                 if not masked or len(mask) != 4:
                     rec["masks_ok"] = False
+                if opcode in (0x01, 0x02):
+                    rec["rsv1_flags"].append(rsv1)
+                    if pmd_mode in ("default", "nct") and rsv1:
+                        rec["compressed_wire_lens"].append(len(payload))
+                        payload = decomp.decompress(payload + b"\x00\x00\xff\xff")
+                        if pmd_nct:
+                            decomp = zlib.decompressobj(-pmd_wbits)
                 if opcode == 0x01:
                     text = payload.decode("utf-8", errors="replace")
                     rec["messages"].append(text)
-                    conn.sendall(build_ws_frame(0x01, f"echo:{text}".encode("utf-8")))
+                    reply = f"echo:{text}".encode("utf-8")
+                    if pmd_mode == "default" and len(rec["messages"]) == 2:
+                        # Fragmented compressed reply across 2 frames + interleaved Ping!
+                        c_rep = pmd_compress(comp, reply)
+                        mid = max(1, len(c_rep) // 2)
+                        conn.sendall(build_ws_frame(0x01, c_rep[:mid], fin=False, rsv1=True))
+                        conn.sendall(build_ws_frame(0x09, b"pmd-ping", fin=True, rsv1=False))
+                        conn.sendall(build_ws_frame(0x00, c_rep[mid:], fin=True, rsv1=False))
+                    elif pmd_mode in ("default", "nct"):
+                        c_rep = pmd_compress(comp, reply)
+                        if pmd_nct:
+                            comp = zlib.compressobj(6, zlib.DEFLATED, -pmd_wbits)
+                        conn.sendall(build_ws_frame(0x01, c_rep, fin=True, rsv1=True))
+                    else:
+                        conn.sendall(build_ws_frame(0x01, reply))
                 elif opcode == 0x02:
-                    conn.sendall(build_ws_frame(0x02, payload))
+                    rec["binary_messages"].append(payload)
+                    if pmd_mode in ("default", "nct"):
+                        c_rep = pmd_compress(comp, payload)
+                        if pmd_nct:
+                            comp = zlib.compressobj(6, zlib.DEFLATED, -pmd_wbits)
+                        conn.sendall(build_ws_frame(0x02, c_rep, fin=True, rsv1=True))
+                    else:
+                        conn.sendall(build_ws_frame(0x02, payload))
                 elif opcode == 0x09:
                     conn.sendall(build_ws_frame(0x0A, payload))
+                elif opcode == 0x0A:
+                    rec["rsv1_flags"].append(("pong", rsv1))
                 elif opcode == 0x08:
                     if len(payload) >= 2:
                         rec["close_code"] = struct.unpack("!H", payload[:2])[0]
                         rec["close_reason"] = payload[2:].decode("utf-8", errors="replace")
                     conn.sendall(build_ws_frame(0x08, payload))
                     break
-        except (EOFError, OSError, ssl.SSLError):
+        except (EOFError, OSError, ssl.SSLError, zlib.error):
             pass
         with self.lock:
             self.upgrades.append(rec)
@@ -425,6 +493,24 @@ def main() -> int:
     checks = 0
     failures = 0
 
+    def refused_before_close(record: str | None) -> bool:
+        """An error event followed by an unclean 1006 close, in that order."""
+        record = record or ""
+        return record.startswith("err") and record.endswith(",close:1006:false")
+
+    def tls_refusal_code(record: str | None) -> int | None:
+        """The X509_V_ERR code a wss:// refusal named, from the page's own event.
+
+        A refusal on a socket does not reach the engine's stderr: it surfaces as
+        the error event's message, which the page logs. A first version of this
+        check searched stderr and found nothing, so it was blind in exactly the
+        way it was written to cure. Every refusal used to say only
+        "certificate verification failed"; the code is what separates an
+        expired certificate from an untrusted issuer from a wrong name.
+        """
+        match = re.search(r"certificate verification failed \(code (\d+)", record or "")
+        return int(match.group(1)) if match else None
+
     def check(label: str, cond: bool, detail: str = "") -> None:
         nonlocal checks, failures
         checks += 1
@@ -450,6 +536,29 @@ def main() -> int:
                     f"var ws = new WebSocket('wss://127.0.0.1:{wss_valid.port}/worker-ok');\n"
                     f"ws.onmessage = function(e) {{ postMessage('W:' + e.data); ws.close(1000, 'wdone'); }};\n"
                     f"ws.onerror = function() {{ postMessage('W:ERR'); }};\n"
+                ).encode("utf-8"),
+            )
+            https_srv.routes["/worker-bin-ws.js"] = (
+                "application/javascript",
+                (
+                    f"var ws = new WebSocket('wss://127.0.0.1:{wss_valid.port}/worker-bin');\n"
+                    "ws.binaryType = 'arraybuffer';\n"
+                    "var step = 0;\n"
+                    "ws.onmessage = function(e) {\n"
+                    "  step++;\n"
+                    "  if (step === 1) {\n"
+                    "    var u = new Uint8Array(e.data);\n"
+                    "    var ok1 = (e.data instanceof ArrayBuffer) && u.length === 4 && u[0] === 0 && u[1] === 254 && u[2] === 255 && u[3] === 128;\n"
+                    "    ws.binaryType = 'blob';\n"
+                    "    ws.send(new Uint8Array([9, 0, 255]).buffer);\n"
+                    "    ws._ok1 = ok1;\n"
+                    "  } else if (step === 2) {\n"
+                    "    var ok2 = (e.data instanceof Blob) && e.data.size === 3 && e.data.type === '';\n"
+                    "    postMessage('WB:' + ws._ok1 + ':' + ok2);\n"
+                    "    ws.close(1000, 'wbdone');\n"
+                    "  }\n"
+                    "};\n"
+                    "ws.onerror = function() { postMessage('WB:ERR'); };\n"
                 ).encode("utf-8"),
             )
 
@@ -545,7 +654,7 @@ function expectTlsFail(tag, url) {{
   pending++;
   var seq = [];
   var s = new WebSocket(url);
-  s.onerror = function() {{ seq.push('err'); }};
+  s.onerror = function(e) {{ seq.push('err[' + (e && e.message ? e.message : 'no-msg') + ']'); }};
   s.onclose = function(e) {{
     seq.push('close:' + e.code + ':' + e.wasClean);
     log(tag, seq.join(','));
@@ -567,6 +676,141 @@ wk.onmessage = function(e) {{
 }};
 wk.onerror = function(e) {{
   log('worker_err', e.message || 'err');
+  pending--;
+}};
+
+// Binary wss:// round-trip (ArrayBuffer, TypedArray subarray, DataView, Blob, detached TypeError)
+pending++;
+var wsBin = new WebSocket('wss://127.0.0.1:{wss_valid.port}/wss-bin');
+var binResults = [];
+var binStep = 0;
+function toHex(ab) {{
+  var u = new Uint8Array(ab);
+  var s = '';
+  for (var i = 0; i < u.length; i++) s += (u[i] < 16 ? '0' : '') + u[i].toString(16);
+  return s;
+}}
+wsBin.onopen = function() {{
+  var det = new ArrayBuffer(4);
+  det.transfer();
+  try {{ wsBin.send(det); log('bin_detached', 'NO_THROW'); }}
+  catch (e) {{ log('bin_detached', e.name); }}
+
+  var b1 = new Uint8Array([0, 255, 254, 128, 65]);
+  wsBin.send(b1.buffer);
+  b1[0] = 99; // synchronous snapshot check
+  var b2 = new Uint8Array([10, 20, 30, 40, 50]);
+  wsBin.send(b2.subarray(1, 4));
+  wsBin.send(new DataView(b2.buffer, 2, 2));
+  wsBin.send(new Blob([b2.subarray(0, 2), new DataView(b2.buffer, 3, 2), '\\x00Z']));
+  wsBin.send(new Uint8Array(0));
+}};
+wsBin.onmessage = function(e) {{
+  binStep++;
+  if (binStep === 1) {{
+    var isBlob = (e.data instanceof Blob) && e.data.size === 5 && e.data.type === '';
+    wsBin.binaryType = 'arraybuffer';
+    pending++;
+    e.data.arrayBuffer().then(function(ab) {{
+      log('bin_blob', isBlob + ':' + toHex(ab));
+      pending--;
+    }});
+  }} else {{
+    binResults.push((e.data instanceof ArrayBuffer) + ':' + toHex(e.data));
+    if (binStep === 5) {{
+      log('bin_ab', binResults.join('|'));
+      wsBin.close(1000);
+    }}
+  }}
+}};
+wsBin.onclose = function(e) {{
+  log('bin_close', e.code + ':' + e.wasClean);
+  pending--;
+}};
+
+// Worker binary wss:// (ArrayBuffer + Blob) inside HTTPS page
+pending++;
+var wkBin = new Worker('/worker-bin-ws.js');
+wkBin.onmessage = function(e) {{
+  log('worker_bin_msg', e.data);
+  pending--;
+  wkBin.terminate();
+}};
+wkBin.onerror = function(e) {{
+  log('worker_bin_err', e.message || 'err');
+  pending--;
+}};
+
+// RFC 7692 permessage-deflate over wss:// (window_bits=11, context takeover, fragmented + binary)
+pending++;
+var wsPmd = new WebSocket('wss://127.0.0.1:{wss_valid.port}/wss-pmd');
+wsPmd.binaryType = 'arraybuffer';
+var pmdGot = [];
+wsPmd.onopen = function() {{
+  log('pmd_ext', wsPmd.extensions);
+  wsPmd.send('deflate-wss-chunk-'.repeat(60));
+  wsPmd.send('deflate-wss-chunk-'.repeat(60));
+  var b = new Uint8Array(64);
+  for (var i = 0; i < 64; i++) b[i] = (i * 17) & 0xFF;
+  wsPmd.send(b);
+}};
+wsPmd.onmessage = function(e) {{
+  if (typeof e.data === 'string') {{
+    pmdGot.push('S:' + e.data.length + ':' + e.data.slice(0, 12));
+  }} else {{
+    var u = new Uint8Array(e.data);
+    pmdGot.push('B:' + u.length + ':' + u[0] + ',' + u[1] + ',' + u[63]);
+  }}
+  if (pmdGot.length === 3) {{
+    log('pmd_got', pmdGot.join('|'));
+    wsPmd.close(1000, 'pmd-done');
+  }}
+}};
+wsPmd.onclose = function(e) {{
+  log('pmd_close', e.code + ':' + e.wasClean);
+  pending--;
+}};
+
+// RFC 7692 permessage-deflate no_context_takeover + window_bits=9
+pending++;
+var wsPmdNct = new WebSocket('wss://127.0.0.1:{wss_valid.port}/wss-pmd-nct');
+var pmdNctGot = [];
+wsPmdNct.onopen = function() {{
+  log('pmd_nct_ext', wsPmdNct.extensions);
+  wsPmdNct.send('nct-payload-'.repeat(80));
+  wsPmdNct.send('nct-payload-'.repeat(80));
+}};
+wsPmdNct.onmessage = function(e) {{
+  pmdNctGot.push(e.data.length);
+  if (pmdNctGot.length === 2) {{
+    log('pmd_nct_got', pmdNctGot.join(','));
+    wsPmdNct.close(1000);
+  }}
+}};
+wsPmdNct.onclose = function(e) {{
+  log('pmd_nct_close', e.code + ':' + e.wasClean);
+  pending--;
+}};
+
+// RFC 7692 invalid Sec-WebSocket-Extensions rejected fail-closed
+pending++;
+var wsPmdBad = new WebSocket('wss://127.0.0.1:{wss_valid.port}/wss-pmd-bad');
+var pmdBadEv = [];
+wsPmdBad.onerror = function() {{ pmdBadEv.push('err'); }};
+wsPmdBad.onclose = function(e) {{
+  pmdBadEv.push('close:' + e.code + ':' + e.wasClean);
+  log('pmd_bad', pmdBadEv.join(','));
+  pending--;
+}};
+
+// RFC 7692 decompression bomb (>16 MiB) rejected with 1009 without OOM
+pending++;
+var wsPmdBomb = new WebSocket('wss://127.0.0.1:{wss_valid.port}/wss-pmd-bomb');
+var pmdBombEv = [];
+wsPmdBomb.onerror = function() {{ pmdBombEv.push('err'); }};
+wsPmdBomb.onclose = function(e) {{
+  pmdBombEv.push('close:' + e.code + ':' + e.wasClean);
+  log('pmd_bomb', pmdBombEv.join(','));
   pending--;
 }};
 
@@ -616,26 +860,69 @@ setTimeout(pump, 1);
                   r1.get("loop_msg") == "echo:hi-loop" and r1.get("loop_close") == "1000:true",
                   f"{r1.get('loop_msg')} / {r1.get('loop_close')}")
             check("wss:// untrusted CA rejected fail-closed with 0 upgrades",
-                  r1.get("tls_untrusted") == "err,close:1006:false" and len(wss_untrusted.upgrades) == 0,
+                  refused_before_close(r1.get("tls_untrusted")) and len(wss_untrusted.upgrades) == 0
+                  and tls_refusal_code(r1.get("tls_untrusted")) == 18,
                   str(r1.get("tls_untrusted")))
             check("wss:// wrong SAN rejected fail-closed with 0 upgrades",
-                  r1.get("tls_wronghost") == "err,close:1006:false" and len(wss_wrong.upgrades) == 0,
+                  refused_before_close(r1.get("tls_wronghost")) and len(wss_wrong.upgrades) == 0
+                  and tls_refusal_code(r1.get("tls_wronghost")) == 64,
                   str(r1.get("tls_wronghost")))
             check("wss:// expired cert rejected fail-closed with 0 upgrades",
-                  r1.get("tls_expired") == "err,close:1006:false" and len(wss_expired.upgrades) == 0,
+                  refused_before_close(r1.get("tls_expired")) and len(wss_expired.upgrades) == 0
+                  and tls_refusal_code(r1.get("tls_expired")) == 10,
                   str(r1.get("tls_expired")))
             check("wss:// plaintext TCP peer rejected fail-closed",
-                  r1.get("tls_plaintext") == "err,close:1006:false",
+                  refused_before_close(r1.get("tls_plaintext"))
+                  and tls_refusal_code(r1.get("tls_plaintext")) is None,
                   str(r1.get("tls_plaintext")))
             check("Worker inherits Origin and completes wss:// roundtrip",
                   r1.get("worker_msg") == "W:wss-worker-ok",
                   str(r1.get("worker_msg")))
+            check("wss:// binary send(ArrayBuffer/TypedArray/DataView/Blob) & detached TypeError",
+                  r1.get("bin_detached") == "TypeError"
+                  and r1.get("bin_blob") == "true:00fffe8041"
+                  and r1.get("bin_ab") == "true:141e28|true:1e28|true:0a142832005a|true:"
+                  and r1.get("bin_close") == "1000:true",
+                  f"det={r1.get('bin_detached')} blob={r1.get('bin_blob')} ab={r1.get('bin_ab')} close={r1.get('bin_close')}")
+            check("Worker completes wss:// binary ArrayBuffer & Blob roundtrip",
+                  r1.get("worker_bin_msg") == "WB:true:true",
+                  str(r1.get("worker_bin_msg")))
 
             # Server-side wire assertions for HTTPS upgrades
             with wss_valid.lock:
                 wss_upgrades = list(wss_valid.upgrades)
             with https_srv.lock:
                 https_upgrades = list(https_srv.upgrades)
+
+            pmd_rec = next((u for u in wss_upgrades if u["path"] == "/wss-pmd"), None)
+            pmd_nct_rec = next((u for u in wss_upgrades if u["path"] == "/wss-pmd-nct"), None)
+            pmd_bomb_rec = next((u for u in wss_upgrades if u["path"] == "/wss-pmd-bomb"), None)
+
+            check("wss:// permessage-deflate (window_bits=11, takeover, fragmented, binary & wire RSV1)",
+                  r1.get("pmd_ext") == "permessage-deflate; server_max_window_bits=11; client_max_window_bits=11"
+                  and r1.get("pmd_got") == "S:1085:echo:deflate|S:1085:echo:deflate|B:64:0,17,47"
+                  and r1.get("pmd_close") == "1000:true"
+                  and pmd_rec is not None
+                  and "permessage-deflate" in pmd_rec["offered_ext"]
+                  and len(pmd_rec["compressed_wire_lens"]) == 3
+                  and pmd_rec["compressed_wire_lens"][0] < 100
+                  and pmd_rec["compressed_wire_lens"][1] <= pmd_rec["compressed_wire_lens"][0]
+                  and ("pong", False) in pmd_rec["rsv1_flags"],
+                  f"ext={r1.get('pmd_ext')} got={r1.get('pmd_got')} close={r1.get('pmd_close')} rec={pmd_rec}")
+            check("wss:// permessage-deflate no_context_takeover & invalid extension fail-closed",
+                  r1.get("pmd_nct_ext") == "permessage-deflate; client_no_context_takeover; server_no_context_takeover; client_max_window_bits=9; server_max_window_bits=9"
+                  and r1.get("pmd_nct_got") == "965,965"
+                  and r1.get("pmd_nct_close") == "1000:true"
+                  and pmd_nct_rec is not None
+                  and len(pmd_nct_rec["compressed_wire_lens"]) == 2
+                  and pmd_nct_rec["compressed_wire_lens"][0] < 100
+                  and r1.get("pmd_bad") == "err,close:1006:false",
+                  f"nct={r1.get('pmd_nct_got')} bad={r1.get('pmd_bad')} rec={pmd_nct_rec}")
+            check("wss:// permessage-deflate decompression bomb (>16 MiB) rejected with 1009",
+                  r1.get("pmd_bomb") == "err,close:1009:false"
+                  and pmd_bomb_rec is not None
+                  and pmd_bomb_rec["close_code"] == 1009,
+                  f"bomb={r1.get('pmd_bomb')} rec={pmd_bomb_rec}")
             with plain_srv.lock:
                 plain_upgrades = list(plain_srv.upgrades)
 
@@ -644,6 +931,17 @@ setTimeout(pump, 1);
                   wss_cookie_up is not None and "wss_secure=1" in (wss_cookie_up["cookie"] or "")
                   and r1.get("wss_cookie_close") == "1000:true",
                   f"cookie={wss_cookie_up and wss_cookie_up['cookie']} close={r1.get('wss_cookie_close')}")
+            wss_bin_up = next((u for u in wss_upgrades if u["path"] == "/wss-bin"), None)
+            check("wss:// binary frames arrive on wire as opcode 0x02 with exact raw bytes",
+                  wss_bin_up is not None
+                  and wss_bin_up["binary_messages"] == [
+                      b"\x00\xff\xfe\x80A",
+                      b"\x14\x1e\x28",
+                      b"\x1e\x28",
+                      b"\x0a\x14\x28\x32\x00Z",
+                      b"",
+                  ],
+                  f"bin_msgs={wss_bin_up and [m.hex() for m in wss_bin_up['binary_messages']]}")
 
             keys = [u["key"] for u in wss_upgrades + https_upgrades + plain_upgrades]
             decoded_key_lens = [len(base64.b64decode(k)) for k in keys if k]

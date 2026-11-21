@@ -126,6 +126,7 @@ QUICK_CHECKS = (
     ("check_docs.py", ("tools/ci/check_docs.py", "--base", "{main}")),
     ("next_ids.py --self-test", ("tools/next_ids.py", "--self-test")),
     ("check_pr.py --self-test", ("tools/ci/check_pr.py", "--self-test")),
+    ("check_suites.py", ("tools/ci/check_suites.py",)),
 )
 # "No phase, no finding:", "takes no phase or finding number", "is not a phase".
 # A pull request that claims no numbers has to say that it claims none, rather

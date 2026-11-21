@@ -80,8 +80,8 @@ caught it, and the suite now checks object and function receivers.
   `Promise[Symbol.species]`.
 
 Measured: `prototypes.dat` 70/76, `js-conformance` 1143 → 1144 of 1158 on the
-branch (1145 on the merged tree, where main had fixed one more case), one new
-unit suite; 306 suites in the current merged tree. Details in
+branch (1146 on the latest merged tree, where main had fixed two more cases), one new
+unit suite; 327 suites in the current merged tree. Details in
 `docs/phases/140-a-subclass-is-made-by-the-builtin-it-was-called-on.md`.
 
 ## 3. What is still wrong

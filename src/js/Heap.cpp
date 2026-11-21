@@ -143,13 +143,96 @@ JsObject* Heap::allocate_object() {
     // is armed again when a safe point serves the request, so a request that
     // nothing serves (native code allocating in a loop, say) does not stack up
     // a second one behind it.
-    if (m_stress_enabled && m_stress_countdown > 0) {
-        if (--m_stress_countdown == 0) {
+    if (m_stress_enabled.load(std::memory_order_relaxed)) {
+        if (m_stress_countdown > 0 && --m_stress_countdown == 0) {
             m_stress_pending.store(true, std::memory_order_relaxed);
+        }
+    } else if (m_auto_gc_enabled.load(std::memory_order_relaxed)) {
+        // Automatic per-agent allocation threshold: once this agent allocates
+        // `threshold` cells since its last collection, arm its safe-point flag.
+        AgentAutoState& st = agent_auto_state_locked(t_agent);
+        if (!st.pending && ++st.allocs_since_gc >= st.threshold) {
+            st.pending = true;
+            if (t_agent == 0) {
+                m_main_auto_pending.store(true, std::memory_order_release);
+            } else {
+                const uint64_t bit = uint64_t(1) << (t_agent & 63);
+                m_worker_pending_mask.fetch_or(bit, std::memory_order_release);
+            }
         }
     }
 
     return obj;
+}
+
+Heap::AgentAutoState& Heap::agent_auto_state_locked(uint32_t agent) {
+    if (agent == 0) return m_main_agent_auto;
+    auto [it, inserted] = m_worker_agent_auto.try_emplace(agent);
+    if (inserted) {
+        it->second.threshold = m_auto_min_threshold.load(std::memory_order_relaxed);
+    }
+    return it->second;
+}
+
+Heap::AgentAutoState* Heap::find_agent_auto_state_locked(uint32_t agent) {
+    if (agent == 0) return &m_main_agent_auto;
+    auto it = m_worker_agent_auto.find(agent);
+    return it != m_worker_agent_auto.end() ? &it->second : nullptr;
+}
+
+void Heap::clear_auto_pending_locked(uint32_t agent, AgentAutoState& st) {
+    st.pending = false;
+    if (agent == 0) {
+        m_main_auto_pending.store(false, std::memory_order_relaxed);
+        return;
+    }
+    const uint32_t slot = agent & 63;
+    for (const auto& [other_agent, other_state] : m_worker_agent_auto) {
+        if (other_state.pending && (other_agent & 63) == slot) {
+            return;
+        }
+    }
+    m_worker_pending_mask.fetch_and(~(uint64_t(1) << slot), std::memory_order_relaxed);
+}
+
+void Heap::clear_all_auto_pending_locked() {
+    m_main_agent_auto.pending = false;
+    m_main_auto_pending.store(false, std::memory_order_relaxed);
+    for (auto& [agent, st] : m_worker_agent_auto) {
+        st.pending = false;
+    }
+    m_worker_pending_mask.store(0, std::memory_order_relaxed);
+}
+
+void Heap::reset_auto_gc_after_collect_locked(uint32_t agent, size_t agent_alive) {
+    AgentAutoState& st = agent_auto_state_locked(agent);
+    if (st.pending) {
+        clear_auto_pending_locked(agent, st);
+    }
+    st.allocs_since_gc = 0;
+    const size_t min_threshold = m_auto_min_threshold.load(std::memory_order_relaxed);
+    st.threshold = std::max(min_threshold, agent_alive);
+}
+
+void Heap::set_auto_gc_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_auto_gc_enabled.store(enabled, std::memory_order_release);
+    if (!enabled) {
+        clear_all_auto_pending_locked();
+    }
+}
+
+void Heap::set_auto_gc_min_threshold(size_t min_cells) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    const size_t clamped = min_cells ? min_cells : 1;
+    m_auto_min_threshold.store(clamped, std::memory_order_relaxed);
+    m_main_agent_auto.threshold = clamped;
+    m_main_agent_auto.allocs_since_gc = 0;
+    for (auto& [agent, st] : m_worker_agent_auto) {
+        st.threshold = clamped;
+        st.allocs_since_gc = 0;
+    }
+    clear_all_auto_pending_locked();
 }
 
 uint64_t Heap::next_stress_random() {
@@ -163,7 +246,8 @@ uint64_t Heap::next_stress_random() {
 
 void Heap::set_gc_stress(uint64_t seed, uint32_t interval) {
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_stress_enabled = true;
+    clear_all_auto_pending_locked();
+    m_stress_enabled.store(true, std::memory_order_release);
     m_stress_rng = seed;
     m_stress_interval = interval ? interval : 1;
     m_stress_pending.store(false, std::memory_order_relaxed);
@@ -175,11 +259,31 @@ void Heap::set_gc_stress(uint64_t seed, uint32_t interval) {
 }
 
 bool Heap::take_gc_stress_request() {
-    if (!m_stress_enabled) return false;
-    if (!m_stress_pending.exchange(false, std::memory_order_relaxed)) return false;
+    if (m_stress_enabled.load(std::memory_order_relaxed)) {
+        if (!m_stress_pending.exchange(false, std::memory_order_relaxed)) return false;
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_stress_countdown = 1 + static_cast<uint32_t>(next_stress_random() % m_stress_interval);
+        ++m_stress_collections;
+        return true;
+    }
+    if (!m_auto_gc_enabled.load(std::memory_order_relaxed)) return false;
+    const uint32_t agent = t_agent;
+    if (agent == 0) {
+        if (!m_main_auto_pending.load(std::memory_order_acquire)) return false;
+    } else {
+        const uint64_t bit = uint64_t(1) << (agent & 63);
+        if ((m_worker_pending_mask.load(std::memory_order_acquire) & bit) == 0) return false;
+    }
     std::lock_guard<std::mutex> lock(m_mutex);
-    m_stress_countdown = 1 + static_cast<uint32_t>(next_stress_random() % m_stress_interval);
-    ++m_stress_collections;
+    if (m_stress_enabled.load(std::memory_order_relaxed) ||
+        !m_auto_gc_enabled.load(std::memory_order_relaxed)) {
+        return false;
+    }
+    AgentAutoState* st = find_agent_auto_state_locked(agent);
+    if (!st || !st->pending) return false;
+    clear_auto_pending_locked(agent, *st);
+    st->allocs_since_gc = 0;
+    m_auto_collections.fetch_add(1, std::memory_order_relaxed);
     return true;
 }
 
@@ -236,6 +340,8 @@ void Heap::count_value(const JsValue& val) {
     info.function = val.function_data();
     info.properties = val.payload_properties();
     info.cell = val.payload_cell();
+    info.captured = val.payload_captured();
+    info.bound_target = val.payload_bound_target();
     if (info.cell) ++info.cell->gc_seen;
     if (info.function) {
         if (info.function->closure) {
@@ -243,6 +349,16 @@ void Heap::count_value(const JsValue& val) {
             if (scope != m_scopes.end()) ++scope->second.seen;
         }
     }
+    // What the function's entry point captures is stored in the payload, not
+    // in the callable, so it is one more reference the heap accounts for. A
+    // value kept only inside the std::function would leave the payload looking
+    // held from outside, and it would be rooted for ever; see Extra::captured.
+    if (val.payload_captured()) {
+        for (const auto& kept : *val.payload_captured()) count_value(kept);
+    }
+    // A bound function's target, for the same reason: it lives in the payload
+    // rather than in the callable, and it is a reference the heap accounts for.
+    if (const JsValue* target = val.payload_bound_target()) count_value(*target);
     if (info.properties) m_count_maps.push_back(info.properties);
 }
 
@@ -252,6 +368,10 @@ void Heap::mark_payload(const PayloadInfo& info) {
     if (info.function) {
         if (info.function->closure) mark_environment(info.function->closure.get());
     }
+    if (info.captured) {
+        for (const auto& kept : *info.captured) mark_value(kept);
+    }
+    if (info.bound_target) mark_value(*info.bound_target);
     if (info.properties) mark_property_map(info.properties);
 }
 
@@ -364,15 +484,17 @@ void Heap::collect_roots(std::vector<JsValue*>& roots) const {
 // Counting too little only keeps garbage alive. Counting too much would free
 // live objects, so anything that looks over-counted is treated as a root.
 GCStats Heap::collect_garbage(const std::vector<JsValue*>& roots) {
+    const uint32_t collecting_agent = t_agent;
     std::vector<HeapObject*> garbage;
     std::vector<void*> dead_scopes;
     std::unordered_map<void*, ScopeInfo> scopes;
+    size_t agent_alive = 0;
 
     {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_stats.collections_count++;
         m_epoch = g_epoch.fetch_add(1) + 1;
-        m_collecting_agent = t_agent;
+        m_collecting_agent = collecting_agent;
         m_gray_stack.clear();
         m_gray_environments.clear();
         m_gray_maps.clear();
@@ -481,6 +603,7 @@ GCStats Heap::collect_garbage(const std::vector<JsValue*>& roots) {
                 cell->is_marked = false;
                 link = &cell->next_cell;
                 ++alive;
+                if (cell->agent == collecting_agent) ++agent_alive;
             } else {
                 *link = cell->next_cell;
                 cell->next_cell = nullptr;
@@ -527,9 +650,11 @@ GCStats Heap::collect_garbage(const std::vector<JsValue*>& roots) {
         m_head = cell;
         m_stats.alive_cells++;
         m_stats.total_cells++;
+        if (cell->agent == collecting_agent) ++agent_alive;
     }
     m_stats.bytes_allocated = m_stats.alive_cells * sizeof(JsObject);
     m_stats.collected_cells += collected;
+    reset_auto_gc_after_collect_locked(collecting_agent, agent_alive);
     return m_stats;
 }
 

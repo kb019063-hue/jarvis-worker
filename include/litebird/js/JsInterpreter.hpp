@@ -506,6 +506,13 @@ private:
     /// The same, in `scope` rather than the global one: what a direct eval
     /// does (see eval_source). `direct_eval` says the text is an eval's.
     JsValue run_program(const Program& program, const std::shared_ptr<JsEnvironment>& scope, bool direct_eval);
+    /// Renames a function the definition that made it has just finished with.
+    /// `make_function`'s hint only reaches a function that has no name of its
+    /// own, and the parser gives every method and accessor its key, so the
+    /// cases the parser cannot know -- a symbol key's description, an
+    /// accessor's `get `/`set ` -- are written down here instead.
+    void name_function(JsValue& fn, const std::string& name) const;
+
     JsValue make_function(const std::shared_ptr<FunctionNode>& node, const EnvPtr& env,
                           const std::string& name_hint = std::string());
     /// `new_target` is what `new.target` is inside when that is not the

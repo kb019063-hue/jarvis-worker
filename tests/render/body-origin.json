@@ -1,0 +1,269 @@
+{
+  "_what_this_is": [
+    "Root body placement and three remaining root, margin-collapse and canvas-background gaps.",
+    "Reference pixels were measured against Chromium 153 at 800x600.",
+    "Run by make render-conformance; kept separate while another pull request owns reftests.json."
+  ],
+  "tests": [
+    {
+      "name": "body_default_margin_moves_the_first_block",
+      "html": "<!doctype html><body><div style=\"width:100px;height:20px;background:#ff0000\"></div></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "the default margin leaves the corner blank"
+        },
+        {
+          "kind": "pixel",
+          "x": 7,
+          "y": 7,
+          "colour": "#ffffff",
+          "describe": "one pixel before the body is blank"
+        },
+        {
+          "kind": "rect",
+          "x": 8,
+          "y": 8,
+          "width": 100,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "the block starts at the default 8px margin"
+        },
+        {
+          "kind": "pixel",
+          "x": 108,
+          "y": 8,
+          "colour": "#ffffff",
+          "describe": "one pixel beyond its right edge is blank"
+        },
+        {
+          "kind": "pixel",
+          "x": 8,
+          "y": 28,
+          "colour": "#ffffff",
+          "describe": "one pixel below it is blank"
+        }
+      ]
+    },
+    {
+      "name": "body_margin_padding_and_border_place_both_boxes",
+      "html": "<!doctype html><body style=\"margin:11px 29px 17px 23px;padding:5px 7px 9px 13px;border:3px solid #0000ff\"><div style=\"width:100px;height:20px;background:#ff0000\"></div></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 22,
+          "y": 11,
+          "colour": "#ffffff",
+          "describe": "outside the body is blank"
+        },
+        {
+          "kind": "pixel",
+          "x": 23,
+          "y": 11,
+          "colour": "#0000ff",
+          "describe": "border begins at the asymmetric margins"
+        },
+        {
+          "kind": "pixel",
+          "x": 25,
+          "y": 13,
+          "colour": "#0000ff",
+          "describe": "the 3px border is filled"
+        },
+        {
+          "kind": "pixel",
+          "x": 26,
+          "y": 14,
+          "colour": "#ffffff",
+          "describe": "padding is inside the border"
+        },
+        {
+          "kind": "rect",
+          "x": 39,
+          "y": 19,
+          "width": 100,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "content follows margin, border and padding"
+        },
+        {
+          "kind": "pixel",
+          "x": 139,
+          "y": 19,
+          "colour": "#ffffff",
+          "describe": "the child does not extend into right padding"
+        }
+      ]
+    },
+    {
+      "name": "body_relative_absolute_and_fixed_have_distinct_origins",
+      "html": "<!doctype html><body style=\"margin:40px;padding:5px;border:3px solid #0000ff;position:relative\"><div style=\"width:100px;height:30px;background:#ff0000\"></div><div style=\"position:absolute;left:0;top:0;width:10px;height:10px;background:#008000\"></div><div style=\"position:fixed;left:0;top:0;width:10px;height:10px;background:#000000\"></div></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#000000",
+          "describe": "fixed content remains at the viewport origin"
+        },
+        {
+          "kind": "pixel",
+          "x": 39,
+          "y": 39,
+          "colour": "#ffffff",
+          "describe": "outside the body border is white"
+        },
+        {
+          "kind": "pixel",
+          "x": 40,
+          "y": 40,
+          "colour": "#0000ff",
+          "describe": "the body border starts after the margin"
+        },
+        {
+          "kind": "pixel",
+          "x": 43,
+          "y": 43,
+          "colour": "#008000",
+          "describe": "absolute insets use the body padding edge"
+        },
+        {
+          "kind": "pixel",
+          "x": 60,
+          "y": 55,
+          "colour": "#ff0000",
+          "describe": "normal content starts after padding"
+        }
+      ]
+    },
+    {
+      "name": "body_first_child_top_margin_collapses_through_a_chain",
+      "html": "<!doctype html><body><div style=\"margin:0\"><div style=\"margin:30px 0 0;width:100px;height:20px;background:#ff0000\"></div></div><div style=\"width:100px;height:10px;background:#0000ff\"></div></body>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 8,
+          "y": 29,
+          "colour": "#ffffff",
+          "describe": "the collapsed top margin ends at y=30"
+        },
+        {
+          "kind": "rect",
+          "x": 8,
+          "y": 30,
+          "width": 100,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "nested content begins at the collapsed margin"
+        },
+        {
+          "kind": "rect",
+          "x": 8,
+          "y": 50,
+          "width": 100,
+          "height": 10,
+          "colour": "#0000ff",
+          "describe": "a following sibling begins after the first block"
+        },
+        {
+          "kind": "pixel",
+          "x": 7,
+          "y": 30,
+          "colour": "#ffffff",
+          "describe": "the body left margin remains blank"
+        }
+      ]
+    },
+    {
+      "name": "html_margin_affects_the_body",
+      "html": "<!doctype html><html style=\"margin:30px\"><body><div style=\"width:100px;height:20px;background:#ff0000\"></div></body></html>",
+      "known_failure": "The html element has no layout box, so its 30px margin does not affect the body. Chromium places the child at (38,38); Litebird places it at (8,8).",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 8,
+          "y": 8,
+          "colour": "#ffffff",
+          "describe": "the html and body margins leave this pixel blank"
+        },
+        {
+          "kind": "rect",
+          "x": 38,
+          "y": 38,
+          "width": 100,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "the child follows both margins"
+        },
+        {
+          "kind": "pixel",
+          "x": 138,
+          "y": 38,
+          "colour": "#ffffff",
+          "describe": "one pixel past its right edge is blank"
+        }
+      ]
+    },
+    {
+      "name": "an_empty_first_block_collapses_with_the_following_margin",
+      "html": "<!doctype html><body><div style=\"margin:20px 0 0\"></div><div style=\"margin:30px 0 0;width:100px;height:20px;background:#ff0000\"></div></body>",
+      "known_failure": "Empty blocks and sibling margins are not collapsed. Chromium paints the second block from y=30; Litebird paints it from y=58.",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 8,
+          "y": 29,
+          "colour": "#ffffff",
+          "describe": "the collapsed margin ends above y=30"
+        },
+        {
+          "kind": "rect",
+          "x": 8,
+          "y": 30,
+          "width": 100,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "the second block follows the largest collapsed margin"
+        },
+        {
+          "kind": "pixel",
+          "x": 8,
+          "y": 50,
+          "colour": "#ffffff",
+          "describe": "one pixel below the block is blank"
+        }
+      ]
+    },
+    {
+      "name": "body_background_is_propagated_to_the_canvas",
+      "html": "<!doctype html><body style=\"margin:8px;background:#ff0000\"><div style=\"width:100px;height:20px\"></div></body>",
+      "known_failure": "The HTML root has no box and the body background is not propagated to the canvas. Chromium paints the whole viewport red; Litebird paints only the body. After Phase 152 the origin (0,0), which happened to be red before, is white as well.",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "the canvas inherits the body background at its origin"
+        },
+        {
+          "kind": "pixel",
+          "x": 8,
+          "y": 8,
+          "colour": "#ff0000",
+          "describe": "the body itself is red"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#ff0000",
+          "describe": "the canvas stays red beyond the body"
+        }
+      ]
+    }
+  ]
+}

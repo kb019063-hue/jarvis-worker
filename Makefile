@@ -296,6 +296,7 @@ dom-conformance: $(TARGET)
 ## it with what each reftest asserts.
 render-conformance: $(TARGET)
 	@python3 tools/conformance/render_check.py --binary $(TARGET)
+	@python3 tools/conformance/render_check.py --binary $(TARGET) --suite tests/render/body-origin.json --no-self-test
 	@python3 tools/conformance/canvas_to_data_url.py --binary $(TARGET)
 
 ## Twenty-one directories of test262, the suite of the language's standard:

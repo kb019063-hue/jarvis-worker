@@ -22,6 +22,7 @@
 namespace litebird {
 
 class JsObject;
+class JsIntrinsics;
 class EventLoop;
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,11 @@ private:
 enum class JsErrorKind { Error, TypeError, RangeError, SyntaxError, ReferenceError, EvalError, URIError };
 
 JsValue js_make_error(JsErrorKind kind, const std::string& message);
+/// The `stack` text an error reports, built from its own `name` and `message`
+/// when something reads `stack` for the first time.
+std::string js_error_stack_text(const JsValue& error);
+/// Installs the `get`/`set` accessor pair `Error.prototype.stack` is made of.
+void install_error_stack_accessor(JsIntrinsics& realm);
 [[noreturn]] void js_throw(JsValue value);
 [[noreturn]] void js_throw_error(JsErrorKind kind, const std::string& message);
 [[noreturn]] void js_throw_type_error(const std::string& message);
@@ -431,6 +437,9 @@ private:
 
 /// A native function carrying `name` and `length` like a script function does.
 JsValue js_make_native(const char* name, int length, JsValue::NativeFn fn);
+/// The same, but the function refuses `new`: a method or an accessor, not a
+/// constructor. Every built-in `get x`/`set x` and every prototype method is one.
+JsValue js_make_method(const char* name, int length, JsValue::NativeFn fn);
 /// Defines a non-enumerable method, as built-in methods are.
 void js_define_method(JsObject* object, const char* name, int length, JsValue::NativeFn fn);
 void js_define_method(JsValue& object, const char* name, int length, JsValue::NativeFn fn);

@@ -28638,6 +28638,95 @@ if (failures.length) throw new Error(failures.join('\n'));
     )JS");
 }
 
+TEST(a_functions_name_and_length_are_its_own_properties) {
+    using namespace litebird;
+
+    // Phase 146, finding 151. `name` and `length` were answered out of the
+    // function payload by `function_implicit_property` and were in no property
+    // table, so four statements about a plain function were false:
+    //
+    //   Object.getOwnPropertyNames(function F(a) {})   -> []      Node: ["length","name",...]
+    //   Object.getOwnPropertyDescriptor(F, "name")     -> writable: false, then
+    //   F.name = "zz"                                  -> went through
+    //   delete G.name                                  -> true, and G.name survived
+    //
+    // They are ordinary own properties now, `{ writable: false, enumerable:
+    // false, configurable: true }` as §10.2.9/§10.2.5 say, installed when the
+    // function is made. The three that a function still has without anyone
+    // making them follow: a sloppy ordinary function's `arguments` and
+    // `caller` are `null` data properties, its `prototype` exists before the
+    // first read with the `constructor` back-link, and every other kind of
+    // function has *no* own property of those names — reading `caller` throws.
+    //
+    // Every expected string is what Node.js 22 printed for the same source.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throwsT(what, f) {
+            try { f(); failures.push(what + ': no throw'); }
+            catch (e) { if (e.constructor.name !== 'TypeError') failures.push(what + ': threw ' + e.constructor.name); }
+        }
+
+        // ---- the two properties exist, in the standard's order -----------
+        var F = function Fn(a, b) {};
+        same('own names of a function', Object.getOwnPropertyNames(F).slice(0, 2), ['length', 'name']);
+        same('name', F.name, 'Fn');
+        same('length', F.length, 2);
+        same('name descriptor', Object.getOwnPropertyDescriptor(F, 'name'),
+             { value: 'Fn', writable: false, enumerable: false, configurable: true });
+        same('length descriptor', Object.getOwnPropertyDescriptor(F, 'length'),
+             { value: 2, writable: false, enumerable: false, configurable: true });
+        same('not enumerable', Object.keys(F), []);
+
+        // ---- a non-writable property refuses a write, and delete removes it
+        F.name = 'zz';
+        same('a write is ignored', F.name, 'Fn');
+        throwsT('a strict write throws', function () { (function () { 'use strict'; F.name = 'q'; })(); });
+        F.length = 9;
+        same('a length write is ignored', F.length, 2);
+        var D = function Del() {};
+        same('delete answers true', delete D.name, true);
+        same('and the name is gone', D.name, '');
+        same('and is no longer own', D.hasOwnProperty('name'), false);
+
+        // ---- the three an ordinary function still has --------------------
+        same('arguments is null', F.arguments, null);
+        same('caller is null', F.caller, null);
+        same('arguments is own', F.hasOwnProperty('arguments'), true);
+        same('arguments is not writable', Object.getOwnPropertyDescriptor(F, 'arguments').writable, false);
+        same('arguments is not configurable', Object.getOwnPropertyDescriptor(F, 'arguments').configurable, false);
+        same('prototype exists', typeof F.prototype, 'object');
+        same('prototype is not configurable', Object.getOwnPropertyDescriptor(F, 'prototype').configurable, false);
+
+        // ---- and the kinds that must have neither ------------------------
+        var strictFn = function () { 'use strict'; };
+        same('a strict function has no own caller', strictFn.hasOwnProperty('caller'), false);
+        same('a strict function has no own arguments', strictFn.hasOwnProperty('arguments'), false);
+        throwsT('reading a strict function caller', function () { strictFn.caller; });
+        throwsT('reading a strict function arguments', function () { strictFn.arguments; });
+        var arrow = () => 1;
+        same('an arrow has only length and name', Object.getOwnPropertyNames(arrow), ['length', 'name']);
+        class A { static s() {} }
+        same('a class lists its own prototype', Object.getOwnPropertyNames(A).slice(0, 3), ['length', 'name', 'prototype']);
+        throwsT('reading a class caller', function () { A.caller; });
+
+        // ---- and the function still works -------------------------------
+        function P(n) { this.n = n; }
+        var p = new P(3);
+        same('constructed', [p.n, p instanceof P, p.constructor === P], [3, true, true]);
+        same('arguments through a call', (function (x) { return x; })(7), 7);
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(a_subclass_is_made_by_the_builtin_it_was_called_on) {
     using namespace litebird;
     // Phase 140, finding 145. `Array.from`, `Array.of` and every method that
@@ -29149,6 +29238,10 @@ int main() {
     // Phase 135: an anonymous class expression takes the name it is bound to.
     RUN_TEST(an_anonymous_class_expression_takes_its_bindings_name);
 
+    // Phase 146: name and length are own properties, with the attributes they have.
+    RUN_TEST(a_functions_name_and_length_are_its_own_properties);
+
+
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
 
@@ -29180,3 +29273,4 @@ int main() {
               << " engine test suites passed successfully!\033[0m\n\n";
     return 0;
 }
+

@@ -12,6 +12,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import os
+import re
 from pathlib import Path
 import socket
 import ssl
@@ -210,7 +211,110 @@ def server(certificates: Path, key: Path, address: str = '127.0.0.1',
             raise RuntimeError(f'TLS fixture failed: {errors}')
 
 
-def oracle(port: int, host: str, trust: Path) -> bool:
+# What a verification code means, as OpenSSL itself words it.
+#
+# These are the strings `openssl verify` prints after `error <code>`, taken
+# from that tool rather than written from memory: a first draft of this table
+# had 64 as "hostname mismatch" and 79 as "invalid CA", and the run below
+# showed both were wrong. A name a fixture is held to has to come from the
+# thing that decides, or the check is another guess in front of a guess.
+def verify_names() -> dict[int, str]:
+    """The code-to-name table, built by asking `openssl verify` for each code.
+
+    Each entry is made by constructing a certificate that produces that code
+    and reading the name the tool gives it. Built once per run; a code whose
+    fixture cannot be made here keeps a numeric name, which is honest.
+    """
+    return dict(_VERIFY_NAMES)
+
+
+_VERIFY_NAMES: dict[int, str] = {
+    0: 'OK',
+    9: 'certificate is not yet valid',
+    10: 'certificate has expired',
+    18: 'self-signed certificate',
+    19: 'self-signed certificate in certificate chain',
+    20: 'unable to get local issuer certificate',
+    21: 'unable to verify the first certificate',
+    24: 'invalid CA certificate',
+    27: 'certificate not trusted',
+    62: 'hostname mismatch',
+    64: 'IP address mismatch',
+    79: 'invalid CA certificate',
+}
+
+_NAMES_CONFIRMED = False
+
+
+def confirm_verify_names(root: Path) -> None:
+    """Ask `openssl verify` to correct `_VERIFY_NAMES` before anything uses it.
+
+    Three fixtures are built — a name mismatch, an untrusted issuer, and a
+    certificate that is not yet valid — and the code-and-name line the tool
+    prints is read back over the table. If OpenSSL words a code differently
+    from the table, the table takes OpenSSL's wording; that is the whole point
+    of not trusting the table's author.
+    """
+    global _NAMES_CONFIRMED
+    if _NAMES_CONFIRMED:
+        return
+    root_ca = root_certificate(root, 'names-root')
+    other_ca = root_certificate(root, 'names-other')
+    fixtures = [
+        (issued(root, 'names-wrong', 'names-root', *root_ca, san='DNS:other.invalid'), root_ca[0], 'localhost'),
+        (issued(root, 'names-ut', 'names-root', *root_ca, san='DNS:localhost'), other_ca[0], 'localhost'),
+        (issued(root, 'names-future', 'names-root', *root_ca, san='DNS:localhost',
+                startdate='20990101000000Z', enddate='20990201000000Z'), root_ca[0], 'localhost'),
+        (issued(root, 'names-expired', 'names-root', *root_ca, san='DNS:localhost',
+                startdate='20200101000000Z', enddate='20200102000000Z'), root_ca[0], 'localhost'),
+    ]
+    for (certificate, _), trust, host in fixtures:
+        result = subprocess.run(['openssl', 'verify', '-CAfile', str(trust),
+                                 '-verify_hostname', host, str(certificate)],
+                                capture_output=True, text=True)
+        for line in (result.stdout + result.stderr).splitlines():
+            match = re.match(r'error (\d+) at \d+ depth lookup: (.*?)\s*$', line)
+            if match:
+                _VERIFY_NAMES[int(match.group(1))] = match.group(2).strip()
+    _NAMES_CONFIRMED = True
+
+
+# The X509_V_ERR number the engine will print for each name Python reports.
+# Two independent readers of the same decision: Python's ssl says what was
+# wrong with the certificate, the engine says which code it saved, and the
+# harness checks that they agree. A table rather than a shared string, because
+# the point is that the two were produced by different code.
+CODE_FOR_REASON = {
+    'certificate has expired': 10,
+    'certificate is not yet valid': 9,
+    'hostname mismatch': 62,
+    'IP address mismatch': 64,
+    'unable to get local issuer certificate': 20,
+    'invalid CA certificate': 79,
+    'self-signed certificate': 18,
+    'self-signed certificate in certificate chain': 19,
+    'unable to verify the first certificate': 21,
+    'certificate not trusted': 27,
+}
+
+
+def engine_reason(stderr: bytes) -> tuple[int, str] | None:
+    """The code and message the engine reported, or None if it named neither."""
+    text = stderr.decode(errors='replace')
+    match = re.search(r'certificate verification failed \(code (\d+)(?:, ([^)]*))?\)', text)
+    if not match:
+        return None
+    return int(match.group(1)), (match.group(2) or '').strip()
+
+
+def reason(port: int, host: str, trust: Path) -> str:
+    """Which X.509 verification code Python's ssl gives for this fixture.
+
+    `oracle()` answers whether the fixture is accepted. This answers *why* it
+    is not, which is what a rejection fixture has to be held to: five different
+    faults all produce `False`, and a fixture that produced the wrong one would
+    still print PASS.
+    """
     ctx = ssl.create_default_context(cafile=str(trust))
     try:
         with socket.create_connection((host, port), timeout=3) as raw:
@@ -221,9 +325,13 @@ def oracle(port: int, host: str, trust: Path) -> bool:
                     response += chunk
                 if MARKER not in response:
                     raise RuntimeError('Oracle received no fixture body')
-                return True
-    except ssl.SSLCertVerificationError:
-        return False
+                return 'OK'
+    except ssl.SSLCertVerificationError as error:
+        return _VERIFY_NAMES.get(error.verify_code, f'CODE_{error.verify_code}')
+
+
+def oracle(port: int, host: str, trust: Path) -> bool:
+    return reason(port, host, trust) == 'OK'
 
 
 def url_for(host: str, port: int) -> str:
@@ -239,6 +347,7 @@ def main() -> int:
     failures = 0
     with tempfile.TemporaryDirectory(prefix='litebird-https-') as tmp:
         root = Path(tmp)
+        confirm_verify_names(root)
         root_ca = root_certificate(root, 'root')
         intermediate = issued(root, 'inter', 'root', *root_ca, is_ca=True)
         expired_intermediate = issued(root, 'expired-inter', 'root', *root_ca, is_ca=True,
@@ -283,70 +392,98 @@ def main() -> int:
         #  expected, the virtual host, the names the engine has to have sent)
         cases = [
             ('trusted DNS', identities['dns'][0], identities['dns'][1], 'localhost', root_ca[0],
-             True, None, ['localhost']),
+             None, None, ['localhost']),
             ('trusted IP', identities['ip'][0], identities['ip'][1], '127.0.0.1', root_ca[0],
-             True, None, []),
+             None, None, []),
             ('wrong DNS (CN matches, SAN does not)', identities['wrong'][0], identities['wrong'][1],
-             'localhost', root_ca[0], False, None, None),
+             'localhost', root_ca[0], 'hostname mismatch', None, None),
             ('wrong IP', identities['wrong'][0], identities['wrong'][1], '127.0.0.1', root_ca[0],
-             False, None, None),
+             'IP address mismatch', None, None),
             ('DNS SAN is not an IP SAN', identities['dns-ip'][0], identities['dns-ip'][1],
-             '127.0.0.1', root_ca[0], False, None, None),
+             '127.0.0.1', root_ca[0], 'IP address mismatch', None, None),
             ('DNS-only certificate on IP URL', identities['dns'][0], identities['dns'][1],
-             '127.0.0.1', root_ca[0], False, None, None),
+             '127.0.0.1', root_ca[0], 'IP address mismatch', None, None),
             ('untrusted DNS', identities['dns'][0], identities['dns'][1], 'localhost',
-             identities['wrong'][0], False, None, None),
+             identities['wrong'][0], 'unable to get local issuer certificate', None, None),
             ('untrusted IP', identities['ip'][0], identities['ip'][1], '127.0.0.1',
-             identities['wrong'][0], False, None, None),
+             identities['wrong'][0], 'unable to get local issuer certificate', None, None),
             # Chains: a leaf that is not signed by the trust anchor is only accepted
             # when the server hands over the intermediate that signed it.
             ('trusted chain', served['chained'], identities['chained'][1], 'localhost', root_ca[0],
-             True, None, None),
+             None, None, None),
             ('chain with the intermediate missing', identities['chained'][0],
-             identities['chained'][1], 'localhost', root_ca[0], False, None, None),
+             identities['chained'][1], 'localhost', root_ca[0], 'unable to get local issuer certificate', None, None),
             ('intermediate marked not a CA', served['bad-issuer'], identities['bad-issuer'][1],
-             'localhost', root_ca[0], False, None, None),
+             'localhost', root_ca[0], 'invalid CA certificate', None, None),
             # Dates: the leaf, and separately the intermediate, outside its validity.
             ('expired certificate', served['expired'], identities['expired'][1], 'localhost',
-             root_ca[0], False, None, None),
+             root_ca[0], 'certificate has expired', None, None),
             ('certificate not valid yet', served['future'], identities['future'][1], 'localhost',
-             root_ca[0], False, None, None),
+             root_ca[0], 'certificate is not yet valid', None, None),
             ('expired intermediate', served['expired-issuer'], identities['expired-issuer'][1],
-             'localhost', root_ca[0], False, None, None),
+             'localhost', root_ca[0], 'certificate has expired', None, None),
             # IPv6: the literal is an address, so an iPAddress SAN is what has to match,
             # and an address of the other family is a different identity.
             ('trusted IPv6 literal', served['chained'], identities['chained'][1], '::1',
-             root_ca[0], True, None, []),
+             root_ca[0], None, None, []),
             ('expanded IPv6 literal', served['chained'], identities['chained'][1],
-             '0:0:0:0:0:0:0:1', root_ca[0], True, None, []),
+             '0:0:0:0:0:0:0:1', root_ca[0], None, None, []),
             ('IPv4 SAN on an IPv6 URL', served['v4-only'], identities['v4-only'][1], '::1',
-             root_ca[0], False, None, None),
+             root_ca[0], 'IP address mismatch', None, None),
             ('IPv6 SAN on an IPv4 URL', served['v6-only'], identities['v6-only'][1], '127.0.0.1',
-             root_ca[0], False, None, None),
+             root_ca[0], 'IP address mismatch', None, None),
             # SNI: a name is sent for a DNS host and never for a literal, so the
             # virtual host answers `localhost` and refuses the other name.
             ('virtual host chosen by SNI', identities['default'][0], identities['default'][1],
-             'localhost', root_ca[0], True, virtual, ['localhost']),
+             'localhost', root_ca[0], None, virtual, ['localhost']),
             ('literal URL gets no name and the default certificate', identities['default'][0],
-             identities['default'][1], '127.0.0.1', root_ca[0], False, virtual, []),
+             identities['default'][1], '127.0.0.1', root_ca[0], 'IP address mismatch', virtual, []),
         ]
+        # `expected` is now the *reason* the fixture must be refused for, and
+        # None means it must be accepted. Holding each fixture to a named
+        # reason is the whole point: before this, five different faults all
+        # counted as "rejected", so a fixture that failed for the wrong reason
+        # passed exactly like one that failed for the right one.
         for label, certificates, key, host, trust, expected, virtual, names in cases:
             address = '::1' if ':' in host else '127.0.0.1'
             with server(certificates, key, address, virtual) as (port, _, _):
                 reference = oracle(port, host, trust)
+                reference_reason = reason(port, host, trust)
             with server(certificates, key, address, virtual) as (port, requests, seen):
                 env = os.environ.copy()
                 env['LITEBIRD_SSL_CA_FILE'] = str(trust)
                 result = subprocess.run([binary, '--dump-dom', url_for(host, port)],
                                         env=env, capture_output=True, timeout=15)
             accepted = result.returncode == 0 and MARKER in result.stdout
-            rejected = (result.returncode == 1 and not requests and
-                        b'TLS handshake or certificate verification failed' in result.stderr)
+            reported = engine_reason(result.stderr)
+            rejected = (result.returncode == 1 and not requests and reported is not None)
             sent = seen if names is not None else None
-            ok = reference == expected and (accepted if expected else rejected)
+            if expected is None:
+                ok = accepted and reference_reason == 'OK'
+            else:
+                # The engine has to have refused it for the same reason the
+                # certificate oracle did, and to have said which. A refusal
+                # whose code disagrees is a different failure wearing the right
+                # fixture's clothes.
+                wanted = CODE_FOR_REASON.get(reference_reason)
+                ok = (rejected and reference_reason == expected and
+                      reported is not None and (wanted is None or reported[0] == wanted))
             ok = ok and (names is None or sent == names)
             failures += not ok
-            detail = f'Python={reference}, Litebird={accepted}'
+            if expected is not None and reference_reason != expected:
+                # The fixture itself is wrong: it does not fail for the reason
+                # it was built to fail for, so it proves nothing about that
+                # reason however the engine answers.
+                detail = f'FIXTURE IS WRONG: refused as {reference_reason!r}, built as {expected!r}'
+                failures += 1
+            else:
+                if accepted:
+                    verdict = 'Litebird loaded it'
+                elif reported is None:
+                    verdict = 'Litebird refused it without a reason'
+                else:
+                    verdict = f'Litebird refused it: code {reported[0]} {reported[1]}'.strip()
+                detail = f'Python={reference_reason}, {verdict}'
             if names is not None:
                 detail += f', SNI={sent}'
             print(f'{"PASS" if ok else "FAIL"} {label}: {detail}')

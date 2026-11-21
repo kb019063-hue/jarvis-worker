@@ -1840,6 +1840,16 @@ void auth_remember_next_nonce(std::string_view origin, std::string_view realm, s
     }
 }
 
+/// RFC 7616 §3.3.1: `stale=true` says the nonce, not the password, was refused.
+/// Even if the server repeats the same nonce, a stale challenge starts a fresh
+/// count for the challenge's nonce.
+void auth_reset_stale_nonce(std::string_view origin, std::string_view realm, std::string nonce) {
+    std::lock_guard<std::mutex> lock(g_nonce_mutex);
+    AuthNonceState& state = g_nonce_store[auth_store_key(origin, realm)];
+    state.nonce = std::move(nonce);
+    state.used = 0;
+}
+
 /// The `nc` for the next request that uses `nonce` in this space: the count of
 /// requests already sent with it, plus one, as eight lower-case hex digits.
 std::string auth_nonce_count(std::string_view origin, std::string_view realm,
@@ -1920,6 +1930,24 @@ std::vector<AuthChallenge> auth_note_challenge(ResourceResponse& resp) {
         }
     }
     return challenges;
+}
+
+/// The nonce in a same-realm Digest `stale=true` challenge was rejected, not
+/// the credential. Keep just those challenges so a retry cannot accidentally
+/// use another realm's stored password or a non-stale scheme.
+std::vector<AuthChallenge> auth_stale_digest_challenges(
+    const std::vector<AuthChallenge>& challenges, std::string_view realm) {
+    std::vector<AuthChallenge> stale;
+    for (const AuthChallenge& challenge : challenges) {
+        if (ascii_lower(challenge.scheme) != "digest") continue;
+        const auto stale_it = challenge.params.find("stale");
+        if (stale_it == challenge.params.end() || ascii_lower(stale_it->second) != "true") continue;
+        const auto realm_it = challenge.params.find("realm");
+        const std::string_view challenge_realm = realm_it == challenge.params.end()
+            ? std::string_view() : std::string_view(realm_it->second);
+        if (challenge_realm == realm) stale.push_back(challenge);
+    }
+    return stale;
 }
 
 /// A `407` is the proxy's challenge, not the document's (RFC 9110 §15.5.8),
@@ -2074,7 +2102,8 @@ bool auth_digest_value(const AuthChallenge& challenge,
                        const std::string& request_target,
                        const AuthCredentials& creds,
                        std::string_view entity_body,
-                       std::string& out) {
+                       std::string& out,
+                       bool retrying_stale = false) {
     std::string algorithm = "MD5";
     if (auto it = challenge.params.find("algorithm"); it != challenge.params.end()) {
         algorithm = it->second;
@@ -2089,18 +2118,10 @@ bool auth_digest_value(const AuthChallenge& challenge,
     std::string nonce = param("nonce");
     const std::string opaque = param("opaque");
     if (nonce.empty()) return false;
-    // RFC 7616 §3.5: a `nextnonce` this protection space handed us last time
-    // replaces the one in the challenge, which may be spent.
-    if (std::string remembered = auth_next_nonce_for(origin, realm); !remembered.empty()) {
-        nonce = std::move(remembered);
-    }
     // RFC 7616 §4: `charset` may only be "UTF-8", and this client only has
     // UTF-8 octets to offer; anything else is a server it cannot talk to.
     if (param("charset") != "" && ascii_lower(param("charset")) != "utf-8") return false;
     const bool hash_username = ascii_lower(param("userhash")) == "true";
-
-    const std::string cnonce = auth_client_nonce();
-    const std::string nc = auth_nonce_count(origin, realm, nonce);
 
     // A `qop` list is a comma-separated set of tokens; `auth-int` is preferred
     // when offered (it digests the body) and `auth` is the fallback.
@@ -2123,47 +2144,90 @@ bool auth_digest_value(const AuthChallenge& challenge,
         if (chosen_qop.empty() && !qop.empty()) return false;    // only options this client cannot do
     }
 
+    if (retrying_stale) {
+        // The server's stale challenge carries the replacement nonce. It must
+        // beat an older Authentication-Info nextnonce and start its own nc.
+        if (!is_safe_header_value(nonce)) return false;
+        auth_reset_stale_nonce(origin, realm, nonce);
+    } else if (std::string remembered = auth_next_nonce_for(origin, realm); !remembered.empty()) {
+        // RFC 7616 §3.5: a nextnonce this protection space handed us last time
+        // replaces the challenge's nonce, which may be spent.
+        nonce = std::move(remembered);
+    }
+
+    const std::string cnonce = auth_client_nonce();
+    const std::string nc = auth_nonce_count(origin, realm, nonce);
+
     return auth_digest_build(algorithm, creds.username, creds.password, realm, nonce, opaque,
                              method, request_target, chosen_qop, cnonce, nc,
                              entity_body, hash_username, out);
 }
 
-/// Picks a challenge this client can answer, preferring the strongest scheme
-/// the server offered: Digest with SHA-256, then Digest with MD5, then Basic.
-/// A server that offers both gets Digest, which is what RFC 7616 §1 asks for,
-/// and Basic is the last resort because it sends the password in the clear.
+/// The supported Digest challenges in strongest-first order. Keeping the
+/// selection here lets a stale response remember the nonce for the challenge
+/// the authorizer will actually try first.
+std::vector<const AuthChallenge*> auth_ranked_digest_challenges(
+    const std::vector<AuthChallenge>& challenges) {
+    const AuthChallenge* best_sha512 = nullptr;
+    const AuthChallenge* best_sha256 = nullptr;
+    const AuthChallenge* best_digest_md5 = nullptr;
+    for (const AuthChallenge& challenge : challenges) {
+        if (ascii_lower(challenge.scheme) != "digest") continue;
+        auto it = challenge.params.find("algorithm");
+        const std::string algorithm = it == challenge.params.end() ? "MD5" : it->second;
+        std::string base;
+        bool sess = false;
+        if (!auth_split_algorithm(algorithm, base, sess)) continue;
+        if (!best_sha512 && base == "SHA-512-256") best_sha512 = &challenge;
+        else if (!best_sha256 && base == "SHA-256") best_sha256 = &challenge;
+        else if (!best_digest_md5 && base == "MD5") best_digest_md5 = &challenge;
+    }
+    std::vector<const AuthChallenge*> ranked;
+    if (best_sha512) ranked.push_back(best_sha512);
+    if (best_sha256) ranked.push_back(best_sha256);
+    if (best_digest_md5) ranked.push_back(best_digest_md5);
+    return ranked;
+}
+
+void auth_remember_stale_nonce(const std::vector<AuthChallenge>& challenges,
+                               const std::string& origin, std::string_view realm) {
+    for (const AuthChallenge* challenge : auth_ranked_digest_challenges(challenges)) {
+        const auto realm_it = challenge->params.find("realm");
+        const std::string_view challenge_realm = realm_it == challenge->params.end()
+            ? std::string_view() : std::string_view(realm_it->second);
+        const auto nonce_it = challenge->params.find("nonce");
+        if (challenge_realm != realm || nonce_it == challenge->params.end() ||
+            nonce_it->second.empty() || !is_safe_header_value(nonce_it->second)) continue;
+        auth_reset_stale_nonce(origin, realm, nonce_it->second);
+        return;
+    }
+}
+
+/// Picks a challenge this client can answer, preferring supported Digest
+/// algorithms in their strength order and falling back to Basic only when no
+/// Digest challenge can be answered. Basic sends the password in the clear.
 bool auth_authorization_for(const std::vector<AuthChallenge>& challenges,
                             const std::string& origin,
                             const std::string& method,
                             const std::string& request_target,
                             std::string_view entity_body,
-                            std::string& out) {
-    // RFC 7616 §3.2 lists the algorithms in order of preference: SHA-256 is
-    // mandatory to implement, SHA-512-256 is the backup, MD5 is for backward
-    // compatibility. A server may name one per challenge, so the strengths are
-    // ranked here rather than taken in the order the server wrote them.
-    const AuthChallenge* best_sha512 = nullptr;
-    const AuthChallenge* best_sha256 = nullptr;
-    const AuthChallenge* best_digest_md5 = nullptr;
+                            std::string& out,
+                            std::string* authorized_realm = nullptr,
+                            std::string* authorized_scheme = nullptr,
+                            bool retrying_stale = false) {
+    // RFC 7616 §3.2 ranks SHA-512-256 above SHA-256 and MD5 for backward
+    // compatibility. A server may name one per challenge, so do not take the
+    // order the server happened to write them in.
+    const std::vector<const AuthChallenge*> digests = auth_ranked_digest_challenges(challenges);
     const AuthChallenge* basic = nullptr;
     for (const AuthChallenge& challenge : challenges) {
-        std::string scheme = ascii_lower(challenge.scheme);
-        if (scheme == "digest") {
-            auto it = challenge.params.find("algorithm");
-            std::string algorithm = it == challenge.params.end() ? "MD5" : it->second;
-            std::string base;
-            bool sess = false;
-            if (!auth_split_algorithm(algorithm, base, sess)) continue;
-            if (!best_sha512 && base == "SHA-512-256") best_sha512 = &challenge;
-            else if (!best_sha256 && base == "SHA-256") best_sha256 = &challenge;
-            else if (!best_digest_md5 && base == "MD5") best_digest_md5 = &challenge;
-        } else if (scheme == "basic" && !basic) {
+        if (ascii_lower(challenge.scheme) == "basic") {
             basic = &challenge;
+            break;
         }
     }
 
-    for (const AuthChallenge* challenge : {best_sha512, best_sha256, best_digest_md5}) {
-        if (!challenge) continue;
+    for (const AuthChallenge* challenge : digests) {
         auto it = challenge->params.find("realm");
         const std::string realm = it == challenge->params.end() ? std::string() : it->second;
         AuthCredentials creds;
@@ -2174,7 +2238,11 @@ bool auth_authorization_for(const std::vector<AuthChallenge>& challenges,
             creds = found->second;
         }
         if (!auth_is_header_safe(creds.username) || !auth_is_header_safe(creds.password)) continue;
-        if (auth_digest_value(*challenge, origin, method, request_target, creds, entity_body, out)) return true;
+        if (!auth_digest_value(*challenge, origin, method, request_target, creds,
+                               entity_body, out, retrying_stale)) continue;
+        if (authorized_realm) *authorized_realm = realm;
+        if (authorized_scheme) *authorized_scheme = challenge->scheme;
+        return true;
     }
 
     if (basic) {
@@ -2187,8 +2255,11 @@ bool auth_authorization_for(const std::vector<AuthChallenge>& challenges,
             if (found == g_auth_store.end()) return false;
             creds = found->second;
         }
-        if (!auth_is_header_safe(creds.username) || !auth_is_header_safe(creds.password)) return false;
-        return auth_basic_value(creds, out);
+        if (!auth_is_header_safe(creds.username) || !auth_is_header_safe(creds.password) ||
+            !auth_basic_value(creds, out)) return false;
+        if (authorized_realm) *authorized_realm = realm;
+        if (authorized_scheme) *authorized_scheme = basic->scheme;
+        return true;
     }
     return false;
 }
@@ -2770,8 +2841,9 @@ ResourceResponse ResourceLoader::load_http(
     std::string cur_method = method.empty() ? "GET" : method;
     std::unordered_map<std::string, std::string> cur_caller_headers = headers;
     std::string cur_body = body;
-    /// One retry per load, after the first 401: RFC 9110 leaves the number to
-    /// the client, and one is what a browser does before giving up.
+    // Nothing is sent pre-emptively. If the first credential attempt gets a
+    // Digest stale=true challenge, allow one bounded retry with its replacement
+    // nonce; a repeated stale response stops without treating the password as bad.
     bool auth_attempted = false;
 
     for (int hop = 0; hop <= MaxRedirects; ++hop) {
@@ -2803,14 +2875,17 @@ ResourceResponse ResourceLoader::load_http(
 
         // RFC 9110 §15.5.2. The first request carried no `Authorization`; if
         // credentials are held for this origin *and* the realm the server
-        // named, ask once with them. One retry, never a loop: a server that
-        // answers 401 to the credentials themselves is left to fail.
+        // named, try them once. A second 401 normally refuses that credential,
+        // except for Digest stale=true, which grants one nonce-only retry.
         if (resp.status_code == 401 && !auth_attempted) {
             const std::vector<AuthChallenge> challenges = auth_note_challenge(resp);
             std::string authorization;
+            std::string attempted_realm;
+            std::string attempted_scheme;
             if (!challenges.empty() &&
                 auth_authorization_for(challenges, cur_url.origin(), cur_method,
-                                       auth_request_target(cur_url), cur_body, authorization) &&
+                                       auth_request_target(cur_url), cur_body, authorization,
+                                       &attempted_realm, &attempted_scheme) &&
                 is_safe_header_value(authorization)) {
                 auth_attempted = true;
                 hop_headers["Authorization"] = authorization;
@@ -2822,16 +2897,55 @@ ResourceResponse ResourceLoader::load_http(
                     CacheMode::Default, "nav:cred", /*ingest_cookies=*/true, nullptr);
                 if (!resp.network_ok) return resp;
 
-                // A second 401 means the credentials themselves were refused.
-                // A browser drops them and asks again next time rather than
-                // replaying the same wrong password for the life of the
-                // process, so the store forgets this (origin, realm).
                 if (resp.status_code == 401) {
-                    for (const AuthChallenge& challenge : challenges) {
-                        auto it = challenge.params.find("realm");
-                        if (it == challenge.params.end()) continue;
+                    const std::vector<AuthChallenge> retried_challenges = auth_note_challenge(resp);
+                    const std::vector<AuthChallenge> stale_challenges =
+                        ascii_lower(attempted_scheme) == "digest"
+                            ? auth_stale_digest_challenges(retried_challenges, attempted_realm)
+                            : std::vector<AuthChallenge>{};
+                    if (!stale_challenges.empty()) {
+                        // A stale nonce is not a refused password. Remember the
+                        // replacement even if this bounded load cannot answer it.
+                        auth_remember_stale_nonce(stale_challenges, cur_url.origin(), attempted_realm);
+
+                        std::string stale_authorization;
+                        if (auth_authorization_for(stale_challenges, cur_url.origin(), cur_method,
+                                                   auth_request_target(cur_url), cur_body,
+                                                   stale_authorization, nullptr, nullptr,
+                                                   /*retrying_stale=*/true) &&
+                            is_safe_header_value(stale_authorization)) {
+                            hop_headers["Authorization"] = stale_authorization;
+                            resp = execute_http_hop_with_cache(
+                                hop_address, cur_method, hop_headers, cur_body,
+                                CacheMode::Default, "nav:cred", /*ingest_cookies=*/true, nullptr);
+                            if (!resp.network_ok) return resp;
+
+                            if (resp.status_code == 401) {
+                                const std::vector<AuthChallenge> final_challenges = auth_note_challenge(resp);
+                                const std::vector<AuthChallenge> still_stale =
+                                    auth_stale_digest_challenges(final_challenges, attempted_realm);
+                                if (!still_stale.empty()) {
+                                    // Do not loop on a server that keeps expiring
+                                    // nonces; preserve the credential for a later load.
+                                    auth_remember_stale_nonce(still_stale, cur_url.origin(), attempted_realm);
+                                } else {
+                                    // A non-stale 401 after the retry really does
+                                    // refuse the credential we sent.
+                                    std::lock_guard<std::mutex> lock(g_auth_mutex);
+                                    g_auth_store.erase(auth_store_key(cur_url.origin(), attempted_realm));
+                                }
+                            } else {
+                                // RFC 7616 §3.5: a successful authentication may
+                                // name the nonce to use next in this realm.
+                                auth_note_authentication_info(resp, cur_url.origin(), stale_challenges);
+                            }
+                        }
+                    } else {
+                        // A non-stale 401 means the credentials themselves were
+                        // refused. Do not replay a wrong password for the life of
+                        // the process; forget only the realm actually attempted.
                         std::lock_guard<std::mutex> lock(g_auth_mutex);
-                        g_auth_store.erase(auth_store_key(cur_url.origin(), it->second));
+                        g_auth_store.erase(auth_store_key(cur_url.origin(), attempted_realm));
                     }
                 } else {
                     // RFC 7616 §3.5: a successful authentication may name the

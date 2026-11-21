@@ -177,6 +177,10 @@ public:
         bool is_arrow{false};
         bool is_class_constructor{false};
         bool is_constructor{true};     // false for arrows, methods and async/generator functions
+        // Whether the body is strict code. §10.2.4 hangs the own `caller` and
+        // `arguments` of an ordinary function on this: a sloppy one has them as
+        // `null`, a strict one must have neither, and a read of either throws.
+        bool is_strict{false};
     };
     struct Extra {
         Extra() = default;

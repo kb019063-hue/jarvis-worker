@@ -7813,7 +7813,7 @@ TEST(websocket_handshake_security_and_secure_transport) {
             std::string protocol = response_kind == 6 ? "Sec-WebSocket-Protocol: unknown\r\n" :
                                    response_kind == 7 ? "Sec-WebSocket-Protocol: chat\r\n" : "";
             std::string response = status + upgrade + connection + accept_header + protocol;
-            if (response_kind == 8) response += "Sec-WebSocket-Extensions: permessage-deflate\r\n";
+            if (response_kind == 8) response += "Sec-WebSocket-Extensions: x-unoffered-ext\r\n";
             if (response_kind == 9) response += "X-Large: " + std::string(65536, 'a') + "\r\n";
             response += "\r\n";
             ::send(client, response.data(), response.size(), MSG_NOSIGNAL);
@@ -30429,6 +30429,453 @@ TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob) {
     assert(wire_frames[8].opcode == 0x01u && wire_frames[8].payload == "null");
 }
 
+// Phase 169 (finding 174): RFC 7692 permessage-deflate — stateful RFC 1951
+// DeflateStream/InflateStream vectors, Sec-WebSocket-Extensions negotiation &
+// fail-closed rejection, context takeover & window_bits bounds, RSV1/UTF-8
+// protocol errors, decompression bomb cap, and live JS WebSocket roundtrips.
+TEST(websocket_permessage_deflate_rfc7692) {
+    using namespace litebird;
+
+    // 1. Direct RFC 7692 §7.2.3.1 / §7.2.3.2 / §7.2.3.4 wire vectors & codec bounds.
+    {
+        Deflate::InflateStream inf(15);
+        // §7.2.3.1: single-frame "Hello"
+        const uint8_t v1[] = {0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00};
+        std::vector<uint8_t> out;
+        assert(inf.inflate_message(v1, sizeof(v1), out) == Deflate::InflateStatus::Ok);
+        assert(std::string(out.begin(), out.end()) == "Hello");
+
+        // §7.2.3.2: second "Hello" reusing sliding-window context from first
+        const uint8_t v2[] = {0xf2, 0x00, 0x11, 0x00, 0x00};
+        out.clear();
+        assert(inf.inflate_message(v2, sizeof(v2), out) == Deflate::InflateStatus::Ok);
+        assert(std::string(out.begin(), out.end()) == "Hello");
+
+        // Reset clears history, so v2 (which back-references history) now fails.
+        inf.reset();
+        out.clear();
+        assert(inf.inflate_message(v2, sizeof(v2), out) == Deflate::InflateStatus::CorruptData);
+
+        // §7.2.3.4: empty compressed message (0x00), BFINAL=0 empty fixed (0x02 0x00),
+        // BFINAL=1 empty fixed (0x03 0x00), and corrupt 0-byte payload.
+        const uint8_t empty_sync[] = {0x00};
+        assert(inf.inflate_message(empty_sync, sizeof(empty_sync), out) == Deflate::InflateStatus::Ok && out.empty());
+        const uint8_t empty_f0[] = {0x02, 0x00};
+        assert(inf.inflate_message(empty_f0, sizeof(empty_f0), out) == Deflate::InflateStatus::Ok && out.empty());
+        const uint8_t empty_f1[] = {0x03, 0x00};
+        assert(inf.inflate_message(empty_f1, sizeof(empty_f1), out) == Deflate::InflateStatus::Ok && out.empty());
+        assert(inf.inflate_message(empty_sync, 0, out) == Deflate::InflateStatus::CorruptData);
+
+        // DeflateStream context takeover, window_bits=9 enforcement, and multi-block stored fallback.
+        Deflate::DeflateStream def15(15);
+        std::vector<uint8_t> c1, c2;
+        const std::string rep = "permessage-deflate-context-takeover-sample-";
+        def15.compress_message(reinterpret_cast<const uint8_t*>(rep.data()), rep.size(), c1);
+        def15.compress_message(reinterpret_cast<const uint8_t*>(rep.data()), rep.size(), c2);
+        assert(c2.size() < c1.size()); // context takeover shrinks second identical message
+
+        Deflate::InflateStream inf15(15);
+        std::vector<uint8_t> d1, d2;
+        assert(inf15.inflate_message(c1.data(), c1.size(), d1) == Deflate::InflateStatus::Ok);
+        assert(inf15.inflate_message(c2.data(), c2.size(), d2) == Deflate::InflateStatus::Ok);
+        assert(std::string(d1.begin(), d1.end()) == rep);
+        assert(std::string(d2.begin(), d2.end()) == rep);
+
+        // Enforce server_max_window_bits=9 (512B): back-reference at distance > 512 is rejected.
+        std::string dist_msg = "UNIQUE_MARKER_ABCDEF0123456789";
+        for (int i = 0; i < 600; ++i) dist_msg.push_back(static_cast<char>('A' + (i * 7 + (i / 13)) % 26));
+        dist_msg += "UNIQUE_MARKER_ABCDEF0123456789";
+        std::vector<uint8_t> c_bigwin;
+        Deflate::DeflateStream def_big(15);
+        def_big.compress_message(reinterpret_cast<const uint8_t*>(dist_msg.data()), dist_msg.size(), c_bigwin);
+        Deflate::InflateStream inf_w9(9);
+        std::vector<uint8_t> bad_out;
+        assert(inf_w9.inflate_message(c_bigwin.data(), c_bigwin.size(), bad_out) == Deflate::InflateStatus::CorruptData);
+
+        // DeflateStream(9) stays strictly within 512B window so InflateStream(9) decodes it.
+        Deflate::DeflateStream def_w9(9);
+        std::vector<uint8_t> c_w9, d_w9;
+        def_w9.compress_message(reinterpret_cast<const uint8_t*>(dist_msg.data()), dist_msg.size(), c_w9);
+        Deflate::InflateStream inf_w9_ok(9);
+        assert(inf_w9_ok.inflate_message(c_w9.data(), c_w9.size(), d_w9) == Deflate::InflateStatus::Ok);
+        assert(std::string(d_w9.begin(), d_w9.end()) == dist_msg);
+
+        // Stored-block fallback on >70 KiB pseudo-random incompressible data (spans 2 stored blocks).
+        std::vector<uint8_t> rnd(70000);
+        uint32_t rng = 0x9E3779B9u;
+        for (size_t i = 0; i < rnd.size(); ++i) {
+            rng ^= (rng << 13);
+            rng ^= (rng >> 17);
+            rng ^= (rng << 5);
+            rnd[i] = static_cast<uint8_t>(rng & 0xFFu);
+        }
+        std::vector<uint8_t> c_rnd, d_rnd;
+        Deflate::DeflateStream def_rnd(15);
+        def_rnd.compress_message(rnd.data(), rnd.size(), c_rnd);
+        assert(c_rnd.size() <= rnd.size() + 16);
+        Deflate::InflateStream inf_rnd(15);
+        assert(inf_rnd.inflate_message(c_rnd.data(), c_rnd.size(), d_rnd) == Deflate::InflateStatus::Ok);
+        assert(d_rnd == rnd);
+
+        // Decompression bomb cap returns OutputLimitExceeded cleanly without growing `out`.
+        std::vector<uint8_t> zeros(65536, 0x41u);
+        std::vector<uint8_t> c_bomb, d_bomb;
+        Deflate::DeflateStream def_bomb(15);
+        def_bomb.compress_message(zeros.data(), zeros.size(), c_bomb);
+        assert(c_bomb.size() < 2048);
+        Deflate::InflateStream inf_bomb(15);
+        assert(inf_bomb.inflate_message(c_bomb.data(), c_bomb.size(), d_bomb, 4096) ==
+               Deflate::InflateStatus::OutputLimitExceeded);
+        assert(d_bomb.empty());
+    }
+
+    // 2. RFC 7692 §7.1 Sec-WebSocket-Extensions negotiation matrix (accept & fail-closed).
+    auto test_negotiation = [](const std::string& ext_header, bool expect_open, const std::string& expect_ext) {
+        std::string observed_req;
+        std::atomic<bool> release{false};
+        auto srv = WebSocketObject::start_loopback_server([&](int fd) {
+            std::string req;
+            char ch = 0;
+            while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
+                req += ch;
+                if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+            }
+            observed_req = req;
+            const std::string key_hdr = "Sec-WebSocket-Key: ";
+            size_t k = req.find(key_hdr);
+            std::string key = k == std::string::npos ? "" : req.substr(k + key_hdr.size(), req.find("\r\n", k) - k - key_hdr.size());
+            std::string resp =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: " + WebSocketObject::calculate_accept_key(key) + "\r\n";
+            if (!ext_header.empty()) {
+                resp += ext_header;
+            }
+            resp += "\r\n";
+            (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (!release.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        });
+        assert(srv != nullptr);
+        auto ws = std::make_shared<WebSocketObject>("ws://127.0.0.1:" + std::to_string(srv->port) + "/neg");
+        ws->connect();
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (ws->ready_state() == WebSocketReadyState::Connecting &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const bool opened = ws->ready_state() == WebSocketReadyState::Open;
+        const std::string got_ext = ws->extensions();
+        if (opened) ws->close();
+        release.store(true);
+        ws->join_for_shutdown();
+        assert(observed_req.find("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n") != std::string::npos);
+        assert(opened == expect_open);
+        if (expect_open) assert(got_ext == expect_ext);
+    };
+
+    // Valid responses
+    test_negotiation("", true, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate\r\n", true, "permessage-deflate");
+    test_negotiation(
+        "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover; server_max_window_bits=9; client_max_window_bits=10\r\n",
+        true,
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover; server_max_window_bits=9; client_max_window_bits=10");
+    test_negotiation(
+        "Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=\"12\"; client_max_window_bits=\"8\"\r\n",
+        true,
+        "permessage-deflate; server_max_window_bits=\"12\"; client_max_window_bits=\"8\"");
+
+    // Invalid responses — all MUST fail closed
+    test_negotiation("Sec-WebSocket-Extensions: x-custom-ext\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate, x-other\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate, permessage-deflate\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: Permessage-Deflate\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; unknown_param=1\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; server_no_context_takeover\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover=1\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover=1\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=7\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=16\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits=08\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate;\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=\"12\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: \r\n", false, "");
+
+    // 3. Protocol error matrix over live loopback server:
+    //    (a) RSV1=1 without negotiation -> 1002
+    //    (b) RSV1=1 on Ping control frame -> 1002
+    //    (c) RSV1=1 on Continuation frame -> 1002
+    //    (d) Corrupt DEFLATE bytes in RSV1=1 data frame -> 1002
+    //    (e) Valid DEFLATE bytes inflating to invalid UTF-8 in text frame -> 1007
+    auto send_srv_frame = [](int fd, uint8_t opcode, bool fin, bool rsv1, const uint8_t* data, size_t len) {
+        std::vector<uint8_t> out;
+        out.push_back(static_cast<uint8_t>((fin ? 0x80u : 0x00u) | (rsv1 ? 0x40u : 0x00u) | (opcode & 0x0Fu)));
+        if (len <= 125) {
+            out.push_back(static_cast<uint8_t>(len));
+        } else {
+            out.push_back(126u);
+            out.push_back(static_cast<uint8_t>((len >> 8) & 0xFFu));
+            out.push_back(static_cast<uint8_t>(len & 0xFFu));
+        }
+        if (len > 0 && data) out.insert(out.end(), data, data + len);
+        (void)::send(fd, out.data(), out.size(), MSG_NOSIGNAL);
+    };
+
+    auto recv_client_frame = [](int fd, uint8_t& opcode, bool& rsv1, bool& masked, std::vector<uint8_t>& payload) -> bool {
+        auto rx = [&](uint8_t* dst, size_t n) -> bool {
+            size_t got = 0;
+            while (got < n) {
+                ssize_t r = ::recv(fd, dst + got, n - got, 0);
+                if (r <= 0) return false;
+                got += static_cast<size_t>(r);
+            }
+            return true;
+        };
+        uint8_t hdr[2]{};
+        if (!rx(hdr, 2)) return false;
+        rsv1 = (hdr[0] & 0x40u) != 0;
+        opcode = hdr[0] & 0x0Fu;
+        masked = (hdr[1] & 0x80u) != 0;
+        uint64_t plen = hdr[1] & 0x7Fu;
+        if (plen == 126) {
+            uint8_t e[2]{};
+            if (!rx(e, 2)) return false;
+            plen = (static_cast<uint64_t>(e[0]) << 8) | e[1];
+        } else if (plen == 127) {
+            uint8_t e[8]{};
+            if (!rx(e, 8)) return false;
+            plen = 0;
+            for (int i = 0; i < 8; ++i) plen = (plen << 8) | e[i];
+        }
+        uint8_t mask[4]{};
+        if (masked && !rx(mask, 4)) return false;
+        payload.resize(static_cast<size_t>(plen));
+        if (plen > 0 && !rx(payload.data(), static_cast<size_t>(plen))) return false;
+        if (masked) {
+            for (size_t i = 0; i < payload.size(); ++i) payload[i] ^= mask[i % 4];
+        }
+        return true;
+    };
+
+    auto test_protocol_error = [&](bool negotiate_pmd, int scenario, int expect_close_code) {
+        std::atomic<int> peer_got_code{0};
+        auto srv = WebSocketObject::start_loopback_server([&](int fd) {
+            std::string req;
+            char ch = 0;
+            while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
+                req += ch;
+                if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+            }
+            const std::string key_hdr = "Sec-WebSocket-Key: ";
+            size_t k = req.find(key_hdr);
+            std::string key = k == std::string::npos ? "" : req.substr(k + key_hdr.size(), req.find("\r\n", k) - k - key_hdr.size());
+            std::string resp =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: " + WebSocketObject::calculate_accept_key(key) + "\r\n";
+            if (negotiate_pmd) resp += "Sec-WebSocket-Extensions: permessage-deflate\r\n";
+            resp += "\r\n";
+            (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+
+            if (scenario == 0) { // RSV1=1 without negotiation
+                const uint8_t v[] = {0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00};
+                send_srv_frame(fd, 0x01u, true, true, v, sizeof(v));
+            } else if (scenario == 1) { // RSV1=1 on Ping control frame
+                const uint8_t p[] = {'p', 'i', 'n', 'g'};
+                send_srv_frame(fd, 0x09u, true, true, p, sizeof(p));
+            } else if (scenario == 2) { // RSV1=1 on Continuation frame
+                const uint8_t f1[] = {0xf2, 0x48};
+                const uint8_t f2[] = {0xcd, 0xc9, 0xc9, 0x07, 0x00};
+                send_srv_frame(fd, 0x01u, false, true, f1, sizeof(f1));
+                send_srv_frame(fd, 0x00u, true, true, f2, sizeof(f2));
+            } else if (scenario == 3) { // Corrupt DEFLATE bytes (BTYPE=3 invalid)
+                const uint8_t bad[] = {0x06u, 0xffu, 0xffu};
+                send_srv_frame(fd, 0x01u, true, true, bad, sizeof(bad));
+            } else if (scenario == 4) { // Valid DEFLATE inflating to invalid UTF-8 (0xFF 0xFE) in text frame
+                Deflate::DeflateStream ds(15);
+                const uint8_t bad_utf8[] = {0xffu, 0xfeu, 0x80u};
+                std::vector<uint8_t> comp;
+                ds.compress_message(bad_utf8, sizeof(bad_utf8), comp);
+                send_srv_frame(fd, 0x01u, true, true, comp.data(), comp.size());
+            }
+
+            uint8_t op = 0;
+            bool rsv1 = false, masked = false;
+            std::vector<uint8_t> pl;
+            if (recv_client_frame(fd, op, rsv1, masked, pl) && op == 0x08u && pl.size() >= 2) {
+                peer_got_code.store((static_cast<int>(pl[0]) << 8) | pl[1]);
+                send_srv_frame(fd, 0x08u, true, false, pl.data(), 2);
+            }
+        });
+        assert(srv != nullptr);
+        auto ws = std::make_shared<WebSocketObject>("ws://127.0.0.1:" + std::to_string(srv->port) + "/err");
+        ws->connect();
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (ws->ready_state() != WebSocketReadyState::Closed &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        ws->join_for_shutdown();
+        assert(peer_got_code.load() == expect_close_code);
+    };
+
+    test_protocol_error(false, 0, 1002);
+    test_protocol_error(true, 1, 1002);
+    test_protocol_error(true, 2, 1002);
+    test_protocol_error(true, 3, 1002);
+    test_protocol_error(true, 4, 1007);
+
+    // 4. End-to-end JS TestPage roundtrip with permessage-deflate negotiated:
+    //    verifies ws.extensions, client RSV1=1 compression + context takeover,
+    //    fragmented compressed delivery with interleaved Ping/Pong (Pong RSV1=0),
+    //    uncompressed RSV1=0 message interleaved, binary ArrayBuffer + Blob, and clean close.
+    struct WireRec {
+        uint8_t opcode{0};
+        bool rsv1{false};
+        bool masked{false};
+        size_t wire_len{0};
+        std::string plain;
+    };
+    std::mutex wire_mu;
+    std::vector<WireRec> wire_log;
+
+    auto srv = WebSocketObject::start_loopback_server([&](int fd) {
+        std::string req;
+        char ch = 0;
+        while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
+            req += ch;
+            if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+        }
+        const std::string key_hdr = "Sec-WebSocket-Key: ";
+        size_t k = req.find(key_hdr);
+        std::string key = k == std::string::npos ? "" : req.substr(k + key_hdr.size(), req.find("\r\n", k) - k - key_hdr.size());
+        std::string resp =
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: " + WebSocketObject::calculate_accept_key(key) + "\r\n"
+            "Sec-WebSocket-Extensions: permessage-deflate\r\n\r\n";
+        (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+
+        // Push RFC 7692 §7.2.3.1 + §7.2.3.2 vectors, fragmented compressed + interleaved Ping,
+        // and an uncompressed RSV1=0 message.
+        const uint8_t v1[] = {0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00};
+        const uint8_t v2[] = {0xf2, 0x00, 0x11, 0x00, 0x00};
+        send_srv_frame(fd, 0x01u, true, true, v1, sizeof(v1));
+        send_srv_frame(fd, 0x01u, true, true, v2, sizeof(v2));
+
+        Deflate::DeflateStream srv_def(15);
+        std::vector<uint8_t> frag_c;
+        const std::string frag_plain = "fragmented-compressed-message-1234567890-1234567890";
+        srv_def.compress_message(reinterpret_cast<const uint8_t*>(frag_plain.data()), frag_plain.size(), frag_c);
+        const size_t mid = frag_c.size() / 2;
+        send_srv_frame(fd, 0x01u, false, true, frag_c.data(), mid);
+        const uint8_t ping_b[] = {'o', 'k'};
+        send_srv_frame(fd, 0x09u, true, false, ping_b, sizeof(ping_b));
+        send_srv_frame(fd, 0x00u, true, false, frag_c.data() + mid, frag_c.size() - mid);
+
+        const std::string rsv0_msg = "uncompressed-interleaved";
+        send_srv_frame(fd, 0x01u, true, false, reinterpret_cast<const uint8_t*>(rsv0_msg.data()), rsv0_msg.size());
+
+        Deflate::InflateStream srv_inf(15);
+        while (true) {
+            uint8_t op = 0;
+            bool rsv1 = false, masked = false;
+            std::vector<uint8_t> pl;
+            if (!recv_client_frame(fd, op, rsv1, masked, pl)) break;
+            if (op == 0x0Au) { // Pong
+                std::lock_guard<std::mutex> lock(wire_mu);
+                wire_log.push_back(WireRec{op, rsv1, masked, pl.size(), std::string(pl.begin(), pl.end())});
+                continue;
+            }
+            if (op == 0x08u) {
+                send_srv_frame(fd, 0x08u, true, false, pl.data(), std::min<size_t>(pl.size(), 2));
+                break;
+            }
+            std::vector<uint8_t> plain_bytes;
+            if (rsv1) {
+                assert(srv_inf.inflate_message(pl.data(), pl.size(), plain_bytes) == Deflate::InflateStatus::Ok);
+            } else {
+                plain_bytes = pl;
+            }
+            {
+                std::lock_guard<std::mutex> lock(wire_mu);
+                wire_log.push_back(WireRec{op, rsv1, masked, pl.size(), std::string(plain_bytes.begin(), plain_bytes.end())});
+            }
+            std::vector<uint8_t> reply_c;
+            srv_def.compress_message(plain_bytes.data(), plain_bytes.size(), reply_c);
+            send_srv_frame(fd, op, true, true, reply_c.data(), reply_c.size());
+        }
+    });
+    assert(srv != nullptr);
+
+    TestPage page;
+    auto& js = page.js;
+    js.eval(
+        "var log = []; var done = false; var extBefore = '';\n"
+        "var ws = new WebSocket('ws://127.0.0.1:" + std::to_string(srv->port) + "/pmd');\n"
+        "extBefore = ws.extensions;\n"
+        "ws.binaryType = 'arraybuffer';\n"
+        "ws.onopen = function() {\n"
+        "  log.push('EXT:' + ws.extensions);\n"
+        "  ws.send('deflate-alpha-beta-gamma-'.repeat(40));\n"
+        "  ws.send('deflate-alpha-beta-gamma-'.repeat(40));\n"
+        "  var bin = new Uint8Array([0, 255, 1, 2, 0, 255, 1, 2, 0, 255, 1, 2]);\n"
+        "  ws.send(bin);\n"
+        "};\n"
+        "ws.onmessage = function(e) {\n"
+        "  if (typeof e.data === 'string') {\n"
+        "    log.push('S:' + e.data.length + ':' + e.data.slice(0, 14));\n"
+        "  } else {\n"
+        "    var u = new Uint8Array(e.data);\n"
+        "    log.push('B:' + u.length + ':' + u[0] + ',' + u[1] + ',' + u[11]);\n"
+        "  }\n"
+        "  if (log.length === 8) ws.close(1000, 'ok');\n"
+        "};\n"
+        "ws.onclose = function(e) { log.push('C:' + e.code + ':' + e.wasClean); done = true; };\n"
+    );
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!js.eval("done").is_truthy() && std::chrono::steady_clock::now() < deadline) {
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    assert(js.eval("done").is_truthy());
+    assert(js.eval("extBefore").to_string().empty());
+    assert(js.eval("log.join('|')").to_string() ==
+           "EXT:permessage-deflate|"
+           "S:5:Hello|"
+           "S:5:Hello|"
+           "S:51:fragmented-com|"
+           "S:24:uncompressed-i|"
+           "S:1000:deflate-alpha-|"
+           "S:1000:deflate-alpha-|"
+           "B:12:0,255,2|"
+           "C:1000:true");
+
+    std::lock_guard<std::mutex> lock(wire_mu);
+    // Find the 3 data frames + 1 pong frame recorded on the wire.
+    std::vector<WireRec> data_recs;
+    bool saw_pong_rsv0 = false;
+    for (const auto& r : wire_log) {
+        assert(r.masked);
+        if (r.opcode == 0x0Au && !r.rsv1 && r.plain == "ok") saw_pong_rsv0 = true;
+        if (r.opcode == 0x01u || r.opcode == 0x02u) data_recs.push_back(r);
+    }
+    assert(saw_pong_rsv0);
+    assert(data_recs.size() == 3);
+    assert(data_recs[0].opcode == 0x01u && data_recs[0].rsv1 && data_recs[0].wire_len < 100 && data_recs[0].plain.size() == 1000);
+    assert(data_recs[1].opcode == 0x01u && data_recs[1].rsv1 && data_recs[1].wire_len <= data_recs[0].wire_len && data_recs[1].plain.size() == 1000);
+    assert(data_recs[2].opcode == 0x02u && data_recs[2].rsv1 && data_recs[2].plain.size() == 12);
+}
+
 TEST(a_definition_names_the_function_it_makes) {
     using namespace litebird;
 
@@ -30977,6 +31424,9 @@ int main() {
 
     // Phase 161: WebSocket binary frames — ArrayBuffer, TypedArray, DataView, and Blob.
     RUN_TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob);
+
+    // Phase 169: WebSocket permessage-deflate (RFC 7692) & stateful DEFLATE/INFLATE codec.
+    RUN_TEST(websocket_permessage_deflate_rfc7692);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

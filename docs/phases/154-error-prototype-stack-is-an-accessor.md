@@ -107,9 +107,8 @@ features the engine does not have rather than anything about `stack`:
 `options` argument and the error constructors' own descriptors, all of them
 pre-existing gaps the `stack` change neither helped nor hurt.
 
-Everything else unchanged: `make test` **310/310** including the suite added
-here (309 before `main` was merged into the branch), `make js-conformance`
-**1144/1158**, `make dom-conformance` **678/678**.
+Everything else unchanged: `make test` **312/312** including the suite added
+here, `make js-conformance` **1144/1158**, `make dom-conformance` **678/678**.
 
 ## 5. What is still open
 

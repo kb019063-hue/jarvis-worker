@@ -41,8 +41,9 @@ std::string normalized_type(const std::string& type) {
     return ascii_lower(type);
 }
 
-// The bytes of the parts given to a constructor: strings as UTF-8, blobs as
-// their bytes, anything else as the string it converts to.
+// The bytes of the parts given to a constructor: blobs as their bytes,
+// BufferSource values (ArrayBuffer, TypedArray, DataView) as their raw bytes,
+// anything else as the UTF-8 string it converts to.
 std::string bytes_of_parts(const JsValue& parts, const char* what) {
     std::string out;
     if (parts.is_undefined()) return out;
@@ -50,8 +51,18 @@ std::string bytes_of_parts(const JsValue& parts, const char* what) {
         js_throw_type_error(std::string("Failed to construct '") + what + "': the parts must be given as a sequence.");
     }
     for (const JsValue& part : js_iterable_to_vector(parts)) {
-        if (const BlobState* blob = state_of<BlobState>(part)) out += blob->bytes;
-        else out += to_str(part);
+        if (const BlobState* blob = state_of<BlobState>(part)) {
+            out += blob->bytes;
+        } else if (is_buffer_source(part)) {
+            std::string raw;
+            if (!typed_array_bytes(part, raw)) {
+                js_throw_type_error(std::string("Failed to construct '") + what +
+                                    "': buffer source is detached or out of bounds.");
+            }
+            out += raw;
+        } else {
+            out += to_str(part);
+        }
     }
     return out;
 }
@@ -245,6 +256,13 @@ bool is_blob(const JsValue& value) {
 bool is_file(const JsValue& value) {
     const BlobState* state = state_of<BlobState>(value);
     return state && state->is_file;
+}
+
+bool blob_bytes(const JsValue& value, std::string& out) {
+    const BlobState* state = state_of<BlobState>(value);
+    if (!state) return false;
+    out = state->bytes;
+    return true;
 }
 
 JsValue make_blob(Realm& realm, const std::string& bytes, const std::string& type) {

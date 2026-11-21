@@ -85,7 +85,8 @@ and a fix that does is the next bug. Measured by putting the old
 `LayoutBox.cpp` back:
 
 ```
-$ git checkout src/layout/LayoutBox.cpp && make -j && make render-conformance
+$ git show origin/main:src/layout/LayoutBox.cpp > src/layout/LayoutBox.cpp
+$ make -j && python3 tools/conformance/render_check.py
 FAIL flex_items_stretch_to_the_container_height
 FAIL flex_align_items_center_centres_a_shorter_item
 FAIL grid_items_stretch_to_their_area
@@ -94,15 +95,21 @@ FAIL flex_column_align_items_center_centres_the_item_across
 FAIL flex_column_align_items_flex_end_pushes_the_item_to_the_right
 FAIL grid_align_items_center_centres_an_item_in_its_row
 FAIL flex_stretch_subtracts_the_padding_and_the_border
-Render reftests: 21/32 pages match their reference pixels; 3 more fail as
-recorded, with a reason in the corpus (24 of 32 accounted for)
+Render reftests: 21/34 pages match their reference pixels; 5 more fail as
+recorded, with a reason in the corpus (26 of 34 accounted for)
 $ ...with the fix back in place...
-Render reftests: 29/32 pages match their reference pixels ...
+Render reftests: 29/34 pages match their reference pixels; 5 more fail as
+recorded, with a reason in the corpus (34 of 34 accounted for)
 ```
+
+The five that stay red in both runs are the ledger's other entries: the two
+paint-order pages, the rounded clip, and the two this phase found and did not
+take (§4).
 
 The same statements are asserted in the unit suite, where they are numbers
 rather than pixels: `cross_axis_alignment_places_flex_and_grid_items`, nine
-blocks, **296 suites** (was 295).
+blocks. The suite count is **297** after merging `main`: 295 there, #165's
+boxed-`String` suite, and this one.
 
 ## 4. What is still open
 

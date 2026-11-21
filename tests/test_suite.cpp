@@ -30222,6 +30222,298 @@ TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry) {
     assert(span->bounding_box().x == 23.0f && span->bounding_box().y == 23.0f);
 }
 
+// Phase 170: a document's solid root/body background belongs to its canvas,
+// not to a root box's geometry. Pixel expectations are from Chromium 153.
+TEST(document_canvas_background_is_scoped_and_keeps_computed_styles) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(
+        R"html(<!doctype html><html><body style="margin:20px;width:100px;height:60px;background:rgba(255,0,0,.5)">)html"
+        R"(<div style="width:20px;height:20px;background:#0000ff"></div></body></html>)");
+    StyleResolver resolver;
+    auto unstyled = HtmlParser::parse("<!doctype html><body></body>");
+    assert(resolver.resolve_style(unstyled->body()).background_color.is_transparent());
+    auto unstyled_root = LayoutTree::build(unstyled, resolver, 40, 60);
+    assert(unstyled_root->has_document_canvas && unstyled_root->canvas_background.is_transparent());
+    auto unstyled_list = DisplayList::build(unstyled_root);
+    assert(!unstyled_list.commands().empty() &&
+           std::holds_alternative<DrawCanvasCommand>(unstyled_list.commands().front()));
+    TerminalRenderer unstyled_terminal(4, 3, 10, 20);
+    const auto unstyled_ansi = unstyled_terminal.to_ansi_string(unstyled_list);
+    // The terminal's ordinary empty grid is dark. A document with no canvas
+    // color still has the browser's white top-level backdrop, so its dark
+    // default text remains legible after the UA body became transparent.
+    const std::string white_bg = "\033[48;2;255;255;255m";
+    std::size_t white_count = 0, white_pos = 0;
+    while ((white_pos = unstyled_ansi.find(white_bg, white_pos)) != std::string::npos) {
+        ++white_count;
+        white_pos += white_bg.size();
+    }
+    assert(white_count == 12);
+    auto root = LayoutTree::build(doc, resolver, 200, 150);
+    assert(root && root->node == doc->body() && root->has_document_canvas);
+    assert(root->canvas_background == Color(255, 0, 0, 128));
+    assert(root->background_propagated);
+    assert(root->style->background_color == Color(255, 0, 0, 128)); // computed style did not change
+    auto list = DisplayList::build(root);
+    assert(!list.commands().empty() && std::holds_alternative<DrawCanvasCommand>(list.commands().front()));
+    int canvases = 0;
+    for (const auto& cmd : list.commands()) if (std::holds_alternative<DrawCanvasCommand>(cmd)) ++canvases;
+    assert(canvases == 1);
+    BitmapRenderer bitmap(200, 150);
+    bitmap.clear(Color::white());
+    bitmap.render(list);
+    assert(bitmap.get_pixel(0, 0) == Color(255, 127, 127));
+    assert(bitmap.get_pixel(30, 30) == Color::blue());
+    assert(bitmap.get_pixel(50, 30) == Color(255, 127, 127)); // no second body layer
+    assert(bitmap.get_pixel(199, 149) == Color(255, 127, 127));
+
+    // The same body laid out as an arbitrary subtree has a box background,
+    // not a canvas. Building it must not change the previously built root.
+    auto subtree = LayoutTree::build(doc->body(), resolver, 200, 150);
+    assert(subtree && !subtree->has_document_canvas && subtree->canvas_background.is_transparent());
+    assert(!subtree->background_propagated);
+    auto sub_list = DisplayList::build(subtree);
+    for (const auto& cmd : sub_list.commands()) assert(!std::holds_alternative<DrawCanvasCommand>(cmd));
+    BitmapRenderer sub_bitmap(200, 150);
+    sub_bitmap.clear(Color::white());
+    sub_bitmap.render(sub_list);
+    assert(sub_bitmap.get_pixel(50, 10) == Color(255, 127, 127));
+    assert(sub_bitmap.get_pixel(199, 149) == Color::white());
+    assert(root->canvas_background == Color(255, 0, 0, 128));
+
+    // With a nontransparent root, the body retains its ordinary box paint.
+    auto both = HtmlParser::parse(
+        R"(<!doctype html><html style="background:#0000ff"><body style="margin:20px;height:50px;background:#ff0000"></body></html>)");
+    auto both_root = LayoutTree::build(both, resolver, 200, 150);
+    assert(both_root->canvas_background == Color::blue() && !both_root->background_propagated);
+    BitmapRenderer layered(200, 150);
+    layered.clear(Color::white());
+    layered.render(DisplayList::build(both_root));
+    assert(layered.get_pixel(0, 0) == Color::blue());
+    assert(layered.get_pixel(20, 20) == Color::red());
+    assert(layered.get_pixel(199, 149) == Color::blue());
+
+    // A document whose HTML element has no body still paints the root color
+    // only once, even though in that case the root element has a layout box.
+    auto root_only_doc = std::make_shared<Document>();
+    root_only_doc->set_content_type("text/html");
+    auto html = root_only_doc->create_element("html");
+    html->set_attribute("style", "background:rgba(0,0,255,.5);height:50px");
+    root_only_doc->append_child(html);
+    auto root_only = LayoutTree::build(root_only_doc, resolver, 200, 150);
+    assert(root_only && root_only->node == html && root_only->background_propagated);
+    BitmapRenderer one_layer(200, 150);
+    one_layer.clear(Color::white());
+    one_layer.render(DisplayList::build(root_only));
+    assert(one_layer.get_pixel(0, 0) == Color(127, 127, 255));
+    assert(one_layer.get_pixel(199, 149) == Color(127, 127, 255));
+
+    auto hidden_root_doc = HtmlParser::parse(
+        R"(<!doctype html><html style="display:none;background:blue"><body style="background:red"><div id="child"></div></body></html>)");
+    auto hidden_root = LayoutTree::build(hidden_root_doc, resolver, 200, 150);
+    assert(hidden_root->canvas_background.is_transparent());
+    assert(!hidden_root_doc->document_element()->has_layout_box());
+    assert(!hidden_root_doc->body()->has_layout_box());
+    assert(!hidden_root_doc->get_element_by_id("child")->has_layout_box());
+    BitmapRenderer hidden_bitmap(200, 150);
+    hidden_bitmap.clear(Color::white());
+    hidden_bitmap.render(DisplayList::build(hidden_root));
+    assert(hidden_bitmap.get_pixel(0, 0) == Color::white());
+    assert(hidden_bitmap.get_pixel(199, 149) == Color::white());
+
+    // A non-HTML document root and a null tree do not acquire HTML-body rules.
+    auto other_doc = std::make_shared<Document>();
+    auto other_el = other_doc->create_element("section");
+    other_el->set_attribute("style", "width:40px;height:40px;background:#ff0000");
+    other_doc->append_child(other_el);
+    auto other = LayoutTree::build(other_doc, resolver, 200, 150);
+    assert(other && !other->has_document_canvas && other->canvas_background.is_transparent());
+    const auto other_list = DisplayList::build(other);
+    for (const auto& cmd : other_list.commands()) {
+        assert(!std::holds_alternative<DrawCanvasCommand>(cmd));
+    }
+    assert(DisplayList::build(nullptr).commands().empty());
+}
+
+TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
+    using namespace litebird;
+    BitmapRenderer child(40, 30);
+    child.clear(Color::transparent());
+    DisplayList inner;
+    inner.add(DrawCanvasCommand{Color(255, 0, 0, 128)});
+    inner.add(DrawRectCommand{Rect(5, 5, 10, 10), Color(0, 0, 255, 128)});
+    child.render(inner);
+    assert(child.get_pixel(0, 0) == Color(255, 0, 0, 128));
+    assert(child.get_pixel(6, 6) == Color(85, 0, 170, 192));
+
+    auto image = std::make_shared<ImageData>();
+    image->width = 40;
+    image->height = 30;
+    for (int y = 0; y < 30; ++y) for (int x = 0; x < 40; ++x)
+        image->pixels.push_back(child.get_pixel(x, y).to_argb());
+    BitmapRenderer parent(40, 30);
+    parent.clear(Color::blue());
+    DisplayList image_list;
+    image_list.add(DrawImageCommand{Rect(0, 0, 40, 30), image});
+    parent.render(image_list);
+    assert(parent.get_pixel(0, 0) == Color(128, 0, 127));
+    assert(parent.get_pixel(6, 6) == Color(64, 0, 191));
+
+    // Scroll transforms move document boxes, not the canvas. An explicit clip
+    // around the whole target still confines the canvas to that clip.
+    BitmapRenderer clipped(40, 30);
+    clipped.clear(Color::white());
+    DisplayList commands;
+    commands.add(PushClipCommand{Rect(5, 5, 10, 10)});
+    commands.add(PushTransformCommand{TransformMatrix2D::translation(-100, -100)});
+    commands.add(DrawCanvasCommand{Color::red()});
+    commands.add(PopTransformCommand{});
+    commands.add(PopClipCommand{});
+    clipped.render(commands);
+    assert(clipped.get_pixel(5, 5) == Color::red());
+    assert(clipped.get_pixel(14, 14) == Color::red());
+    assert(clipped.get_pixel(0, 0) == Color::white());
+    assert(clipped.get_pixel(15, 15) == Color::white());
+
+    // The terminal viewport does not scroll its canvas either, and an
+    // offscreen body box must not be clamped back onto the first row.
+    auto doc = HtmlParser::parse(
+        R"(<!doctype html><html style="background:#0000ff"><body style="margin:0;width:40px;height:20px;background:#ff0000"></body></html>)");
+    StyleResolver resolver;
+    auto list = DisplayList::build(LayoutTree::build(doc, resolver, 40, 60));
+    TerminalRenderer terminal(4, 3, 10, 20);
+    terminal.set_scroll(0, 100);
+    const std::string ansi = terminal.to_ansi_string(list);
+    const std::string blue = "\033[48;2;0;0;255m";
+    std::size_t count = 0, pos = 0;
+    while ((pos = ansi.find(blue, pos)) != std::string::npos) { ++count; pos += blue.size(); }
+    assert(count == 12);
+    assert(ansi.find("\033[48;2;255;0;0m") == std::string::npos);
+
+    // A body box over a different root canvas stops at exclusive cell edges.
+    // Before this correction a 20-by-20 box on a 10-by-20 grid colored six
+    // cells instead of two, hiding the canvas in the following row and column.
+    auto bounded_doc = HtmlParser::parse(
+        R"(<!doctype html><html style="background:#0000ff"><body style="margin:0;width:20px;height:20px;background:#ff0000"></body></html>)");
+    auto bounded_list = DisplayList::build(LayoutTree::build(bounded_doc, resolver, 40, 60));
+    TerminalRenderer bounded_terminal(4, 3, 10, 20);
+    const auto bounded_ansi = bounded_terminal.to_ansi_string(bounded_list);
+    const std::string red_bg = "\033[48;2;255;0;0m";
+    count = 0; pos = 0;
+    while ((pos = bounded_ansi.find(red_bg, pos)) != std::string::npos) { ++count; pos += red_bg.size(); }
+    assert(count == 2);
+    count = 0; pos = 0;
+    while ((pos = bounded_ansi.find(blue, pos)) != std::string::npos) { ++count; pos += blue.size(); }
+    assert(count == 10);
+
+    // A translucent iframe bitmap is a terminal image: only the two covered
+    // cells should blend with the blue canvas, and a scrolled-off image must
+    // not be clamped back onto row zero. A surrounding clip also confines it.
+    auto solid = std::make_shared<ImageData>();
+    solid->width = 20;
+    solid->height = 20;
+    solid->pixels.assign(400, Color(255, 0, 0, 128).to_argb());
+    DisplayList frame_list;
+    frame_list.add(DrawCanvasCommand{Color::blue()});
+    frame_list.add(DrawImageCommand{Rect(0, 0, 20, 20), solid});
+    const std::string purple = "\033[48;2;128;0;127m";
+    TerminalRenderer frame_terminal(4, 3, 10, 20);
+    const auto frame_ansi = frame_terminal.to_ansi_string(frame_list);
+    count = 0; pos = 0;
+    while ((pos = frame_ansi.find(purple, pos)) != std::string::npos) { ++count; pos += purple.size(); }
+    assert(count == 2);
+    TerminalRenderer scrolled_frame(4, 3, 10, 20);
+    scrolled_frame.set_scroll(0, 100);
+    const auto scrolled_frame_ansi = scrolled_frame.to_ansi_string(frame_list);
+    assert(scrolled_frame_ansi.find(purple) == std::string::npos);
+
+    auto stripes = std::make_shared<ImageData>();
+    stripes->width = 20;
+    stripes->height = 20;
+    for (int y = 0; y < 20; ++y) {
+        for (int x = 0; x < 20; ++x) {
+            stripes->pixels.push_back((x < 10 ? Color::red() : Color(0, 255, 0)).to_argb());
+        }
+    }
+    DisplayList stripe_list;
+    stripe_list.add(DrawCanvasCommand{Color::blue()});
+    stripe_list.add(DrawImageCommand{Rect(0, 0, 20, 20), stripes});
+    TerminalRenderer scrolled_stripes(4, 3, 10, 20);
+    scrolled_stripes.set_scroll(10, 0);
+    const auto stripe_ansi = scrolled_stripes.to_ansi_string(stripe_list);
+    assert(stripe_ansi.find("\033[48;2;0;255;0m") != std::string::npos);
+    assert(stripe_ansi.find(red_bg) == std::string::npos);
+
+    DisplayList clipped_frame_list;
+    clipped_frame_list.add(DrawCanvasCommand{Color::blue()});
+    clipped_frame_list.add(PushClipCommand{Rect(0, 0, 10, 20)});
+    clipped_frame_list.add(DrawImageCommand{Rect(0, 0, 20, 20), solid});
+    clipped_frame_list.add(PopClipCommand{});
+    TerminalRenderer clipped_frame(4, 3, 10, 20);
+    const auto clipped_frame_ansi = clipped_frame.to_ansi_string(clipped_frame_list);
+    count = 0; pos = 0;
+    while ((pos = clipped_frame_ansi.find(purple, pos)) != std::string::npos) { ++count; pos += purple.size(); }
+    assert(count == 1);
+
+    DisplayList terminal_clip;
+    terminal_clip.add(PushClipCommand{Rect(10, 20, 20, 20)});
+    terminal_clip.add(DrawCanvasCommand{Color::red()});
+    terminal_clip.add(PopClipCommand{});
+    TerminalRenderer clipped_terminal(4, 3, 10, 20);
+    const auto clipped_ansi = clipped_terminal.to_ansi_string(terminal_clip);
+    const std::string red = "\033[48;2;255;0;0m";
+    count = 0; pos = 0;
+    while ((pos = clipped_ansi.find(red, pos)) != std::string::npos) { ++count; pos += red.size(); }
+    assert(count == 2); // two cells of the four-by-three terminal
+}
+
+TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling) {
+    using namespace litebird;
+    BrowserShell shell(200, 150, 20, 10);
+    assert(shell.navigate_to("tests/render/canvas-scroll.html"));
+    auto frame = [&]() {
+        const auto bytes = shell.render_png_frame();
+        auto img = ImageDecoder::decode_png(bytes.data(), bytes.size());
+        assert(img && img->is_valid());
+        return img;
+    };
+    auto top = frame();
+    assert(top->width == 200 && top->height == 150);
+    assert(top->get_pixel_color(0, 0) == Color(127, 127, 255));
+    assert(top->get_pixel_color(20, 20) == Color(0, 255, 0));
+    assert(top->get_pixel_color(50, 20) == Color(191, 63, 127));
+    assert(top->get_pixel_color(150, 20) == Color(127, 127, 255));
+    assert(top->get_pixel_color(199, 149) == Color(127, 127, 255));
+
+    shell.scroll_to(15, 300);
+    assert(shell.scroll_x() == 15 && shell.scroll_y() == 300);
+    auto scrolled = frame();
+    assert(scrolled->get_pixel_color(0, 0) == Color(127, 127, 255));
+    assert(scrolled->get_pixel_color(15, 0) == Color(0, 255, 0));
+    assert(scrolled->get_pixel_color(50, 0) == Color(191, 63, 127));
+    assert(scrolled->get_pixel_color(150, 0) == Color(127, 127, 255));
+    assert(scrolled->get_pixel_color(199, 149) == Color(127, 127, 255));
+
+    // Relayout after live styles changes the selected source and does not
+    // leave stale metadata behind; resizing fills the new viewport as well.
+    shell.js_engine()->eval("document.documentElement.style.backgroundColor = 'transparent'");
+    shell.relayout();
+    auto body_canvas = frame();
+    assert(body_canvas->get_pixel_color(0, 0) == Color(255, 127, 127));
+    assert(body_canvas->get_pixel_color(50, 0) == Color(255, 127, 127));
+    assert(body_canvas->get_pixel_color(199, 149) == Color(255, 127, 127));
+    shell.js_engine()->eval("document.body.style.display = 'none'");
+    shell.relayout();
+    auto hidden = frame();
+    assert(hidden->get_pixel_color(0, 0) == Color::white());
+    assert(hidden->get_pixel_color(199, 149) == Color::white());
+    shell.js_engine()->eval("document.body.style.display = 'block'");
+    shell.set_viewport_size(240, 180);
+    auto resized = frame();
+    assert(resized->width == 240 && resized->height == 180);
+    assert(resized->get_pixel_color(239, 179) == Color(255, 127, 127));
+}
+
 TEST(a_built_in_method_is_not_a_constructor) {
     using namespace litebird;
 
@@ -32018,6 +32310,11 @@ int main() {
     // Phase 152: place the document body, its margins, and its descendants.
     RUN_TEST(document_body_margins_place_boxes_from_the_viewport);
     RUN_TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry);
+
+    // Phase 170: root/body canvas color, compositing, scoping and scrolling.
+    RUN_TEST(document_canvas_background_is_scoped_and_keeps_computed_styles);
+    RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
+    RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
 
     // Phase 157: ArrayBuffer.prototype.transfer(), transferToFixedLength(), detached, and resize().
     RUN_TEST(arraybuffer_transfer_detach_and_resize);

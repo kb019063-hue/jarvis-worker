@@ -1469,6 +1469,12 @@ static void collect_items(
                 items.back().width += extra_right;
             }
 
+            // Chromium paints an inline body's background on its line
+            // fragments as well as propagating it to the canvas. Block bodies
+            // do not have this extra layer. Preserve a descendant's own
+            // background: fragments carry just one color, so this still loses
+            // the body layer under a translucent descendant (see the recorded
+            // inline_body_under_a_translucent_inline_child reftest).
             const bool has_bg = !bs.background_color.is_transparent();
             const bool has_rad = bs.border_radius > 0.0f;
             const bool has_dec = bs.has_text_decoration();
@@ -1481,8 +1487,10 @@ static void collect_items(
                 for (size_t idx = initial_count; idx < items.size(); ++idx) {
                     const ComputedStyle* item_key = items[idx].style.get();
                     const ComputedStyle& cur = *item_key;
+                    const bool apply_bg = has_bg &&
+                        (!box->background_propagated || cur.background_color.is_transparent());
                     const bool already_matches =
-                        (!has_bg || cur.background_color == bs.background_color) &&
+                        (!apply_bg || cur.background_color == bs.background_color) &&
                         (!has_rad || cur.border_radius == bs.border_radius) &&
                         (!has_dec || cur.text_decoration == bs.text_decoration) &&
                         (!has_bdr || (cur.border_width == bs.border_width && cur.border_color == bs.border_color));
@@ -1494,7 +1502,7 @@ static void collect_items(
                         items[idx].style = it->second;
                     } else {
                         ComputedStyle merged = cur;
-                        if (has_bg) merged.background_color = bs.background_color;
+                        if (apply_bg) merged.background_color = bs.background_color;
                         if (has_rad) merged.border_radius = bs.border_radius;
                         if (has_dec) merged.text_decoration = bs.text_decoration;
                         if (has_bdr) {

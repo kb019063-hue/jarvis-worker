@@ -984,8 +984,7 @@
           "colour": "#ff0000",
           "describe": "and so does the straight part of the top edge"
         }
-      ],
-      "known_failure": "`overflow: hidden` clips to a rectangle: the clip command carries `border_radius`, and the corner is not removed, so the child's ink reaches the box's square corner"
+      ]
     },
     {
       "name": "flex_align_items_flex_end_puts_the_item_at_the_cross_end",
@@ -1260,6 +1259,151 @@
           "y": 60,
           "colour": "#ffffff",
           "describe": "and nothing is painted below it"
+        }
+      ]
+    },
+    {
+      "name": "a_rounded_clip_stops_where_a_rounded_background_does",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.bg { position: absolute; left: 0; top: 0; width: 40px; height: 40px; background: #ff0000; border-radius: 16px }\n.p { position: absolute; left: 50px; top: 0; width: 40px; height: 40px; overflow: hidden; border-radius: 16px }\n.c { width: 40px; height: 40px; background: #ff0000 }\n</style></head><body><div class=\"bg\"></div><div class=\"p\"><div class=\"c\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "the background's own corner is blank"
+        },
+        {
+          "kind": "pixel",
+          "x": 50,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "and the clip takes the child's ink out of the corner of the clipped box"
+        },
+        {
+          "kind": "pixel",
+          "x": 2,
+          "y": 2,
+          "colour": "#ffffff",
+          "describe": "two pixels in, both are still blank"
+        },
+        {
+          "kind": "pixel",
+          "x": 52,
+          "y": 2,
+          "colour": "#ffffff",
+          "describe": "for the clip as well"
+        },
+        {
+          "kind": "pixel",
+          "x": 4,
+          "y": 4,
+          "colour": "#ffc3c3",
+          "describe": "four in, the curve has started: the pixel is a quarter painted, and the same shade"
+        },
+        {
+          "kind": "pixel",
+          "x": 54,
+          "y": 4,
+          "colour": "#ffc3c3",
+          "describe": "on the clipped side too -- the clip is anti-aliased, not a stencil"
+        },
+        {
+          "kind": "pixel",
+          "x": 5,
+          "y": 5,
+          "colour": "#ff0000",
+          "describe": "past the curve the background is solid"
+        },
+        {
+          "kind": "pixel",
+          "x": 55,
+          "y": 5,
+          "colour": "#ff0000",
+          "describe": "and the child shows through the clip solid"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#ff0000",
+          "describe": "the middle is untouched"
+        },
+        {
+          "kind": "pixel",
+          "x": 70,
+          "y": 20,
+          "colour": "#ff0000",
+          "describe": "and the middle of the clipped box"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "the straight part of the top edge still paints"
+        },
+        {
+          "kind": "pixel",
+          "x": 70,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "on the clipped box as well"
+        }
+      ]
+    },
+    {
+      "name": "a_scaled_rounded_clip_scales_its_corner",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.p { position: absolute; left: 0; top: 0; width: 40px; height: 40px; overflow: hidden; border-radius: 16px; transform: scale(2); transform-origin: 0 0 }\n.c { width: 40px; height: 40px; background: #ff0000 }\n</style></head><body><div class=\"p\"><div class=\"c\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "the box is drawn 80x80, so a 16px corner is a 32px one"
+        },
+        {
+          "kind": "pixel",
+          "x": 8,
+          "y": 8,
+          "colour": "#ffffff",
+          "describe": "a pixel that was inside the 16px curve is outside the 32px one"
+        },
+        {
+          "kind": "pixel",
+          "x": 9,
+          "y": 9,
+          "colour": "#ff5151",
+          "describe": "on the curve: a fraction of the child shows"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 10,
+          "colour": "#ff0000",
+          "describe": "past it the child is solid"
+        },
+        {
+          "kind": "pixel",
+          "x": 40,
+          "y": 40,
+          "colour": "#ff0000",
+          "describe": "the middle is untouched"
+        },
+        {
+          "kind": "pixel",
+          "x": 79,
+          "y": 0,
+          "colour": "#ffffff",
+          "describe": "the far corner curves too, as the scaled radius says"
+        },
+        {
+          "kind": "pixel",
+          "x": 40,
+          "y": 0,
+          "colour": "#ff0000",
+          "describe": "the straight part of the scaled top edge paints"
         }
       ]
     }

@@ -53,7 +53,7 @@ in both.
 
 - the 13 checks of the new suite, in Node.js 22 and in this build: the same
   text, all thirteen; nine differ on a build of `main` at `e1414f6`.
-- `make test` 305 / 305 (304 on `main` as this was written; 296 when the change
+- `make test` 306 / 306 (305 on `main` as this was written; 296 when the change
   was made), 114 cross-origin checks.
 - the corpora unchanged: js-conformance 1143 / 1158, DOM 678 / 678, tree
   construction 1973 / 1973, URL 1188 / 1188, WPT 9567 / 9824 with no unlisted

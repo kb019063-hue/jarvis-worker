@@ -84,8 +84,9 @@ suite pins all three shapes (an object receiver, a function receiver, `null`).
 - `Array[Symbol.species]`, `Map[Symbol.species]`, `Set[Symbol.species]` and
   `Promise[Symbol.species]`.
 
-Measured: `prototypes.dat` 70/76, `js-conformance` 1143 → 1144 of 1158, one
-new unit suite, 300 suites in total. Details in
+Measured: `prototypes.dat` 70/76, `js-conformance` 1143 → 1144 of 1158 on the
+branch (1145 on the merged tree, where main had fixed one more case), one new
+unit suite, 303 suites in total. Details in
 `docs/phases/140-a-subclass-is-made-by-the-builtin-it-was-called-on.md`.
 
 ## 3. What is still wrong

@@ -87,19 +87,24 @@ $ python3 tools/conformance/run_js_conformance.py --binary build/litebird
 JS conformance, full corpus: 1144/1158 (98.8%)  [29 files, 0 crashes, 0 timeouts]
 ```
 
-1143 → **1144**: the `Symbol.species` case of `prototypes.dat` passes, and
-`prototypes.dat` has six recorded failures left rather than seven. The other
-case — `Array.from` *and* `Promise.resolve` in one script — still fails on its
-`Promise` half (see §4).
+1143 → **1144** on the branch as it was written: the `Symbol.species` case of
+`prototypes.dat` passes, and `prototypes.dat` has six recorded failures left
+rather than seven. The other case — `Array.from` *and* `Promise.resolve` in one
+script — still fails on its `Promise` half (see §4). Main was merged before this
+landed and had fixed one `iteration.dat` case of its own, so the tree this
+merges as prints **1145/1158 (98.9%)**; the ledger and the floor in `ci.yml`
+carry that number.
 
 ```
 $ make test
-All 300 engine test suites passed successfully!
+All 303 engine test suites passed successfully!
 Cross-origin Window/Location and MessageChannel suite: 114 checks, 0 failure(s).
 ```
 
 The new suite `a_subclass_is_made_by_the_builtin_it_was_called_on` asserts
 eighteen statements; every expected string was printed by Node v22.22.3 first.
+(303 rather than 301 + 1 because main merged a new suite of its own beside
+this one.)
 Everything else is unchanged: dom 678/678, url 1188/1188, xml 1718/1718,
 tree-construction 1973/1973, wpt 9567/9824, render reftests 29/34 with five
 recorded.

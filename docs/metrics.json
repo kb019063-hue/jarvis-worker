@@ -26,10 +26,10 @@
       "derived": "RUN_TEST lines of tests/test_suite.cpp"
     },
     "js_conformance": {
-      "pass": 1144,
+      "pass": 1145,
       "command": "make js-conformance",
       "date": "2026-11-21",
-      "note": "the total is the corpus on disk; only the pass count needs a run. 1137 before Phase 102, which fixed the two cases iteration.dat records for array destructuring; 1141 before Phase 114, which made `instanceof` ask Symbol.hasInstance and stopped prototypes.dat aborting on the case that asks for it; 1144 after Phase 140, which made the array methods ask Symbol.species (prototypes.dat, \"methods of a built-in make the subclass of the object they are called on\")"
+      "note": "the total is the corpus on disk; only the pass count needs a run. 1137 before Phase 102, which fixed the two cases iteration.dat records for array destructuring; 1141 before Phase 114, which made `instanceof` ask Symbol.hasInstance and stopped prototypes.dat aborting on the case that asks for it; 1144 after Phase 140, which made the array methods ask Symbol.species (prototypes.dat, \"methods of a built-in make the subclass of the object they are called on\"); 1145 after merging main on 21 November, which fixed one iteration.dat case"
     },
     "dom_conformance": {
       "pass": 678,

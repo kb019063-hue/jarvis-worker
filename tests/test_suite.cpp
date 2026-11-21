@@ -130,6 +130,97 @@ static void give_memory_back() {}
     std::cout << "\033[32mPASSED\033[0m\n"; \
 } while(0)
 
+/// A page and an interpreter over it, which is how nearly every suite that runs
+/// script begins.
+///
+/// This exists because of what a merge did, not for brevity. A suite written as
+///
+///     TEST(mine) {
+///         auto doc = std::make_shared<Document>();
+///         doc->set_url("https://example.test/");
+///         JsInterpreter js(doc);
+///         js.load_page("<!DOCTYPE html><body></body>");
+///         js.notify_document_loaded();
+///         js.eval(...);
+///     }
+///
+/// and one written the same way on `main` differ only in their two titles and
+/// their two evals. Git sees six lines of identical text between the titles and
+/// the evals, and splits that into **two** conflicts with the boilerplate left
+/// outside both — so "take mine" and "take theirs" each produce a function with
+/// another suite's body. That happened five times merging one branch, and each
+/// time the fix was to take both functions whole from their own side of the
+/// merge and write them back in order.
+///
+/// With the boilerplate behind one call the two suites have nothing in common
+/// but the title, and the same merge is one conflict enclosing the whole
+/// function: keeping both is the whole resolution. Verified with `git
+/// merge-file` on the two shapes before this was written; the test of this
+/// helper is `tools/ci/check_suites.py` (see "the merge" in README.md).
+class TestPage {
+public:
+    /// The empty page, and "loaded" so a script sees a document rather than a
+    /// tree that is still arriving.
+    TestPage() : m_doc(std::make_shared<litebird::Document>()), js(m_doc) {
+        m_doc->set_url("https://example.test/");
+        js.load_page("<!DOCTYPE html><body></body>");
+        js.notify_document_loaded();
+    }
+
+    /// An interpreter over a document that has a URL and no page in it, which is
+    /// what a suite that builds its own tree needs; `TestPage::load` puts an
+    /// empty page in after the tree is built, where a suite wants that.
+    struct WithUrl {};
+    TestPage(WithUrl) : m_doc(std::make_shared<litebird::Document>()), js(m_doc) {
+        m_doc->set_url("https://example.test/");
+    }
+
+    /// A document to build a tree in, with the interpreter made after `build`
+    /// has run over it. A suite that needs its own nodes before any script runs
+    /// (`doc->append_child(...)`, then `new JsInterpreter(doc)`) writes
+    ///
+    ///     TestPage page(TestPage::Built([](litebird::Document& d) { ... }));
+    ///
+    /// and the order that matters — document first, interpreter second — is the
+    /// constructor's rather than the suite's, so a suite cannot get it wrong.
+    struct Built {
+        std::function<void(litebird::Document&)> build;
+        explicit Built(std::function<void(litebird::Document&)> f) : build(std::move(f)) {}
+    };
+    TestPage(Built made) : m_doc(std::make_shared<litebird::Document>()), js(make_document(made)) {}
+
+private:
+    std::shared_ptr<litebird::Document> make_document(const Built& made) {
+        m_doc->set_url("https://example.test/");
+        made.build(*m_doc);
+        return m_doc;
+    }
+
+public:
+
+    /// Parse and finish `html` in this page's document, after any tree a suite
+    /// has already built. Answers the interpreter, so `page.load(...).eval(...)`
+    /// reads in one line.
+    litebird::JsInterpreter& load(const std::string& html) {
+        js.load_page(html);
+        js.notify_document_loaded();
+        return js;
+    }
+
+    litebird::Document& document() { return *m_doc; }
+
+    /// The document, declared before `js` so that it outlives it: members are
+    /// destroyed in reverse declaration order, so the interpreter is unwound
+    /// first. The other way round is a use-after-free that segfaults
+    /// `xml_serializer_writes_a_tree_that_reads_back_the_same`, the suite that
+    /// tears down the most. The boilerplate this replaces declared `doc` before
+    /// `js` for that reason, and keeping that order is the one thing about it
+    /// that had to survive the change.
+    std::shared_ptr<litebird::Document> m_doc;
+
+    litebird::JsInterpreter js;
+};
+
 TEST(color_parsing) {
     using namespace litebird;
     Color c1 = Color::parse("#ff0000");
@@ -9233,9 +9324,8 @@ TEST(page_scripts_run_by_the_rules_of_a_page_load) {
     using namespace litebird;
     // Which <script> elements are JavaScript to run, and when: each one as
     // the parser reaches its end tag, seeing the page up to itself.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><head><title>T</title>"
         "<script id=first>window.log = ['first:' + document.currentScript.id + ':' + document.readyState + ':' +"
@@ -9336,9 +9426,8 @@ TEST(get_element_by_id_answers_from_an_index) {
     // (Document::get_element_by_id), so every question here is asked twice:
     // once of the walk and once of the index, and after every kind of change
     // that must make the index forget. jsdom prints the same line.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><body><p id=\"a\" class=\"first\">x</p><span id=\"dup\" class=\"one\"></span><div id=\"b\"></div>"
         "<span id=\"dup\" class=\"two\"></span><em id=\"null\"></em><template><s id=\"intemplate\"></s></template></body>");
@@ -9393,9 +9482,8 @@ TEST(computed_style_answers_for_every_property) {
     // initial values, specificity, colours, lengths, the defaults of HTML
     // elements, shorthands, inherit and initial). Here is what those cannot
     // hold, because jsdom answers something else and CSS says this.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>"
         "#a { line-height: 200%; font-size: 20px; border: 0.6px solid; outline: 2px dotted green; word-spacing: 0.5em }"
@@ -9489,9 +9577,8 @@ TEST(ranges_follow_the_tree) {
     // cases of the DOM corpus hold the rules (tests/dom-conformance/
     // ranges.dat). Here: the two answers jsdom gets wrong, and trees and
     // numbers of ranges no person writes.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><p id=p></p><div id=d><span>one</span><span>two</span></div></body>");
     js.notify_document_loaded();
 
@@ -9558,9 +9645,8 @@ TEST(dom_follows_the_standard_where_jsdom_does_not) {
     // and the HTML and DOM standards differ, so the corpus stays away from
     // them (tests/dom-conformance/README.md) and the standard's answer is
     // asserted here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><body><div id=d tabindex='junk'></div><button id=b tabindex='junk'>b</button>"
         "<a id=a href='#x' tabindex='junk'>a</a><span id=s></span>"
@@ -10045,9 +10131,8 @@ TEST(xml_documents_in_the_dom) {
 
 TEST(xml_serializer_writes_a_tree_that_reads_back_the_same) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body></body>");
     js.notify_document_loaded();
     js.eval(R"JS(
@@ -10177,11 +10262,8 @@ TEST(xml_serializer_writes_a_tree_that_reads_back_the_same) {
 
 TEST(inner_html_of_an_xml_document_is_xml) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var P = new DOMParser();
         function xml(text) { return P.parseFromString(text, 'application/xml'); }
@@ -10233,11 +10315,8 @@ TEST(inner_html_of_an_xml_document_is_xml) {
 
 TEST(dom_names_are_checked_by_the_dom_standard) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var X = document.implementation.createDocument(null, null);
         function each(list, f) { return list.map(function (item) { try { return String(f(item)); } catch (e) { return e.name; } }).join(' '); }
@@ -10287,11 +10366,8 @@ TEST(dom_names_are_checked_by_the_dom_standard) {
 
 TEST(a_document_keeps_one_doctype_and_one_element_in_that_order) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var S = new XMLSerializer(), I = document.implementation;
         function caught(f) { try { f(); return 'ok'; } catch (e) { return e.name; } }
@@ -10338,9 +10414,8 @@ TEST(a_document_keeps_one_doctype_and_one_element_in_that_order) {
 
 TEST(foreign_attributes_from_the_html_parser_have_namespaces) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     // The HTML parser gives eleven attributes of SVG and MathML elements a
     // namespace ("adjust foreign attributes"). They used to be stored under
     // the names of the html5lib test format ("xlink href"), so no script
@@ -10382,7 +10457,7 @@ TEST(foreign_attributes_from_the_html_parser_have_namespaces) {
     assert(S("var copy = document.createElement('div'); copy.innerHTML = s.outerHTML; names(copy.querySelector('a')) === names(lnk) && copy.innerHTML === s.outerHTML") == "true");
 
     // The tree dump of the html5lib tests still writes them its way.
-    const std::string dump = dump_tree_webplatform(*doc);
+    const std::string dump = dump_tree_webplatform(page.document());
     assert(dump.find("xlink href=\"#x\"") != std::string::npos);
     assert(dump.find("xml lang=\"en\"") != std::string::npos);
     assert(dump.find("xmlns xlink=\"http://www.w3.org/1999/xlink\"") != std::string::npos);
@@ -10395,11 +10470,8 @@ TEST(xml_dom_follows_the_standard_where_jsdom_does_not) {
     // places jsdom and the standards differ, so the corpus stays away from
     // them (tests/dom-conformance/README.md) and the standard's answer is
     // asserted here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var P = new DOMParser(), S = new XMLSerializer();
         function xml(text, type) { return P.parseFromString(text, type || 'application/xml'); }
@@ -10461,9 +10533,8 @@ TEST(xml_dom_follows_the_standard_where_jsdom_does_not) {
 
 TEST(selectors_know_namespaces) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><svg><a xlink:href=\"#x\"></a></svg><a href=\"#y\"></a></body>");
     js.notify_document_loaded();
     js.eval("function count(d, selector) { try { return d.querySelectorAll(selector).length; } catch (e) { return e.name; } }"
@@ -10603,11 +10674,8 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
 
     // 3. From a script: 50,000 attributes set, read, half of them removed,
     //    and the order is still the order they were added in.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     const auto start = std::chrono::steady_clock::now();
     assert(js.eval("var e = document.createElement('div'); for (var i = 0; i < 50000; i++) e.setAttribute('a' + i, i);"
                    "var sum = 0; for (var i = 0; i < 50000; i++) sum += Number(e.getAttribute('a' + i));"
@@ -10627,9 +10695,8 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
 
 TEST(attributes_are_kept_by_namespace_and_local_name) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><div id=\"host\"></div></body>");
     js.notify_document_loaded();
     auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
@@ -13966,8 +14033,8 @@ TEST(strict_equality_does_not_coerce) {
     // one: `document` was undefined, every DOM line below silently evaluated to
     // undefined, and `undefined === undefined` made the identity assertions
     // pass without a single DOM node being involved.
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
 
     js.eval_ast(R"(
         var n_eq = (1 === 1);
@@ -16002,11 +16069,8 @@ TEST(fetch_relative_requests_use_the_document_base_url) {
 
 TEST(regexp_vm_handles_deep_nesting_and_long_inputs) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var deepNonCap = new RegExp("(?:".repeat(250) + "abc" + ")".repeat(250));
@@ -16109,11 +16173,8 @@ TEST(css_cascade_layers_supports_combinators_and_mq_l4) {
 
 TEST(inline_style_cssom_shorthands_and_aliases) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var el = document.createElement('div');
@@ -16151,9 +16212,8 @@ TEST(cssom_sheets_rules_insert_amounts_and_fonts) {
     //
     // Every assertion is a comparison made in the page (`ok(...)`), because
     // what a script sees is the thing being tested.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>#target { color: red } .gone { display: none }</style></head>"
         "<body><div id=\"target\">x</div><p class=\"gone\">y</p></body></html>");
@@ -16295,9 +16355,8 @@ TEST(cssom_media_rules_and_the_cascade_inside_them) {
     // is asked where the cascade reads it — against the window the page is in
     // (1024x768, a light screen with a mouse), which is what `matchMedia` and
     // `innerWidth` already answered with.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>"
         "#target { color: red }"
@@ -16445,9 +16504,8 @@ TEST(keyframes_are_rules_of_the_cssom) {
     // next one's index, and `insertRule('@keyframes …')` was a `SyntaxError`.
     // A browser lists the block as a `CSSKeyframesRule` whose frames are a
     // `CSSRuleList` of their own.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>"
         "@keyframes slide { 0% { left: 0px } 50%, 100% { left: 10px; opacity: .5 } }"
@@ -16573,9 +16631,8 @@ TEST(array_holes_are_not_elements) {
     // Every assertion is a comparison made in the page, and the whole set was
     // run through this engine and through Node.js first: the same text, the
     // same 38 lines. Where they must differ it is said so in a comment.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><html><body><p id=t>x</p></body></html>");
     js.notify_document_loaded();
 
@@ -16751,11 +16808,8 @@ TEST(cssom_a_sheet_a_script_constructs) {
     // rule of its own. What is new is `replace`/`replaceSync` and the
     // constructor. Every line was compared against jsdom before it was
     // written down.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var failures = [];
@@ -16888,9 +16942,8 @@ TEST(destructuring_asks_the_value_for_its_iterator) {
     // Every assertion is a comparison made in the page. The whole script was
     // run under Node.js first and prints the same lines there; where this
     // engine must differ it is said so.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><html><body></body></html>");
     js.notify_document_loaded();
 
@@ -17018,11 +17071,8 @@ TEST(a_hole_is_a_place_the_prototype_can_fill) {
     //
     // Every assertion is compared in the page, and the whole set was run
     // through this engine and through Node.js first: the same lines.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     // The find family visits every place, holes included.
     js.eval(R"JS(
@@ -17210,11 +17260,8 @@ TEST(length_is_inherited_from_an_array_prototype) {
 
 TEST(html5_date_time_inputs_validation_and_stepping) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         function inp(t, v) { var e = document.createElement('input'); e.type = t; if (v !== undefined) e.value = v; return e; }
@@ -17697,8 +17744,8 @@ TEST(web_browser_server_and_http11_gzip_chunked_cors_and_gui_e2e) {
     // 2. CORS enforcement on cross-origin XHR & fetch()
     {
         auto doc = std::make_shared<Document>();
-        doc->set_url("https://webapp.example/index.html");
-        JsInterpreter js(doc);
+    doc->set_url("https://webapp.example/index.html");
+    JsInterpreter js(doc);
         js.load_page("<script>window.openRes = ''; window.closedErr = false;</script>");
         js.notify_document_loaded();
 
@@ -18029,8 +18076,8 @@ TEST(js_classes_compiled_to_es5_run) {
 TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype) {
     using namespace litebird;
 
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.eval_ast(R"(
         class MyEvent extends Event { constructor(type, extra) { super(type); this.extra = extra; } }
         class Bus extends EventTarget { emit(name) { return this.dispatchEvent(new MyEvent(name, 7)); } }
@@ -18297,11 +18344,8 @@ TEST(attribute_list_front_removal_is_linear_in_practice) {
     assert(direct.empty());
     assert(direct_seconds < 5.0);
 
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     start = std::chrono::steady_clock::now();
     assert(js.eval(
@@ -20860,8 +20904,8 @@ TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering) {
     for (int round = 0; round < 3; ++round) {
         {
             auto doc = std::make_shared<Document>();
-            doc->set_url("https://gc.example.test/root.html");
-            JsInterpreter js(doc);
+    doc->set_url("https://gc.example.test/root.html");
+    JsInterpreter js(doc);
             js.load_page(R"html(<!doctype html><html><body>
               <iframe id="child" srcdoc="<div id='item'>from-child</div><iframe srcdoc='<p>leaf</p>'></iframe><script>class CustomBox {} window.box = new CustomBox();</script>"></iframe>
             </body></html>)html", true);
@@ -22711,9 +22755,8 @@ TEST(cloning_for_selectedcontent_keeps_attribute_namespaces) {
     // `clone_node_tree`). An attribute carries its own namespace since Phase
     // 51 — there is no side table to copy — so a clone that copied only names
     // and values would lose the namespaces of `xml:lang` and `xlink:href`.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><select><button><selectedcontent></selectedcontent></button>"
                  "<option selected>x<svg xml:lang=\"en\"><use xlink:href=\"#i\"/></svg></option></select>");
     js.notify_document_loaded();
@@ -22866,8 +22909,9 @@ TEST(select_selectedcontent_cloning_and_edge_cases) {
     assert(contains(with_tpl_child, "<selectedcontent>\n|           <template>\n|             content\n|               <span>\n|                 \"T\"\n|           \"Label\"\n"));
 
     {
-        auto doc = std::make_shared<Document>();
-        JsInterpreter js(doc);
+            auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
         js.load_page(
             "<!doctype html><select><button><selectedcontent id='sc'></button>"
             "<option id='o1'>First</option>"
@@ -22963,8 +23007,8 @@ TEST(regexp_unicode17_tables_and_parse_time_validation) {
 
 TEST(regexp_unicode_sets_v_mode_case_folding_and_has_indices) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var r = new RegExp("[\\p{Decimal_Number}--[0-9]]+", "v");
         var v_checks = [
@@ -23004,8 +23048,8 @@ TEST(regexp_unicode_sets_v_mode_case_folding_and_has_indices) {
 
 TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         // ES2025 inline modifiers (?ims-ims:...)
         var mod_ok =
@@ -26323,11 +26367,8 @@ TEST(an_accessor_on_an_array_index_is_its_property) {
     // methods that move elements in place (`reverse`, `sort`, `shift`,
     // `unshift`, `splice`, `fill`, `copyWithin`) and array destructuring move
     // and read the places and not what an accessor makes of them (AGENTS.md).
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -26981,11 +27022,8 @@ TEST(array_destructuring_reads_the_place_not_the_vector) {
     //
     // Every case was run through Node.js first, and the expected text of each
     // is what it printed.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -27243,11 +27281,8 @@ TEST(array_methods_that_move_places_ask_the_index) {
     //
     // Every case was run through Node.js first, and the expected text of each
     // is what it printed.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
 var failures = [];
 function check(what, f, want) {
@@ -27412,9 +27447,8 @@ TEST(instanceof_asks_symbol_has_instance) {
     // `r instanceof Response` answers false where the language says true; the
     // operator does not throw for them, because a native function with no
     // `prototype` is left answering false (AGENTS.md).
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><div id=\"d\"></div></body>");
     js.notify_document_loaded();
     auto none_failed = [&]() {
@@ -27578,11 +27612,8 @@ TEST(a_strict_delete_refuses_what_it_cannot_remove) {
     // still be deleted; and `arguments` prints as `#<Array>` in the message
     // because its prototype is `Array.prototype` here, which is its own
     // divergence.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -28105,9 +28136,8 @@ TEST(reflect_describes_and_answers_extensibility) {
     // Object.getOwnPropertyDescriptor either. Neither is asserted here; the
     // suite would fail on the engine and pass on Node, and a test of a bug
     // that is out of the task's files is the next task, not this one.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><div id=\"d\"></div></body>");
     js.notify_document_loaded();
     auto none_failed = [&]() {
@@ -28284,11 +28314,8 @@ TEST(object_integrity_levels_ask_every_property) {
     // The suite it was found in (Phase 124) wrote this case down and did not
     // assert it, because the bug was outside that task's files; this is the
     // task that owns them.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -28489,11 +28516,8 @@ TEST(boxed_string_own_index_descriptors) {
     // exotic object own, enumerable, non-writable, non-configurable index
     // properties too. Every expected JSON value below was printed by Node.js
     // v22.22.3 before being asserted here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var failures = [];
         function check(what, f, want) {
@@ -28552,11 +28576,8 @@ TEST(object_prototype_legacy_accessor_reflection) {
     // accessor; lookupGetter/Setter walk the prototype chain and stop at the
     // first own property. Node.js v22.22.3 printed each expected JSON value
     // below before it was added to the suite.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var failures = [];
@@ -28663,11 +28684,8 @@ TEST(image_data_is_an_interface) {
     // the dirty rectangle it is given and nothing else. Every expectation
     // below is the standard's; where the standard leaves a choice (the exact
     // message) it is not asserted.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var failures = [];
         function check(what, f, want) {
@@ -28931,11 +28949,8 @@ TEST(text_codec_a_decoder_and_an_encoder_in_script) {
     //
     // Every assertion below was run through Node first, as a standalone script;
     // its output is identical there and here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var failures = [];

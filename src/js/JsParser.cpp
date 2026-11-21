@@ -985,6 +985,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
                 ctx.forbid_arguments = true;
                 ctx.forbid_await = true;
                 ctx.allow_super_property = true;
+                ctx.in_class_field = true;
                 m_functions.push_back(ctx);
                 parse_function_body(*fn);
                 m_functions.pop_back();
@@ -1039,9 +1040,30 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
             }
         }
 
+        // Two names a class body may not use, both checked on the static
+        // semantics of the element rather than on how it is written:
+        //   ClassElementName : "prototype"  is refused as a *static* MethodDefinition
+        //   FieldDefinition : ClassElementName Initializer?  may not be named "constructor"
+        const bool named = !member.computed_key && !member.is_private;
+        if (named && member.is_static && member.key == "prototype") {
+            fail("Classes may not have a static property named 'prototype'");
+        }
+        if (named && !member.is_static && member.key == "constructor" &&
+            !check(JsTokenType::OpenParen)) {
+            fail("Classes may not have a field named 'constructor'");
+        }
+
         if (check(JsTokenType::OpenParen)) {
             const bool is_constructor = member.kind == ClassMember::Kind::Method && !member.is_static &&
-                                        !member.computed_key && member.key == "constructor";
+                                        !member.computed_key && member.key == "constructor" &&
+                                        !is_async && !is_generator;
+            // A MethodDefinition named "constructor" is the class's constructor
+            // or it is an error: a getter, a setter, an async method and a
+            // generator may not take that name on the instance side. Static
+            // ones and computed ones are ordinary methods, and are allowed.
+            if (named && !member.is_static && member.key == "constructor" && !is_constructor) {
+                fail("Class constructor may not be an accessor, async or a generator");
+            }
             auto fn = parse_method(is_async, is_generator, /*allow_super_property=*/true,
                                    /*allow_super_call=*/is_constructor && static_cast<bool>(cls->super_class));
             set_source(*fn, member_token);
@@ -1070,6 +1092,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
                 ctx.strict = true;
                 ctx.forbid_arguments = true;
                 ctx.allow_super_property = true;
+                ctx.in_class_field = true;
                 m_functions.push_back(ctx);
                 member.value = parse_assignment();
                 m_functions.pop_back();
@@ -1501,6 +1524,14 @@ std::unique_ptr<Expr> JsParser::parse_unary() {
                 static_cast<const MemberExpr*>(operand.get())->private_name) {
                 fail("Private fields can not be deleted");
             }
+            // `delete name` is an early error in strict code: a binding is not
+            // a property, and the language refuses to look as if it were.
+            // `this` is not an identifier here (the parser keeps it as one
+            // node kind), and is not a reference to delete either.
+            if (op == JsTokenType::Delete && operand->kind == NodeKind::Identifier) {
+                const std::string& name = static_cast<const IdentifierExpr*>(operand.get())->name;
+                if (name != "this" && is_strict()) fail("Delete of an unqualified identifier in strict mode.");
+            }
             return std::make_unique<UnaryExpr>(op, std::move(operand));
         }
         // Prefix increment/decrement: `++i` yields the value *after* the change.
@@ -1913,6 +1944,15 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
             if (m_context.direct_eval && (is_call ? !allows_call : !allows_property)) {
                 fail("'super' keyword unexpected here");
             }
+            // `super()` is legal in one place only: a derived constructor, so
+            // that is exactly what allow_super_call is set for (§15.7.1). A
+            // method of a derived class cannot call it — Contains SuperCall is
+            // false for a FunctionBody, so a call there is not part of the
+            // grammar either. A field initialiser and a static block have a
+            // home object, so `super.x` is theirs, but they *do* contain their
+            // own `super()`, which is an early error of those productions
+            // (ClassFieldDefinition / ClassStaticBlockBody).
+            if (is_call && !allows_call) fail("'super' keyword unexpected here");
             if (auto* fn = nearest_non_arrow_function()) fn->uses_super = true;
             if (is_call) {
                 result = std::make_unique<SuperCallExpr>(parse_arguments());

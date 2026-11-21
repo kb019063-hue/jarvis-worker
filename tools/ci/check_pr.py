@@ -152,6 +152,31 @@ def file_at(path: str, ref: str) -> str:
     return gh("api", f"{REPO}/contents/{path}?ref={ref}", "-H", "Accept: application/vnd.github.raw")
 
 
+def without_remarks(line: str) -> str:
+    """A line of a `Files:` list without what is said in brackets.
+
+    Brackets inside the brackets are part of the remark. They used not to be:
+    of "`src/a.cpp` (the `f()` helper)" the first closing bracket ended the
+    remark, "` helper)" stayed, and the name that was read was no file's. On
+    20 November that hid a clash: #163 named `src/js/BuiltinsArray.cpp` that
+    way thirty-one seconds after #161 had claimed it, and was told nothing.
+    """
+    kept, depth = [], 0
+    for character in line:
+        if character == "(":
+            depth += 1
+        elif character == ")":
+            if depth == 0:
+                break               # a bracket that closes nothing: read the line the old way
+            depth -= 1
+        elif depth == 0:
+            kept.append(character)
+    else:
+        if depth == 0:
+            return "".join(kept)
+    return re.sub(r"\([^)]*\)", "", line)   # brackets that do not pair up
+
+
 def claim_of(pr: dict) -> dict:
     """The claim a pull request makes: the three lines AGENTS.md asks for."""
     body = (pr.get("body") or "").replace("\r\n", "\n")
@@ -190,7 +215,12 @@ def claim_of(pr: dict) -> dict:
             # "No phase", and the later was told to stay out of it.
             collecting = False
         if collecting:
-            for part in re.sub(r"\([^)]*\)", "", line).split(","):
+            for part in re.split(r"[,;]", without_remarks(line)):
+                # A name in backticks is the name, whatever is said around it
+                # ("new `src/a.cpp`", "`src/a.cpp` -- the helper").
+                quoted = re.search(r"`([^`]+)`", part)
+                if quoted:
+                    part = quoted.group(1)
                 # "`docs/x.md`." at the end of a sentence is docs/x.md; a name
                 # may begin with a full stop (.github/...), so only the end.
                 part = FILE_NAME_END_RE.sub("", part.strip().lstrip("`").strip())
@@ -775,11 +805,19 @@ def self_test() -> int:
     silent = claim("## What\n\nA change, described.", title="Phase 56: a title that says a number")
     folder = claim("Task: a row\nFiles: `tests/dom-conformance/`\nPhase 5, finding 7\n")
     inside = claim("Task: a row\nFiles: `src/b.cpp`\nPhase 6, finding 8\n", changed=("tests/dom-conformance/everyday.dat",))
+    remark = claim("Task: a row\nFiles: `src/a.cpp` (the `f()` helper), `tests/test_suite.cpp`\nPhase 5, finding 7\n")
+    around = claim("Task: a row\nFiles: new `src/a.cpp`, `src/b.cpp` -- the helper; `src/c.cpp` (half (the `g()` half, not `h()`))\nPhase 5, finding 7\n")
+    unpaired = claim("Task: a row\nFiles: `src/a.cpp` (new, `src/b.cpp`\nPhase 5, finding 7\n")
 
     cases = [
         ("the three lines: the numbers", (numbered["phase"], numbered["finding"]), (5, 7)),
         ("the three lines: the files, over two lines, without what is in brackets",
          numbered["files"], {"src/a.cpp", "include/a.hpp", "tests/test_suite.cpp"}),
+        ("a remark in brackets that has brackets in it is a remark to its end",
+         remark["files"], {"src/a.cpp", "tests/test_suite.cpp"}),
+        ("a name in backticks is the name, whatever is said around it, and a semicolon parts two as a comma does",
+         around["files"], {"src/a.cpp", "src/b.cpp", "src/c.cpp"}),
+        ("brackets that do not pair up are read as they were", unpaired["files"], {"src/a.cpp", "src/b.cpp"}),
         ("the three lines are a claim", numbered["has_claim_lines"], True),
         ("`No phase, no finding` is the third line of a claim, and a claim", plain["has_claim_lines"], True),
         ("`No phase, no finding` takes no number", (plain["phase"], plain["finding"]), (None, None)),

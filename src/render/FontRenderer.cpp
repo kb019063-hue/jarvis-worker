@@ -485,16 +485,29 @@ bool TrueTypeFont::load_memory(std::vector<uint8_t> data) {
     m_gdef_glyph_class = OtfClassDef{};
     m_gdef_mark_attach_class = OtfClassDef{};
     m_gdef_mark_sets.clear();
+    m_has_contextual_gsub = false;
+    m_gsub_singles.clear();
+    m_gsub_multiples.clear();
+    m_gsub_alternates.clear();
+    m_gsub_ligatures.clear();
+    m_gsub_contexts.clear();
+    m_gsub_lookups.clear();
+    m_gsub_scripts.clear();
     m_has_gpos_kern = false;
+    m_has_gpos_cursive = false;
     m_has_gpos_marks = false;
+    m_has_contextual_gpos = false;
     m_gpos_known_marks.clear();
     m_gpos_singles.clear();
     m_gpos_pair_fmt1.clear();
     m_gpos_pair_fmt2.clear();
+    m_gpos_cursives.clear();
     m_gpos_mark_base.clear();
     m_gpos_mark_lig.clear();
     m_gpos_mark_mark.clear();
+    m_gpos_contexts.clear();
     m_gpos_lookups.clear();
+    m_gpos_scripts.clear();
 
     uint32_t gdef_off = 0, gdef_len = 0;
     if (find_table("GDEF", gdef_off, gdef_len)) load_gdef(gdef_off, gdef_len);
@@ -662,170 +675,799 @@ uint16_t TrueTypeFont::glyph_index(uint32_t codepoint) const {
     return 0;
 }
 
+namespace {
+
+constexpr uint32_t ot_tag(char a, char b, char c, char d) {
+    return (static_cast<uint32_t>(static_cast<uint8_t>(a)) << 24) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(b)) << 16) |
+           (static_cast<uint32_t>(static_cast<uint8_t>(c)) << 8) |
+           static_cast<uint32_t>(static_cast<uint8_t>(d));
+}
+
+constexpr uint32_t kTagCommon = 0u;
+constexpr uint32_t kTagInherited = 1u;
+constexpr uint32_t kTagDflt = ot_tag('D', 'F', 'L', 'T');
+constexpr uint32_t kTagLatn = ot_tag('l', 'a', 't', 'n');
+constexpr uint32_t kTagArab = ot_tag('a', 'r', 'a', 'b');
+constexpr uint32_t kTagHebr = ot_tag('h', 'e', 'b', 'r');
+constexpr uint32_t kTagSyrc = ot_tag('s', 'y', 'r', 'c');
+constexpr uint32_t kTagThaa = ot_tag('t', 'h', 'a', 'a');
+constexpr uint32_t kTagNko  = ot_tag('n', 'k', 'o', ' ');
+constexpr uint32_t kTagCyrl = ot_tag('c', 'y', 'r', 'l');
+constexpr uint32_t kTagGrek = ot_tag('g', 'r', 'e', 'k');
+constexpr uint32_t kTagThai = ot_tag('t', 'h', 'a', 'i');
+constexpr uint32_t kTagLao  = ot_tag('l', 'a', 'o', ' ');
+constexpr uint32_t kTagDev2 = ot_tag('d', 'e', 'v', '2');
+constexpr uint32_t kTagDeva = ot_tag('d', 'e', 'v', 'a');
+
+bool is_rtl_script_tag(uint32_t tag) {
+    return tag == kTagArab || tag == kTagHebr || tag == kTagSyrc ||
+           tag == kTagThaa || tag == kTagNko;
+}
+
+bool is_digit_codepoint(uint32_t cp) {
+    return (cp >= '0' && cp <= '9') ||
+           (cp >= 0x0660u && cp <= 0x0669u) ||
+           (cp >= 0x06F0u && cp <= 0x06F9u);
+}
+
+bool is_join_control(uint32_t cp) {
+    return cp == 0x200Cu || cp == 0x200Du;
+}
+
+uint32_t classify_codepoint_script(uint32_t cp) {
+    if ((cp >= 0x0300u && cp <= 0x036Fu) ||
+        (cp >= 0x1AB0u && cp <= 0x1AFFu) ||
+        (cp >= 0x1DC0u && cp <= 0x1DFFu) ||
+        (cp >= 0x20D0u && cp <= 0x20FFu) ||
+        (cp >= 0xFE20u && cp <= 0xFE2Fu) ||
+        is_join_control(cp)) {
+        return kTagInherited;
+    }
+    if ((cp >= 0x0600u && cp <= 0x06FFu) ||
+        (cp >= 0x0750u && cp <= 0x077Fu) ||
+        (cp >= 0x0870u && cp <= 0x08FFu) ||
+        (cp >= 0xFB50u && cp <= 0xFDFFu) ||
+        (cp >= 0xFE70u && cp <= 0xFEFFu)) {
+        if (is_digit_codepoint(cp)) return kTagCommon;
+        return kTagArab;
+    }
+    if ((cp >= 0x0590u && cp <= 0x05FFu) || (cp >= 0xFB1Du && cp <= 0xFB4Fu)) return kTagHebr;
+    if (cp >= 0x0700u && cp <= 0x074Fu) return kTagSyrc;
+    if (cp >= 0x0780u && cp <= 0x07BFu) return kTagThaa;
+    if (cp >= 0x07C0u && cp <= 0x07FFu) return kTagNko;
+    if ((cp >= 0x0400u && cp <= 0x052Fu) || (cp >= 0x2DE0u && cp <= 0x2DFFu) ||
+        (cp >= 0xA640u && cp <= 0xA69Fu)) {
+        return kTagCyrl;
+    }
+    if ((cp >= 0x0370u && cp <= 0x03FFu) || (cp >= 0x1F00u && cp <= 0x1FFFu)) return kTagGrek;
+    if (cp >= 0x0E00u && cp <= 0x0E7Fu) return kTagThai;
+    if (cp >= 0x0E80u && cp <= 0x0EFFu) return kTagLao;
+    if (cp >= 0x0900u && cp <= 0x097Fu) return kTagDev2;
+    if ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') ||
+        cp == 0x00AAu || cp == 0x00BAu ||
+        (cp >= 0x00C0u && cp <= 0x00D6u) || (cp >= 0x00D8u && cp <= 0x00F6u) ||
+        (cp >= 0x00F8u && cp <= 0x024Fu) || (cp >= 0x1E00u && cp <= 0x1EFFu) ||
+        (cp >= 0x2C60u && cp <= 0x2C7Fu) || (cp >= 0xA720u && cp <= 0xA7FFu)) {
+        return kTagLatn;
+    }
+    return kTagCommon;
+}
+
+std::vector<uint32_t> itemize_codepoint_scripts(const std::vector<uint32_t>& cps) {
+    const std::size_t n = cps.size();
+    std::vector<uint32_t> out(n, kTagLatn);
+    if (n == 0) return out;
+
+    for (std::size_t i = 0; i < n; ++i) {
+        out[i] = classify_codepoint_script(cps[i]);
+    }
+    // Attach Inherited (combining marks, ZWJ/ZWNJ) to preceding strong/common script.
+    for (std::size_t i = 0; i < n; ++i) {
+        if (out[i] == kTagInherited) {
+            if (i > 0) out[i] = out[i - 1];
+            else {
+                std::size_t k = i + 1;
+                while (k < n && out[k] == kTagInherited) ++k;
+                out[i] = (k < n) ? out[k] : kTagLatn;
+            }
+        }
+    }
+    // Resolve Common spans: spaces/punctuation bounded by identical strong scripts
+    // (without digits) merge into that script so multi-word RTL stays a single run.
+    std::size_t i = 0;
+    while (i < n) {
+        if (out[i] != kTagCommon) {
+            ++i;
+            continue;
+        }
+        std::size_t j = i;
+        bool has_digit = false;
+        while (j < n && out[j] == kTagCommon) {
+            if (is_digit_codepoint(cps[j])) has_digit = true;
+            ++j;
+        }
+        const uint32_t prev_strong = (i > 0) ? out[i - 1] : 0u;
+        const uint32_t next_strong = (j < n) ? out[j] : 0u;
+        uint32_t resolved = kTagLatn;
+        if (!has_digit && prev_strong != 0u && prev_strong == next_strong &&
+            prev_strong != kTagCommon) {
+            resolved = prev_strong;
+        }
+        for (std::size_t k = i; k < j; ++k) out[k] = resolved;
+        i = j;
+    }
+    return out;
+}
+
+enum class ArabicJoinType : uint8_t {
+    NonJoining,  // U
+    Right,       // R
+    Left,        // L
+    Dual,        // D
+    Causing,     // C (Tatweel, ZWJ)
+    Transparent  // T (combining marks)
+};
+
+ArabicJoinType classify_arabic_joining(uint32_t cp) {
+    if (is_join_control(cp)) {
+        return (cp == 0x200Du) ? ArabicJoinType::Causing : ArabicJoinType::NonJoining;
+    }
+    if ((cp >= 0x0300u && cp <= 0x036Fu) ||
+        (cp >= 0x0610u && cp <= 0x061Au) ||
+        (cp >= 0x064Bu && cp <= 0x065Fu) ||
+        cp == 0x0670u ||
+        (cp >= 0x06D6u && cp <= 0x06DCu) ||
+        (cp >= 0x06DFu && cp <= 0x06E4u) ||
+        (cp >= 0x06E7u && cp <= 0x06E8u) ||
+        (cp >= 0x06EAu && cp <= 0x06EDu) ||
+        (cp >= 0x07EBu && cp <= 0x07F3u) ||
+        cp == 0x07FDu ||
+        (cp >= 0x08D3u && cp <= 0x08E1u) ||
+        (cp >= 0x08E3u && cp <= 0x08FFu) ||
+        (cp >= 0xFE20u && cp <= 0xFE2Fu)) {
+        return ArabicJoinType::Transparent;
+    }
+    if (cp == 0x0640u || cp == 0x07FAu) return ArabicJoinType::Causing;
+
+    // Arabic U+0620..U+06FF
+    if ((cp >= 0x0622u && cp <= 0x0625u) || cp == 0x0627u || cp == 0x0629u ||
+        (cp >= 0x062Fu && cp <= 0x0632u) || cp == 0x0648u ||
+        (cp >= 0x0671u && cp <= 0x0673u) || (cp >= 0x0675u && cp <= 0x0677u) ||
+        (cp >= 0x0688u && cp <= 0x0699u) || cp == 0x06C0u ||
+        (cp >= 0x06C3u && cp <= 0x06CBu) || cp == 0x06CDu || cp == 0x06CFu ||
+        (cp >= 0x06D2u && cp <= 0x06D3u) || cp == 0x06D5u ||
+        (cp >= 0x06EEu && cp <= 0x06EFu)) {
+        return ArabicJoinType::Right;
+    }
+    if (cp == 0x0620u || cp == 0x0626u || cp == 0x0628u ||
+        (cp >= 0x062Au && cp <= 0x062Eu) ||
+        (cp >= 0x0633u && cp <= 0x063Fu) ||
+        (cp >= 0x0641u && cp <= 0x0647u) ||
+        (cp >= 0x0649u && cp <= 0x064Au) ||
+        (cp >= 0x066Eu && cp <= 0x066Fu) ||
+        (cp >= 0x0678u && cp <= 0x0687u) ||
+        (cp >= 0x069Au && cp <= 0x06BFu) ||
+        (cp >= 0x06C1u && cp <= 0x06C2u) ||
+        cp == 0x06CCu || cp == 0x06CEu ||
+        (cp >= 0x06D0u && cp <= 0x06D1u) ||
+        (cp >= 0x06FAu && cp <= 0x06FCu) || cp == 0x06FFu) {
+        return ArabicJoinType::Dual;
+    }
+    // Arabic Supplement U+0750..U+077F
+    if ((cp >= 0x0750u && cp <= 0x0758u) || (cp >= 0x075Cu && cp <= 0x076Au) ||
+        (cp >= 0x076Du && cp <= 0x0770u) || cp == 0x0772u ||
+        (cp >= 0x0775u && cp <= 0x0777u) || (cp >= 0x077Cu && cp <= 0x077Fu)) {
+        return ArabicJoinType::Dual;
+    }
+    if ((cp >= 0x0759u && cp <= 0x075Bu) || (cp >= 0x076Bu && cp <= 0x076Cu) ||
+        cp == 0x0771u || (cp >= 0x0773u && cp <= 0x0774u) ||
+        (cp >= 0x0778u && cp <= 0x077Bu)) {
+        return ArabicJoinType::Right;
+    }
+    // Arabic Extended-A U+08A0..U+08CE
+    if (cp == 0x08AAu || cp == 0x08ABu || cp == 0x08ACu || cp == 0x08AEu ||
+        cp == 0x08B1u || cp == 0x08B2u || cp == 0x08B9u) {
+        return ArabicJoinType::Right;
+    }
+    if (cp >= 0x08A0u && cp <= 0x08CEu) {
+        return ArabicJoinType::Dual;
+    }
+    // N'Ko U+07CA..U+07EA
+    if (cp >= 0x07CAu && cp <= 0x07EAu) {
+        return ArabicJoinType::Dual;
+    }
+    return ArabicJoinType::NonJoining;
+}
+
+std::vector<uint32_t> compute_arabic_feature_masks(const std::vector<uint32_t>& cps,
+                                                   std::size_t start,
+                                                   std::size_t end) {
+    constexpr uint32_t kMaskGlobal = 1u << 0;
+    constexpr uint32_t kMaskIsol   = 1u << 1;
+    constexpr uint32_t kMaskInit   = 1u << 2;
+    constexpr uint32_t kMaskMedi   = 1u << 3;
+    constexpr uint32_t kMaskFina   = 1u << 4;
+
+    const std::size_t len = end - start;
+    std::vector<uint32_t> masks(len, kMaskGlobal);
+    std::vector<ArabicJoinType> jts(len);
+    for (std::size_t i = 0; i < len; ++i) {
+        jts[i] = classify_arabic_joining(cps[start + i]);
+    }
+    for (std::size_t i = 0; i < len; ++i) {
+        const ArabicJoinType jt = jts[i];
+        if (jt == ArabicJoinType::NonJoining || jt == ArabicJoinType::Causing ||
+            jt == ArabicJoinType::Transparent) {
+            continue;
+        }
+        int32_t prev = static_cast<int32_t>(i) - 1;
+        while (prev >= 0 && jts[static_cast<std::size_t>(prev)] == ArabicJoinType::Transparent) {
+            --prev;
+        }
+        std::size_t next = i + 1;
+        while (next < len && jts[next] == ArabicJoinType::Transparent) {
+            ++next;
+        }
+        const bool prev_joins = (prev >= 0) &&
+                                (jts[static_cast<std::size_t>(prev)] == ArabicJoinType::Dual ||
+                                 jts[static_cast<std::size_t>(prev)] == ArabicJoinType::Left ||
+                                 jts[static_cast<std::size_t>(prev)] == ArabicJoinType::Causing);
+        const bool next_joins = (next < len) &&
+                                (jts[next] == ArabicJoinType::Dual ||
+                                 jts[next] == ArabicJoinType::Right ||
+                                 jts[next] == ArabicJoinType::Causing);
+
+        uint32_t form = kMaskIsol;
+        if (jt == ArabicJoinType::Right) {
+            form = prev_joins ? kMaskFina : kMaskIsol;
+        } else if (jt == ArabicJoinType::Left) {
+            form = next_joins ? kMaskInit : kMaskIsol;
+        } else { // Dual
+            if (prev_joins && next_joins) form = kMaskMedi;
+            else if (prev_joins) form = kMaskFina;
+            else if (next_joins) form = kMaskInit;
+            else form = kMaskIsol;
+        }
+        masks[i] |= form;
+    }
+    return masks;
+}
+
+}  // namespace
+
+bool TrueTypeFont::parse_context_subtable(std::size_t sub_off, std::size_t table_end,
+                                          bool is_chain, uint16_t expected_type,
+                                          OtfContextSubtable& out) const {
+    (void)expected_type;
+    out = OtfContextSubtable{};
+    out.is_chain = is_chain;
+    const auto within = [table_end](std::size_t pos, std::size_t need) {
+        return pos <= table_end && need <= table_end - pos;
+    };
+    if (!within(sub_off, 6)) return false;
+    const uint16_t fmt = read_u16_be(m_data, sub_off);
+    out.format = fmt;
+
+    const auto read_records = [&](std::size_t pos, uint16_t cnt,
+                                  std::vector<OtfLookupRecord>& recs) -> bool {
+        if (!within(pos, static_cast<std::size_t>(cnt) * 4u)) return false;
+        recs.resize(cnt);
+        for (uint16_t i = 0; i < cnt; ++i) {
+            recs[i].sequence_index = read_u16_be(m_data, pos + 4u * i);
+            recs[i].lookup_index = read_u16_be(m_data, pos + 2u + 4u * i);
+        }
+        return true;
+    };
+
+    if (!is_chain) {
+        if (fmt == 1) {
+            const uint16_t cov_off = read_u16_be(m_data, sub_off + 2);
+            const uint16_t set_cnt = read_u16_be(m_data, sub_off + 4);
+            if (!parse_coverage(sub_off + cov_off, table_end, out.cov)) return false;
+            if (!within(sub_off + 6u, 2u * set_cnt)) return false;
+            out.sets.resize(set_cnt);
+            for (uint16_t si = 0; si < set_cnt; ++si) {
+                const uint16_t rel = read_u16_be(m_data, sub_off + 6u + 2u * si);
+                if (rel == 0) continue;
+                const std::size_t rset = sub_off + rel;
+                if (!within(rset, 2)) continue;
+                const uint16_t rcnt = read_u16_be(m_data, rset);
+                if (!within(rset + 2u, 2u * rcnt)) continue;
+                out.sets[si].reserve(rcnt);
+                for (uint16_t ri = 0; ri < rcnt; ++ri) {
+                    const std::size_t rpos = rset + read_u16_be(m_data, rset + 2u + 2u * ri);
+                    if (!within(rpos, 4)) continue;
+                    const uint16_t gcnt = read_u16_be(m_data, rpos);
+                    const uint16_t act_cnt = read_u16_be(m_data, rpos + 2);
+                    if (gcnt < 1) continue;
+                    const std::size_t inp_bytes = static_cast<std::size_t>(gcnt - 1u) * 2u;
+                    if (!within(rpos + 4u, inp_bytes)) continue;
+                    OtfContextRule rule;
+                    rule.input.resize(gcnt - 1u);
+                    for (uint16_t k = 0; k + 1 < gcnt; ++k) {
+                        rule.input[k] = read_u16_be(m_data, rpos + 4u + 2u * k);
+                    }
+                    if (!read_records(rpos + 4u + inp_bytes, act_cnt, rule.actions)) continue;
+                    out.sets[si].push_back(std::move(rule));
+                }
+            }
+            return true;
+        }
+        if (fmt == 2) {
+            if (!within(sub_off, 8)) return false;
+            const uint16_t cov_off = read_u16_be(m_data, sub_off + 2);
+            const uint16_t cd_off = read_u16_be(m_data, sub_off + 4);
+            const uint16_t set_cnt = read_u16_be(m_data, sub_off + 6);
+            if (!parse_coverage(sub_off + cov_off, table_end, out.cov)) return false;
+            if (!parse_classdef(sub_off + cd_off, table_end, out.in_cd)) return false;
+            if (!within(sub_off + 8u, 2u * set_cnt)) return false;
+            out.sets.resize(set_cnt);
+            for (uint16_t si = 0; si < set_cnt; ++si) {
+                const uint16_t rel = read_u16_be(m_data, sub_off + 8u + 2u * si);
+                if (rel == 0) continue;
+                const std::size_t rset = sub_off + rel;
+                if (!within(rset, 2)) continue;
+                const uint16_t rcnt = read_u16_be(m_data, rset);
+                if (!within(rset + 2u, 2u * rcnt)) continue;
+                out.sets[si].reserve(rcnt);
+                for (uint16_t ri = 0; ri < rcnt; ++ri) {
+                    const std::size_t rpos = rset + read_u16_be(m_data, rset + 2u + 2u * ri);
+                    if (!within(rpos, 4)) continue;
+                    const uint16_t gcnt = read_u16_be(m_data, rpos);
+                    const uint16_t act_cnt = read_u16_be(m_data, rpos + 2);
+                    if (gcnt < 1) continue;
+                    const std::size_t inp_bytes = static_cast<std::size_t>(gcnt - 1u) * 2u;
+                    if (!within(rpos + 4u, inp_bytes)) continue;
+                    OtfContextRule rule;
+                    rule.input.resize(gcnt - 1u);
+                    for (uint16_t k = 0; k + 1 < gcnt; ++k) {
+                        rule.input[k] = read_u16_be(m_data, rpos + 4u + 2u * k);
+                    }
+                    if (!read_records(rpos + 4u + inp_bytes, act_cnt, rule.actions)) continue;
+                    out.sets[si].push_back(std::move(rule));
+                }
+            }
+            return true;
+        }
+        if (fmt == 3) {
+            const uint16_t gcnt = read_u16_be(m_data, sub_off + 2);
+            const uint16_t act_cnt = read_u16_be(m_data, sub_off + 4);
+            if (gcnt < 1) return false;
+            const std::size_t cov_bytes = static_cast<std::size_t>(gcnt) * 2u;
+            if (!within(sub_off + 6u, cov_bytes)) return false;
+            out.in_covs.resize(gcnt);
+            for (uint16_t k = 0; k < gcnt; ++k) {
+                const uint16_t rel = read_u16_be(m_data, sub_off + 6u + 2u * k);
+                if (!parse_coverage(sub_off + rel, table_end, out.in_covs[k])) return false;
+            }
+            return read_records(sub_off + 6u + cov_bytes, act_cnt, out.fmt3_actions);
+        }
+        return false;
+    }
+
+    // Chaining Contextual (GSUB Type 6 / GPOS Type 8)
+    const auto parse_chain_rule = [&](std::size_t rpos, OtfContextRule& rule) -> bool {
+        if (!within(rpos, 2)) return false;
+        const uint16_t bcnt = read_u16_be(m_data, rpos);
+        std::size_t cur = rpos + 2u;
+        if (!within(cur, static_cast<std::size_t>(bcnt) * 2u + 2u)) return false;
+        rule.backtrack.resize(bcnt);
+        for (uint16_t k = 0; k < bcnt; ++k) {
+            rule.backtrack[k] = read_u16_be(m_data, cur + 2u * k);
+        }
+        cur += static_cast<std::size_t>(bcnt) * 2u;
+        const uint16_t icnt = read_u16_be(m_data, cur);
+        cur += 2u;
+        if (icnt < 1) return false;
+        if (!within(cur, static_cast<std::size_t>(icnt - 1u) * 2u + 2u)) return false;
+        rule.input.resize(icnt - 1u);
+        for (uint16_t k = 0; k + 1 < icnt; ++k) {
+            rule.input[k] = read_u16_be(m_data, cur + 2u * k);
+        }
+        cur += static_cast<std::size_t>(icnt - 1u) * 2u;
+        const uint16_t lcnt = read_u16_be(m_data, cur);
+        cur += 2u;
+        if (!within(cur, static_cast<std::size_t>(lcnt) * 2u + 2u)) return false;
+        rule.lookahead.resize(lcnt);
+        for (uint16_t k = 0; k < lcnt; ++k) {
+            rule.lookahead[k] = read_u16_be(m_data, cur + 2u * k);
+        }
+        cur += static_cast<std::size_t>(lcnt) * 2u;
+        const uint16_t act_cnt = read_u16_be(m_data, cur);
+        cur += 2u;
+        return read_records(cur, act_cnt, rule.actions);
+    };
+
+    if (fmt == 1) {
+        const uint16_t cov_off = read_u16_be(m_data, sub_off + 2);
+        const uint16_t set_cnt = read_u16_be(m_data, sub_off + 4);
+        if (!parse_coverage(sub_off + cov_off, table_end, out.cov)) return false;
+        if (!within(sub_off + 6u, 2u * set_cnt)) return false;
+        out.sets.resize(set_cnt);
+        for (uint16_t si = 0; si < set_cnt; ++si) {
+            const uint16_t rel = read_u16_be(m_data, sub_off + 6u + 2u * si);
+            if (rel == 0) continue;
+            const std::size_t rset = sub_off + rel;
+            if (!within(rset, 2)) continue;
+            const uint16_t rcnt = read_u16_be(m_data, rset);
+            if (!within(rset + 2u, 2u * rcnt)) continue;
+            out.sets[si].reserve(rcnt);
+            for (uint16_t ri = 0; ri < rcnt; ++ri) {
+                const std::size_t rpos = rset + read_u16_be(m_data, rset + 2u + 2u * ri);
+                OtfContextRule rule;
+                if (parse_chain_rule(rpos, rule)) out.sets[si].push_back(std::move(rule));
+            }
+        }
+        return true;
+    }
+    if (fmt == 2) {
+        if (!within(sub_off, 12)) return false;
+        const uint16_t cov_off = read_u16_be(m_data, sub_off + 2);
+        const uint16_t bcd_off = read_u16_be(m_data, sub_off + 4);
+        const uint16_t icd_off = read_u16_be(m_data, sub_off + 6);
+        const uint16_t lcd_off = read_u16_be(m_data, sub_off + 8);
+        const uint16_t set_cnt = read_u16_be(m_data, sub_off + 10);
+        if (!parse_coverage(sub_off + cov_off, table_end, out.cov)) return false;
+        if (bcd_off != 0 && !parse_classdef(sub_off + bcd_off, table_end, out.back_cd)) return false;
+        if (icd_off != 0 && !parse_classdef(sub_off + icd_off, table_end, out.in_cd)) return false;
+        if (lcd_off != 0 && !parse_classdef(sub_off + lcd_off, table_end, out.look_cd)) return false;
+        if (!within(sub_off + 12u, 2u * set_cnt)) return false;
+        out.sets.resize(set_cnt);
+        for (uint16_t si = 0; si < set_cnt; ++si) {
+            const uint16_t rel = read_u16_be(m_data, sub_off + 12u + 2u * si);
+            if (rel == 0) continue;
+            const std::size_t rset = sub_off + rel;
+            if (!within(rset, 2)) continue;
+            const uint16_t rcnt = read_u16_be(m_data, rset);
+            if (!within(rset + 2u, 2u * rcnt)) continue;
+            out.sets[si].reserve(rcnt);
+            for (uint16_t ri = 0; ri < rcnt; ++ri) {
+                const std::size_t rpos = rset + read_u16_be(m_data, rset + 2u + 2u * ri);
+                OtfContextRule rule;
+                if (parse_chain_rule(rpos, rule)) out.sets[si].push_back(std::move(rule));
+            }
+        }
+        return true;
+    }
+    if (fmt == 3) {
+        std::size_t cur = sub_off + 2u;
+        if (!within(cur, 2)) return false;
+        const uint16_t bcnt = read_u16_be(m_data, cur);
+        cur += 2u;
+        if (!within(cur, static_cast<std::size_t>(bcnt) * 2u + 2u)) return false;
+        out.back_covs.resize(bcnt);
+        for (uint16_t k = 0; k < bcnt; ++k) {
+            if (!parse_coverage(sub_off + read_u16_be(m_data, cur + 2u * k), table_end, out.back_covs[k])) {
+                return false;
+            }
+        }
+        cur += static_cast<std::size_t>(bcnt) * 2u;
+        const uint16_t icnt = read_u16_be(m_data, cur);
+        cur += 2u;
+        if (icnt < 1 || !within(cur, static_cast<std::size_t>(icnt) * 2u + 2u)) return false;
+        out.in_covs.resize(icnt);
+        for (uint16_t k = 0; k < icnt; ++k) {
+            if (!parse_coverage(sub_off + read_u16_be(m_data, cur + 2u * k), table_end, out.in_covs[k])) {
+                return false;
+            }
+        }
+        cur += static_cast<std::size_t>(icnt) * 2u;
+        const uint16_t lcnt = read_u16_be(m_data, cur);
+        cur += 2u;
+        if (!within(cur, static_cast<std::size_t>(lcnt) * 2u + 2u)) return false;
+        out.look_covs.resize(lcnt);
+        for (uint16_t k = 0; k < lcnt; ++k) {
+            if (!parse_coverage(sub_off + read_u16_be(m_data, cur + 2u * k), table_end, out.look_covs[k])) {
+                return false;
+            }
+        }
+        cur += static_cast<std::size_t>(lcnt) * 2u;
+        const uint16_t act_cnt = read_u16_be(m_data, cur);
+        cur += 2u;
+        return read_records(cur, act_cnt, out.fmt3_actions);
+    }
+    return false;
+}
+
 bool TrueTypeFont::load_ligatures(uint32_t gsub_offset, uint32_t gsub_length) {
     m_ligature_sets.clear();
+    m_has_contextual_gsub = false;
+    m_gsub_singles.clear();
+    m_gsub_multiples.clear();
+    m_gsub_alternates.clear();
+    m_gsub_ligatures.clear();
+    m_gsub_contexts.clear();
+    m_gsub_lookups.clear();
+    m_gsub_scripts.clear();
+
     const std::size_t table_end = static_cast<std::size_t>(gsub_offset) + gsub_length;
     if (gsub_length < 10 || table_end > m_data.size()) return false;
     const uint32_t version = read_u32_be(m_data, gsub_offset);
-    // 1.0 and 1.1 have the same three lists at the same offsets; 1.1 adds a
-    // feature-variations table after them, which nothing here asks for yet.
     if (version != 0x00010000u && version != 0x00010001u) return false;
 
     const auto within = [table_end](std::size_t pos, std::size_t need) {
-        return pos + need <= table_end;
+        return pos <= table_end && need <= table_end - pos;
     };
     const uint32_t script_list = gsub_offset + read_u16_be(m_data, gsub_offset + 4);
     const uint32_t feature_list = gsub_offset + read_u16_be(m_data, gsub_offset + 6);
     const uint32_t lookup_list = gsub_offset + read_u16_be(m_data, gsub_offset + 8);
     if (!within(script_list, 2) || !within(feature_list, 2) || !within(lookup_list, 2)) return false;
 
-    // Which script: `latn` when there is one, else the default. A page of Latin
-    // text is what this engine lays out, and `DFLT` is the table's own answer
-    // for a font that does not name Latin separately.
-    std::size_t lang_sys = 0;
-    {
-        std::size_t latn_script = 0, dflt_script = 0;
-        const uint16_t script_count = read_u16_be(m_data, script_list);
-        for (uint16_t i = 0; i < script_count; ++i) {
-            const std::size_t record = script_list + 2u + 6u * i;
-            if (!within(record, 6)) return false;
-            const uint32_t tag = read_u32_be(m_data, record);
-            const uint32_t script = script_list + read_u16_be(m_data, record + 4);
-            if (tag == 0x6C61746Eu && !latn_script) latn_script = script;   // 'latn'
-            if (tag == 0x44464C54u && !dflt_script) dflt_script = script;   // 'DFLT'
-        }
-        const std::size_t script = latn_script ? latn_script : dflt_script;
-        if (!script || !within(script, 4)) return false;
-        const uint16_t default_lang_sys = read_u16_be(m_data, script);
-        if (default_lang_sys == 0 || !within(script + default_lang_sys, 6)) return false;
-        lang_sys = script + default_lang_sys;
-    }
+    // 1. Parse all GSUB lookups (Types 1..7) indexed by LookupList index so
+    //    nested contextual lookup records resolve directly.
+    const uint16_t lookup_count = read_u16_be(m_data, lookup_list);
+    if (!within(lookup_list + 2u, 2u * lookup_count)) return false;
+    m_gsub_lookups.resize(lookup_count);
 
-    // The features this language system turns on, filtered to the two that mean
-    // "join these letters": `liga` (common) and `rlig` (required).
-    std::vector<uint16_t> lookup_indices;
-    const auto add_feature = [&](uint16_t feature_index) {
-        const uint16_t feature_count = read_u16_be(m_data, feature_list);
-        if (feature_index >= feature_count) return;
-        const std::size_t record = feature_list + 2u + 6u * feature_index;
-        if (!within(record, 6)) return;
-        const uint32_t tag = read_u32_be(m_data, record);
-        if (tag != 0x6C696761u && tag != 0x726C6967u) return;   // 'liga', 'rlig'
-        const std::size_t feature = feature_list + read_u16_be(m_data, record + 4);
-        if (!within(feature, 4)) return;
-        const uint16_t lookup_count = read_u16_be(m_data, feature + 2);
-        for (uint16_t i = 0; i < lookup_count; ++i) {
-            if (!within(feature + 4u + 2u * i, 2)) return;
-            lookup_indices.push_back(read_u16_be(m_data, feature + 4u + 2u * i));
-        }
-    };
-    const uint16_t feature_count = read_u16_be(m_data, lang_sys + 4);
-    for (uint16_t i = 0; i < feature_count; ++i) {
-        if (!within(lang_sys + 6u + 2u * i, 2)) return false;
-        add_feature(read_u16_be(m_data, lang_sys + 6u + 2u * i));
-    }
-    const uint16_t required_feature = read_u16_be(m_data, lang_sys + 2);
-    if (required_feature != 0xFFFF) add_feature(required_feature);
-    if (lookup_indices.empty()) return false;
+    for (uint16_t li = 0; li < lookup_count; ++li) {
+        const std::size_t lpos = lookup_list + read_u16_be(m_data, lookup_list + 2u + 2u * li);
+        if (!within(lpos, 6)) continue;
+        const uint16_t raw_type = read_u16_be(m_data, lpos);
+        const uint16_t flag = read_u16_be(m_data, lpos + 2);
+        const uint16_t sub_count = read_u16_be(m_data, lpos + 4);
+        if (!within(lpos + 6u, 2u * sub_count)) continue;
 
-    // Each lookup, as a set of type-4 (ligature) subtables. A type-7 lookup is
-    // a wrapper that points at another type, which is how a font with more than
-    // 64k of lookups keeps its offsets small; follow it rather than skip it.
-    std::map<uint16_t, std::vector<Ligature>> by_first;
-    for (uint16_t lookup_index : lookup_indices) {
-        const uint16_t lookup_count = read_u16_be(m_data, lookup_list);
-        if (lookup_index >= lookup_count) continue;
-        const std::size_t lookup_record = lookup_list + 2u + 2u * lookup_index;
-        if (!within(lookup_record, 2)) continue;
-        const std::size_t lookup = lookup_list + read_u16_be(m_data, lookup_record);
-        if (!within(lookup, 6)) continue;
-        const uint16_t lookup_flag = read_u16_be(m_data, lookup + 2);
-        const bool ignore_marks = (lookup_flag & 0x0008u) != 0;
-        const uint16_t subtable_count = read_u16_be(m_data, lookup + 4);
-        for (uint16_t s = 0; s < subtable_count; ++s) {
-            if (!within(lookup + 6u + 2u * s, 2)) break;
-            std::size_t subtable = lookup + read_u16_be(m_data, lookup + 6u + 2u * s);
-            if (!within(subtable, 6)) continue;
-            uint16_t lookup_type = read_u16_be(m_data, lookup);
-            if (lookup_type == 7) {   // extension
-                if (read_u16_be(m_data, subtable) != 1) continue;
-                lookup_type = read_u16_be(m_data, subtable + 2);
-                subtable += read_u32_be(m_data, subtable + 4);
-                if (!within(subtable, 6)) continue;
+        uint16_t mark_filtering_set = 0;
+        if ((flag & 0x0010u) != 0) {
+            if (!within(lpos + 6u + 2u * sub_count, 2)) continue;
+            mark_filtering_set = read_u16_be(m_data, lpos + 6u + 2u * sub_count);
+        }
+
+        GsubLookup& lk = m_gsub_lookups[li];
+        lk.flag = flag;
+        lk.mark_filtering_set = mark_filtering_set;
+
+        for (uint16_t s = 0; s < sub_count; ++s) {
+            std::size_t sub = lpos + read_u16_be(m_data, lpos + 6u + 2u * s);
+            uint16_t ltype = raw_type;
+            if (ltype == 7) { // ExtensionSubst
+                if (!within(sub, 8) || read_u16_be(m_data, sub) != 1) continue;
+                ltype = read_u16_be(m_data, sub + 2);
+                const uint32_t ext_rel = read_u32_be(m_data, sub + 4);
+                if (ext_rel > table_end - sub) continue;
+                sub += ext_rel;
             }
-            if (lookup_type != 4) continue;   // only ligature substitution
-            if (read_u16_be(m_data, subtable) != 1) continue;   // format 1 only
+            if (!within(sub, 4)) continue;
+            if (lk.type == 0) lk.type = ltype;
 
-            // Coverage: which glyphs may start a ligature, and where each one's
-            // ligature set is. Format 2 is ranges; both are read because a font
-            // picks whichever is smaller.
-            const std::size_t coverage = subtable + read_u16_be(m_data, subtable + 2);
-            if (!within(coverage, 4)) continue;
-            const uint16_t set_count = read_u16_be(m_data, subtable + 4);
-            std::vector<std::pair<uint16_t, uint16_t>> starts;   // glyph, set index
-            const uint16_t coverage_format = read_u16_be(m_data, coverage);
-            const uint16_t covered = read_u16_be(m_data, coverage + 2);
-            if (coverage_format == 1) {
-                for (uint16_t i = 0; i < covered && i < set_count; ++i) {
-                    if (!within(coverage + 4u + 2u * i, 2)) break;
-                    starts.emplace_back(read_u16_be(m_data, coverage + 4u + 2u * i), i);
+            if (ltype == 1) { // SingleSubst
+                const uint16_t fmt = read_u16_be(m_data, sub);
+                if (!within(sub, 6)) continue;
+                GsubSingleSubtable st;
+                st.format = fmt;
+                if (!parse_coverage(sub + read_u16_be(m_data, sub + 2), table_end, st.cov)) continue;
+                if (fmt == 1) {
+                    st.delta = read_i16_be(m_data, sub + 4);
+                    const uint32_t idx = static_cast<uint32_t>(m_gsub_singles.size());
+                    m_gsub_singles.push_back(std::move(st));
+                    lk.subtables.push_back({GsubSubRef::Kind::Single, idx});
+                } else if (fmt == 2) {
+                    const uint16_t gcnt = read_u16_be(m_data, sub + 4);
+                    if (!within(sub + 6u, 2u * gcnt)) continue;
+                    st.substitutes.resize(gcnt);
+                    for (uint16_t k = 0; k < gcnt; ++k) {
+                        st.substitutes[k] = read_u16_be(m_data, sub + 6u + 2u * k);
+                    }
+                    const uint32_t idx = static_cast<uint32_t>(m_gsub_singles.size());
+                    m_gsub_singles.push_back(std::move(st));
+                    lk.subtables.push_back({GsubSubRef::Kind::Single, idx});
                 }
-            } else if (coverage_format == 2) {
-                for (uint16_t i = 0; i < covered; ++i) {
-                    if (!within(coverage + 4u + 6u * i, 6)) break;
-                    const uint16_t first_glyph = read_u16_be(m_data, coverage + 4u + 6u * i);
-                    const uint16_t last_glyph = read_u16_be(m_data, coverage + 6u + 6u * i);
-                    const uint16_t first_set = read_u16_be(m_data, coverage + 8u + 6u * i);
-                    for (uint32_t g = first_glyph; g <= last_glyph; ++g) {
-                        starts.emplace_back(static_cast<uint16_t>(g),
-                                            static_cast<uint16_t>(first_set + (g - first_glyph)));
+            } else if (ltype == 2) { // MultipleSubst
+                if (read_u16_be(m_data, sub) != 1 || !within(sub, 6)) continue;
+                GsubMultipleSubtable st;
+                if (!parse_coverage(sub + read_u16_be(m_data, sub + 2), table_end, st.cov)) continue;
+                const uint16_t scnt = read_u16_be(m_data, sub + 4);
+                if (!within(sub + 6u, 2u * scnt)) continue;
+                st.sequences.resize(scnt);
+                for (uint16_t k = 0; k < scnt; ++k) {
+                    const std::size_t seq_pos = sub + read_u16_be(m_data, sub + 6u + 2u * k);
+                    if (!within(seq_pos, 2)) continue;
+                    const uint16_t gc = read_u16_be(m_data, seq_pos);
+                    if (gc > 64 || !within(seq_pos + 2u, 2u * gc)) continue;
+                    st.sequences[k].resize(gc);
+                    for (uint16_t j = 0; j < gc; ++j) {
+                        st.sequences[k][j] = read_u16_be(m_data, seq_pos + 2u + 2u * j);
+                    }
+                }
+                const uint32_t idx = static_cast<uint32_t>(m_gsub_multiples.size());
+                m_gsub_multiples.push_back(std::move(st));
+                lk.subtables.push_back({GsubSubRef::Kind::Multiple, idx});
+            } else if (ltype == 3) { // AlternateSubst
+                if (read_u16_be(m_data, sub) != 1 || !within(sub, 6)) continue;
+                GsubAlternateSubtable st;
+                if (!parse_coverage(sub + read_u16_be(m_data, sub + 2), table_end, st.cov)) continue;
+                const uint16_t acnt = read_u16_be(m_data, sub + 4);
+                if (!within(sub + 6u, 2u * acnt)) continue;
+                st.alternates.resize(acnt);
+                for (uint16_t k = 0; k < acnt; ++k) {
+                    const std::size_t aset = sub + read_u16_be(m_data, sub + 6u + 2u * k);
+                    if (!within(aset, 2)) continue;
+                    const uint16_t gc = read_u16_be(m_data, aset);
+                    if (!within(aset + 2u, 2u * gc)) continue;
+                    st.alternates[k].resize(gc);
+                    for (uint16_t j = 0; j < gc; ++j) {
+                        st.alternates[k][j] = read_u16_be(m_data, aset + 2u + 2u * j);
+                    }
+                }
+                const uint32_t idx = static_cast<uint32_t>(m_gsub_alternates.size());
+                m_gsub_alternates.push_back(std::move(st));
+                lk.subtables.push_back({GsubSubRef::Kind::Alternate, idx});
+            } else if (ltype == 4) { // LigatureSubst
+                if (read_u16_be(m_data, sub) != 1 || !within(sub, 6)) continue;
+                GsubLigatureSubtable st;
+                if (!parse_coverage(sub + read_u16_be(m_data, sub + 2), table_end, st.cov)) continue;
+                const uint16_t set_count = read_u16_be(m_data, sub + 4);
+                if (!within(sub + 6u, 2u * set_count)) continue;
+                st.sets.resize(set_count);
+                const bool ignore_marks = (flag & 0x0008u) != 0;
+                for (uint16_t si = 0; si < set_count; ++si) {
+                    const std::size_t set_pos = sub + read_u16_be(m_data, sub + 6u + 2u * si);
+                    if (!within(set_pos, 2)) continue;
+                    const uint16_t lcnt = read_u16_be(m_data, set_pos);
+                    if (!within(set_pos + 2u, 2u * lcnt)) continue;
+                    auto& ligs = st.sets[si];
+                    ligs.reserve(lcnt);
+                    for (uint16_t l = 0; l < lcnt; ++l) {
+                        const std::size_t lpos2 = set_pos + read_u16_be(m_data, set_pos + 2u + 2u * l);
+                        if (!within(lpos2, 4)) continue;
+                        const uint16_t produced = read_u16_be(m_data, lpos2);
+                        const uint16_t comps = read_u16_be(m_data, lpos2 + 2);
+                        if (comps < 2 || comps > 32) continue;
+                        if (!within(lpos2 + 4u, 2u * (comps - 1u))) continue;
+                        Ligature lig;
+                        lig.glyph = produced;
+                        lig.ignore_marks = ignore_marks;
+                        lig.rest.reserve(comps - 1u);
+                        for (uint16_t c = 1; c < comps; ++c) {
+                            lig.rest.push_back(read_u16_be(m_data, lpos2 + 2u + 2u * c));
+                        }
+                        ligs.push_back(std::move(lig));
+                    }
+                    std::stable_sort(ligs.begin(), ligs.end(),
+                                     [](const Ligature& a, const Ligature& b) {
+                                         return a.rest.size() > b.rest.size();
+                                     });
+                }
+                const uint32_t idx = static_cast<uint32_t>(m_gsub_ligatures.size());
+                m_gsub_ligatures.push_back(std::move(st));
+                lk.subtables.push_back({GsubSubRef::Kind::Ligature, idx});
+            } else if (ltype == 5 || ltype == 6) {
+                OtfContextSubtable ctx;
+                if (parse_context_subtable(sub, table_end, ltype == 6, ltype, ctx)) {
+                    const uint32_t idx = static_cast<uint32_t>(m_gsub_contexts.size());
+                    m_gsub_contexts.push_back(std::move(ctx));
+                    lk.subtables.push_back({GsubSubRef::Kind::Context, idx});
+                    m_has_contextual_gsub = true;
+                }
+            }
+        }
+    }
+
+    // 2. Collect per-script active GSUB feature plans.
+    const uint16_t script_count = read_u16_be(m_data, script_list);
+    const uint16_t total_features = read_u16_be(m_data, feature_list);
+    std::vector<uint16_t> latn_liga_lookups;
+    std::vector<uint16_t> dflt_liga_lookups;
+
+    for (uint16_t si = 0; si < script_count; ++si) {
+        const std::size_t rec = script_list + 2u + 6u * si;
+        if (!within(rec, 6)) break;
+        const uint32_t stag = read_u32_be(m_data, rec);
+        const std::size_t spos = script_list + read_u16_be(m_data, rec + 4);
+        if (!within(spos, 4)) continue;
+        uint16_t ls_off = read_u16_be(m_data, spos);
+        if (ls_off == 0) {
+            const uint16_t ls_cnt = read_u16_be(m_data, spos + 2);
+            if (ls_cnt > 0 && within(spos + 4u, 6)) ls_off = read_u16_be(m_data, spos + 8);
+        }
+        if (ls_off == 0 || !within(spos + ls_off, 6)) continue;
+        const std::size_t lang_sys = spos + ls_off;
+
+        std::map<uint16_t, uint32_t> active;
+        const auto add_feat = [&](uint16_t fi, bool is_required) {
+            if (fi >= total_features) return;
+            const std::size_t frec = feature_list + 2u + 6u * fi;
+            if (!within(frec, 6)) return;
+            const uint32_t ftag = read_u32_be(m_data, frec);
+            uint32_t fmask = kGsubFeatNone;
+            if (is_required) fmask |= kGsubFeatGlobal;
+            if (ftag == ot_tag('c', 'c', 'm', 'p') ||
+                ftag == ot_tag('l', 'o', 'c', 'l') ||
+                ftag == ot_tag('r', 'l', 'i', 'g') ||
+                ftag == ot_tag('l', 'i', 'g', 'a') ||
+                ftag == ot_tag('c', 'a', 'l', 't') ||
+                ftag == ot_tag('c', 'l', 'i', 'g') ||
+                ftag == ot_tag('r', 'c', 'l', 't')) {
+                fmask |= kGsubFeatGlobal;
+            } else if (ftag == ot_tag('i', 's', 'o', 'l')) {
+                fmask |= kGsubFeatIsol;
+            } else if (ftag == ot_tag('i', 'n', 'i', 't')) {
+                fmask |= kGsubFeatInit;
+            } else if (ftag == ot_tag('m', 'e', 'd', 'i')) {
+                fmask |= kGsubFeatMedi;
+            } else if (ftag == ot_tag('f', 'i', 'n', 'a')) {
+                fmask |= kGsubFeatFina;
+            }
+            if (fmask == kGsubFeatNone) return;
+
+            const std::size_t fpos = feature_list + read_u16_be(m_data, frec + 4);
+            if (!within(fpos, 4)) return;
+            const uint16_t lcnt = read_u16_be(m_data, fpos + 2);
+            for (uint16_t k = 0; k < lcnt; ++k) {
+                if (!within(fpos + 4u + 2u * k, 2)) break;
+                const uint16_t li = read_u16_be(m_data, fpos + 4u + 2u * k);
+                if (li >= lookup_count) continue;
+                active[li] |= fmask;
+                if (ftag == ot_tag('l', 'i', 'g', 'a') || ftag == ot_tag('r', 'l', 'i', 'g')) {
+                    if (stag == kTagLatn) latn_liga_lookups.push_back(li);
+                    else if (stag == kTagDflt) dflt_liga_lookups.push_back(li);
+                }
+            }
+        };
+
+        const uint16_t req = read_u16_be(m_data, lang_sys + 2);
+        if (req != 0xFFFFu) add_feat(req, true);
+        const uint16_t fc = read_u16_be(m_data, lang_sys + 4);
+        for (uint16_t i = 0; i < fc; ++i) {
+            if (!within(lang_sys + 6u + 2u * i, 2)) break;
+            add_feat(read_u16_be(m_data, lang_sys + 6u + 2u * i), false);
+        }
+
+        if (!active.empty()) {
+            GsubScriptPlan plan;
+            plan.script_tag = stag;
+            plan.lookups.assign(active.begin(), active.end());
+            m_gsub_scripts.push_back(std::move(plan));
+        }
+    }
+
+    // 3. Populate `m_ligature_sets` for `latn` (or `DFLT`) `liga`/`rlig` so
+    //    `has_ligatures()` and `apply_ligatures()` remain identical to callers.
+    const std::vector<uint16_t>& liga_lks =
+        !latn_liga_lookups.empty() ? latn_liga_lookups : dflt_liga_lookups;
+    if (!liga_lks.empty()) {
+        std::map<uint16_t, std::vector<Ligature>> by_first;
+        for (uint16_t li : liga_lks) {
+            if (li >= m_gsub_lookups.size()) continue;
+            const GsubLookup& lk = m_gsub_lookups[li];
+            if (lk.type != 4) continue;
+            for (const GsubSubRef& ref : lk.subtables) {
+                if (ref.kind != GsubSubRef::Kind::Ligature) continue;
+                const auto& st = m_gsub_ligatures[ref.index];
+                if (st.cov.format == 1) {
+                    for (std::size_t idx = 0; idx < st.cov.glyphs.size() && idx < st.sets.size(); ++idx) {
+                        auto& dst = by_first[st.cov.glyphs[idx]];
+                        dst.insert(dst.end(), st.sets[idx].begin(), st.sets[idx].end());
+                    }
+                } else if (st.cov.format == 2) {
+                    for (const auto& r : st.cov.ranges) {
+                        for (uint32_t g = r.start; g <= r.end; ++g) {
+                            const std::size_t idx = r.start_index + (g - r.start);
+                            if (idx < st.sets.size()) {
+                                auto& dst = by_first[static_cast<uint16_t>(g)];
+                                dst.insert(dst.end(), st.sets[idx].begin(), st.sets[idx].end());
+                            }
+                        }
                     }
                 }
             }
-
-            for (const auto& [first_glyph, set_index] : starts) {
-                if (set_index >= set_count) continue;
-                const std::size_t set_pos = subtable + read_u16_be(m_data, subtable + 6u + 2u * set_index);
-                if (!within(set_pos, 2)) continue;
-                const uint16_t ligature_count = read_u16_be(m_data, set_pos);
-                for (uint16_t l = 0; l < ligature_count; ++l) {
-                    if (!within(set_pos + 2u + 2u * l, 2)) break;
-                    const std::size_t ligature = set_pos + read_u16_be(m_data, set_pos + 2u + 2u * l);
-                    if (!within(ligature, 4)) break;
-                    const uint16_t produced = read_u16_be(m_data, ligature);
-                    const uint16_t components = read_u16_be(m_data, ligature + 2);
-                    if (components < 2 || components > 8) continue;
-                    if (!within(ligature + 4u, 2u * (components - 1))) break;
-                    Ligature lig;
-                    lig.glyph = produced;
-                    lig.ignore_marks = ignore_marks;
-                    lig.rest.reserve(components - 1);
-                    for (uint16_t c = 1; c < components; ++c) {
-                        lig.rest.push_back(read_u16_be(m_data, ligature + 2u + 2u * c));
-                    }
-                    by_first[first_glyph].push_back(std::move(lig));
-                }
-            }
         }
+        m_ligature_sets.reserve(by_first.size());
+        for (auto& [first_glyph, ligatures] : by_first) {
+            LigatureSet set;
+            set.first = first_glyph;
+            std::stable_sort(ligatures.begin(), ligatures.end(),
+                             [](const Ligature& a, const Ligature& b) {
+                                 return a.rest.size() > b.rest.size();
+                             });
+            set.ligatures = std::move(ligatures);
+            m_ligature_sets.push_back(std::move(set));
+        }
+        std::sort(m_ligature_sets.begin(), m_ligature_sets.end(),
+                  [](const LigatureSet& a, const LigatureSet& b) { return a.first < b.first; });
     }
-    if (by_first.empty()) return false;
-
-    m_ligature_sets.reserve(by_first.size());
-    for (auto& [first_glyph, ligatures] : by_first) {
-        LigatureSet set;
-        set.first = first_glyph;
-        // Longest first, so `ffi` wins over `ff` at the same position: the
-        // table's own order is not a promise about which match to prefer.
-        std::stable_sort(ligatures.begin(), ligatures.end(),
-                         [](const Ligature& a, const Ligature& b) {
-                             return a.rest.size() > b.rest.size();
-                         });
-        set.ligatures = std::move(ligatures);
-        m_ligature_sets.push_back(std::move(set));
-    }
-    std::sort(m_ligature_sets.begin(), m_ligature_sets.end(),
-              [](const LigatureSet& a, const LigatureSet& b) { return a.first < b.first; });
-    return true;
+    return !m_gsub_lookups.empty();
 }
 
 void TrueTypeFont::apply_ligatures(std::vector<uint16_t>& glyphs) const {
@@ -1111,6 +1753,22 @@ bool TrueTypeFont::load_gdef(uint32_t gdef_offset, uint32_t gdef_length) {
 }
 
 bool TrueTypeFont::load_gpos(uint32_t gpos_offset, uint32_t gpos_length) {
+    m_has_gpos_kern = false;
+    m_has_gpos_cursive = false;
+    m_has_gpos_marks = false;
+    m_has_contextual_gpos = false;
+    m_gpos_known_marks.clear();
+    m_gpos_singles.clear();
+    m_gpos_pair_fmt1.clear();
+    m_gpos_pair_fmt2.clear();
+    m_gpos_cursives.clear();
+    m_gpos_mark_base.clear();
+    m_gpos_mark_lig.clear();
+    m_gpos_mark_mark.clear();
+    m_gpos_contexts.clear();
+    m_gpos_lookups.clear();
+    m_gpos_scripts.clear();
+
     if (gpos_length < 10) return false;
     const std::size_t table_end = static_cast<std::size_t>(gpos_offset) + gpos_length;
     if (table_end > m_data.size()) return false;
@@ -1125,61 +1783,6 @@ bool TrueTypeFont::load_gpos(uint32_t gpos_offset, uint32_t gpos_length) {
     const std::size_t feature_list = gpos_offset + read_u16_be(m_data, gpos_offset + 6);
     const std::size_t lookup_list = gpos_offset + read_u16_be(m_data, gpos_offset + 8);
     if (!within(script_list, 2) || !within(feature_list, 2) || !within(lookup_list, 2)) return false;
-
-    // Collect desired GPOS features (`kern`, `mark`, `mkmk`) for `latn` first,
-    // falling back to `DFLT` if `latn` is absent or exposes none of them.
-    std::size_t latn_script = 0, dflt_script = 0;
-    const uint16_t script_count = read_u16_be(m_data, script_list);
-    for (uint16_t i = 0; i < script_count; ++i) {
-        const std::size_t rec = script_list + 2u + 6u * i;
-        if (!within(rec, 6)) return false;
-        const uint32_t tag = read_u32_be(m_data, rec);
-        const std::size_t script = script_list + read_u16_be(m_data, rec + 4);
-        if (tag == 0x6C61746Eu && !latn_script) latn_script = script; // 'latn'
-        if (tag == 0x44464C54u && !dflt_script) dflt_script = script; // 'DFLT'
-    }
-
-    const uint16_t total_features = read_u16_be(m_data, feature_list);
-    std::map<uint16_t, GposLookup::Feature> wanted;
-    const auto collect_from_script = [&](std::size_t script) {
-        if (!script || !within(script, 4)) return;
-        const uint16_t def_ls = read_u16_be(m_data, script);
-        if (def_ls == 0 || !within(script + def_ls, 6)) return;
-        const std::size_t lang_sys = script + def_ls;
-
-        const auto add_feature = [&](uint16_t feature_index) {
-            if (feature_index >= total_features) return;
-            const std::size_t rec = feature_list + 2u + 6u * feature_index;
-            if (!within(rec, 6)) return;
-            const uint32_t tag = read_u32_be(m_data, rec);
-            GposLookup::Feature feat{};
-            if (tag == 0x6B65726Eu) feat = GposLookup::Feature::Kern;      // 'kern'
-            else if (tag == 0x6D61726Bu) feat = GposLookup::Feature::Mark; // 'mark'
-            else if (tag == 0x6D6B6D6Bu) feat = GposLookup::Feature::Mkmk; // 'mkmk'
-            else return;
-
-            const std::size_t feat_pos = feature_list + read_u16_be(m_data, rec + 4);
-            if (!within(feat_pos, 4)) return;
-            const uint16_t lc = read_u16_be(m_data, feat_pos + 2);
-            for (uint16_t k = 0; k < lc; ++k) {
-                if (!within(feat_pos + 4u + 2u * k, 2)) break;
-                const uint16_t li = read_u16_be(m_data, feat_pos + 4u + 2u * k);
-                wanted.emplace(li, feat);
-            }
-        };
-
-        const uint16_t req = read_u16_be(m_data, lang_sys + 2);
-        if (req != 0xFFFFu) add_feature(req);
-        const uint16_t fc = read_u16_be(m_data, lang_sys + 4);
-        for (uint16_t i = 0; i < fc; ++i) {
-            if (!within(lang_sys + 6u + 2u * i, 2)) break;
-            add_feature(read_u16_be(m_data, lang_sys + 6u + 2u * i));
-        }
-    };
-
-    collect_from_script(latn_script);
-    if (wanted.empty()) collect_from_script(dflt_script);
-    if (wanted.empty()) return false;
 
     const auto parse_mark_array = [&](std::size_t ma_pos, uint16_t expect_count,
                                       std::vector<GposMarkRecord>& out) -> bool {
@@ -1207,13 +1810,15 @@ bool TrueTypeFont::load_gpos(uint32_t gpos_offset, uint32_t gpos_length) {
         }
     };
 
-    std::vector<uint16_t> known_marks;
+    // 1. Parse ALL lookups (0..lookup_count-1) so contextual PosLookupRecords
+    //    can call nested lookups directly by LookupList index.
     const uint16_t lookup_count = read_u16_be(m_data, lookup_list);
-    for (const auto& [lookup_index, feat] : wanted) {
-        if (lookup_index >= lookup_count) continue;
-        const std::size_t lrec = lookup_list + 2u + 2u * lookup_index;
-        if (!within(lrec, 2)) continue;
-        const std::size_t lpos = lookup_list + read_u16_be(m_data, lrec);
+    if (!within(lookup_list + 2u, 2u * lookup_count)) return false;
+    m_gpos_lookups.resize(lookup_count);
+    std::vector<uint16_t> known_marks;
+
+    for (uint16_t lookup_index = 0; lookup_index < lookup_count; ++lookup_index) {
+        const std::size_t lpos = lookup_list + read_u16_be(m_data, lookup_list + 2u + 2u * lookup_index);
         if (!within(lpos, 6)) continue;
 
         const uint16_t raw_type = read_u16_be(m_data, lpos);
@@ -1227,10 +1832,10 @@ bool TrueTypeFont::load_gpos(uint32_t gpos_offset, uint32_t gpos_length) {
             mark_filtering_set = read_u16_be(m_data, lpos + 6u + 2u * sub_count);
         }
 
-        GposLookup parsed_lookup;
+        GposLookup& parsed_lookup = m_gpos_lookups[lookup_index];
         parsed_lookup.flag = flag;
         parsed_lookup.mark_filtering_set = mark_filtering_set;
-        parsed_lookup.feature = feat;
+        parsed_lookup.feature = GposLookup::Feature::Other;
 
         for (uint16_t s = 0; s < sub_count; ++s) {
             std::size_t sub = lpos + read_u16_be(m_data, lpos + 6u + 2u * s);
@@ -1318,7 +1923,6 @@ bool TrueTypeFont::load_gpos(uint32_t gpos_offset, uint32_t gpos_length) {
                     const uint32_t idx = static_cast<uint32_t>(m_gpos_pair_fmt1.size());
                     m_gpos_pair_fmt1.push_back(std::move(st));
                     parsed_lookup.subtables.push_back({GposSubRef::Kind::PairFmt1, idx});
-                    if (feat == GposLookup::Feature::Kern) m_has_gpos_kern = true;
                 } else if (fmt == 2) {
                     if (!within(sub, 16)) continue;
                     GposPairFmt2Subtable st;
@@ -1342,8 +1946,24 @@ bool TrueTypeFont::load_gpos(uint32_t gpos_offset, uint32_t gpos_length) {
                     const uint32_t idx = static_cast<uint32_t>(m_gpos_pair_fmt2.size());
                     m_gpos_pair_fmt2.push_back(std::move(st));
                     parsed_lookup.subtables.push_back({GposSubRef::Kind::PairFmt2, idx});
-                    if (feat == GposLookup::Feature::Kern) m_has_gpos_kern = true;
                 }
+            } else if (ltype == 3) { // Cursive Attachment
+                if (!within(sub, 6) || read_u16_be(m_data, sub) != 1) continue;
+                GposCursiveSubtable st;
+                if (!parse_coverage(sub + read_u16_be(m_data, sub + 2), table_end, st.cov)) continue;
+                const uint16_t ee_count = read_u16_be(m_data, sub + 4);
+                if (!within(sub + 6u, static_cast<std::size_t>(ee_count) * 4u)) continue;
+                st.records.resize(ee_count);
+                for (uint16_t k = 0; k < ee_count; ++k) {
+                    const uint16_t eoff = read_u16_be(m_data, sub + 6u + 4u * k);
+                    const uint16_t xoff = read_u16_be(m_data, sub + 8u + 4u * k);
+                    if (eoff != 0) read_gpos_anchor(sub + eoff, table_end, st.records[k].entry);
+                    if (xoff != 0) read_gpos_anchor(sub + xoff, table_end, st.records[k].exit);
+                }
+                const uint32_t idx = static_cast<uint32_t>(m_gpos_cursives.size());
+                m_gpos_cursives.push_back(std::move(st));
+                parsed_lookup.subtables.push_back({GposSubRef::Kind::Cursive, idx});
+                m_has_gpos_cursive = true;
             } else if (ltype == 4) { // MarkToBase
                 if (!within(sub, 12) || read_u16_be(m_data, sub) != 1) continue;
                 GposMarkBaseSubtable st;
@@ -1468,20 +2088,423 @@ bool TrueTypeFont::load_gpos(uint32_t gpos_offset, uint32_t gpos_length) {
                 m_gpos_mark_mark.push_back(std::move(st));
                 parsed_lookup.subtables.push_back({GposSubRef::Kind::MarkMark, idx});
                 m_has_gpos_marks = true;
+            } else if (ltype == 7 || ltype == 8) { // ContextPos / ChainContextPos
+                OtfContextSubtable ctx;
+                if (parse_context_subtable(sub, table_end, ltype == 8, ltype, ctx)) {
+                    const uint32_t idx = static_cast<uint32_t>(m_gpos_contexts.size());
+                    m_gpos_contexts.push_back(std::move(ctx));
+                    parsed_lookup.subtables.push_back({GposSubRef::Kind::Context, idx});
+                    m_has_contextual_gpos = true;
+                }
             }
         }
+    }
 
-        if (!parsed_lookup.subtables.empty()) {
-            m_gpos_lookups.push_back(std::move(parsed_lookup));
+    // 2. Collect per-script GPOS feature plans across all scripts in ScriptList.
+    const uint16_t script_count = read_u16_be(m_data, script_list);
+    const uint16_t total_features = read_u16_be(m_data, feature_list);
+    bool latn_has_kern = false;
+    bool dflt_has_kern = false;
+
+    for (uint16_t si = 0; si < script_count; ++si) {
+        const std::size_t rec = script_list + 2u + 6u * si;
+        if (!within(rec, 6)) break;
+        const uint32_t stag = read_u32_be(m_data, rec);
+        const std::size_t spos = script_list + read_u16_be(m_data, rec + 4);
+        if (!within(spos, 4)) continue;
+        uint16_t ls_off = read_u16_be(m_data, spos);
+        if (ls_off == 0) {
+            const uint16_t ls_cnt = read_u16_be(m_data, spos + 2);
+            if (ls_cnt > 0 && within(spos + 4u, 6)) ls_off = read_u16_be(m_data, spos + 8);
+        }
+        if (ls_off == 0 || !within(spos + ls_off, 6)) continue;
+        const std::size_t lang_sys = spos + ls_off;
+
+        std::map<uint16_t, GposLookup::Feature> active;
+        const auto add_feat = [&](uint16_t fi, bool is_required) {
+            if (fi >= total_features) return;
+            const std::size_t frec = feature_list + 2u + 6u * fi;
+            if (!within(frec, 6)) return;
+            const uint32_t ftag = read_u32_be(m_data, frec);
+            GposLookup::Feature feat = GposLookup::Feature::Other;
+            bool match = is_required;
+            if (ftag == ot_tag('k', 'e', 'r', 'n')) {
+                feat = GposLookup::Feature::Kern;
+                match = true;
+            } else if (ftag == ot_tag('c', 'u', 'r', 's')) {
+                feat = GposLookup::Feature::Cursive;
+                match = true;
+            } else if (ftag == ot_tag('m', 'a', 'r', 'k')) {
+                feat = GposLookup::Feature::Mark;
+                match = true;
+            } else if (ftag == ot_tag('m', 'k', 'm', 'k')) {
+                feat = GposLookup::Feature::Mkmk;
+                match = true;
+            } else if (ftag == ot_tag('c', 'a', 'l', 't') ||
+                       ftag == ot_tag('d', 'i', 's', 't') ||
+                       ftag == ot_tag('a', 'b', 'v', 'm') ||
+                       ftag == ot_tag('b', 'l', 'w', 'm')) {
+                feat = GposLookup::Feature::Other;
+                match = true;
+            }
+            if (!match) return;
+
+            const std::size_t fpos = feature_list + read_u16_be(m_data, frec + 4);
+            if (!within(fpos, 4)) return;
+            const uint16_t lcnt = read_u16_be(m_data, fpos + 2);
+            for (uint16_t k = 0; k < lcnt; ++k) {
+                if (!within(fpos + 4u + 2u * k, 2)) break;
+                const uint16_t li = read_u16_be(m_data, fpos + 4u + 2u * k);
+                if (li >= lookup_count || m_gpos_lookups[li].subtables.empty()) continue;
+                active.emplace(li, feat);
+                if (feat == GposLookup::Feature::Kern) {
+                    if (stag == kTagLatn) latn_has_kern = true;
+                    else if (stag == kTagDflt) dflt_has_kern = true;
+                    if (m_gpos_lookups[li].feature == GposLookup::Feature::Other) {
+                        m_gpos_lookups[li].feature = feat;
+                    }
+                } else if (m_gpos_lookups[li].feature == GposLookup::Feature::Other) {
+                    m_gpos_lookups[li].feature = feat;
+                }
+            }
+        };
+
+        const uint16_t req = read_u16_be(m_data, lang_sys + 2);
+        if (req != 0xFFFFu) add_feat(req, true);
+        const uint16_t fc = read_u16_be(m_data, lang_sys + 4);
+        for (uint16_t i = 0; i < fc; ++i) {
+            if (!within(lang_sys + 6u + 2u * i, 2)) break;
+            add_feat(read_u16_be(m_data, lang_sys + 6u + 2u * i), false);
+        }
+
+        if (!active.empty()) {
+            GposScriptPlan plan;
+            plan.script_tag = stag;
+            plan.lookups.assign(active.begin(), active.end());
+            m_gpos_scripts.push_back(std::move(plan));
         }
     }
+
+    m_has_gpos_kern = latn_has_kern || dflt_has_kern;
 
     if (!known_marks.empty()) {
         std::sort(known_marks.begin(), known_marks.end());
         known_marks.erase(std::unique(known_marks.begin(), known_marks.end()), known_marks.end());
         m_gpos_known_marks = std::move(known_marks);
     }
-    return !m_gpos_lookups.empty();
+    return !m_gpos_scripts.empty();
+}
+
+const TrueTypeFont::GsubScriptPlan* TrueTypeFont::find_gsub_script(uint32_t script_tag) const {
+    const GsubScriptPlan* dflt = nullptr;
+    const GsubScriptPlan* deva = nullptr;
+    for (const auto& plan : m_gsub_scripts) {
+        if (plan.script_tag == script_tag) return &plan;
+        if (plan.script_tag == kTagDflt) dflt = &plan;
+        if (script_tag == kTagDev2 && plan.script_tag == kTagDeva) deva = &plan;
+    }
+    if (deva) return deva;
+    return dflt;
+}
+
+const TrueTypeFont::GposScriptPlan* TrueTypeFont::find_gpos_script(uint32_t script_tag) const {
+    const GposScriptPlan* dflt = nullptr;
+    const GposScriptPlan* deva = nullptr;
+    for (const auto& plan : m_gpos_scripts) {
+        if (plan.script_tag == script_tag) return &plan;
+        if (plan.script_tag == kTagDflt) dflt = &plan;
+        if (script_tag == kTagDev2 && plan.script_tag == kTagDeva) deva = &plan;
+    }
+    if (deva) return deva;
+    return dflt;
+}
+
+int32_t TrueTypeFont::next_unignored(const std::vector<ShapingGlyph>& run, std::size_t idx,
+                                     uint16_t flag, uint16_t mark_filtering_set) const {
+    for (std::size_t k = idx + 1; k < run.size(); ++k) {
+        if (!is_ignored_by_lookup(run[k].glyph, flag, mark_filtering_set)) {
+            return static_cast<int32_t>(k);
+        }
+    }
+    return -1;
+}
+
+int32_t TrueTypeFont::prev_unignored(const std::vector<ShapingGlyph>& run, std::size_t idx,
+                                     uint16_t flag, uint16_t mark_filtering_set) const {
+    std::size_t k = idx;
+    while (k > 0) {
+        --k;
+        if (!is_ignored_by_lookup(run[k].glyph, flag, mark_filtering_set)) {
+            return static_cast<int32_t>(k);
+        }
+    }
+    return -1;
+}
+
+bool TrueTypeFont::match_context_subtable(const OtfContextSubtable& ctx,
+                                          const std::vector<ShapingGlyph>& run,
+                                          std::size_t pos,
+                                          uint16_t flag,
+                                          uint16_t mark_filtering_set,
+                                          std::vector<std::size_t>& match_positions,
+                                          const std::vector<OtfLookupRecord>*& out_actions) const {
+    if (pos >= run.size()) return false;
+    match_positions.clear();
+
+    if (ctx.format == 3) {
+        if (ctx.in_covs.empty()) return false;
+        if (ctx.in_covs[0].index(run[pos].glyph) < 0) return false;
+        match_positions.push_back(pos);
+        std::size_t cur = pos;
+        for (std::size_t k = 1; k < ctx.in_covs.size(); ++k) {
+            const int32_t nx = next_unignored(run, cur, flag, mark_filtering_set);
+            if (nx < 0) return false;
+            cur = static_cast<std::size_t>(nx);
+            if (ctx.in_covs[k].index(run[cur].glyph) < 0) return false;
+            match_positions.push_back(cur);
+        }
+        if (ctx.is_chain) {
+            std::size_t bcur = pos;
+            for (std::size_t k = 0; k < ctx.back_covs.size(); ++k) {
+                const int32_t pv = prev_unignored(run, bcur, flag, mark_filtering_set);
+                if (pv < 0) return false;
+                bcur = static_cast<std::size_t>(pv);
+                if (ctx.back_covs[k].index(run[bcur].glyph) < 0) return false;
+            }
+            std::size_t lcur = match_positions.back();
+            for (std::size_t k = 0; k < ctx.look_covs.size(); ++k) {
+                const int32_t nx = next_unignored(run, lcur, flag, mark_filtering_set);
+                if (nx < 0) return false;
+                lcur = static_cast<std::size_t>(nx);
+                if (ctx.look_covs[k].index(run[lcur].glyph) < 0) return false;
+            }
+        }
+        out_actions = &ctx.fmt3_actions;
+        return true;
+    }
+
+    const int cov_idx = ctx.cov.index(run[pos].glyph);
+    if (cov_idx < 0) return false;
+
+    std::size_t set_idx = 0;
+    bool by_class = false;
+    if (ctx.format == 1) {
+        set_idx = static_cast<std::size_t>(cov_idx);
+    } else if (ctx.format == 2) {
+        set_idx = static_cast<std::size_t>(ctx.in_cd.class_of(run[pos].glyph));
+        by_class = true;
+    } else {
+        return false;
+    }
+    if (set_idx >= ctx.sets.size()) return false;
+
+    for (const OtfContextRule& rule : ctx.sets[set_idx]) {
+        match_positions.clear();
+        match_positions.push_back(pos);
+        std::size_t cur = pos;
+        bool ok = true;
+        for (uint16_t expected : rule.input) {
+            const int32_t nx = next_unignored(run, cur, flag, mark_filtering_set);
+            if (nx < 0) { ok = false; break; }
+            cur = static_cast<std::size_t>(nx);
+            const uint16_t got = by_class ? ctx.in_cd.class_of(run[cur].glyph) : run[cur].glyph;
+            if (got != expected) { ok = false; break; }
+            match_positions.push_back(cur);
+        }
+        if (!ok) continue;
+
+        if (ctx.is_chain) {
+            std::size_t bcur = pos;
+            for (uint16_t expected : rule.backtrack) {
+                const int32_t pv = prev_unignored(run, bcur, flag, mark_filtering_set);
+                if (pv < 0) { ok = false; break; }
+                bcur = static_cast<std::size_t>(pv);
+                const uint16_t got = by_class ? ctx.back_cd.class_of(run[bcur].glyph) : run[bcur].glyph;
+                if (got != expected) { ok = false; break; }
+            }
+            if (!ok) continue;
+
+            std::size_t lcur = match_positions.back();
+            for (uint16_t expected : rule.lookahead) {
+                const int32_t nx = next_unignored(run, lcur, flag, mark_filtering_set);
+                if (nx < 0) { ok = false; break; }
+                lcur = static_cast<std::size_t>(nx);
+                const uint16_t got = by_class ? ctx.look_cd.class_of(run[lcur].glyph) : run[lcur].glyph;
+                if (got != expected) { ok = false; break; }
+            }
+            if (!ok) continue;
+        }
+
+        out_actions = &rule.actions;
+        return true;
+    }
+    return false;
+}
+
+bool TrueTypeFont::apply_gsub_lookup_at(uint16_t lookup_index,
+                                        std::vector<ShapingGlyph>& run,
+                                        std::size_t pos,
+                                        uint16_t& next_lig_id,
+                                        bool check_feat_mask,
+                                        uint32_t feat_mask,
+                                        int depth,
+                                        std::size_t max_glyphs,
+                                        std::size_t& out_next_pos) const {
+    out_next_pos = pos + 1u;
+    if (pos >= run.size() || lookup_index >= m_gsub_lookups.size()) return false;
+    const GsubLookup& lk = m_gsub_lookups[lookup_index];
+    if (lk.subtables.empty()) return false;
+    if (is_ignored_by_lookup(run[pos].glyph, lk.flag, lk.mark_filtering_set)) return false;
+    if (check_feat_mask && (run[pos].feature_mask & feat_mask) == 0u) return false;
+
+    for (const GsubSubRef& ref : lk.subtables) {
+        if (ref.kind == GsubSubRef::Kind::Single) {
+            const auto& st = m_gsub_singles[ref.index];
+            const int ci = st.cov.index(run[pos].glyph);
+            if (ci < 0) continue;
+            if (st.format == 1) {
+                run[pos].glyph = static_cast<uint16_t>(
+                    (static_cast<int32_t>(run[pos].glyph) + st.delta) & 0xFFFF);
+                return true;
+            }
+            if (st.format == 2 && static_cast<std::size_t>(ci) < st.substitutes.size()) {
+                run[pos].glyph = st.substitutes[static_cast<std::size_t>(ci)];
+                return true;
+            }
+        } else if (ref.kind == GsubSubRef::Kind::Multiple) {
+            const auto& st = m_gsub_multiples[ref.index];
+            const int ci = st.cov.index(run[pos].glyph);
+            if (ci < 0 || static_cast<std::size_t>(ci) >= st.sequences.size()) continue;
+            const auto& seq = st.sequences[static_cast<std::size_t>(ci)];
+            if (seq.empty()) {
+                run.erase(run.begin() + static_cast<std::ptrdiff_t>(pos));
+                out_next_pos = pos;
+                return true;
+            }
+            if (run.size() - 1u + seq.size() > max_glyphs) return false;
+            const ShapingGlyph base = run[pos];
+            run[pos].glyph = seq[0];
+            if (seq.size() > 1u) {
+                std::vector<ShapingGlyph> extra(seq.size() - 1u, base);
+                for (std::size_t k = 1; k < seq.size(); ++k) extra[k - 1u].glyph = seq[k];
+                run.insert(run.begin() + static_cast<std::ptrdiff_t>(pos + 1u),
+                           extra.begin(), extra.end());
+            }
+            out_next_pos = pos + seq.size();
+            return true;
+        } else if (ref.kind == GsubSubRef::Kind::Alternate) {
+            const auto& st = m_gsub_alternates[ref.index];
+            const int ci = st.cov.index(run[pos].glyph);
+            if (ci < 0 || static_cast<std::size_t>(ci) >= st.alternates.size()) continue;
+            const auto& alts = st.alternates[static_cast<std::size_t>(ci)];
+            if (alts.empty()) continue;
+            run[pos].glyph = alts[0];
+            return true;
+        } else if (ref.kind == GsubSubRef::Kind::Ligature) {
+            const auto& st = m_gsub_ligatures[ref.index];
+            const int ci = st.cov.index(run[pos].glyph);
+            if (ci < 0 || static_cast<std::size_t>(ci) >= st.sets.size()) continue;
+            for (const Ligature& lig : st.sets[static_cast<std::size_t>(ci)]) {
+                std::vector<std::size_t> comp_idx;
+                comp_idx.reserve(1u + lig.rest.size());
+                comp_idx.push_back(pos);
+                std::size_t cur = pos;
+                bool matched = true;
+                for (std::size_t k = 0; k < lig.rest.size(); ++k) {
+                    const int32_t nx = next_unignored(run, cur, lk.flag, lk.mark_filtering_set);
+                    if (nx < 0) { matched = false; break; }
+                    cur = static_cast<std::size_t>(nx);
+                    if (run[cur].glyph != lig.rest[k]) { matched = false; break; }
+                    comp_idx.push_back(cur);
+                }
+                if (!matched) continue;
+
+                const std::size_t end_pos = comp_idx.back();
+                const uint16_t lid = next_lig_id ? next_lig_id++ : 1u;
+                if (next_lig_id == 0) next_lig_id = 1u;
+
+                std::vector<ShapingGlyph> preserved;
+                std::size_t comp_cursor = 0;
+                for (std::size_t p = pos + 1u; p <= end_pos; ++p) {
+                    while (comp_cursor + 1u < comp_idx.size() && p >= comp_idx[comp_cursor + 1u]) {
+                        ++comp_cursor;
+                    }
+                    bool is_comp = false;
+                    for (std::size_t ci_p : comp_idx) {
+                        if (p == ci_p) { is_comp = true; break; }
+                    }
+                    if (!is_comp) {
+                        ShapingGlyph sg = run[p];
+                        if (is_mark_glyph(sg.glyph)) {
+                            sg.lig_id = lid;
+                            sg.lig_comp = static_cast<uint16_t>(
+                                comp_cursor > 0 ? comp_cursor - 1u : 0u);
+                        }
+                        preserved.push_back(sg);
+                    }
+                }
+
+                run[pos].glyph = lig.glyph;
+                run[pos].lig_id = lid;
+                run[pos].lig_comp = 0;
+                run.erase(run.begin() + static_cast<std::ptrdiff_t>(pos + 1u),
+                          run.begin() + static_cast<std::ptrdiff_t>(end_pos + 1u));
+                if (!preserved.empty()) {
+                    run.insert(run.begin() + static_cast<std::ptrdiff_t>(pos + 1u),
+                               preserved.begin(), preserved.end());
+                }
+                out_next_pos = pos + 1u;
+                return true;
+            }
+        } else if (ref.kind == GsubSubRef::Kind::Context) {
+            const auto& ctx = m_gsub_contexts[ref.index];
+            std::vector<std::size_t> match_pos;
+            const std::vector<OtfLookupRecord>* actions = nullptr;
+            if (!match_context_subtable(ctx, run, pos, lk.flag, lk.mark_filtering_set,
+                                        match_pos, actions)) {
+                continue;
+            }
+            if (depth < 16 && actions) {
+                for (const OtfLookupRecord& act : *actions) {
+                    if (act.sequence_index >= match_pos.size()) continue;
+                    const std::size_t target = match_pos[act.sequence_index];
+                    if (target >= run.size()) continue;
+                    const std::size_t before = run.size();
+                    std::size_t dummy_next = target + 1u;
+                    apply_gsub_lookup_at(act.lookup_index, run, target, next_lig_id,
+                                         false, 0u, depth + 1, max_glyphs, dummy_next);
+                    const std::ptrdiff_t delta =
+                        static_cast<std::ptrdiff_t>(run.size()) - static_cast<std::ptrdiff_t>(before);
+                    if (delta != 0) {
+                        for (std::size_t m = act.sequence_index + 1u; m < match_pos.size(); ++m) {
+                            const std::ptrdiff_t adj = static_cast<std::ptrdiff_t>(match_pos[m]) + delta;
+                            match_pos[m] = adj >= 0 ? static_cast<std::size_t>(adj) : 0u;
+                        }
+                    }
+                }
+            }
+            out_next_pos = match_pos.empty() ? (pos + 1u)
+                                             : std::min(run.size(), match_pos.back() + 1u);
+            return true;
+        }
+    }
+    return false;
+}
+
+void TrueTypeFont::apply_gsub_plan(const GsubScriptPlan* plan,
+                                   std::vector<ShapingGlyph>& run,
+                                   uint16_t& next_lig_id) const {
+    if (!plan || run.empty()) return;
+    const std::size_t max_glyphs = std::max<std::size_t>(run.size() * 8u + 64u, 4096u);
+    for (const auto& [lookup_idx, feat_mask] : plan->lookups) {
+        std::size_t pos = 0;
+        while (pos < run.size()) {
+            std::size_t next_pos = pos + 1u;
+            apply_gsub_lookup_at(lookup_idx, run, pos, next_lig_id,
+                                 true, feat_mask, 0, max_glyphs, next_pos);
+            pos = (next_pos > pos) ? next_pos : (pos + 1u);
+        }
+    }
 }
 
 bool TrueTypeFont::match_pair_subtable(const GposSubRef& ref, uint16_t left, uint16_t right,
@@ -1520,322 +2543,405 @@ bool TrueTypeFont::match_pair_subtable(const GposSubRef& ref, uint16_t left, uin
     return false;
 }
 
-std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
-    const std::vector<uint32_t>& codepoints, bool kerning) const {
-    std::vector<PositionedGlyph> result;
-    if (!m_loaded || codepoints.empty()) return result;
+bool TrueTypeFont::apply_gpos_lookup_at(uint16_t lookup_index,
+                                        std::vector<ShapingGlyph>& run,
+                                        std::size_t pos,
+                                        bool is_rtl,
+                                        bool kerning,
+                                        int depth,
+                                        std::size_t& out_next_pos) const {
+    (void)is_rtl;
+    out_next_pos = pos + 1u;
+    if (pos >= run.size() || lookup_index >= m_gpos_lookups.size()) return false;
+    const GposLookup& lk = m_gpos_lookups[lookup_index];
+    if (lk.subtables.empty()) return false;
+    if (is_ignored_by_lookup(run[pos].glyph, lk.flag, lk.mark_filtering_set)) return false;
 
-    struct GlyState {
-        uint16_t glyph{0};
-        uint16_t lig_id{0};
-        uint16_t lig_comp{0};
-        int32_t x_advance{0};
-        int32_t y_advance{0};
-        int32_t x_offset{0};
-        int32_t y_offset{0};
-        int32_t attach_parent{-1};
-        int32_t attach_dx{0};
-        int32_t attach_dy{0};
-    };
-
-    std::vector<uint16_t> raw;
-    raw.reserve(codepoints.size());
-    for (uint32_t cp : codepoints) raw.push_back(glyph_index(cp));
-
-    // Apply `GSUB` `liga`/`rlig` substitutions while preserving per-mark
-    // component indices when a ligature lookup ignores marks.
-    std::vector<GlyState> run;
-    run.reserve(raw.size());
-    if (m_ligature_sets.empty() || raw.size() < 2) {
-        for (uint16_t g : raw) {
-            GlyState st;
-            st.glyph = g;
-            run.push_back(st);
-        }
-    } else {
-        uint16_t next_lig_id = 1;
-        std::size_t i = 0;
-        while (i < raw.size()) {
-            std::size_t lo = 0, hi = m_ligature_sets.size();
-            while (lo < hi) {
-                const std::size_t mid = lo + (hi - lo) / 2;
-                if (m_ligature_sets[mid].first < raw[i]) lo = mid + 1;
-                else hi = mid;
-            }
-            bool matched = false;
-            if (lo < m_ligature_sets.size() && m_ligature_sets[lo].first == raw[i]) {
-                for (const Ligature& lig : m_ligature_sets[lo].ligatures) {
-                    if (!lig.ignore_marks) {
-                        if (i + 1u + lig.rest.size() > raw.size()) continue;
-                        bool same = true;
-                        for (std::size_t k = 0; k < lig.rest.size(); ++k) {
-                            if (raw[i + 1u + k] != lig.rest[k]) {
-                                same = false;
-                                break;
-                            }
-                        }
-                        if (same) {
-                            GlyState base;
-                            base.glyph = lig.glyph;
-                            base.lig_id = next_lig_id++;
-                            run.push_back(base);
-                            i += 1u + lig.rest.size();
-                            matched = true;
-                            break;
-                        }
-                    } else {
-                        std::size_t cursor = i + 1u;
-                        std::vector<std::pair<uint16_t, uint16_t>> skipped_marks;
-                        bool same = true;
-                        for (std::size_t k = 0; k < lig.rest.size(); ++k) {
-                            while (cursor < raw.size() && is_mark_glyph(raw[cursor])) {
-                                skipped_marks.emplace_back(raw[cursor], static_cast<uint16_t>(k));
-                                ++cursor;
-                            }
-                            if (cursor >= raw.size() || raw[cursor] != lig.rest[k]) {
-                                same = false;
-                                break;
-                            }
-                            ++cursor;
-                        }
-                        if (same) {
-                            const uint16_t lid = next_lig_id++;
-                            GlyState base;
-                            base.glyph = lig.glyph;
-                            base.lig_id = lid;
-                            run.push_back(base);
-                            for (const auto& [mg, comp] : skipped_marks) {
-                                GlyState ms;
-                                ms.glyph = mg;
-                                ms.lig_id = lid;
-                                ms.lig_comp = comp;
-                                run.push_back(ms);
-                            }
-                            i = cursor;
-                            matched = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (!matched) {
-                GlyState st;
-                st.glyph = raw[i];
-                run.push_back(st);
-                ++i;
-            }
-        }
-    }
-
-    const std::size_t n = run.size();
-    for (std::size_t i = 0; i < n; ++i) {
-        const uint16_t g = run[i].glyph;
-        const uint16_t adv = (g < m_advance_widths.size()) ? m_advance_widths[g] : m_advance_widths[0];
-        run[i].x_advance = static_cast<int32_t>(adv);
-    }
-
-    const auto apply_value = [](const GposValue& v, GlyState& st) {
+    const auto apply_value = [](const GposValue& v, ShapingGlyph& st) {
         st.x_offset += v.x_placement;
         st.y_offset += v.y_placement;
         st.x_advance += v.x_advance;
         st.y_advance += v.y_advance;
     };
 
-    // Pass 1: SinglePos (Type 1) and PairPos (Type 2; skipped for `kern` when
-    // `font-kerning: none`). Runs in LookupList index order.
-    for (const GposLookup& lk : m_gpos_lookups) {
-        if (lk.type == 1) {
-            for (std::size_t i = 0; i < n; ++i) {
-                if (is_ignored_by_lookup(run[i].glyph, lk.flag, lk.mark_filtering_set)) continue;
-                for (const GposSubRef& ref : lk.subtables) {
-                    const auto& st = m_gpos_singles[ref.index];
-                    const int idx = st.cov.index(run[i].glyph);
-                    if (idx < 0) continue;
-                    if (st.format == 1) {
-                        apply_value(st.single_val, run[i]);
-                    } else if (st.format == 2 && static_cast<std::size_t>(idx) < st.vals.size()) {
-                        apply_value(st.vals[static_cast<std::size_t>(idx)], run[i]);
-                    }
-                    break;
-                }
+    if (lk.type == 1) { // SinglePos
+        for (const GposSubRef& ref : lk.subtables) {
+            const auto& st = m_gpos_singles[ref.index];
+            const int idx = st.cov.index(run[pos].glyph);
+            if (idx < 0) continue;
+            if (st.format == 1) {
+                apply_value(st.single_val, run[pos]);
+                return true;
             }
-        } else if (lk.type == 2) {
-            if (!kerning && lk.feature == GposLookup::Feature::Kern) continue;
-            for (std::size_t i = 0; i + 1 < n;) {
-                if (is_ignored_by_lookup(run[i].glyph, lk.flag, lk.mark_filtering_set)) {
-                    ++i;
-                    continue;
-                }
-                std::size_t j = i + 1;
-                while (j < n && is_ignored_by_lookup(run[j].glyph, lk.flag, lk.mark_filtering_set)) {
-                    ++j;
-                }
-                if (j >= n) break;
-                bool adv2 = false;
-                for (const GposSubRef& ref : lk.subtables) {
-                    GposValue v1, v2;
-                    bool step_two = false;
-                    if (match_pair_subtable(ref, run[i].glyph, run[j].glyph, v1, v2, step_two)) {
-                        apply_value(v1, run[i]);
-                        apply_value(v2, run[j]);
-                        adv2 = step_two;
+            if (st.format == 2 && static_cast<std::size_t>(idx) < st.vals.size()) {
+                apply_value(st.vals[static_cast<std::size_t>(idx)], run[pos]);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if (lk.type == 2) { // PairPos
+        if (!kerning && lk.feature == GposLookup::Feature::Kern) return false;
+        const int32_t nx = next_unignored(run, pos, lk.flag, lk.mark_filtering_set);
+        if (nx < 0) return false;
+        const std::size_t j = static_cast<std::size_t>(nx);
+        for (const GposSubRef& ref : lk.subtables) {
+            GposValue v1, v2;
+            bool step_two = false;
+            if (match_pair_subtable(ref, run[pos].glyph, run[j].glyph, v1, v2, step_two)) {
+                apply_value(v1, run[pos]);
+                apply_value(v2, run[j]);
+                out_next_pos = step_two ? (j + 1u) : (pos + 1u);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    if (lk.type == 3) { // Cursive Attachment
+        const int32_t nx = next_unignored(run, pos, lk.flag, lk.mark_filtering_set);
+        if (nx < 0) return false;
+        const std::size_t j = static_cast<std::size_t>(nx);
+        const bool rtl_lookup = (lk.flag & 0x0001u) != 0;
+        for (const GposSubRef& ref : lk.subtables) {
+            const auto& st = m_gpos_cursives[ref.index];
+            const int ii = st.cov.index(run[pos].glyph);
+            const int ji = st.cov.index(run[j].glyph);
+            if (ii < 0 || ji < 0) continue;
+            if (static_cast<std::size_t>(ii) >= st.records.size() ||
+                static_cast<std::size_t>(ji) >= st.records.size()) {
+                continue;
+            }
+            const auto& exit_anc = st.records[static_cast<std::size_t>(ii)].exit;
+            const auto& entry_anc = st.records[static_cast<std::size_t>(ji)].entry;
+            if (!exit_anc.present || !entry_anc.present) continue;
+
+            if (rtl_lookup) {
+                run[pos].cursive_chain = static_cast<int32_t>(j);
+                run[pos].cursive_dy = static_cast<int32_t>(entry_anc.y) - exit_anc.y;
+                run[pos].x_offset -= exit_anc.x;
+                run[pos].x_advance -= exit_anc.x;
+                run[j].x_advance = static_cast<int32_t>(entry_anc.x) + run[j].x_offset;
+            } else {
+                run[j].cursive_chain = static_cast<int32_t>(pos);
+                run[j].cursive_dy = static_cast<int32_t>(exit_anc.y) - entry_anc.y;
+                run[pos].x_advance = static_cast<int32_t>(exit_anc.x) + run[pos].x_offset;
+                run[j].x_offset -= entry_anc.x;
+                run[j].x_advance -= entry_anc.x;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    if (lk.type == 4 || lk.type == 5) { // MarkToBase / MarkToLig
+        if (pos == 0) return false;
+        std::size_t j = pos;
+        bool found_base = false;
+        while (j > 0) {
+            --j;
+            if (is_mark_glyph(run[j].glyph)) continue;
+            found_base = true;
+            break;
+        }
+        if (!found_base || is_ignored_by_lookup(run[j].glyph, lk.flag, lk.mark_filtering_set)) {
+            return false;
+        }
+        if (lk.type == 4) {
+            if (m_has_gdef_glyph_class && m_gdef_glyph_class.class_of(run[j].glyph) == 2) {
+                return false;
+            }
+            for (const GposSubRef& ref : lk.subtables) {
+                const auto& st = m_gpos_mark_base[ref.index];
+                const int mi = st.mark_cov.index(run[pos].glyph);
+                if (mi < 0 || static_cast<std::size_t>(mi) >= st.marks.size()) continue;
+                const int bi = st.base_cov.index(run[j].glyph);
+                if (bi < 0) continue;
+                const GposMarkRecord& mrec = st.marks[static_cast<std::size_t>(mi)];
+                if (!mrec.anchor.present || mrec.mark_class >= st.class_count) continue;
+                const std::size_t bidx =
+                    static_cast<std::size_t>(bi) * st.class_count + mrec.mark_class;
+                if (bidx >= st.base_anchors.size() || !st.base_anchors[bidx].present) continue;
+                run[pos].mark_base = static_cast<int32_t>(j);
+                run[pos].cursive_dx = static_cast<int32_t>(st.base_anchors[bidx].x) - mrec.anchor.x;
+                run[pos].cursive_dy = static_cast<int32_t>(st.base_anchors[bidx].y) - mrec.anchor.y;
+                return true;
+            }
+            return false;
+        }
+
+        for (const GposSubRef& ref : lk.subtables) {
+            const auto& st = m_gpos_mark_lig[ref.index];
+            const int mi = st.mark_cov.index(run[pos].glyph);
+            if (mi < 0 || static_cast<std::size_t>(mi) >= st.marks.size()) continue;
+            const int li = st.lig_cov.index(run[j].glyph);
+            if (li < 0 || static_cast<std::size_t>(li) >= st.lig_attaches.size()) continue;
+            const GposMarkRecord& mrec = st.marks[static_cast<std::size_t>(mi)];
+            if (!mrec.anchor.present || mrec.mark_class >= st.class_count) continue;
+            const auto& attach = st.lig_attaches[static_cast<std::size_t>(li)];
+            if (attach.component_count == 0) continue;
+
+            GposAnchor lanc;
+            if (run[j].lig_id != 0 && run[pos].lig_id == run[j].lig_id) {
+                const uint16_t comp =
+                    std::min<uint16_t>(run[pos].lig_comp, attach.component_count - 1u);
+                const std::size_t idx =
+                    static_cast<std::size_t>(comp) * st.class_count + mrec.mark_class;
+                if (idx < attach.anchors.size()) lanc = attach.anchors[idx];
+            } else {
+                for (int comp = static_cast<int>(attach.component_count) - 1; comp >= 0; --comp) {
+                    const std::size_t idx =
+                        static_cast<std::size_t>(comp) * st.class_count + mrec.mark_class;
+                    if (idx < attach.anchors.size() && attach.anchors[idx].present) {
+                        lanc = attach.anchors[idx];
                         break;
                     }
                 }
-                i = adv2 ? (j + 1u) : (i + 1u);
             }
+            if (!lanc.present) continue;
+            run[pos].mark_base = static_cast<int32_t>(j);
+            run[pos].cursive_dx = static_cast<int32_t>(lanc.x) - mrec.anchor.x;
+            run[pos].cursive_dy = static_cast<int32_t>(lanc.y) - mrec.anchor.y;
+            return true;
         }
+        return false;
     }
 
-    // Legacy `kern` table fallback only when `GPOS` provides no `kern` lookups.
-    if (kerning && !m_has_gpos_kern && m_kern_pairs > 0) {
-        for (std::size_t i = 0; i + 1 < n; ++i) {
-            run[i].x_advance += kerning_units_for_glyphs(run[i].glyph, run[i + 1].glyph);
+    if (lk.type == 6) { // MarkToMark
+        if (pos == 0) return false;
+        const int32_t pv = prev_unignored(run, pos, lk.flag, lk.mark_filtering_set);
+        if (pv < 0) return false;
+        const std::size_t j = static_cast<std::size_t>(pv);
+        if (!is_mark_glyph(run[j].glyph)) return false;
+        if (run[pos].lig_id != 0 && run[j].lig_id == run[pos].lig_id &&
+            run[pos].lig_comp != run[j].lig_comp) {
+            return false;
         }
+        for (const GposSubRef& ref : lk.subtables) {
+            const auto& st = m_gpos_mark_mark[ref.index];
+            const int m1i = st.mark1_cov.index(run[pos].glyph);
+            if (m1i < 0 || static_cast<std::size_t>(m1i) >= st.mark1s.size()) continue;
+            const int m2i = st.mark2_cov.index(run[j].glyph);
+            if (m2i < 0) continue;
+            const GposMarkRecord& mrec = st.mark1s[static_cast<std::size_t>(m1i)];
+            if (!mrec.anchor.present || mrec.mark_class >= st.class_count) continue;
+            const std::size_t m2idx =
+                static_cast<std::size_t>(m2i) * st.class_count + mrec.mark_class;
+            if (m2idx >= st.mark2_anchors.size() || !st.mark2_anchors[m2idx].present) continue;
+            run[pos].mark_base = static_cast<int32_t>(j);
+            run[pos].cursive_dx = static_cast<int32_t>(st.mark2_anchors[m2idx].x) - mrec.anchor.x;
+            run[pos].cursive_dy = static_cast<int32_t>(st.mark2_anchors[m2idx].y) - mrec.anchor.y;
+            return true;
+        }
+        return false;
     }
 
-    // Pass 2: Mark-to-Base (Type 4) and Mark-to-Ligature (Type 5).
-    for (const GposLookup& lk : m_gpos_lookups) {
-        if (lk.type != 4 && lk.type != 5) continue;
-        for (std::size_t i = 1; i < n; ++i) {
-            if (is_ignored_by_lookup(run[i].glyph, lk.flag, lk.mark_filtering_set)) continue;
-            // Find the preceding non-mark glyph without crossing a ligature when
-            // running MarkToBase.
-            std::size_t j = i;
-            bool found_base = false;
-            while (j > 0) {
-                --j;
-                if (is_mark_glyph(run[j].glyph)) continue;
-                found_base = true;
-                break;
-            }
-            if (!found_base) continue;
-            if (is_ignored_by_lookup(run[j].glyph, lk.flag, lk.mark_filtering_set)) continue;
-
-            if (lk.type == 4) {
-                if (m_has_gdef_glyph_class && m_gdef_glyph_class.class_of(run[j].glyph) == 2) {
-                    continue; // do not jump past a ligature onto an earlier base
-                }
-                for (const GposSubRef& ref : lk.subtables) {
-                    const auto& st = m_gpos_mark_base[ref.index];
-                    const int mi = st.mark_cov.index(run[i].glyph);
-                    if (mi < 0 || static_cast<std::size_t>(mi) >= st.marks.size()) continue;
-                    const int bi = st.base_cov.index(run[j].glyph);
-                    if (bi < 0) continue;
-                    const GposMarkRecord& mrec = st.marks[static_cast<std::size_t>(mi)];
-                    if (!mrec.anchor.present || mrec.mark_class >= st.class_count) continue;
-                    const std::size_t bidx =
-                        static_cast<std::size_t>(bi) * st.class_count + mrec.mark_class;
-                    if (bidx >= st.base_anchors.size() || !st.base_anchors[bidx].present) continue;
-                    run[i].attach_parent = static_cast<int32_t>(j);
-                    run[i].attach_dx = static_cast<int32_t>(st.base_anchors[bidx].x) - mrec.anchor.x;
-                    run[i].attach_dy = static_cast<int32_t>(st.base_anchors[bidx].y) - mrec.anchor.y;
-                    break;
-                }
-            } else { // Type 5: MarkToLig
-                for (const GposSubRef& ref : lk.subtables) {
-                    const auto& st = m_gpos_mark_lig[ref.index];
-                    const int mi = st.mark_cov.index(run[i].glyph);
-                    if (mi < 0 || static_cast<std::size_t>(mi) >= st.marks.size()) continue;
-                    const int li = st.lig_cov.index(run[j].glyph);
-                    if (li < 0 || static_cast<std::size_t>(li) >= st.lig_attaches.size()) continue;
-                    const GposMarkRecord& mrec = st.marks[static_cast<std::size_t>(mi)];
-                    if (!mrec.anchor.present || mrec.mark_class >= st.class_count) continue;
-                    const auto& attach = st.lig_attaches[static_cast<std::size_t>(li)];
-                    if (attach.component_count == 0) continue;
-
-                    GposAnchor lanc;
-                    if (run[j].lig_id != 0 && run[i].lig_id == run[j].lig_id) {
-                        const uint16_t comp =
-                            std::min<uint16_t>(run[i].lig_comp, attach.component_count - 1u);
-                        const std::size_t idx =
-                            static_cast<std::size_t>(comp) * st.class_count + mrec.mark_class;
-                        if (idx < attach.anchors.size()) lanc = attach.anchors[idx];
-                    } else {
-                        for (int comp = static_cast<int>(attach.component_count) - 1; comp >= 0; --comp) {
-                            const std::size_t idx =
-                                static_cast<std::size_t>(comp) * st.class_count + mrec.mark_class;
-                            if (idx < attach.anchors.size() && attach.anchors[idx].present) {
-                                lanc = attach.anchors[idx];
-                                break;
-                            }
-                        }
-                    }
-                    if (!lanc.present) continue;
-                    run[i].attach_parent = static_cast<int32_t>(j);
-                    run[i].attach_dx = static_cast<int32_t>(lanc.x) - mrec.anchor.x;
-                    run[i].attach_dy = static_cast<int32_t>(lanc.y) - mrec.anchor.y;
-                    break;
-                }
-            }
-        }
-    }
-
-    // Pass 3: Mark-to-Mark (Type 6). Run after MarkToBase/MarkToLig so stacked
-    // marks always anchor onto their preceding mark even in fonts (such as
-    // DejaVu Sans and DejaVu Serif) where `mkmk` carries a lower LookupIndex.
-    for (const GposLookup& lk : m_gpos_lookups) {
-        if (lk.type != 6) continue;
-        for (std::size_t i = 1; i < n; ++i) {
-            if (is_ignored_by_lookup(run[i].glyph, lk.flag, lk.mark_filtering_set)) continue;
-            std::size_t j = i;
-            bool found_prev = false;
-            while (j > 0) {
-                --j;
-                if (is_ignored_by_lookup(run[j].glyph, lk.flag, lk.mark_filtering_set)) continue;
-                found_prev = true;
-                break;
-            }
-            if (!found_prev) continue;
-            if (!is_mark_glyph(run[j].glyph)) continue;
-            if (run[i].lig_id != 0 && run[j].lig_id == run[i].lig_id &&
-                run[i].lig_comp != run[j].lig_comp) {
+    if (lk.type == 7 || lk.type == 8) { // ContextPos / ChainContextPos
+        for (const GposSubRef& ref : lk.subtables) {
+            const auto& ctx = m_gpos_contexts[ref.index];
+            std::vector<std::size_t> match_pos;
+            const std::vector<OtfLookupRecord>* actions = nullptr;
+            if (!match_context_subtable(ctx, run, pos, lk.flag, lk.mark_filtering_set,
+                                        match_pos, actions)) {
                 continue;
             }
-
-            for (const GposSubRef& ref : lk.subtables) {
-                const auto& st = m_gpos_mark_mark[ref.index];
-                const int m1i = st.mark1_cov.index(run[i].glyph);
-                if (m1i < 0 || static_cast<std::size_t>(m1i) >= st.mark1s.size()) continue;
-                const int m2i = st.mark2_cov.index(run[j].glyph);
-                if (m2i < 0) continue;
-                const GposMarkRecord& mrec = st.mark1s[static_cast<std::size_t>(m1i)];
-                if (!mrec.anchor.present || mrec.mark_class >= st.class_count) continue;
-                const std::size_t m2idx =
-                    static_cast<std::size_t>(m2i) * st.class_count + mrec.mark_class;
-                if (m2idx >= st.mark2_anchors.size() || !st.mark2_anchors[m2idx].present) continue;
-                run[i].attach_parent = static_cast<int32_t>(j);
-                run[i].attach_dx = static_cast<int32_t>(st.mark2_anchors[m2idx].x) - mrec.anchor.x;
-                run[i].attach_dy = static_cast<int32_t>(st.mark2_anchors[m2idx].y) - mrec.anchor.y;
-                break;
+            if (depth < 16 && actions) {
+                for (const OtfLookupRecord& act : *actions) {
+                    if (act.sequence_index >= match_pos.size()) continue;
+                    const std::size_t target = match_pos[act.sequence_index];
+                    std::size_t dummy_next = target + 1u;
+                    apply_gpos_lookup_at(act.lookup_index, run, target, is_rtl, kerning,
+                                         depth + 1, dummy_next);
+                }
             }
+            out_next_pos = match_pos.empty() ? (pos + 1u)
+                                             : std::min(run.size(), match_pos.back() + 1u);
+            return true;
         }
     }
+    return false;
+}
 
-    // Pass 4: Resolve anchor attachment chains left to right (`parent < i`).
-    for (std::size_t i = 0; i < n; ++i) {
-        const int32_t j = run[i].attach_parent;
-        if (j >= 0 && static_cast<std::size_t>(j) < i) {
-            int32_t sum_adv_x = 0;
-            int32_t sum_adv_y = 0;
-            for (std::size_t k = static_cast<std::size_t>(j); k < i; ++k) {
-                sum_adv_x += run[k].x_advance;
-                sum_adv_y += run[k].y_advance;
-            }
-            run[i].x_offset += run[static_cast<std::size_t>(j)].x_offset + run[i].attach_dx - sum_adv_x;
-            run[i].y_offset += run[static_cast<std::size_t>(j)].y_offset + run[i].attach_dy - sum_adv_y;
+std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
+    const std::vector<uint32_t>& codepoints, bool kerning, bool visual_rtl) const {
+    std::vector<PositionedGlyph> result;
+    if (!m_loaded || codepoints.empty()) return result;
+
+    const std::vector<uint32_t> scripts = itemize_codepoint_scripts(codepoints);
+    uint16_t next_lig_id = 1;
+
+    std::size_t run_start = 0;
+    while (run_start < codepoints.size()) {
+        const uint32_t script_tag = scripts[run_start];
+        std::size_t run_end = run_start + 1u;
+        while (run_end < codepoints.size() && scripts[run_end] == script_tag) ++run_end;
+        const bool is_rtl = is_rtl_script_tag(script_tag);
+
+        std::vector<uint32_t> feat_masks;
+        if (script_tag == kTagArab || script_tag == kTagNko || script_tag == kTagSyrc) {
+            feat_masks = compute_arabic_feature_masks(codepoints, run_start, run_end);
+        } else {
+            feat_masks.assign(run_end - run_start, kGsubFeatGlobal);
         }
-    }
 
-    result.reserve(n);
-    for (const GlyState& st : run) {
-        PositionedGlyph pg;
-        pg.glyph = st.glyph;
-        pg.x_advance = st.x_advance;
-        pg.y_advance = st.y_advance;
-        pg.x_offset = st.x_offset;
-        pg.y_offset = st.y_offset;
-        result.push_back(pg);
+        std::vector<ShapingGlyph> run;
+        run.reserve(run_end - run_start);
+        for (std::size_t i = run_start; i < run_end; ++i) {
+            const uint32_t cp = codepoints[i];
+            ShapingGlyph sg;
+            sg.glyph = glyph_index(cp);
+            sg.feature_mask = feat_masks[i - run_start];
+            // Borrow `lig_comp` bit flag sentinel? No — track join control explicitly via codepoint
+            // check? Wait: use feature_mask bit (1<<31) temporarily to strip surviving join controls!
+            if (is_join_control(cp)) sg.feature_mask |= (1u << 31);
+            run.push_back(sg);
+        }
+
+        const GsubScriptPlan* gsub_plan = find_gsub_script(script_tag);
+        if (gsub_plan) {
+            apply_gsub_plan(gsub_plan, run, next_lig_id);
+        }
+
+        // Strip surviving default-ignorable join controls (`U+200C`/`U+200D`) so
+        // they never paint `.notdef` boxes or interfere with `GPOS` adjacency.
+        run.erase(std::remove_if(run.begin(), run.end(),
+                                 [](const ShapingGlyph& sg) {
+                                     return (sg.feature_mask & (1u << 31)) != 0u;
+                                 }),
+                  run.end());
+
+        const std::size_t n = run.size();
+        for (std::size_t i = 0; i < n; ++i) {
+            const uint16_t g = run[i].glyph;
+            const uint16_t adv = (g < m_advance_widths.size()) ? m_advance_widths[g] : m_advance_widths[0];
+            run[i].x_advance = static_cast<int32_t>(adv);
+        }
+
+        const GposScriptPlan* gpos_plan = find_gpos_script(script_tag);
+        bool script_has_kern = false;
+        if (gpos_plan) {
+            // Stage 1: SinglePos (1), PairPos (2), Cursive (3), Contextual (7/8)
+            for (const auto& [li, feat] : gpos_plan->lookups) {
+                if (li >= m_gpos_lookups.size()) continue;
+                const GposLookup& lk = m_gpos_lookups[li];
+                if (feat == GposLookup::Feature::Kern) script_has_kern = true;
+                if (lk.type == 4 || lk.type == 5 || lk.type == 6) continue;
+                if (lk.type == 2 && !kerning && feat == GposLookup::Feature::Kern) continue;
+                std::size_t pos = 0;
+                while (pos < n) {
+                    std::size_t next_pos = pos + 1u;
+                    apply_gpos_lookup_at(li, run, pos, is_rtl, kerning, 0, next_pos);
+                    pos = (next_pos > pos) ? next_pos : (pos + 1u);
+                }
+            }
+            // Stage 2: MarkToBase (4) and MarkToLig (5)
+            for (const auto& [li, feat] : gpos_plan->lookups) {
+                (void)feat;
+                if (li >= m_gpos_lookups.size()) continue;
+                const GposLookup& lk = m_gpos_lookups[li];
+                if (lk.type != 4 && lk.type != 5) continue;
+                for (std::size_t pos = 0; pos < n; ++pos) {
+                    std::size_t dummy_next = pos + 1u;
+                    apply_gpos_lookup_at(li, run, pos, is_rtl, kerning, 0, dummy_next);
+                }
+            }
+            // Stage 3: MarkToMark (6)
+            for (const auto& [li, feat] : gpos_plan->lookups) {
+                (void)feat;
+                if (li >= m_gpos_lookups.size()) continue;
+                const GposLookup& lk = m_gpos_lookups[li];
+                if (lk.type != 6) continue;
+                for (std::size_t pos = 0; pos < n; ++pos) {
+                    std::size_t dummy_next = pos + 1u;
+                    apply_gpos_lookup_at(li, run, pos, is_rtl, kerning, 0, dummy_next);
+                }
+            }
+        }
+
+        // Legacy `kern` fallback when this script has no `GPOS` `kern` lookup.
+        if (kerning && !script_has_kern && m_kern_pairs > 0) {
+            for (std::size_t i = 0; i + 1u < n; ++i) {
+                run[i].x_advance += kerning_units_for_glyphs(run[i].glyph, run[i + 1u].glyph);
+            }
+        }
+
+        // Stage 4a: Resolve CursiveAttachment chains via memoized DFS (works for
+        // both LTR `parent < i` and RTL `parent > i`).
+        std::vector<uint8_t> cursive_state(n, 0); // 0=unvisited, 1=visiting, 2=done
+        auto resolve_cursive = [&](auto& self, std::size_t idx) -> void {
+            if (cursive_state[idx] == 2 || cursive_state[idx] == 1) return;
+            cursive_state[idx] = 1;
+            const int32_t parent = run[idx].cursive_chain;
+            if (parent >= 0 && static_cast<std::size_t>(parent) < n) {
+                const std::size_t p = static_cast<std::size_t>(parent);
+                self(self, p);
+                run[idx].y_offset += run[p].y_offset + run[idx].cursive_dy;
+            }
+            cursive_state[idx] = 2;
+        };
+        for (std::size_t i = 0; i < n; ++i) {
+            if (run[i].cursive_chain >= 0) resolve_cursive(resolve_cursive, i);
+        }
+
+        // Stage 4b: Resolve Mark attachment chains left to right (`mark_base < i`).
+        for (std::size_t i = 0; i < n; ++i) {
+            const int32_t j = run[i].mark_base;
+            if (j >= 0 && static_cast<std::size_t>(j) < i) {
+                int32_t sum_adv_x = 0;
+                int32_t sum_adv_y = 0;
+                for (std::size_t k = static_cast<std::size_t>(j); k < i; ++k) {
+                    sum_adv_x += run[k].x_advance;
+                    sum_adv_y += run[k].y_advance;
+                }
+                run[i].x_offset += run[static_cast<std::size_t>(j)].x_offset + run[i].cursive_dx - sum_adv_x;
+                run[i].y_offset += run[static_cast<std::size_t>(j)].y_offset + run[i].cursive_dy - sum_adv_y;
+            }
+        }
+
+        if (visual_rtl && is_rtl && n > 1u) {
+            // Reorder base+marks clusters right-to-left while keeping each base
+            // followed immediately by its own marks so pen advances match mark offsets.
+            std::vector<std::pair<std::size_t, std::size_t>> clusters;
+            std::size_t c = 0;
+            while (c < n) {
+                if (run[c].mark_base < 0 && is_mark_glyph(run[c].glyph)) {
+                    clusters.emplace_back(c, c + 1u);
+                    ++c;
+                    continue;
+                }
+                std::size_t ce = c + 1u;
+                while (ce < n && (run[ce].mark_base >= 0 || is_mark_glyph(run[ce].glyph))) {
+                    ++ce;
+                }
+                clusters.emplace_back(c, ce);
+                c = ce;
+            }
+            for (auto it = clusters.rbegin(); it != clusters.rend(); ++it) {
+                for (std::size_t k = it->first; k < it->second; ++k) {
+                    PositionedGlyph pg;
+                    pg.glyph = run[k].glyph;
+                    pg.x_advance = run[k].x_advance;
+                    pg.y_advance = run[k].y_advance;
+                    pg.x_offset = run[k].x_offset;
+                    pg.y_offset = run[k].y_offset;
+                    pg.is_mark = (run[k].mark_base >= 0 || is_mark_glyph(run[k].glyph));
+                    result.push_back(pg);
+                }
+            }
+        } else {
+            for (const ShapingGlyph& st : run) {
+                PositionedGlyph pg;
+                pg.glyph = st.glyph;
+                pg.x_advance = st.x_advance;
+                pg.y_advance = st.y_advance;
+                pg.x_offset = st.x_offset;
+                pg.y_offset = st.y_offset;
+                pg.is_mark = (st.mark_base >= 0 || is_mark_glyph(st.glyph));
+                result.push_back(pg);
+            }
+        }
+        run_start = run_end;
     }
     return result;
 }
@@ -1850,19 +2956,28 @@ int16_t TrueTypeFont::kerning_units_for_glyphs(uint16_t left_glyph, uint16_t rig
     if (left_glyph == 0 || right_glyph == 0) return 0;
 
     if (m_has_gpos_kern) {
-        int32_t total = 0;
-        for (const GposLookup& lk : m_gpos_lookups) {
-            if (lk.type != 2 || lk.feature != GposLookup::Feature::Kern) continue;
-            for (const GposSubRef& ref : lk.subtables) {
-                GposValue v1, v2;
-                bool adv2 = false;
-                if (match_pair_subtable(ref, left_glyph, right_glyph, v1, v2, adv2)) {
-                    total += static_cast<int32_t>(v1.x_advance) + v2.x_advance;
-                    break;
+        const GposScriptPlan* plan = find_gpos_script(kTagLatn);
+        if (plan) {
+            bool plan_has_kern = false;
+            int32_t total = 0;
+            for (const auto& [li, feat] : plan->lookups) {
+                if (feat != GposLookup::Feature::Kern || li >= m_gpos_lookups.size()) continue;
+                plan_has_kern = true;
+                const GposLookup& lk = m_gpos_lookups[li];
+                if (lk.type != 2) continue;
+                for (const GposSubRef& ref : lk.subtables) {
+                    GposValue v1, v2;
+                    bool adv2 = false;
+                    if (match_pair_subtable(ref, left_glyph, right_glyph, v1, v2, adv2)) {
+                        total += static_cast<int32_t>(v1.x_advance) + v2.x_advance;
+                        break;
+                    }
                 }
             }
+            if (plan_has_kern) {
+                return static_cast<int16_t>(std::clamp<int32_t>(total, -32768, 32767));
+            }
         }
-        return static_cast<int16_t>(std::clamp<int32_t>(total, -32768, 32767));
     }
 
     if (m_kern_pairs == 0) return 0;
@@ -2922,70 +4037,171 @@ bool FontRenderer::font_kerning(std::string_view css_family, int font_weight, bo
 std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view utf8_text,
                                                                 float font_size, int font_weight,
                                                                 int family_id, bool italic,
-                                                                bool kerning) const {
+                                                                bool kerning, bool visual_rtl,
+                                                                bool pre_reversed) const {
     std::vector<ShapedGlyph> out;
     if (utf8_text.empty()) return out;
 
-    // A run is the stretch of text one face draws. Ligatures and GPOS lookups
-    // apply inside a run and never across a face boundary: a mark or ligature
-    // rule belongs to one face's coordinate space and tables.
-    std::vector<uint32_t> run;
-    const TrueTypeFont* run_face = nullptr;
-    bool run_shear = false;
+    std::vector<uint32_t> cps;
+    cps.reserve(utf8_text.size());
+    std::size_t pos = 0;
+    while (pos < utf8_text.size()) {
+        cps.push_back(next_utf8_codepoint(utf8_text, pos));
+    }
+    if (pre_reversed && cps.size() > 1u) {
+        // Bidi L2 wrote this odd-level run in visual order; restore logical
+        // codepoint order before script itemization, Arabic joining, and GSUB/GPOS.
+        std::reverse(cps.begin(), cps.end());
+    }
+    const std::vector<uint32_t> scripts = itemize_codepoint_scripts(cps);
 
-    const auto flush = [&]() {
-        if (run.empty()) return;
-        if (run_face) {
-            const float upem = static_cast<float>(run_face->units_per_em());
+    struct FaceRun {
+        const TrueTypeFont* face{nullptr};
+        bool shear{false};
+        bool is_rtl{false};
+        std::vector<uint32_t> cps;
+        std::vector<ShapedGlyph> glyphs;
+    };
+
+    std::vector<FaceRun> runs;
+    const TrueTypeFont* cur_face = nullptr;
+    bool cur_shear = false;
+    bool cur_rtl = false;
+    uint32_t prev_script = 0;
+
+    for (std::size_t k = 0; k < cps.size(); ++k) {
+        const uint32_t cp = cps[k];
+        const uint32_t sc = scripts[k];
+        const bool rtl = is_rtl_script_tag(sc);
+
+        const TrueTypeFont* face = nullptr;
+        bool shear = false;
+        if (!runs.empty() && cur_face &&
+            (is_join_control(cp) ||
+             (sc == prev_script && rtl && cur_face->glyph_index(cp) != 0))) {
+            face = cur_face;
+            shear = cur_shear;
+        } else {
+            face = face_for(cp, font_weight, family_id, italic, &shear);
+        }
+
+        if (runs.empty() || face != cur_face || shear != cur_shear || rtl != cur_rtl) {
+            FaceRun fr;
+            fr.face = face;
+            fr.shear = shear;
+            fr.is_rtl = rtl;
+            runs.push_back(std::move(fr));
+            cur_face = face;
+            cur_shear = shear;
+            cur_rtl = rtl;
+        }
+        runs.back().cps.push_back(cp);
+        prev_script = sc;
+    }
+
+    const bool face_visual_rtl = visual_rtl && !pre_reversed;
+    for (FaceRun& fr : runs) {
+        if (fr.face) {
+            const float upem = static_cast<float>(fr.face->units_per_em());
             const float scale = (upem > 0.0f) ? (font_size / upem) : 0.0f;
             const std::vector<TrueTypeFont::PositionedGlyph> positioned =
-                run_face->shape_glyphs(run, kerning);
+                fr.face->shape_glyphs(fr.cps, kerning, face_visual_rtl);
+            fr.glyphs.reserve(positioned.size());
             for (const TrueTypeFont::PositionedGlyph& pg : positioned) {
                 ShapedGlyph shaped;
                 shaped.glyph = pg.glyph;
-                shaped.face = run_face;
-                shaped.shear = run_shear;
+                shaped.face = fr.face;
+                shaped.shear = fr.shear;
+                shaped.is_mark = pg.is_mark;
                 shaped.advance = static_cast<float>(pg.x_advance) * scale;
                 shaped.x_offset = static_cast<float>(pg.x_offset) * scale;
                 shaped.y_offset = static_cast<float>(pg.y_offset) * scale;
-                if (run_shear && shaped.y_offset != 0.0f) {
+                if (fr.shear && shaped.y_offset != 0.0f) {
                     shaped.x_offset += kSyntheticObliqueSkew * shaped.y_offset;
                 }
-                out.push_back(shaped);
+                fr.glyphs.push_back(shaped);
             }
         } else {
-            for (uint32_t cp : run) {
+            std::vector<uint32_t> vis;
+            vis.reserve(fr.cps.size());
+            for (uint32_t cp : fr.cps) {
+                if (!is_join_control(cp)) vis.push_back(cp);
+            }
+            if (face_visual_rtl && fr.is_rtl && vis.size() > 1u) {
+                std::reverse(vis.begin(), vis.end());
+            }
+            for (uint32_t cp : vis) {
                 ShapedGlyph shaped;
                 shaped.glyph = static_cast<uint16_t>(cp <= 0xFFFFu ? cp : '?');
                 shaped.face = nullptr;
-                shaped.shear = run_shear;
+                shaped.shear = fr.shear;
                 shaped.advance = std::max(1.0f, font_size * 0.55f);
-                out.push_back(shaped);
+                fr.glyphs.push_back(shaped);
             }
         }
-        run.clear();
-    };
-
-    std::size_t pos = 0;
-    while (pos < utf8_text.size()) {
-        const uint32_t cp = next_utf8_codepoint(utf8_text, pos);
-        bool shear = false;
-        const TrueTypeFont* face = face_for(cp, font_weight, family_id, italic, &shear);
-        if (face != run_face && !run.empty()) flush();
-        run_face = face;
-        run_shear = shear;
-        run.push_back(cp);
     }
-    flush();
+
+    if (pre_reversed) {
+        std::vector<ShapedGlyph> logical_all;
+        for (const FaceRun& fr : runs) {
+            logical_all.insert(logical_all.end(), fr.glyphs.begin(), fr.glyphs.end());
+        }
+        if (visual_rtl && logical_all.size() > 1u) {
+            std::vector<std::pair<std::size_t, std::size_t>> clusters;
+            std::size_t c = 0;
+            while (c < logical_all.size()) {
+                if (logical_all[c].is_mark) {
+                    clusters.emplace_back(c, c + 1u);
+                    ++c;
+                    continue;
+                }
+                std::size_t ce = c + 1u;
+                while (ce < logical_all.size() && logical_all[ce].is_mark) ++ce;
+                clusters.emplace_back(c, ce);
+                c = ce;
+            }
+            out.reserve(logical_all.size());
+            for (auto it = clusters.rbegin(); it != clusters.rend(); ++it) {
+                out.insert(out.end(),
+                           logical_all.begin() + static_cast<std::ptrdiff_t>(it->first),
+                           logical_all.begin() + static_cast<std::ptrdiff_t>(it->second));
+            }
+        } else {
+            out = std::move(logical_all);
+        }
+        return out;
+    }
+
+    // Emit shaped runs; if a contiguous RTL script span split across fallback
+    // faces, reverse those subruns visually while keeping cluster order intact.
+    std::size_t r = 0;
+    while (r < runs.size()) {
+        if (visual_rtl && runs[r].is_rtl) {
+            std::size_t re = r + 1u;
+            while (re < runs.size() && runs[re].is_rtl) ++re;
+            for (std::size_t k = re; k > r; --k) {
+                const auto& gs = runs[k - 1u].glyphs;
+                out.insert(out.end(), gs.begin(), gs.end());
+            }
+            r = re;
+        } else {
+            const auto& gs = runs[r].glyphs;
+            out.insert(out.end(), gs.begin(), gs.end());
+            ++r;
+        }
+    }
     return out;
 }
 
 std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view utf8_text,
                                                                float font_size, int font_weight,
                                                                std::string_view css_family,
-                                                               bool italic, bool kerning) const {
+                                                               bool italic, bool kerning,
+                                                               bool visual_rtl,
+                                                               bool pre_reversed) const {
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
-    return shape_text(utf8_text, font_size, font_weight, family_id, italic, kerning);
+    return shape_text(utf8_text, font_size, font_weight, family_id, italic, kerning,
+                      visual_rtl, pre_reversed);
 }
 
 float FontRenderer::kerning_px_shaped(const ShapedGlyph& left, const ShapedGlyph& right,
@@ -3102,7 +4318,9 @@ void FontRenderer::draw_text(
     const std::function<void(int px, int py, uint8_t coverage)>& emit_pixel,
     std::string_view css_family,
     bool italic,
-    bool kerning
+    bool kerning,
+    bool visual_rtl,
+    bool pre_reversed
 ) {
     if (utf8_text.empty() || font_size <= 0.0f) return;
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
@@ -3138,7 +4356,8 @@ void FontRenderer::draw_text(
     // already baked into `advance`, `x_offset`, `y_offset`), so measurement and
     // ink agree to the pixel.
     const std::vector<ShapedGlyph> shaped =
-        shape_text(utf8_text, font_size, font_weight, family_id, italic, kerning);
+        shape_text(utf8_text, font_size, font_weight, family_id, italic, kerning,
+                   visual_rtl, pre_reversed);
     for (std::size_t i = 0; i < shaped.size(); ++i) {
         const GlyphBitmap& g = get_glyph_shaped(shaped[i], px_size, font_weight);
         if (g.width > 0 && g.height > 0) {

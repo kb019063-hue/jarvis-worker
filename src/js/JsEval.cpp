@@ -1398,6 +1398,62 @@ JsValue JsInterpreter::eval_super_call(const SuperCallExpr* expr, const EnvPtr& 
 // Variables, properties and patterns
 // ---------------------------------------------------------------------------
 
+namespace {
+
+/// The tag V8 prints for a value inside `[object ...]` in a refused `delete`:
+/// the three kinds a browser shows by tag — an array, a Date, a RegExp — and
+/// the wrapper objects. Empty for everything else, which prints by class name.
+std::string printed_tag(const JsValue& value) {
+    const JsObject* cell = value.property_cell();
+    if (!cell) return {};
+    switch (cell->klass) {
+        case ObjectClass::Array: return "Array";
+        case ObjectClass::Date: return "Date";
+        case ObjectClass::RegExp: return "RegExp";
+        case ObjectClass::String: return "String";
+        case ObjectClass::Number: return "Number";
+        case ObjectClass::Boolean: return "Boolean";
+        case ObjectClass::Symbol: return "Symbol";
+        default: return {};
+    }
+}
+
+/// V8's words for a refused `delete`, which is what the corpus records: a
+/// function and an Error print as themselves, an array, a Date, a RegExp and
+/// the wrappers by their tag, and every other object as `#<Constructor>`.
+std::string delete_refusal_message(const JsValue& base, const std::string& key) {
+    std::string described;
+    const JsObject* cell = base.property_cell();
+    const bool is_error = cell && cell->klass == ObjectClass::Error;
+    if (base.is_function() || is_error) {
+        described = base.to_string();
+    } else {
+        const std::string tag = printed_tag(base);
+        if (!tag.empty()) {
+            described = "[object " + tag + "]";
+        } else if (!base.prototype_object()) {
+            // An object with no prototype prints by tag: there is no
+            // `Object.prototype` to give it a class name.
+            described = "[object Object]";
+        } else {
+            // The name of the class, read off the prototype's own `constructor`
+            // without running a getter or anything a script could observe.
+            std::string name = "Object";
+            if (const JsObject* proto = base.prototype_object()) {
+                auto it = proto->properties.find("constructor");
+                if (it != proto->properties.end() && !(it->flags & PropertyMap::Accessor) && it->second.is_function()) {
+                    JsValue declared = it->second.get_property("name");
+                    if (declared.type == JsType::String && declared.string_val.length()) name = declared.string_val.str();
+                }
+            }
+            described = "#<" + name + ">";
+        }
+    }
+    return "Cannot delete property '" + key + "' of " + described;
+}
+
+} // namespace
+
 JsValue JsInterpreter::lookup_identifier(const std::string& name, const EnvPtr& env) {
     if (auto* binding = env->lookup(name)) {
         if (!binding->is_initialized) throw_tdz_error(name);
@@ -2329,9 +2385,37 @@ JsValue JsInterpreter::eval_unary(const UnaryExpr* expr, const EnvPtr& env) {
                 if (base.is_nullish()) {
                     js_throw_type_error("Cannot convert undefined or null to object");
                 }
-                return JsValue::make_boolean(base.delete_property(key));
+                if (base.delete_property(key)) return JsValue::make_boolean(true);
+                // [[Delete]] answers false for a property that is not
+                // configurable. Sloppy code reads that as the answer `false`;
+                // strict code makes it a TypeError, which is DeletePropertyOrThrow.
+                if (env->is_strict()) js_throw_type_error(delete_refusal_message(base, key));
+                return JsValue::make_boolean(false);
             }
-            if (operand->kind == NodeKind::Identifier) return JsValue::make_boolean(false);
+            if (operand->kind == NodeKind::Identifier) {
+                const std::string& name = static_cast<const IdentifierExpr*>(operand)->name;
+                // `this` is kept as an identifier by the parser and is not a
+                // reference, so there is no property to refuse.
+                if (name == "this") return JsValue::make_boolean(true);
+                // The parser refuses this in strict code; a direct eval
+                // inherits its caller's strictness only once it runs.
+                if (env->is_strict()) {
+                    js_throw_error(JsErrorKind::SyntaxError, "Delete of an unqualified identifier in strict mode.");
+                }
+                // A declarative binding is not a property and is not
+                // deletable. A name the global object carries is one: a
+                // `globalThis.x = 1` goes, a `var` is not configurable and
+                // stays; and a name that resolves to nothing is deletable,
+                // which is what `delete notDeclared` answers rather than a
+                // ReferenceError.
+                if (env->lookup(name)) return JsValue::make_boolean(false);
+                if (JsObject* global = m_global_object.object_val) {
+                    if (global->properties.find(name) != global->properties.end()) {
+                        return JsValue::make_boolean(m_global_object.delete_property(name));
+                    }
+                }
+                return JsValue::make_boolean(!m_global_object.has_property(name));
+            }
             evaluate(operand, env);
             return JsValue::make_boolean(true);
         }

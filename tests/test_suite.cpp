@@ -2951,6 +2951,96 @@ inline std::vector<uint8_t> build_classdef_fmt2(
     return b.data;
 }
 
+inline std::vector<uint8_t> build_otl_table(
+    const std::map<std::string, std::map<std::string, std::vector<uint16_t>>>& script_features,
+    const std::vector<GposBuildLookup>& lookups) {
+    // Flatten features preserving sorted script order and sorted feature tags.
+    struct FeatInst {
+        std::string tag;
+        std::vector<uint16_t> lks;
+    };
+    std::vector<FeatInst> feat_list;
+    std::map<std::string, std::vector<uint16_t>> script_feat_ids;
+    for (const auto& [stag, feats] : script_features) {
+        for (const auto& [ftag, lks] : feats) {
+            script_feat_ids[stag].push_back(static_cast<uint16_t>(feat_list.size()));
+            feat_list.push_back({ftag, lks});
+        }
+    }
+
+    SfntByteBuf sl;
+    sl.u16(static_cast<uint16_t>(script_features.size()));
+    const std::size_t srec_pos = sl.data.size();
+    for (const auto& [stag, _] : script_features) {
+        sl.tag(stag.c_str());
+        sl.u16(0);
+    }
+    std::size_t sidx = 0;
+    for (const auto& [stag, _] : script_features) {
+        const std::size_t spos = sl.data.size();
+        sl.patch_u16(srec_pos + sidx * 6u + 4u, static_cast<uint16_t>(spos));
+        sl.u16(4); // defaultLangSys offset relative to Script
+        sl.u16(0); // langSysCount = 0
+        // defaultLangSys:
+        const auto& fids = script_feat_ids[stag];
+        sl.u16(0);
+        sl.u16(0xFFFFu);
+        sl.u16(static_cast<uint16_t>(fids.size()));
+        for (uint16_t fid : fids) sl.u16(fid);
+        ++sidx;
+    }
+
+    SfntByteBuf fl;
+    fl.u16(static_cast<uint16_t>(feat_list.size()));
+    const std::size_t frec_pos = fl.data.size();
+    for (const auto& fi : feat_list) {
+        fl.tag(fi.tag.c_str());
+        fl.u16(0);
+    }
+    for (std::size_t i = 0; i < feat_list.size(); ++i) {
+        fl.patch_u16(frec_pos + i * 6u + 4u, static_cast<uint16_t>(fl.data.size()));
+        fl.u16(0);
+        fl.u16(static_cast<uint16_t>(feat_list[i].lks.size()));
+        for (uint16_t li : feat_list[i].lks) fl.u16(li);
+    }
+
+    SfntByteBuf ll;
+    ll.u16(static_cast<uint16_t>(lookups.size()));
+    const std::size_t lrec_pos = ll.data.size();
+    for (std::size_t i = 0; i < lookups.size(); ++i) ll.u16(0);
+    for (std::size_t i = 0; i < lookups.size(); ++i) {
+        const std::size_t lpos = ll.data.size();
+        ll.patch_u16(lrec_pos + i * 2u, static_cast<uint16_t>(lpos));
+        const auto& lk = lookups[i];
+        ll.u16(lk.type);
+        ll.u16(lk.flag);
+        ll.u16(static_cast<uint16_t>(lk.subtables.size()));
+        const std::size_t srec_pos2 = ll.data.size();
+        for (std::size_t s = 0; s < lk.subtables.size(); ++s) ll.u16(0);
+        if ((lk.flag & 0x0010u) != 0) {
+            ll.u16(static_cast<uint16_t>(std::max(0, lk.mark_filtering_set)));
+        }
+        for (std::size_t s = 0; s < lk.subtables.size(); ++s) {
+            const std::size_t spos = ll.data.size();
+            ll.patch_u16(srec_pos2 + s * 2u, static_cast<uint16_t>(spos - lpos));
+            ll.data.insert(ll.data.end(), lk.subtables[s].begin(), lk.subtables[s].end());
+        }
+    }
+
+    SfntByteBuf tbl;
+    tbl.u32(0x00010000u);
+    const std::size_t sl_off = 10u;
+    const std::size_t fl_off = sl_off + sl.data.size();
+    const std::size_t ll_off = fl_off + fl.data.size();
+    tbl.u16(static_cast<uint16_t>(sl_off));
+    tbl.u16(static_cast<uint16_t>(fl_off));
+    tbl.u16(static_cast<uint16_t>(ll_off));
+    tbl.data.insert(tbl.data.end(), sl.data.begin(), sl.data.end());
+    tbl.data.insert(tbl.data.end(), fl.data.begin(), fl.data.end());
+    tbl.data.insert(tbl.data.end(), ll.data.begin(), ll.data.end());
+    return tbl.data;
+}
+
 } // namespace
 
 TEST(gpos_pair_and_single_positioning_without_kern_table) {
@@ -3643,6 +3733,1054 @@ TEST(gpos_rejects_malformed_and_cyclic_tables_safely) {
     const auto res = f_bad.shape_glyphs({'A', 0x0301}, true);
     assert(res.size() == 2 && res[0].x_advance == 700);
     std::printf("      [gpos] malformed/overflowing/cyclic GDEF & GPOS rejected safely\n");
+    std::fflush(stdout);
+}
+
+TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions) {
+    using namespace litebird;
+
+    // Glyph palette:
+    //  0=.notdef
+    //  1='a'(600), 2='b'(600), 3='c'(600), 4='x'(500), 5='y'(300), 6='z'(350),
+    //  7='i'(400), 8=0x0131 dotless i(380), 9=0x0301 acute(0),
+    // 10='A'(700), 11='A.alt'(750), 12='p'(550), 13='q'(550), 14='P'(650).
+    const std::vector<TestGlyphSpec> glyphs = {
+        {0, 500, false, 0, 0, 0, 0},
+        {'a', 600, true, 40, 0, 560, 500},
+        {'b', 600, true, 40, 0, 560, 500},
+        {'c', 600, true, 40, 0, 560, 500},
+        {'x', 500, true, 40, 0, 460, 500},
+        {'y', 300, true, 30, 0, 270, 500},
+        {'z', 350, true, 30, 0, 320, 500},
+        {'i', 400, true, 80, 0, 320, 700},
+        {0x0131, 380, true, 80, 0, 300, 500},
+        {0x0301, 0, true, 80, 520, 200, 620},
+        {'A', 700, true, 50, 0, 650, 700},
+        {0xE001, 750, true, 50, 0, 700, 750},
+        {'p', 550, true, 40, 0, 510, 500},
+        {'q', 550, true, 40, 0, 510, 500},
+        {'P', 650, true, 40, 0, 610, 700},
+    };
+
+    SfntByteBuf gdef;
+    gdef.u32(0x00010000u);
+    gdef.u16(12); gdef.u16(0); gdef.u16(0); gdef.u16(0);
+    auto gcd = build_classdef_fmt2({{1, 8, 1}, {9, 9, 3}, {10, 14, 1}});
+    gdef.data.insert(gdef.data.end(), gcd.begin(), gcd.end());
+
+    // L0: SingleSubst fmt1 ('i'=7 -> +1 = 8 dotless i)
+    SfntByteBuf l0;
+    l0.u16(1); l0.u16(6); l0.i16(1);
+    auto c0 = build_cov_fmt1({7});
+    l0.data.insert(l0.data.end(), c0.begin(), c0.end());
+
+    // L1: SingleSubst fmt2 ('p'=12 -> 'P'=14)
+    SfntByteBuf l1;
+    l1.u16(2); l1.u16(0); l1.u16(1); l1.u16(14);
+    l1.patch_u16(2, static_cast<uint16_t>(l1.data.size()));
+    auto c1 = build_cov_fmt1({12});
+    l1.data.insert(l1.data.end(), c1.begin(), c1.end());
+
+    // L2: MultipleSubst fmt1 ('x'=4 -> ['y'=5, 'z'=6])
+    SfntByteBuf l2;
+    l2.u16(1); l2.u16(0); l2.u16(1); l2.u16(0);
+    l2.patch_u16(2, static_cast<uint16_t>(l2.data.size()));
+    auto c2 = build_cov_fmt1({4});
+    l2.data.insert(l2.data.end(), c2.begin(), c2.end());
+    l2.patch_u16(6, static_cast<uint16_t>(l2.data.size()));
+    l2.u16(2); l2.u16(5); l2.u16(6);
+
+    // L3: AlternateSubst fmt1 ('A'=10 -> [11])
+    SfntByteBuf l3;
+    l3.u16(1); l3.u16(0); l3.u16(1); l3.u16(0);
+    l3.patch_u16(2, static_cast<uint16_t>(l3.data.size()));
+    auto c3 = build_cov_fmt1({10});
+    l3.data.insert(l3.data.end(), c3.begin(), c3.end());
+    l3.patch_u16(6, static_cast<uint16_t>(l3.data.size()));
+    l3.u16(1); l3.u16(11);
+
+    // L4 (`ccmp`): ChainContextSubst fmt3: input ['i'=7], lookahead [0x0301=9] -> at 0 apply L0
+    SfntByteBuf l4;
+    l4.u16(3); // fmt 3
+    l4.u16(0); // backtrackCount = 0
+    l4.u16(1); l4.u16(0); // inputCount = 1, cov[0]
+    l4.u16(1); l4.u16(0); // lookaheadCount = 1, cov[0]
+    l4.u16(1); l4.u16(0); l4.u16(0); // 1 subst: seqIdx=0, lookupIdx=0
+    l4.patch_u16(6, static_cast<uint16_t>(l4.data.size()));
+    auto c4i = build_cov_fmt1({7});
+    l4.data.insert(l4.data.end(), c4i.begin(), c4i.end());
+    l4.patch_u16(10, static_cast<uint16_t>(l4.data.size()));
+    auto c4l = build_cov_fmt1({9});
+    l4.data.insert(l4.data.end(), c4l.begin(), c4l.end());
+
+    // L5 (`calt` wrapped in ExtensionSubst Type 7): ContextSubst fmt1:
+    //   input ['p'=12, 'q'=13] -> at 0 apply L1 ('p' -> 'P'). Note 'q' stays 'q'.
+    SfntByteBuf l5_inner;
+    l5_inner.u16(1); // fmt 1
+    l5_inner.u16(0); // cov off
+    l5_inner.u16(1); l5_inner.u16(0); // subRuleSetCount=1, off[0]
+    l5_inner.patch_u16(2, static_cast<uint16_t>(l5_inner.data.size()));
+    auto c5 = build_cov_fmt1({12});
+    l5_inner.data.insert(l5_inner.data.end(), c5.begin(), c5.end());
+    const std::size_t rs_pos = l5_inner.data.size();
+    l5_inner.patch_u16(6, static_cast<uint16_t>(rs_pos));
+    l5_inner.u16(1); l5_inner.u16(4); // subRuleCount=1, rule off=4 (rel to rs_pos)
+    // SubRule: glyphCount=2, substCount=1, input[0]='q'(13), subst(0, 1)
+    l5_inner.u16(2); l5_inner.u16(1); l5_inner.u16(13); l5_inner.u16(0); l5_inner.u16(1);
+
+    SfntByteBuf l5_ext;
+    l5_ext.u16(1); // fmt 1
+    l5_ext.u16(5); // Extension Type 7 -> Type 5
+    l5_ext.u32(8); // offset = 8
+    l5_ext.data.insert(l5_ext.data.end(), l5_inner.data.begin(), l5_inner.data.end());
+
+    // L6 (`calt`): ChainContextSubst fmt2 (class-based backtrack ['a'=cls1] + input ['b'=cls2] + lookahead ['c'=cls3] -> empty exception, wait: apply L2 on 'x'=cls4 after 'a'=cls1 before 'c'=cls3!)
+    // Specifically: backtrack cls1={'a'=1}, input cls2={'x'=4}, lookahead cls3={'c'=3} -> apply L2 at 0 ('x' -> 'y','z')!
+    SfntByteBuf l6;
+    l6.u16(2); // fmt 2
+    l6.u16(0); // cov off
+    l6.u16(0); // backtrackClassDef
+    l6.u16(0); // inputClassDef
+    l6.u16(0); // lookaheadClassDef
+    l6.u16(3); // chainSubClassSetCount = 3 (0, 1, 2; our input 'x' is class 2)
+    l6.u16(0); l6.u16(0); l6.u16(0); // set[0]=0, set[1]=0, set[2] patched below
+    l6.patch_u16(2, static_cast<uint16_t>(l6.data.size()));
+    auto c6 = build_cov_fmt1({4});
+    l6.data.insert(l6.data.end(), c6.begin(), c6.end());
+    auto bcd6 = build_classdef_fmt2({{1, 1, 1}});
+    l6.patch_u16(4, static_cast<uint16_t>(l6.data.size()));
+    l6.data.insert(l6.data.end(), bcd6.begin(), bcd6.end());
+    auto icd6 = build_classdef_fmt2({{4, 4, 2}});
+    l6.patch_u16(6, static_cast<uint16_t>(l6.data.size()));
+    l6.data.insert(l6.data.end(), icd6.begin(), icd6.end());
+    auto lcd6 = build_classdef_fmt2({{3, 3, 3}});
+    l6.patch_u16(8, static_cast<uint16_t>(l6.data.size()));
+    l6.data.insert(l6.data.end(), lcd6.begin(), lcd6.end());
+    const std::size_t cs_pos = l6.data.size();
+    l6.patch_u16(16, static_cast<uint16_t>(cs_pos)); // set[2]
+    l6.u16(1); l6.u16(4); // ruleCount=1, rule off=4
+    // ChainSubClassRule: backtrackCount=1[1], inputCount=1[], lookaheadCount=1[3], substCount=1[(0, L2=2)]
+    l6.u16(1); l6.u16(1);
+    l6.u16(1);
+    l6.u16(1); l6.u16(3);
+    l6.u16(1); l6.u16(0); l6.u16(2);
+
+    auto gsub_bytes = build_otl_table(
+        {{"latn", {{"ccmp", {4}}, {"calt", {5, 6}}, {"liga", {3}}}}},
+        {
+            {"ccmp", 1, 0x0000, -1, {l0.data}},
+            {"calt", 1, 0x0000, -1, {l1.data}},
+            {"calt", 2, 0x0000, -1, {l2.data}},
+            {"liga", 3, 0x0000, -1, {l3.data}},
+            {"ccmp", 6, 0x0000, -1, {l4.data}},
+            {"calt", 7, 0x0000, -1, {l5_ext.data}},
+            {"calt", 6, 0x0000, -1, {l6.data}},
+        });
+
+    auto sfnt = build_synthetic_sfnt(1000, 800, -200, glyphs,
+                                     {{"GDEF", gdef.data}, {"GSUB", gsub_bytes}});
+    TrueTypeFont f;
+    assert(f.load_memory(sfnt));
+    assert(f.has_gsub());
+    assert(f.has_contextual_shaping());
+
+    // 1. ChainContext fmt3: 'i' + acute -> dotless i (gid 8) + acute, while 'i' + 'a' keeps 'i' (gid 7).
+    const auto i_acute = f.shape_glyphs({'i', 0x0301}, true);
+    const auto i_plain = f.shape_glyphs({'i', 'a'}, true);
+    assert(i_acute.size() == 2 && i_acute[0].glyph == 8 && i_acute[0].x_advance == 380);
+    assert(i_plain.size() == 2 && i_plain[0].glyph == 7 && i_plain[0].x_advance == 400);
+
+    // 2. ContextSubst fmt1 inside Type 7 Extension: "pq" -> ['P', 'q'], while "pa" keeps ['p', 'a'].
+    const auto pq = f.shape_glyphs({'p', 'q'}, true);
+    const auto pa = f.shape_glyphs({'p', 'a'}, true);
+    assert(pq.size() == 2 && pq[0].glyph == 14 && pq[1].glyph == 13);
+    assert(pa.size() == 2 && pa[0].glyph == 12 && pa[1].glyph == 1);
+
+    // 3. ChainContext fmt2 + MultipleSubst: "axc" -> ['a', 'y', 'z', 'c'] (x expanded to y+z!), while "bxc" stays ['b', 'x', 'c'].
+    const auto axc = f.shape_glyphs({'a', 'x', 'c'}, true);
+    const auto bxc = f.shape_glyphs({'b', 'x', 'c'}, true);
+    assert(axc.size() == 4 && axc[0].glyph == 1 && axc[1].glyph == 5 &&
+           axc[2].glyph == 6 && axc[3].glyph == 3);
+    assert(axc[1].x_advance == 300 && axc[2].x_advance == 350);
+    assert(bxc.size() == 3 && bxc[1].glyph == 4);
+
+    // 4. AlternateSubst fmt1 under 'liga': 'A' -> 11 ('A.alt', adv 750).
+    const auto alt_a = f.shape_glyphs({'A'}, true);
+    assert(alt_a.size() == 1 && alt_a[0].glyph == 11 && alt_a[0].x_advance == 750);
+
+    // 5. Optional host DejaVuSans.ttf real `ccmp` ChainContext: 'i' + acute converts to dotless i!
+    FontRenderer& fr = FontRenderer::instance();
+    const std::string dejavu_path = fr.face_path("DejaVu Sans");
+    if (!dejavu_path.empty()) {
+        TrueTypeFont dejavu;
+        if (dejavu.load_file(dejavu_path) && dejavu.has_contextual_shaping()) {
+            const uint16_t gid_i = dejavu.glyph_index('i');
+            const uint16_t gid_dotless = dejavu.glyph_index(0x0131);
+            if (gid_i != 0 && gid_dotless != 0) {
+                const auto d_ia = dejavu.shape_glyphs({'i', 0x0301}, true);
+                const auto d_ip = dejavu.shape_glyphs({'i', 'a'}, true);
+                assert(d_ia.size() == 2 && d_ip.size() == 2);
+                assert(d_ia[0].glyph == gid_dotless);
+                assert(d_ip[0].glyph == gid_i);
+            }
+        }
+    }
+    std::printf("      [gsub] Single/Multiple/Alternate/Context/ChainContext/Extension + DejaVu ccmp passed\n");
+    std::fflush(stdout);
+}
+
+TEST(arabic_joining_zwnj_zwj_lam_alef_and_mark_anchoring) {
+    using namespace litebird;
+
+    // Synthetic Arabic SFNT testing init/medi/fina/isol + IgnoreMarks + rlig Lam-Alef + GPOS MarkToLig + MarkToBase:
+    //  1 = U+0627 ALEF (R)      adv 300
+    //  2 = U+0628 BEH (D)       adv 650
+    //  3 = U+0644 LAM (D)       adv 550
+    //  4 = U+0645 MEEM (D)      adv 600
+    //  5 = U+064E FATHA (T)     adv 200 (zeroed by GPOS SinglePos)
+    //  6 = U+200C ZWNJ          adv 100 (must be stripped before GPOS!)
+    //  7 = U+200D ZWJ           adv 100 (must be stripped before GPOS!)
+    //  8 = U+FE8E ALEF.fina     adv 320
+    //  9 = U+FE91 BEH.init      adv 620
+    // 10 = U+FE92 BEH.medi      adv 580
+    // 11 = U+FE90 BEH.fina      adv 640
+    // 12 = U+FEDF LAM.init      adv 480
+    // 13 = U+FEE0 LAM.medi      adv 460
+    // 14 = U+FEDE LAM.fina      adv 520
+    // 15 = U+FEE3 MEEM.init     adv 540
+    // 16 = U+FEE4 MEEM.medi     adv 500
+    // 17 = U+FEE2 MEEM.fina     adv 560
+    // 18 = U+FEFB LAM_ALEF.isol adv 700
+    // 19 = U+FEFC LAM_ALEF.fina adv 720
+    const std::vector<TestGlyphSpec> glyphs = {
+        {0, 500, false, 0, 0, 0, 0},
+        {0x0627, 300, true, 50, 0, 250, 650},
+        {0x0628, 650, true, 40, 0, 610, 350},
+        {0x0644, 550, true, 40, 0, 510, 700},
+        {0x0645, 600, true, 40, 0, 560, 400},
+        {0x064E, 200, true, 60, 500, 160, 580},
+        {0x200C, 100, false, 0, 0, 0, 0},
+        {0x200D, 100, false, 0, 0, 0, 0},
+        {0xFE8E, 320, true, 50, 0, 270, 650},
+        {0xFE91, 620, true, 40, 0, 580, 350},
+        {0xFE92, 580, true, 40, 0, 540, 350},
+        {0xFE90, 640, true, 40, 0, 600, 350},
+        {0xFEDF, 480, true, 40, 0, 440, 700},
+        {0xFEE0, 460, true, 40, 0, 420, 700},
+        {0xFEDE, 520, true, 40, 0, 480, 700},
+        {0xFEE3, 540, true, 40, 0, 500, 400},
+        {0xFEE4, 500, true, 40, 0, 460, 400},
+        {0xFEE2, 560, true, 40, 0, 520, 400},
+        {0xFEFB, 700, true, 50, 0, 650, 700},
+        {0xFEFC, 720, true, 50, 0, 670, 700},
+    };
+
+    SfntByteBuf gdef;
+    gdef.u32(0x00010000u);
+    gdef.u16(12); gdef.u16(0); gdef.u16(0); gdef.u16(0);
+    // Class 1 = base, Class 2 = ligatures (18, 19), Class 3 = marks (5)
+    auto gcd = build_classdef_fmt2({{1, 4, 1}, {5, 5, 3}, {8, 17, 1}, {18, 19, 2}});
+    gdef.data.insert(gdef.data.end(), gcd.begin(), gcd.end());
+
+    auto make_single_map = [](const std::vector<std::pair<uint16_t, uint16_t>>& pairs) {
+        SfntByteBuf b;
+        b.u16(2); b.u16(0); b.u16(static_cast<uint16_t>(pairs.size()));
+        std::vector<uint16_t> cov;
+        for (const auto& [src, dst] : pairs) {
+            cov.push_back(src);
+            b.u16(dst);
+        }
+        b.patch_u16(2, static_cast<uint16_t>(b.data.size()));
+        auto cv = build_cov_fmt1(cov);
+        b.data.insert(b.data.end(), cv.begin(), cv.end());
+        return b.data;
+    };
+
+    // L0 init, L1 medi, L2 fina
+    auto s_init = make_single_map({{2, 9}, {3, 12}, {4, 15}});
+    auto s_medi = make_single_map({{2, 10}, {3, 13}, {4, 16}});
+    auto s_fina = make_single_map({{1, 8}, {2, 11}, {3, 14}, {4, 17}});
+
+    // L3 rlig: [LAM.init=12, ALEF.fina=8] -> 18, [LAM.medi=13, ALEF.fina=8] -> 19
+    // Notice Coverage of first glyph has [12, 13] in sorted GID order!
+    SfntByteBuf s_rlig;
+    s_rlig.u16(1); // fmt 1
+    s_rlig.u16(0); // cov off
+    s_rlig.u16(2); // ligSetCount = 2
+    s_rlig.u16(0); s_rlig.u16(0);
+    s_rlig.patch_u16(2, static_cast<uint16_t>(s_rlig.data.size()));
+    auto rcov = build_cov_fmt1({12, 13});
+    s_rlig.data.insert(s_rlig.data.end(), rcov.begin(), rcov.end());
+    for (int set_i = 0; set_i < 2; ++set_i) {
+        const std::size_t ls_pos = s_rlig.data.size();
+        s_rlig.patch_u16(6 + set_i * 2, static_cast<uint16_t>(ls_pos));
+        s_rlig.u16(1); s_rlig.u16(4);
+        s_rlig.u16(static_cast<uint16_t>(18 + set_i));
+        s_rlig.u16(2);
+        s_rlig.u16(8);
+    }
+
+    auto gsub_bytes = build_otl_table(
+        {{"arab", {{"init", {0}}, {"medi", {1}}, {"fina", {2}}, {"rlig", {3}}}}},
+        {
+            {"init", 1, 0x0000, -1, {s_init}},
+            {"medi", 1, 0x0000, -1, {s_medi}},
+            {"fina", 1, 0x0000, -1, {s_fina}},
+            {"rlig", 4, 0x0008 /* IgnoreMarks! */, -1, {s_rlig.data}},
+        });
+
+    // GPOS: L0 SinglePos zeroes Fatha (5) adv, L1 MarkToBase onto BEH.init(9), L2 MarkToLig onto LAM_ALEF(18).
+    SfntByteBuf sp_zero;
+    sp_zero.u16(1); sp_zero.u16(8); sp_zero.u16(0x0004); sp_zero.i16(-200);
+    auto spc = build_cov_fmt1({5});
+    sp_zero.data.insert(sp_zero.data.end(), spc.begin(), spc.end());
+
+    // MarkToBase: Fatha(5) anchor (110, 500) -> BEH.init(9) anchor (310, 620)
+    SfntByteBuf mkbase;
+    mkbase.u16(1); mkbase.u16(0); mkbase.u16(0); mkbase.u16(1); mkbase.u16(0); mkbase.u16(0);
+    mkbase.patch_u16(2, static_cast<uint16_t>(mkbase.data.size()));
+    auto mc = build_cov_fmt1({5});
+    mkbase.data.insert(mkbase.data.end(), mc.begin(), mc.end());
+    mkbase.patch_u16(4, static_cast<uint16_t>(mkbase.data.size()));
+    auto bc = build_cov_fmt1({9});
+    mkbase.data.insert(mkbase.data.end(), bc.begin(), bc.end());
+    const std::size_t ma_pos = mkbase.data.size();
+    mkbase.patch_u16(8, static_cast<uint16_t>(ma_pos));
+    mkbase.u16(1); mkbase.u16(0); mkbase.u16(6);
+    mkbase.u16(1); mkbase.i16(110); mkbase.i16(500);
+    const std::size_t ba_pos = mkbase.data.size();
+    mkbase.patch_u16(10, static_cast<uint16_t>(ba_pos));
+    mkbase.u16(1); mkbase.u16(4); mkbase.u16(1); mkbase.i16(310); mkbase.i16(620);
+
+    // MarkToLig: Fatha(5) anchor (110, 500) -> LAM_ALEF.isol(18) component0=(520, 760), component1=(180, 720)
+    SfntByteBuf mklig;
+    mklig.u16(1); mklig.u16(0); mklig.u16(0); mklig.u16(1); mklig.u16(0); mklig.u16(0);
+    mklig.patch_u16(2, static_cast<uint16_t>(mklig.data.size()));
+    mklig.data.insert(mklig.data.end(), mc.begin(), mc.end());
+    mklig.patch_u16(4, static_cast<uint16_t>(mklig.data.size()));
+    auto lc = build_cov_fmt1({18});
+    mklig.data.insert(mklig.data.end(), lc.begin(), lc.end());
+    const std::size_t lma_pos = mklig.data.size();
+    mklig.patch_u16(8, static_cast<uint16_t>(lma_pos));
+    mklig.u16(1); mklig.u16(0); mklig.u16(6);
+    mklig.u16(1); mklig.i16(110); mklig.i16(500);
+    const std::size_t la_pos = mklig.data.size();
+    mklig.patch_u16(10, static_cast<uint16_t>(la_pos));
+    mklig.u16(1); mklig.u16(4); // ligCount=1, ligAttach at +4
+    mklig.u16(2); mklig.u16(6); mklig.u16(12); // compCount=2
+    mklig.u16(1); mklig.i16(520); mklig.i16(760);
+    mklig.u16(1); mklig.i16(180); mklig.i16(720);
+
+    auto gpos_bytes = build_otl_table(
+        {{"arab", {{"mark", {0, 1, 2}}}}},
+        {
+            {"mark", 1, 0x0000, -1, {sp_zero.data}},
+            {"mark", 4, 0x0000, -1, {mkbase.data}},
+            {"mark", 5, 0x0000, -1, {mklig.data}},
+        });
+
+    auto sfnt = build_synthetic_sfnt(1000, 900, -200, glyphs,
+                                     {{"GDEF", gdef.data}, {"GSUB", gsub_bytes}, {"GPOS", gpos_bytes}});
+    TrueTypeFont f;
+    assert(f.load_memory(sfnt));
+
+    // 1. Contextual joining: Beh isolated -> [2]; Beh+Beh -> [9, 11]; Beh+Beh+Beh -> [9, 10, 11].
+    const auto b1 = f.shape_glyphs({0x0628}, false);
+    const auto b2 = f.shape_glyphs({0x0628, 0x0628}, false);
+    const auto b3 = f.shape_glyphs({0x0628, 0x0628, 0x0628}, false);
+    assert(b1.size() == 1 && b1[0].glyph == 2);
+    assert(b2.size() == 2 && b2[0].glyph == 9 && b2[1].glyph == 11);
+    assert(b3.size() == 3 && b3[0].glyph == 9 && b3[1].glyph == 10 && b3[2].glyph == 11);
+
+    // 2. Transparent mark doesn't break joining, and MarkToBase anchors Fatha onto Beh.init!
+    const auto bf = f.shape_glyphs({0x0628, 0x064E, 0x0628}, false);
+    assert(bf.size() == 3 && bf[0].glyph == 9 && bf[1].glyph == 5 && bf[2].glyph == 11);
+    assert(bf[1].x_advance == 0);
+    assert(bf[1].y_offset == 620 - 500);
+    assert(bf[1].x_offset == (310 - 110) - 620);
+
+    // 3. Right-joining Alef breaks following Beh to isolated: [Beh, Alef, Beh] -> [9, 8, 2].
+    const auto bab = f.shape_glyphs({0x0628, 0x0627, 0x0628}, false);
+    assert(bab.size() == 3 && bab[0].glyph == 9 && bab[1].glyph == 8 && bab[2].glyph == 2);
+
+    // 4. Lam-Alef rlig + Lam + Fatha + Alef MarkToLig on component 0!
+    const auto la = f.shape_glyphs({0x0644, 0x0627}, false);
+    const auto sla = f.shape_glyphs({0x0628, 0x0644, 0x0627, 0x0645}, false);
+    const auto lfa = f.shape_glyphs({0x0644, 0x064E, 0x0627}, false);
+    assert(la.size() == 1 && la[0].glyph == 18);
+    assert(sla.size() == 3 && sla[0].glyph == 9 && sla[1].glyph == 19 && sla[2].glyph == 4);
+    assert(lfa.size() == 2 && lfa[0].glyph == 18 && lfa[1].glyph == 5);
+    assert(lfa[1].y_offset == 760 - 500);
+    assert(lfa[1].x_offset == (520 - 110) - 700);
+
+    // 5. ZWNJ breaks joining & prevents Lam-Alef; ZWJ forces joining; neither leaves a glyph!
+    const auto zwnj = f.shape_glyphs({0x0644, 0x200C, 0x0627}, false);
+    const auto zwj_pre = f.shape_glyphs({0x0645, 0x200D}, false);
+    const auto zwj_post = f.shape_glyphs({0x200D, 0x0645}, false);
+    assert(zwnj.size() == 2 && zwnj[0].glyph == 3 && zwnj[1].glyph == 1);
+    assert(zwj_pre.size() == 1 && zwj_pre[0].glyph == 15);
+    assert(zwj_post.size() == 1 && zwj_post[0].glyph == 17);
+
+    // 6. Optional host DejaVuSans.ttf Arabic shaping ("سلام" + "لا" + "ل\u200cا" + "م\u200d" + shadda+fatha)!
+    FontRenderer& fr = FontRenderer::instance();
+    const std::string dejavu_path = fr.face_path("DejaVu Sans");
+    if (!dejavu_path.empty()) {
+        TrueTypeFont dejavu;
+        if (dejavu.load_file(dejavu_path) && dejavu.has_contextual_shaping()) {
+            const uint16_t lam_iso = dejavu.glyph_index(0x0644);
+            const uint16_t alef_iso = dejavu.glyph_index(0x0627);
+            const uint16_t meem_iso = dejavu.glyph_index(0x0645);
+            const uint16_t seen_iso = dejavu.glyph_index(0x0633);
+            const uint16_t beh_iso = dejavu.glyph_index(0x0628);
+            const uint16_t shadda = dejavu.glyph_index(0x0651);
+            const uint16_t fatha = dejavu.glyph_index(0x064E);
+            if (lam_iso != 0 && alef_iso != 0 && meem_iso != 0 &&
+                seen_iso != 0 && beh_iso != 0 && shadda != 0 && fatha != 0) {
+                const auto d_la = dejavu.shape_glyphs({0x0644, 0x0627}, false);
+                const auto d_zwnj = dejavu.shape_glyphs({0x0644, 0x200C, 0x0627}, false);
+                const auto d_zwj = dejavu.shape_glyphs({0x0645, 0x200D}, false);
+                const auto d_salam_log = dejavu.shape_glyphs({0x0633, 0x0644, 0x0627, 0x0645}, true, false);
+                const auto d_salam = dejavu.shape_glyphs({0x0633, 0x0644, 0x0627, 0x0645}, true, true);
+                const auto d_shadda = dejavu.shape_glyphs({0x0628, 0x0651, 0x064E}, false);
+                assert(d_la.size() == 1 && d_la[0].glyph != lam_iso && d_la[0].glyph != alef_iso);
+                assert(d_zwnj.size() == 2 && d_zwnj[0].glyph == lam_iso && d_zwnj[1].glyph == alef_iso);
+                assert(d_zwj.size() == 1 && d_zwj[0].glyph != meem_iso);
+                // "سلام" logical: [س_init, لا_fina, م_isol]; visually RTL: [م_isol, لا_fina, س_init]
+                assert(d_salam_log.size() == 3 && d_salam.size() == 3);
+                assert(d_salam_log[2].glyph == meem_iso);
+                assert(d_salam_log[0].glyph != seen_iso);
+                assert(d_salam[0].glyph == meem_iso);
+                assert(d_salam[2].glyph == d_salam_log[0].glyph);
+                assert(d_salam[1].glyph == d_salam_log[1].glyph);
+                // Shadda + Fatha ligates in DejaVuSans rlig!
+                assert(d_shadda.size() == 2 && d_shadda[1].x_advance == 0);
+            }
+        }
+    }
+    std::printf("      [arab] init/medi/fina/isol, ZWNJ/ZWJ, Lam-Alef, MarkToLig & DejaVu Arabic passed\n");
+    std::fflush(stdout);
+}
+
+TEST(gpos_cursive_attachment_ltr_rtl_and_contextual_pos) {
+    using namespace litebird;
+
+    // Glyphs: 1='A'(600), 2='B'(600), 3='C'(600), 4=0x0301 mark(0), 5='p'(500), 6='q'(500),
+    //         7=0x0628 Arabic Beh(600), 8=0x062A Arabic Teh(600), 9=0x064E Fatha(0).
+    const std::vector<TestGlyphSpec> glyphs = {
+        {0, 500, false, 0, 0, 0, 0},
+        {'A', 600, true, 50, 0, 550, 600},
+        {'B', 600, true, 50, 0, 550, 600},
+        {'C', 600, true, 50, 0, 550, 600},
+        {0x0301, 0, true, 80, 520, 200, 620},
+        {'p', 500, true, 40, 0, 460, 500},
+        {'q', 500, true, 40, 0, 460, 500},
+        {0x0628, 600, true, 40, 0, 560, 400},
+        {0x062A, 600, true, 40, 0, 560, 400},
+        {0x064E, 0, true, 80, 520, 180, 600},
+    };
+
+    SfntByteBuf gdef;
+    gdef.u32(0x00010000u);
+    gdef.u16(12); gdef.u16(0); gdef.u16(0); gdef.u16(0);
+    auto gcd = build_classdef_fmt2({{1, 3, 1}, {4, 4, 3}, {5, 8, 1}, {9, 9, 3}});
+    gdef.data.insert(gdef.data.end(), gcd.begin(), gcd.end());
+
+    // L0: CursiveAttachment (LTR flag 0x0000):
+    //   A(1): entry=NULL, exit=(520, 120)
+    //   B(2): entry=(100, 20), exit=(480, 200) -> dy(B onto A) = +100, adv(A) = 520 - 100 = 420
+    //   C(3): entry=(120, 50), exit=NULL       -> dy(C onto B) = 200 - 50 = +150 -> total y(C)=+250, adv(B)=480-120=360!
+    SfntByteBuf cur_ltr;
+    cur_ltr.u16(1); cur_ltr.u16(0); cur_ltr.u16(3);
+    // Reserve 3 EntryExit records (3 * 4 = 12 bytes)
+    for (int i = 0; i < 6; ++i) cur_ltr.u16(0);
+    cur_ltr.patch_u16(2, static_cast<uint16_t>(cur_ltr.data.size()));
+    auto cl_cov = build_cov_fmt1({1, 2, 3});
+    cur_ltr.data.insert(cur_ltr.data.end(), cl_cov.begin(), cl_cov.end());
+    auto push_anchor = [&](SfntByteBuf& buf, int rec_off, int16_t x, int16_t y) {
+        buf.patch_u16(rec_off, static_cast<uint16_t>(buf.data.size()));
+        buf.u16(1); buf.i16(x); buf.i16(y);
+    };
+    push_anchor(cur_ltr, 6 + 0 * 4 + 2, 520, 120); // A exit
+    push_anchor(cur_ltr, 6 + 1 * 4 + 0, 100, 20);  // B entry
+    push_anchor(cur_ltr, 6 + 1 * 4 + 2, 480, 200); // B exit
+    push_anchor(cur_ltr, 6 + 2 * 4 + 0, 120, 50);  // C entry
+
+    // L1: MarkToBase: mark 4 (100, 500) onto B(2) (300, 600) -> inherits B's cursive y_offset (+100)!
+    SfntByteBuf mkbase;
+    mkbase.u16(1); mkbase.u16(0); mkbase.u16(0); mkbase.u16(1); mkbase.u16(0); mkbase.u16(0);
+    mkbase.patch_u16(2, static_cast<uint16_t>(mkbase.data.size()));
+    auto mc4 = build_cov_fmt1({4});
+    mkbase.data.insert(mkbase.data.end(), mc4.begin(), mc4.end());
+    mkbase.patch_u16(4, static_cast<uint16_t>(mkbase.data.size()));
+    auto bc2 = build_cov_fmt1({2});
+    mkbase.data.insert(mkbase.data.end(), bc2.begin(), bc2.end());
+    mkbase.patch_u16(8, static_cast<uint16_t>(mkbase.data.size()));
+    mkbase.u16(1); mkbase.u16(0); mkbase.u16(6); mkbase.u16(1); mkbase.i16(100); mkbase.i16(500);
+    mkbase.patch_u16(10, static_cast<uint16_t>(mkbase.data.size()));
+    mkbase.u16(1); mkbase.u16(4); mkbase.u16(1); mkbase.i16(300); mkbase.i16(600);
+
+    // L2: SinglePos for 'p'(5) x_advance -80 (nested, invoked only when followed by 'q'(6))
+    SfntByteBuf sp_pq;
+    sp_pq.u16(1); sp_pq.u16(8); sp_pq.u16(0x0004); sp_pq.i16(-80);
+    auto cp = build_cov_fmt1({5});
+    sp_pq.data.insert(sp_pq.data.end(), cp.begin(), cp.end());
+
+    // L3: ChainContextPos fmt3: backtrack=['A'=1], input=['p'=5], lookahead=['q'=6] -> L2
+    SfntByteBuf cpos;
+    cpos.u16(3);
+    cpos.u16(1); cpos.u16(0); // backtrack[0]
+    cpos.u16(1); cpos.u16(0); // input[0]
+    cpos.u16(1); cpos.u16(0); // lookahead[0]
+    cpos.u16(1); cpos.u16(0); cpos.u16(2); // pos(0, L2)
+    cpos.patch_u16(4, static_cast<uint16_t>(cpos.data.size()));
+    auto ca = build_cov_fmt1({1});
+    cpos.data.insert(cpos.data.end(), ca.begin(), ca.end());
+    cpos.patch_u16(8, static_cast<uint16_t>(cpos.data.size()));
+    cpos.data.insert(cpos.data.end(), cp.begin(), cp.end());
+    cpos.patch_u16(12, static_cast<uint16_t>(cpos.data.size()));
+    auto cq = build_cov_fmt1({6});
+    cpos.data.insert(cpos.data.end(), cq.begin(), cq.end());
+
+    // L4: CursiveAttachment (RTL flag 0x0001) on Arabic Beh(7) -> Teh(8):
+    //   Beh(7) entry=(540, 80), exit=(40, 140)
+    //   Teh(8) entry=(560, 20), exit=NULL
+    //   RTL cursive attaches entry of first(7) to exit of second(8) — here let's connect:
+    //   Beh(7) exit=(40, 140) -> Teh(8) entry=(560, 20):
+    //     RTL anchor: second(Teh) gets y_offset = exit.y - entry.y = 140 - 20 = +120,
+    //     first(Beh).x_advance = (600 - exit.x) + entry.x? Wait: let's check our formula!
+    //     In FontRenderer.cpp:
+    //       dx = cur.exit_x - nxt.entry_x;
+    //       nxt.x_advance = nxt_entry_x? Wait: for RTL, prev is RIGHT of cur -> nxt is visually LEFT of cur!
+    //       Let's verify exact math: cur=Beh(7) exit=(40,140), nxt=Teh(8) entry=(560,20):
+    //       dy = 140 - 20 = +120 on nxt(Teh), and on RTL chain after visual reversal [Teh, Beh],
+    //       we want Teh.entry(560) to align with Beh.exit(40) when drawing Teh THEN Beh!
+    //       Width check: Beh(x_offset) & Teh(x_advance) -> sum = (600 - 40) + 560? Wait:
+    //       Beh's left part is [0..40], right part is [40..600] (560 units). Teh's left part is [0..560], right part [560..600] (40 units).
+    //       Aligned: total distance from Teh.0 to Beh.600 = 560 + (600 - 40) = 1120!
+    //       Wait: in logical order before reversal, our code sets:
+    //         cur.x_advance = (cur.adv - cur.exit.x) + nxt.entry.x? Wait: let's check exact lines 2240..2310 of FontRenderer.cpp!
+    SfntByteBuf cur_rtl;
+    cur_rtl.u16(1); cur_rtl.u16(0); cur_rtl.u16(2);
+    for (int i = 0; i < 4; ++i) cur_rtl.u16(0);
+    cur_rtl.patch_u16(2, static_cast<uint16_t>(cur_rtl.data.size()));
+    auto cr_cov = build_cov_fmt1({7, 8});
+    cur_rtl.data.insert(cur_rtl.data.end(), cr_cov.begin(), cr_cov.end());
+    push_anchor(cur_rtl, 6 + 0 * 4 + 2, 40, 140);  // Beh exit
+    push_anchor(cur_rtl, 6 + 1 * 4 + 0, 560, 20);  // Teh entry
+
+    auto gpos_bytes = build_otl_table(
+        {
+            {"latn", {{"curs", {0}}, {"mark", {1}}, {"calt", {3}}}},
+            {"arab", {{"curs", {4}}}},
+        },
+        {
+            {"curs", 3, 0x0008, -1, {cur_ltr.data}},
+            {"mark", 4, 0x0000, -1, {mkbase.data}},
+            {"calt", 1, 0x0000, -1, {sp_pq.data}},
+            {"calt", 8, 0x0008, -1, {cpos.data}},
+            {"curs", 3, 0x0009 /* RightToLeft=1 | IgnoreMarks=8 */, -1, {cur_rtl.data}},
+        });
+
+    auto sfnt = build_synthetic_sfnt(1000, 900, -200, glyphs,
+                                     {{"GDEF", gdef.data}, {"GPOS", gpos_bytes}});
+    TrueTypeFont f;
+    assert(f.load_memory(sfnt));
+    assert(f.has_cursive_positioning());
+
+    // 1. LTR cursive chain A -> B(+mark) -> C:
+    //    A draws at 0, exit=520 -> adv(A)=520.
+    //    B draws at 520 - 100 = 420, y(B) = 120 - 20 = 100, exit=480 -> adv(B)=380.
+    //    Mark(4) on B inherits B's y_offset (+100) + mark offset (600 - 500) = +200,
+    //      and x_offset = (-100) + (300 - 100) - 380 = -280 so 900 + (-280) + 100 == 420 + 300!
+    //    C draws at 900 - 120 = 780, y(C) = 100 + (200 - 50) = 250, adv(C) = 600 - 120 = 480.
+    const auto abc = f.shape_glyphs({'A', 'B', 0x0301, 'C'}, false);
+    assert(abc.size() == 4);
+    assert(abc[0].x_advance == 520 && abc[0].x_offset == 0 && abc[0].y_offset == 0);
+    assert(abc[1].x_advance == 380 && abc[1].x_offset == -100 && abc[1].y_offset == 100);
+    assert(abc[2].x_advance == 0 && abc[2].x_offset == -280 && abc[2].y_offset == 200);
+    assert(abc[3].x_advance == 480 && abc[3].x_offset == -120 && abc[3].y_offset == 250);
+
+    // 2. ChainContextPos: "Apq" reduces 'p' advance by 80 -> 420, while "pq" alone leaves 'p' at 500!
+    const auto apq = f.shape_glyphs({'A', 'p', 'q'}, false);
+    const auto pq = f.shape_glyphs({'p', 'q'}, false);
+    assert(apq.size() == 3 && apq[1].x_advance == 420);
+    assert(pq.size() == 2 && pq[0].x_advance == 500);
+
+    // 3. RTL cursive Beh(7) -> Teh(8):
+    //    Teh drawn first visually has entry=560 (adv=560, y=0);
+    //    Beh drawn second visually has exit=40 (x_offset=-40, adv=560, y=20-140=-120)!
+    const auto rtl_log = f.shape_glyphs({0x0628, 0x062A}, false, false);
+    const auto rtl_vis = f.shape_glyphs({0x0628, 0x062A}, false, true);
+    assert(rtl_log.size() == 2 && rtl_vis.size() == 2);
+    assert(rtl_log[0].glyph == 7 && rtl_log[1].glyph == 8);
+    assert(rtl_log[0].y_offset == -120 && rtl_log[0].x_offset == -40 && rtl_log[0].x_advance == 560);
+    assert(rtl_log[1].y_offset == 0 && rtl_log[1].x_advance == 560);
+    assert(rtl_vis[0].glyph == 8 && rtl_vis[1].glyph == 7);
+    assert(rtl_vis[0].y_offset == 0 && rtl_vis[0].x_advance == 560);
+    assert(rtl_vis[1].y_offset == -120 && rtl_vis[1].x_offset == -40 && rtl_vis[1].x_advance == 560);
+    std::printf("      [gpos] CursiveAttachment LTR/RTL (with mark chain) + ChainContextPos passed\n");
+    std::fflush(stdout);
+}
+
+// Reusable synthetic Arabic+Latin SFNT with ASCII (` `, `1`..`3`, `h`, `i`, `k`, `o`),
+// Arabic letters (`ا`, `ب`, `ح`, `ر`, `س`, `ع`, `ك`, `ل`, `م`, `ي`, `َ`, ZWNJ, ZWJ),
+// `init`/`medi`/`fina` positional forms, `rlig` Lam-Alef ligatures, and GPOS mark advance zeroing.
+inline std::vector<uint8_t> build_test_arabic_latin_sfnt() {
+    using namespace litebird;
+    const std::vector<TestGlyphSpec> glyphs = {
+        {0, 500, false, 0, 0, 0, 0},                    // 0 .notdef
+        {' ', 300, false, 0, 0, 0, 0},                  // 1 space
+        {'1', 500, true, 50, 0, 450, 650},              // 2 '1'
+        {'2', 500, true, 50, 0, 450, 650},              // 3 '2'
+        {'3', 500, true, 50, 0, 450, 650},              // 4 '3'
+        {'h', 550, true, 50, 0, 500, 650},              // 5 'h'
+        {'i', 300, true, 50, 0, 250, 650},              // 6 'i'
+        {'k', 550, true, 50, 0, 500, 650},              // 7 'k'
+        {'o', 550, true, 50, 0, 500, 500},              // 8 'o'
+        {0x0627, 320, true, 80, 0, 240, 700},           // 9 ALEF isol
+        {0x0628, 650, true, 50, 0, 600, 380},           // 10 BEH isol
+        {0x062D, 650, true, 50, 0, 600, 450},           // 11 HAH isol
+        {0x0631, 400, true, 50, -100, 350, 400},        // 12 REH isol
+        {0x0633, 750, true, 50, 0, 700, 450},           // 13 SEEN isol
+        {0x0639, 650, true, 50, 0, 600, 450},           // 14 AIN isol
+        {0x0643, 600, true, 50, 0, 550, 650},           // 15 KAF isol
+        {0x0644, 550, true, 50, 0, 500, 700},           // 16 LAM isol
+        {0x0645, 600, true, 50, 0, 550, 450},           // 17 MEEM isol
+        {0x064A, 650, true, 50, 0, 600, 450},           // 18 YEH isol
+        {0x064E, 200, true, 100, 560, 260, 640},        // 19 FATHA mark
+        {0x200C, 100, false, 0, 0, 0, 0},               // 20 ZWNJ
+        {0x200D, 100, false, 0, 0, 0, 0},               // 21 ZWJ
+        // init (22..29) for dual-joining 10,11,13,14,15,16,17,18
+        {0, 620, true, 40, 0, 580, 380},                // 22 BEH.init
+        {0, 620, true, 40, 0, 580, 450},                // 23 HAH.init
+        {0, 720, true, 40, 0, 680, 450},                // 24 SEEN.init
+        {0, 620, true, 40, 0, 580, 450},                // 25 AIN.init
+        {0, 580, true, 40, 0, 540, 650},                // 26 KAF.init
+        {0, 520, true, 40, 0, 480, 700},                // 27 LAM.init
+        {0, 580, true, 40, 0, 540, 450},                // 28 MEEM.init
+        {0, 620, true, 40, 0, 580, 450},                // 29 YEH.init
+        // medi (30..37) for dual-joining 10,11,13,14,15,16,17,18
+        {0, 600, true, 30, 0, 570, 380},                // 30 BEH.medi
+        {0, 600, true, 30, 0, 570, 450},                // 31 HAH.medi
+        {0, 700, true, 30, 0, 670, 450},                // 32 SEEN.medi
+        {0, 600, true, 30, 0, 570, 450},                // 33 AIN.medi
+        {0, 560, true, 30, 0, 530, 650},                // 34 KAF.medi
+        {0, 500, true, 30, 0, 470, 700},                // 35 LAM.medi
+        {0, 560, true, 30, 0, 530, 450},                // 36 MEEM.medi
+        {0, 600, true, 30, 0, 570, 450},                // 37 YEH.medi
+        // fina (38..47) for 9..18
+        {0, 340, true, 60, 0, 280, 700},                // 38 ALEF.fina
+        {0, 620, true, 40, 0, 580, 380},                // 39 BEH.fina
+        {0, 620, true, 40, 0, 580, 450},                // 40 HAH.fina
+        {0, 420, true, 50, -100, 370, 400},             // 41 REH.fina
+        {0, 720, true, 40, 0, 680, 450},                // 42 SEEN.fina
+        {0, 620, true, 40, 0, 580, 450},                // 43 AIN.fina
+        {0, 580, true, 40, 0, 540, 650},                // 44 KAF.fina
+        {0, 520, true, 40, 0, 480, 700},                // 45 LAM.fina
+        {0, 580, true, 40, 0, 540, 450},                // 46 MEEM.fina
+        {0, 620, true, 40, 0, 580, 450},                // 47 YEH.fina
+        // rlig Lam-Alef ligatures (48..49): strictly narrower than Lam(520) + Alef(340) = 860
+        {0, 520, true, 40, 0, 480, 700},                // 48 LAM_ALEF.isol
+        {0, 520, true, 40, 0, 480, 700},                // 49 LAM_ALEF.fina
+    };
+
+    SfntByteBuf gdef;
+    gdef.u32(0x00010000u);
+    gdef.u16(12); gdef.u16(0); gdef.u16(0); gdef.u16(0);
+    auto gcd = build_classdef_fmt2({{1, 18, 1}, {19, 19, 3}, {22, 47, 1}, {48, 49, 2}});
+    gdef.data.insert(gdef.data.end(), gcd.begin(), gcd.end());
+
+    auto make_single_map = [](const std::vector<std::pair<uint16_t, uint16_t>>& pairs) {
+        SfntByteBuf b;
+        b.u16(2); b.u16(0); b.u16(static_cast<uint16_t>(pairs.size()));
+        std::vector<uint16_t> cov;
+        for (const auto& [src, dst] : pairs) {
+            cov.push_back(src);
+            b.u16(dst);
+        }
+        b.patch_u16(2, static_cast<uint16_t>(b.data.size()));
+        auto cv = build_cov_fmt1(cov);
+        b.data.insert(b.data.end(), cv.begin(), cv.end());
+        return b.data;
+    };
+
+    auto s_init = make_single_map({{10, 22}, {11, 23}, {13, 24}, {14, 25}, {15, 26}, {16, 27}, {17, 28}, {18, 29}});
+    auto s_medi = make_single_map({{10, 30}, {11, 31}, {13, 32}, {14, 33}, {15, 34}, {16, 35}, {17, 36}, {18, 37}});
+    auto s_fina = make_single_map({{9, 38}, {10, 39}, {11, 40}, {12, 41}, {13, 42}, {14, 43}, {15, 44}, {16, 45}, {17, 46}, {18, 47}});
+
+    // rlig: sorted coverage {16 (LAM.isol), 27 (LAM.init), 35 (LAM.medi)}
+    SfntByteBuf s_rlig;
+    s_rlig.u16(1); s_rlig.u16(0); s_rlig.u16(3);
+    s_rlig.u16(0); s_rlig.u16(0); s_rlig.u16(0);
+    s_rlig.patch_u16(2, static_cast<uint16_t>(s_rlig.data.size()));
+    auto rcov = build_cov_fmt1({16, 27, 35});
+    s_rlig.data.insert(s_rlig.data.end(), rcov.begin(), rcov.end());
+    const uint16_t lig_specs[3][2] = {
+        {48, 9},   // 16 + 9 -> 48
+        {48, 38},  // 27 + 38 -> 48
+        {49, 38},  // 35 + 38 -> 49
+    };
+    for (int set_i = 0; set_i < 3; ++set_i) {
+        const std::size_t ls_pos = s_rlig.data.size();
+        s_rlig.patch_u16(6 + set_i * 2, static_cast<uint16_t>(ls_pos));
+        s_rlig.u16(1); s_rlig.u16(4);
+        s_rlig.u16(lig_specs[set_i][0]);
+        s_rlig.u16(2);
+        s_rlig.u16(lig_specs[set_i][1]);
+    }
+
+    auto gsub_bytes = build_otl_table(
+        {{"arab", {{"init", {0}}, {"medi", {1}}, {"fina", {2}}, {"rlig", {3}}}}},
+        {
+            {"init", 1, 0x0000, -1, {s_init}},
+            {"medi", 1, 0x0000, -1, {s_medi}},
+            {"fina", 1, 0x0000, -1, {s_fina}},
+            {"rlig", 4, 0x0008, -1, {s_rlig.data}},
+        });
+
+    SfntByteBuf sp_zero;
+    sp_zero.u16(1); sp_zero.u16(8); sp_zero.u16(0x0004); sp_zero.i16(-200);
+    auto mc = build_cov_fmt1({19});
+    sp_zero.data.insert(sp_zero.data.end(), mc.begin(), mc.end());
+
+    SfntByteBuf mkbase;
+    mkbase.u16(1); mkbase.u16(0); mkbase.u16(0); mkbase.u16(1); mkbase.u16(0); mkbase.u16(0);
+    mkbase.patch_u16(2, static_cast<uint16_t>(mkbase.data.size()));
+    mkbase.data.insert(mkbase.data.end(), mc.begin(), mc.end());
+    mkbase.patch_u16(4, static_cast<uint16_t>(mkbase.data.size()));
+    auto bc = build_cov_fmt1({22});
+    mkbase.data.insert(mkbase.data.end(), bc.begin(), bc.end());
+    mkbase.patch_u16(8, static_cast<uint16_t>(mkbase.data.size()));
+    mkbase.u16(1); mkbase.u16(0); mkbase.u16(6); mkbase.u16(1); mkbase.i16(100); mkbase.i16(560);
+    mkbase.patch_u16(10, static_cast<uint16_t>(mkbase.data.size()));
+    mkbase.u16(1); mkbase.u16(4); mkbase.u16(1); mkbase.i16(310); mkbase.i16(460);
+
+    auto gpos_bytes = build_otl_table(
+        {{"arab", {{"mark", {0, 1}}}}},
+        {
+            {"mark", 1, 0x0000, -1, {sp_zero.data}},
+            {"mark", 4, 0x0000, -1, {mkbase.data}},
+        });
+
+    return build_synthetic_sfnt(1000, 800, -200, glyphs,
+                                {{"GDEF", gdef.data}, {"GSUB", gsub_bytes}, {"GPOS", gpos_bytes}});
+}
+
+TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    fr.clear_webfonts();
+    const auto ar_sfnt = build_test_arabic_latin_sfnt();
+    const int ar_fam = fr.register_webfont("TestArabicSans", {[ar_sfnt]() { return ar_sfnt; }}, 400, 400, false);
+    assert(ar_fam != FontRenderer::kNoFamily);
+    TrueTypeFont ar_font;
+    assert(ar_font.load_memory(ar_sfnt) && ar_font.has_gsub() && ar_font.has_mark_positioning());
+
+    // 1. Multi-word Arabic keeps internal space in a single RTL run and reverses visually!
+    const auto salam_alaykum = fr.shape_text("\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85 \xD8\xB9\xD9\x84\xD9\x8A\xD9\x83\xD9\x85", 24.0f, 400, "TestArabicSans", false, true);
+    // "سلام" (3 glyphs) + ' ' (1) + "عليكم" (5 glyphs) -> 9 glyphs visually: [م_fina, ك_medi, ي_medi, ل_medi, ع_init, ' ', م_isol, لا_fina, س_init]
+    assert(salam_alaykum.size() == 9);
+    assert(salam_alaykum[5].glyph == ar_font.glyph_index(' '));
+    assert(salam_alaykum[6].glyph == ar_font.glyph_index(0x0645)); // Meem isolated at end of "سلام"
+    assert(salam_alaykum[8].glyph != ar_font.glyph_index(0x0633)); // initial Sin!
+
+    // 2. Mixed Latin + Arabic + Latin keeps LTR segments LTR and reverses RTL segment in between!
+    const auto mixed = fr.shape_text("hi \xD9\x85\xD8\xB1\xD8\xAD\xD8\xA8\xD8\xA7 ok", 24.0f, 400, "TestArabicSans", false, true);
+    assert(mixed.size() >= 10);
+    assert(mixed[0].glyph == ar_font.glyph_index('h'));
+    assert(mixed[1].glyph == ar_font.glyph_index('i'));
+    assert(mixed[mixed.size() - 2].glyph == ar_font.glyph_index('o'));
+    assert(mixed[mixed.size() - 1].glyph == ar_font.glyph_index('k'));
+
+    // 3. European digits inside Arabic stay LTR ("123" stays '1','2','3', NOT '3','2','1')!
+    const auto rtl_num = fr.shape_text("\xD9\x85\xD8\xB1 123 \xD8\xA8\xD8\xA7", 24.0f, 400, "TestArabicSans", false, true);
+    const uint16_t g1 = ar_font.glyph_index('1'), g2 = ar_font.glyph_index('2'), g3 = ar_font.glyph_index('3');
+    int pos1 = -1, pos2 = -1, pos3 = -1;
+    for (int i = 0; i < static_cast<int>(rtl_num.size()); ++i) {
+        if (rtl_num[i].glyph == g1) pos1 = i;
+        else if (rtl_num[i].glyph == g2) pos2 = i;
+        else if (rtl_num[i].glyph == g3) pos3 = i;
+    }
+    assert(pos1 >= 0 && pos1 + 1 == pos2 && pos2 + 1 == pos3);
+
+    // 4. Combining marks stay AFTER their base after visual RTL cluster reversal ([base, mark], not [mark, base])!
+    const auto rtl_mark = fr.shape_text("\xD8\xA8\xD9\x8E\xD8\xB3", 24.0f, 400, "TestArabicSans", false, true);
+    assert(rtl_mark.size() == 3);
+    assert(rtl_mark[1].glyph != ar_font.glyph_index(0x064E)); // base Beh comes before Fatha!
+    assert(rtl_mark[2].glyph == ar_font.glyph_index(0x064E)); // Fatha follows Beh in same cluster!
+
+    // 5. Fallback preservation across common spaces: a Latin-only primary webfont (covering ASCII)
+    //    falling back via system fallbacks to TestArabicSans must keep "سلام عليكم" as one coherent Arabic run!
+    const std::vector<TestGlyphSpec> latin_only = {
+        {0, 500, false, 0, 0, 0, 0},
+        {' ', 300, false, 0, 0, 0, 0},
+        {'a', 500, true, 40, 0, 460, 500},
+    };
+    auto latin_sfnt = build_synthetic_sfnt(1000, 800, -200, latin_only, {});
+    const int fam = fr.register_webfont("LatinOnlyPrimary", {[latin_sfnt]() { return latin_sfnt; }}, 400, 400, false);
+    assert(fam != FontRenderer::kNoFamily);
+    const std::string tmp_ar_path =
+        (std::filesystem::temp_directory_path() / "litebird_test_arabic_fallback.ttf").string();
+    {
+        std::ofstream tf(tmp_ar_path, std::ios::binary | std::ios::trunc);
+        assert(tf.good());
+        tf.write(reinterpret_cast<const char*>(ar_sfnt.data()),
+                 static_cast<std::streamsize>(ar_sfnt.size()));
+        assert(tf.good());
+    }
+    const std::vector<std::string> saved_fallbacks = fr.fallback_paths();
+    fr.set_fallbacks({tmp_ar_path});
+    const auto fallback_rtl = fr.shape_text("\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85 \xD8\xB9\xD9\x84\xD9\x8A\xD9\x83\xD9\x85", 24.0f, 400, "LatinOnlyPrimary", false, true);
+    fr.set_fallbacks(saved_fallbacks);
+    std::error_code rm_ec;
+    std::filesystem::remove(tmp_ar_path, rm_ec);
+    assert(fallback_rtl.size() == 9);
+    // Space stays from whichever Arabic fallback face was selected (`m_regular` or `tmp_ar_path`),
+    // NOT split into 3 subruns with non-reversed words!
+    const TrueTypeFont* fb = fallback_rtl[6].face;
+    assert(fb != nullptr);
+    assert(fallback_rtl[5].face == fb);
+    assert(fallback_rtl[5].glyph == fb->glyph_index(' '));
+    assert(fallback_rtl[6].glyph == fb->glyph_index(0x0645));
+    assert(fallback_rtl[8].glyph != fb->glyph_index(0x0633)); // initial Sin!
+
+    // Optional live host-DejaVu verification when installed with Arabic coverage
+    const std::string dejavu_path = fr.face_path("DejaVu Sans");
+    if (!dejavu_path.empty()) {
+        TrueTypeFont dv;
+        if (dv.load_file(dejavu_path) && dv.has_contextual_shaping() &&
+            dv.glyph_index(0x0645) != 0 && dv.glyph_index(0x0633) != 0 && dv.glyph_index(0x0644) != 0 && dv.glyph_index(0x0627) != 0) {
+            const auto dv_rtl = fr.shape_text("\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85 \xD8\xB9\xD9\x84\xD9\x8A\xD9\x83\xD9\x85", 24.0f, 400, "DejaVu Sans", false, true);
+            assert(dv_rtl.size() == 9);
+            assert(dv_rtl[6].glyph == dv.glyph_index(0x0645));
+        }
+    }
+
+    fr.clear_webfonts();
+    std::printf("      [shaping] multiscript itemization, visual RTL, digits & fallback runs passed\n");
+    std::fflush(stdout);
+}
+
+TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs) {
+    using namespace litebird;
+
+    FontRenderer& fr = FontRenderer::instance();
+    fr.clear_webfonts();
+    const auto ar_sfnt = build_test_arabic_latin_sfnt();
+    const int ar_fam = fr.register_webfont("TestArabicSans", {[ar_sfnt]() { return ar_sfnt; }}, 400, 400, false);
+    assert(ar_fam != FontRenderer::kNoFamily);
+
+    // 1. Canvas2D measureText & fillText: "لا" (1 ligature) is measurably narrower than "ل\u200cا" (2 glyphs)!
+    CanvasRenderingContext2D ctx(320, 140);
+    ctx.font = "40px TestArabicSans";
+    const double w_lig = ctx.measure_text("\xD9\x84\xD8\xA7").width;
+    const double w_zwnj = ctx.measure_text("\xD9\x84\xE2\x80\x8C\xD8\xA7").width;
+    assert(w_lig > 0.0 && w_zwnj > w_lig + 4.0);
+
+    // 2. Canvas2D actually paints Arabic RTL ink pixels!
+    ctx.fill_style = Color(0, 0, 0);
+    ctx.fill_text("\xD9\x84\xD8\xA7", 40.0f, 90.0f);
+    int dark_px = 0;
+    for (int y = 20; y < 120; ++y) {
+        for (int x = 20; x < 160; ++x) {
+            if ((ctx.image_data()->get_pixel(x, y) & 0xFF000000u) != 0) ++dark_px;
+        }
+    }
+    assert(dark_px > 40);
+
+    // 3. Synthetic SFNT with huge negative x_offset (-400 at 50px = -20px) tests Canvas2D horizontal overhang padding!
+    const std::vector<TestGlyphSpec> over_glyphs = {
+        {0, 500, false, 0, 0, 0, 0},
+        {'a', 600, true, 100, 0, 500, 500},
+    };
+    SfntByteBuf sp_neg;
+    sp_neg.u16(1); sp_neg.u16(8); sp_neg.u16(0x0001); sp_neg.i16(-400); // x_placement = -400
+    auto spc_a = build_cov_fmt1({1});
+    sp_neg.data.insert(sp_neg.data.end(), spc_a.begin(), spc_a.end());
+    auto gpos_over = build_gpos_table({{"kern", 1, 0x0000, -1, {sp_neg.data}}});
+    auto over_sfnt = build_synthetic_sfnt(1000, 800, -200, over_glyphs, {{"GPOS", gpos_over}});
+    const int fam = fr.register_webfont("OverhangFont", {[over_sfnt]() { return over_sfnt; }}, 400, 400, false);
+    assert(fam != FontRenderer::kNoFamily);
+    CanvasRenderingContext2D ctx_over(200, 120);
+    ctx_over.fill_style = Color(0, 0, 0);
+    ctx_over.font = "50px OverhangFont";
+    ctx_over.fill_text("a", 80.0f, 80.0f); // x_offset = -20px, ink spans ~65..85; would be ~85..105 without offset!
+    int min_ink_x = 999, max_ink_x = -1;
+    for (int y = 0; y < 120; ++y) {
+        for (int x = 0; x < 200; ++x) {
+            if ((ctx_over.image_data()->get_pixel(x, y) & 0xFF000000u) != 0) {
+                min_ink_x = std::min(min_ink_x, x);
+                max_ink_x = std::max(max_ink_x, x);
+            }
+        }
+    }
+    assert(min_ink_x < 75 && max_ink_x <= 90);
+
+    // 4. HTML/DOM layout + BitmapRenderer paints Arabic "لا" narrower than "ل\u200cا"!
+    auto render_right_edge = [](const char* utf8, const char* family) {
+        auto doc = HtmlParser::parse(
+            std::string("<body style=\"margin:0;padding:0;font-size:48px;color:#000\">"
+                        "<p style=\"margin:0;font-family:") + family + ";\">" + utf8 + "</p></body>");
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 400.0f, 150.0f);
+        BitmapRenderer bmp(400, 150);
+        bmp.clear(Color::white());
+        bmp.render(DisplayList::build(root));
+        int max_x = -1;
+        for (int y = 0; y < 150; ++y) {
+            for (int x = 0; x < 400; ++x) {
+                if (bmp.get_pixel(x, y).r < 200) max_x = std::max(max_x, x);
+            }
+        }
+        return max_x;
+    };
+    const int right_lig = render_right_edge("\xD9\x84\xD8\xA7", "TestArabicSans");
+    const int right_zwnj = render_right_edge("\xD9\x84\xE2\x80\x8C\xD8\xA7", "TestArabicSans");
+    assert(right_lig > 0 && right_zwnj > right_lig + 5);
+
+    // 5. Pixel-identity oracle: HTML Bidi + Arabic shaping ("سلام") renders identically to
+    //    direct logical FontRenderer::draw_text("سلام") (no double-reversal or broken joining).
+    auto render_html_and_verify_oracle = [](const char* family) {
+        auto doc = HtmlParser::parse(
+            std::string("<body style=\"margin:0;padding:0;font-size:40px;color:#000\">"
+                        "<p id=\"p\" style=\"margin:0;font-family:") + family + ";\">\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85</p></body>");
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 400.0f, 150.0f);
+        float hx = 0.0f, hy = 0.0f;
+        std::function<void(const std::shared_ptr<LayoutBox>&)> find_p =
+            [&](const std::shared_ptr<LayoutBox>& b) {
+                if (!b) return;
+                if (!b->line_boxes.empty() && !b->line_boxes.front().fragments.empty()) {
+                    hx = b->line_boxes.front().fragments.front().rect.x;
+                    hy = b->line_boxes.front().fragments.front().rect.y;
+                }
+                for (const auto& ch : b->children) find_p(ch);
+            };
+        find_p(root);
+        BitmapRenderer bmp_html(400, 150);
+        bmp_html.clear(Color::white());
+        bmp_html.render(DisplayList::build(root));
+
+        BitmapRenderer bmp_direct(400, 150);
+        bmp_direct.clear(Color::white());
+        DisplayList dl_direct;
+        DrawTextCommand cmd_direct;
+        cmd_direct.position = Point(hx, hy);
+        cmd_direct.text = "\xD8\xB3\xD9\x84\xD8\xA7\xD9\x85";
+        cmd_direct.color = Color(0, 0, 0);
+        cmd_direct.font_size = 40.0f;
+        cmd_direct.font_weight = 400;
+        cmd_direct.font_family = family;
+        cmd_direct.font_italic = false;
+        cmd_direct.font_kerning = true;
+        cmd_direct.is_rtl_visual = false;
+        dl_direct.add(cmd_direct);
+        bmp_direct.render(dl_direct);
+        int salam_dark = 0;
+        for (int y = 0; y < 150; ++y) {
+            for (int x = 0; x < 400; ++x) {
+                assert(bmp_html.get_pixel(x, y).r == bmp_direct.get_pixel(x, y).r);
+                if (bmp_html.get_pixel(x, y).r < 200) ++salam_dark;
+            }
+        }
+        assert(salam_dark > 80);
+    };
+    render_html_and_verify_oracle("TestArabicSans");
+
+    // Optional live host-DejaVu end-to-end verification when installed with Arabic coverage
+    const std::string dejavu_path = fr.face_path("DejaVu Sans");
+    if (!dejavu_path.empty()) {
+        TrueTypeFont dv;
+        if (dv.load_file(dejavu_path) && dv.has_contextual_shaping() &&
+            dv.glyph_index(0x0644) != 0 && dv.glyph_index(0x0627) != 0 &&
+            dv.glyph_index(0x0633) != 0 && dv.glyph_index(0x0645) != 0) {
+            render_html_and_verify_oracle("DejaVu Sans");
+        }
+    }
+
+    fr.clear_webfonts();
+    std::printf("      [shaping] Canvas2D & HTML Arabic + overhang rendering passed (right_lig=%d, right_zwnj=%d)\n",
+                right_lig, right_zwnj);
+    std::fflush(stdout);
+}
+
+TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely) {
+    using namespace litebird;
+
+    const std::vector<TestGlyphSpec> glyphs = {
+        {0, 500, false, 0, 0, 0, 0},
+        {'a', 600, true, 40, 0, 560, 500},
+        {'b', 600, true, 40, 0, 560, 500},
+    };
+
+    // 1. Truncated GSUB buffers (0..20 bytes)
+    for (std::size_t trunc : {std::size_t(0), std::size_t(4), std::size_t(10), std::size_t(20)}) {
+        auto sfnt = build_synthetic_sfnt(
+            1000, 800, -200, glyphs,
+            {{"GSUB", std::vector<uint8_t>(trunc, 0xFF)},
+             {"GPOS", std::vector<uint8_t>(trunc, 0xFF)}});
+        TrueTypeFont f;
+        assert(f.load_memory(sfnt));
+        const auto s = f.shape_glyphs({'a', 'b'}, true);
+        assert(s.size() == 2);
+    }
+
+    // 2. Self-recursive GSUB ChainContext (L0 calls L0) + runaway MultipleSubst (1 -> 16) bounded safely!
+    SfntByteBuf l_rec;
+    l_rec.u16(3); l_rec.u16(0);
+    l_rec.u16(1); l_rec.u16(0); // input[0]
+    l_rec.u16(0); // lookahead=0
+    l_rec.u16(1); l_rec.u16(0); l_rec.u16(0); // call lookup 0 (self!)
+    l_rec.patch_u16(6, static_cast<uint16_t>(l_rec.data.size()));
+    auto ca = build_cov_fmt1({1});
+    l_rec.data.insert(l_rec.data.end(), ca.begin(), ca.end());
+
+    // Malformed MultipleSubst with glyphCount=0 (empty expansion), Extension Type 7 pointing to Type 7,
+    // and ChainContext fmt2 with overflowing subClassSetCount=65535.
+    SfntByteBuf bad_ext7;
+    bad_ext7.u16(1); bad_ext7.u16(7); bad_ext7.u32(0);
+
+    SfntByteBuf bad_ctx2;
+    bad_ctx2.u16(2); bad_ctx2.u16(12); bad_ctx2.u16(12); bad_ctx2.u16(12); bad_ctx2.u16(12);
+    bad_ctx2.u16(65535);
+    bad_ctx2.u16(1); bad_ctx2.u16(1); bad_ctx2.u16(1);
+
+    // Self-recursive GPOS ChainContextPos (L0 calls L0) + cyclic Type 3 Cursive (1 <-> 2)!
+    SfntByteBuf p_rec = l_rec;
+    SfntByteBuf cur_cyc;
+    cur_cyc.u16(1); cur_cyc.u16(0); cur_cyc.u16(2);
+    for (int i = 0; i < 4; ++i) cur_cyc.u16(0);
+    cur_cyc.patch_u16(2, static_cast<uint16_t>(cur_cyc.data.size()));
+    auto ccab = build_cov_fmt1({1, 2});
+    cur_cyc.data.insert(cur_cyc.data.end(), ccab.begin(), ccab.end());
+    for (int r = 0; r < 2; ++r) {
+        cur_cyc.patch_u16(6 + r * 4 + 0, static_cast<uint16_t>(cur_cyc.data.size()));
+        cur_cyc.u16(1); cur_cyc.i16(100); cur_cyc.i16(50);
+        cur_cyc.patch_u16(6 + r * 4 + 2, static_cast<uint16_t>(cur_cyc.data.size()));
+        cur_cyc.u16(1); cur_cyc.i16(500); cur_cyc.i16(80);
+    }
+
+    auto gsub_bad = build_otl_table(
+        {{"latn", {{"calt", {0, 1, 2}}}}},
+        {
+            {"calt", 6, 0x0000, -1, {l_rec.data}},
+            {"calt", 7, 0x0000, -1, {bad_ext7.data}},
+            {"calt", 6, 0x0000, -1, {bad_ctx2.data}},
+        });
+    auto gpos_bad = build_otl_table(
+        {{"latn", {{"calt", {0}}, {"curs", {1}}}}},
+        {
+            {"calt", 8, 0x0000, -1, {p_rec.data}},
+            {"curs", 3, 0x0000, -1, {cur_cyc.data}},
+        });
+    auto sfnt_hostile = build_synthetic_sfnt(1000, 800, -200, glyphs,
+                                             {{"GSUB", gsub_bad}, {"GPOS", gpos_bad}});
+    TrueTypeFont fh;
+    assert(fh.load_memory(sfnt_hostile));
+    const auto out = fh.shape_glyphs({'a', 'b', 'a', 'b'}, true);
+    assert(out.size() == 4);
+    std::printf("      [shaping] malformed/cyclic/recursive GSUB & GPOS rejected safely\n");
     std::fflush(stdout);
 }
 
@@ -11475,6 +12613,170 @@ TEST(gc_keeps_state_reachable_only_from_listeners_and_frames) {
             }
         )");
         assert(js.global_env()->get("seen").to_string() == "111");
+    }
+}
+
+// GC oracle — what an unbounded page must be able to assume about the
+// collector (ROADMAP Tier 1: "automatic GC"). The collector here runs only
+// on gc(), which these suites count on and cannot fix; what they fix is the
+// other half of the question — if it collects, is the answer right, and does
+// repeating churn grow? Each suite is a differential: what the roots cannot
+// reach must go, however it is wired; what a global still names must stay;
+// and the live set must be a plateau, not a ramp.
+
+TEST(gc_oracle_cycles_are_reclaimed) {
+    using namespace litebird;
+
+    // The handle-counting collector frees a cycle only when it works every
+    // reference — self, mutual, through a closure, through an array that
+    // holds itself. A churn built from all four shapes keeps none of what
+    // it makes, so once it returns, collecting must bring the heap back to
+    // exactly where it rested. The proof is a differential: identical work
+    // again, then larger work again, and the live set must not move either
+    // time. That check is deterministic; comparing against a heap the rest
+    // of the process shared is not, because an earlier suite's cells can be
+    // swept at any collection once the stack bits they accidentally depended
+    // on change.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            function churn(tag, n) {
+                for (var i = 0; i < n; i++) {
+                    var a = { tag: tag + i };
+                    var b = { tag: tag + i, other: a };
+                    a.other = b;            // mutual cycle
+                    a.self = a;             // self cycle
+                    var captured = { tag: tag + i };
+                    var fn = function () { return captured; };
+                    captured.fn = fn;       // cycle through a closure's scope
+                    a.fn = fn;              // and reachable from the object graph too
+                    var list = [a, b, captured];
+                    list.push(list);        // an array that holds itself
+                }
+            }
+            churn("a", 24);
+            churn("b", 24);
+        )");
+        Heap::default_heap().collect_garbage();
+        const size_t stable = Heap::default_heap().stats().alive_cells;
+        js.eval_ast("churn(\"c\", 24);");
+        Heap::default_heap().collect_garbage();
+        // Same work again: every shape the first round built and dropped
+        // must have been reclaimed, or the same survival repeats and the
+        // number grows by a round.
+        assert(Heap::default_heap().stats().alive_cells == stable);
+        js.eval_ast("churn(\"d\", 96);");
+        Heap::default_heap().collect_garbage();
+        // Larger work: a leak scales with the batch, a collector does not.
+        assert(Heap::default_heap().stats().alive_cells == stable);
+        // Collecting again is idempotent: nothing collected comes back.
+        Heap::default_heap().collect_garbage();
+        assert(Heap::default_heap().stats().alive_cells == stable);
+    }
+    // The interpreter is gone here, so everything it made is unreachable. A
+    // teardown must never grow the heap beyond what it was before the
+    // interpreter existed plus a handful of cells: what an earlier suite
+    // left reachable only through stack-bit patterns can legitimately be
+    // swept by these collections, which can only shrink the number, and a
+    // real boundary leak would show up as far more than 32 extra cells.
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t surviving = Heap::default_heap().stats().alive_cells;
+    if (surviving > permanent_cells + 32) {
+        std::printf("      [gc-oracle] %zu cells survive interpreter teardown (permanent %zu, delta %+zd)\n",
+                    surviving, permanent_cells,
+                    static_cast<ptrdiff_t>(surviving) - static_cast<ptrdiff_t>(permanent_cells));
+        std::fflush(stdout);
+    }
+    assert(surviving <= permanent_cells + 32);
+}
+
+TEST(gc_oracle_retention_is_exact) {
+    using namespace litebird;
+
+    // Reclaiming is only half right if you also reclaim what is reachable.
+    // Here one thread of the graph is kept by a global and the rest is a
+    // cyclic pile; the pile must go, the thread must not move or change.
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    const size_t permanent_cells = Heap::default_heap().stats().alive_cells;
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            var keep = { name: "keep", child: { name: "child" } };
+            var pile = [];
+            for (var i = 0; i < 16; i++) {
+                var node = { name: "pile" + i };
+                node.self = node;           // a pile of cycles
+                pile.push(node);
+            }
+            pile[3].child = pile[7];
+            pile[7].child = pile[3];        // cycles across elements
+        )");
+        Heap::default_heap().collect_garbage();
+        const size_t with_pile = Heap::default_heap().stats().alive_cells;
+        js.eval_ast("pile = null;");
+        Heap::default_heap().collect_garbage();
+        const size_t without_pile = Heap::default_heap().stats().alive_cells;
+        assert(without_pile < with_pile);
+        // The retained thread answers exactly what it was given, after two
+        // collections — a handle must point at the same cell, never a copy.
+        assert(js.global_env()->get("keep").get_property("child").get_property("name").to_string() == "child");
+        js.eval_ast("keep.child.deep = { value: 42 };");
+        Heap::default_heap().collect_garbage();
+        assert(js.global_env()->get("keep").get_property("child").get_property("deep").get_property("value").to_number() == 42.0);
+    }
+    // Same boundary rule as gc_oracle_cycles_are_reclaimed: teardown may
+    // sweep older garbage down, but it must not make the heap bigger.
+    Heap::default_heap().collect_garbage();
+    Heap::default_heap().collect_garbage();
+    const size_t surviving = Heap::default_heap().stats().alive_cells;
+    if (surviving > permanent_cells + 32) {
+        std::printf("      [gc-oracle] %zu cells survive interpreter teardown (permanent %zu, delta %+zd)\n",
+                    surviving, permanent_cells,
+                    static_cast<ptrdiff_t>(surviving) - static_cast<ptrdiff_t>(permanent_cells));
+        std::fflush(stdout);
+    }
+    assert(surviving <= permanent_cells + 32);
+}
+
+TEST(gc_oracle_repeated_churn_stays_flat) {
+    using namespace litebird;
+
+    // A page that allocates and drops forever must not grow forever once it
+    // collects. Twenty-four identical rounds, collecting after each, and the
+    // last rounds may not hold more than the early ones by more than a
+    // handful of cells (the checkpoints array itself, the eval transient).
+    JsIntrinsics::get();
+    Heap::default_heap().collect_garbage();
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            var checkpoints = [];
+            for (var round = 0; round < 24; round++) {
+                for (var i = 0; i < 150; i++) {
+                    var junk = { round: round, idx: i, pair: { value: "v" + i } };
+                    junk.self = junk;          // cycle: cell -> cell
+                    junk.pair.owner = junk;    // cycle: pair -> owner
+                }
+                checkpoints.push(gc().alive_cells);
+            }
+        )");
+        JsValue list = js.global_env()->get("checkpoints");
+        const size_t length = static_cast<size_t>(list.get_property("length").to_number());
+        assert(length == 24);
+        size_t first_max = 0, last_max = 0;
+        for (size_t i = 0; i < length; i++) {
+            const size_t alive = static_cast<size_t>(list.get_property(std::to_string(i)).to_number());
+            if (i < 6) first_max = std::max(first_max, alive);
+            if (i + 6 >= length) last_max = std::max(last_max, alive);
+        }
+        // The ramp a leak makes is not bounded; the plateau a collector
+        // makes is. Sixteen cells of slack for interpreter noise.
+        assert(last_max <= first_max + 16);
     }
 }
 
@@ -25444,6 +26746,171 @@ TEST(bidi_reorders_hebrew_and_arabic_runs) {
     }
 }
 
+TEST(array_methods_that_move_places_ask_the_index) {
+    using namespace litebird;
+    // Phase 116, finding 125. The seven methods that move elements inside an
+    // array -- `reverse`, `sort`, `splice`, `copyWithin`, `fill`, `shift`,
+    // `unshift` -- used to read and write `array_elements` directly, which is
+    // this engine's dense vector for a plain array. That vector is not the
+    // array's properties: a place can be an accessor that
+    // `Object.defineProperty` put there (Phase 108), or a place only
+    // `Array.prototype` has. So `reverse` over a getter at index 0 never
+    // called it and left a data property where the accessor had been, `sort`
+    // never called a getter, and every one of the seven threw "requires an
+    // array" for a receiver that was an array-like object, a boxed primitive or
+    // a string -- while the standard has them work on any of those and only
+    // that, and throw for a write it is refused.
+    //
+    // Each method now asks `HasProperty`, `Get` and `Set` place by place,
+    // the way the standard is written, whenever the dense vector cannot answer
+    // the same (an accessor, a frozen or non-extensible array, a read-only
+    // `length`, or a hole that some prototype would answer). The dense form is
+    // still there for a plain array, which is why the shift/unshift/splice
+    // timings in tools/bench/bench_delete_shift.py are ~30/10/25 ms.
+    //
+    // Every case was run through Node.js first, and the expected text of each
+    // is what it printed.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+var failures = [];
+function check(what, f, want) {
+    var got;
+    try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+    if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+}
+function places(a) { var out = []; for (var i = 0; i < a.length; i++) out.push(i in a ? 'x' : '.'); return out.join(''); }
+check('reverse asks the accessor at a place and writes through it', function () {
+    var log = [];
+    var a = [1, 2, 3];
+    var store = 10;
+    Object.defineProperty(a, 0, { get: function () { log.push('get'); return store; },
+                                  set: function (v) { log.push('set=' + v); store = v; },
+                                  enumerable: true, configurable: true });
+    a.reverse();
+    return [log, a[0], a[1], a[2], places(a)];
+}, '[["get","set=3","get"],3,2,10,"xxx"]');
+check('sort reads what a getter answers and writes what a setter takes', function () {
+    var a = [3, 1, 2];
+    var log = [];
+    var store = 1;
+    Object.defineProperty(a, 1, { get: function () { log.push('get'); return store; },
+                                 set: function (v) { log.push('set=' + v); store = v; },
+                                 enumerable: true, configurable: true });
+    a.sort();
+    return [log.length > 0, a[0], a[1], a[2]];
+}, '[true,1,2,3]');
+check('splice reads the places it removes, and refuses to write one it cannot', function () {
+    var a = [1, 2, 3];
+    var log = [];
+    Object.defineProperty(a, 1, { get: function () { log.push('get'); return 20; },
+                                 enumerable: true, configurable: true });
+    var outcome;
+    try { a.splice(1, 1, 'x'); outcome = 'no throw'; } catch (e) { outcome = e.name; }
+    return [outcome, log];
+}, '["TypeError",["get"]]');
+check('copyWithin copies what a getter answers', function () {
+    var a = [1, 2, 3];
+    Object.defineProperty(a, 2, { get: function () { return 9; }, enumerable: true, configurable: true });
+    a.copyWithin(0, 2);
+    return [a[0], a[1], a[2]];
+}, '[9,2,9]');
+check('fill writes through the setter of a place', function () {
+    var log = [];
+    var a = [1, 2];
+    Object.defineProperty(a, 0, { get: function () { return 1; }, set: function (v) { log.push(v); },
+                                 enumerable: true, configurable: true });
+    a.fill(7);
+    return [log, a[0]];
+}, '[[7],1]');
+check('a frozen array refuses every method that writes', function () {
+    var results = [];
+    [function (a) { a.fill(0); }, function (a) { a.reverse(); }, function (a) { a.sort(); },
+     function (a) { a.splice(0, 1); }, function (a) { a.copyWithin(0, 1); },
+     function (a) { a.push(1); }, function (a) { a.pop(); }, function (a) { a.shift(); },
+     function (a) { a.unshift(1); }].forEach(function (f) {
+        var a = Object.freeze([1, 2]);
+        try { f(a); results.push('no throw'); } catch (e) { results.push(e.name); }
+    });
+    return results;
+}, '["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]');
+check('a primitive receiver is boxed, not refused', function () {
+    return [Array.prototype.reverse.call(true) instanceof Boolean,
+            Array.prototype.fill.call(1, 0) instanceof Number];
+}, '[true,true]');
+check('a string receiver refuses the writes to its characters', function () {
+    var results = [];
+    [function () { return Array.prototype.reverse.call('abc'); },
+     function () { return Array.prototype.fill.call('abc', 'x'); },
+     function () { return Array.prototype.splice.call('abc', 0, 1); }].forEach(function (f) {
+        try { f(); results.push('no throw'); } catch (e) { results.push(e.name); }
+    });
+    return results;
+}, '["TypeError","TypeError","TypeError"]');
+check('an array-like receiver is moved and answered with itself', function () {
+    var o = { 0: 'a', 1: 'b', length: 2 };
+    var back = Array.prototype.reverse.call(o);
+    var moved = { 0: 'a', 1: 'b', 2: 'c', length: 3 };
+    var removed = Array.prototype.splice.call(moved, 1, 1, 'x', 'y');
+    var one = { 0: 'a', length: 1 };
+    var grown = Array.prototype.unshift.call(one, 'z');
+    var shrunk = { 0: 'a', 1: 'b', length: 2 };
+    var first = Array.prototype.shift.call(shrunk);
+    var sorted = { 0: 'b', 1: 'a', length: 2 };
+    Array.prototype.sort.call(sorted);
+    return [back === o, o, removed, moved, grown, one, first, shrunk, sorted];
+}, '[true,{"0":"b","1":"a","length":2},["b"],{"0":"a","1":"x","2":"y","3":"c","length":4},2,{"0":"z","1":"a","length":2},"a",{"0":"b","length":1},{"0":"a","1":"b","length":2}]');
+check('a place the prototype has is read, and becomes own where it lands', function () {
+    Array.prototype[1] = 1;
+    var a = [0];
+    a.length = 2;
+    a.reverse();
+    var answer = [a[0], a[1], 0 in a, 1 in a];
+    delete Array.prototype[1];
+    return answer;
+}, '[1,0,true,true]');
+check('the methods that copy write every place', function () {
+    var holey = [3, , 1];
+    var sorted = holey.toSorted();
+    var reversed = [0, , 2].toReversed();
+    var spliced = [0, , 2].toSpliced(0, 0);
+    var replaced = [0, , 2].with(0, 9);
+    return [sorted, places(sorted), '2' in sorted,
+            reversed, places(reversed), '1' in reversed,
+            spliced, places(spliced), '1' in spliced,
+            replaced, places(replaced), '1' in replaced];
+}, '[[1,3,null],"xxx",true,[2,null,0],"xxx",true,[0,null,2],"xxx",true,[9,null,2],"xxx",true]');
+check('the methods that move in place keep a hole a hole', function () {
+    var a = [3, , 1];
+    a.sort();
+    var b = [1, , 3];
+    b.reverse();
+    return [a, places(a), b, places(b), a.hasOwnProperty(2), b.hasOwnProperty(1)];
+}, '[[1,3,null],"xx.",[3,null,1],"x.x",false,false]');
+check('none of the methods is a constructor', function () {
+    var results = [];
+    ['reverse', 'sort', 'splice', 'fill', 'copyWithin', 'shift', 'unshift', 'push', 'pop',
+     'toReversed', 'toSorted', 'toSpliced', 'with'].forEach(function (name) {
+        try { new (Array.prototype[name])(); results.push('made'); } catch (e) { results.push(e.name); }
+    });
+    return results;
+}, '["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]');
+check('length is taken once, before a getter can change it', function () {
+    var a = [1, 2, 3];
+    Object.defineProperty(a, 0, { get: function () { a.length = 1; return 7; },
+                                 enumerable: true, configurable: true });
+    a.reverse();
+    return a.length;
+}, '3');
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 // ---------------------------------------------------------------------------
 // Phase 114: `instanceof` asks Symbol.hasInstance.
 // ---------------------------------------------------------------------------
@@ -25610,6 +27077,123 @@ TEST(instanceof_asks_symbol_has_instance) {
     assert(none_failed());
 }
 
+// ---------------------------------------------------------------------------
+// Phase 123: a strict `delete` refuses what it cannot remove.
+// ---------------------------------------------------------------------------
+TEST(a_strict_delete_refuses_what_it_cannot_remove) {
+    using namespace litebird;
+    // Phase 123, finding 128. `delete` was one line of the evaluator: it asked
+    // the object and returned what it was told. Three things were missing.
+    //
+    //   * `[[Delete]]` answered true for an array's `length`, which is
+    //     computed and not configurable: `delete a.length` was a "yes" and the
+    //     array kept its length, so no code could tell the two apart.
+    //   * nothing turned a refused delete into a TypeError in strict code,
+    //     where `DeletePropertyOrThrow` requires one. Sloppy code reads the
+    //     same refusal as the answer `false`, which is why the two modes had
+    //     to be told apart at the operator and not in `[[Delete]]`.
+    //   * `delete name` was never an early error, and answered `false` for
+    //     every name: for one that resolves to nothing (`delete notDeclared`)
+    //     and for a property of the global object (`globalThis.x = 1; delete
+    //     x`) the language answers `true` and removes the property.
+    //
+    // The messages are V8's — `Cannot delete property 'x' of #<Object>` — and
+    // every expected string below is what Node.js printed for the same script.
+    // What is not here because it is not so yet: an index of an array defined
+    // with a descriptor keeps no attributes of its own (its own row), so
+    // `Object.defineProperty(a, '0', { value: 1 })` makes an element that can
+    // still be deleted; and `arguments` prints as `#<Array>` in the message
+    // because its prototype is `Array.prototype` here, which is its own
+    // divergence.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    auto none_failed = [&]() {
+        const std::string failed = js.eval("failures.join('\\n')").to_string();
+        if (!failed.empty()) std::cerr << failed << "\n";
+        return failed.empty();
+    };
+    js.eval(R"JS(
+var failures = [];
+function check(what, f, want) {
+  var got;
+  try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+  if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+}
+function refused(o, k) { Object.defineProperty(o, k, { value: 1 }); return o; }
+check('sloppy code reads the refusal as false', function () {
+  var o = refused({}, 'x');
+  return [delete o.x, o.x, 'x' in o];
+}, '[false,1,true]');
+check('strict code makes it a TypeError', function () {
+  var caught = [];
+  (function () { 'use strict'; var o = refused({}, 'x'); try { delete o.x; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var o = Object.freeze({ y: 2 }); try { delete o.y; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var s = new String('ab'); try { delete s.length; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var d = refused(new Date(0), 'q'); try { delete d.q; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; var m = refused(new Map(), 'q'); try { delete m.q; } catch (e) { caught.push(e.name); } })();
+  (function () { 'use strict'; class C {} var c = refused(new C(), 'q'); try { delete c.q; } catch (e) { caught.push(e.name); } })();
+  return caught;
+}, '["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]');
+check('an array length cannot be deleted', function () {
+  var a = [1, 2, 3];
+  var sloppy = delete a.length;
+  var caught = 'none';
+  (function () { 'use strict'; try { delete a.length; } catch (e) { caught = e.name; } })();
+  return [sloppy, caught, a.length, a.join()];
+}, '[false,"TypeError",3,"1,2,3"]');
+check('what the message names', function () {
+  var said = [];
+  function refusal(o, k) {
+    var caught = '';
+    (function () { 'use strict'; try { delete o[k]; } catch (e) { caught = e.message; } })();
+    return caught;
+  }
+  function f() {}
+  said.push(refusal(refused({}, 'x'), 'x'));
+  said.push(refusal([1], 'length'));
+  said.push(refusal(refused(new Date(0), 'd'), 'd'));
+  said.push(refusal(refused(new Map(), 'm'), 'm'));
+  said.push(refusal(refused(Object.create(null), 'n'), 'n'));
+  said.push(refusal(refused(f, 'q'), 'q'));
+  said.push(refusal(refused(new String('ab'), 's'), 's'));
+  return said.join(' || ');
+}, "\"Cannot delete property 'x' of #<Object> || Cannot delete property 'length' of [object Array] || Cannot delete property 'd' of [object Date] || Cannot delete property 'm' of #<Map> || Cannot delete property 'n' of [object Object] || Cannot delete property 'q' of function f() {} || Cannot delete property 's' of [object String]\"");
+check('strictness belongs to the code that deletes', function () {
+  var o = refused({}, 'x');
+  var strict_inner = function () { 'use strict'; try { return delete o.x; } catch (e) { return e.name; } };
+  class Holder { static run() { try { return delete o.x; } catch (e) { return e.name; } } }
+  return [strict_inner(), Holder.run(), (function () { return delete o.x; })()];
+}, '["TypeError","TypeError",false]');
+check('what may be deleted is still deleted', function () {
+  var o = { x: 1 };
+  var a = [1, 2, 3];
+  var gone = delete a[1];
+  return [delete o.x, 'x' in o, gone, a.length, 1 in a, a.join(), delete o.nothere, delete this, delete (function () { return 1; })(), delete 1];
+}, '[true,false,true,3,false,"1,,3",true,true,true,true]');
+check('an identifier', function () {
+  var declared = 1;
+  var said = 'none';
+  try { eval("'use strict'; var x = 1; delete x;"); } catch (e) { said = e.name; }
+  return [delete declared, delete neverDeclaredAnywhere, said];
+}, '[false,true,"SyntaxError"]');
+check('a global property', function () {
+  globalThis.temp = 1;
+  var gone = delete temp;
+  var stays = 'temp' in globalThis;
+  var v = 1;
+  return [gone, stays, delete v];
+}, '[true,false,false]');
+check('Reflect answers false rather than throwing', function () {
+  var o = refused({}, 'x');
+  return [Reflect.deleteProperty(o, 'x'), o.x];
+}, '[false,1]');
+    )JS");
+    assert(none_failed());
+}
+
 // Phase 106: ArrayBuffer and the typed arrays.
 //
 // The oracle is the standard's conversions, not an implementation: an element
@@ -25621,11 +27205,9 @@ TEST(instanceof_asks_symbol_has_instance) {
 // object, a subarray shares its bytes and a slice does not).
 TEST(arraybuffer_and_typed_arrays) {
     using namespace litebird;
-
     JsInterpreter js(nullptr);
     auto text = [&](const char* source) { return js.eval(source).to_string(); };
     text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
-
     // ---- the eleven element types, each storing its own conversion --------
     assert(text("new Uint8Array([1, 2, 300]).join()") == "1,2,44");
     assert(text("var a = new Uint8Array(1); a[0] = 258; a[0]") == "2");
@@ -25642,11 +27224,9 @@ TEST(arraybuffer_and_typed_arrays) {
            "255,0,2,4");
     // A float that is not finite survives Float64Array and is widened by it.
     assert(text("var a = new Float64Array([1, 2, 3]); a.length + '|' + a[1] + '|' + a.join('-')") == "3|2|1-2-3");
-
     // ---- length, byteLength, byteOffset, BYTES_PER_ELEMENT ---------------
     assert(text("var u = new Uint16Array(3); u.length + '|' + u.byteLength + '|' + u.byteOffset") == "3|6|0");
     assert(text("Uint32Array.BYTES_PER_ELEMENT + '|' + Uint8Array.prototype.BYTES_PER_ELEMENT") == "4|1");
-
     // ---- indexing: in range, past the end, and not an index at all -------
     assert(text("var a = new Uint8Array(2); a[5] = 9; String(a[5])") == "undefined");
     assert(text("var a = new Uint8Array(2); a[5] = 9; a.length") == "2");
@@ -25658,7 +27238,6 @@ TEST(arraybuffer_and_typed_arrays) {
     // `-1` is not a canonical index, so it is an ordinary property.
     assert(text("var a = new Uint8Array(2); a[-1] = 9; a[-1]") == "9");
     assert(text("var a = new Uint8Array(2); a['x'] = 5; a.x") == "5");
-
     // ---- windows: one buffer, one object, shared bytes -------------------
     assert(text("var b = new ArrayBuffer(8); new Uint8Array(b).buffer === new Uint16Array(b).buffer") == "true");
     assert(text("var b = new ArrayBuffer(8); b.byteLength") == "8");
@@ -25669,7 +27248,6 @@ TEST(arraybuffer_and_typed_arrays) {
     // subarray shares the bytes; slice copies them.
     assert(text("var t = new Uint8Array([1,2,3]); var w = t.subarray(1); w[0] = 9; t[1]") == "9");
     assert(text("var t = new Uint8Array([1,2,3]); var w = t.slice(1); w[0] = 9; t[1]") == "2");
-
     // ---- methods ---------------------------------------------------------
     assert(text("new Uint8Array([3,1,2]).slice(1).join()") == "1,2");
     // A negative index counts from the end.
@@ -25695,12 +27273,10 @@ TEST(arraybuffer_and_typed_arrays) {
     assert(text("Uint8Array.from([1,2], function (x) { return x * 2; }).join()") == "2,4");
     assert(text("Uint16Array.of(1,2).join()") == "1,2");
     assert(text("ArrayBuffer.isView(new Uint8Array(1)) + '|' + ArrayBuffer.isView({})") == "true|false");
-
     // ---- iterators and Array.from ---------------------------------------
     assert(text("var o = []; for (var v of new Uint8Array([4,5])) o.push(v); o.join()") == "4,5");
     assert(text("var o = []; for (var k of new Uint8Array(2).keys()) o.push(k); o.join()") == "0,1");
     assert(text("Array.from(new Uint8Array([1,2])).join()") == "1,2");
-
     // ---- the chain the standard has -------------------------------------
     assert(text("new Uint8Array(1) instanceof Uint8Array") == "true");
     assert(text("new Uint8Array(1) instanceof Int8Array") == "false");
@@ -25710,12 +27286,260 @@ TEST(arraybuffer_and_typed_arrays) {
     // A subclass of a typed array is one: the element type follows new.target.
     assert(text("class L extends Uint8Array {} var l = new L(2); "
                 "(l instanceof L) + '|' + (l instanceof Uint8Array) + '|' + l.length") == "true|true|2");
-
     // ---- the errors a browser throws ------------------------------------
     assert(text("errName(function () { new Uint8Array(-1); })") == "TypeError");
     assert(text("errName(function () { new Uint16Array(new ArrayBuffer(8), 1); })") == "TypeError");
     assert(text("errName(function () { new Uint32Array(new ArrayBuffer(8), 0, 3); })") == "TypeError");
     assert(text("errName(function () { new Uint16Array(new ArrayBuffer(7)); })") == "TypeError");
+}
+
+// ECMA-262 §25.3 (`DataView`) and §23.2.3 (the iterating half of
+// `%TypedArray%.prototype`): the two surfaces Phase 106's typed arrays left
+// out. The offsets, the byte order and the numeric default sort are the parts
+// a wrong implementation can get plausibly wrong, so each is asserted against
+// bytes rather than against its own output.
+TEST(dataview_and_the_iterating_typed_array_methods) {
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- construction, and the three properties --------------------------
+    assert(text("var b = new ArrayBuffer(16); var d = new DataView(b, 4, 8); d.byteOffset + '|' + d.byteLength") == "4|8");
+    assert(text("var b = new ArrayBuffer(16); new DataView(b).byteOffset + '|' + new DataView(b).byteLength") == "0|16");
+    // The `buffer` of a view is the buffer itself, not a copy of it.
+    assert(text("var b = new ArrayBuffer(8); new DataView(b).buffer === b") == "true");
+    assert(text("var b = new ArrayBuffer(8); new Uint8Array(b).buffer === b") == "true");
+    assert(text("Object.prototype.toString.call(new DataView(new ArrayBuffer(1)))") == "[object DataView]");
+    assert(text("ArrayBuffer.isView(new DataView(new ArrayBuffer(1)))") == "true");
+    assert(text("ArrayBuffer.isView(new Uint8Array(1)) + '|' + ArrayBuffer.isView(new ArrayBuffer(1))") == "true|false");
+    // A buffer above a view outlives the reference that made it: the view's
+    // own exotic keeps the one script object for the buffer alive.
+    assert(text("var v = (function () { return new Uint8Array(new ArrayBuffer(8), 2); })(); gc();"
+                "v.buffer.byteLength + '|' + v.length") == "8|6");
+
+    // ---- byte order -------------------------------------------------------
+    // `setUint16(0, 0x1234, true)` writes 34 12, which is what an ordinary
+    // Uint8Array sees — the check is the bytes, not the getter.
+    assert(text("var b = new ArrayBuffer(2); var d = new DataView(b); d.setUint16(0, 0x1234, true);"
+                "new Uint8Array(b).join()") == "52,18");
+    assert(text("var b = new ArrayBuffer(2); var d = new DataView(b); d.setUint16(0, 0x1234);"
+                "new Uint8Array(b).join()") == "18,52");
+    // Big-endian is the default, and the same four bytes read both ways.
+    assert(text("var b = new ArrayBuffer(4); var d = new DataView(b);"
+                "new Uint8Array(b).set([0x12, 0x34, 0x56, 0x78]);"
+                "d.getUint32(0).toString(16) + '|' + d.getUint32(0, true).toString(16)") == "12345678|78563412");
+    assert(text("var b = new ArrayBuffer(4); var d = new DataView(b);"
+                "new Uint8Array(b).set([0x12, 0x34, 0x56, 0x78]); d.getUint16(1).toString(16)") == "3456");
+    assert(text("var b = new ArrayBuffer(2); var d = new DataView(b); d.setInt16(0, -2); d.getInt16(0)") == "-2");
+    assert(text("var b = new ArrayBuffer(2); var d = new DataView(b); d.setInt16(0, -2); d.getInt16(0, true)") == "-257");
+
+    // ---- every width, and the conversions a typed array would make -------
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setInt8(0, 200); d.getInt8(0)") == "-56");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setUint8(0, 258); d.getUint8(0)") == "2");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setUint32(0, -1, true); d.getUint32(0, true)") == "4294967295");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setInt32(0, -7); d.getInt32(0) + '|' + d.getInt32(0, true)") ==
+           "-7|-100663297");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setFloat64(0, 1.5, true); d.getFloat64(0, true)") == "1.5");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setFloat64(0, -0.25); d.getFloat64(0)") == "-0.25");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setFloat32(0, 0.1, true);"
+                "d.getFloat32(0, true) === Math.fround(0.1)") == "true");
+
+    // ---- the two views of one buffer see each other ----------------------
+    assert(text("var b = new ArrayBuffer(4); var d = new DataView(b); var u = new Uint8Array(b);"
+                "u[0] = 1; d.setUint8(1, 2); u[0] + '|' + d.getUint8(1)") == "1|2");
+    assert(text("var b = new ArrayBuffer(4); var d = new DataView(b); var u = new Uint32Array(b);"
+                "d.setUint32(0, 0x01020304, true); u[0].toString(16)") == "1020304");
+
+    // ---- bounds ----------------------------------------------------------
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8)).getUint32(5); })") == "RangeError");
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8)).getInt8(8); })") == "RangeError");
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8)).setFloat64(1, 1); })") == "RangeError");
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8)).getUint16(-1); })") == "RangeError");
+    assert(text("var d = new DataView(new ArrayBuffer(8)); d.setUint32(4, 7); d.getUint32(4)") == "7");
+    assert(text("errName(function () { new DataView({}); })") == "TypeError");
+    assert(text("errName(function () { new DataView(new Uint8Array(8)); })") == "TypeError");
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8), 9); })") == "RangeError");
+    assert(text("errName(function () { new DataView(new ArrayBuffer(8), 6, 4); })") == "RangeError");
+    assert(text("errName(function () { DataView.prototype.getUint8.call({}, 0); })") == "TypeError");
+
+    // ---- the iterating methods, all of them ------------------------------
+    assert(text("new Uint8Array([1, 2, 3]).map(function (v) { return v * 2; }).join()") == "2,4,6");
+    assert(text("new Uint8Array([1, 2, 3]).map(function (v) { return v * 2; }).constructor === Uint8Array") == "true");
+    assert(text("new Int8Array([300, -1]).map(function (v) { return v; }).constructor.name") == "Int8Array");
+    // The callback sees (value, index, the typed array itself), in order.
+    assert(text("var seen = []; new Uint8Array([7, 8]).map(function (v, i, a) { seen.push(v + '@' + i + '/' + a.length);"
+                "return v; }); seen.join()") == "7@0/2,8@1/2");
+    assert(text("new Uint8Array([1, 2, 3, 4]).filter(function (v) { return v % 2 === 0; }).join()") == "2,4");
+    assert(text("new Float32Array([1.5, 2.5]).filter(function () { return false; }).constructor.name + '|' +"
+                "new Float32Array([1, 2]).filter(function () { return false; }).length") == "Float32Array|0");
+    assert(text("var out = ''; new Uint8Array([5, 6]).forEach(function (v, i) { out += v + ':' + i + ';'; }); out") ==
+           "5:0;6:1;");
+    assert(text("var out = []; new Uint8Array([1, 2]).forEach(function (v) { out.push(this.tag + v); }, { tag: 't' });"
+                "out.join()") == "t1,t2");
+    assert(text("new Uint8Array([1, 2]).some(function (v) { return v === 2; }) + '|' +"
+                "new Uint8Array([1, 2]).some(function (v) { return v === 3; })") == "true|false");
+    assert(text("new Uint8Array([1, 2]).every(function (v) { return v > 1; }) + '|' +"
+                "new Uint8Array(0).every(function () { return false; })") == "false|true");
+    assert(text("new Uint8Array([1, 2, 3]).find(function (v) { return v > 1; }) + '|' +"
+                "String(new Uint8Array([1, 2, 3]).find(function (v) { return v > 9; }))") == "2|undefined");
+    assert(text("new Uint8Array([1, 2, 3]).findIndex(function (v) { return v > 1; }) + '|' +"
+                "new Uint8Array([1, 2, 3]).findIndex(function (v) { return v > 9; })") == "1|-1");
+    assert(text("new Uint8Array([1, 2, 3]).reduce(function (a, b) { return a + b; })") == "6");
+    assert(text("new Uint8Array([1, 2, 3]).reduce(function (a, b) { return a + b; }, 10)") == "16");
+    assert(text("new Uint8Array([1, 2, 3]).reduceRight(function (a, b) { return a - b; })") == "0");
+    assert(text("new Uint8Array(0).reduce(function (a, b) { return a; }, 5)") == "5");
+
+    // ---- the numeric sort, which is not the Array sort -------------------
+    // `[10, 9].sort()` is 10, 9 by string comparison; a typed array sorts by
+    // value, and NaN goes last.
+    assert(text("new Float64Array([10, 9, 2.5, 1]).sort().join()") == "1,2.5,9,10");
+    assert(text("var a = new Float64Array([NaN, 3, 1]).sort();"
+                "a[0] + ',' + a[1] + ',' + isNaN(a[2])") == "1,3,true");
+    assert(text("new Float32Array([NaN, 2]).join()") == "NaN,2");
+    assert(text("new Int8Array([-5, 3, -1]).sort(function (a, b) { return b - a; }).join()") == "3,-1,-5");
+    // Stability: a comparator that answers 0 keeps the order it was given.
+    assert(text("new Uint8Array([3, 1, 2]).sort(function () { return 0; }).join()") == "3,1,2");
+    assert(text("var a = new Uint8Array([3, 1]); a.sort() === a") == "true");
+    assert(text("var a = new Uint8Array([3, 1]); a.sort(); a.join()") == "1,3");
+
+    // ---- the copying methods, which leave the receiver alone -------------
+    assert(text("var a = new Uint8Array([3, 1, 2]); var s = a.toSorted(); s.join() + '|' + a.join()") == "1,2,3|3,1,2");
+    assert(text("var a = new Uint8Array([3, 1, 2]); a.toSorted(function (x, y) { return y - x; }).join()") == "3,2,1");
+    assert(text("var a = new Uint8Array([3, 1, 2]); a.toReversed().join() + '|' + a.join()") == "2,1,3|3,1,2");
+    assert(text("var a = new Uint8Array([3, 1, 2]); a.with(1, 9).join() + '|' + a.join()") == "3,9,2|3,1,2");
+    assert(text("new Uint8Array([3, 1, 2]).with(-1, 9).join()") == "3,1,9");
+    assert(text("errName(function () { new Uint8Array([1]).with(1, 0); })") == "RangeError");
+    assert(text("errName(function () { new Uint8Array([1]).with(-2, 0); })") == "RangeError");
+    assert(text("new Uint8Array([1]).toSorted().constructor === Uint8Array") == "true");
+
+    // ---- at() ------------------------------------------------------------
+    assert(text("new Uint8Array([7, 8, 9]).at(0) + '|' + new Uint8Array([7, 8, 9]).at(-1)") == "7|9");
+    assert(text("String(new Uint8Array([7]).at(1)) + '|' + String(new Uint8Array([7]).at(-2))") == "undefined|undefined");
+
+    // ---- a TypeError where a callback is missing -------------------------
+    for (const char* call : {
+             "new Uint8Array([1]).map(1)",
+             "new Uint8Array([1]).filter()",
+             "new Uint8Array([1]).forEach('f')",
+             "new Uint8Array([1]).some({})",
+             "new Uint8Array([1]).every(null)",
+             "new Uint8Array([1]).find(1)",
+             "new Uint8Array([1]).findIndex()",
+             "new Uint8Array([1]).reduce(1)",
+             "new Uint8Array([1]).reduceRight()",
+             "new Uint8Array(0).reduce(function (a, b) { return a; })",
+             "new Uint8Array(0).reduceRight(function (a, b) { return a; })",
+             "new Uint8Array([1]).sort(1)",
+             "new Uint8Array([1]).toSorted('x')"}) {
+        const std::string call_name = call;
+        assert(text(("errName(function () { " + call_name + "; })").c_str()) == "TypeError");
+    }
+    assert(text("errName(function () { Uint8Array.prototype.map.call([1], function (v) { return v; }); })") == "TypeError");
+
+    // ---- a subclass keeps its own prototype ------------------------------
+    assert(text("class L extends Int16Array {}; var l = new L([1, 2]);"
+                "l.map(function (v) { return v + 1; }) instanceof L") == "true");
+    assert(text("class L extends Int16Array {}; var l = new L([3, 1]); l.toSorted() instanceof L") == "true");
+}
+
+TEST(class_bodies_reject_what_the_grammar_does_not_allow) {
+    using namespace litebird;
+
+    // Phase 128, finding 133. A class body's early errors were three: a second
+    // constructor, a duplicate private name, and `#constructor`. The six
+    // regular grammar rules of §15.7 were not checked at all, so code the
+    // language refuses to parse ran, and either worked or threw at runtime —
+    // test262 rejects these at `phase: parse`, which is why 364 of its class
+    // cases failed with "expected SyntaxError" and no other way to pass.
+    //
+    //   FieldDefinition / ClassStaticBlockBody: Contains SuperCall -> `super()`
+    //   MethodDefinition: an instance element named "constructor" that is an
+    //                     accessor, async or a generator
+    //   Static Semantics: the PropName of a static element may not be "prototype"
+    //   FieldDefinition may not be named "constructor"
+    //
+    // Every expected answer below is what Node.js 22 printed for the same
+    // source. The last group is the point of the phase: the rules are narrow,
+    // and the methods that are legal must stay legal — a first cut of this
+    // change refused every instance method, which the engine's own suites
+    // caught, and this suite now would too.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function rejects(what, src) {
+            try {
+                new Function(src);
+                failures.push(what + ': accepted, expected SyntaxError');
+            } catch (e) {
+                if (!(e instanceof SyntaxError)) failures.push(what + ': threw ' + e.name);
+            }
+        }
+        function accepts(what, src) {
+            try { new Function(src); }
+            catch (e) { failures.push(what + ': threw ' + e.name + ' ' + e.message); }
+        }
+
+        // ---- a super call is legal only in a derived constructor ----------
+        rejects('a super call in a method', 'class C extends Object { m() { super(); } }');
+        rejects('a super call in a method of a class with no heritage', 'class C { m() { super(); } }');
+        rejects('a super call in an arrow nested in a method', 'class C extends Object { m() { var f = () => super(); } }');
+        rejects('a super call in a field initialiser', 'class C extends Object { x = super(); }');
+        rejects('a super call in an arrow in a field initialiser', 'class C extends Object { x = () => super(); }');
+        rejects('a super call in a static block', 'class C extends Object { static { super(); } }');
+        rejects('a super call in a constructor of a class with no heritage', 'class C { constructor() { super(); } }');
+        accepts('a super call in a derived constructor', 'class C extends Object { constructor() { super(); } }');
+        accepts('a super call in an arrow in a derived constructor', 'class C extends Object { constructor() { var f = () => super(); } }');
+        accepts('a super call through a nested class in a derived constructor', 'class C extends Object { constructor() { super(); class D { m() { return 1; } } } }');
+        // `super.x` is a different question: a field initialiser and a static
+        // block have a home object, so it stays allowed there.
+        accepts('super.x in a field initialiser', 'class C extends Object { x = super.toString; }');
+        accepts('super.x in a static block', 'class C extends Object { static { super.toString; } }');
+        accepts('super.x in a method', 'class C extends Object { m() { return super.toString; } }');
+
+        // ---- the name "constructor", on the instance side ------------------
+        rejects('a getter named constructor', 'class C { get constructor() {} }');
+        rejects('a setter named constructor', 'class C { set constructor(v) {} }');
+        rejects('an async method named constructor', 'class C { async constructor() {} }');
+        rejects('a generator named constructor', 'class C { *constructor() {} }');
+        rejects('an async generator named constructor', 'class C { async *constructor() {} }');
+        rejects('a field named constructor', 'class C { constructor; }');
+        rejects('a field named constructor with an initialiser', 'class C { constructor = 1; }');
+        accepts('a method named constructor', 'class C { constructor() {} }');
+        accepts('a static method named constructor', 'class C { static constructor() {} }');
+        accepts('a static getter named constructor', 'class C { static get constructor() { return 1; } }');
+        accepts('a static async method named constructor', 'class C { static async constructor() {} }');
+        accepts('a computed getter named constructor', 'class C { get ["constructor"]() { return 1; } }');
+        accepts('a computed field named constructor', 'class C { ["constructor"] = 1; }');
+
+        // ---- the name "prototype", on the static side ----------------------
+        rejects('a static field named prototype', 'class C { static prototype; }');
+        rejects('a static field named prototype with an initialiser', 'class C { static prototype = 1; }');
+        rejects('a static method named prototype', 'class C { static prototype() {} }');
+        rejects('a static getter named prototype', 'class C { static get prototype() { return 1; } }');
+        rejects('a static setter named prototype', 'class C { static set prototype(v) {} }');
+        rejects('a static async method named prototype', 'class C { static async prototype() {} }');
+        rejects('a static generator named prototype', 'class C { static *prototype() {} }');
+        accepts('an instance field named prototype', 'class C { prototype = 1; }');
+        accepts('an instance method named prototype', 'class C { prototype() {} }');
+        accepts('a computed static named prototype', 'class C { static ["prototype"] = 1; }');
+        accepts('a static block that writes prototype', 'class C { static { this.prototype = 1; } }');
+
+        // ---- a private name is exempt from the two name rules --------------
+        accepts('a private static field named prototype', 'class C { static #prototype = 1; }');
+        // `#constructor` is refused by a rule that was already there.
+        rejects('a private field named constructor', 'class C { #constructor = 1; }');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+
+    // ---- the class still works: parsing is not all that changed ----------
+    assert(js.eval("new (class { static tag = 'c'; m() { return 7; } })().m()").to_string() == "7");
+    assert(js.eval("new (class extends Object { x = 1; constructor() { super(); } })().x").to_string() == "1");
 }
 
 TEST(reflect_describes_and_answers_extensibility) {
@@ -25900,6 +27724,120 @@ failures;
     if (!none_failed()) { std::cout << "\033[31mFAILED\033[0m"; return; }
     std::cout << "\033[32mPASSED\033[0m";
 }
+TEST(object_integrity_levels_ask_every_property) {
+    using namespace litebird;
+    // Phase 125, finding 130. Both answered from a bit that only `freeze()`
+    // and `seal()` ever set, so an object that is non-extensible and has
+    // nothing writable or configurable in it — which is *exactly* what frozen
+    // means — was reported `false` unless somebody had called `freeze` on it.
+    // ECMA-262 §20.1.2.13 and §20.1.2.15 define them by §7.3.15
+    // TestIntegrityLevel: `[[IsExtensible]]` false, and then every own
+    // property asked one at a time.
+    //
+    // Every expected string below is what Node.js printed for the same script,
+    // checked line for line against a second run of the same script in Node.
+    // The suite it was found in (Phase 124) wrote this case down and did not
+    // assert it, because the bug was outside that task's files; this is the
+    // task that owns them.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    auto none_failed = [&]() {
+        const std::string failed = js.eval("failures.join('\\n')").to_string();
+        if (!failed.empty()) std::cerr << failed << "\n";
+        return failed.empty();
+    };
+
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        // Both levels at once, which is the whole point: the two questions are
+        // different and an object can answer them differently.
+        function levels(o) { return [Object.isFrozen(o), Object.isSealed(o)]; }
+        function data(w, c) { return { value: 1, writable: w, configurable: c }; }
+
+        // The case the row was written about: nothing there, nothing to write.
+        check('preventExtensions of an empty object', function () {
+            return levels(Object.preventExtensions({}));
+        }, '[true,true]');
+        check('seal of an empty object', function () { return levels(Object.seal({})); }, '[true,true]');
+        check('freeze of an empty object', function () { return levels(Object.freeze({})); }, '[true,true]');
+
+        // A property that is still writable or still configurable fails.
+        check('preventExtensions with a plain property', function () {
+            return levels(Object.preventExtensions({ a: 1 }));
+        }, '[false,false]');
+        check('preventExtensions, non-writable and non-configurable', function () {
+            return levels(Object.preventExtensions(Object.defineProperty({}, 'a', data(false, false))));
+        }, '[true,true]');
+        check('preventExtensions, non-writable but configurable', function () {
+            return levels(Object.preventExtensions(Object.defineProperty({}, 'a', data(false, true))));
+        }, '[false,false]');
+        //   The clause that separates frozen from sealed: a writable property
+        //   that cannot be reconfigured is sealed but not frozen.
+        check('preventExtensions, writable and non-configurable', function () {
+            return levels(Object.preventExtensions(Object.defineProperty({}, 'a', data(true, false))));
+        }, '[false,true]');
+        //   An accessor has no `writable` to fail the frozen test with.
+        check('preventExtensions, a non-configurable accessor', function () {
+            return levels(Object.preventExtensions(Object.defineProperty({}, 'a', { get: function () { return 1; }, configurable: false })));
+        }, '[true,true]');
+        check('preventExtensions, a configurable accessor', function () {
+            return levels(Object.preventExtensions(Object.defineProperty({}, 'a', { get: function () { return 1; }, configurable: true })));
+        }, '[false,false]');
+
+        // An extensible object is never either, whatever its properties say.
+        check('an extensible object with sealed-looking properties', function () {
+            return levels(Object.defineProperty({}, 'a', data(false, false)));
+        }, '[false,false]');
+        check('a plain object', function () { return levels({}); }, '[false,false]');
+
+        // What the two operations actually do to descriptors, which the levels
+        // now read: seal keeps `writable`, freeze clears it.
+        check('seal keeps writable', function () {
+            var d = Object.getOwnPropertyDescriptor(Object.seal({ a: 1 }), 'a');
+            return [d.writable, d.configurable];
+        }, '[true,false]');
+        check('freeze clears writable', function () {
+            var d = Object.getOwnPropertyDescriptor(Object.freeze({ a: 1 }), 'a');
+            return [d.writable, d.configurable];
+        }, '[false,false]');
+
+        // Arrays, including a hole, which is not an own property to fail on.
+        check('a sealed array', function () { return levels(Object.seal([1, 2])); }, '[false,true]');
+        check('a frozen array', function () { return levels(Object.freeze([1, 2])); }, '[true,true]');
+        check('a sealed array with a hole', function () {
+            var a = Object.seal([1, , 3]);
+            return [Object.isFrozen(a), Object.isSealed(a), a.length];
+        }, '[false,true,3]');
+
+        // The frozen level asks each own property, so the answer follows what
+        // `defineProperty` does afterwards — and a write that `freeze` refused
+        // is not a level that stays.
+        check('a sealed object whose last writable property is made read-only', function () {
+            var o = Object.seal({ a: 1 });
+            var before = Object.isFrozen(o);
+            Object.defineProperty(o, 'a', { writable: false });
+            return [before, Object.isFrozen(o)];
+        }, '[false,true]');
+
+        // Primitives: §20.1.2.13 step 1 and step 2 — not an object is `true`.
+        check('a primitive is frozen and sealed', function () {
+            return [Object.isFrozen(1), Object.isSealed('x'), Object.isFrozen(null),
+                    Object.isFrozen(undefined), Object.isSealed(true)];
+        }, '[true,true,true,true,true]');
+        failures;
+    )JS");
+    if (!none_failed()) { std::cout << "\033[31mFAILED\033[0m"; return; }
+    std::cout << "\033[32mPASSED\033[0m";
+}
+
 TEST(text_codec_a_decoder_and_an_encoder_in_script) {
     using namespace litebird;
     // Phase 127. The WHATWG Encoding Standard's tables were in this engine since
@@ -26395,6 +28333,11 @@ int main() {
     // Phase 90: WebSocket wss:// TLS, Fetch Origin/mixed-content policy, and RFC 6455 framing.
     RUN_TEST(websocket_tls_origin_mixed_content_and_framing);
 
+    // GC oracle: the collector's answer, checked against itself (ROADMAP Tier 1).
+    RUN_TEST(gc_oracle_cycles_are_reclaimed);
+    RUN_TEST(gc_oracle_retention_is_exact);
+    RUN_TEST(gc_oracle_repeated_churn_stays_flat);
+
     // Phase 113: HTTP authentication challenges (RFC 7617 Basic, RFC 7616 Digest).
     RUN_TEST(http_authentication_basic_and_digest_challenges);
 
@@ -26411,14 +28354,32 @@ int main() {
     // Phase 109: UAX #9 -- Hebrew and Arabic reordered, and not painted left to right.
     RUN_TEST(bidi_reorders_hebrew_and_arabic_runs);
 
+    // Phase 116: the methods that move elements ask the places for what they are.
+    RUN_TEST(array_methods_that_move_places_ask_the_index);
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
 
+    // Phase 123: a strict `delete` refuses what it cannot remove.
+    RUN_TEST(a_strict_delete_refuses_what_it_cannot_remove);
+
     // Phase 106: ArrayBuffer and the typed arrays.
     RUN_TEST(arraybuffer_and_typed_arrays);
+    RUN_TEST(dataview_and_the_iterating_typed_array_methods);
+
+    // Phase 128: the six regular grammar rules of a class body.
+    RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
+    RUN_TEST(object_integrity_levels_ask_every_property);
+
+    // Phase 119: Contextual GSUB (Type 1-7), Cursive GPOS (Type 3/7/8), and Arabic Shaping.
+    RUN_TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions);
+    RUN_TEST(arabic_joining_zwnj_zwj_lam_alef_and_mark_anchoring);
+    RUN_TEST(gpos_cursive_attachment_ltr_rtl_and_contextual_pos);
+    RUN_TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs);
+    RUN_TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs);
+    RUN_TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely);
 
     // Phase 127: TextDecoder and TextEncoder reachable from script.
     RUN_TEST(text_codec_a_decoder_and_an_encoder_in_script);

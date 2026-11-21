@@ -167,7 +167,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full gc-oracle deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket help
 
 all: $(TARGET)
 
@@ -240,6 +240,12 @@ bench-floats: $(TARGET)
 ## runner has its own checksums and makes both batches in one process, without gc().
 bench-collections: $(TARGET)
 	@python3 tools/bench/bench_collection_iterators.py $(TARGET) --rounds 8192 --reps 3 --max-growth 2.25 --slack-ms 40
+
+## GC oracle: the collector's answer through the CLI, the way a page meets it.
+## Cycles must be reclaimed, repeating churn must not grow the live set, what
+## a global names must stay intact, and collected_cells must end above zero.
+gc-oracle: $(TARGET)
+	@python3 tools/bench/gc_oracle.py $(TARGET)
 
 ## Style-heavy inline pages share deduplicated ComputedStyle instances across
 ## boxes and inline fragments; 100k `word <b>bold</b>` took ~1,382 MiB before.
@@ -615,5 +621,5 @@ clean:
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, verify-brotli, fuzz-brotli, verify-gc-stress (verify-gc-stress-full), deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, clean"
+	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, verify-brotli, fuzz-brotli, verify-gc-stress (verify-gc-stress-full), gc-oracle, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, clean"
 	@echo "Parts of asan-core, which CI runs as jobs side by side: asan-build, asan-unit, asan-verify, asan-js, asan-dom, asan-xml, asan-wpt, asan-xml-generated, asan-fuzz"

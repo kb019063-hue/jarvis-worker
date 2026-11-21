@@ -28600,6 +28600,69 @@ TEST(image_data_is_an_interface) {
     if (!failed.empty()) std::cerr << failed << "\n";
     assert(failed.empty());
 }
+
+// ---------------------------------------------------------------------------
+// CSS 2.1 Appendix E: the display list is emitted in paint phases, not in
+// document order (Phase 135, finding 140). Six boxes, in the document order
+// that the old tree walk painted -- which is the wrong order for three of them.
+// ---------------------------------------------------------------------------
+TEST(paint_order_follows_the_appendix_e_steps) {
+    using namespace litebird;
+    const char* html =
+        "<body style=\"margin:0\">"
+        // step 2: a negative z-index stacking context, behind everything in flow
+        "<div style=\"position:absolute;left:0;top:0;width:10px;height:10px;"
+        "z-index:-1;background:#ffff00\"></div>"
+        // step 3: two in-flow blocks
+        "<div style=\"width:100px;height:20px;background:#0000ff\"></div>"
+        "<div style=\"float:left;width:10px;height:10px;background:#ff0000\"></div>"
+        "<div style=\"width:100px;height:20px;background:#ff00ff\"></div>"
+        // step 6: a transform creates a stacking context with z-index auto
+        "<div style=\"width:10px;height:10px;background:#00ff00;"
+        "transform:translate(30px,5px)\"></div>"
+        // step 7: a positive z-index stacking context, painted last
+        "<div style=\"position:absolute;left:20px;top:0;width:10px;height:10px;"
+        "z-index:3;background:#00ffff\"></div>"
+        "</body>";
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 400.0f, 300.0f);
+    assert(root);
+    const DisplayList list = DisplayList::build(root);
+
+    const std::pair<const char*, std::string> wanted[] = {
+        {"step 2: negative z-index", "#ffff00"},
+        {"step 3: first block", "#0000ff"},
+        {"step 3: second block", "#ff00ff"},
+        {"step 4: the float", "#ff0000"},
+        {"step 6: the transformed box", "#00ff00"},
+        {"step 7: positive z-index", "#00ffff"},
+    };
+    std::vector<std::string> painted;
+    for (const auto& cmd : list.commands()) {
+        std::visit([&](auto&& arg) {
+            using T = std::decay_t<decltype(arg)>;
+            if constexpr (std::is_same_v<T, DrawRectCommand>) {
+                for (const auto& [why, colour] : wanted) {
+                    if (arg.color == Color::parse(colour)) painted.push_back(colour);
+                }
+            }
+        }, cmd);
+    }
+    std::string order;
+    for (const auto& colour : painted) order += colour + " ";
+    std::printf("      [paint order] %s\n", order.c_str());
+    std::fflush(stdout);
+    assert(painted.size() == 6);
+    for (size_t i = 0; i < 6; ++i) {
+        if (painted[i] != wanted[i].second) {
+            std::fprintf(stderr, "      paint order: %s should be %s (%s), but %s was\n",
+                         wanted[i].second.c_str(), wanted[i].first, wanted[i].first,
+                         painted[i].c_str());
+        }
+        assert(painted[i] == wanted[i].second);
+    }
+}
 TEST(text_codec_a_decoder_and_an_encoder_in_script) {
     using namespace litebird;
     // Phase 127. The WHATWG Encoding Standard's tables were in this engine since
@@ -29314,6 +29377,7 @@ int main() {
     RUN_TEST(array_methods_over_an_exotic_receiver_ask_it_for_its_indices);
     RUN_TEST(array_methods_survive_a_length_they_could_never_reach);
     RUN_TEST(array_methods_that_move_places_ask_the_index);
+    RUN_TEST(paint_order_follows_the_appendix_e_steps);
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
 

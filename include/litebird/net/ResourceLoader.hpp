@@ -132,11 +132,13 @@ public:
 
     /// Credentials for an HTTP authentication realm (RFC 7617 §2.2).
     ///
-    /// Nothing is sent until a server asks: the first request for an origin
-    /// carries no `Authorization`, a `401` is read for its challenges, and the
-    /// request is tried once more with credentials for that origin *and* that
-    /// realm. A credential set for one realm is never offered to another, which
-    /// is what keeps a page from collecting a password meant for elsewhere.
+    /// Nothing is sent until a server asks: the first request carries no
+    /// `Authorization`, and a `401` may be answered with credentials for that
+    /// origin *and* that realm. A same-realm Digest `stale=true` response gets
+    /// one bounded retry with its replacement nonce; it does not discard the
+    /// credential. A non-stale refusal does. A credential set for one realm is
+    /// never offered to another, which keeps a page from collecting a password
+    /// meant for elsewhere.
     static void set_auth_credentials(const std::string& origin, const std::string& realm,
                                      const std::string& username, const std::string& password);
 

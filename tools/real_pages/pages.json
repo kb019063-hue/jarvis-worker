@@ -1,0 +1,200 @@
+{
+  "sources": {
+    "pep": [
+      "python/peps",
+      "cf1c986dbc1f45c4dc032cc4029abac8f90ff9e5"
+    ],
+    "git": [
+      "git/htmldocs",
+      "aa5d64a6f5a0c897d2bfd3df8803376865eccb82"
+    ],
+    "tool": [
+      "mathiasbynens/mothereff.in",
+      "9cd5ec4649db25ae675aec25f428f3ddf3d9a087"
+    ],
+    "2048": [
+      "gabrielecirulli/2048",
+      "478b6ec346e3787f589e4af751378d06ded4cbbc"
+    ],
+    "hex": [
+      "hextris/hextris",
+      "3f4847dc8fd7dab3d1c87e6324b9159d92fbd396"
+    ]
+  },
+  "pages": [
+    {
+      "category": "article",
+      "source": "pep",
+      "path": "pep-0008/",
+      "task": "Use Contents to bring Code Lay-out into view",
+      "click": "#contents a[href=\"#code-lay-out\"]",
+      "heading": "code-lay-out"
+    },
+    {
+      "category": "article",
+      "source": "pep",
+      "path": "pep-0257/",
+      "task": "Use Contents to bring One-line Docstrings into view",
+      "click": "#contents a[href=\"#one-line-docstrings\"]",
+      "heading": "one-line-docstrings"
+    },
+    {
+      "category": "article",
+      "source": "pep",
+      "path": "pep-0484/",
+      "task": "Use Contents to bring Rationale and Goals into view",
+      "click": "#contents a[href=\"#rationale-and-goals\"]",
+      "heading": "rationale-and-goals"
+    },
+    {
+      "category": "article",
+      "source": "pep",
+      "path": "pep-0634/",
+      "task": "Use Contents to bring Match Semantics into view",
+      "click": "#contents a[href=\"#match-semantics\"]",
+      "heading": "match-semantics"
+    },
+    {
+      "category": "article",
+      "source": "pep",
+      "path": "pep-0703/",
+      "task": "Use Contents to bring Motivation into view",
+      "click": "#contents a[href=\"#motivation\"]",
+      "heading": "motivation"
+    },
+    {
+      "category": "docs",
+      "source": "git",
+      "path": "git-add.html",
+      "task": "Follow a command cross-reference to its manual; read its heading",
+      "click": "a[href=\"git-commit.html\"]",
+      "manual": "git-commit"
+    },
+    {
+      "category": "docs",
+      "source": "git",
+      "path": "git-branch.html",
+      "task": "Follow a command cross-reference to its manual; read its heading",
+      "click": "a[href=\"git-remote.html\"]",
+      "manual": "git-remote"
+    },
+    {
+      "category": "docs",
+      "source": "git",
+      "path": "git-clone.html",
+      "task": "Follow a command cross-reference to its manual; read its heading",
+      "click": "a[href=\"git-maintenance.html\"]",
+      "manual": "git-maintenance"
+    },
+    {
+      "category": "docs",
+      "source": "git",
+      "path": "git-log.html",
+      "task": "Follow a command cross-reference to its manual; read its heading",
+      "click": "a[href=\"git-rev-list.html\"]",
+      "manual": "git-rev-list"
+    },
+    {
+      "category": "docs",
+      "source": "git",
+      "path": "git-status.html",
+      "task": "Follow a command cross-reference to its manual; read its heading",
+      "click": "a[href=\"git-config.html\"]",
+      "manual": "git-config"
+    },
+    {
+      "category": "form",
+      "source": "tool",
+      "path": "byte-counter/",
+      "task": "Replace input with hello; read a byte count of 5",
+      "click": "textarea",
+      "type": "hello",
+      "read": "#bytes",
+      "expect": "5 bytes"
+    },
+    {
+      "category": "form",
+      "source": "tool",
+      "path": "custom-element-name/",
+      "task": "Enter x-sample; read valid-name feedback",
+      "click": "input",
+      "type": "x-sample",
+      "read": "#valid",
+      "expect": "valid custom element name"
+    },
+    {
+      "category": "form",
+      "source": "tool",
+      "path": "base64/",
+      "task": "Enter hello as plain text; read aGVsbG8=",
+      "click": "textarea",
+      "type": "hello",
+      "read": "textarea:nth-of-type(2)",
+      "expect": "aGVsbG8="
+    },
+    {
+      "category": "form",
+      "source": "tool",
+      "path": "binary-ascii/",
+      "task": "Enter A as plain text; read its binary encoding",
+      "click": "textarea",
+      "type": "A",
+      "read": "textarea:nth-of-type(2)",
+      "expect": "01000001 "
+    },
+    {
+      "category": "form",
+      "source": "tool",
+      "path": "utf-8/",
+      "task": "Enter A as decoded text; read its encoded byte 41",
+      "click": "textarea",
+      "type": "A",
+      "read": "textarea:nth-of-type(2)",
+      "expect": "\\x41"
+    },
+    {
+      "category": "app",
+      "source": "2048",
+      "path": "index.html",
+      "task": "Use arrow keys until a tile moves and the board changes",
+      "game": "2048"
+    },
+    {
+      "category": "app",
+      "source": "hex",
+      "path": "index.html",
+      "task": "Start the game; see the start screen replaced by active play",
+      "game": "hex"
+    },
+    {
+      "category": "app",
+      "source": "tool",
+      "path": "reverse-string/",
+      "task": "Enter bird; read drib",
+      "click": "textarea",
+      "type": "bird",
+      "read": "#output",
+      "expect": "drib"
+    },
+    {
+      "category": "app",
+      "source": "tool",
+      "path": "html-entities/",
+      "task": "Enter < as decoded text; read an HTML character reference",
+      "click": "textarea",
+      "type": "<",
+      "read": "textarea:nth-of-type(2)",
+      "expect": "&#x3C;"
+    },
+    {
+      "category": "app",
+      "source": "tool",
+      "path": "punycode/",
+      "task": "Enter bücher.de as Unicode; read xn--bcher-kva.de",
+      "click": "#decoded",
+      "type": "bücher.de",
+      "read": "#encoded",
+      "expect": "xn--bcher-kva.de"
+    }
+  ]
+}

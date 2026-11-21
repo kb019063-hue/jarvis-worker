@@ -1,0 +1,6 @@
+stage: open
+HIT	#updateDetails @ 58.168,10 -> button#updateDetails
+Dialog open
+READ	updateDetails
+BLOCKED	key input not delivered: Escape
+END

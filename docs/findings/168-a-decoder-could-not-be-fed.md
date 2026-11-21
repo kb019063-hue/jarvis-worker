@@ -34,7 +34,7 @@ a lead — found by the sweep, not by reading.
 
 ## 3. Evidence
 
-`make test` **320/320**, new suite `textdecoder_reaches_script_in_pieces`,
+`make test` **321/321**, new suite `textdecoder_reaches_script_in_pieces`,
 whose second half requires that a stream cut **anywhere** answer what one call
 answers: 164 splits, 0 differ. Through the CLI, on seeded random byte strings
 over all thirteen encodings: **800 splits and 300 four-chunk streams, 0

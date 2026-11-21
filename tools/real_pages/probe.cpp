@@ -84,7 +84,35 @@ int main(int argc, char** argv) {
         pass=shell.current_url()==origin+"/"+target+".html" && h && h->text_content().find(target+"(1)")!=std::string::npos;
         note=shell.current_url();
     } else if (mode=="type" && selector=="#decoded") {
-        std::cout<<"BENCH not-tested: shell cannot edit contenteditable text\n"; return 0;
+        auto el=locate(selector), result=locate(read), link=locate("#permalink");
+        bool ok=el && result && link && click(selector) && shell.document()->focused_element()==el;
+        if (ok) ok=shell.handle_key("SelectAll");
+        if (ok) {
+            auto selected=shell.js_engine()->eval("window.getSelection().toString()").to_string();
+            std::cout<<"BENCH-SELECT "<<selected<<'\n';
+            ok=!selected.empty() && selected==el->text_content();
+        }
+        std::string prefix;
+        for (size_t i=0; ok && i<typed.size();) {
+            size_t end=i+1;
+            while (end<typed.size() && (static_cast<unsigned char>(typed[end])&0xc0)==0x80) ++end;
+            auto ch=typed.substr(i,end-i); i=end; prefix+=ch;
+            ok=shell.handle_key(ch) && shell.document()->focused_element()==el && el->text_content()==prefix;
+            std::cout<<"BENCH-EDIT "<<(shell.document()->focused_element()==el?el->id():"(lost focus)")<<'\t'
+                     <<el->text_content()<<'\t'<<result->text_content()<<'\t'<<link->get_attribute("href")<<'\n';
+        }
+        auto visible=[&](const auto& e) {
+            if (!e) return false;
+            auto r=e->bounding_box(); auto x=r.x-shell.scroll_x(), y=r.y-shell.scroll_y();
+            return r.width>0 && r.height>0 && x>=0 && y>=0 && x+r.width<=800 && y+r.height<=600 &&
+                   shell.element_at(x+r.width/2,y+r.height/2)==e;
+        };
+        auto hidden=[&](const char* sel) {
+            auto e=locate(sel);
+            return e && (e->bounding_box().width<=0 || e->bounding_box().height<=0);
+        };
+        pass=ok && visible(el) && visible(result) && hidden("noscript") && hidden("#invalid") && result->text_content()==expect;
+        note="input="+(el?el->text_content():"(missing)")+"; output="+(result?result->text_content():"(missing)");
     } else if (mode=="type") {
         auto el=locate(selector);
         click(selector);

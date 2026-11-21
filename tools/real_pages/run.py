@@ -25,8 +25,18 @@ for i, t in enumerate(manifest['pages'], 1):
     try:
         proc = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=45)
         (out / f'lite-{i}.log').write_bytes(proc.stdout)
-        marks = [line[6:] for line in proc.stdout.decode(errors='replace').splitlines() if line.startswith('BENCH ')]
+        lines = proc.stdout.decode(errors='replace').splitlines()
+        marks = [line[6:] for line in lines if line.startswith('BENCH ')]
         row['result'] = marks[-1] if proc.returncode == 0 and marks else f'probe exited {proc.returncode}'
+        if t.get('click') == '#decoded':
+            row['edits'] = [line.removeprefix('BENCH-EDIT ') for line in lines if line.startswith('BENCH-EDIT ')]
+            selected = [line.removeprefix('BENCH-SELECT ') for line in lines if line.startswith('BENCH-SELECT ')]
+            row['selected'] = selected
+            oracle = ref[i-1]
+            if (not oracle.get('selected') or selected != [oracle['selected']] or
+                    len(row['edits']) != len(t['type']) or row['edits'] != oracle.get('edits')):
+                if row['result'].startswith('pass:'):
+                    row['result'] = 'not-completed: selection or per-key trace differs from Chromium'
     except subprocess.TimeoutExpired:
         row['result'] = 'timeout: 45s budget'
     print(i, row['result'], flush=True)

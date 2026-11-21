@@ -6,6 +6,7 @@
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/js/DomEditing.hpp"
 #include "litebird/net/DataUrl.hpp"
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/render/ImageDecoder.hpp"
@@ -451,10 +452,15 @@ bool BrowserShell::click_at(float x, float y) {
     auto el = element_at(x, y);
     if (!el) return false;
 
-    const std::string tag = el->tag_name();
-    if (tag == "input" || tag == "textarea" || tag == "select" || tag == "button" ||
-        el->has_attribute("tabindex")) {
+    if (dom::plain_editable(*el)) {
         el->focus();
+        dom::select_edit_text(*el, false);
+    } else {
+        const std::string tag = el->tag_name();
+        if (tag == "input" || tag == "textarea" || tag == "select" || tag == "button" ||
+            el->has_attribute("tabindex")) {
+            el->focus();
+        }
     }
 
     // Dispatch click event first so page JS handlers (and `preventDefault()`) run.
@@ -556,6 +562,13 @@ bool BrowserShell::type_text(const std::string& text) {
     if (!target) target = focused_element();
     if (!target) return false;
     const std::string tag = target->tag_name();
+    if (dom::plain_editable(*target) && m_document->focused_element() == target) {
+        if (!dom::edit_selected_text(*target, text, false)) return false;
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+        rebuild_layout();
+        m_dirty = true;
+        return true;
+    }
     if (tag != "input" && tag != "textarea") return false;
 
     target->set_value(target->value() + text);
@@ -610,6 +623,16 @@ bool BrowserShell::handle_key(const std::string& key) {
     auto target = m_document->focused_element();
     if (target) {
         const std::string tag = target->tag_name();
+        if (dom::plain_editable(*target)) {
+            if (key == "SelectAll") return dom::select_edit_text(*target, true);
+            if (key == "Backspace") {
+                if (!dom::edit_selected_text(*target, "", true)) return false;
+                EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+                rebuild_layout();
+                m_dirty = true;
+                return true;
+            }
+        }
         if (key == "Backspace" && (tag == "input" || tag == "textarea")) {
             std::string val = target->value();
             if (!val.empty()) {
@@ -646,7 +669,12 @@ bool BrowserShell::handle_key(const std::string& key) {
         }
     }
 
-    if (key.size() == 1 && static_cast<unsigned char>(key[0]) >= 32) {
+    // DOM KeyboardEvent.key is UTF-8 here, not necessarily one byte. Keep
+    // named keys out, and reject malformed sequences and control characters.
+    const JsString ch(key);
+    if (!key.empty() && ch.view()==key && ch.unit_at(0)>=32 && ch.unit_at(0)!=127 &&
+        (ch.length()==1 || (ch.length()==2 && ch.unit_at(0)>=0xd800 && ch.unit_at(0)<=0xdbff &&
+                             ch.unit_at(1)>=0xdc00 && ch.unit_at(1)<=0xdfff))) {
         return type_text(key);
     }
     return false;

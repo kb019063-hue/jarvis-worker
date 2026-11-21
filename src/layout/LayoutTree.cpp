@@ -490,6 +490,10 @@ void LayoutTree::build_boxes(
     if (node->is_element()) {
         auto element = std::static_pointer_cast<Element>(node);
         const std::string& tag = element->tag_name();
+        if (tag == "noscript" && !element->is_foreign()) {
+            auto doc = element->owner_document();
+            if (doc && doc->scripting_enabled()) return;
+        }
         if (tag == "head" || tag == "style" || tag == "script" || tag == "meta" ||
             tag == "link" || tag == "base" || tag == "title" || tag == "template") {
             return;

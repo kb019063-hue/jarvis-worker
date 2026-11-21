@@ -44,7 +44,16 @@ async function run() {
           await Promise.all([page.waitForNavigation(), page.click(t.click)]);
           row.passed = page.url().endsWith('/'+t.manual+'.html') && (await page.$eval('h1',e=>e.innerText)).includes(t.manual+'(1)');
         } else if(t.type) {
-          await page.click(t.click); await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control'); await page.keyboard.type(t.type);
+          await page.click(t.click); await page.keyboard.down('Control'); await page.keyboard.press('a'); await page.keyboard.up('Control');
+          if (t.click==='#decoded') {
+            row.selected=await page.evaluate(()=>getSelection().toString());
+            row.edits=[];
+            for (const ch of t.type) {
+              await page.keyboard.type(ch);
+              row.edits.push(await page.evaluate(()=>[document.activeElement.id, document.querySelector('#decoded').textContent,
+                document.querySelector('#encoded').textContent, document.querySelector('#permalink').getAttribute('href')].join('\t')));
+            }
+          } else await page.keyboard.type(t.type);
           await page.$eval(t.read,e=>e.scrollIntoView({block:'nearest'}));
           const result = await page.$eval(t.read,e=>({text:e.value??e.innerText,visible:e.checkVisibility() && e.getBoundingClientRect().top<600 && e.getBoundingClientRect().bottom>0}));
           row.observed=result.text; row.passed=result.visible && (t.read==='#valid'?result.text.includes(t.expect):result.text===t.expect) && (await page.$eval(t.click,e=>e.value??e.innerText))===t.type;

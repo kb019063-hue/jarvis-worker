@@ -543,10 +543,15 @@ const char* kBrowserUiHtml = R"HTML(<!DOCTYPE html>
     };
   }
 
-  img.addEventListener('click', async function(ev) {
+  // Serialize clicks and text so a fast typist cannot outrun focus or Select All.
+  let pendingInput = Promise.resolve();
+  function enqueueInput(path, body) {
+    pendingInput = pendingInput.then(async () => applyState(await api(path, body))).catch(console.error);
+  }
+  img.addEventListener('click', function(ev) {
     shell.focus();
     const pt = canvasCoords(ev);
-    applyState(await api('api/click', pt));
+    enqueueInput('api/click', pt);
   });
 
   let hoverBusy = false;
@@ -566,10 +571,12 @@ const char* kBrowserUiHtml = R"HTML(<!DOCTYPE html>
     applyState(await api('api/scroll', { dx: ev.deltaX, dy: ev.deltaY }));
   }, { passive: false });
 
-  shell.addEventListener('keydown', async function(ev) {
-    if (ev.metaKey || ev.ctrlKey || ev.altKey) return;
+  shell.addEventListener('keydown', function(ev) {
+    const selectAll = (ev.metaKey || ev.ctrlKey) && !ev.shiftKey && !ev.altKey && ev.key.toLowerCase() === 'a';
+    if (!selectAll && (ev.metaKey || ev.ctrlKey || ev.altKey)) return;
+    const key = selectAll ? 'SelectAll' : ev.key;
     ev.preventDefault();
-    applyState(await api('api/key', { key: ev.key }));
+    enqueueInput('api/key', { key });
   });
 
   api('api/state').then(applyState);

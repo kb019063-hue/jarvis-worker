@@ -909,7 +909,15 @@ SimpleSelector CssParser::parse_simple_selector(std::string& raw_out, bool& has_
                     }
                 }
                 std::shared_ptr<SelectorList> compiled_arg;
-                if (has_paren && !compact_arg.empty() && compact_arg.size() <= 512 &&
+                if (has_paren && pseudo_name == "has") {
+                    // Keep the :has() wrapper: its relative list is anchored
+                    // at the subject, and may begin with a combinator.
+                    s.has_dynamic_specificity = true;
+                    if (compact_arg.size() <= 512) {
+                        auto parsed = std::make_shared<SelectorList>();
+                        if (SelectorList::parse(":has(" + compact_arg + ")", *parsed)) compiled_arg = std::move(parsed);
+                    }
+                } else if (has_paren && !compact_arg.empty() && compact_arg.size() <= 512 &&
                     (pseudo_name == "is" || pseudo_name == "where" || pseudo_name == "matches" ||
                      pseudo_name == "not" || pseudo_name == "host")) {
                     if (pseudo_name != "where" && pseudo_name != "host") {

@@ -6,6 +6,7 @@
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/js/DomEditing.hpp"
 #include "litebird/net/DataUrl.hpp"
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/render/ImageDecoder.hpp"
@@ -15,6 +16,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cstring>
+#include <unordered_set>
 
 #include <termios.h>
 #include <unistd.h>
@@ -423,16 +425,28 @@ std::shared_ptr<Element> BrowserShell::element_at(float x, float y) const {
                 }
             }
 
-            for (const auto& ch : box->children) {
-                search(ch);
-            }
+            // The painter emits these line fragments *instead of* painting
+            // their backing child boxes. The latter have unfragmented bounds
+            // and can steal a hit from a neighbouring, visibly painted link.
+        }
+        if (!box->line_boxes.empty()) return;
+
+        // A fixed descendant can escape an anonymous wrapper with no area.
+        // Its parent need not cover the point. Only prune a subtree at a
+        // clip, not merely because the cursor lies outside its border box.
+        if (!inside && (box->style->overflow != Overflow::Visible || box->style->contains_paint())) return;
+        // Visit overlapping siblings in the same stable z order as paint.
+        auto z = [](const auto& child) {
+            const auto& style = *child->style;
+            return style.is_positioned() && style.has_z_index ? style.z_index : 0;
+        };
+        auto below = [&](const auto& a, const auto& b) { return z(a) < z(b); };
+        if (std::is_sorted(box->children.begin(), box->children.end(), below)) {
+            for (const auto& ch : box->children) search(ch);
         } else {
-            // Out-of-flow positioned descendants can sit outside their parent's box.
-            for (const auto& ch : box->children) {
-                if (ch && ch->style->is_out_of_flow()) {
-                    search(ch);
-                }
-            }
+            auto ordered = box->children;
+            std::stable_sort(ordered.begin(), ordered.end(), below);
+            for (const auto& ch : ordered) search(ch);
         }
     };
 
@@ -444,40 +458,58 @@ bool BrowserShell::click_at(float x, float y) {
     auto el = element_at(x, y);
     if (!el) return false;
 
-    const std::string tag = el->tag_name();
-    if (tag == "input" || tag == "textarea" || tag == "select" || tag == "button" ||
-        el->has_attribute("tabindex")) {
-        el->focus();
+    auto send_mouse = [&](const std::shared_ptr<Element>& target, const char* type, int buttons, bool click) {
+        if (auto* realm = dom::realm_if_any(*target)) {
+            JsIntrinsics::set_current(realm->intrinsics);
+            JsScriptScope scope;
+            std::vector<dom::EventField> fields{
+                {"view", dom::window_of(*realm)}, {"clientX", JsValue::make_number(x)},
+                {"clientY", JsValue::make_number(y)}, {"button", JsValue::make_number(0)},
+                {"buttons", JsValue::make_number(buttons)}, {"detail", JsValue::make_number(1)}
+            };
+            if (click) {
+                fields.push_back({"pointerType", JsValue::make_string("mouse")});
+                fields.push_back({"pointerId", JsValue::make_number(1)});
+                fields.push_back({"isPrimary", JsValue::make_boolean(true)});
+            }
+            auto ev = dom::make_event(*realm, click ? "PointerEvent" : "MouseEvent", type, true, true,
+                                      std::move(fields), true);
+            return dom::dispatch(*realm, dom::wrap(*realm, *target), ev, true);
+        }
+        return click ? target->click() : target->dispatch_event(std::make_shared<Event>(type, true, true));
+    };
+    // This entry point models one primary click at a single viewport point,
+    // not a drag. A canceled press suppresses focus, not release or click.
+    if (send_mouse(el, "mousedown", 1, false) && el->is_connected()) {
+        if (dom::plain_editable(*el)) {
+            el->focus();
+            dom::select_edit_text(*el, false);
+        } else {
+            const auto& tag = el->tag_name();
+            if (tag == "input" || tag == "textarea" || tag == "select" || tag == "button" ||
+                el->has_attribute("tabindex")) el->focus();
+        }
     }
-
-    // Dispatch click event first so page JS handlers (and `preventDefault()`) run.
-    bool canceled = false;
-    if (dom::Realm* realm = dom::realm_if_any(*el)) {
-        JsIntrinsics::set_current(realm->intrinsics);
-        JsScriptScope scope;
-        JsValue ev = dom::make_event(
-            *realm,
-            "PointerEvent",
-            "click",
-            true,
-            true,
-            {
-                {"view", dom::window_of(*realm)},
-                {"clientX", JsValue::make_number(x)},
-                {"clientY", JsValue::make_number(y)},
-                {"pageX", JsValue::make_number(x + m_scroll_x)},
-                {"pageY", JsValue::make_number(y + m_scroll_y)},
-            },
-            true
-        );
-        canceled = !dom::dispatch(*realm, dom::wrap(*realm, *el), ev, false);
-    } else {
-        canceled = !el->click();
+    // A press listener can hide/move the target before the release. Do not
+    // activate a stale link simply because it was under the initial press.
+    rebuild_layout();
+    auto up = element_at(x, y);
+    bool canceled = true;
+    if (up) {
+        send_mouse(up, "mouseup", 0, false);
+        if (up != el) {
+            std::unordered_set<const Node*> ancestors;
+            for (auto at = el->parent(); at; at = at->parent()) ancestors.insert(at.get());
+            auto common = std::static_pointer_cast<Node>(up);
+            while (common && !ancestors.count(common.get()) && common != el) common = common->parent();
+            el = std::dynamic_pointer_cast<Element>(common);
+        }
+        if (el && el->is_connected()) canceled = !send_mouse(el, "click", 0, true);
     }
 
     EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(100));
 
-    if (!canceled) {
+    if (!canceled && el->is_connected()) {
         std::shared_ptr<Node> curr = el;
         while (curr) {
             if (auto elem = std::dynamic_pointer_cast<Element>(curr)) {
@@ -509,7 +541,7 @@ bool BrowserShell::click_at(float x, float y) {
         }
     }
 
-    m_status_message = "Clicked <" + el->tag_name() + (el->id().empty() ? "" : ("#" + el->id())) + ">";
+    m_status_message = el ? "Clicked <" + el->tag_name() + (el->id().empty() ? "" : ("#" + el->id())) + ">" : "Released";
     rebuild_layout();
     m_dirty = true;
     return true;
@@ -549,6 +581,13 @@ bool BrowserShell::type_text(const std::string& text) {
     if (!target) target = focused_element();
     if (!target) return false;
     const std::string tag = target->tag_name();
+    if (dom::plain_editable(*target) && m_document->focused_element() == target) {
+        if (!dom::edit_selected_text(*target, text, false)) return false;
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+        rebuild_layout();
+        m_dirty = true;
+        return true;
+    }
     if (tag != "input" && tag != "textarea") return false;
 
     target->set_value(target->value() + text);
@@ -567,10 +606,35 @@ bool BrowserShell::type_text(const std::string& text) {
 
 bool BrowserShell::handle_key(const std::string& key) {
     if (!m_document) return false;
+    // A page sees an arrow before the browser performs its scrolling default.
+    // Like the GUI, this entry point receives one keydown, not a key release.
+    const int arrow = key == "ArrowLeft" ? 37 : key == "ArrowUp" ? 38 :
+                      key == "ArrowRight" ? 39 : key == "ArrowDown" ? 40 : 0;
+    if (arrow) {
+        auto target = m_document->focused_element();
+        if (!target) target = m_document->body();
+        std::shared_ptr<Node> recipient = target ? std::static_pointer_cast<Node>(target) : m_document;
+        bool allow_default = true;
+        if (auto* realm = dom::realm_if_any(*recipient)) {
+            JsIntrinsics::set_current(realm->intrinsics);
+            JsScriptScope scope;
+            const auto event = dom::make_event(*realm, "KeyboardEvent", "keydown", true, true, {
+                {"view", dom::window_of(*realm)}, {"key", JsValue::make_string(key)},
+                {"code", JsValue::make_string(key)}, {"keyCode", JsValue::make_number(arrow)}
+            }, true);
+            allow_default = dom::dispatch(*realm, dom::wrap(*realm, recipient), event, true);
+        }
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(100));
+        rebuild_layout();
+        if (allow_default && !m_document->focused_element()) {
+            if (arrow == 38) scroll_by(0.0f, -48.0f);
+            if (arrow == 40) scroll_by(0.0f, 48.0f);
+        }
+        m_dirty = true;
+        return true;
+    }
     if (key == "PageDown") { scroll_by(0.0f, m_viewport_h * 0.8f); return true; }
     if (key == "PageUp") { scroll_by(0.0f, -m_viewport_h * 0.8f); return true; }
-    if (key == "ArrowDown" && !m_document->focused_element()) { scroll_by(0.0f, 48.0f); return true; }
-    if (key == "ArrowUp" && !m_document->focused_element()) { scroll_by(0.0f, -48.0f); return true; }
     if (key == "Home" && !m_document->focused_element()) { scroll_to(0.0f, 0.0f); return true; }
     if (key == "End" && !m_document->focused_element()) { scroll_to(0.0f, m_content_height); return true; }
     if (key == "Tab") { focus_next(); return true; }
@@ -578,6 +642,16 @@ bool BrowserShell::handle_key(const std::string& key) {
     auto target = m_document->focused_element();
     if (target) {
         const std::string tag = target->tag_name();
+        if (dom::plain_editable(*target)) {
+            if (key == "SelectAll") return dom::select_edit_text(*target, true);
+            if (key == "Backspace") {
+                if (!dom::edit_selected_text(*target, "", true)) return false;
+                EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+                rebuild_layout();
+                m_dirty = true;
+                return true;
+            }
+        }
         if (key == "Backspace" && (tag == "input" || tag == "textarea")) {
             std::string val = target->value();
             if (!val.empty()) {
@@ -614,7 +688,12 @@ bool BrowserShell::handle_key(const std::string& key) {
         }
     }
 
-    if (key.size() == 1 && static_cast<unsigned char>(key[0]) >= 32) {
+    // DOM KeyboardEvent.key is UTF-8 here, not necessarily one byte. Keep
+    // named keys out, and reject malformed sequences and control characters.
+    const JsString ch(key);
+    if (!key.empty() && ch.view()==key && ch.unit_at(0)>=32 && ch.unit_at(0)!=127 &&
+        (ch.length()==1 || (ch.length()==2 && ch.unit_at(0)>=0xd800 && ch.unit_at(0)<=0xdbff &&
+                             ch.unit_at(1)>=0xdc00 && ch.unit_at(1)<=0xdfff))) {
         return type_text(key);
     }
     return false;

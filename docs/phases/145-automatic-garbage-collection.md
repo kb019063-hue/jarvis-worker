@@ -73,7 +73,7 @@ Checks run:
 
 | Command | Result |
 | :--- | :--- |
-| `make test` | **303 / 303** engine suites + 114 cross-origin checks (new suites: `automatic_gc_threshold_and_geometric_growth`, `automatic_gc_reclaims_churn_without_calling_gc`) |
+| `make test` | **304 / 304** engine suites + 114 cross-origin checks (new suites: `automatic_gc_threshold_and_geometric_growth`, `automatic_gc_reclaims_churn_without_calling_gc`) |
 | `make gc-oracle` | PASS (`baseline 184`, all 5 rounds `+0`, `collections_count 7`, `collected_cells 9206`, `retained keep|child`) |
 | `make verify-gc-stress` | self-test 3/3 controls caught; `tests/gc-conformance` 28/28 (958 collections); `tests/dom-conformance` 678/678 (11,160 collections) |
 | `make js-conformance` | 1143 / 1158 (98.7%), everyday probe 90/90, 0 crashes |

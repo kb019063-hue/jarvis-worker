@@ -27,10 +27,10 @@ See [`docs/phases/145-automatic-garbage-collection.md`](../phases/145-automatic-
 
 ## How it was verified
 
-- `make test` (**303/303** suites, including
+- `make test` (**304/304** suites, including
   `automatic_gc_threshold_and_geometric_growth` and
   `automatic_gc_reclaims_churn_without_calling_gc`), `make asan-unit`
-  (**303/303** under ASan+UBSan).
+  (**303/303** pre-merge under ASan+UBSan).
 - `make gc-oracle` (PASS), `make verify-gc-stress` (self-test 3/3, corpus
   28/28, DOM 678/678), `make bench-collections` (PASS), `make security-worker`
   (17/17).

@@ -30170,6 +30170,101 @@ TEST(arraybuffer_transfer_detach_and_resize) {
     assert(text("errName(function () { Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get.call({}); })") == "TypeError");
 }
 
+TEST(a_definition_names_the_function_it_makes) {
+    using namespace litebird;
+
+    // Phase 159, finding 164. `name` inference was right for a string key and
+    // wrong for everything else a definition can be written with:
+    //
+    //   ({ [Symbol('m')]() {} })[Symbol('m')].name   -> ''   ('[m]')
+    //   Object.getOwnPropertyDescriptor({ get id() {} }, 'id').get.name
+    //                                                -> 'id' ('get id')
+    //
+    // §15.4.4/§15.4.5 (SetFunctionName) put the name in the production's hands:
+    // a property key, a symbol key as `[` + description + `]` (and nothing at
+    // all when the description is empty), and `get `/`set ` in front of it for
+    // an accessor. The parser gives a method its key as a name, which is right
+    // by default; the cases it cannot know are written down at the definition
+    // site instead, by `name_function`.
+    //
+    // Every expected string was printed by Node.js 22 for the same source.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function N(f) { return f.name; }
+        var anon = Symbol(), named = Symbol('test262'), m = Symbol('method');
+
+        // ---- a function or class written as a value -----------------------
+        var values = { id: function () {}, [anon]: function () {}, [named]: function () {}, xId: function x() {} };
+        same('a function value', N(values.id), 'id');
+        same('an unnamed symbol value', N(values[anon]), '');
+        same('a named symbol value', N(values[named]), '[test262]');
+        same('an explicit name wins', N(values.xId), 'x');
+
+        // ---- accessors take the prefix ------------------------------------
+        var g = { get id() {}, get [anon]() {}, get [named]() {}, set id(v) {}, set [named](v) {} };
+        same('a getter', N(Object.getOwnPropertyDescriptor(g, 'id').get), 'get id');
+        same('an unnamed symbol getter', N(Object.getOwnPropertyDescriptor(g, anon).get), 'get ');
+        same('a symbol getter', N(Object.getOwnPropertyDescriptor(g, named).get), 'get [test262]');
+        same('a setter', N(Object.getOwnPropertyDescriptor(g, 'id').set), 'set id');
+        same('a symbol setter', N(Object.getOwnPropertyDescriptor(g, named).set), 'set [test262]');
+
+        // ---- methods, including generators and async methods --------------
+        var methods = { [m]() {}, id() {}, [anon]() {}, *[m]() {}, *id() {}, async id() {} };
+        same('a symbol method', N(methods[m]), '[method]');
+        same('a method', N(methods.id), 'id');
+        same('an unnamed symbol method', N(methods[anon]), '');
+
+        // ---- and in a class, static and not -------------------------------
+        class C {
+            m() {}
+            static s() {}
+            get g() {}
+            set g(v) {}
+            [m]() {}
+            static [named]() {}
+            *[m]() {}
+            static #p() {}
+        }
+        same('a class method', N(C.prototype.m), 'm');
+        same('a static class method', N(C.s), 's');
+        same('a class getter', N(Object.getOwnPropertyDescriptor(C.prototype, 'g').get), 'get g');
+        same('a class setter', N(Object.getOwnPropertyDescriptor(C.prototype, 'g').set), 'set g');
+        same('a symbol class method', N(C.prototype[m]), '[method]');
+        same('a static symbol class method', N(C[named]), '[test262]');
+        // A private name is not reachable from outside the class, which is the
+        // point; the method asks its own name from inside.
+        class D { static #m() {} static n() { return D.#m.name; } static get #g() { return 1; } }
+        same('a private method is spelled as written', D.n(), '#m');
+
+        // ---- the assignment form that is *not* a named evaluation ---------
+        var plain;
+        plain = function () {};
+        same('an assignment names it after the binding', N(plain), 'plain');
+        var grouped;
+        (grouped) = function () {};
+        same('a grouped target does not', N(grouped), '');
+
+        // ---- and the values are still the same functions ------------------
+        same('a method is still callable', typeof methods.id, 'function');
+        same('a getter still runs', (function () { var o = { get v() { return 7; } }; return o.v; })(), 7);
+        same('a symbol method is still reachable', typeof methods[m], 'function');
+        same('a class still constructs', new C() instanceof C, true);
+        same('a name is still not writable', (function () {
+            var f = values.id; f.name = 'zz'; return f.name;
+        })(), 'id');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -30575,6 +30670,9 @@ int main() {
 
     // Phase 158: a built-in method has no [[Construct]].
     RUN_TEST(a_built_in_method_is_not_a_constructor);
+
+    // Phase 159: a definition names the function it makes.
+    RUN_TEST(a_definition_names_the_function_it_makes);
 
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.

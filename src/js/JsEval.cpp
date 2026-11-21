@@ -562,6 +562,53 @@ void JsInterpreter::hoist_functions(const std::vector<const FunctionDeclStmt*>& 
 // Functions
 // ---------------------------------------------------------------------------
 
+/// The `name` a *definition* gives the function it makes.
+///
+/// §15.4.4/§15.4.5 (SetFunctionName) put the name in the hands of the
+/// production: a FunctionExpression written as the value of a property takes
+/// the property key, and an accessor takes the key with `get `/`set ` in front
+/// of it. A symbol key is not its string form -- there is no string form -- but
+/// `[` + its description + `]`, and a symbol with no description contributes
+/// nothing, so an anonymous symbol-keyed method is named `""`.
+///
+/// `key` is the key's string form and `computed` is the value a computed key
+/// evaluated to, which is the only way the key can be a symbol. Both are
+/// needed: the string form is what a symbol's opaque internal text looks like,
+/// and it is the whole answer for every other kind of key.
+static std::string defined_name(const std::string& key, const JsValue* computed, const char* prefix) {
+    std::string name = prefix;
+    if (computed && computed->type == JsType::Symbol) {
+        // The description, not `toString()`: a symbol with none contributes
+        // nothing at all, where `String(Symbol())` is the text "Symbol()".
+        // `make_symbol` keeps it in the symbol's own property table, which is
+        // where Symbol.prototype.description reads it (BuiltinsObject.cpp).
+        std::string description;
+        if (computed->properties) {
+            auto it = computed->properties->find("description");
+            if (it != computed->properties->end() && it->second.type == JsType::String) {
+                description = it->second.string_val.str();
+            }
+        }
+        if (!description.empty()) name += "[" + description + "]";
+        return name;
+    }
+    return name + key;
+}
+
+/// `fd.name`, overridden by the definition that made the function.
+///
+/// The parser gives a method or an accessor its key as a name already, because
+/// that is right by default; a definition that knows better -- a private
+/// name's spelling, an accessor's `get `/`set `, a symbol key's description --
+/// sets the name here instead of working out which case it is standing in.
+void JsInterpreter::name_function(JsValue& fn, const std::string& name) const {
+    if (auto* fd = const_cast<JsValue::FunctionData*>(fn.function_data())) fd->name = name;
+    if (JsObject* cell = fn.property_cell()) {
+        auto entry = cell->properties.find("name");
+        if (entry != cell->properties.end()) entry->second = JsValue::make_string(name);
+    }
+}
+
 JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, const EnvPtr& env,
                                      const std::string& name_hint) {
     JsValue fn;
@@ -1146,12 +1193,20 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     }
 
     std::vector<std::string> member_keys;
+    // What each computed key evaluated to, for the `name` of the function the
+    // member defines: a symbol key is named from its description, which the
+    // string form has already thrown away.
+    std::vector<JsValue> member_key_values;
     member_keys.reserve(cls->members.size());
+    member_key_values.reserve(cls->members.size());
     for (const auto& member : cls->members) {
+        JsValue computed_value;
+        if (member.computed_key) computed_value = evaluate(member.computed_key.get(), class_env);
         member_keys.push_back(member.computed_key
-                                  ? js_to_property_key(evaluate(member.computed_key.get(), class_env))
+                                  ? js_to_property_key(computed_value)
                                   : member.is_private ? private_prefix + member.key
                                                       : member.key);
+        member_key_values.push_back(std::move(computed_value));
     }
 
     if (!cls->name.empty()) class_env->initialize_lexical(cls->name, ctor, true);
@@ -1173,13 +1228,20 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
         const auto& member = cls->members[i];
         JsValue target = member.is_static ? ctor : proto;
         const std::string& key = member_keys[i];
-        // What the function is called: the source spelling for a private name,
-        // so `#m` and `get #x` print as they were written.
-        const std::string& fn_name = member.is_private ? member.key : key;
+        // What the function is called. A method is named after the key it was
+        // defined by; an accessor with `get `/`set ` in front of it. A private
+        // name is spelled as it was written, so `#m` stays `#m` and
+        // `get #x` stays `get #x` — it can only be written literally.
+        const JsValue* key_value = member.is_private ? nullptr : &member_key_values[i];
+        const bool key_computed = !member.is_private && member.computed_key != nullptr;
 
         switch (member.kind) {
             case ClassMember::Kind::Method: {
-                JsValue fn = make_function(member.fn, class_env, fn_name);
+                JsValue fn = make_function(member.fn, class_env);
+                // A private name is spelled as written (`#m`), never with the
+                // prefix the environment uses to keep it apart from a string.
+                name_function(fn, member.is_private ? member.key
+                                                    : defined_name(key, key_computed ? &member_key_values[i] : nullptr, ""));
                 if (member.fn->uses_super) fn.define_property("%home", target, PropertyMap::Hidden);
                 if (!member.is_private) {
                     target.define_property(key, fn, PropertyMap::Hidden);
@@ -1193,7 +1255,12 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
             }
             case ClassMember::Kind::Getter:
             case ClassMember::Kind::Setter: {
-                JsValue fn = make_function(member.fn, class_env, fn_name);
+                JsValue fn = make_function(member.fn, class_env);
+                name_function(fn, member.is_private
+                                      ? std::string(member.kind == ClassMember::Kind::Getter ? "get " : "set ") +
+                                            member.key
+                                      : defined_name(key, key_computed ? &member_key_values[i] : nullptr,
+                                                     member.kind == ClassMember::Kind::Getter ? "get " : "set "));
                 if (member.fn->uses_super) fn.define_property("%home", target, PropertyMap::Hidden);
                 if (member.is_private) {
                     if (!member.is_static) {
@@ -1243,7 +1310,11 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
                     auto field_env = std::make_shared<JsEnvironment>(class_env);
                     field_env->define("this", ctor);
                     field_env->define("%home", ctor);
-                    value = evaluate_named(member.value.get(), field_env, fn_name);
+                    // A function or arrow written *in* the initialiser is
+                    // named by its field, as `x = function () {}` is named
+                    // `x`; that is a different question from what the member's
+                    // own function is called, above.
+                    value = evaluate_named(member.value.get(), field_env, member.key);
                 }
                 if (member.is_private) ctor.define_private(key, value, PropertyMap::Default);
                 else ctor.define_property(key, value, PropertyMap::Default);
@@ -2257,7 +2328,12 @@ JsInterpreter::Flow JsInterpreter::exec_switch(const SwitchStmt* stmt, const Env
 // ---------------------------------------------------------------------------
 
 JsValue JsInterpreter::evaluate_named(const Expr* expr, const EnvPtr& env, const std::string& name_hint) {
-    // `const f = function () {}` names the function after the binding.
+    // `const f = function () {}` names the function after the binding. What
+    // the parentheses around the *initialiser* are does not matter: test262
+    // asserts `[cover = (function () {})]` names it `cover`, so the named
+    // evaluation is chosen by the context, not by the expression's own
+    // grouping. Only a grouped *assignment target* changes the answer, and
+    // that is decided where the target is (see eval_assign).
     if (expr->kind == NodeKind::Function) {
         auto* fn_expr = static_cast<const FunctionExpr*>(expr);
         if (fn_expr->fn->name.empty()) return make_function(fn_expr->fn, env, name_hint);
@@ -2516,7 +2592,11 @@ JsValue JsInterpreter::eval_assign(const AssignExpr* expr, const EnvPtr& env) {
     if (expr->op == JsTokenType::Equal) {
         if (target->kind == NodeKind::Identifier) {
             const std::string& name = static_cast<const IdentifierExpr*>(target)->name;
-            JsValue value = evaluate_named(expr->value.get(), env, name);
+            // `(f) = function () {}` leaves the function anonymous: the target
+            // is a parenthesised expression, not an IdentifierReference, so
+            // this is not a named evaluation (see evaluate_named).
+            JsValue value = target->explicitly_grouped ? evaluate(expr->value.get(), env)
+                                                       : evaluate_named(expr->value.get(), env, name);
             assign_identifier(name, value, env);
             return value;
         }
@@ -2674,13 +2754,18 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
             continue;
         }
 
-        std::string key = prop.computed_key
-            ? js_to_property_key(evaluate(prop.computed_key.get(), env))
-            : prop.key;
+        // The key, and — for a computed one — the value it evaluated to, which
+        // is what an anonymous function defined by this property is named
+        // after when the key is a symbol (see defined_name).
+        JsValue key_value;
+        if (prop.computed_key) key_value = evaluate(prop.computed_key.get(), env);
+        std::string key = prop.computed_key ? js_to_property_key(key_value) : prop.key;
 
         if (prop.kind == ObjectProperty::Kind::Getter || prop.kind == ObjectProperty::Kind::Setter) {
             auto* fn_expr = static_cast<const FunctionExpr*>(prop.value.get());
-            JsValue fn = make_function(fn_expr->fn, env, key);
+            JsValue fn = make_function(fn_expr->fn, env);
+            name_function(fn, defined_name(key, prop.computed_key ? &key_value : nullptr,
+                                           prop.kind == ObjectProperty::Kind::Getter ? "get " : "set "));
             if (fn_expr->fn->uses_super) fn.define_property("%home", object, PropertyMap::Hidden);
             JsValue getter;
             JsValue setter;
@@ -2697,7 +2782,8 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
 
         if (prop.is_method) {
             auto* fn_expr = static_cast<const FunctionExpr*>(prop.value.get());
-            JsValue fn = make_function(fn_expr->fn, env, key);
+            JsValue fn = make_function(fn_expr->fn, env);
+            name_function(fn, defined_name(key, prop.computed_key ? &key_value : nullptr, ""));
             if (fn_expr->fn->uses_super) fn.define_property("%home", object, PropertyMap::Hidden);
             object.define_property(key, fn, PropertyMap::Default);
             continue;
@@ -2706,8 +2792,22 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
         // `{ __proto__: base }` sets the prototype rather than a property, so
         // a function or a class written there is not named after the key.
         const bool sets_prototype = key == "__proto__" && !prop.computed_key && !prop.shorthand;
-        JsValue value = sets_prototype ? evaluate(prop.value.get(), env)
-                                       : evaluate_named(prop.value.get(), env, key);
+        // A function or class written as the value is named after the key too
+        // (the third form SetFunctionName is applied to), and a symbol key
+        // needs the `[description]` the string form has thrown away.
+        JsValue value;
+        if (sets_prototype) {
+            value = evaluate(prop.value.get(), env);
+        } else if (prop.computed_key && key_value.type == JsType::Symbol &&
+                   (prop.value->kind == NodeKind::Function || prop.value->kind == NodeKind::Class)) {
+            value = evaluate(prop.value.get(), env);
+            if (prop.value->kind == NodeKind::Function &&
+                static_cast<const FunctionExpr*>(prop.value.get())->fn->name.empty()) {
+                name_function(value, defined_name(key, &key_value, ""));
+            }
+        } else {
+            value = evaluate_named(prop.value.get(), env, key);
+        }
         if (sets_prototype) {
             if (value.is_object_like()) {
                 if (JsObject* target = value.as_prototype()) object.object_val->prototype = target;

@@ -37,6 +37,7 @@ import sys
 import tempfile
 import threading
 import time
+import zlib
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
@@ -152,10 +153,11 @@ def recv_exact(sock: socket.socket, n: int) -> bytes:
     return bytes(out)
 
 
-def read_ws_frame(sock: socket.socket) -> tuple[int, bytes, bool, bytes]:
+def read_ws_frame(sock: socket.socket) -> tuple[int, bytes, bool, bytes, bool]:
     hdr = recv_exact(sock, 2)
     b0, b1 = hdr[0], hdr[1]
     opcode = b0 & 0x0F
+    rsv1 = bool(b0 & 0x40)
     masked = bool(b1 & 0x80)
     length = b1 & 0x7F
     if length == 126:
@@ -167,11 +169,11 @@ def read_ws_frame(sock: socket.socket) -> tuple[int, bytes, bool, bytes]:
     if masked:
         for i in range(len(payload)):
             payload[i] ^= mask[i % 4]
-    return opcode, bytes(payload), masked, mask
+    return opcode, bytes(payload), masked, mask, rsv1
 
 
-def build_ws_frame(opcode: int, payload: bytes) -> bytes:
-    header = bytearray([0x80 | (opcode & 0x0F)])
+def build_ws_frame(opcode: int, payload: bytes, fin: bool = True, rsv1: bool = False) -> bytes:
+    header = bytearray([(0x80 if fin else 0) | (0x40 if rsv1 else 0) | (opcode & 0x0F)])
     n = len(payload)
     if n < 126:
         header.append(n)
@@ -326,6 +328,23 @@ class DualProtocolServer:
         )
         if selected_proto:
             resp += f"Sec-WebSocket-Protocol: {selected_proto}\r\n"
+        pmd_mode = None
+        pmd_wbits = 15
+        pmd_nct = False
+        if path == "/wss-pmd":
+            pmd_mode = "default"
+            pmd_wbits = 11
+            resp += "Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=11; client_max_window_bits=11\r\n"
+        elif path == "/wss-pmd-nct":
+            pmd_mode = "nct"
+            pmd_wbits = 9
+            pmd_nct = True
+            resp += "Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover; server_no_context_takeover; client_max_window_bits=9; server_max_window_bits=9\r\n"
+        elif path == "/wss-pmd-bad":
+            resp += "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits=7\r\n"
+        elif path == "/wss-pmd-bomb":
+            pmd_mode = "bomb"
+            resp += "Sec-WebSocket-Extensions: permessage-deflate\r\n"
         # Cookies set on an upgrade response: an ordinary Set-Cookie header on
         # the one response the handshake ever gets.
         if path == "/ws-cookie":
@@ -341,42 +360,86 @@ class DualProtocolServer:
             "key": sec_key,
             "offered": offered,
             "selected": selected_proto,
+            "offered_ext": headers.get("sec-websocket-extensions", ""),
             "cookie": headers.get("cookie"),
             "messages": [],
             "binary_messages": [],
+            "compressed_wire_lens": [],
+            "rsv1_flags": [],
             "masks_ok": True,
             "close_code": None,
             "close_reason": None,
         }
+
+        def pmd_compress(comp_obj, data: bytes) -> bytes:
+            raw = comp_obj.compress(data) + comp_obj.flush(zlib.Z_SYNC_FLUSH)
+            assert raw.endswith(b"\x00\x00\xff\xff")
+            return raw[:-4]
+
+        comp = zlib.compressobj(6, zlib.DEFLATED, -pmd_wbits) if pmd_mode in ("default", "nct") else None
+        decomp = zlib.decompressobj(-pmd_wbits) if pmd_mode in ("default", "nct") else None
 
         # Worker endpoints proactively push a greeting then close cleanly.
         if path == "/worker-ok":
             conn.sendall(build_ws_frame(0x01, b"wss-worker-ok"))
         elif path == "/worker-bin":
             conn.sendall(build_ws_frame(0x02, b"\x00\xfe\xff\x80"))
+        elif pmd_mode == "bomb":
+            bcomp = zlib.compressobj(9, zlib.DEFLATED, -15)
+            bomb = pmd_compress(bcomp, b"\x00" * (20 * 1024 * 1024))
+            conn.sendall(build_ws_frame(0x02, bomb, fin=True, rsv1=True))
 
         conn.settimeout(2.5)
         try:
             while True:
-                opcode, payload, masked, mask = read_ws_frame(conn)
+                opcode, payload, masked, mask, rsv1 = read_ws_frame(conn)
                 if not masked or len(mask) != 4:
                     rec["masks_ok"] = False
+                if opcode in (0x01, 0x02):
+                    rec["rsv1_flags"].append(rsv1)
+                    if pmd_mode in ("default", "nct") and rsv1:
+                        rec["compressed_wire_lens"].append(len(payload))
+                        payload = decomp.decompress(payload + b"\x00\x00\xff\xff")
+                        if pmd_nct:
+                            decomp = zlib.decompressobj(-pmd_wbits)
                 if opcode == 0x01:
                     text = payload.decode("utf-8", errors="replace")
                     rec["messages"].append(text)
-                    conn.sendall(build_ws_frame(0x01, f"echo:{text}".encode("utf-8")))
+                    reply = f"echo:{text}".encode("utf-8")
+                    if pmd_mode == "default" and len(rec["messages"]) == 2:
+                        # Fragmented compressed reply across 2 frames + interleaved Ping!
+                        c_rep = pmd_compress(comp, reply)
+                        mid = max(1, len(c_rep) // 2)
+                        conn.sendall(build_ws_frame(0x01, c_rep[:mid], fin=False, rsv1=True))
+                        conn.sendall(build_ws_frame(0x09, b"pmd-ping", fin=True, rsv1=False))
+                        conn.sendall(build_ws_frame(0x00, c_rep[mid:], fin=True, rsv1=False))
+                    elif pmd_mode in ("default", "nct"):
+                        c_rep = pmd_compress(comp, reply)
+                        if pmd_nct:
+                            comp = zlib.compressobj(6, zlib.DEFLATED, -pmd_wbits)
+                        conn.sendall(build_ws_frame(0x01, c_rep, fin=True, rsv1=True))
+                    else:
+                        conn.sendall(build_ws_frame(0x01, reply))
                 elif opcode == 0x02:
                     rec["binary_messages"].append(payload)
-                    conn.sendall(build_ws_frame(0x02, payload))
+                    if pmd_mode in ("default", "nct"):
+                        c_rep = pmd_compress(comp, payload)
+                        if pmd_nct:
+                            comp = zlib.compressobj(6, zlib.DEFLATED, -pmd_wbits)
+                        conn.sendall(build_ws_frame(0x02, c_rep, fin=True, rsv1=True))
+                    else:
+                        conn.sendall(build_ws_frame(0x02, payload))
                 elif opcode == 0x09:
                     conn.sendall(build_ws_frame(0x0A, payload))
+                elif opcode == 0x0A:
+                    rec["rsv1_flags"].append(("pong", rsv1))
                 elif opcode == 0x08:
                     if len(payload) >= 2:
                         rec["close_code"] = struct.unpack("!H", payload[:2])[0]
                         rec["close_reason"] = payload[2:].decode("utf-8", errors="replace")
                     conn.sendall(build_ws_frame(0x08, payload))
                     break
-        except (EOFError, OSError, ssl.SSLError):
+        except (EOFError, OSError, ssl.SSLError, zlib.error):
             pass
         with self.lock:
             self.upgrades.append(rec)
@@ -678,6 +741,79 @@ wkBin.onerror = function(e) {{
   pending--;
 }};
 
+// RFC 7692 permessage-deflate over wss:// (window_bits=11, context takeover, fragmented + binary)
+pending++;
+var wsPmd = new WebSocket('wss://127.0.0.1:{wss_valid.port}/wss-pmd');
+wsPmd.binaryType = 'arraybuffer';
+var pmdGot = [];
+wsPmd.onopen = function() {{
+  log('pmd_ext', wsPmd.extensions);
+  wsPmd.send('deflate-wss-chunk-'.repeat(60));
+  wsPmd.send('deflate-wss-chunk-'.repeat(60));
+  var b = new Uint8Array(64);
+  for (var i = 0; i < 64; i++) b[i] = (i * 17) & 0xFF;
+  wsPmd.send(b);
+}};
+wsPmd.onmessage = function(e) {{
+  if (typeof e.data === 'string') {{
+    pmdGot.push('S:' + e.data.length + ':' + e.data.slice(0, 12));
+  }} else {{
+    var u = new Uint8Array(e.data);
+    pmdGot.push('B:' + u.length + ':' + u[0] + ',' + u[1] + ',' + u[63]);
+  }}
+  if (pmdGot.length === 3) {{
+    log('pmd_got', pmdGot.join('|'));
+    wsPmd.close(1000, 'pmd-done');
+  }}
+}};
+wsPmd.onclose = function(e) {{
+  log('pmd_close', e.code + ':' + e.wasClean);
+  pending--;
+}};
+
+// RFC 7692 permessage-deflate no_context_takeover + window_bits=9
+pending++;
+var wsPmdNct = new WebSocket('wss://127.0.0.1:{wss_valid.port}/wss-pmd-nct');
+var pmdNctGot = [];
+wsPmdNct.onopen = function() {{
+  log('pmd_nct_ext', wsPmdNct.extensions);
+  wsPmdNct.send('nct-payload-'.repeat(80));
+  wsPmdNct.send('nct-payload-'.repeat(80));
+}};
+wsPmdNct.onmessage = function(e) {{
+  pmdNctGot.push(e.data.length);
+  if (pmdNctGot.length === 2) {{
+    log('pmd_nct_got', pmdNctGot.join(','));
+    wsPmdNct.close(1000);
+  }}
+}};
+wsPmdNct.onclose = function(e) {{
+  log('pmd_nct_close', e.code + ':' + e.wasClean);
+  pending--;
+}};
+
+// RFC 7692 invalid Sec-WebSocket-Extensions rejected fail-closed
+pending++;
+var wsPmdBad = new WebSocket('wss://127.0.0.1:{wss_valid.port}/wss-pmd-bad');
+var pmdBadEv = [];
+wsPmdBad.onerror = function() {{ pmdBadEv.push('err'); }};
+wsPmdBad.onclose = function(e) {{
+  pmdBadEv.push('close:' + e.code + ':' + e.wasClean);
+  log('pmd_bad', pmdBadEv.join(','));
+  pending--;
+}};
+
+// RFC 7692 decompression bomb (>16 MiB) rejected with 1009 without OOM
+pending++;
+var wsPmdBomb = new WebSocket('wss://127.0.0.1:{wss_valid.port}/wss-pmd-bomb');
+var pmdBombEv = [];
+wsPmdBomb.onerror = function() {{ pmdBombEv.push('err'); }};
+wsPmdBomb.onclose = function(e) {{
+  pmdBombEv.push('close:' + e.code + ':' + e.wasClean);
+  log('pmd_bomb', pmdBombEv.join(','));
+  pending--;
+}};
+
 var tries = 0;
 function pump() {{
   if (pending === 0 || tries >= 120) {{
@@ -757,6 +893,36 @@ setTimeout(pump, 1);
                 wss_upgrades = list(wss_valid.upgrades)
             with https_srv.lock:
                 https_upgrades = list(https_srv.upgrades)
+
+            pmd_rec = next((u for u in wss_upgrades if u["path"] == "/wss-pmd"), None)
+            pmd_nct_rec = next((u for u in wss_upgrades if u["path"] == "/wss-pmd-nct"), None)
+            pmd_bomb_rec = next((u for u in wss_upgrades if u["path"] == "/wss-pmd-bomb"), None)
+
+            check("wss:// permessage-deflate (window_bits=11, takeover, fragmented, binary & wire RSV1)",
+                  r1.get("pmd_ext") == "permessage-deflate; server_max_window_bits=11; client_max_window_bits=11"
+                  and r1.get("pmd_got") == "S:1085:echo:deflate|S:1085:echo:deflate|B:64:0,17,47"
+                  and r1.get("pmd_close") == "1000:true"
+                  and pmd_rec is not None
+                  and "permessage-deflate" in pmd_rec["offered_ext"]
+                  and len(pmd_rec["compressed_wire_lens"]) == 3
+                  and pmd_rec["compressed_wire_lens"][0] < 100
+                  and pmd_rec["compressed_wire_lens"][1] <= pmd_rec["compressed_wire_lens"][0]
+                  and ("pong", False) in pmd_rec["rsv1_flags"],
+                  f"ext={r1.get('pmd_ext')} got={r1.get('pmd_got')} close={r1.get('pmd_close')} rec={pmd_rec}")
+            check("wss:// permessage-deflate no_context_takeover & invalid extension fail-closed",
+                  r1.get("pmd_nct_ext") == "permessage-deflate; client_no_context_takeover; server_no_context_takeover; client_max_window_bits=9; server_max_window_bits=9"
+                  and r1.get("pmd_nct_got") == "965,965"
+                  and r1.get("pmd_nct_close") == "1000:true"
+                  and pmd_nct_rec is not None
+                  and len(pmd_nct_rec["compressed_wire_lens"]) == 2
+                  and pmd_nct_rec["compressed_wire_lens"][0] < 100
+                  and r1.get("pmd_bad") == "err,close:1006:false",
+                  f"nct={r1.get('pmd_nct_got')} bad={r1.get('pmd_bad')} rec={pmd_nct_rec}")
+            check("wss:// permessage-deflate decompression bomb (>16 MiB) rejected with 1009",
+                  r1.get("pmd_bomb") == "err,close:1009:false"
+                  and pmd_bomb_rec is not None
+                  and pmd_bomb_rec["close_code"] == 1009,
+                  f"bomb={r1.get('pmd_bomb')} rec={pmd_bomb_rec}")
             with plain_srv.lock:
                 plain_upgrades = list(plain_srv.upgrades)
 

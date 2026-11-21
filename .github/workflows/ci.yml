@@ -152,6 +152,17 @@ jobs:
         # "ready" before a merge. These are the forms it is trusted for, and
         # it asks GitHub nothing here.
         run: python3 tools/ci/check_pr.py --self-test
+      - name: check_suites reads a suite's opening the way a merge does
+        # Two branches that each add a suite sharing the six-line page prologue
+        # merge into two conflict regions with the prologue outside both, so
+        # "take ours" and "take theirs" each produce a function with the other's
+        # body. These are the shapes it is trusted for, and it builds nothing.
+        run: python3 tools/ci/check_suites.py --self-test
+      - name: Every suite that runs script takes its page from TestPage
+        # Not a failure while suites are being converted: the count is printed so
+        # it can be watched. A suite that uses TestPage *and* sets its own URL is
+        # a failure, because that is the helper's page used for another document.
+        run: python3 tools/ci/check_suites.py
       - name: check_numbers reads a marked figure the way the documents write one
         # `make metrics` rewrites the text in front of every marker, and the
         # wrong shape there is a document rewritten and still plausible. These

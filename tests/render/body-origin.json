@@ -180,7 +180,6 @@
     {
       "name": "html_margin_affects_the_body",
       "html": "<!doctype html><html style=\"margin:30px\"><body><div style=\"width:100px;height:20px;background:#ff0000\"></div></body></html>",
-      "known_failure": "The html element has no layout box, so its 30px margin does not affect the body. Chromium places the child at (38,38); Litebird places it at (8,8).",
       "assert": [
         {
           "kind": "pixel",

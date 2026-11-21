@@ -27842,6 +27842,69 @@ TEST(object_integrity_levels_ask_every_property) {
     std::cout << "\033[32mPASSED\033[0m";
 }
 
+TEST(boxed_string_own_index_descriptors) {
+    using namespace litebird;
+    // Phase 132, finding 137. `new String("ab")` already reads its indexed
+    // characters and lists them in Object.keys, but descriptor_for only knew
+    // the primitive JsType::String case. ECMA-262 §10.4.3 gives a String
+    // exotic object own, enumerable, non-writable, non-configurable index
+    // properties too. Every expected JSON value below was printed by Node.js
+    // v22.22.3 before being asserted here.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function shape(d) {
+            return d === undefined ? null : [d.value, d.writable, d.enumerable, d.configurable];
+        }
+
+        check('Object describes a boxed String index', function () {
+            return shape(Object.getOwnPropertyDescriptor(new String('ab'), '1'));
+        }, '["b",false,true,false]');
+        check('Reflect asks the same String exotic property', function () {
+            return shape(Reflect.getOwnPropertyDescriptor(new String('ab'), '0'));
+        }, '["a",false,true,false]');
+        check('boxed String indices are own and enumerable', function () {
+            var s = new String('ab');
+            return [Object.keys(s).join(','), s.propertyIsEnumerable('1'),
+                    Object.prototype.propertyIsEnumerable.call(s, '0')];
+        }, '["0,1",true,true]');
+        check('all own descriptors include indices and length', function () {
+            var d = Object.getOwnPropertyDescriptors(new String('ab'));
+            return [Object.keys(d).join(','), d['0'].value, d['1'].value,
+                    d.length.value, d.length.enumerable];
+        }, '["0,1,length","a","b",2,false]');
+        check('indices are UTF-16 code units', function () {
+            var d = Object.getOwnPropertyDescriptor(new String('😀'), '0');
+            return [d.value.length, d.value.charCodeAt(0), d.writable, d.enumerable, d.configurable];
+        }, '[1,55357,false,true,false]');
+        check('an index past the wrapped length is ordinary', function () {
+            var s = new String('ab');
+            s[2] = 'c'; s.extra = 9;
+            return [shape(Object.getOwnPropertyDescriptor(s, '2')),
+                    shape(Object.getOwnPropertyDescriptor(s, 'extra'))];
+        }, '[["c",true,true,true],[9,true,true,true]]');
+        check('a non-index remains absent', function () {
+            return Object.getOwnPropertyDescriptor(new String('ab'), '2') === undefined;
+        }, 'true');
+        check('the primitive String descriptor is unchanged', function () {
+            return shape(Object.getOwnPropertyDescriptor('ab', '1'));
+        }, '["b",false,true,false]');
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -28227,6 +28290,9 @@ int main() {
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
     RUN_TEST(object_integrity_levels_ask_every_property);
+
+    // Phase 132: a boxed String exposes character indices as own descriptors.
+    RUN_TEST(boxed_string_own_index_descriptors);
 
     // Phase 119: Contextual GSUB (Type 1-7), Cursive GPOS (Type 3/7/8), and Arabic Shaping.
     RUN_TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions);

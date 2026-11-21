@@ -53,10 +53,42 @@ marks, Arabic without marks. Differences:
   control; Litebird drops it. This is an output-contract difference, not
   proof of a visible joining defect.
 
-Do not label all five as visual bugs. This strict raw-output oracle discovers
-where to investigate; a follow-up absolute-position/pixel oracle is needed
-to distinguish equivalent representations from incorrect rendering. No
-mismatch is hidden or turned into a passing baseline here.
+## Absolute placement diagnostic
+
+Each case now also carries `placement` in the JSON report. Starting at pen
+`(0, 0)`, a glyph's origin is `pen + offset`, then the pen moves by its
+advance. We compare sorted **multisets** of `(glyph ID, origin x, origin y)`
+and the final pen in both axes, exactly in font units. Multiplicity is kept.
+Sorting deliberately ignores draw order: this is not a compositing test.
+
+Only nonzero glyph IDs whose HarfBuzz font extents have both width and height
+zero can be omitted, and only when both advances are also zero. Unknown
+extents are not treated as empty. `.notdef` never disappears. The report lists
+the verified blank IDs; their original records remain in the raw arrays.
+
+On the same font/hash above: **11 same-placement, 2 different-placement,
+1 unsupported**. Of the five raw differences:
+
+- Marked Arabic has identical glyph origins and terminal pen despite its
+  different mark order and offsets.
+- ZWNJ/ZWJ have identical placement after dropping verified blank,
+  zero-advance glyphs. Visible glyphs are not discarded.
+- Marked Hebrew has a genuine origin disagreement: glyph 1305 is at
+  `(3081, 0)` in HarfBuzz and `(3208, 0)` in Litebird, **127 font units**
+  apart. Both runs end at `(4532, 0)`. This narrows the investigation to a
+  mark's placement, not merely a reordered output list.
+- Combining Latin remains different: composition changes the glyph IDs and
+  count, so absolute origins alone cannot establish visual equivalence.
+
+No raw mismatch is hidden or turned into a passing baseline. Exit codes still
+use the strict raw comparison. `same-placement` means only equal glyph IDs,
+origins and terminal pen under the stated blank-glyph rule, not equal pixels,
+paint order, clusters, caret behavior or correctness of either engine.
+
+The self-test covers compensating mark reordering, zero-advance blank removal,
+changed glyph IDs and both offsets/advances, duplicate marks, terminal advance,
+vertical pen accumulation, nonblank zero-advance glyphs, `.notdef`, and empty
+runs. These controls run in the existing CI self-test step without HarfBuzz.
 
 ## Limits
 

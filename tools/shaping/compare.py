@@ -30,6 +30,29 @@ def compare(expected, actual):
     return expected == actual
 
 
+def placement_signature(rows, blank_glyphs=frozenset()):
+    """Unordered glyph origins plus terminal pen; never a pixel-equivalence claim.
+
+    Offsets do not move the pen. Preserve multiplicity, and only omit a glyph
+    independently known to have empty ink when both its advances are zero.
+    """
+    x = y = 0
+    origins = []
+    for glyph, dx, dy, ox, oy in rows:
+        if not (glyph != 0 and glyph in blank_glyphs and dx == dy == 0):
+            origins.append([glyph, x + ox, y + oy])
+        x += dx
+        y += dy
+    return dict(origins=sorted(origins), terminal_pen=[x, y])
+
+
+def placement_comparison(expected, actual, blank_glyphs=frozenset()):
+    reference = placement_signature(expected, blank_glyphs)
+    candidate = placement_signature(actual, blank_glyphs)
+    return dict(status="same-placement" if reference == candidate else "different-placement",
+                harfbuzz=reference, litebird=candidate)
+
+
 def self_test():
     sample = [[42, 600, 0, 0, 0], [43, 0, 0, -20, 50]]
     assert compare(sample, [row[:] for row in sample])
@@ -39,7 +62,26 @@ def self_test():
         assert not compare(sample, mutated), f"missed column {column}"
     assert not compare(sample, sample[::-1])
     assert not compare(sample, sample[:1])
-    print("negative controls: IDs, advances, offsets, order and count detected", file=sys.stderr)
+    # Mark before base vs after base, compensated by the base advance.
+    before = [[43, 0, 0, 20, 50], [42, 600, 0, 0, 0]]
+    after = [[42, 600, 0, 0, 0], [43, 0, 0, -580, 50]]
+    assert placement_signature(before) == placement_signature(after)
+    for column in range(5):
+        mutated = [row[:] for row in after]
+        mutated[-1][column] += 1
+        assert placement_signature(before) != placement_signature(mutated)
+    assert placement_signature(after) != placement_signature(after + [after[-1]])
+    assert placement_signature([[42, 601, 0, 0, 0]]) != placement_signature([[42, 600, 0, 0, 0]])
+    assert placement_signature([[42, 0, 600, 4, 5], [43, 0, 0, 6, 7]]) == dict(
+        origins=[[42, 4, 5], [43, 6, 607]], terminal_pen=[0, 600])
+    blanks = {3, 0}
+    assert placement_signature(after + [[3, 0, 0, 0, 0]], blanks) == placement_signature(after)
+    assert placement_signature(after + [[3, 1, 0, 0, 0]], blanks) != placement_signature(after)
+    assert placement_signature(after + [[0, 0, 0, 0, 0]], blanks) != placement_signature(after)
+    assert placement_signature(after + [[44, 0, 0, 0, 0]], blanks) != placement_signature(after)
+    assert placement_signature([]) == dict(origins=[], terminal_pen=[0, 0])
+    print("negative controls: raw fields/order/count and absolute origins/terminal pen; "
+          "positive controls: compensated mark order and verified blank glyph", file=sys.stderr)
 
 
 def main():
@@ -79,9 +121,21 @@ def main():
         # .notdef agreement is not evidence of script support.
         missing = any(row[0] == 0 for row in expected + actual)
         status = "unsupported" if missing else "match" if compare(expected, actual) else "mismatch"
+        # Reference font extents identify empty ink, not a hard-coded space ID.
+        # None is unknown, not evidence that the glyph is blank.
+        blanks = set()
+        for glyph in {row[0] for row in expected + actual} - {0}:
+            extents = font.get_glyph_extents(glyph)
+            if extents is not None and extents.width == 0 and extents.height == 0:
+                blanks.add(glyph)
+        placement = placement_comparison(expected, actual, blanks)
+        if missing:
+            placement["status"] = "unsupported"
+        placement["verified_blank_glyphs"] = sorted(blanks)
         results.append(dict(name=name, text=text, script=script, direction=direction,
-                            status=status, harfbuzz=expected, litebird=actual))
-        print(f"{name}: {status}", file=sys.stderr)
+                            status=status, harfbuzz=expected, litebird=actual,
+                            placement=placement))
+        print(f"{name}: {status}; {placement['status']}", file=sys.stderr)
     report = dict(font=str(args.font), sha256=hashlib.sha256(data).hexdigest(),
                   uharfbuzz=hb.__version__, harfbuzz=hb.version_string(),
                   units_per_em=face.upem, language="und", features="defaults",
@@ -96,6 +150,9 @@ def main():
     counts = {s: sum(r["status"] == s for r in results)
               for s in ("match", "mismatch", "unsupported")}
     print(counts, file=sys.stderr)
+    placement_counts = {s: sum(r["placement"]["status"] == s for r in results)
+                        for s in ("same-placement", "different-placement", "unsupported")}
+    print(placement_counts, file=sys.stderr)
     return int(any(r["status"] != "match" for r in results))
 
 

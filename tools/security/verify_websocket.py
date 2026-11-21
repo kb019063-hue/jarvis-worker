@@ -28,6 +28,7 @@ import base64
 import hashlib
 import os
 import pathlib
+import re
 import socket
 import ssl
 import struct
@@ -425,6 +426,24 @@ def main() -> int:
     checks = 0
     failures = 0
 
+    def refused_before_close(record: str | None) -> bool:
+        """An error event followed by an unclean 1006 close, in that order."""
+        record = record or ""
+        return record.startswith("err") and record.endswith(",close:1006:false")
+
+    def tls_refusal_code(record: str | None) -> int | None:
+        """The X509_V_ERR code a wss:// refusal named, from the page's own event.
+
+        A refusal on a socket does not reach the engine's stderr: it surfaces as
+        the error event's message, which the page logs. A first version of this
+        check searched stderr and found nothing, so it was blind in exactly the
+        way it was written to cure. Every refusal used to say only
+        "certificate verification failed"; the code is what separates an
+        expired certificate from an untrusted issuer from a wrong name.
+        """
+        match = re.search(r"certificate verification failed \(code (\d+)", record or "")
+        return int(match.group(1)) if match else None
+
     def check(label: str, cond: bool, detail: str = "") -> None:
         nonlocal checks, failures
         checks += 1
@@ -545,7 +564,7 @@ function expectTlsFail(tag, url) {{
   pending++;
   var seq = [];
   var s = new WebSocket(url);
-  s.onerror = function() {{ seq.push('err'); }};
+  s.onerror = function(e) {{ seq.push('err[' + (e && e.message ? e.message : 'no-msg') + ']'); }};
   s.onclose = function(e) {{
     seq.push('close:' + e.code + ':' + e.wasClean);
     log(tag, seq.join(','));
@@ -616,16 +635,20 @@ setTimeout(pump, 1);
                   r1.get("loop_msg") == "echo:hi-loop" and r1.get("loop_close") == "1000:true",
                   f"{r1.get('loop_msg')} / {r1.get('loop_close')}")
             check("wss:// untrusted CA rejected fail-closed with 0 upgrades",
-                  r1.get("tls_untrusted") == "err,close:1006:false" and len(wss_untrusted.upgrades) == 0,
+                  refused_before_close(r1.get("tls_untrusted")) and len(wss_untrusted.upgrades) == 0
+                  and tls_refusal_code(r1.get("tls_untrusted")) == 18,
                   str(r1.get("tls_untrusted")))
             check("wss:// wrong SAN rejected fail-closed with 0 upgrades",
-                  r1.get("tls_wronghost") == "err,close:1006:false" and len(wss_wrong.upgrades) == 0,
+                  refused_before_close(r1.get("tls_wronghost")) and len(wss_wrong.upgrades) == 0
+                  and tls_refusal_code(r1.get("tls_wronghost")) == 64,
                   str(r1.get("tls_wronghost")))
             check("wss:// expired cert rejected fail-closed with 0 upgrades",
-                  r1.get("tls_expired") == "err,close:1006:false" and len(wss_expired.upgrades) == 0,
+                  refused_before_close(r1.get("tls_expired")) and len(wss_expired.upgrades) == 0
+                  and tls_refusal_code(r1.get("tls_expired")) == 10,
                   str(r1.get("tls_expired")))
             check("wss:// plaintext TCP peer rejected fail-closed",
-                  r1.get("tls_plaintext") == "err,close:1006:false",
+                  refused_before_close(r1.get("tls_plaintext"))
+                  and tls_refusal_code(r1.get("tls_plaintext")) is None,
                   str(r1.get("tls_plaintext")))
             check("Worker inherits Origin and completes wss:// roundtrip",
                   r1.get("worker_msg") == "W:wss-worker-ok",

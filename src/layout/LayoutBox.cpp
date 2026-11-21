@@ -831,6 +831,20 @@ void LayoutBox::layout_flex(float containing_width) {
             lines.push_back(std::move(single));
         }
 
+        // The cross size the lines are asked to fill. A definite height on the
+        // container is one; `align-content` being `stretch` by default means a
+        // lone line takes it (CSS Flexbox §9.4, "the cross size of a
+        // single-line flex container's line is the flex container's inner
+        // cross size"). Without it there is nothing for `align-items` to
+        // align against: the line's height is its tallest item, so centring in
+        // it moves nothing and stretching to it makes no item any taller.
+        float container_cross = -1.0f;
+        if (s.height >= 0.0f) {
+            container_cross = (s.box_sizing == BoxSizing::BorderBox)
+                                  ? std::max(0.0f, s.height - v_padding_border)
+                                  : s.height;
+        }
+
         float y_line_cursor = 0.0f;
         for (auto& line : lines) {
             float total_gaps = (line.items.size() > 1) ? (line.items.size() - 1) * s.gap : 0.0f;
@@ -853,6 +867,14 @@ void LayoutBox::layout_flex(float containing_width) {
                 cur_line_max_h = std::max(cur_line_max_h, child->dimensions.margin_box().height);
             }
             float remaining = dimensions.content.width - (total_used_w + total_gaps);
+
+            // One line in a container of definite height fills the container;
+            // several lines are only as tall as their tallest item until
+            // `align-content` is implemented and shares the height out.
+            float line_cross = cur_line_max_h;
+            if (lines.size() == 1 && container_cross >= 0.0f) {
+                line_cross = std::max(line_cross, container_cross);
+            }
 
             float x_cursor = 0.0f;
             float gap_spacing = col_gap;
@@ -895,18 +917,18 @@ void LayoutBox::layout_flex(float containing_width) {
 
                 switch (s.align_items) {
                     case AlignItems::Stretch:
-                        if (cs.height < 0.0f && cur_line_max_h > 0.0f) {
+                        if (cs.height < 0.0f && line_cross > 0.0f) {
                             float child_v_extra = child->dimensions.margin.top + child->dimensions.margin.bottom +
                                                   child->dimensions.border.top + child->dimensions.border.bottom +
                                                   child->dimensions.padding.top + child->dimensions.padding.bottom;
-                            child->dimensions.content.height = std::max(0.0f, cur_line_max_h - child_v_extra);
+                            child->dimensions.content.height = std::max(0.0f, line_cross - child_v_extra);
                         }
                         break;
                     case AlignItems::FlexEnd:
-                        y_offset = cur_line_max_h - child_h;
+                        y_offset = line_cross - child_h;
                         break;
                     case AlignItems::Center:
-                        y_offset = (cur_line_max_h - child_h) / 2.0f;
+                        y_offset = (line_cross - child_h) / 2.0f;
                         break;
                     case AlignItems::FlexStart:
                     default:
@@ -933,7 +955,7 @@ void LayoutBox::layout_flex(float containing_width) {
                 x_cursor += child->dimensions.margin_box().width + gap_spacing;
             }
 
-            y_line_cursor += cur_line_max_h + row_gap;
+            y_line_cursor += line_cross + row_gap;
         }
 
         float total_h = y_line_cursor > 0.0f ? (y_line_cursor - row_gap) : 0.0f;
@@ -946,12 +968,41 @@ void LayoutBox::layout_flex(float containing_width) {
         // Column layout: main axis is vertical (Y), cross axis is horizontal (X)
         float y_cursor = 0.0f;
         float max_child_w = 0.0f;
+        float cross_available = dimensions.content.width;
 
         for (auto& child : in_flow) {
             child->layout(dimensions.content.width);
             max_child_w = std::max(max_child_w, child->dimensions.margin_box().width);
 
-            float new_x = dimensions.content.x +
+            // `align-items` on a column container places the item across the
+            // width. Stretch — the default — fills an auto width: a block item
+            // has already done that in layout_block, an inline-block item has
+            // not, and an item that states a width keeps it, because stretch
+            // only answers a cross size that is auto.
+            const ComputedStyle& cross_cs = *child->style;
+            if (s.align_items == AlignItems::Stretch && cross_cs.width < 0.0f) {
+                float child_h_extra = child->dimensions.margin.left + child->dimensions.margin.right +
+                                      child->dimensions.border.left + child->dimensions.border.right +
+                                      child->dimensions.padding.left + child->dimensions.padding.right;
+                child->dimensions.content.width = std::max(0.0f, cross_available - child_h_extra);
+            }
+
+            float x_offset = 0.0f;
+            switch (s.align_items) {
+                case AlignItems::Center:
+                    x_offset = (cross_available - child->dimensions.margin_box().width) / 2.0f;
+                    break;
+                case AlignItems::FlexEnd:
+                    x_offset = cross_available - child->dimensions.margin_box().width;
+                    break;
+                case AlignItems::Stretch:
+                case AlignItems::FlexStart:
+                default:
+                    x_offset = 0.0f;
+                    break;
+            }
+
+            float new_x = dimensions.content.x + x_offset +
                           child->dimensions.margin.left + child->dimensions.border.left + child->dimensions.padding.left;
             float new_y = dimensions.content.y + y_cursor +
                           child->dimensions.margin.top + child->dimensions.border.top + child->dimensions.padding.top;
@@ -1180,9 +1231,45 @@ void LayoutBox::layout_grid(float containing_width) {
         size_t rs = std::min(placements[i].r_start, num_rows - 1);
 
         auto& child = in_flow[i];
+        const ComputedStyle& item_cs = *child->style;
+
+        // `align-items` in a grid container is the block axis, and stretch —
+        // the default — is what makes a cell painted: the item's area is its
+        // rows' heights, and an item with no height of its own fills it. The
+        // rows are already settled by now (an item's height is what asked for
+        // the row to be that tall), so the stretch happens after the tracks.
+        size_t re = std::min(placements[i].r_end, num_rows);
+        float area_h = 0.0f;
+        for (size_t r = rs; r < re; ++r) {
+            area_h += row_heights[r];
+            if (r + 1 < re) area_h += row_gap;
+        }
+
+        float y_offset = 0.0f;
+        switch (s.align_items) {
+            case AlignItems::Stretch:
+                if (item_cs.height < 0.0f) {
+                    float item_v_extra = child->dimensions.margin.top + child->dimensions.margin.bottom +
+                                         child->dimensions.border.top + child->dimensions.border.bottom +
+                                         child->dimensions.padding.top + child->dimensions.padding.bottom;
+                    child->dimensions.content.height = std::max(0.0f, area_h - item_v_extra);
+                }
+                break;
+            case AlignItems::Center:
+                y_offset = (area_h - child->dimensions.margin_box().height) / 2.0f;
+                break;
+            case AlignItems::FlexEnd:
+                y_offset = area_h - child->dimensions.margin_box().height;
+                break;
+            case AlignItems::FlexStart:
+            default:
+                y_offset = 0.0f;
+                break;
+        }
+
         float new_x = dimensions.content.x + col_x[cs] +
                       child->dimensions.margin.left + child->dimensions.border.left + child->dimensions.padding.left;
-        float new_y = dimensions.content.y + row_y[rs] +
+        float new_y = dimensions.content.y + row_y[rs] + y_offset +
                       child->dimensions.margin.top + child->dimensions.border.top + child->dimensions.padding.top;
 
         const ComputedStyle& post_cs = *child->style;

@@ -469,7 +469,14 @@ bool decode_euc_jp(std::string_view bytes, std::string& out, bool fatal) {
     }
 }
 
-bool decode_iso2022_jp(std::string_view bytes, std::string& out, bool fatal) {
+// ISO-2022-JP is the one decoder here whose state outlives its input: an
+// escape sequence decides which of four modes the bytes that follow are read
+// in, and a `TextDecoder` with `{stream: true}` (§11.1.1) feeds it in chunks
+// that can end between two of them. `mode_in` is the mode the previous chunk
+// left it in (0 ASCII, 1 Roman, 2 Katakana, 3 double-byte), `mode_out` the one
+// this chunk leaves. A one-shot call passes 0 for both.
+bool decode_iso2022_jp(std::string_view bytes, std::string& out, bool fatal,
+                       int mode_in = 0, int* mode_out = nullptr) {
     enum class State : uint8_t {
         Ascii,
         Roman,
@@ -479,10 +486,19 @@ bool decode_iso2022_jp(std::string_view bytes, std::string& out, bool fatal) {
         EscapeStart,
         Escape,
     };
+    auto mode_of = [](int mode) {
+        switch (mode) {
+        case 1: return State::Roman;
+        case 2: return State::Katakana;
+        case 3: return State::LeadingByte;
+        default: return State::Ascii;
+        }
+    };
 
     ByteQueue q(bytes);
-    State state = State::Ascii;
-    State output_state = State::Ascii;
+    State state = mode_of(mode_in);
+    State output_state = state;
+    if (mode_out) *mode_out = mode_in;
     uint8_t leading = 0;
     bool output = false;
 
@@ -504,6 +520,7 @@ bool decode_iso2022_jp(std::string_view bytes, std::string& out, bool fatal) {
                 output = false;
                 out.push_back(static_cast<char>(byte));
             } else if (byte == kEndOfQueue) {
+                if (mode_out) *mode_out = 0;
                 return true;
             } else {
                 output = false;
@@ -525,6 +542,10 @@ bool decode_iso2022_jp(std::string_view bytes, std::string& out, bool fatal) {
                 output = false;
                 out.push_back(static_cast<char>(byte));
             } else if (byte == kEndOfQueue) {
+                if (mode_out) {
+                    *mode_out = state == State::Roman ? 1 : state == State::Katakana ? 2
+                             : state == State::LeadingByte ? 3 : 0;
+                }
                 return true;
             } else {
                 output = false;
@@ -539,6 +560,10 @@ bool decode_iso2022_jp(std::string_view bytes, std::string& out, bool fatal) {
                 output = false;
                 append_utf8(out, static_cast<uint32_t>(0xFF61 - 0x21 + byte));
             } else if (byte == kEndOfQueue) {
+                if (mode_out) {
+                    *mode_out = state == State::Roman ? 1 : state == State::Katakana ? 2
+                             : state == State::LeadingByte ? 3 : 0;
+                }
                 return true;
             } else {
                 output = false;
@@ -554,6 +579,10 @@ bool decode_iso2022_jp(std::string_view bytes, std::string& out, bool fatal) {
                 leading = static_cast<uint8_t>(byte);
                 state = State::TrailingByte;
             } else if (byte == kEndOfQueue) {
+                if (mode_out) {
+                    *mode_out = state == State::Roman ? 1 : state == State::Katakana ? 2
+                             : state == State::LeadingByte ? 3 : 0;
+                }
                 return true;
             } else {
                 output = false;
@@ -1566,6 +1595,12 @@ bool sniff_bom_encoding(std::string_view bytes, EncodingId& out, std::size_t& bo
     }
     bom_length = 0;
     return false;
+}
+
+bool decode_stream_chunk(std::string_view bytes, EncodingId encoding, std::string& out_utf8,
+                         bool fatal, int mode_in, int* mode_out) {
+    if (encoding != EncodingId::Iso2022Jp) return decode_with_encoding(bytes, encoding, out_utf8, fatal);
+    return decode_iso2022_jp(bytes, out_utf8, fatal, mode_in, mode_out);
 }
 
 bool decode_with_encoding(std::string_view bytes, EncodingId encoding, std::string& out_utf8, bool fatal) {

@@ -49,7 +49,7 @@ standard now makes, which is 1,967 of the 1,973.
 | **`delete` in strict code** | The operator is ECMAScript `DeletePropertyOrThrow`: a property that is not configurable answers `false` in sloppy code and is a `TypeError` in strict code, with V8's words (`Cannot delete property 'x' of #<Object>`, `of [object Array]`, `of #<Map>`, …). An array's `length` is now refused at all — it is computed, not stored, and used to answer `true` without removing anything. `delete name` is answered rather than always `false`: a `var` is not deletable, a configurable property of the global object goes, a name that resolves to nothing is `true`, and `this` is `true`; in strict code it is the language's early `SyntaxError`. `Reflect.deleteProperty` keeps answering `false` in both modes (Phase 123, finding 128). Still open: an array index defined by a descriptor keeps no attributes of its own, so deleting one does not throw | `make test`, suite `a_strict_delete_refuses_what_it_cannot_remove` |
 | **Collection's answer, invariants checked** | The collector's answer is checked in-process and through the CLI: unreachable cycles of every shape are reclaimed (self, mutual, closure, self-containing array), a global-kept thread of a graph is untouched while the cyclic pile around it is reclaimed, and the live set stays flat across 24 churn rounds within 16 cells | `make test`, suites `gc_oracle_cycles_are_reclaimed`, `gc_oracle_retention_is_exact`, `gc_oracle_repeated_churn_stays_flat`; `make gc-oracle` |
 | **Automatic GC at safe points** | Per-agent allocation threshold (`kDefaultAutoGcMinThreshold = 8192` cells, growing geometrically as `max(min_threshold, surviving_agent_cells)` after each collection) triggers collection automatically at the existing statement and bytecode safe points without calling `gc()` (Phase 145, finding 150). Peak RSS on `for (var i = 0; i < 400000; i++) o = { a: i }` drops **412.4 → 18.1 MiB** (-95.6%) and 3,000,000 iterations finishes in **2.16 s at 18.0 MiB** (previously >3 GB). Still open: native-capture leaks (`o.b = f.bind(o)`, pending timers), event-loop turn safe points, and incremental/generational collection | `make test`, suites `automatic_gc_threshold_and_geometric_growth`, `automatic_gc_reclaims_churn_without_calling_gc`; `make gc-oracle`; `make verify-gc-stress` |
-| Engine unit tests | 320<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
+| Engine unit tests | 321<!--metrics:unit_suites/int--> suites + 114 cross-origin/channel checks, all passing | `make test` |
 | **Shared `ComputedStyle` & enum compaction** | `LayoutBox` (1,320 → **344 B**) and `InlineFragment` (1,064 → **88 B**) hold a 16-byte `SharedComputedStyle` deduplicated per layout build (`ComputedStylePool`), with copy-on-write percentage resolution and `uint8_t` enums/bitmasks (Phase 71, finding 77). Peak RSS on 100k `word <b>bold</b> ` drops **1,382.3 → 352.0 MiB** (-74.5%) with identical paint dumps | `make bench-styles`; `make test` |
 | **Map/Set iterator cursors** | A completed iterator unregisters its remapping cursor immediately; `new_cursor()` prunes abandoned partial iterators only at geometric registry sizes. Node-recorded cases keep two iterators live across compaction, insertion, `clear()`, and `done`; in two equal 8,192-loop batches in one process with no `gc()`, the later Map and Set batch may take no more than 2.25× the earlier one plus 40 ms, and both batches must sum every value | `make verify-collection-iterators`; `make bench-collections` |
 | **Per-glyph font fallback** | A codepoint the primary face does not cover is drawn from the next discovered system face that has it, loaded lazily (Phase 64). The oracle is the measured `cmap` coverage of two faces, not an assumption: `'A'` is in both DejaVuSans and the vendored Ahem, `'Ā'` in DejaVu only, `'一'` (`U+4E00`) in Ahem only | `make test`, suite `per_glyph_font_fallback` |
@@ -69,6 +69,7 @@ standard now makes, which is 1,967 of the 1,973.
 | RegExp Unicode 17.0 & ES2025 | **1,849 / 1,879 (98.4%)** test262 `built-ins/RegExp` (up from 739/1,879) + **237 / 240 (98.8%, 0 fail)** `language/literals/regexp` + **333 / 339 (98.2%)** `String.prototype/{match,matchAll,replace,replaceAll,search,split}`; **588 / 588** Node.js differential + fuzz (`0` discrepancies) & **112 / 112** ES2025 spec checks; `make diff-strings` **50,509 / 50,580** (`0` RegExp diffs) | `make verify-regexp`, `make diff-strings`, `tools/conformance/run_test262.py` |
 | **Array prototype methods on any receiver** | **1,523 / 1,632 (93.3%)** test262 `built-ins/Array/prototype` (up from 1,391, **22 crashes → 0**, 132 gained and none lost): `every` over `{ 0: 9, length: Infinity }` reads one index and stops instead of reading four billion; `map` over `{ length: 4294967296 }` throws the `RangeError` of `ArrayCreate` before the first callback; `indexOf` finds a key past 2^32-1 and one at index 2^53-2 without counting to it; `map` over `{0: 1, length: 3}` is `[2, <hole>, <hole>]` rather than `[2, NaN, NaN]`; a callback that fills a hole gets it visited (`[1,2,,4,5]` runs five, not four), one that throws is allowed to, and one that shortens the array ends the loop. `Array.prototype.toString` is `join` looked up on the receiver, so `[1,2].toString()` is `1,2` (Phase 129, finding 134) | `make test262`, `make test` |
 | **The Annex B `String.prototype` HTML methods** | The thirteen methods Annex B kept — `anchor`, `big`, `blink`, `bold`, `fixed`, `fontcolor`, `fontsize`, `italics`, `link`, `small`, `strike`, `sub`, `sup` — as one `CreateHTML` (§B.2.3.1): the receiver is converted first and the attribute second, only `"` is escaped (as `&quot;`, since it is the character that would end the attribute), the answer is built in UTF-16 so an emoji or a lone surrogate survives, and each is a non-constructor with the standard's `length`. `trimLeft`/`trimRight` are now the *same function objects* as `trimStart`/`trimEnd` (§B.2.3.13), so they are `===` and both are named `trimStart` (Phase 149, finding 154). `annexB/built-ins/String` **19/111 → 105/111 (94.6%)** and the whole `annexB` **585 → 671**, 86 gained and none lost; the six that remain need `$262.IsHTMLDDA` | `make test`, suite `annex_b_string_html_methods`; `tools/conformance/run_test262.py annexB` |
+| **`TextDecoder` in pieces** | `decode(input, {stream: true})` is the same decoder asked to keep the bytes a chunk *ends inside of* instead of answering `U+FFFD` for them (Encoding §11.1.1): `d.decode([0xE2], {stream: true})` is `""` and the `[0x82, 0xAC]` that follows is `"€"`, where before every chunk boundary inside a character cost one replacement character. The bytes held back are decided by scanning the chunk forward — backwards is wrong, `0xA1` is a lead in EUC-JP and a trail in EUC-KR — and ISO-2022-JP's mode, chosen by an escape sequence, crosses the chunk. The BOM is sniffed once per stream (a second one is data, a split one is waited for) and a fatal stream that ends inside a character throws on the flush (Phase 163, finding 168). **164 splits of 12 byte strings in 12 encodings, 0 differing** from the one-shot answer; 800 seeded splits and 300 four-chunk streams through the CLI, 0 differing | `make test`, suite `textdecoder_reaches_script_in_pieces` |
 | String Unicode 17.0 & CLDR 48 | **50,580 / 50,580 (0 diffs)** in `make diff-strings` (down from 71); **12,255,232** all-code-point (`1,114,112 × 11` ops) + **1,112** curated/fuzz strings + **1,038** collation pairs + **400,680** UCD `NormalizationTest.txt` assertions + **206,297** CLDR `CollationTest_CLDR` pairs = **0 diffs**; test262 String Unicode/locale 9 dirs **152 / 156 (97.4%)** (up from 105/156), full `built-ins/String` **1,199 / 1,223 (98.0%)** | `make diff-strings`, `make verify-string-unicode`, `tools/conformance/run_test262.py` |
 | Worker MIME/static-module & lifecycle | 17 end-to-end checks (HTTP/data MIME policy, a `{type:"module"}` static import graph, classic `importScripts` boundary, `addEventListener("error")`, 60/60 4-worker exit runs) | `make security-worker` |
 | WebSocket TLS, Fetch policy, RFC 6455, cookies & binary frames | 35 end-to-end checks against OpenSSL 3 CA/SAN/IP/expired TLS peers, Fetch `Origin` & mixed-content policy across `https:`/`http:`/`file:`/Worker/sandboxed `iframe`, relative URLs, WHATWG validation/close semantics, 60/60 concurrent 4x `wss://` exit runs, upgrade `Cookie`/`Set-Cookie` in `http:`/`https:` pages (Phase 90, finding 96; Phase 117, finding 122), and binary frame `send(ArrayBuffer/TypedArray/DataView/Blob)` + `binaryType` (`"blob"` / `"arraybuffer"`) delivery across pages and Workers (Phase 161, finding 166) | `make security-websocket`; `make test` |
@@ -87,7 +88,7 @@ make url-conformance # URL parsing and setters (web-platform-tests data)
 make xml-conformance # the XML parser: the W3C suite, downloaded the first time
 make wpt             # web-platform-tests for dom/nodes and domparsing, with testharness.js
 make diff-xml        # generated XML read here, by Expat and by libxml2; serialized trees read back
-make test            # 320<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
+make test            # 321<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
 make gc-oracle       # the collector's invariants through the CLI: cycles reclaimed, the live set flat, reached data intact
 make check-numbers   # the numbers above still divide and still count, and every marked figure and floor agrees (tools/ci/check_numbers.py)
 make check-suites    # every suite that runs script begins through TestPage, so two new ones merge cleanly (tools/ci/check_suites.py)
@@ -783,7 +784,7 @@ twice.
 # Build the main litebird CLI
 make
 
-# Run the 320<!--metrics:unit_suites/int--> engine test suites
+# Run the 321<!--metrics:unit_suites/int--> engine test suites
 make test
 
 # Check the collector's invariants through the CLI
@@ -854,14 +855,14 @@ make gc-oracle
 make test
 ```
 
-Output (320<!--metrics:unit_suites/int--> suites; the first and last lines shown):
+Output (321<!--metrics:unit_suites/int--> suites; the first and last lines shown):
 ```text
 === Running Litebird Browser Engine Test Suite ===
 
 Running test: color_parsing... PASSED
 Running test: css_color_keywords_match_the_css_specification... PASSED
 ...
-All 320<!--metrics:unit_suites/int--> engine test suites passed successfully!
+All 321<!--metrics:unit_suites/int--> engine test suites passed successfully!
 ```
 
 ```bash
@@ -1021,7 +1022,7 @@ between halves, `indexOf` between halves, and a `substring` piece read then
 completed) against Node.js under a one-second guard (`14 / 22 / 11 / 17 / 154 /
 17 ms`, versus `58 / 242 / 893 ms` at 5k/10k/20k for read-between-halves
 before), `make bench` runs all 45 cases, `make tsan` passes under TSan and
-ASan+UBSan, `make test` passes 320/320<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
+ASan+UBSan, `make test` passes 321/321<!--metrics:unit_suites/pair--> suites, and `make diff-strings` prints
 `50485 / 50580`. Remaining nuances: in JS, `s += '\uD83D\uDE00'; s =
 s.substring(0, s.length - 1); s += '\uDE00'` still keeps `refs == 2` across
 the variable slot and operand temporary during `+=` (though single-owner C++

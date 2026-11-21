@@ -30721,6 +30721,125 @@ TEST(a_definition_names_the_function_it_makes) {
     assert(failed.empty());
 }
 
+TEST(object_assign_boxes_throws_and_copies_every_own_key) {
+    using namespace litebird;
+
+    // Phase 167, finding 169. `Object.assign` had been three lines that did
+    // what the signature suggests and not what §20.1.2.1 says:
+    //
+    //   Object.assign('test', { a: 1 }).a   -> undefined   (the write was
+    //                                          dropped on the primitive)
+    //   Object.assign(frozen, { a: 2 })     -> no throw    (Set must throw)
+    //   Object.assign({}, { [sym]: 1 })     -> no symbol   (own *keys*, not
+    //                                          own string keys)
+    //
+    // Each part of the fix is one sentence of the spec: the target is boxed by
+    // `ToObject`; every copy is a strict `Set`, whose `false` throws; the keys
+    // are `[[OwnPropertyKeys]]` — the string keys in their order, then the
+    // symbols, which `own_keys` never reported at all.
+    //
+    // Every expected value was printed by Node.js 22 for the same source.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throws(what, f) {
+            try { f(); failures.push(what + ': did not throw'); }
+            catch (e) { if (!(e instanceof TypeError)) failures.push(what + ': threw ' + e); }
+        }
+
+        // ---- ToObject on the target ---------------------------------------
+        var fromString = Object.assign('test', { a: 1 });
+        same('a string target is boxed', typeof fromString, 'object');
+        same('and the write lands on the box', fromString.a, 1);
+        same('the box still knows its string', fromString.valueOf(), 'test');
+        same('assign of one argument boxes too', typeof Object.assign('a'), 'object');
+        same('a number target', Object.assign(12, 'aaa').valueOf(), 12);
+        same('and takes the characters', Object.getOwnPropertyNames(Object.assign(12, 'aaa')).join(','), '0,1,2');
+        same('a boolean target', Object.assign(true, { a: 1 }).valueOf(), true);
+        same('a symbol target', Object.assign(Symbol('foo'), { a: 1 }).toString(), 'Symbol(foo)');
+        same('an object target is returned as it is',
+             (function () { var o = {}; return Object.assign(o, { a: 1 }) === o; })(), true);
+        throws('a null target', function () { Object.assign(null, {}); });
+        throws('an undefined target', function () { Object.assign(undefined, {}); });
+
+        // ---- Set(target, key, value, true) ---------------------------------
+        throws('a non-writable data property', function () {
+            var o = {}; Object.defineProperty(o, 'attr', { writable: false });
+            Object.assign(o, { attr: 1 });
+        });
+        throws('a frozen data property', function () {
+            Object.assign(Object.freeze({ foo: 1 }), { foo: 2 });
+        });
+        throws('creating a property on a sealed target', function () {
+            Object.assign(Object.seal({}), { foo: 2 });
+        });
+        throws('creating a property on a non-extensible target', function () {
+            Object.assign(Object.preventExtensions({}), { foo: 2 });
+        });
+
+        // ...and a setter is still a setter, however frozen its object is.
+        var seen = [];
+        var frozenAccessor = { set foo(v) { seen.push(v); } };
+        Object.freeze(frozenAccessor);
+        Object.assign(frozenAccessor, { foo: 2 });
+        same('a frozen accessor is still called', seen, [2]);
+
+        var sym = Symbol('s'), symSeen = [];
+        var sealedAccessor = { set [sym](v) { symSeen.push(v); } };
+        Object.seal(sealedAccessor);
+        var symbolSource = {}; symbolSource[sym] = 3;
+        Object.assign(sealedAccessor, symbolSource);
+        same('a sealed symbol accessor is still called', symSeen, [3]);
+
+        // An existing property of a non-extensible target can still be set.
+        var loose = Object.preventExtensions({ foo: 1 });
+        Object.assign(loose, { foo: 2 });
+        same('an existing property of a non-extensible target', loose.foo, 2);
+        var looseSymbol = {}; looseSymbol[sym] = 1;
+        Object.preventExtensions(looseSymbol);
+        var second = {}; second[sym] = 2;
+        Object.assign(looseSymbol, second);
+        same('an existing symbol property of a non-extensible target', looseSymbol[sym], 2);
+
+        // A source that is null or undefined is skipped, not refused.
+        same('a null source', Object.assign({ a: 1 }, null, { b: 2 }).b, 2);
+
+        // ---- [[OwnPropertyKeys]]: strings first, then symbols --------------
+        var s1 = Symbol('x'), s2 = Symbol('y'), log = [];
+        var ordered = {};
+        Object.defineProperty(ordered, s1, { get: function () { log.push('sym1'); }, enumerable: true });
+        Object.defineProperty(ordered, 'a', { get: function () { log.push('a'); }, enumerable: true });
+        Object.defineProperty(ordered, s2, { get: function () { log.push('sym2'); }, enumerable: true });
+        Object.defineProperty(ordered, 'b', { get: function () { log.push('b'); }, enumerable: true });
+        Object.assign({}, ordered);
+        same('the order is strings then symbols', log, ['a', 'b', 'sym1', 'sym2']);
+
+        var copied = Object.assign({}, ordered);
+        same('the symbols were copied', Object.getOwnPropertySymbols(copied).length, 2);
+
+        // A non-enumerable key is not one, and a string source copies its
+        // characters rather than its `length`.
+        var hidden = {}; Object.defineProperty(hidden, 'h', { value: 1, enumerable: false });
+        same('a non-enumerable key is skipped', Object.keys(Object.assign({}, hidden)).length, 0);
+        same('a string source copies characters', Object.getOwnPropertyNames(Object.assign({}, 'ab')).join(','), '0,1');
+
+        // ---- and the methods that read the same key list are unchanged -----
+        same('Object.keys still reports strings only', Object.keys(ordered).join(','), 'a,b');
+        same('for-in still reports strings only', (function () {
+            var out = []; for (var k in ordered) out.push(k); return out.join(',');
+        })(), 'a,b');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -31129,6 +31248,10 @@ int main() {
 
     // Phase 159: a definition names the function it makes.
     RUN_TEST(a_definition_names_the_function_it_makes);
+
+    // Phase 167: Object.assign boxes its target, throws on a refused Set, and
+    // copies the symbols.
+    RUN_TEST(object_assign_boxes_throws_and_copies_every_own_key);
 
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.

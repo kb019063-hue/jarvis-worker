@@ -181,9 +181,9 @@ public:
         }
         // A pattern asks for the iterator and nothing else. An object that only
         // has `next` is not iterable, however much it looks like an iterator:
-        // `var [x] = { next() {} }` is a TypeError here, as it is in the
-        // language, where for...of accepts that object. (IterationCursor used
-        // to accept it too, which is the case `iteration.dat` records.)
+        // `var [x] = { next() {} }`, and `for (var x of { next() {} })` beside
+        // it, are TypeErrors. (IterationCursor used to accept the object, which
+        // is the case `iteration.dat` records.)
         js_throw_type_error(js_describe_thrown(source) + " is not iterable");
     }
 
@@ -193,7 +193,11 @@ public:
         switch (m_mode) {
             case Mode::Array: {
                 const auto& elements = m_source.object_val->array_elements;
-                if (m_index < elements.size()) return m_source.array_element(m_index++);
+                // An element is a read of the array's storage, and a hole is not
+                // undefined necessarily but whatever the index has otherwise:
+                // js_array_get is what `array[index]` gives, and what the
+                // array's own iterator yields for that index.
+                if (m_index < elements.size()) return js_array_get(m_source, m_index++);
                 m_done = true;
                 return JsValue::make_undefined();
             }

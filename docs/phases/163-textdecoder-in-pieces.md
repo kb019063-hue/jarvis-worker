@@ -70,7 +70,7 @@ Its second half is the check that a stream cannot be a second, worse decoder:
 must produce exactly what one call produces — 164 splits, 0 differing:
 
 ```bash
-make test     # All 319 engine test suites passed successfully!
+make test     # All 320 engine test suites passed successfully!
 ```
 
 The same invariant, at scale, through the CLI:

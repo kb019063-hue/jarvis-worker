@@ -32,7 +32,7 @@ attribute as `&quot;`; `define_str_method` returning the function it made so
 
 `annexB/built-ins/String`: **19/111 → 105/111 (94.6%)**. Whole `annexB`:
 **585 → 671**, 86 gained and **0 lost**. `built-ins/String` (1200/1223) and
-`language` (19783/23015) identical before and after. `make test` 304/304, new
+`language` (19783/23015) identical before and after. `make test` 306/306, new
 suite `annex_b_string_html_methods`.
 
 ## 4. What is still open

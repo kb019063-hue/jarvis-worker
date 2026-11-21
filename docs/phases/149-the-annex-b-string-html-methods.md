@@ -95,7 +95,7 @@ a throwing attribute, an emoji on both sides, `new` refusing, `length`/`name`
 for all thirteen, the descriptor, and both trim identities):
 
 ```bash
-make test     # All 304 engine test suites passed successfully!  (114 cross-origin, 0 failure(s))
+make test     # All 306 engine test suites passed successfully!  (114 cross-origin, 0 failure(s))
 ```
 
 ## 4. What is still open

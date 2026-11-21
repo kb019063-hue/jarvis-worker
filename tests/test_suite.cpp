@@ -16971,14 +16971,30 @@ TEST(a_hole_is_a_place_the_prototype_can_fill) {
         ok('a hole with nothing behind it reads undefined', [, ][0], undefined);
         // An object whose prototype is an array inherits its indices one by
         // one -- the elements are the prototype's own properties, which is
-        // what `lookup_chain` did not look at. Its `length` is a *different*
-        // gap and a row of AGENTS.md of its own: the standard inherits it from
-        // the prototype's `length` and this engine answers `undefined`, so it
-        // is asserted here as it is, where a change to it will be noticed.
+        // what `lookup_chain` did not look at. `length` is the other thing an
+        // array keeps in `array_elements` instead of the property map, and it
+        // inherits the same way: a read that falls through the chain finds it
+        // on the array it lands on (finding 138). It is inherited, but it is
+        // not an own property, so it has no descriptor and `Object.keys` does
+        // not list it.
         var inherited = Object.create([7, 8, 9]);
         ok('an object with an array prototype inherits an index', inherited[0], 7);
         ok('an index past the array end is undefined', inherited[3], undefined);
-        ok('its length is not inherited here', inherited.length, undefined);
+        ok('and it inherits the length', inherited.length, 3);
+        ok('the inherited length is not an own property', inherited.hasOwnProperty('length'), false);
+        ok('and has no descriptor', Object.getOwnPropertyDescriptor(inherited, 'length'), undefined);
+        ok('but it is in', 'length' in inherited, true);
+        // The length belongs to the array it was found on, not to the object
+        // that asked: a prototype that grows is a longer length for everyone.
+        var grows = Object.create([1, 2]);
+        ok('the length is a read, not a copy', grows.length, 2);
+        [1, 2, 3, 4].forEach(function (v) { if (v === 3) { grows[0] = 0; } });
+        var longer = Object.create([1, 2, 3, 4]);
+        ok('a longer prototype is a longer length', longer.length, 4);
+        ok('an empty array prototype is length zero', Object.create([]).length, 0);
+        // Two levels of it: the walk keeps going until it reaches an array.
+        ok('the walk reaches an array through another object', Object.create(grows).length, 2);
+        ok('and a longer one through the same walk', Object.create(Object.create([1, 2, 3, 4])).length, 4);
         var prototypeIndexed = Object.create(Array.prototype);
         Array.prototype[2] = 'two';
         ok('a plain object still sees an index the prototype has', prototypeIndexed[2], 'two');
@@ -16988,6 +17004,90 @@ TEST(a_hole_is_a_place_the_prototype_can_fill) {
         var own = [1, , 3];
         ok('a hole has no descriptor', Object.getOwnPropertyDescriptor(own, '1'), undefined);
         ok('but the length still counts it', own.length, 3);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
+// Finding 138. An array keeps two things in `array_elements` instead of in
+// its property map: its indices and its `length`. `lookup_chain` had learnt to
+// hand out the indices -- so `Object.create([7, 8, 9])[0]` was already 7 --
+// but it had no case for `length`, so a read that fell through the chain to an
+// array stopped one answer short: `Object.create([7, 8, 9]).length` was
+// `undefined` where the language has `3`. Both answers now come from the same
+// place, the array the walk lands on.
+TEST(length_is_inherited_from_an_array_prototype) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"JS(
+        var failures = [];
+        function ok(label, actual, expected) {
+            if (!Object.is(actual, expected)) {
+                failures.push(label + ': got ' + String(actual) + ' want ' + String(expected));
+            }
+        }
+    )JS");
+
+    // The read itself, and the fact that it is inherited rather than owned:
+    // the standard has `HasProperty(o, 'length')` true and
+    // `GetOwnPropertyDescriptor(o, 'length')` undefined, which is exactly the
+    // pair a chain walk with no descriptor to hand out produces.
+    js.eval(R"JS(
+        var inherited = Object.create([7, 8, 9]);
+        ok('an object with an array prototype has its length', inherited.length, 3);
+        ok('the length is not an own property', inherited.hasOwnProperty('length'), false);
+        ok('and it has no descriptor', Object.getOwnPropertyDescriptor(inherited, 'length'), undefined);
+        ok('but `in` finds it', 'length' in inherited, true);
+        ok('Object.keys does not list it', Object.keys(inherited).length, 0);
+        ok('JSON.stringify does not show it', JSON.stringify(inherited), '{}');
+        ok('for-in does not enumerate it', (function () {
+            var seen = [];
+            for (var k in inherited) seen.push(k);
+            return seen.join();
+        })(), '0,1,2');
+        ok('the indices still come through', inherited[1], 8);
+        ok('and past the end is still undefined', inherited[9], undefined);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+
+    // It is a read of the array it lands on, not a number copied to the
+    // reader: the same object sees the new length after the array grows, and
+    // the walk goes through any number of objects to reach it.
+    js.eval(R"JS(
+        var proto = [1, 2];
+        var reader = Object.create(proto);
+        ok('the length starts at two', reader.length, 2);
+        proto.push(3);
+        ok('and follows the array growing', reader.length, 3);
+        proto.length = 1;
+        ok('and the array shrinking', reader.length, 1);
+        ok('the walk reaches an array two levels up', Object.create(Object.create([1, 2, 3, 4])).length, 4);
+        ok('an empty array prototype is length zero', Object.create([]).length, 0);
+        ok('Array.prototype still has a length', typeof Array.prototype.length, 'number');
+        ok('and it is zero', Array.prototype.length, 0);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+
+    // An array's own length is its own property and is unaffected, and a
+    // plain object has none to inherit: the walk only answers for an array.
+    js.eval(R"JS(
+        var own = [4, 5];
+        ok('an array owns its length', own.hasOwnProperty('length'), true);
+        ok('and it is its element count', own.length, 2);
+        ok('a plain object has no length', ({}).length, undefined);
+        ok('nor does one with a plain prototype', Object.create({}).length, undefined);
+        ok('a string still has a length', 'abc'.length, 3);
+        ok('a function still has its arity', (function (a, b) {}).length, 2);
+        // `Object.setPrototypeOf` to null leaves an array with the length it
+        // computes for itself, because that answer never needed the chain.
+        var bare = [1, 2, 3];
+        Object.setPrototypeOf(bare, null);
+        ok('an array off the chain still knows its length', bare.length, 3);
+        // An own `length` on the reader wins over the inherited one, which is
+        // the ordinary shadowing rule and not a special case for arrays.
+        var shadowed = Object.create([1, 2, 3]);
+        shadowed.length = 'mine';
+        ok('an own length shadows the inherited one', shadowed.length, 'mine');
     )JS");
     assert(js.eval("failures.length").to_string() == "0");
     assert(js.eval("failures.join('; ')").to_string().empty());
@@ -27921,10 +28021,6 @@ failures;
     if (!none_failed()) { std::cout << "\033[31mFAILED\033[0m"; return; }
     std::cout << "\033[32mPASSED\033[0m";
 }
-// ---------------------------------------------------------------------------
-// Phase 125: Object.isFrozen and Object.isSealed ask the properties
-// ---------------------------------------------------------------------------
-
 TEST(object_integrity_levels_ask_every_property) {
     using namespace litebird;
     // Phase 125, finding 130. Both answered from a bit that only `freeze()`
@@ -28393,6 +28489,154 @@ TEST(image_data_is_an_interface) {
     if (!failed.empty()) std::cerr << failed << "\n";
     assert(failed.empty());
 }
+TEST(text_codec_a_decoder_and_an_encoder_in_script) {
+    using namespace litebird;
+    // Phase 127. The WHATWG Encoding Standard's tables were in this engine since
+    // Phase 47 and both directions since Phase 110, but script could reach
+    // neither: `TextDecoder` and `TextEncoder` were undefined globals, so every
+    // page that reads bytes had to be handed a string already decoded. That was
+    // the row in AGENTS.md, and it waited on typed arrays because the interface
+    // is defined in terms of them: `encode()` returns a `Uint8Array`,
+    // `encodeInto()` writes into one, `decode()` takes a view. Phase 113 (the
+    // TypedArray constructors) is what unblocked it.
+    //
+    // So this file is mostly interface, not new decoding: the 40 decoders and
+    // 26 encoders are the ones Phase 47 and Phase 110 already had. The things
+    // that had to be *got right* rather than merely wired were the canonical
+    // label ("utf-8", not the table's "UTF-8"), the `read`/`written` pair from
+    // `encodeInto()`, and walking UTF-16 code units rather than UTF-8 bytes,
+    // which is where a lone surrogate becomes U+FFFD instead of being dropped.
+    //
+    // Every assertion below was run through Node first, as a standalone script;
+    // its output is identical there and here.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function throws(what, fn, name) {
+            try { fn(); failures.push(what + ': did not throw, expected ' + name); }
+            catch (e) { if (!(e instanceof globalThis[name])) failures.push(what + ': threw ' + e.constructor.name + ', expected ' + name); }
+        }
+
+function ok(what, got, want) {
+  if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+}
+function throws(what, fn, name) {
+  try { fn(); failures.push(what + ': did not throw, expected ' + name); }
+  catch (e) { if (!(e instanceof globalThis[name])) failures.push(what + ': threw ' + e.constructor.name + ', expected ' + name); }
+}
+
+// --- construction and options ---
+var d = new TextDecoder();
+ok('default encoding', d.encoding, 'utf-8');
+ok('default fatal', d.fatal, false);
+ok('default ignoreBOM', d.ignoreBOM, false);
+ok('instanceof', d instanceof TextDecoder, true);
+ok('toStringTag', Object.prototype.toString.call(d), '[object TextDecoder]');
+ok('label is case-insensitive', new TextDecoder('UTF-8').encoding, 'utf-8');
+ok('whitespace in label', new TextDecoder('  utf-8  ').encoding, 'utf-8');
+ok('latin1 is windows-1252', new TextDecoder('latin1').encoding, 'windows-1252');
+ok('ascii is windows-1252', new TextDecoder('ascii').encoding, 'windows-1252');
+ok('iso-8859-1 is windows-1252', new TextDecoder('iso-8859-1').encoding, 'windows-1252');
+ok('shift_jis canonical', new TextDecoder('shift-jis').encoding, 'shift_jis');
+ok('utf-16le canonical', new TextDecoder('utf-16').encoding, 'utf-16le');
+ok('gb18030 canonical', new TextDecoder('gb18030').encoding, 'gb18030');
+ok('fatal option', new TextDecoder('utf-8', {fatal: true}).fatal, true);
+ok('ignoreBOM option', new TextDecoder('utf-8', {ignoreBOM: true}).ignoreBOM, true);
+ok('options coerced to boolean', new TextDecoder('utf-8', {fatal: 1}).fatal, true);
+ok('undefined label', new TextDecoder(undefined).encoding, 'utf-8');
+throws('unknown label', function() { new TextDecoder('nope'); }, 'RangeError');
+throws('replacement is not decodable', function() { new TextDecoder('replacement'); }, 'RangeError');
+throws('no construct', function() { TextDecoder(); }, 'TypeError');
+
+// --- decode: the input forms ---
+ok('decode Uint8Array', d.decode(new Uint8Array([104, 105])), 'hi');
+ok('decode a buffer', d.decode(new Uint8Array([104, 105]).buffer), 'hi');
+ok('decode a subarray view', d.decode(new Uint8Array([120, 104, 105, 120]).subarray(1, 3)), 'hi');
+ok('decode with nothing', d.decode(), '');
+ok('decode empty', d.decode(new Uint8Array(0)), '');
+throws('decode a plain array', function() { d.decode([104, 105]); }, 'TypeError');
+throws('decode a number', function() { d.decode(5); }, 'TypeError');
+
+// --- the encodings themselves ---
+ok('utf-8 multibyte', new TextDecoder().decode(new Uint8Array([195, 169])), '\u00e9');
+ok('windows-1252', new TextDecoder('windows-1252').decode(new Uint8Array([233])), '\u00e9');
+ok('latin1 0x80 is euro', new TextDecoder('latin1').decode(new Uint8Array([128])), '\u20ac');
+ok('utf-16le', new TextDecoder('utf-16le').decode(new Uint8Array([104, 0, 105, 0])), 'hi');
+ok('utf-16be', new TextDecoder('utf-16be').decode(new Uint8Array([0, 104, 0, 105])), 'hi');
+ok('iso-8859-2', new TextDecoder('iso-8859-2').decode(new Uint8Array([161])), '\u0104');
+ok('windows-1251', new TextDecoder('windows-1251').decode(new Uint8Array([192])), '\u0410');
+ok('koi8-r', new TextDecoder('koi8-r').decode(new Uint8Array([193])), '\u0430');
+ok('gb18030 two byte', new TextDecoder('gb18030').decode(new Uint8Array([196, 227])), '\u4f60');
+ok('big5', new TextDecoder('big5').decode(new Uint8Array([167, 65])), '\u4f60');
+ok('shift_jis', new TextDecoder('shift_jis').decode(new Uint8Array([130, 160])), '\u3042');
+ok('euc-jp', new TextDecoder('euc-jp').decode(new Uint8Array([164, 162])), '\u3042');
+ok('euc-kr', new TextDecoder('euc-kr').decode(new Uint8Array([176, 161])), '\uac00');
+ok('iso-2022-jp', new TextDecoder('iso-2022-jp').decode(new Uint8Array([27, 36, 66, 36, 34, 27, 40, 66])), '\u3042');
+
+// --- errors: replaces by default, throws when fatal ---
+ok('invalid byte is U+FFFD', new TextDecoder().decode(new Uint8Array([0xff])), '\ufffd');
+ok('truncated sequence', new TextDecoder().decode(new Uint8Array([226, 130])), '\ufffd');
+ok('fatal throws on invalid', (function() {
+  try { new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array([0xff])); return 'no throw'; }
+  catch (e) { return e instanceof TypeError ? 'TypeError' : 'other'; }
+})(), 'TypeError');
+ok('fatal is silent on valid', new TextDecoder('utf-8', {fatal: true}).decode(new Uint8Array([104])), 'h');
+
+// --- the BOM ---
+ok('BOM stripped by default', new TextDecoder().decode(new Uint8Array([239, 187, 191, 104])), 'h');
+ok('ignoreBOM keeps it', new TextDecoder('utf-8', {ignoreBOM: true}).decode(new Uint8Array([239, 187, 191, 104])), '\ufeffh');
+ok('utf-16le BOM stripped', new TextDecoder('utf-16le').decode(new Uint8Array([255, 254, 104, 0])), 'h');
+
+// --- reentrancy: one decoder decodes twice ---
+var twice = new TextDecoder();
+ok('first decode', twice.decode(new Uint8Array([104, 105])), 'hi');
+ok('second decode', twice.decode(new Uint8Array([104, 105])), 'hi');
+
+// --- TextEncoder ---
+var e = new TextEncoder();
+ok('encoder encoding', e.encoding, 'utf-8');
+ok('encoder instanceof', e instanceof TextEncoder, true);
+ok('encoder toStringTag', Object.prototype.toString.call(e), '[object TextEncoder]');
+throws('encoder no construct', function() { TextEncoder(); }, 'TypeError');
+ok('encode ascii', Array.prototype.join.call(e.encode('hi'), ','), '104,105');
+ok('encode multibyte', Array.prototype.join.call(e.encode('\u00e9'), ','), '195,169');
+ok('encode empty', e.encode('').length, 0);
+ok('encode returns Uint8Array', e.encode('hi') instanceof Uint8Array, true);
+ok('encode a number', Array.prototype.join.call(e.encode(65), ','), '54,53');
+ok('encode with no argument', e.encode().length, 0);
+ok('encode undefined is the default', e.encode(undefined).length, 0);
+ok('encode null is "null"', Array.prototype.join.call(e.encode(null), ','), '110,117,108,108');
+ok('encode a surrogate pair', Array.prototype.join.call(e.encode('\ud83d\ude00'), ','), '240,159,152,128');
+ok('encode a lone surrogate', Array.prototype.join.call(e.encode('\ud800'), ','), '239,191,189');
+
+var into = new Uint8Array(8);
+var r = e.encodeInto('h\u00e9', into);
+ok('encodeInto read', r.read, 2);
+ok('encodeInto written', r.written, 3);
+ok('encodeInto bytes', Array.prototype.join.call(into.subarray(0, 3), ','), '104,195,169');
+ok('encodeInto leaves the rest', into[3], 0);
+var small = new Uint8Array(2);
+var r2 = e.encodeInto('h\u00e9', small);
+ok('encodeInto short read', r2.read, 1);
+ok('encodeInto short written', r2.written, 1);
+var tiny = new Uint8Array(1);
+var r3 = e.encodeInto('\u00e9', tiny);
+ok('encodeInto no room read', r3.read, 0);
+ok('encodeInto no room written', r3.written, 0);
+ok('encodeInto empty source', e.encodeInto('', new Uint8Array(4)).written, 0);
+throws('encodeInto needs a view', function() { e.encodeInto('hi', [104, 105]); }, 'TypeError');
+
+if (failures.length) throw new Error(failures.join('\n'));
+    )JS");
+}
 
 TEST(annex_b_string_html_methods) {
     using namespace litebird;
@@ -28818,6 +29062,9 @@ int main() {
     // loop does, instead of reading an array's elements by is_array().
     RUN_TEST(destructuring_asks_the_value_for_its_iterator);
     RUN_TEST(a_hole_is_a_place_the_prototype_can_fill);
+    // Finding 138: the other thing an array keeps in `array_elements`, its
+    // length, is inherited through the chain the same way its indices are.
+    RUN_TEST(length_is_inherited_from_an_array_prototype);
 
     // Per-glyph font fallback: a codepoint the primary face does not cover is
     // drawn from another face instead of painting nothing.
@@ -28903,6 +29150,9 @@ int main() {
     RUN_TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs);
     RUN_TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs);
     RUN_TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely);
+
+    // Phase 127: TextDecoder and TextEncoder reachable from script.
+    RUN_TEST(text_codec_a_decoder_and_an_encoder_in_script);
 
     // Phase 134: `align-items` places items on the cross axis, in flex and in grid.
     RUN_TEST(cross_axis_alignment_places_flex_and_grid_items);

@@ -340,6 +340,8 @@ void Heap::count_value(const JsValue& val) {
     info.function = val.function_data();
     info.properties = val.payload_properties();
     info.cell = val.payload_cell();
+    info.captured = val.payload_captured();
+    info.bound_target = val.payload_bound_target();
     if (info.cell) ++info.cell->gc_seen;
     if (info.function) {
         if (info.function->closure) {
@@ -347,6 +349,16 @@ void Heap::count_value(const JsValue& val) {
             if (scope != m_scopes.end()) ++scope->second.seen;
         }
     }
+    // What the function's entry point captures is stored in the payload, not
+    // in the callable, so it is one more reference the heap accounts for. A
+    // value kept only inside the std::function would leave the payload looking
+    // held from outside, and it would be rooted for ever; see Extra::captured.
+    if (val.payload_captured()) {
+        for (const auto& kept : *val.payload_captured()) count_value(kept);
+    }
+    // A bound function's target, for the same reason: it lives in the payload
+    // rather than in the callable, and it is a reference the heap accounts for.
+    if (const JsValue* target = val.payload_bound_target()) count_value(*target);
     if (info.properties) m_count_maps.push_back(info.properties);
 }
 
@@ -356,6 +368,10 @@ void Heap::mark_payload(const PayloadInfo& info) {
     if (info.function) {
         if (info.function->closure) mark_environment(info.function->closure.get());
     }
+    if (info.captured) {
+        for (const auto& kept : *info.captured) mark_value(kept);
+    }
+    if (info.bound_target) mark_value(*info.bound_target);
     if (info.properties) mark_property_map(info.properties);
 }
 

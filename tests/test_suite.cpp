@@ -29738,6 +29738,105 @@ TEST(automatic_gc_reclaims_churn_without_calling_gc) {
     heap.collect_garbage();
 }
 
+TEST(gc_reclaims_a_bound_functions_target) {
+    using namespace litebird;
+
+    // A bound function held the target, the bound `this`, the bound arguments
+    // and (for `instanceof`) a second copy of the target inside the
+    // std::function the collector cannot look into. Those copies are invisible
+    // to it, so every copy of the bound function counted as the payload's one
+    // owner; the payload looked held from outside, became a root, and the
+    // target, its closure and every variable the closure held stayed alive for
+    // good. `o.b = f.bind(null)` in a loop leaked three cells an iteration and
+    // `o.b = f.bind(o)` -- the row's own example -- six.
+    //
+    // What the entry point needs now lives in the payload (Extra::captured,
+    // Extra::bound_target), which the collector counts and marks like any
+    // other reference. Every function the test calls is defined once, up
+    // front, so that a measurement is not confused with the globals an
+    // eval_ast() would add.
+    Heap& heap = Heap::default_heap();
+
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            // Nothing but a bound function's payload refers to the target: the
+            // closure's only escape is the bound function, and the object is
+            // reachable only through the bound `this`.
+            function churnCycle(n) {
+                for (var i = 0; i < n; i++) {
+                    var o = {};
+                    o.b = (function () { return i; }).bind(o);
+                }
+            }
+            // The same without a cycle: the leak did not need one.
+            function churnDetached(n) {
+                for (var i = 0; i < n; i++) { var k = {}; k.b = (function () {}).bind(null); }
+            }
+            churnCycle(200);
+        )");
+        heap.collect_garbage();
+        const size_t settled = heap.stats().alive_cells;
+
+        js.eval_ast("churnCycle(500);");
+        heap.collect_garbage();
+        // Before the fix this was +3000: six cells per iteration.
+        assert(heap.stats().alive_cells == settled);
+
+        js.eval_ast("churnDetached(500);");
+        heap.collect_garbage();
+        // Before the fix this was +1500: three cells per iteration.
+        assert(heap.stats().alive_cells == settled);
+
+        // A target the collector must still keep alive: the bound function is
+        // reachable, so it and everything it refers to survive a collection.
+        js.eval_ast(R"(
+            var boundNow = (function () { return { tag: "target-alive" }; }).bind(null);
+        )");
+        heap.collect_garbage();
+        assert(js.global_env()->get("boundNow").call({}).get_property("tag").to_string() == "target-alive");
+    }
+    heap.collect_garbage();
+}
+
+TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour) {
+    using namespace litebird;
+
+    // The values `bind` used to capture are read from the payload now, so the
+    // order they are stored in is part of the contract: target, bound `this`,
+    // then the arguments already bound. These are the answers Node.js
+    // v22.22.3 gives (checked against it directly).
+    JsInterpreter js;
+    JsValue r = js.eval(R"(
+        function greet(a, b) { return this.who + ":" + a + ":" + b; }
+        var g = greet.bind({ who: "obj" }, 1);
+
+        function three(a, b, c) {}
+        function Point(x, y) { this.x = x; this.y = y; }
+        var BP = Point.bind(null, 10);
+        var p = new BP(20);
+
+        function T() { this.nt = typeof new.target; }
+        function sum() { var s = 0; for (var i = 0; i < arguments.length; i++) s += arguments[i]; return s; }
+
+        [
+            g(2),
+            g.name,
+            g.length,
+            three.bind(null, 1).length,
+            three.bind(null, 1, 2, 3, 4).length,
+            p.x + "," + p.y,
+            p instanceof Point,
+            p instanceof BP,
+            new (T.bind(null))().nt,
+            g.bind({ who: "no" }, "x")("y"),
+            sum.bind(null, 1, 2, 3)(4, 5)
+        ].join("|");
+    )");
+    assert(r.to_string() ==
+           "obj:1:2|bound greet|1|2|0|10,20|true|true|function|obj:1:x|15");
+}
+
 TEST(document_body_margins_place_boxes_from_the_viewport) {
     using namespace litebird;
     // Reference rectangles were measured in Chromium 153 at 800x600. The
@@ -31521,6 +31620,10 @@ int main() {
 
     // Phase 161: WebSocket binary frames — ArrayBuffer, TypedArray, DataView, and Blob.
     RUN_TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob);
+
+    // Phase 168: what a native entry point captures is traced by the collector.
+    RUN_TEST(gc_reclaims_a_bound_functions_target);
+    RUN_TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

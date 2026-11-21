@@ -14,6 +14,7 @@
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/JsInterpreter.hpp"
 #include "litebird/js/Storage.hpp"
+#include "litebird/js/TypedArray.hpp"
 
 #include <cstdlib>
 #include <deque>
@@ -1285,8 +1286,10 @@ JsValue response_object(Realm& r, const JsValue& self, RequestState& state) {
         if (made.type == JsType::Null) return made;
     } else if (type == "blob") {
         made = make_blob(r, state.response.bytes, final_mime(state).serialize());
+    } else if (type == "arraybuffer") {
+        const JsValue view = typed_array_from_bytes(state.response.bytes);
+        made = view.get_property("buffer");
     }
-    // "arraybuffer": the engine has no ArrayBuffer to give, and says null.
     if (made.type == JsType::Null) {
         state.made = RequestState::Made::Failed;
         return made;

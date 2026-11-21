@@ -181,9 +181,9 @@ public:
         }
         // A pattern asks for the iterator and nothing else. An object that only
         // has `next` is not iterable, however much it looks like an iterator:
-        // `var [x] = { next() {} }` is a TypeError here, as it is in the
-        // language, where for...of accepts that object. (IterationCursor used
-        // to accept it too, which is the case `iteration.dat` records.)
+        // `var [x] = { next() {} }`, and `for (var x of { next() {} })` beside
+        // it, are TypeErrors. (IterationCursor used to accept the object, which
+        // is the case `iteration.dat` records.)
         js_throw_type_error(js_describe_thrown(source) + " is not iterable");
     }
 
@@ -193,7 +193,11 @@ public:
         switch (m_mode) {
             case Mode::Array: {
                 const auto& elements = m_source.object_val->array_elements;
-                if (m_index < elements.size()) return m_source.array_element(m_index++);
+                // An element is a read of the array's storage, and a hole is not
+                // undefined necessarily but whatever the index has otherwise:
+                // js_array_get is what `array[index]` gives, and what the
+                // array's own iterator yields for that index.
+                if (m_index < elements.size()) return js_array_get(m_source, m_index++);
                 m_done = true;
                 return JsValue::make_undefined();
             }
@@ -571,6 +575,7 @@ JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, 
     fd.is_generator = node->is_generator;
     fd.is_arrow = node->is_arrow;
     fd.is_class_constructor = node->is_class_constructor;
+    fd.is_strict = node->is_strict;
     fd.is_constructor = !node->is_arrow && !node->is_method && !node->is_async && !node->is_generator;
     fd.body = node->body;
     if (node->simple_params) fd.params = node->simple_param_names();
@@ -596,6 +601,58 @@ JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, 
         return invoke_function(shared_node, closure ? closure->shared_from_this() : nullptr, callee, this_val,
                                is_construct, args, new_target);
     };
+
+    // `name` and `length` are ordinary own properties of the function, not
+    // values answered out of the payload: §10.2.9/§10.2.5 give them
+    // `{ writable: false, enumerable: false, configurable: true }`, so a write
+    // through a non-strict reference is ignored, a strict one throws, a delete
+    // removes them, and `Object.getOwnPropertyNames` lists them. They are
+    // installed here, in this order, because the standard's order *is*
+    // insertion order and Node prints `["length","name",...]`.
+    if (JsObject* cell = fn.property_cell(/*create=*/true)) {
+        cell->properties.entry("length").second = JsValue::make_number(node->length);
+        cell->properties.entry("length").flags = PropertyMap::Configurable;
+        cell->properties.entry("name").second = JsValue::make_string(fd.name);
+        cell->properties.entry("name").flags = PropertyMap::Configurable;
+        // `arguments`, `caller` and `prototype` are the three an *ordinary*
+        // function has without anyone making them (§10.2.4-6), and what the
+        // first two are depends on strictness: `null` data properties in
+        // sloppy code, and the *poison pill* accessors in strict code, where
+        // reading either throws — that is how a strict script is refused the
+        // caller of a function.
+        //
+        // The set is narrower than "every function". An arrow, a method, a
+        // generator and an async function have an exotic `%Function.prototype%`
+        // that carries the pair (that prototype is not modelled yet, so they
+        // have neither own property and read as `undefined`), and a class
+        // constructor is strict code that inherits the pair rather than owning
+        // it — Node lists `["length","name","prototype","s"]` for a class and
+        // nothing else.
+        // Only the sloppy ordinary function gets them, and only as data
+        // properties. Everything else — a strict function, an arrow, a method,
+        // a generator, an async function, a class — must have *no* own property
+        // of either name (§10.2.4: "must not be created with own properties
+        // named caller or arguments"), and reading one throws because the
+        // lookup refuses it, not because something is stored.
+        const bool sloppy_ordinary = fd.is_constructor && !node->is_class_constructor &&
+                                     !node->is_method && !node->is_arrow && !node->is_generator &&
+                                     !node->is_async && !node->is_strict;
+        if (sloppy_ordinary) {
+            for (const char* key : {"arguments", "caller"}) {
+                auto& entry = cell->properties.entry(key);
+                entry.second = JsValue::make_null();
+                entry.flags = 0;
+            }
+            auto& proto_entry = cell->properties.entry("prototype");
+            JsValue proto = JsValue::make_object();
+            // The same back-link the lazy path makes in
+            // `function_implicit_property`: `p.constructor === P` is how an
+            // instance finds the function it came from.
+            proto.define_property("constructor", fn, PropertyMap::Hidden);
+            proto_entry.second = proto;
+            proto_entry.flags = PropertyMap::Writable;
+        }
+    }
     return fn;
 }
 

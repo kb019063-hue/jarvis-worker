@@ -520,6 +520,57 @@ void install_object_builtins(JsIntrinsics& realm) {
     // ---- Object.prototype -------------------------------------------------
     JsObject* op = realm.object_proto;
 
+    // Annex B.3.3's legacy accessor methods use ordinary property descriptors.
+    // Keep the setter when a getter is added to an existing accessor (and
+    // vice versa) by routing the update through the same validation path as
+    // Object.defineProperty.
+    auto define_legacy_accessor = [](Args args, bool is_getter) {
+        JsValue object = js_to_object(self());
+        const JsValue accessor = js_arg(args, 1);
+        if (!accessor.is_function()) {
+            js_throw_type_error(is_getter ? "Getter must be a function" : "Setter must be a function");
+        }
+        const std::string key = js_to_property_key(js_arg(args, 0));
+        JsValue descriptor = JsValue::make_object();
+        descriptor.set_property(is_getter ? "get" : "set", accessor);
+        descriptor.set_property("enumerable", JsValue::make_boolean(true));
+        descriptor.set_property("configurable", JsValue::make_boolean(true));
+        define_from_descriptor(object, key, descriptor);
+        return JsValue::make_undefined();
+    };
+    auto lookup_legacy_accessor = [](Args args, bool is_getter) {
+        JsValue current = js_to_object(self());
+        const std::string key = js_to_property_key(js_arg(args, 0));
+        for (int depth = 0; current.is_object_like() && depth < kMaxPrototypeChain; ++depth) {
+            const JsValue descriptor = descriptor_for(current, key);
+            if (!descriptor.is_undefined()) {
+                return descriptor.get_property(is_getter ? "get" : "set");
+            }
+            // HTML's cross-origin Window/Location exotic objects report a
+            // null prototype; do not walk the engine's internal prototype
+            // past the keys their cross-origin descriptor exposed.
+            std::vector<std::string> exposed;
+            if (litebird::dom::cross_origin_own_keys(current, true, exposed)) break;
+            JsObject* prototype = current.prototype_object();
+            if (!prototype) break;
+            current = JsValue::make_object(prototype);
+        }
+        return JsValue::make_undefined();
+    };
+
+    js_define_method(op, "__defineGetter__", 2, [define_legacy_accessor](Args args) {
+        return define_legacy_accessor(args, true);
+    });
+    js_define_method(op, "__defineSetter__", 2, [define_legacy_accessor](Args args) {
+        return define_legacy_accessor(args, false);
+    });
+    js_define_method(op, "__lookupGetter__", 1, [lookup_legacy_accessor](Args args) {
+        return lookup_legacy_accessor(args, true);
+    });
+    js_define_method(op, "__lookupSetter__", 1, [lookup_legacy_accessor](Args args) {
+        return lookup_legacy_accessor(args, false);
+    });
+
     js_define_method(op, "hasOwnProperty", 1, [](Args args) {
         return JsValue::make_boolean(self().has_own_property(js_to_property_key(js_arg(args, 0))));
     });
@@ -1072,9 +1123,14 @@ void install_error_builtins(JsIntrinsics& realm) {
             // V8-specific but called unconditionally by a lot of library code.
             js_define_method(ctor, "captureStackTrace", 1, [](Args args) {
                 JsValue target = js_arg(args, 0);
+                // Nothing to install: `stack` is the inherited accessor on
+                // Error.prototype, reported from the [[ErrorData]] slot, so a
+                // target that has the slot already answers the same text. A
+                // target that is not an error gets an ordinary own property
+                // through the same setter an assignment would use.
                 if (target.is_object_like() && !target.has_own_property("stack")) {
-                    target.define_property("stack", JsValue::make_string(js_describe_thrown(target) + "\n    at <anonymous>"),
-                                           PropertyMap::Hidden);
+                    JsValue text = JsValue::make_string(js_describe_thrown(target) + "\n    at <anonymous>");
+                    target.set_property("stack", text);
                 }
                 return JsValue::make_undefined();
             });

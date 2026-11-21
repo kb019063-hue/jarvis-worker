@@ -35,13 +35,13 @@ general block-formatting or margin-collapse implementation; see below.
 ## 3. How it was verified
 
 Before: a freshly built binary at `fe06a73` (before the change). After: this
-branch with `main` through #191. The two binary comparison is about the body
+branch with `main` through #168. The two binary comparison is about the body
 change; the original render corpus was also changed by #187 in between, so its
 aggregate increase is **not** attributed to this phase.
 
 | Check | Before | After |
 | :--- | :--- | :--- |
-| `make test` | 308 engine suites | 314 engine suites and 114 cross-origin checks; the extra four include main's work |
+| `make test` | 308 engine suites | 315 engine suites and 114 cross-origin checks; the extra seven include main's work |
 | `make dom-conformance` | 678/678, everyday 68/68 | 678/678, everyday 68/68; 0 crashes/timeouts |
 | `make wpt` | 9567/9824, 257 listed | 9567/9824, 257 listed, 0 unlisted |
 | `make render-conformance`, original corpus | 33/36, 3 known | 36/38, 2 known, after #187 changed the corpus and rounded clipping |
@@ -94,11 +94,13 @@ python3 tools/conformance/render_check.py --binary /tmp/litebird-body-before/bui
 # exits 1: four FAIL pages, three KNOWN
 ```
 
-Other checks (tree through #181, before #187 and #191): HTML tree construction 1973/1973, URL 1188/1188,
-XML 1718/1718, 6,000 generated tree comparisons with the corrected parse5
-oracle, and 4,000 generated XML documents plus 3,000 XML round trips. A
-full-depth run before #187 and #191 passed 1,332 runs over 465 pages at depth
-200,000. On the tree through #187, all eight remaining ASan/UBSan parts
+Other checks on the tree through #168: HTML tree construction 1973/1973, URL
+1188/1188 and XML 1718/1718. On an earlier tree through #181, 6,000 generated
+tree comparisons agreed with the corrected parse5 oracle, as did 4,000
+generated XML documents and 3,000 XML round trips. A full-depth run on the tree
+through #191 passed 1,332 runs over 465 pages at depth 200,000; `make tsan`
+passed its string model and thread tests. On the tree through #187, all eight
+remaining ASan/UBSan parts
 (`asan-verify`, `asan-js`, `asan-dom`, `asan-xml`, `asan-wpt`,
 `asan-xml-generated`, `asan-fuzz`, `asan-deep`) passed; `asan-deep` ran 882
 checks at depth 10,000. The **default** full `make asan` on the tree through #181 was killed in the

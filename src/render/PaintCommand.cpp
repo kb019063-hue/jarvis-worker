@@ -81,7 +81,7 @@ if (!skip_cell_chrome && s.box_shadow.has_shadow &&
 }
 
 // 1. Background
-if (!skip_cell_chrome && !s.background_color.is_transparent()) {
+if (!skip_cell_chrome && !box->background_propagated && !s.background_color.is_transparent()) {
     DrawRectCommand cmd;
     cmd.rect = box->dimensions.padding_box();
     cmd.color = s.background_color;
@@ -354,6 +354,11 @@ void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
 DisplayList DisplayList::build(const std::shared_ptr<LayoutBox>& root_box) {
     DisplayList list;
     if (root_box) {
+        // The canvas is behind every box, including the body's shadow and
+        // border, and is not subject to the body's transform or overflow.
+        if (!root_box->canvas_background.is_transparent()) {
+            list.add(DrawCanvasCommand{root_box->canvas_background});
+        }
         build_recursive(root_box, list);
     }
     return list;

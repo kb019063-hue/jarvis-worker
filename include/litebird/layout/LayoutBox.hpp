@@ -146,6 +146,15 @@ public:
     /// not resize its column after the first row was read.
     bool ignore_own_width{false};
 
+    /// Only the root box of an HTML document carries the solid canvas color.
+    /// It is separate from box geometry, so it can fill the viewport before
+    /// any scrolling, clipping, transforms or body chrome are applied.
+    Color canvas_background{Color::transparent()};
+    /// The selected root/body background is painted on the canvas instead of
+    /// as this box's chrome. Computed styles remain unchanged and shareable;
+    /// inline-body line fragments follow the separately observed browser rule.
+    bool background_propagated{false};
+
     /// A table cell resolves percentage lengths against the *table's* width,
     /// not against the column width it happens to be laid out with (CSS 2.1
     /// 17.5.2). Negative means "use the containing block".

@@ -531,17 +531,19 @@ TEST(flexbox_layout) {
     auto item2 = flex_container->children[1];
     auto item3 = flex_container->children[2];
 
-    // Item 1 at x = 0, width = 100
-    assert(item1->dimensions.content.x == 0.0f);
+    // Offsets are relative to the flex container, not the viewport: the
+    // implied body's default margin also moves the container itself.
+    const float origin_x = flex_container->dimensions.content.x;
+    assert(item1->dimensions.content.x - origin_x == 0.0f);
     assert(item1->dimensions.content.width == 100.0f);
 
     // Item 2 at x = 100 + 20(gap) = 120, width = 200
-    assert(item2->dimensions.content.x == 120.0f);
+    assert(item2->dimensions.content.x - origin_x == 120.0f);
     assert(item2->dimensions.content.width == 200.0f);
 
     // Item 3 at x = 120 + 200 + 20(gap) = 340
     // Remaining space = 600 - (100 + 200 + 40 gaps) = 260. flex-grow: 1 takes 260!
-    assert(item3->dimensions.content.x == 340.0f);
+    assert(item3->dimensions.content.x - origin_x == 340.0f);
     assert(item3->dimensions.content.width == 260.0f);
 }
 
@@ -5307,15 +5309,14 @@ TEST(css_positioning_and_stacking_contexts) {
     assert(abs_box != nullptr);
     assert(fix_box != nullptr);
 
-    // Relative positioning offset: container content.x = 20, rel child margin=0, pad=0, so x = 20 + 15 = 35, y = 20 + 10 = 30
-    assert(rel_box->dimensions.content.x == 35.0f);
-    assert(rel_box->dimensions.content.y == 30.0f);
-    assert(rel_box->dimensions.content.y == 30.0f);
+    // Relative positioning is measured from the container's content edge,
+    // which includes the implied body's default margin as well as its padding.
+    assert(rel_box->dimensions.content.x == container_box->dimensions.content.x + 15.0f);
+    assert(rel_box->dimensions.content.y == container_box->dimensions.content.y + 10.0f);
 
-    // Absolute positioning: container padding box is x=0, y=0, w=440, h=340.
-    // abs top: 30px, left: 40px -> x = 0 + 40 = 40, y = 0 + 30 = 30
-    assert(abs_box->dimensions.content.x == 40.0f);
-    assert(abs_box->dimensions.content.y == 30.0f);
+    // Absolute insets are measured from the positioned container's padding box.
+    assert(abs_box->dimensions.content.x == container_box->dimensions.padding_box().x + 40.0f);
+    assert(abs_box->dimensions.content.y == container_box->dimensions.padding_box().y + 30.0f);
 
     // Fixed positioning: viewport 800x600, bottom: 10, right: 20, w: 120, h: 40
     // x = 800 - 20 - 120 = 660, y = 600 - 10 - 40 = 550
@@ -5404,10 +5405,11 @@ TEST(box_sizing_and_constraints) {
     // Centered: the document now parses through the spec tree builder, so the
     // snippet is wrapped in the implied <html>/<body> elements and the body's
     // 8px user-agent margin applies. Containing width is therefore 800 - 16 =
-    // 784px, and centering a 200px box yields (784 - 200) / 2 = 292px.
+    // 784px, and each margin is (784 - 200) / 2 = 292px. The body's left edge
+    // is at x=8, so the centered box begins at x=300 in the viewport.
     assert(center_box->dimensions.margin.left == 292.0f);
     assert(center_box->dimensions.margin.right == 292.0f);
-    assert(center_box->dimensions.content.x == 292.0f);
+    assert(center_box->dimensions.content.x == 300.0f);
 }
 
 TEST(javascript_prototype_chain_and_arrays) {
@@ -5784,21 +5786,24 @@ TEST(css_flex_wrapping_and_grid_layout) {
     auto item2 = flex_box->children[1];
     auto item3 = flex_box->children[2];
 
+    // Coordinates are relative to the flex container, not the body margin.
+    const float flex_x = flex_box->dimensions.content.x;
+    const float flex_y = flex_box->dimensions.content.y;
     // item1 fits on line 1 at (0, 0)
-    assert(item1->dimensions.content.x == 0.0f);
-    assert(item1->dimensions.content.y == 0.0f);
+    assert(item1->dimensions.content.x - flex_x == 0.0f);
+    assert(item1->dimensions.content.y - flex_y == 0.0f);
     assert(item1->dimensions.content.width == 180.0f);
     assert(item1->dimensions.content.height == 50.0f);
 
     // item2 overflows line 1 (180 + 150 = 330 > 300), so wraps to line 2 at (0, 50)
-    assert(item2->dimensions.content.x == 0.0f);
-    assert(item2->dimensions.content.y == 50.0f);
+    assert(item2->dimensions.content.x - flex_x == 0.0f);
+    assert(item2->dimensions.content.y - flex_y == 50.0f);
     assert(item2->dimensions.content.width == 150.0f);
     assert(item2->dimensions.content.height == 60.0f);
 
     // item3 fits on line 2 (150 + 100 = 250 <= 300) at (150, 50)
-    assert(item3->dimensions.content.x == 150.0f);
-    assert(item3->dimensions.content.y == 50.0f);
+    assert(item3->dimensions.content.x - flex_x == 150.0f);
+    assert(item3->dimensions.content.y - flex_y == 50.0f);
     assert(item3->dimensions.content.width == 100.0f);
     assert(item3->dimensions.content.height == 40.0f);
 
@@ -5821,18 +5826,20 @@ TEST(css_flex_wrapping_and_grid_layout) {
     auto g4 = grid_box->children[3];
 
     // Col 0: 100px, Col 1: (360 - 40 - 100)/3 = 73.33px, Col 2: 146.67px
-    assert(std::abs(g1->dimensions.content.x - 0.0f) < 0.1f);
+    const float grid_x = grid_box->dimensions.content.x;
+    const float grid_y = grid_box->dimensions.content.y;
+    assert(std::abs(g1->dimensions.content.x - grid_x) < 0.1f);
     assert(std::abs(g1->dimensions.content.width - 100.0f) < 0.1f);
 
-    assert(std::abs(g2->dimensions.content.x - 120.0f) < 0.1f);
+    assert(std::abs(g2->dimensions.content.x - grid_x - 120.0f) < 0.1f);
     assert(std::abs(g2->dimensions.content.width - (220.0f / 3.0f)) < 0.1f);
 
-    assert(std::abs(g3->dimensions.content.x - (120.0f + 220.0f / 3.0f + 20.0f)) < 0.1f);
+    assert(std::abs(g3->dimensions.content.x - grid_x - (120.0f + 220.0f / 3.0f + 20.0f)) < 0.1f);
     assert(std::abs(g3->dimensions.content.width - (440.0f / 3.0f)) < 0.1f);
 
     // g4 wraps to next row!
-    assert(std::abs(g4->dimensions.content.x - 0.0f) < 0.1f);
-    assert(std::abs(g4->dimensions.content.y - (40.0f + 20.0f)) < 0.1f);
+    assert(std::abs(g4->dimensions.content.x - grid_x) < 0.1f);
+    assert(std::abs(g4->dimensions.content.y - grid_y - (40.0f + 20.0f)) < 0.1f);
 }
 
 TEST(dom_3phase_events_and_form_controls) {
@@ -28444,6 +28451,7 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
         assert(item->dimensions.content.height == 32.0f);
     }
 
+    // Position assertions below are relative to the container, not the body.
     // A stated height is not stretched — `stretch` has nothing to do when the
     // cross size is definite, and overwriting it would be a different bug.
     {
@@ -28451,7 +28459,7 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
                           R"(<div style="width: 50px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
         assert(item->dimensions.content.height == 20.0f);
-        assert(item->dimensions.content.y == 0.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 0.0f);
     }
 
     // `center` and `flex-end` place the item in the line, not at its top.
@@ -28460,14 +28468,14 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
                           R"(width: 100px; height: 100px">)"
                           R"(<div style="width: 50px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.y == 40.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 40.0f);
     }
     {
         auto root = build(R"(<body><div style="display: flex; align-items: flex-end; )"
                           R"(width: 100px; height: 100px">)"
                           R"(<div style="width: 50px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.y == 80.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 80.0f);
     }
 
     // A column container's cross axis is the width.
@@ -28476,14 +28484,14 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
                           R"(align-items: center; width: 100px; height: 100px">)"
                           R"(<div style="width: 40px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.x == 30.0f);
+        assert(item->dimensions.content.x - root->children[0]->dimensions.content.x == 30.0f);
     }
     {
         auto root = build(R"(<body><div style="display: flex; flex-direction: column; )"
                           R"(align-items: flex-end; width: 100px; height: 100px">)"
                           R"(<div style="width: 40px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.x == 60.0f);
+        assert(item->dimensions.content.x - root->children[0]->dimensions.content.x == 60.0f);
     }
 
     // Grid: the item's area is its rows, and stretch fills it. Both items are
@@ -28496,14 +28504,14 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
         assert(g->children.size() == 2);
         assert(g->children[0]->dimensions.content.height == 30.0f);
         assert(g->children[1]->dimensions.content.height == 30.0f);
-        assert(g->children[1]->dimensions.content.x == 60.0f);
+        assert(g->children[1]->dimensions.content.x - g->dimensions.content.x == 60.0f);
     }
     {
         auto root = build(R"(<body><div style="display: grid; align-items: center; )"
                           R"(grid-template-columns: 60px; grid-template-rows: 40px">)"
                           R"(<div style="height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.y == 10.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 10.0f);
         assert(item->dimensions.content.height == 20.0f);
     }
 }
@@ -29438,6 +29446,176 @@ TEST(automatic_gc_reclaims_churn_without_calling_gc) {
     heap.collect_garbage();
 }
 
+TEST(document_body_margins_place_boxes_from_the_viewport) {
+    using namespace litebird;
+    // Reference rectangles were measured in Chromium 153 at 800x600. The
+    // HTML root box and general margin collapsing remain separate work; these
+    // cases deliberately include both a top-margin chain and its boundaries.
+    struct Example {
+        const char* name;
+        const char* html;
+        Rect body;
+        Rect child;
+        const char* other_id = nullptr;
+        Rect other{};
+    };
+    const Example examples[] = {
+        {"user-agent margin", R"(<body><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {8, 8, 784, 20}, {8, 8, 100, 20}},
+        {"zero margin", R"(<body style="margin:0"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {0, 0, 800, 20}, {0, 0, 100, 20}},
+        {"forty pixels", R"(<body style="margin:40px"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {40, 40, 720, 20}, {40, 40, 100, 20}},
+        {"different margins, padding and border",
+         R"(<body style="margin:11px 29px 17px 23px;padding:5px 7px 9px 13px;border:3px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {23, 11, 748, 40}, {39, 19, 100, 20}},
+        {"percentages use viewport width",
+         R"(<body style="margin:2.5% 5%;padding:1% 2%;border:2px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {40, 20, 720, 40}, {58, 30, 100, 20}},
+        {"two auto margins", R"(<body style="width:100px;margin:10px auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {350, 10, 100, 20}, {350, 10, 50, 20}},
+        {"one auto margin", R"(<body style="width:100px;margin:10px 25px 0 auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {675, 10, 100, 20}, {675, 10, 50, 20}},
+        {"auto longhands with auto width", R"(<body style="margin-left:auto;margin-right:auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {0, 8, 800, 20}, {0, 8, 50, 20}},
+        {"one auto longhand with auto width", R"(<body style="margin-left:auto;margin-right:25px"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {0, 8, 775, 20}, {0, 8, 50, 20}},
+        {"vertical auto margin", R"(<body style="margin-top:auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {8, 0, 784, 20}, {8, 0, 50, 20}},
+        {"negative margins", R"(<body style="margin:-12px 20px 5px -7px"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {-7, -12, 787, 20}, {-7, -12, 100, 20}},
+        {"flex body",
+         R"(<body style="display:flex;margin:11px 29px 17px 23px;padding:5px 7px 9px 13px;border:3px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {23, 11, 748, 40}, {39, 19, 100, 20}},
+        {"grid body",
+         R"(<body style="display:grid;margin:11px 29px 17px 23px;padding:5px 7px 9px 13px;border:3px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {23, 11, 748, 40}, {39, 19, 100, 20}},
+        {"auto margin on flex body",
+         R"(<body style="display:flex;width:100px;margin:10px 25px 0 auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {675, 10, 100, 20}, {675, 10, 50, 20}},
+        {"auto margins on grid body",
+         R"(<body style="display:grid;width:100px;margin:10px auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {350, 10, 100, 20}, {350, 10, 50, 20}},
+        {"relative body", R"(<body style="margin:40px;position:relative;left:11px;top:12px"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {51, 52, 720, 20}, {51, 52, 100, 20}},
+        {"absolute body", R"(<body style="position:absolute;left:30px;top:25px;margin:8px;width:100px"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {38, 33, 100, 20}, {38, 33, 50, 20}},
+        {"child margin larger than body", R"(<body><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 30, 784, 20}, {8, 30, 100, 20}},
+        {"body margin larger, with sibling",
+         R"(<body style="margin:40px"><div id="kid" style="margin:10px 0 0;width:100px;height:20px"></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {40, 40, 720, 30}, {40, 40, 100, 20}, "other", {40, 60, 100, 10}},
+        {"positive and negative collapse",
+         R"(<body style="margin:20px 8px 8px"><div id="kid" style="margin:-30px 0 0;width:100px;height:20px"></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, -10, 784, 30}, {8, -10, 100, 20}, "other", {8, 10, 100, 10}},
+        {"two negative margins", R"(<body style="margin:-10px 8px 8px"><div id="kid" style="margin:-20px 0 0;width:100px;height:20px"></div></body>)",
+         {8, -20, 784, 20}, {8, -20, 100, 20}},
+        {"padding prevents top collapse", R"(<body style="margin:8px;padding-top:1px"><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 8, 784, 51}, {8, 39, 100, 20}},
+        {"flex prevents top collapse", R"(<body style="display:flex;margin:8px"><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 8, 784, 50}, {8, 38, 100, 20}},
+        {"definite body height", R"(<body style="margin:8px;height:100px"><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 30, 784, 100}, {8, 30, 100, 20}},
+        {"nested first-child chain",
+         R"(<body><div id="kid" style="margin:0"><div id="other" style="margin:30px 0 0;width:100px;height:20px"></div></div></body>)",
+         {8, 30, 784, 20}, {8, 30, 784, 20}, "other", {8, 30, 100, 20}},
+        {"nested collapse moves the following sibling",
+         R"(<body><div id="kid" style="margin:0"><div style="margin:30px 0 0;width:100px;height:20px"></div></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, 30, 784, 30}, {8, 30, 784, 20}, "other", {8, 50, 100, 10}},
+        {"nested mixed margins",
+         R"(<body style="margin:10px"><div id="kid" style="margin:-20px 0 0"><div id="other" style="margin:30px 0 0;width:100px;height:20px"></div></div></body>)",
+         {10, 10, 780, 20}, {10, 10, 780, 20}, "other", {10, 10, 100, 20}},
+        {"definite height stops height propagation",
+         R"(<body><div id="kid" style="margin:20px 0 0;height:100px"><div id="other" style="margin:30px 0 0;width:100px;height:20px"></div></div></body>)",
+         {8, 30, 784, 100}, {8, 30, 784, 100}, "other", {8, 30, 100, 20}},
+        {"negative nested margin grows ancestor and moves sibling",
+         R"(<body><div id="kid" style="margin:0"><div style="margin:-30px 0 0;width:100px;height:20px"></div></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, -22, 784, 30}, {8, -22, 784, 20}, "other", {8, -2, 100, 10}},
+        {"fixed-height child keeps following sibling",
+         R"(<body><div id="kid" style="margin:20px 0 0;height:100px"><div style="margin:30px 0 0;width:100px;height:20px"></div></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, 30, 784, 110}, {8, 30, 784, 100}, "other", {8, 130, 100, 10}},
+    };
+    auto check_rect = [](const char* example, const char* what, const Rect& got, const Rect& want) {
+        const bool correct = std::fabs(got.x - want.x) < 0.001f && std::fabs(got.y - want.y) < 0.001f &&
+                             std::fabs(got.width - want.width) < 0.001f && std::fabs(got.height - want.height) < 0.001f;
+        if (!correct) {
+            std::fprintf(stderr, "      %s %s: got (%g,%g %gx%g), expected (%g,%g %gx%g)\n",
+                         example, what, got.x, got.y, got.width, got.height,
+                         want.x, want.y, want.width, want.height);
+        }
+        assert(correct);
+    };
+    for (const auto& example : examples) {
+        auto doc = HtmlParser::parse(std::string("<!doctype html>") + example.html);
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        auto child = doc->get_element_by_id("kid");
+        assert(root && doc->body() && child);
+        check_rect(example.name, "body", doc->body()->bounding_box(), example.body);
+        check_rect(example.name, "child", child->bounding_box(), example.child);
+        if (example.other_id) {
+            auto other = doc->get_element_by_id(example.other_id);
+            assert(other);
+            check_rect(example.name, "other", other->bounding_box(), example.other);
+        }
+    }
+    std::printf("      [body origin] %zu Chromium-derived geometry cases\n", std::size(examples));
+}
+
+TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(
+        R"(<!doctype html><body style="margin:40px;padding:5px;border:3px solid blue;position:relative">)"
+        R"(<div id="kid" style="width:100px;height:30px;background:red"></div>)"
+        R"(<div id="abs" style="position:absolute;left:0;top:0;width:10px;height:10px;background:green"></div>)"
+        R"(<div id="fixed" style="position:fixed;left:0;top:0;width:10px;height:10px;background:black"></div></body>)");
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    auto kid = doc->get_element_by_id("kid");
+    auto abs = doc->get_element_by_id("abs");
+    auto fixed = doc->get_element_by_id("fixed");
+    assert(root && kid && abs && fixed);
+    assert(kid->bounding_box().x == 48.0f && kid->bounding_box().y == 48.0f);
+    assert(abs->bounding_box().x == 43.0f && abs->bounding_box().y == 43.0f);
+    assert(fixed->bounding_box().x == 0.0f && fixed->bounding_box().y == 0.0f);
+
+    BitmapRenderer bmp(160, 100);
+    bmp.clear(Color::parse("#ffffff"));
+    bmp.render(DisplayList::build(root));
+    assert(bmp.get_pixel(0, 0) == Color::parse("#000000"));    // fixed at the viewport
+    assert(bmp.get_pixel(40, 40) == Color::parse("#0000ff"));  // body border
+    assert(bmp.get_pixel(43, 43) == Color::parse("#008000"));  // body's padding box
+    assert(bmp.get_pixel(60, 55) == Color::parse("#ff0000"));  // in-flow child
+    assert(bmp.get_pixel(39, 39) == Color::parse("#ffffff"));  // outside the body
+
+    // A document relayout must replace the offset, not accumulate it, and
+    // getBoundingClientRect must report the same geometry as the painter.
+    auto live_doc = std::make_shared<Document>();
+    live_doc->set_viewport_size(800.0f, 600.0f);
+    JsInterpreter js(live_doc);
+    js.load_page(R"(<!doctype html><body><div id="kid" style="width:100px;height:20px"></div></body>)");
+    js.notify_document_loaded();
+    auto geometry = [&]() {
+        return js.eval("var b=document.body.getBoundingClientRect(), k=document.getElementById('kid').getBoundingClientRect(); [b.left,b.top,b.width,k.left,k.top].join(',')").to_string();
+    };
+    assert(geometry() == "8,8,784,8,8");
+    js.eval("document.body.style.margin = '40px'");
+    assert(geometry() == "40,40,720,40,40");
+    js.eval("document.body.style.margin = '0px'");
+    assert(geometry() == "0,0,800,0,0");
+    js.eval("document.getElementById('kid').style.marginTop = '30px'");
+    assert(geometry() == "0,30,800,0,30");
+
+    // Inline fragments move with their body; their font-dependent height is
+    // not a body-margin oracle.
+    auto inline_doc = HtmlParser::parse(
+        R"(<!doctype html><body style="margin:15px;padding:5px;border:3px solid blue"><span id="kid">text</span></body>)");
+    auto inline_root = LayoutTree::build(inline_doc, resolver, 800.0f, 600.0f);
+    auto span = inline_doc->get_element_by_id("kid");
+    assert(inline_root && span && !inline_root->line_boxes.empty());
+    assert(span->bounding_box().x == 23.0f && span->bounding_box().y == 23.0f);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -29870,6 +30048,10 @@ int main() {
     // Phase 145: automatic per-agent allocation-threshold garbage collection at safe points.
     RUN_TEST(automatic_gc_threshold_and_geometric_growth);
     RUN_TEST(automatic_gc_reclaims_churn_without_calling_gc);
+
+    // Phase 152: place the document body, its margins, and its descendants.
+    RUN_TEST(document_body_margins_place_boxes_from_the_viewport);
+    RUN_TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

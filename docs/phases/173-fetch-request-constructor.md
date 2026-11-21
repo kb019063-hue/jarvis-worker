@@ -88,7 +88,7 @@ Workers, and the bytecode VM):
   `Request <-> Headers <-> AbortSignal` GC reclamation and bytecode `VM`
   invocation) and `fetch_request_loopback_http_worker_and_abort` (loopback HTTP,
   binary `Uint8Array` override, pre-aborted and late-aborted `AbortController`,
-  and Web Worker `new Request` + `fetch(req)`): **328/328** suites pass.
+  and Web Worker `new Request` + `fetch(req)`): **331/331** suites pass.
 - **Existing suites:** `make security-fetch` (3/3), `make security-worker`
   (17/17), `make js-conformance` (1145/1158), and `make dom-conformance`
   (678/678) all remain green.

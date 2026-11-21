@@ -4,6 +4,42 @@
 
 namespace litebird {
 
+namespace {
+Color over_opaque(Color src, Color dst) {
+    const unsigned a = src.a;
+    auto over = [a](unsigned s, unsigned d) -> uint8_t {
+        return static_cast<uint8_t>((s * a + d * (255u - a) + 127u) / 255u);
+    };
+    return Color(over(src.r, dst.r), over(src.g, dst.g), over(src.b, dst.b));
+}
+
+struct CellRange { int first_col, last_col, first_row, last_row; };
+
+// Return the terminal cells intersected by a rectangle. Its right and bottom
+// edges are exclusive; also reject wholly offscreen rectangles rather than
+// clamping them onto an edge cell. Clamp floats before converting them to int.
+bool intersecting_cells(const Rect& rect, float scroll_x, float scroll_y,
+                        int cols, int rows, float cell_w, float cell_h,
+                        CellRange& cells) {
+    if (cols <= 0 || rows <= 0 || cell_w <= 0 || cell_h <= 0 ||
+        !std::isfinite(rect.x) || !std::isfinite(rect.y) ||
+        !std::isfinite(rect.width) || !std::isfinite(rect.height) ||
+        !std::isfinite(scroll_x) || !std::isfinite(scroll_y) ||
+        !std::isfinite(cell_w) || !std::isfinite(cell_h) ||
+        rect.width <= 0 || rect.height <= 0 ||
+        rect.x + rect.width <= scroll_x || rect.y + rect.height <= scroll_y ||
+        rect.x >= scroll_x + cols * cell_w || rect.y >= scroll_y + rows * cell_h) return false;
+
+    const float left = std::clamp((rect.x - scroll_x) / cell_w, 0.0f, static_cast<float>(cols));
+    const float right = std::clamp((rect.x + rect.width - scroll_x) / cell_w, 0.0f, static_cast<float>(cols));
+    const float top = std::clamp((rect.y - scroll_y) / cell_h, 0.0f, static_cast<float>(rows));
+    const float bottom = std::clamp((rect.y + rect.height - scroll_y) / cell_h, 0.0f, static_cast<float>(rows));
+    cells = {static_cast<int>(std::floor(left)), static_cast<int>(std::ceil(right)) - 1,
+             static_cast<int>(std::floor(top)), static_cast<int>(std::ceil(bottom)) - 1};
+    return cells.first_col <= cells.last_col && cells.first_row <= cells.last_row;
+}
+} // namespace
+
 TerminalRenderer::TerminalRenderer(int cols, int rows, float cell_w, float cell_h)
     : m_cols(cols), m_rows(rows), m_cell_w(cell_w), m_cell_h(cell_h), m_grid(cols * rows) {
     // Fill with default background
@@ -30,7 +66,17 @@ bool TerminalRenderer::inside_clip(int col, int row) const {
 void TerminalRenderer::execute_command(const PaintCommand& cmd) {
     std::visit([this](auto&& arg) {
         using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, PushTransformCommand>) {
+        if constexpr (std::is_same_v<T, DrawCanvasCommand>) {
+            // A canvas covers the viewport even after terminal scrolling. Its
+            // transparent channels composite over the ordinary white canvas,
+            // just as they do in the bitmap/PNG renderer.
+            const Color background = over_opaque(arg.color, Color::white());
+            for (int row = 0; row < m_rows; ++row) {
+                for (int col = 0; col < m_cols; ++col) {
+                    if (inside_clip(col, row)) m_grid[row * m_cols + col].bg = background;
+                }
+            }
+        } else if constexpr (std::is_same_v<T, PushTransformCommand>) {
             auto curr = current_transform();
             m_transform_stack.push_back(curr.multiply(arg.matrix));
         } else if constexpr (std::is_same_v<T, PopTransformCommand>) {
@@ -53,14 +99,14 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
             }
         } else if constexpr (std::is_same_v<T, DrawRectCommand>) {
             Rect tr = current_transform().map_rect(arg.rect);
-            int start_col = std::clamp(static_cast<int>((tr.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-            int end_col   = std::clamp(static_cast<int>((tr.x + tr.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-            int start_row = std::clamp(static_cast<int>((tr.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
-            int end_row   = std::clamp(static_cast<int>((tr.y + tr.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
-
-            for (int r = start_row; r <= end_row; ++r) {
-                for (int c = start_col; c <= end_col; ++c) {
-                    m_grid[r * m_cols + c].bg = arg.color;
+            CellRange cells;
+            if (!intersecting_cells(tr, m_scroll_x, m_scroll_y, m_cols, m_rows,
+                                    m_cell_w, m_cell_h, cells)) return;
+            for (int r = cells.first_row; r <= cells.last_row; ++r) {
+                for (int c = cells.first_col; c <= cells.last_col; ++c) {
+                    if (!inside_clip(c, r)) continue;
+                    auto& cell = m_grid[r * m_cols + c];
+                    cell.bg = over_opaque(arg.color, cell.bg);
                 }
             }
         } else if constexpr (std::is_same_v<T, DrawBorderCommand>) {
@@ -115,21 +161,24 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
         } else if constexpr (std::is_same_v<T, DrawImageCommand>) {
             if (arg.image && arg.image->is_valid()) {
                 Rect tr = current_transform().map_rect(arg.rect);
-                int start_col = std::clamp(static_cast<int>((tr.x - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-                int end_col   = std::clamp(static_cast<int>((tr.x + tr.width - m_scroll_x) / m_cell_w), 0, m_cols - 1);
-                int start_row = std::clamp(static_cast<int>((tr.y - m_scroll_y) / m_cell_h), 0, m_rows - 1);
-                int end_row   = std::clamp(static_cast<int>((tr.y + tr.height - m_scroll_y) / m_cell_h), 0, m_rows - 1);
-
-                int span_cols = std::max(1, end_col - start_col);
-                int span_rows = std::max(1, end_row - start_row);
-
-                for (int r = start_row; r <= end_row; ++r) {
-                    for (int c = start_col; c <= end_col; ++c) {
-                        int sx = std::clamp((c - start_col) * arg.image->width / span_cols, 0, arg.image->width - 1);
-                        int sy = std::clamp((r - start_row) * arg.image->height / span_rows, 0, arg.image->height - 1);
+                CellRange cells;
+                if (!intersecting_cells(tr, m_scroll_x, m_scroll_y, m_cols, m_rows,
+                                        m_cell_w, m_cell_h, cells)) return;
+                for (int r = cells.first_row; r <= cells.last_row; ++r) {
+                    for (int c = cells.first_col; c <= cells.last_col; ++c) {
+                        if (!inside_clip(c, r)) continue;
+                        // Sample in the image's own coordinates, not relative
+                        // to the clamped first cell. That matters when a frame
+                        // has been partially scrolled out of the viewport.
+                        const float u = std::clamp((c * m_cell_w + m_scroll_x - tr.x) / tr.width, 0.0f, 1.0f);
+                        const float v = std::clamp((r * m_cell_h + m_scroll_y - tr.y) / tr.height, 0.0f, 1.0f);
+                        int sx = std::min(static_cast<int>(u * arg.image->width), arg.image->width - 1);
+                        int sy = std::min(static_cast<int>(v * arg.image->height), arg.image->height - 1);
                         Color pixel = arg.image->get_pixel_color(sx, sy);
-                        m_grid[r * m_cols + c].bg = pixel;
-                        m_grid[r * m_cols + c].ch = ' ';
+                        if (pixel.a == 0) continue;
+                        auto& cell = m_grid[r * m_cols + c];
+                        cell.bg = over_opaque(pixel, cell.bg);
+                        cell.ch = ' ';
                     }
                 }
             }

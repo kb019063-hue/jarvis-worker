@@ -44,6 +44,6 @@ but omitted the WHATWG Fetch `Request` interface:
   header-guard + `<base href>` checks).
 - Unit suites `fetch_request_constructor_validation_body_clone_and_signal` and
   `fetch_request_loopback_http_worker_and_abort` in `tests/test_suite.cpp`:
-  **328/328** engine test suites pass; `make security-fetch` (3/3),
+  **331/331** engine test suites pass; `make security-fetch` (3/3),
   `make security-worker` (17/17), `make js-conformance` (1145/1158), and
   `make dom-conformance` (678/678) remain green.

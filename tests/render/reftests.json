@@ -1374,8 +1374,8 @@
           "kind": "pixel",
           "x": 9,
           "y": 9,
-          "colour": "#ff5151",
-          "describe": "on the curve: a fraction of the child shows"
+          "colour": "#ff5252",
+          "describe": "on the curve: a fraction of the child shows (Chromium 153)"
         },
         {
           "kind": "pixel",

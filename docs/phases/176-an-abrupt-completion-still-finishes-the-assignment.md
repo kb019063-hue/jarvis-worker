@@ -72,9 +72,10 @@ language/expressions/assignment
   now        441 pass (90.9%)  [fail 44]
 6 pass in now and not in before; 0 pass in before and not in now
 
-the whole suite
+the whole suite (measured on the tree as merged with main, which brought
+Reflect.ownKeys' symbol keys along with it)
   before     14889 pass (94.9%)  [fail 797]
-  now        14895 pass (95.0%)  [fail 791]
+  now        14898 pass (95.0%)  [fail 788]
 ```
 
 The six: `target-member-identifier-reference-null`,

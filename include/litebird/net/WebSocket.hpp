@@ -66,6 +66,7 @@ public:
 
     void connect();
     void send(const std::string& message);
+    void send_binary(const uint8_t* data, size_t len);
     void send_binary(const std::vector<uint8_t>& data);
     void close(int code = 1000, const std::string& reason = "");
     void request_stop();

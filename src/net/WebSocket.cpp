@@ -5,6 +5,7 @@
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/JsOps.hpp"
 #include "litebird/js/Storage.hpp"
+#include "litebird/js/TypedArray.hpp"
 #include "litebird/net/UrlParser.hpp"
 
 #include <arpa/inet.h>
@@ -523,6 +524,7 @@ struct WebSocketObject::JsOwnerState {
     };
 
     JsValue inst{JsValue::make_undefined()};
+    uint64_t realm_id{0};
     mutable std::mutex listeners_mutex;
     std::vector<ListenerEntry> listeners;
     std::shared_ptr<WebSocketEventSink> sink;
@@ -1148,8 +1150,7 @@ void WebSocketObject::dispatch_open_on_owner(const std::string& selected_protoco
 }
 
 void WebSocketObject::dispatch_message_on_owner(const std::string& payload, bool is_binary) {
-    (void)is_binary;
-    post_to_owner([self = shared_from_this(), payload]() {
+    post_to_owner([self = shared_from_this(), payload, is_binary]() {
         if (self->m_event_sink && self->m_event_sink->owner_alive &&
             !self->m_event_sink->owner_alive->load(std::memory_order_acquire)) {
             self->release_owner_js_on_owner();
@@ -1157,10 +1158,33 @@ void WebSocketObject::dispatch_message_on_owner(const std::string& payload, bool
             return;
         }
         if (!self->m_owner_js || self->m_owner_js->inst.is_undefined()) return;
+
+        dom::Realm* realm = self->m_owner_js->realm_id ? dom::find_realm(self->m_owner_js->realm_id) : nullptr;
+        JsIntrinsics* previous_intrinsics = &JsIntrinsics::get();
+        const bool switched_realm = realm && realm->intrinsics && realm->intrinsics != previous_intrinsics;
+        if (switched_realm) JsIntrinsics::set_current(realm->intrinsics);
+        struct RestoreIntrinsics {
+            JsIntrinsics* previous;
+            bool active;
+            ~RestoreIntrinsics() {
+                if (active) JsIntrinsics::set_current(previous);
+            }
+        } restore_guard{previous_intrinsics, switched_realm};
+
+        JsValue data_val;
+        if (!is_binary) {
+            data_val = JsValue::make_string(payload);
+        } else if (self->binary_type() == "arraybuffer") {
+            data_val = array_buffer_from_bytes(payload);
+        } else {
+            dom::Realm& target_realm = realm ? *realm : dom::current_realm();
+            data_val = dom::make_blob(target_realm, payload, "");
+        }
+
         JsValue target = self->m_owner_js->inst;
         JsValue ev = JsValue::make_object(Heap::default_heap().allocate_object());
         ev.set_property("type", JsValue::make_string("message"));
-        ev.set_property("data", JsValue::make_string(payload));
+        ev.set_property("data", data_val);
         ev.set_property("origin", JsValue::make_string(self->m_event_origin));
         ev.set_property("lastEventId", JsValue::make_string(""));
         ev.set_property("source", JsValue::make_null());
@@ -1320,10 +1344,14 @@ void WebSocketObject::send(const std::string& message) {
     enqueue_frame(0x01u, reinterpret_cast<const uint8_t*>(message.data()), message.size(), true);
 }
 
-void WebSocketObject::send_binary(const std::vector<uint8_t>& data) {
+void WebSocketObject::send_binary(const uint8_t* data, size_t len) {
     if (m_ready_state.load(std::memory_order_acquire) != WebSocketReadyState::Open) return;
-    if (data.size() > kMaxMessageBytes) return;
-    enqueue_frame(0x02u, data.data(), data.size(), true);
+    if (len > kMaxMessageBytes) return;
+    enqueue_frame(0x02u, data, len, true);
+}
+
+void WebSocketObject::send_binary(const std::vector<uint8_t>& data) {
+    send_binary(data.data(), data.size());
 }
 
 void WebSocketObject::close(int code, const std::string& reason) {
@@ -2203,8 +2231,28 @@ JsValue attach_ws_js_instance(const std::shared_ptr<WebSocketObject>& ws) {
             dom::throw_dom(dom::current_realm(), "InvalidStateError",
                            "Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.");
         }
+        const JsValue& arg = sargs[0];
+        if (is_buffer_source(arg)) {
+            std::string raw;
+            if (!typed_array_bytes(arg, raw)) {
+                js_throw_type_error(
+                    "Failed to execute 'send' on 'WebSocket': Cannot send a detached or out-of-bounds buffer.");
+            }
+            if (ws->ready_state() == WebSocketReadyState::Open) {
+                ws->send_binary(reinterpret_cast<const uint8_t*>(raw.data()), raw.size());
+            }
+            return JsValue::make_undefined();
+        }
+        std::string blob_raw;
+        if (dom::blob_bytes(arg, blob_raw)) {
+            if (ws->ready_state() == WebSocketReadyState::Open) {
+                ws->send_binary(reinterpret_cast<const uint8_t*>(blob_raw.data()), blob_raw.size());
+            }
+            return JsValue::make_undefined();
+        }
+        std::string text = arg.to_string();
         if (ws->ready_state() == WebSocketReadyState::Open) {
-            ws->send(sargs[0].to_string());
+            ws->send(text);
         }
         return JsValue::make_undefined();
     }));
@@ -2271,6 +2319,7 @@ JsValue WebSocketObject::create_js_instance(std::string_view url,
     }
     JsValue inst = attach_ws_js_instance(ws);
     ws->m_owner_js->inst = inst;
+    ws->m_owner_js->realm_id = dom::current_realm().id;
     ws->connect();
     return inst;
 }
@@ -2303,6 +2352,7 @@ JsValue WebSocketObject::create_constructor(std::function<WebSocketContext()> co
             }
             JsValue inst = attach_ws_js_instance(ws);
             ws->m_owner_js->inst = inst;
+            ws->m_owner_js->realm_id = dom::current_realm().id;
             ws->connect();
             return inst;
         });

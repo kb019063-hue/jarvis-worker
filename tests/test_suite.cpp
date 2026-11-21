@@ -28394,6 +28394,166 @@ TEST(image_data_is_an_interface) {
     assert(failed.empty());
 }
 
+TEST(automatic_gc_threshold_and_geometric_growth) {
+    using namespace litebird;
+
+    // Isolated Heap so tests do not disturb Heap::default_heap()'s counters.
+    Heap heap;
+    assert(heap.auto_gc_enabled());
+    assert(heap.auto_gc_min_threshold() == Heap::kDefaultAutoGcMinThreshold);
+    assert(heap.auto_gc_collections() == 0);
+
+    // Lower threshold to test exact firing and geometric doubling quickly.
+    heap.set_auto_gc_min_threshold(64);
+    assert(heap.auto_gc_min_threshold() == 64);
+
+    for (int i = 0; i < 63; ++i) {
+        heap.allocate_object();
+        assert(!heap.take_gc_stress_request());
+    }
+    heap.allocate_object(); // 64th allocation arms the request.
+    assert(heap.take_gc_stress_request());
+    assert(!heap.take_gc_stress_request());
+    assert(heap.auto_gc_collections() == 1);
+    assert(heap.gc_stress_collections() == 0);
+
+    // Geometric growth: keep 200 live objects alive across a collection.
+    // The next threshold must grow to max(64, 200) = 200, keeping mark work O(N).
+    std::vector<JsValue> live;
+    std::vector<JsValue*> roots;
+    live.reserve(200);
+    roots.reserve(200);
+    for (int i = 0; i < 200; ++i) {
+        live.push_back(JsValue::make_object(heap.allocate_object()));
+    }
+    for (auto& v : live) roots.push_back(&v);
+    auto stats = heap.collect_garbage(roots);
+    assert(stats.alive_cells == 200);
+    assert(!heap.take_gc_stress_request());
+
+    for (int i = 0; i < 199; ++i) {
+        heap.allocate_object();
+        assert(!heap.take_gc_stress_request());
+    }
+    heap.allocate_object(); // 200th allocation arms the request.
+    assert(heap.take_gc_stress_request());
+    assert(!heap.take_gc_stress_request());
+    assert(heap.auto_gc_collections() == 2);
+
+    // Once the live set drops to 0, threshold shrinks back to min_threshold (64).
+    roots.clear();
+    live.clear();
+    auto after_reclaim = heap.collect_garbage({});
+    assert(after_reclaim.alive_cells == 0);
+    for (int i = 0; i < 63; ++i) {
+        heap.allocate_object();
+        assert(!heap.take_gc_stress_request());
+    }
+    heap.allocate_object();
+    assert(heap.take_gc_stress_request());
+    assert(heap.auto_gc_collections() == 3);
+
+    // Disabling automatic GC suppresses all requests; re-enabling resumes them.
+    heap.set_auto_gc_enabled(false);
+    assert(!heap.auto_gc_enabled());
+    for (int i = 0; i < 1000; ++i) {
+        heap.allocate_object();
+        assert(!heap.take_gc_stress_request());
+    }
+    heap.set_auto_gc_enabled(true);
+    for (int i = 0; i < 64; ++i) heap.allocate_object();
+    assert(heap.take_gc_stress_request());
+
+    // Per-agent isolation: a worker thread hitting its threshold arms ONLY
+    // that worker's safe point and never triggers agent 0.
+    heap.collect_garbage({});
+    std::atomic<bool> worker_ready{false};
+    std::atomic<bool> main_checked{false};
+    bool worker_fired = false;
+    bool worker_second_call = true;
+    std::thread worker([&]() {
+        Heap::enter_new_agent();
+        for (int i = 0; i < 64; ++i) heap.allocate_object();
+        worker_ready.store(true, std::memory_order_release);
+        while (!main_checked.load(std::memory_order_acquire)) {
+            std::this_thread::yield();
+        }
+        worker_fired = heap.take_gc_stress_request();
+        worker_second_call = heap.take_gc_stress_request();
+        heap.collect_garbage({});
+    });
+    while (!worker_ready.load(std::memory_order_acquire)) {
+        std::this_thread::yield();
+    }
+    // Main thread (agent 0) has allocated nothing since its last collection.
+    assert(!heap.take_gc_stress_request());
+    main_checked.store(true, std::memory_order_release);
+    worker.join();
+    assert(worker_fired);
+    assert(!worker_second_call);
+
+    // Stress mode overrides automatic GC cleanly.
+    heap.set_gc_stress(42, 4);
+    assert(heap.gc_stress_enabled());
+    const uint64_t auto_before_stress = heap.auto_gc_collections();
+    uint64_t stress_hits = 0;
+    for (int i = 0; i < 200; ++i) {
+        heap.allocate_object();
+        if (heap.take_gc_stress_request()) ++stress_hits;
+    }
+    assert(stress_hits > 0);
+    assert(heap.gc_stress_collections() == stress_hits);
+    assert(heap.auto_gc_collections() == auto_before_stress);
+}
+
+TEST(automatic_gc_reclaims_churn_without_calling_gc) {
+    using namespace litebird;
+
+    Heap& heap = Heap::default_heap();
+    heap.collect_garbage();
+    const uint64_t auto_before = heap.auto_gc_collections();
+    const size_t base_alive = heap.stats().alive_cells;
+
+    {
+        JsInterpreter js;
+        // Allocate >50,000 objects including mutual, closure, and array cycles
+        // without ever calling gc().
+        JsValue res = js.eval(R"JS(
+            var keep = { tag: "alive", child: { n: 42 } };
+            var makeClosure = function (v) { return function () { return v; }; };
+            var keepFn = makeClosure("retained");
+            for (var i = 0; i < 20000; i++) {
+                var a = { i: i };
+                var b = { a: a };
+                a.b = b;
+                var list = [a, b];
+                list.push(list);
+            }
+            keep.tag + "|" + keep.child.n + "|" + keepFn();
+        )JS");
+        assert(res.to_string() == "alive|42|retained");
+        const uint64_t auto_after_interp = heap.auto_gc_collections();
+        const size_t alive_without_manual_gc = heap.stats().alive_cells;
+        // Automatic GC must have fired multiple times and kept the live heap
+        // bounded far below the 60,000+ objects allocated in the loop.
+        assert(auto_after_interp > auto_before);
+        assert(alive_without_manual_gc < base_alive + 2 * Heap::kDefaultAutoGcMinThreshold);
+
+        // Bytecode VM safe point: allocate >10,000 objects in a VM loop without
+        // calling gc() and verify automatic collection fires there as well.
+        const uint64_t auto_before_vm = heap.auto_gc_collections();
+        auto fn = js.compile_to_bytecode(
+            "let i = 0; let last = 0; while (i < 12000) { let o = {}; last = i; i = i + 1; } last;");
+        assert(fn != nullptr);
+        VM vm;
+        JsValue vm_res = vm.interpret(fn);
+        assert(vm_res.to_number() == 11999.0);
+        assert(heap.auto_gc_collections() > auto_before_vm);
+    }
+
+    heap.collect_garbage();
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -28801,6 +28961,10 @@ int main() {
 
     // Phase 134: `align-items` places items on the cross axis, in flex and in grid.
     RUN_TEST(cross_axis_alignment_places_flex_and_grid_items);
+
+    // Phase 145: automatic per-agent allocation-threshold garbage collection at safe points.
+    RUN_TEST(automatic_gc_threshold_and_geometric_growth);
+    RUN_TEST(automatic_gc_reclaims_churn_without_calling_gc);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

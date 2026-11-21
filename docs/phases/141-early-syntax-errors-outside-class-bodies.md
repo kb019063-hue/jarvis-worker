@@ -100,15 +100,15 @@ Top directory gains across the 47,967-test run: `language/statements/class` (+12
 
 **Repository suites & ASan+UBSan:**
 
-- `make test` → **310 / 310** engine test suites + **114** cross-origin checks, 0 failures.
+- `make test` → **312 / 312** engine test suites + **114** cross-origin checks, 0 failures.
 - `make conformance` (`1973/1973`), `make js-conformance` (`1144/1158`, `90/90` everyday probe),
   `make dom-conformance` (`678/678`), `make url-conformance` (`1188/1188`),
   `make xml-conformance` (`1718/1718`), `make wpt` (`9567/9824`), `make render-conformance`,
   `make diff-strings` (`50,580/50,580`), `make verify-regexp`, `make verify-promise-iterators`,
   `make verify-collection-iterators`, `make check-numbers`, `python3 tools/ci/check_docs.py`
   all pass.
-- Under ASan + UBSan (`build-asan`): `test_suite` **310 / 310**, `cross_origin_test`
-  **114 / 114**, `make asan-js` (**1144 / 1158**, 0 crashes, 0 timeouts), `make asan-dom`
+- Under ASan + UBSan (`build-asan`): `test_suite` **312 / 312**, `cross_origin_test`
+  **114 / 114**, `make asan-js` (**1143 / 1158**, 0 crashes, 0 timeouts), `make asan-dom`
   (**678 / 678**), `make asan-url` (**1188 / 1188**).
 
 ## 4. What is still open

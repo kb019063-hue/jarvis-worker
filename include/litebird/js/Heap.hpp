@@ -244,11 +244,32 @@ public:
     // served -- a harness can require that a run actually collected something
     // rather than passing because stress mode was never armed.
     void set_gc_stress(uint64_t seed, uint32_t interval);
-    bool gc_stress_enabled() const { return m_stress_enabled; }
-    /// True when a collection is due, and clears the request. The caller
-    /// collects; the heap does not collect inside an allocation.
+    bool gc_stress_enabled() const { return m_stress_enabled.load(std::memory_order_relaxed); }
+    /// True when a collection is due (either from stress mode or from the
+    /// automatic allocation policy), and clears the request. The caller
+    /// collects at a safe point; the heap never collects inside an allocation.
     bool take_gc_stress_request();
     uint64_t gc_stress_collections() const { return m_stress_collections; }
+
+    // --- Automatic collection policy -----------------------------------------
+    //
+    // Each agent (page or worker) counts allocations since its last collection
+    // and requests a collection at the next safe point once that count reaches
+    // the agent's threshold. After a collection, the next threshold is
+    // `max(min_threshold, surviving_agent_cells)`:
+    //   - under churn (small live set), collections fire every `min_threshold`
+    //     allocations, keeping peak memory flat without requiring `gc()`;
+    //   - under a growing live set, the threshold doubles geometrically (2x
+    //     heap growth), keeping mark work O(N) amortized instead of O(N^2).
+    //
+    // Stress mode (`set_gc_stress`) overrides the automatic policy so seeded
+    // stress runs remain deterministic.
+    static constexpr size_t kDefaultAutoGcMinThreshold = 8192;
+    void set_auto_gc_enabled(bool enabled);
+    bool auto_gc_enabled() const { return m_auto_gc_enabled.load(std::memory_order_relaxed); }
+    void set_auto_gc_min_threshold(size_t min_cells);
+    size_t auto_gc_min_threshold() const { return m_auto_min_threshold.load(std::memory_order_relaxed); }
+    uint64_t auto_gc_collections() const { return m_auto_collections.load(std::memory_order_relaxed); }
 
     void register_root(JsValue* val);
     void unregister_root(JsValue* val);
@@ -374,13 +395,35 @@ private:
     // Collection stress (see set_gc_stress). The countdown is read and written
     // only with m_mutex held; the request flag is read by a thread's own safe
     // point, so it is atomic.
-    bool m_stress_enabled{false};
+    std::atomic<bool> m_stress_enabled{false};
     uint64_t m_stress_rng{0};
     uint32_t m_stress_interval{16};
     uint32_t m_stress_countdown{0};
     std::atomic<bool> m_stress_pending{false};
     uint64_t m_stress_collections{0};
     uint64_t next_stress_random();
+
+    // Per-agent automatic collection state (see set_auto_gc_enabled).
+    // Protected by m_mutex; hot-path safe points check m_main_auto_pending
+    // (for agent 0) or m_worker_pending_mask (for worker agents) lock-free.
+    struct AgentAutoState {
+        size_t allocs_since_gc{0};
+        size_t threshold{kDefaultAutoGcMinThreshold};
+        bool pending{false};
+    };
+    AgentAutoState& agent_auto_state_locked(uint32_t agent);
+    AgentAutoState* find_agent_auto_state_locked(uint32_t agent);
+    void clear_auto_pending_locked(uint32_t agent, AgentAutoState& st);
+    void clear_all_auto_pending_locked();
+    void reset_auto_gc_after_collect_locked(uint32_t agent, size_t agent_alive);
+
+    std::atomic<bool> m_auto_gc_enabled{true};
+    std::atomic<size_t> m_auto_min_threshold{kDefaultAutoGcMinThreshold};
+    AgentAutoState m_main_agent_auto;
+    std::unordered_map<uint32_t, AgentAutoState> m_worker_agent_auto;
+    std::atomic<bool> m_main_auto_pending{false};
+    std::atomic<uint64_t> m_worker_pending_mask{0};
+    std::atomic<uint64_t> m_auto_collections{0};
 };
 
 } // namespace litebird

@@ -43,7 +43,7 @@ deliver binary data:
 - Differential probe against Node.js v22.22.3 over a shared loopback RFC 6455
   server: 7/7 wire frames (opcodes, masking, raw payloads) and all JS results
   identical.
-- `make test`: **318/318** engine suites (including
+- `make test`: **319/319** engine suites (including
   `websocket_binary_frames_arraybuffer_typedarray_and_blob`) + **114/114**
   cross-origin checks.
 - `make security-websocket`: **35/35** checks (normal build and ASan+UBSan

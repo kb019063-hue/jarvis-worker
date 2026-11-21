@@ -77,7 +77,7 @@ engine — yet script could neither send nor receive binary WebSocket frames:
   binary reply, coerced text frame `null`, plus detached `ArrayBuffer`/`DataView`
   `TypeError` and `CONNECTING` `InvalidStateError`): **wire frames identical
   (7/7, all masked, exact opcodes and payloads) and JS outputs identical**.
-- **Unit test suite:** `make test` → **318/318** engine suites (new
+- **Unit test suite:** `make test` → **319/319** engine suites (new
   `websocket_binary_frames_arraybuffer_typedarray_and_blob` using `TestPage`) +
   **114/114** cross-origin checks.
 - **End-to-end TLS & Worker WebSocket verifier:** `make security-websocket` →

@@ -1249,7 +1249,9 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
             rest.target->name = "args";
             fn->params.push_back(std::move(rest));
             std::vector<std::unique_ptr<Expr>> args;
-            args.push_back(std::make_unique<SpreadExpr>(std::make_unique<IdentifierExpr>("args")));
+            auto rest_spread = std::make_unique<SpreadExpr>(std::make_unique<IdentifierExpr>("args"));
+            rest_spread->synthesised = true;
+            args.push_back(std::move(rest_spread));
             fn->body->statements.push_back(
                 std::make_unique<ExprStmt>(std::make_unique<SuperCallExpr>(std::move(args))));
         }

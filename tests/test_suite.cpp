@@ -30265,6 +30265,127 @@ TEST(a_definition_names_the_function_it_makes) {
     assert(failed.empty());
 }
 
+TEST(textdecoder_reaches_script_in_pieces) {
+    using namespace litebird;
+    // Phase 163, finding 168. WHATWG Encoding §11.1.1: a `{stream: true}`
+    // decode is the same decoder as a one-shot one, asked to keep the bytes a
+    // chunk ends inside of for the next chunk instead of answering U+FFFD for
+    // them. The checks below are of three kinds, and the second is the one
+    // that cannot be satisfied by writing a second, worse decoder: a stream
+    // split anywhere must produce exactly what one call produces.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var failures = [];
+        function report(what, got, want) {
+            var a = JSON.stringify(got), b = JSON.stringify(want);
+            if (a !== b) failures.push(what + ': got ' + a + ', expected ' + b);
+        }
+        function bytes(a) { return new Uint8Array(a); }
+        function stream(enc, parts, options) {
+            var d = new TextDecoder(enc, options);
+            var out = '';
+            for (var i = 0; i < parts.length; i++) out += d.decode(bytes(parts[i]), {stream: true});
+            return out + d.decode();
+        }
+
+        // ---- one character per encoding, split at every byte --------------
+        report('UTF-8 three bytes, split after one', stream('utf-8', [[0xE2], [0x82, 0xAC]]), '\u20AC');
+        report('UTF-8 four bytes, split after two', stream('utf-8', [[0xF0, 0x9F], [0x98, 0x80]]), '\u{1F600}');
+        report('UTF-16LE one unit, split', stream('utf-16le', [[0x41], [0x00, 0x42, 0x00]]), 'AB');
+        report('UTF-16LE surrogate pair, split inside it',
+               stream('utf-16le', [[0x00, 0xD8], [0x00, 0xDC]]), '\u{10000}');
+        report('Big5 two bytes, split', stream('big5', [[0xA4], [0x40]]), '\u4E00');
+        report('Shift_JIS two bytes, split', stream('shift_jis', [[0x82], [0xA0]]), '\u3042');
+        report('EUC-JP two bytes, split', stream('euc-jp', [[0xA4], [0xA2]]), '\u3042');
+        report('EUC-JP three-byte JIS0212 form, split twice',
+               stream('euc-jp', [[0x8F], [0xA1], [0xA1]]), new TextDecoder('euc-jp').decode(bytes([0x8F, 0xA1, 0xA1])));
+        report('EUC-KR two bytes, split', stream('euc-kr', [[0xB0], [0xA1]]), '\uAC00');
+        report('gb18030 four-byte form, split twice',
+               stream('gb18030', [[0x81], [0x30], [0x81, 0x30]]),
+               new TextDecoder('gb18030').decode(bytes([0x81, 0x30, 0x81, 0x30])));
+        // ISO-2022-JP's mode is the one piece of decoder state that has to
+        // cross a chunk boundary: the escape says how to read what follows.
+        report('ISO-2022-JP escape in one chunk, its text in the next',
+               stream('iso-2022-jp', [[0x1B, 0x24, 0x42], [0x24, 0x22, 0x1B, 0x28, 0x42]]), '\u3042');
+        report('ISO-2022-JP split inside the escape',
+               stream('iso-2022-jp', [[0x1B], [0x24], [0x42, 0x24, 0x22]]), '\u3042');
+
+        // ---- a stream split anywhere answers what one call answers --------
+        // The bytes are the encodings' own, including a lead byte with no trail
+        // and a lone continuation, which a one-shot call answers U+FFFD for.
+        var cases = [
+            ['utf-8', [0x41, 0xE2, 0x82, 0xAC, 0xFF, 0xC3, 0xA9]],
+            ['utf-8', [0xE2, 0x28, 0xA1]],
+            ['utf-16le', [0x41, 0x00, 0x00, 0xD8, 0x00, 0xDC, 0x42, 0x00]],
+            ['utf-16be', [0x00, 0x41, 0xD8, 0x00, 0xDC, 0x00]],
+            ['gb18030', [0x81, 0x30, 0x81, 0x30, 0x41, 0x84, 0x31, 0xA4, 0x39]],
+            ['big5', [0xA4, 0x40, 0x41, 0x88, 0x62]],
+            ['shift_jis', [0x82, 0xA0, 0x41, 0x81, 0x60]],
+            ['euc-jp', [0xA4, 0xA2, 0x8F, 0xA1, 0xA1, 0x8E, 0xA2, 0x41]],
+            ['euc-kr', [0xB0, 0xA1, 0x41]],
+            ['iso-2022-jp', [0x1B, 0x24, 0x42, 0x24, 0x22, 0x24, 0x24, 0x1B, 0x28, 0x42, 0x41]],
+            ['windows-1252', [0xE9, 0x80, 0x41]],
+            ['koi8-r', [0xC1, 0x41]]
+        ];
+        var splits = 0, differ = 0;
+        for (var c = 0; c < cases.length; c++) {
+            var enc = cases[c][0], data = cases[c][1];
+            for (var fatal = 0; fatal < 2; fatal++) {
+                var whole;
+                try { whole = 'ok:' + new TextDecoder(enc, {fatal: !!fatal}).decode(bytes(data)); }
+                catch (e) { whole = 'throw:' + e.name; }
+                for (var cut = 0; cut <= data.length; cut++) {
+                    var got;
+                    try {
+                        var d = new TextDecoder(enc, {fatal: !!fatal});
+                        got = 'ok:' + d.decode(bytes(data.slice(0, cut)), {stream: true})
+                                            + d.decode(bytes(data.slice(cut)), {stream: true}) + d.decode();
+                    } catch (e2) { got = 'throw:' + e2.name; }
+                    ++splits;
+                    if (got !== whole) {
+                        if (differ === 0) failures.push('stream differs: ' + enc + ' ' + JSON.stringify(data) + ' cut ' + cut);
+                        ++differ;
+                    }
+                }
+            }
+        }
+        // 12 cases, two error modes, every cut from before the first byte to
+        // after the last: the sum of (length + 1) over the cases, twice.
+        report('a stream split anywhere is the one-shot answer', [splits, differ], [164, 0]);
+
+        // ---- the BOM, the fatal flag and the flush ------------------------
+        report('a one-byte BOM piece is waited for', stream('utf-8', [[0xEF], [0xBB, 0xBF, 0x41]]), 'A');
+        report('a BOM is stripped once, in a stream too',
+               stream('utf-8', [[0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF, 0x41]]), '\uFEFFA');
+        report('ignoreBOM keeps it', stream('utf-8', [[0xEF], [0xBB, 0xBF, 0x41]], {ignoreBOM: true}), '\uFEFFA');
+        var oneShot = new TextDecoder();
+        report('a one-shot call flushes what a stream would hold', oneShot.decode(bytes([0xE2])), '\uFFFD');
+        var flushing = new TextDecoder('utf-8', {fatal: true});
+        flushing.decode(bytes([0xE2]), {stream: true});
+        var threw = 'no throw';
+        try { flushing.decode(); } catch (e) { threw = e.name; }
+        report('a fatal stream that ends inside a character throws on the flush', threw, 'TypeError');
+        report('decode() with no argument flushes an empty decoder',
+               new TextDecoder().decode(undefined, {stream: false}), '');
+        // A stream restarts: a decode() with stream false ends it, and the
+        // next one sniffs its own BOM again.
+        var restart = new TextDecoder();
+        restart.decode(bytes([0x41]), {stream: true});
+        report('a decode() without stream ends the stream', restart.decode(bytes([0xEF, 0xBB, 0xBF, 0x42])), '\uFEFFB');
+        // x-user-defined carries every byte: nothing is ever held back.
+        report('x-user-defined holds nothing', stream('x-user-defined', [[0x80], [0x81]]),
+               '\uF780\uF781');
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -30690,6 +30811,9 @@ int main() {
 
     // Phase 149: the Annex B String.prototype HTML methods, and the trim aliases.
     RUN_TEST(annex_b_string_html_methods);
+
+    // Phase 163: TextDecoder's `{stream: true}`, and the bytes it holds back.
+    RUN_TEST(textdecoder_reaches_script_in_pieces);
 
     // Phase 119: Contextual GSUB (Type 1-7), Cursive GPOS (Type 3/7/8), and Arabic Shaping.
     RUN_TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions);

@@ -128,6 +128,15 @@ bool sniff_bom_encoding(std::string_view bytes, EncodingId& out, std::size_t& bo
 /// error mode, used by XML 1.0), returns false at the first decoding error.
 bool decode_with_encoding(std::string_view bytes, EncodingId encoding, std::string& out_utf8, bool fatal = false);
 
+/// The same for a stream (§11.1.1), for the one encoding whose state outlives
+/// its input: ISO-2022-JP is read in a mode an escape sequence chose, and a
+/// chunk boundary can fall after the escape and before the text it governs.
+/// `mode_in` is the mode the previous chunk ended in, `*mode_out` the one this
+/// chunk ends in (0 ASCII, 1 Roman, 2 Katakana, 3 double-byte). Every other
+/// encoding ignores both and is decoded exactly as `decode_with_encoding` does.
+bool decode_stream_chunk(std::string_view bytes, EncodingId encoding, std::string& out_utf8,
+                         bool fatal, int mode_in, int* mode_out);
+
 /// WHATWG Encoding Standard §6 "decode": sniffs and strips at most one leading
 /// BOM (`UTF-8`, `UTF-16BE`, `UTF-16LE`), otherwise uses `fallback_encoding`,
 /// and decodes the remaining bytes in replacement mode into well-formed UTF-8.

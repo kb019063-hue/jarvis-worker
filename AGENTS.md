@@ -173,7 +173,9 @@ asan`.
   to what is left.
 - The `WIP:` comes off the title. Merged into `main` with a merge commit
   (`gh pr merge N --merge`) once CI is green, and CI on `main` checked
-  afterwards.
+  afterwards, in the same turn: once you have merged and replied, GitHub is
+  out of reach until the person presses Continue ("The turn, and what a
+  merge does to it", below).
 - `python3 tools/ci/check_pr.py merge N` says "ready" right before the merge.
   It asks what is easy to believe and was wrong more than once: that `main`
   is in the head commit, that CI passed on that commit, that the numbers are
@@ -187,7 +189,7 @@ asan`.
 
 ## What has gone wrong, and what to do about it
 
-Everything here happened between 15 and 18 November 2026, to agents that had
+Everything here happened between 15 and 21 November 2026, to agents that had
 read this file. Most of it is a rule from above that was not looked up at the
 moment it applied, so `tools/ci/check_pr.py` looks it up (it reads GitHub and
 changes nothing there):
@@ -419,6 +421,59 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
     dozen documents written in the script, passes, and has checked far
     less. The one job ran them in this order and nothing said that it
     mattered; the check above now requires it.
+
+**The turn, and what a merge does to it**
+
+- **An agent works while its turn lasts, and not in between.** A turn begins
+  when the person we work for writes to the agent and ends with the agent's
+  reply. Nothing wakes an agent in between: not a CI run that ends, not a
+  comment on its pull request, not a line of this file. #164's CI passed on
+  20 November at 19:16, after the turn that had opened it had ended; nobody
+  was there to merge it, `main` moved at 19:23, and it was closed the next
+  day. So what has to happen is done before the reply, and the reply, which
+  is all that reaches the person, says which pull request is merged, which
+  is still open and why, and what they have to do before you can go on.
+- **After `gh pr merge`, GitHub still answers until the turn ends.** #171
+  was merged on 21 November at 03:05:20. Ten seconds later `git fetch` and
+  `git push --dry-run` worked, and within the minute a comment on one pull
+  request and `gh pr close` on another. A new pull request can be opened
+  from the same branch too: #164 was, a minute after #162 had been merged
+  from it, and #159 seventeen minutes after #146; thirteen branches have
+  done it. So what a merge leaves to do is done in that turn: CI on `main`
+  watched to its end, and `main` repaired if it is red ("Watch CI on
+  `main`", above); the notes in the pull requests you carried; what you
+  leave open closed, or handed over in the reply.
+- **Once that turn has ended, the branch is `pr_merged` and GitHub is out of
+  reach.** The next message came with a note from the platform: edit no
+  file, commit nothing, and pushes, pull requests and every `gh` call that
+  reaches GitHub "will fail and must not be attempted"; files can be read
+  and questions answered. (21 November, 03:40, the first message after
+  #171. Nothing was tried, as the note says; the checkout was the branch's
+  base commit.) It stays that way until the person presses Continue beside
+  the pull request's status, or starts a new session where there is no
+  such button, so that is the first thing to tell a person who writes to
+  such a branch. And an agent that has merged and stopped cannot be reached
+  through GitHub by anyone: a note on its pull request waits until it is
+  continued, and what it should do next has to be said to it by the person.
+- **Continue is a new branch, cut from `main` as it is then.** It has
+  another name (`arena/` and another ID), and the old one is no longer
+  yours to push to. One session has had eleven names since 15 November, so
+  an ID is not an agent: two pull requests with different IDs can be one
+  agent's, and GitHub does not say. A pull request still open on the old
+  branch cannot be pushed to any more. It can be merged as it is, when
+  `check_pr.py merge N` says "ready"; or closed; or carried, its head
+  merged into the new branch and landed from there ("A finished pull
+  request whose session has gone quiet", above). #134 was opened a minute
+  after #130 had been merged from the same branch, the turn ended, and it
+  was carried in #141; #164 was closed. So a pull request opened after a
+  merge is merged in the same turn, or the reply says that it is open and
+  what should become of it.
+- **Whether another task follows the merge is for the person to say.**
+  Asked for one task, an agent does what the merge leaves to do, and
+  replies. Asked for more, the next one begins before the reply, because
+  afterwards nothing can begin it: `git merge --ff-only origin/main`, a
+  claim as in "Before starting", and a pull request from the same branch,
+  to which the bullet above applies.
 
 **The sandbox**
 

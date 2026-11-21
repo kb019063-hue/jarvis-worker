@@ -28073,6 +28073,146 @@ TEST(class_bodies_reject_what_the_grammar_does_not_allow) {
     assert(js.eval("new (class extends Object { x = 1; constructor() { super(); } })().x").to_string() == "1");
 }
 
+TEST(parser_rejects_early_syntax_errors_outside_class_bodies) {
+    using namespace litebird;
+
+    // Phase 141, finding 146. Early SyntaxErrors outside class bodies across
+    // object literals, function declarations/expressions/methods/arrows,
+    // assignment/update targets, destructuring rest/cover grammar, directive
+    // prologues, and non-method `super` property lookups. Every expectation
+    // below was verified against Node.js v22.22.3.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function rejects(what, src) {
+            try {
+                (0, eval)(src);
+                failures.push(what + ': accepted, expected SyntaxError');
+            } catch (e) {
+                if (!(e instanceof SyntaxError)) failures.push(what + ': threw ' + e.name);
+            }
+        }
+        function accepts(what, src) {
+            try { (0, eval)(src); }
+            catch (e) { failures.push(what + ': threw ' + e.name + ' ' + e.message); }
+        }
+
+        // ---- directive prologue & strict params / bindings ----------------
+        rejects('use strict in default-param fn', 'function f(a = 1) { "use strict"; }');
+        rejects('use strict in destructuring-param fn', 'function f({a}) { "use strict"; }');
+        rejects('use strict in rest-param fn', 'function f(...a) { "use strict"; }');
+        rejects('retroactive strict fn named eval', 'function eval() { "use strict"; }');
+        rejects('retroactive strict fn named arguments', 'function arguments() { "use strict"; }');
+        rejects('retroactive strict param eval', 'function f(eval) { "use strict"; }');
+        rejects('retroactive strict param arguments', 'function f(arguments) { "use strict"; }');
+        rejects('retroactive strict dup params', 'function f(a, a) { "use strict"; }');
+        rejects('strict fn decl named eval', '"use strict"; function eval() {}');
+        rejects('strict fn expr named eval', '"use strict"; (function eval() {})');
+        rejects('strict var eval', '"use strict"; var eval = 1;');
+        rejects('strict let arguments', '"use strict"; let arguments = 1;');
+        rejects('strict const [eval]', '"use strict"; const [eval] = [1];');
+        rejects('strict catch arguments', '"use strict"; try {} catch (arguments) {}');
+        rejects('strict class decl eval', '"use strict"; class eval {}');
+        rejects('strict class expr arguments', '"use strict"; (class arguments {})');
+        accepts('escaped use strict is not directive', 'function f(a = 1) { "\\x75se strict"; var eval = 1; return eval; } f();');
+        accepts('concatenated use strict is not directive', 'function f(a = 1) { "use strict" + ""; var eval = 1; return eval; } f();');
+        accepts('member after use strict is not directive', 'function f(a = 1) { "use strict"\n.length; var eval = 1; return eval; } f();');
+        accepts('sloppy fn duplicate params', 'function f(a, a) { return a; }');
+        accepts('sloppy fn named eval', '(function() { function eval() { return 1; } return eval(); })()');
+        accepts('sloppy fn named arguments', '(function() { function arguments() { return 1; } return arguments(); })()');
+        accepts('strict member named eval/arguments', '"use strict"; var o = {}; o.eval = 1; o.arguments = 2;');
+
+        // ---- duplicate params & param vs body lexical redeclaration -------
+        rejects('dup param before default', 'function f(a, a = 1) {}');
+        rejects('dup param after default', 'function f(a = 1, a) {}');
+        rejects('dup param with pattern', 'function f({a}, a) {}');
+        rejects('arrow dup params', 'var f = (a, a) => a;');
+        rejects('method dup params', 'var o = { m(a, a) {} };');
+        rejects('fn param shadowed by body let', 'function f(p) { let p; }');
+        rejects('fn param shadowed by body const', 'function f(p) { const p = 1; }');
+        rejects('method param shadowed by body let', 'var o = { m(p) { let p; } };');
+        rejects('arrow param shadowed by body let', 'var f = p => { let p; };');
+        rejects('fn expr param shadowed by body const', 'var f = function(a, b) { const b = 1; };');
+        accepts('param shadowed inside inner block', 'function f(p) { { let p = 2; return p; } }');
+
+        // ---- parameter default yield / await ------------------------------
+        rejects('yield expr in generator param', 'function* g(a = yield 1) {}');
+        rejects('await expr in async param', 'async function f(a = await 1) {}');
+        rejects('yield expr in method generator param', 'var o = { *m(a = yield 1) {} };');
+        rejects('await expr in async method param', 'var o = { async m(a = await 1) {} };');
+        rejects('await expr in class-ish method param', 'var o = { m(x = await 1) {} };');
+        accepts('yield inside inner arrow in generator param', 'function* g(a = () => yield) { return a; }');
+        accepts('await inside inner arrow in async param', 'async function f(a = () => await) { return a; }');
+
+        // ---- object literal, accessor & class member early errors ---------
+        rejects('duplicate __proto__ keys', 'var o = { __proto__: 1, __proto__: 2 };');
+        rejects('string + bare __proto__ keys', 'var o = { "__proto__": 1, __proto__: 2 };');
+        rejects('cover init in var initializer', 'var o = { a = 1 };');
+        rejects('standalone cover init', '({ a = 1 });');
+        rejects('object getter with param', 'var o = { get a(x) {} };');
+        rejects('object getter with default param', 'var o = { get a(x = 1) {} };');
+        rejects('object setter with 0 params', 'var o = { set a() {} };');
+        rejects('object setter with 2 params', 'var o = { set a(a, b) {} };');
+        rejects('object setter with rest param', 'var o = { set a(...a) {} };');
+        rejects('async getter on object', 'var o = { async get a() {} };');
+        rejects('generator setter on object', 'var o = { *set a(v) {} };');
+        rejects('class getter with default param', 'class C { get a(x = 1) {} }');
+        rejects('static field named constructor', 'class C { static constructor; }');
+        rejects('static string field named constructor', 'class C { static "constructor" = 1; }');
+        accepts('mixed valid __proto__ forms', 'var o = { __proto__: {}, ["__proto__"]: 2, __proto__() {} };');
+        accepts('shorthand plus explicit __proto__', 'var __proto__ = 1; var o = { __proto__, __proto__: {} };');
+        accepts('strict object methods named eval/arguments', '"use strict"; var o = { eval() {}, arguments() {} };');
+        accepts('static method named constructor', 'class C { static constructor() {} }');
+
+        // ---- rest, destructuring cover grammar & assignment targets -------
+        rejects('non-final rest in fn param pattern', 'function f([...x, y]) {}');
+        rejects('non-final rest in array decl', 'var [...x, y] = [];');
+        rejects('non-final rest in object decl', 'var {...rest, a} = {};');
+        rejects('non-final rest in array assign', 'var x, y; [...x, y] = [];');
+        rejects('trailing comma after rest in array assign', 'var x; [...x,] = [];');
+        rejects('trailing comma after rest in object assign', 'var rest; ({ ...rest, } = {});');
+        rejects('non-final rest in object assign', 'var rest, a; ({ ...rest, a } = {});');
+        rejects('default inside object rest assign', 'var a; ({ ...a = 1 } = {});');
+        rejects('grouped array target', 'var a; ([a]) = [];');
+        rejects('grouped object target', 'var a; ({ a }) = {};');
+        rejects('grouped assign inside array target', 'var a; ([(a = 1)] = []);');
+        rejects('grouped object nested target', 'var b; ({ a: ({ b = 1 }) } = {});');
+        rejects('strict assign eval', '"use strict"; eval = 1;');
+        rejects('strict grouped assign arguments', '"use strict"; (arguments) = 20;');
+        rejects('strict prefix ++eval', '"use strict"; ++eval;');
+        rejects('strict postfix arguments--', '"use strict"; arguments--;');
+        rejects('strict destructuring [arguments]', '"use strict"; [arguments] = [];');
+        rejects('strict destructuring {eval}', '"use strict"; ({ eval } = {});');
+        rejects('strict destructuring {eval=0}', '"use strict"; ({ eval = 0 } = {});');
+        rejects('assign to this', 'this = 1;');
+        rejects('grouped assign to this', '(this) = 1;');
+        rejects('prefix ++this', '++this;');
+        rejects('postfix this--', 'this--;');
+        rejects('destructuring [this]', '[this] = [];');
+        rejects('for-of this', 'for (this of [1]) {}');
+        accepts('cover init resolved to object destructuring', 'var a; ({ a = 1 } = {});');
+        accepts('duplicate __proto__ in object destructuring', 'var a, b; ({ __proto__: a, __proto__: b } = {});');
+        accepts('cover init in for-of head', 'var a; for ({ a = 1 } of [{}]) {}');
+        accepts('grouped simple ident in array pattern', 'var a; [(a) = 1] = []; [(a)] = [2];');
+
+        // ---- super property outside home-object methods -----------------
+        rejects('top-level super.x', 'super.x;');
+        rejects('plain function super.x', 'function f() { return super.x; }');
+        rejects('top-level arrow super[0]', 'var f = () => super[0];');
+        rejects('nested function inside method super.x', 'class C { m() { function inner() { return super.x; } } }');
+        accepts('arrow inside object method super.toString', 'var o = { m() { return (() => super.toString)(); } };');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+
+    // Sanity check runtime values for accepted constructs.
+    assert(js.eval("var o = { get x() { return 4; }, m() { return super.toString === Object.prototype.toString; } }; o.x + ':' + o.m()").to_string() == "4:true");
+    assert(js.eval("var a = 0, b = 0; ({ x: a = 7 } = {}); [b] = [9]; a + b").to_number() == 16.0);
+}
+
 TEST(an_anonymous_class_expression_takes_its_bindings_name) {
     using namespace litebird;
 
@@ -29981,6 +30121,8 @@ int main() {
 
     // Phase 128: the six regular grammar rules of a class body.
     RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);
+    // Phase 141: remaining early SyntaxErrors outside class bodies.
+    RUN_TEST(parser_rejects_early_syntax_errors_outside_class_bodies);
 
     // Phase 135: an anonymous class expression takes the name it is bound to.
     RUN_TEST(an_anonymous_class_expression_takes_its_bindings_name);

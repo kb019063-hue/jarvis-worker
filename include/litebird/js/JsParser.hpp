@@ -265,6 +265,7 @@ struct ObjectProperty {
 class ObjectLiteralExpr : public Expr {
 public:
     std::vector<ObjectProperty> properties;
+    bool rest_trailing_comma{false};
     explicit ObjectLiteralExpr(std::vector<ObjectProperty> p)
         : Expr(NodeKind::ObjectLiteral), properties(std::move(p)) {}
 
@@ -280,6 +281,7 @@ public:
 class ArrayLiteralExpr : public Expr {
 public:
     std::vector<std::unique_ptr<Expr>> elements;   // null entries are holes
+    bool rest_trailing_comma{false};
     explicit ArrayLiteralExpr(std::vector<std::unique_ptr<Expr>> elems)
         : Expr(NodeKind::ArrayLiteral), elements(std::move(elems)) {}
 };
@@ -709,6 +711,9 @@ private:
         // nowhere else (a method's body is a FunctionBody, which does not
         // contain its own `super()`).
         bool in_class_field{false};
+        // True while parsing formal parameter defaults/patterns, where
+        // generator `yield` and async `await` expressions are early errors.
+        bool in_params{false};
     };
 
     const JsToken& peek(size_t offset = 0) const;
@@ -725,6 +730,7 @@ private:
     void consume_semicolon();
     bool is_strict() const;
     void validate_identifier(const std::string& name, bool strict_ctx) const;
+    void validate_binding_identifier(const std::string& name, bool strict_ctx) const;
     std::string consume_binding_identifier(const char* what);
     bool is_property_name_token() const;
 
@@ -740,7 +746,7 @@ private:
     std::unique_ptr<Stmt> parse_try_statement();
     std::unique_ptr<Stmt> parse_return_statement();
     std::unique_ptr<BlockStmt> parse_block();
-    void parse_statement_list(BlockStmt& block, bool until_close_brace);
+    bool parse_statement_list(BlockStmt& block, bool until_close_brace);
 
     // Functions and classes
     std::shared_ptr<FunctionNode> parse_function(bool is_async, bool is_declaration);
@@ -749,6 +755,7 @@ private:
     void parse_params(FunctionNode& fn);
     void parse_function_body(FunctionNode& fn);
     void finish_params(FunctionNode& fn);
+    void validate_function_early_errors(const FunctionNode& fn, bool body_has_use_strict) const;
     std::shared_ptr<FunctionNode> parse_method(bool is_async, bool is_generator,
                                                bool allow_super_property = false,
                                                bool allow_super_call = false);
@@ -817,6 +824,25 @@ private:
     int m_closure_count{0};
     std::vector<FunctionContext> m_functions;
     std::vector<BlockStmt*> m_blocks;
+    struct PendingCoverError {
+        const ObjectLiteralExpr* expr{nullptr};
+        int line{0};
+        std::string message;
+    };
+    struct InParamsScope {
+        std::vector<FunctionContext>& stack;
+        size_t index{0};
+        bool saved{false};
+        explicit InParamsScope(std::vector<FunctionContext>& s)
+            : stack(s), index(s.size() - 1), saved(s[index].in_params) {
+            stack[index].in_params = true;
+        }
+        ~InParamsScope() {
+            if (index < stack.size()) stack[index].in_params = saved;
+        }
+    };
+    std::vector<PendingCoverError> m_pending_cover_errors;
+    void clear_cover_error(const ObjectLiteralExpr* expr);
 };
 
 } // namespace litebird

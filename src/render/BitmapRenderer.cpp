@@ -110,18 +110,37 @@ static const uint8_t FONT_8X8[96][8] = {
 BitmapRenderer::BitmapRenderer(int width, int height)
     : m_width(width), m_height(height), m_pixels(width * height, Color::white()) {}
 
+// Defined below, beside the fill and border code that draws with it. The clip
+// asks the same question a background of the same box asks (finding 156).
+static float rounded_box_sdf(float px, float py, float x, float y, float w, float h, float r);
+
 void BitmapRenderer::clear(Color color) {
     std::fill(m_pixels.begin(), m_pixels.end(), color);
 }
 
-bool BitmapRenderer::inside_clip(int x, int y) const {
+bool BitmapRenderer::clip_coverage(int x, int y, float& coverage) const {
+    coverage = 1.0f;
     if (m_clip_stack.empty()) return true;
     const float px = static_cast<float>(x) + 0.5f;
     const float py = static_cast<float>(y) + 0.5f;
     for (const auto& clip : m_clip_stack) {
-        if (px < clip.x || py < clip.y ||
-            px >= clip.x + clip.width || py >= clip.y + clip.height) {
+        const Rect& r = clip.rect;
+        if (px < r.x || py < r.y || px >= r.x + r.width || py >= r.y + r.height) {
             return false;
+        }
+        if (clip.radius > 0.5f) {
+            // An `overflow: hidden` box with a `border-radius` clips to the
+            // rounded box, not to its bounding rectangle (CSS 2.1 §11.1.1 makes
+            // the overflow clip the padding box shaped by the corner curves).
+            // The same signed-distance field the background fill uses answers
+            // it, so the ink of a child stops exactly where a background of the
+            // same box would stop (finding 156) -- including on the curve
+            // itself, where the answer is a fraction and not yes or no.
+            const float radius = std::min({clip.radius, r.width / 2.0f, r.height / 2.0f});
+            const float dist = rounded_box_sdf(px, py, r.x, r.y, r.width, r.height, radius);
+            if (dist >= 0.5f) return false;
+            coverage *= std::clamp(0.5f - dist, 0.0f, 1.0f);
+            if (coverage <= 0.0f) return false;
         }
     }
     return true;
@@ -129,7 +148,15 @@ bool BitmapRenderer::inside_clip(int x, int y) const {
 
 void BitmapRenderer::set_pixel(int x, int y, Color color) {
     if (x < 0 || x >= m_width || y < 0 || y >= m_height) return;
-    if (!inside_clip(x, y)) return;
+    float coverage = 1.0f;
+    if (!clip_coverage(x, y, coverage)) return;
+    // A pixel on the curve of a rounded clip is clipped by the *part of it*
+    // that is inside, so the ink keeps that fraction of its alpha rather than
+    // all of it or none. This is what makes the child's edge land on the same
+    // anti-aliased curve a background of the same box paints (finding 156).
+    if (coverage < 1.0f && color.a > 0) {
+        color.a = static_cast<uint8_t>(color.a * coverage);
+    }
     if (color.a == 0) return;
 
     if (color.a == 255) {
@@ -197,7 +224,17 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
         } else if constexpr (std::is_same_v<T, PopTransformCommand>) {
             if (!m_transform_stack.empty()) m_transform_stack.pop_back();
         } else if constexpr (std::is_same_v<T, PushClipCommand>) {
-            m_clip_stack.push_back(current_transform().map_rect(arg.rect));
+            ClipRegion region;
+            region.rect = current_transform().map_rect(arg.rect);
+            // The clip is pushed in device space with the rest of the geometry,
+            // so the radius has to be mapped too: a scale of 2 makes a 16px
+            // corner a 32px one on the bitmap it actually clips.
+            const Rect& tr = region.rect;
+            const Rect& src = arg.rect;
+            const float sx = src.width > 0.0f ? tr.width / src.width : 1.0f;
+            const float sy = src.height > 0.0f ? tr.height / src.height : 1.0f;
+            region.radius = arg.border_radius * std::min(sx, sy);
+            m_clip_stack.push_back(region);
         } else if constexpr (std::is_same_v<T, PopClipCommand>) {
             if (!m_clip_stack.empty()) m_clip_stack.pop_back();
         } else if constexpr (std::is_same_v<T, DrawShadowCommand>) {

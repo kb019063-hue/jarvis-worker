@@ -7317,6 +7317,19 @@ TEST(fetch_api_and_headers) {
         const resStatus = resp.status;
         const resHeader = resp.headers.get("content-type");
 
+        const binaryText = "A\u0000\u00e9";
+        function binarySummary(buffer) {
+            const bytes = new Uint8Array(buffer);
+            return (buffer instanceof ArrayBuffer) + ":" + buffer.byteLength + ":" +
+                bytes[0] + "," + bytes[1] + "," + bytes[2] + "," + bytes[3];
+        }
+        let responseBinary = "";
+        let fetchedBinary = "";
+        new Response(binaryText).arrayBuffer().then((buffer) => { responseBinary = binarySummary(buffer); });
+        fetch("data:application/octet-stream;base64,QQDDqQ==")
+            .then((res) => res.arrayBuffer())
+            .then((buffer) => { fetchedBinary = binarySummary(buffer); });
+
         let fetchedJsonVal = "";
         fetch("data:application/json;base64,eyJoZWxsbyI6IndvcmxkIn0=").then((res) => {
             return res.json();
@@ -7338,6 +7351,8 @@ TEST(fetch_api_and_headers) {
     assert(js.global_env()->get("resHeader").to_string() == "application/json");
 
     assert(js.global_env()->get("fetchedJsonVal").to_string() == "world");
+    assert(js.global_env()->get("responseBinary").to_string() == "true:4:65,0,195,169");
+    assert(js.global_env()->get("fetchedBinary").to_string() == "true:4:65,0,195,169");
 }
 
 TEST(url_and_url_search_params) {
@@ -11207,8 +11222,10 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
     assert(S("try { get(secret); 'read' } catch (e) { e.name }") == "NetworkError");
     assert(S("try { get('http://127.0.0.1:9/'); 'read' } catch (e) { e.name }") == "NetworkError");
 
-    // 9. There is no ArrayBuffer in the engine: that response is null.
-    js.eval("later('arraybuffer', 'data:text/plain,abc', function (x) { x.responseType = 'arraybuffer'; }, function (x) { return String(x.response) + ' ' + x.status; });");
+    // 9. A binary response is an ArrayBuffer containing the original bytes.
+    js.eval("later('arraybuffer', 'data:text/plain,abc', function (x) { x.responseType = 'arraybuffer'; },"
+            "function (x) { return String(x.response instanceof ArrayBuffer) + ' ' + x.response.byteLength + ' ' +"
+            "new Uint8Array(x.response).join(',') + ' ' + x.status; });");
 
     // 10. The XML parser's limits hold here as they do for DOMParser: a
     //     document that expands without end gives no document, at once.
@@ -11228,7 +11245,17 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
                          "x.responseXML.documentElement.childNodes.length + ' ' + x.responseText.length + ' ' + (Date.now() - t0 < ") +
              big_xhr_budget + ")") == "200000 2800007 true");
 
+    js.eval(R"JS(
+        var blobBinary = '';
+        new Blob(["A\u0000\u00e9"]).arrayBuffer().then(function (buffer) {
+            var bytes = new Uint8Array(buffer);
+            blobBinary = (buffer instanceof ArrayBuffer) + ':' + buffer.byteLength + ':' +
+                bytes[0] + ',' + bytes[1] + ',' + bytes[2] + ',' + bytes[3];
+        });
+    )JS");
+
     settle();
+    assert(S("blobBinary") == "true:4:65,0,195,169");
     assert(S("results['text type']") == "state 1, loadstart, state 2, state 3, progress 51/0, state 4, load 51/0, loadend | 65533");
     assert(S("results.aborted + ' / ' + requests.aborted.seen.length + ' ' + requests.aborted.x.readyState") ==
            "state 1, loadstart, state 2, state 3, state 4, abort, loadend / 7 0");
@@ -11244,7 +11271,7 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
     assert(S("results.blob") == failed + "0");
     assert(S("results.about") == failed + "0");
     assert(S("results.javascript") == failed + "0 undefined");
-    assert(S("results.arraybuffer") == "state 1, loadstart, state 2, state 3, progress 3/0, state 4, load 3/0, loadend | null 200");
+    assert(S("results.arraybuffer") == "state 1, loadstart, state 2, state 3, progress 3/0, state 4, load 3/0, loadend | true 3 97,98,99 200");
     std::remove(secret_path.c_str());
 }
 

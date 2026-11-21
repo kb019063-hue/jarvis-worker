@@ -3,6 +3,7 @@
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Promise.hpp"
+#include "litebird/js/TypedArray.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -290,6 +291,11 @@ JsValue ResponseObject::create_js_instance(
 
     inst.set_property("text", JsValue::make_native_function([body](const std::vector<JsValue>&) {
         return Promise::make_resolved(JsValue::make_string(body));
+    }));
+
+    inst.set_property("arrayBuffer", JsValue::make_native_function([body](const std::vector<JsValue>&) {
+        const JsValue view = typed_array_from_bytes(body);
+        return Promise::make_resolved(view.get_property("buffer"));
     }));
 
     inst.set_property("json", JsValue::make_native_function([body](const std::vector<JsValue>&) {

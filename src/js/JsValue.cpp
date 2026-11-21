@@ -1061,6 +1061,10 @@ bool JsValue::delete_property(const std::string& name) {
             return !has_own_property(name);
         }
         if (is_wrapped_string_index(cell, name)) return false;
+        // `length` of an array is not an element and not in the property map:
+        // it is computed, and it is not configurable, so [[Delete]] answers
+        // false and a strict-mode delete is a TypeError.
+        if (cell->is_array && name == "length") return false;
         size_t index = 0;
         if (cell->is_array && parse_array_index(name, index)) {
             // An index can also be in the property map: `Object.defineProperty`

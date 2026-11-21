@@ -138,6 +138,7 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
                     text_cmd.font_family = fs.font_family;
                     text_cmd.font_italic = fs.font_style != FontStyle::Normal;
                     text_cmd.font_kerning = fs.kerning_enabled();
+                    text_cmd.is_rtl_visual = frag.is_rtl_visual;
                     list.add(text_cmd);
                 }
 

@@ -115,6 +115,137 @@ JsValue read_through(const JsValue& array, size_t skip_from = 0, size_t skip_to 
     return copy;
 }
 
+
+/// ToLength(value), clamped to the standard's 2^53 - 1.
+size_t to_length(const JsValue& value) {
+    const double number = js_to_number(value);
+    if (!(number > 0)) return 0;
+    if (number > 9007199254740991.0) return static_cast<size_t>(9007199254740991ull);
+    return static_cast<size_t>(number);
+}
+
+/// LengthOfArrayLike(O).
+size_t length_of(JsValue object) { return to_length(object.get_property("length")); }
+
+/// True when a method may keep using this engine's dense element vector: a real
+/// array, no accessor on a place, and nothing that would refuse a write.
+/// Everything else takes the standard's index-by-index form, which is what
+/// makes these methods work on `{ 0: "a", length: 1 }` at all, and what calls a
+/// getter that `Object.defineProperty` put on an index.
+bool dense_path(const JsValue& object) {
+    if (!object.is_array()) return false;
+    const JsObject* cell = object.object_val;
+    if (cell == nullptr || cell->has_accessors || cell->frozen || cell->sealed ||
+        !cell->extensible) {
+        return false;
+    }
+    // Every one of these methods ends by setting `length`, and an array whose
+    // length was made read-only has to refuse that write loudly.
+    const auto entry = cell->properties.find("length");
+    return entry == cell->properties.end() || (entry->flags & PropertyMap::Writable) != 0;
+}
+
+/// The dense form for a method that reads the places as well as writing them:
+/// a place the array does not have must read `undefined`, or the vector would
+/// answer differently from Get (which finds what the prototype has there, and
+/// runs a getter). `js_array_holes_read_undefined` is that question.
+bool dense_readable(const JsValue& object) {
+    return dense_path(object) && js_array_holes_read_undefined(object);
+}
+
+/// ToObject(this), with the standard's TypeError for null and undefined: a
+/// method that writes takes any other value, a primitive's wrapper included
+/// (`Array.prototype.reverse.call(true) instanceof Boolean`, as test262 asks).
+JsValue this_object(const char* method) {
+    JsValue me = self();
+    if (me.is_nullish()) {
+        js_throw_type_error(std::string("Array.prototype.") + method +
+                            " called on null or undefined");
+    }
+    return js_to_object(me);
+}
+
+/// HasProperty(O, k).
+bool has_place(JsValue object, size_t index) {
+    return object.has_property(std::to_string(index));
+}
+
+/// Get(O, k): `a[k]` for an array, holes included.
+JsValue get_place(JsValue object, size_t index) {
+    return object.is_array() ? js_array_get(object, index)
+                             : object.get_property(std::to_string(index));
+}
+
+/// True when `key` is an own data property with [[Writable]] false. The
+/// engine's `set_property` reports success when the value written is the one a
+/// read-only property already holds; the standard's Set with Throw = true calls
+/// that a refusal and throws, so the attribute is looked at here.
+bool read_only_own(JsValue object, const std::string& key) {
+    const JsObject* cell = object.property_cell();
+    if (cell != nullptr) {
+        const auto entry = cell->properties.find(key);
+        if (entry != cell->properties.end()) {
+            return !(entry->flags & PropertyMap::Accessor) &&
+                   !(entry->flags & PropertyMap::Writable);
+        }
+    }
+    // A function's `length` lives in the function rather than in the property
+    // table (a script function may have no table at all yet), and the standard
+    // makes it non-writable, which is why
+    // `Array.prototype.shift.call(function () {})` is a TypeError.
+    return key == "length" && object.is_function();
+}
+
+/// Set(O, k, v, true). A refused write is a TypeError, which is what the
+/// standard's "true" asks for: a frozen array, a read-only index, a string's
+/// own characters.
+void set_place_or_throw(JsValue object, size_t index, const JsValue& value) {
+    const std::string key = std::to_string(index);
+    // Asked before the write: writing the value a read-only property already
+    // holds would store a new entry, and then nothing would look read-only.
+    if (read_only_own(object, key) || !object.set_property(key, value)) {
+        js_throw_type_error("Cannot assign to read only property '" + key + "' of object");
+    }
+}
+
+/// DeletePropertyOrThrow(O, k).
+void delete_place_or_throw(JsValue object, size_t index) {
+    if (!object.delete_property(std::to_string(index))) {
+        js_throw_type_error("Cannot delete property '" + std::to_string(index) + "' of object");
+    }
+}
+
+/// Set(O, "length", n, true).
+void set_length_or_throw(JsValue object, size_t length) {
+    if (read_only_own(object, "length") ||
+        !object.set_property("length", JsValue::make_number(static_cast<double>(length)))) {
+        js_throw_type_error("Cannot assign to read only property 'length' of object");
+    }
+}
+
+/// A new array of `length` places, every one of them a hole: what `splice`
+/// hands back for a place the source did not have. (The methods that copy —
+/// `toReversed`, `toSorted`, `toSpliced`, `with` — are different: they write
+/// every place with CreateDataPropertyOrThrow, so `[1, , 3].toReversed()` is
+/// three own places with the middle one `undefined`, not a hole. test262's
+/// `holes-not-preserved.js` in each of those four directories says so.)
+JsValue make_holey_array(size_t length) {
+    JsValue array = JsValue::make_array();
+    array.object_val->array_elements.assign(length, JsValue::make_undefined());
+    for (size_t i = 0; i < length; ++i) array.set_array_hole(i);
+    return array;
+}
+
+/// `result[k] = value` for an array the method itself made: the dense write,
+/// and the place is no longer a hole.
+void put_place(JsValue& array, size_t index, const JsValue& value) {
+    auto& elements = array.object_val->array_elements;
+    if (index < elements.size()) {
+        elements[index] = value;
+        array.clear_array_hole(index);
+    }
+}
+
 // Array iteration uses ToLength on the original receiver. In particular,
 // Infinity and lengths above 2^53 - 1 must not be cast directly to size_t:
 // out-of-range floating-to-integer conversion is undefined in C++.
@@ -411,7 +542,21 @@ void install_array_builtins(JsIntrinsics& realm) {
 
     // ---- Stack and queue --------------------------------------------------
     js_define_method(ap, "push", 1, [](Args args) {
-        JsValue array = receiver("push", true);
+        JsValue array = this_object("push");
+        if (!dense_path(array)) {
+            const size_t length = length_of(array);
+            // The standard's own limit, which `push` names because it is the
+            // one method here that can pass it without being asked for a count.
+            if (static_cast<double>(length) + static_cast<double>(args.size()) >
+                9007199254740991.0) {
+                js_throw_type_error("Invalid array length");
+            }
+            for (size_t i = 0; i < args.size(); ++i) {
+                set_place_or_throw(array, length + i, args[i]);
+            }
+            set_length_or_throw(array, length + args.size());
+            return JsValue::make_number(static_cast<double>(length + args.size()));
+        }
         if (array.object_val->frozen) js_throw_type_error("Cannot add property, object is not extensible");
         auto& elements = elements_of(array);
         const size_t start = elements.size();
@@ -420,7 +565,18 @@ void install_array_builtins(JsIntrinsics& realm) {
         return JsValue::make_number(static_cast<double>(elements.size()));
     });
     js_define_method(ap, "pop", 0, [](Args) {
-        JsValue array = receiver("pop", true);
+        JsValue array = this_object("pop");
+        if (!dense_readable(array)) {
+            const size_t length = length_of(array);
+            if (length == 0) {
+                set_length_or_throw(array, 0);
+                return JsValue::make_undefined();
+            }
+            const JsValue last = get_place(array, length - 1);
+            delete_place_or_throw(array, length - 1);
+            set_length_or_throw(array, length - 1);
+            return last;
+        }
         auto& elements = elements_of(array);
         if (elements.empty()) return JsValue::make_undefined();
         // `pop` reads the last place as `a[i]` does and then deletes it. For
@@ -451,7 +607,22 @@ void install_array_builtins(JsIntrinsics& realm) {
         return last;
     });
     js_define_method(ap, "shift", 0, [](Args) {
-        JsValue array = receiver("shift", true);
+        JsValue array = this_object("shift");
+        if (!dense_readable(array)) {
+            const size_t length = length_of(array);
+            if (length == 0) {
+                set_length_or_throw(array, 0);
+                return JsValue::make_undefined();
+            }
+            const JsValue first = get_place(array, 0);
+            for (size_t k = 1; k < length; ++k) {
+                if (has_place(array, k)) set_place_or_throw(array, k - 1, get_place(array, k));
+                else delete_place_or_throw(array, k - 1);
+            }
+            delete_place_or_throw(array, length - 1);
+            set_length_or_throw(array, length - 1);
+            return first;
+        }
         auto& elements = elements_of(array);
         if (elements.empty()) return JsValue::make_undefined();
         // The first place as `a[0]` reads it (see `pop`).
@@ -462,7 +633,29 @@ void install_array_builtins(JsIntrinsics& realm) {
         return first;
     });
     js_define_method(ap, "unshift", 1, [](Args args) {
-        JsValue array = receiver("unshift", true);
+        JsValue array = this_object("unshift");
+        if (!dense_readable(array)) {
+            const size_t length = length_of(array);
+            if (static_cast<double>(length) + static_cast<double>(args.size()) > 9007199254740991.0) {
+                js_throw_type_error("Invalid array length");
+            }
+            if (!args.empty()) {
+                for (size_t k = length; k > 0; --k) {
+                    const size_t from = k - 1;
+                    const size_t to = from + args.size();
+                    if (has_place(array, from)) {
+                        set_place_or_throw(array, to, get_place(array, from));
+                    } else {
+                        delete_place_or_throw(array, to);
+                    }
+                }
+                for (size_t i = 0; i < args.size(); ++i) {
+                    set_place_or_throw(array, i, args[i]);
+                }
+            }
+            set_length_or_throw(array, length + args.size());
+            return JsValue::make_number(static_cast<double>(length + args.size()));
+        }
         auto& elements = elements_of(array);
         if (array.object_val->array_holes) {
             array.object_val->array_holes->shift(0, static_cast<std::ptrdiff_t>(args.size()));
@@ -507,24 +700,74 @@ void install_array_builtins(JsIntrinsics& realm) {
         return removed;
     };
     js_define_method(ap, "splice", 2, [splice_impl](Args args) {
-        JsValue array = receiver("splice", true);
-        if (args.empty()) return JsValue::make_array();
+        JsValue array = this_object("splice");
+        // The length is taken once, before any argument is asked for its
+        // number: a `valueOf` can shorten the array, and the places that move
+        // are the ones that length names, not the ones there are now.
+        const size_t length = length_of(array);
+        if (args.empty()) {
+            // `splice()` removes nothing, but step 19 still writes `length`,
+            // and that write is the one a read-only `length` refuses.
+            set_length_or_throw(array, length);
+            return JsValue::make_array();
+        }
+        const size_t start = relative_index(js_arg(args, 0), length, 0);
+        size_t dropped = 0;
+        if (args.size() == 1) {
+            dropped = length - start;
+        } else {
+            double requested = js_to_integer(js_to_number(args[1]));
+            if (requested < 0) requested = 0;
+            dropped = static_cast<size_t>(std::min(requested, static_cast<double>(length - start)));
+        }
+        const size_t inserted = args.size() > 2 ? args.size() - 2 : 0;
+        if (static_cast<double>(length) + static_cast<double>(inserted) -
+                static_cast<double>(dropped) > 9007199254740991.0) {
+            js_throw_type_error("Invalid array length");
+        }
+        if (!dense_readable(array) || elements_of(array).size() != length) {
+            // The standard's form: the removed places are read through Get,
+            // the places that move are read and written one at a time (so a
+            // getter runs, in the order the standard names), and a place the
+            // object does not have is deleted where it lands.
+            JsValue removed = make_holey_array(dropped);
+            for (size_t i = 0; i < dropped; ++i) {
+                if (has_place(array, start + i)) put_place(removed, i, get_place(array, start + i));
+            }
+            if (inserted < dropped) {
+                for (size_t k = start; k < length - dropped; ++k) {
+                    if (has_place(array, k + dropped)) {
+                        set_place_or_throw(array, k + inserted, get_place(array, k + dropped));
+                    } else {
+                        delete_place_or_throw(array, k + inserted);
+                    }
+                }
+                for (size_t k = length; k > length - dropped + inserted; --k) {
+                    delete_place_or_throw(array, k - 1);
+                }
+            } else if (inserted > dropped) {
+                for (size_t k = length - dropped; k > start; --k) {
+                    if (has_place(array, k + dropped - 1)) {
+                        set_place_or_throw(array, k + inserted - 1, get_place(array, k + dropped - 1));
+                    } else {
+                        delete_place_or_throw(array, k + inserted - 1);
+                    }
+                }
+            }
+            for (size_t i = 0; i < inserted; ++i) set_place_or_throw(array, start + i, args[i + 2]);
+            set_length_or_throw(array, length - dropped + inserted);
+            return removed;
+        }
         // Which of the removed places were holes, before the erase moves them.
         std::vector<bool> removed_holes;
         {
-            const size_t start = relative_index(js_arg(args, 0), elements_of(array).size(), 0);
-            double requested = args.size() >= 2 ? js_to_integer(js_to_number(args[1]))
-                                                : static_cast<double>(elements_of(array).size() - start);
-            if (requested < 0) requested = 0;
-            const size_t count = static_cast<size_t>(
-                std::min(requested, static_cast<double>(elements_of(array).size() - start)));
-            for (size_t i = 0; i < count; ++i) removed_holes.push_back(array.is_array_hole(start + i));
+            for (size_t i = 0; i < dropped; ++i) removed_holes.push_back(array.is_array_hole(start + i));
             const std::ptrdiff_t delta = static_cast<std::ptrdiff_t>(args.size() - 2) -
-                                         static_cast<std::ptrdiff_t>(count);
+                                         static_cast<std::ptrdiff_t>(dropped);
             if (array.object_val->array_holes && delta != 0) {
                 array.object_val->array_holes->shift(start, delta);
             }
-            for (size_t i = start; i < start + count; ++i) array.clear_array_hole(i);
+            for (size_t i = start; i < start + dropped; ++i) array.clear_array_hole(i);
         }
         JsValue result = JsValue::make_array(splice_impl(elements_of(array), args));
         for (size_t i = 0; i < removed_holes.size() && i < result.object_val->array_elements.size(); ++i) {
@@ -537,8 +780,8 @@ void install_array_builtins(JsIntrinsics& realm) {
         // places: the standard's order. The places that are dropped are not
         // read, so a getter on one of them is not called; and what the
         // arguments are is asked once, before any place is read.
-        JsValue source = receiver("toSpliced");
-        const size_t length = elements_of(source).size();
+        JsValue source = this_object("toSpliced");
+        const size_t length = length_of(source);
         const size_t start = relative_index(js_arg(args, 0), length, 0);
         size_t dropped = 0;
         if (args.size() == 1) {
@@ -548,14 +791,35 @@ void install_array_builtins(JsIntrinsics& realm) {
             if (requested < 0) requested = 0;
             dropped = static_cast<size_t>(std::min(requested, static_cast<double>(length - start)));
         }
-        JsValue array = read_through(source, start, start + dropped, length);
-        std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
-        copy.resize(length, JsValue::make_undefined());
-        copy.erase(copy.begin() + static_cast<std::ptrdiff_t>(start),
-                   copy.begin() + static_cast<std::ptrdiff_t>(start + dropped));
-        if (args.size() > 2) {
-            copy.insert(copy.begin() + static_cast<std::ptrdiff_t>(start), args.begin() + 2, args.end());
+        const size_t inserted = args.size() > 2 ? args.size() - 2 : 0;
+        // The answer is what has to be a legal array length: dropping a huge
+        // range from a huge length leaves a small array, and that is fine. The
+        // standard's two limits, in its order: past 2^53 - 1 the answer cannot
+        // be a length at all (TypeError, before a single place is read), and
+        // past 2^32 - 1 this engine cannot make an array of it (RangeError).
+        const double new_length = static_cast<double>(length) - static_cast<double>(dropped) +
+                                  static_cast<double>(inserted);
+        if (new_length > 9007199254740991.0) js_throw_type_error("Invalid array length");
+        if (new_length > 4294967295.0) js_throw_range_error("Invalid array length");
+        if (dense_readable(source) && !source.object_val->array_holes) {
+            std::vector<JsValue> copy(elements_of(source).begin(), elements_of(source).end());
+            copy.resize(length, JsValue::make_undefined());
+            copy.erase(copy.begin() + static_cast<std::ptrdiff_t>(start),
+                       copy.begin() + static_cast<std::ptrdiff_t>(start + dropped));
+            if (inserted > 0) {
+                copy.insert(copy.begin() + static_cast<std::ptrdiff_t>(start), args.begin() + 2,
+                            args.end());
+            }
+            return JsValue::make_array(copy);
         }
+        // The three runs copied place by place, every place written: before
+        // the drop, the inserted places, and what follows. A place the source
+        // does not have is read as `undefined` and written as own.
+        std::vector<JsValue> copy(length - dropped + inserted, JsValue::make_undefined());
+        size_t index = 0;
+        for (size_t k = 0; k < start; ++k, ++index) copy[index] = get_place(source, k);
+        for (size_t i = 0; i < inserted; ++i) copy[index++] = args[i + 2];
+        for (size_t k = start + dropped; k < length; ++k, ++index) copy[index] = get_place(source, k);
         return JsValue::make_array(copy);
     });
     js_define_method(ap, "concat", 1, [](Args args) {
@@ -594,7 +858,30 @@ void install_array_builtins(JsIntrinsics& realm) {
         return JsValue::make_string(join_array(receiver("toLocaleString"), ","));
     });
     js_define_method(ap, "reverse", 0, [](Args) {
-        JsValue array = receiver("reverse", true);
+        JsValue array = this_object("reverse");
+        if (!dense_readable(array)) {
+            // The standard's form: every place asked for, read and written,
+            // because a place can be an accessor, an index the object does not
+            // have, or an index only its prototype has.
+            const size_t length = length_of(array);
+            for (size_t lower = 0; lower < length / 2; ++lower) {
+                const size_t upper = length - 1 - lower;
+                // Asked and read one place at a time, in the standard's
+                // order: reading the lower one can run a getter that changes
+                // whether the upper one is there at all.
+                const bool lower_exists = has_place(array, lower);
+                JsValue lower_value;
+                if (lower_exists) lower_value = get_place(array, lower);
+                const bool upper_exists = has_place(array, upper);
+                JsValue upper_value;
+                if (upper_exists) upper_value = get_place(array, upper);
+                if (upper_exists) set_place_or_throw(array, lower, upper_value);
+                else delete_place_or_throw(array, lower);
+                if (lower_exists) set_place_or_throw(array, upper, lower_value);
+                else delete_place_or_throw(array, upper);
+            }
+            return array;
+        }
         std::reverse(elements_of(array).begin(), elements_of(array).end());
         if (array.object_val->array_holes) {
             auto& bits = array.object_val->array_holes->bits;
@@ -610,21 +897,42 @@ void install_array_builtins(JsIntrinsics& realm) {
         return array;
     });
     js_define_method(ap, "toReversed", 0, [](Args) {
-        JsValue array = read_through(receiver("toReversed"));
-        std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
-        const size_t total = copy.size();
-        std::vector<bool> holes;
-        for (size_t i = 0; i < total; ++i) holes.push_back(array.is_array_hole(i));
-        std::reverse(copy.begin(), copy.end());
-        JsValue result = JsValue::make_array(copy);
-        for (size_t i = 0; i < total; ++i) if (holes[total - 1 - i]) result.set_array_hole(i);
-        return result;
+        JsValue source = this_object("toReversed");
+        if (dense_readable(source) && !source.object_val->array_holes) {
+            std::vector<JsValue> copy(elements_of(source).begin(), elements_of(source).end());
+            std::reverse(copy.begin(), copy.end());
+            return JsValue::make_array(copy);
+        }
+        // Every place of the answer is written: `CreateDataPropertyOrThrow`
+        // for each one, with the value Get hands back, so a place the source
+        // does not have becomes an own `undefined` (and takes a value from the
+        // prototype if one is there).
+        const size_t length = length_of(source);
+        if (length > 4294967295u) js_throw_range_error("Invalid array length");
+        std::vector<JsValue> copy(length, JsValue::make_undefined());
+        for (size_t k = 0; k < length; ++k) copy[k] = get_place(source, length - 1 - k);
+        return JsValue::make_array(copy);
     });
     js_define_method(ap, "sort", 1, [](Args args) {
-        JsValue array = receiver("sort", true);
+        JsValue array = this_object("sort");
         const JsValue& comparator = js_arg(args, 0);
         if (!comparator.is_undefined() && !comparator.is_function()) {
             js_throw_type_error("The comparison function must be either a function or undefined");
+        }
+        if (!dense_readable(array)) {
+            // SortIndexedProperties with skip-holes: the places the object has
+            // are read, sorted, written back from 0, and the places after them
+            // are deleted, so a hole stays at the end.
+            const size_t length = length_of(array);
+            std::vector<JsValue> items;
+            for (size_t k = 0; k < length; ++k) {
+                if (has_place(array, k)) items.push_back(get_place(array, k));
+            }
+            std::vector<bool> holes(items.size(), false);
+            sort_values(items, holes, comparator);
+            for (size_t i = 0; i < items.size(); ++i) set_place_or_throw(array, i, items[i]);
+            for (size_t i = items.size(); i < length; ++i) delete_place_or_throw(array, i);
+            return array;
         }
         // Sort a copy: the comparator is script and may touch the array.
         std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
@@ -639,45 +947,248 @@ void install_array_builtins(JsIntrinsics& realm) {
         return array;
     });
     js_define_method(ap, "toSorted", 1, [](Args args) {
-        JsValue array = read_through(receiver("toSorted"));
-        std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
-        std::vector<bool> holes;
-        for (size_t i = 0; i < copy.size(); ++i) holes.push_back(array.is_array_hole(i));
-        sort_values(copy, holes, js_arg(args, 0));
-        JsValue result = JsValue::make_array(copy);
-        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) result.set_array_hole(i);
-        return result;
+        JsValue source = this_object("toSorted");
+        const JsValue& comparator = js_arg(args, 0);
+        if (!comparator.is_undefined() && !comparator.is_function()) {
+            js_throw_type_error("The comparison function must be either a function or undefined");
+        }
+        if (dense_readable(source) && !source.object_val->array_holes) {
+            std::vector<JsValue> copy(elements_of(source).begin(), elements_of(source).end());
+            std::vector<bool> holes(copy.size(), false);
+            sort_values(copy, holes, comparator);
+            return JsValue::make_array(copy);
+        }
+        // SortIndexedProperties with skip-holes reads only the places the
+        // source has, and then every place of the answer is written, so the
+        // places past the values read come out as own `undefined`s.
+        const size_t length = length_of(source);
+        if (length > 4294967295u) js_throw_range_error("Invalid array length");
+        std::vector<JsValue> items;
+        for (size_t k = 0; k < length; ++k) {
+            if (has_place(source, k)) items.push_back(get_place(source, k));
+        }
+        std::vector<bool> holes(items.size(), false);
+        sort_values(items, holes, comparator);
+        items.resize(length, JsValue::make_undefined());
+        return JsValue::make_array(items);
     });
     js_define_method(ap, "with", 2, [](Args args) {
         // The length, then the index, then the places: the standard's order,
         // and the index that is replaced is not read, so a getter on it is
         // not called. Turning the index into a number can run a script that
         // changes the array, and the answer still has the length taken first.
-        JsValue source = receiver("with");
-        const size_t length = elements_of(source).size();
+        JsValue source = this_object("with");
+        const size_t length = length_of(source);
+        if (length > 4294967295u) js_throw_range_error("Invalid array length");
         double index = js_to_integer(js_to_number(js_arg(args, 0)));
         if (index < 0) index += static_cast<double>(length);
         if (index < 0 || index >= static_cast<double>(length)) js_throw_range_error("Invalid index");
         const size_t at = static_cast<size_t>(index);
-        JsValue array = read_through(source, at, at + 1, length);
-        std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
-        copy.resize(length, JsValue::make_undefined());
-        copy[at] = js_arg(args, 1);
+        if (dense_readable(source) && !source.object_val->array_holes) {
+            // The length was taken before the index was asked for, and asking
+            // for it can run a script that grows or shortens the array: the
+            // answer is the length taken then, not the one there is now.
+            std::vector<JsValue> copy(elements_of(source).begin(), elements_of(source).end());
+            copy.resize(length, JsValue::make_undefined());
+            copy[at] = js_arg(args, 1);
+            return JsValue::make_array(copy);
+        }
+        std::vector<JsValue> copy(length, JsValue::make_undefined());
+        for (size_t k = 0; k < length; ++k) {
+            copy[k] = (k == at) ? js_arg(args, 1) : get_place(source, k);
+        }
         return JsValue::make_array(copy);
     });
     js_define_method(ap, "fill", 1, [](Args args) {
-        JsValue array = receiver("fill", true);
-        auto& elements = elements_of(array);
-        size_t begin = relative_index(js_arg(args, 1), elements.size(), 0);
-        size_t end = relative_index(js_arg(args, 2), elements.size(), elements.size());
-        for (size_t i = begin; i < end; ++i) {
-            elements[i] = js_arg(args, 0);
-            array.clear_array_hole(i);           // fill writes every place it covers
+        JsValue array = this_object("fill");
+        // The length first, then the two places, as the standard has them:
+        // asking a place for its number can run a script that changes the
+        // array, and the places that are filled are the ones that length names.
+        const size_t length = length_of(array);
+        const size_t begin = relative_index(js_arg(args, 1), length, 0);
+        const size_t end = relative_index(js_arg(args, 2), length, length);
+        if (dense_path(array) && elements_of(array).size() == length) {
+            auto& elements = elements_of(array);
+            for (size_t i = begin; i < end; ++i) {
+                elements[i] = js_arg(args, 0);
+                array.clear_array_hole(i);       // fill writes every place it covers
+            }
+            return array;
         }
+        for (size_t i = begin; i < end; ++i) set_place_or_throw(array, i, js_arg(args, 0));
         return array;
     });
     js_define_method(ap, "copyWithin", 2, [](Args args) {
-        JsValue array = receiver("copyWithin", true);
+        JsValue array = this_object("copyWithin");
+        // The length is taken once, then the three places in the standard's
+        // order. Asking one of them for its number can run a script that
+        // changes the array, so both forms below work from that length.
+        const size_t length = length_of(array);
+        size_t to = relative_index(js_arg(args, 0), length, 0);
+        size_t from = relative_index(js_arg(args, 1), length, 0);
+        const size_t final = args.size() > 2 ? relative_index(js_arg(args, 2), length, length) : length;
+        size_t count = std::min(final > from ? final - from : 0, length > to ? length - to : 0);
+        int direction = 1;
+        if (from < to && to < from + count) {
+            // Overlapping, and the copy runs backwards so it does not read a
+            // place it has already written.
+            direction = -1;
+            from += count - 1;
+            to += count - 1;
+        }
+        if (dense_readable(array) && elements_of(array).size() == length) {
+            auto& elements = elements_of(array);
+            while (count > 0) {
+                elements[to] = elements[from];
+                // Copying a hole leaves a hole at the target (the standard
+                // calls DeletePropertyOrThrow for it).
+                if (array.is_array_hole(from)) array.set_array_hole(to);
+                else array.clear_array_hole(to);
+                if (direction > 0) { ++from; ++to; } else { --from; --to; }
+                --count;
+            }
+            return array;
+        }
+        while (count > 0) {
+            if (has_place(array, from)) set_place_or_throw(array, to, get_place(array, from));
+            else delete_place_or_throw(array, to);
+            if (direction > 0) { ++from; ++to; } else { --from; --to; }
+            --count;
+        }
+        return array;
+    });
+    js_define_method(ap, "sort", 1, [](Args args) {
+        JsValue array = this_object("sort");
+        const JsValue& comparator = js_arg(args, 0);
+        if (!comparator.is_undefined() && !comparator.is_function()) {
+            js_throw_type_error("The comparison function must be either a function or undefined");
+        }
+        if (!dense_readable(array)) {
+            // SortIndexedProperties with skip-holes: the places the object has
+            // are read, sorted, written back from 0, and the places after them
+            // are deleted, so a hole stays at the end.
+            const size_t length = length_of(array);
+            std::vector<JsValue> items;
+            for (size_t k = 0; k < length; ++k) {
+                if (has_place(array, k)) items.push_back(get_place(array, k));
+            }
+            std::vector<bool> holes(items.size(), false);
+            sort_values(items, holes, comparator);
+            for (size_t i = 0; i < items.size(); ++i) set_place_or_throw(array, i, items[i]);
+            for (size_t i = items.size(); i < length; ++i) delete_place_or_throw(array, i);
+            return array;
+        }
+        // Sort a copy: the comparator is script and may touch the array.
+        std::vector<JsValue> copy(elements_of(array).begin(), elements_of(array).end());
+        std::vector<bool> holes;
+        for (size_t i = 0; i < copy.size(); ++i) holes.push_back(array.is_array_hole(i));
+        sort_values(copy, holes, comparator);
+        elements_of(array).assign(copy.begin(), copy.end());
+        for (size_t i = 0; i < holes.size(); ++i) {
+            if (holes[i]) array.set_array_hole(i);
+            else array.clear_array_hole(i);
+        }
+        return array;
+    });
+    js_define_method(ap, "toSorted", 1, [](Args args) {
+        JsValue source = this_object("toSorted");
+        const JsValue& comparator = js_arg(args, 0);
+        if (!comparator.is_undefined() && !comparator.is_function()) {
+            js_throw_type_error("The comparison function must be either a function or undefined");
+        }
+        if (dense_readable(source) && !source.object_val->array_holes) {
+            std::vector<JsValue> copy(elements_of(source).begin(), elements_of(source).end());
+            std::vector<bool> holes(copy.size(), false);
+            sort_values(copy, holes, comparator);
+            return JsValue::make_array(copy);
+        }
+        // SortIndexedProperties with skip-holes reads only the places the
+        // source has, and then every place of the answer is written, so the
+        // places past the values read come out as own `undefined`s.
+        const size_t length = length_of(source);
+        if (length > 4294967295u) js_throw_range_error("Invalid array length");
+        std::vector<JsValue> items;
+        for (size_t k = 0; k < length; ++k) {
+            if (has_place(source, k)) items.push_back(get_place(source, k));
+        }
+        std::vector<bool> holes(items.size(), false);
+        sort_values(items, holes, comparator);
+        items.resize(length, JsValue::make_undefined());
+        return JsValue::make_array(items);
+    });
+    js_define_method(ap, "with", 2, [](Args args) {
+        // The length, then the index, then the places: the standard's order,
+        // and the index that is replaced is not read, so a getter on it is
+        // not called. Turning the index into a number can run a script that
+        // changes the array, and the answer still has the length taken first.
+        JsValue source = this_object("with");
+        const size_t length = length_of(source);
+        if (length > 4294967295u) js_throw_range_error("Invalid array length");
+        double index = js_to_integer(js_to_number(js_arg(args, 0)));
+        if (index < 0) index += static_cast<double>(length);
+        if (index < 0 || index >= static_cast<double>(length)) js_throw_range_error("Invalid index");
+        const size_t at = static_cast<size_t>(index);
+        if (dense_readable(source) && !source.object_val->array_holes) {
+            // The length was taken before the index was asked for, and asking
+            // for it can run a script that grows or shortens the array: the
+            // answer is the length taken then, not the one there is now.
+            std::vector<JsValue> copy(elements_of(source).begin(), elements_of(source).end());
+            copy.resize(length, JsValue::make_undefined());
+            copy[at] = js_arg(args, 1);
+            return JsValue::make_array(copy);
+        }
+        std::vector<JsValue> copy(length, JsValue::make_undefined());
+        for (size_t k = 0; k < length; ++k) {
+            copy[k] = (k == at) ? js_arg(args, 1) : get_place(source, k);
+        }
+        return JsValue::make_array(copy);
+    });
+    js_define_method(ap, "fill", 1, [](Args args) {
+        JsValue array = this_object("fill");
+        // The length first, then the two places, as the standard has them:
+        // asking a place for its number can run a script that changes the
+        // array, and the places that are filled are the ones that length names.
+        const size_t length = length_of(array);
+        const size_t begin = relative_index(js_arg(args, 1), length, 0);
+        const size_t end = relative_index(js_arg(args, 2), length, length);
+        if (dense_path(array) && elements_of(array).size() == length) {
+            auto& elements = elements_of(array);
+            for (size_t i = begin; i < end; ++i) {
+                elements[i] = js_arg(args, 0);
+                array.clear_array_hole(i);       // fill writes every place it covers
+            }
+            return array;
+        }
+        for (size_t i = begin; i < end; ++i) set_place_or_throw(array, i, js_arg(args, 0));
+        return array;
+    });
+    js_define_method(ap, "copyWithin", 2, [](Args args) {
+        JsValue array = this_object("copyWithin");
+        if (!dense_readable(array)) {
+            // The standard's form, which reads every place it copies through
+            // Get and writes it through Set: the direction matters when the
+            // ranges overlap, and a place the object does not have is deleted
+            // at the target rather than written as `undefined`.
+            const size_t length = length_of(array);
+            size_t to = relative_index(js_arg(args, 0), length, 0);
+            size_t from = relative_index(js_arg(args, 1), length, 0);
+            const size_t final = args.size() > 2 ? relative_index(js_arg(args, 2), length, length)
+                                                 : length;
+            size_t count = std::min(final > from ? final - from : 0, length > to ? length - to : 0);
+            int direction = 1;
+            if (from < to && to < from + count) {
+                direction = -1;
+                from += count - 1;
+                to += count - 1;
+            }
+            while (count > 0) {
+                if (has_place(array, from)) set_place_or_throw(array, to, get_place(array, from));
+                else delete_place_or_throw(array, to);
+                if (direction > 0) { ++from; ++to; } else { --from; --to; }
+                --count;
+            }
+            return array;
+        }
         auto& elements = elements_of(array);
         size_t target = relative_index(js_arg(args, 0), elements.size(), 0);
         size_t begin = relative_index(js_arg(args, 1), elements.size(), 0);
@@ -971,6 +1482,21 @@ void install_array_builtins(JsIntrinsics& realm) {
     js_define_hidden(ap, "values", values_iterator);
     js_define_hidden(ap, kIteratorKey, values_iterator);
     js_define_hidden(ap, "Symbol.iterator", values_iterator);
+
+    // Every method here is a built-in function, and a built-in function has no
+    // [[Construct]]: `new Array.prototype.reverse()` is a TypeError, which
+    // test262's not-a-constructor.js in each method's directory asks for. The
+    // keys are copied first because asking a method for its cell can move its
+    // property table.
+    std::vector<JsValue> methods;
+    for (const auto& entry : ap->properties) {
+        if (entry.first != "constructor" && entry.second.is_function()) {
+            methods.push_back(entry.second);
+        }
+    }
+    for (const auto& method : methods) {
+        if (JsObject* cell = method.function_cell()) cell->not_constructor = true;
+    }
 }
 
 } // namespace litebird

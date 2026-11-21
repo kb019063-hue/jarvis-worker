@@ -26746,6 +26746,131 @@ TEST(bidi_reorders_hebrew_and_arabic_runs) {
     }
 }
 
+TEST(array_methods_over_an_exotic_receiver_ask_it_for_its_indices) {
+    using namespace litebird;
+    // Phase 129. A NodeList keeps its indices outside the object's property
+    // map, so a walk that reads only that map found none of them and
+    // `Array.prototype.slice.call(childNodes)` answered the right length full
+    // of `undefined`. `own_keys` asks the object, which is the only thing that
+    // knows what it has.
+    auto doc = HtmlParser::parse("<!DOCTYPE html><body><div id='host'><i></i><b></b></div></body>");
+    JsInterpreter js(doc);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    assert(text("var d = document.getElementById('host');"
+                "Array.prototype.slice.call(d.childNodes).map(function (n) { return n.nodeName; }).join()") ==
+           "I,B");
+    assert(text("var d = document.getElementById('host');"
+                "Array.prototype.map.call(d.childNodes, function (n) { return n.nodeName; }).join()") ==
+           "I,B");
+    assert(text("var d = document.getElementById('host');"
+                "var n = 0; Array.prototype.forEach.call(d.childNodes, function () { n++; }); n") == "2");
+    // The same receiver through the methods that do not copy at all.
+    assert(text("var d = document.getElementById('host');"
+                "Array.prototype.join.call(d.childNodes, '|')") == "[object HTMLElement]|[object HTMLElement]");
+    assert(text("var d = document.getElementById('host');"
+                "Array.prototype.indexOf.call(d.childNodes, d.lastChild)") == "1");
+}
+
+TEST(array_methods_survive_a_length_they_could_never_reach) {
+    using namespace litebird;
+    // Phase 129, finding 134. Every Array.prototype method that took an
+    // array-like receiver copied it into a real array first, by reading index
+    // 0 up to its `length` before the method read a single argument. A length
+    // of Infinity is four billion reads pushing four billion values: the
+    // process ended in std::bad_alloc or was killed for the memory. A length
+    // of 2^32 was an allocation where the standard asks for a RangeError.
+    //
+    // Twenty-one cases of test262's built-ins/Array/prototype died that way.
+    // These are the shapes they test, in the engine's own suite so that the
+    // next change to these methods cannot bring the copy back quietly.
+    JsInterpreter js(nullptr);
+    auto text = [&](const char *source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- a length the method will never reach -----------------------------
+    // `every` reads index 0, calls the callback, and stops when it answers
+    // false. It never looks at index 1, so Infinity costs one callback.
+    assert(text("Array.prototype.every.call({ 0: 9, length: Infinity }, function (v) { return v > 10; })") ==
+           "false");
+    assert(text("Array.prototype.some.call({ 0: 11, 1: 12, length: 4294967297 }, function (v) { return v > 10; })") ==
+           "true");
+    // The *string* "Infinity" is ToNumber'd to Infinity and is the same case:
+    // one callback, at index 0, and then the answers run out. Measured, not
+    // assumed — an earlier draft of this test guessed it was a length of 0.
+    assert(text("var n = 0;"
+                "Array.prototype.every.call({ 0: 9, length: 'Infinity' },"
+                "  function () { n++; return true; }); n") == "1");
+    // "-Infinity" is not positive, and ToLength makes it 0: no callback.
+    assert(text("var n = 0;"
+                "Array.prototype.every.call({ 0: 9, length: '-Infinity' },"
+                "  function () { n++; return true; }); n") == "0");
+    // `indexOf` over the number Infinity still finds index 0 and stops there.
+    assert(text("Array.prototype.indexOf.call({ 0: 0, length: Infinity }, 0)") == "0");
+
+    // ---- `length` past 2^32-1 is a length, not an array -------------------
+    // `indexOf` and `lastIndexOf` are generic: a key past 2^32-1 is an
+    // ordinary property of an object, and both must find it.
+    assert(text("var o = { 0: 'a', 4294967295: 'z', length: 4294967296 };"
+                "Array.prototype.indexOf.call(o, 'z')") == "4294967295");
+    assert(text("var o = { 0: 'a', 4294967295: 'z', length: 4294967296 };"
+                "Array.prototype.lastIndexOf.call(o, 'z')") == "4294967295");
+    // A method that builds an array cannot build one that long: RangeError,
+    // before the callback runs even once.
+    assert(text("var calls = 0;"
+                "errName(function () { Array.prototype.map.call({ length: 4294967296 },"
+                "  function () { calls++; }); }) + '|' + calls") == "RangeError|0");
+    assert(text("errName(function () { Array.prototype.slice.call({ length: 4294967296 }); })") ==
+           "RangeError");
+
+    // ---- a length of 2^53-1 with one place on it --------------------------
+    // The length cannot be counted, and the place is not near the start: the
+    // answer comes from the places that are there, not from counting to it.
+    assert(text("var el = {}; var o = { length: 9007199254740991 };"
+                "o[9007199254740990] = el;"
+                "Array.prototype.indexOf.call(o, el, 9007199254740988)") == "9007199254740990");
+    // `slice` reads the places between two indices and keeps the rest holes.
+    assert(text("var o = { 9007199254740989: 'a', length: 9007199254740993 };"
+                "Array.prototype.slice.call(o, 9007199254740989).length") == "2");
+    assert(text("var o = { 9007199254740989: 'a', length: 9007199254740993 };"
+                "Array.prototype.slice.call(o, 9007199254740989)[0]") == "a");
+
+    // ---- holes are still holes, and a callback may fill one ---------------
+    assert(text("var a = [1, 2, , 4, 5]; var n = 0; a.forEach(function () { n++; }); n") == "4");
+    assert(text("var a = [1, 2, , 4, 5]; var n = 0;"
+                "a.forEach(function () { n++; a[2] = 3; }); n") == "5");
+    // map makes an own property only where the callback ran, which is why a
+    // sparse receiver maps to a sparse result rather than to `NaN`s.
+    assert(text("var r = Array.prototype.map.call({ 0: 1, length: 3 }, function (v) { return v * 2; });"
+                "r.length + '|' + r[0] + '|' + (1 in r)") == "3|2|false");
+
+    // ---- a length that shrinks under the loop ----------------------------
+    // The length is taken once, as the standard takes it, but a callback that
+    // shortens the array ends the loop early: `arr.length = 3` inside a
+    // forEach over five elements runs three callbacks.
+    assert(text("var a = [1, 2, 3, 4, 5]; var n = 0;"
+                "a.forEach(function () { n++; a.length = 3; }); n") == "3");
+
+    // ---- a String object's characters and `length` are on its prototype --
+    // `length_of` used to read `length` as an own property, so a String object
+    // answered 0 and every method over one visited nothing.
+    assert(text("var s = new String('432');"
+                "Array.prototype.every.call(s, function (v) { return parseInt(v, 10) > 1; })") == "true");
+    assert(text("var s = new String('432');"
+                "Array.prototype.indexOf.call(s, '3')") == "1");
+
+    // ---- join and toString -----------------------------------------------
+    // toString is `join` looked up on the receiver by name, not a fixed call.
+    assert(text("[1, 2].toString()") == "1,2");
+    assert(text("var o = { join: Array.prototype.join, length: 4, 1: 'x' }; o.join()") == ",x,,");
+    assert(text("var o = { join: Array.prototype.join, length: 3 }; o.join()") == ",,");
+    assert(text("Array.prototype.toString.call({ join: function () { return 'own'; } })") == "own");
+    // A string that would be longer than memory is a RangeError, not a loop
+    // that never ends: no engine builds 2^53 separators.
+    assert(text("errName(function () { Array.prototype.join.call({ length: Infinity }, '-'); })") ==
+           "RangeError");
+}
+
 TEST(array_methods_that_move_places_ask_the_index) {
     using namespace litebird;
     // Phase 116, finding 125. The seven methods that move elements inside an
@@ -27842,6 +27967,104 @@ TEST(object_integrity_levels_ask_every_property) {
     std::cout << "\033[32mPASSED\033[0m";
 }
 
+TEST(cross_axis_alignment_places_flex_and_grid_items) {
+    using namespace litebird;
+    // Phase 134, finding 139. `align-items` was parsed and then never asked:
+    // the flex line was as tall as its tallest item, so `center` and `flex-end`
+    // had nothing to move against, and the default `stretch` had nothing to
+    // stretch to — an item with no height of its own stayed 0 tall and painted
+    // nothing. A line is now as tall as its container's cross size when the
+    // container has one (CSS Flexbox §9.4), which is the space both the
+    // alignment and the stretch are measured in.
+    auto build = [](const std::string& html) {
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        return LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    };
+
+    // Stretch is the default: an item with no cross size of its own fills the
+    // container's height instead of collapsing to nothing.
+    {
+        auto root = build(R"(<body><div style="display: flex; width: 100px; height: 40px">)"
+                          R"(<div style="width: 40px"></div></div></body>)");
+        auto item = root->children[0]->children[0];
+        assert(item->dimensions.content.height == 40.0f);
+        assert(item->dimensions.content.width == 40.0f);
+    }
+
+    // The stretch is of the border box: padding and border come out of the 40.
+    {
+        auto root = build(R"(<body><div style="display: flex; width: 100px; height: 40px">)"
+                          R"(<div style="width: 40px; border-top: 3px solid #0000ff; padding-top: 5px">)"
+                          R"(</div></div></body>)");
+        auto item = root->children[0]->children[0];
+        assert(item->dimensions.content.height == 32.0f);
+    }
+
+    // A stated height is not stretched — `stretch` has nothing to do when the
+    // cross size is definite, and overwriting it would be a different bug.
+    {
+        auto root = build(R"(<body><div style="display: flex; width: 100px; height: 100px">)"
+                          R"(<div style="width: 50px; height: 20px"></div></div></body>)");
+        auto item = root->children[0]->children[0];
+        assert(item->dimensions.content.height == 20.0f);
+        assert(item->dimensions.content.y == 0.0f);
+    }
+
+    // `center` and `flex-end` place the item in the line, not at its top.
+    {
+        auto root = build(R"(<body><div style="display: flex; align-items: center; )"
+                          R"(width: 100px; height: 100px">)"
+                          R"(<div style="width: 50px; height: 20px"></div></div></body>)");
+        auto item = root->children[0]->children[0];
+        assert(item->dimensions.content.y == 40.0f);
+    }
+    {
+        auto root = build(R"(<body><div style="display: flex; align-items: flex-end; )"
+                          R"(width: 100px; height: 100px">)"
+                          R"(<div style="width: 50px; height: 20px"></div></div></body>)");
+        auto item = root->children[0]->children[0];
+        assert(item->dimensions.content.y == 80.0f);
+    }
+
+    // A column container's cross axis is the width.
+    {
+        auto root = build(R"(<body><div style="display: flex; flex-direction: column; )"
+                          R"(align-items: center; width: 100px; height: 100px">)"
+                          R"(<div style="width: 40px; height: 20px"></div></div></body>)");
+        auto item = root->children[0]->children[0];
+        assert(item->dimensions.content.x == 30.0f);
+    }
+    {
+        auto root = build(R"(<body><div style="display: flex; flex-direction: column; )"
+                          R"(align-items: flex-end; width: 100px; height: 100px">)"
+                          R"(<div style="width: 40px; height: 20px"></div></div></body>)");
+        auto item = root->children[0]->children[0];
+        assert(item->dimensions.content.x == 60.0f);
+    }
+
+    // Grid: the item's area is its rows, and stretch fills it. Both items are
+    // auto-placed into the first row, which the explicit track makes 30 tall.
+    {
+        auto root = build(R"(<body><div style="display: grid; grid-template-columns: 60px 40px; )"
+                          R"(grid-template-rows: 30px 20px">)"
+                          R"(<div></div><div></div></div></body>)");
+        auto g = root->children[0];
+        assert(g->children.size() == 2);
+        assert(g->children[0]->dimensions.content.height == 30.0f);
+        assert(g->children[1]->dimensions.content.height == 30.0f);
+        assert(g->children[1]->dimensions.content.x == 60.0f);
+    }
+    {
+        auto root = build(R"(<body><div style="display: grid; align-items: center; )"
+                          R"(grid-template-columns: 60px; grid-template-rows: 40px">)"
+                          R"(<div style="height: 20px"></div></div></body>)");
+        auto item = root->children[0]->children[0];
+        assert(item->dimensions.content.y == 10.0f);
+        assert(item->dimensions.content.height == 20.0f);
+    }
+}
+
 TEST(boxed_string_own_index_descriptors) {
     using namespace litebird;
     // Phase 132, finding 137. `new String("ab")` already reads its indexed
@@ -28467,6 +28690,8 @@ int main() {
     RUN_TEST(bidi_reorders_hebrew_and_arabic_runs);
 
     // Phase 116: the methods that move elements ask the places for what they are.
+    RUN_TEST(array_methods_over_an_exotic_receiver_ask_it_for_its_indices);
+    RUN_TEST(array_methods_survive_a_length_they_could_never_reach);
     RUN_TEST(array_methods_that_move_places_ask_the_index);
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
@@ -28498,6 +28723,9 @@ int main() {
     RUN_TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs);
     RUN_TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs);
     RUN_TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely);
+
+    // Phase 134: `align-items` places items on the cross axis, in flex and in grid.
+    RUN_TEST(cross_axis_alignment_places_flex_and_grid_items);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

@@ -103,7 +103,7 @@ file boundary asks for: `Canvas2D.cpp` says what a pixel is,
 
 ```bash
 make test
-#   ... All 297 engine test suites passed successfully!  (114 cross-origin checks, 0 failure(s))
+#   ... All 300 engine test suites passed successfully!  (114 cross-origin checks, 0 failure(s))
 ```
 
 The new suite is `image_data_is_an_interface` (`tests/test_suite.cpp`), 27

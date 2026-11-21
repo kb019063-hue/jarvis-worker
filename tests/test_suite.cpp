@@ -7408,6 +7408,19 @@ TEST(fetch_api_and_headers) {
         const resStatus = resp.status;
         const resHeader = resp.headers.get("content-type");
 
+        const binaryText = "A\u0000\u00e9";
+        function binarySummary(buffer) {
+            const bytes = new Uint8Array(buffer);
+            return (buffer instanceof ArrayBuffer) + ":" + buffer.byteLength + ":" +
+                bytes[0] + "," + bytes[1] + "," + bytes[2] + "," + bytes[3];
+        }
+        let responseBinary = "";
+        let fetchedBinary = "";
+        new Response(binaryText).arrayBuffer().then((buffer) => { responseBinary = binarySummary(buffer); });
+        fetch("data:application/octet-stream;base64,QQDDqQ==")
+            .then((res) => res.arrayBuffer())
+            .then((buffer) => { fetchedBinary = binarySummary(buffer); });
+
         let fetchedJsonVal = "";
         fetch("data:application/json;base64,eyJoZWxsbyI6IndvcmxkIn0=").then((res) => {
             return res.json();
@@ -7429,6 +7442,8 @@ TEST(fetch_api_and_headers) {
     assert(js.global_env()->get("resHeader").to_string() == "application/json");
 
     assert(js.global_env()->get("fetchedJsonVal").to_string() == "world");
+    assert(js.global_env()->get("responseBinary").to_string() == "true:4:65,0,195,169");
+    assert(js.global_env()->get("fetchedBinary").to_string() == "true:4:65,0,195,169");
 }
 
 TEST(url_and_url_search_params) {
@@ -11274,8 +11289,10 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
     assert(S("try { get(secret); 'read' } catch (e) { e.name }") == "NetworkError");
     assert(S("try { get('http://127.0.0.1:9/'); 'read' } catch (e) { e.name }") == "NetworkError");
 
-    // 9. There is no ArrayBuffer in the engine: that response is null.
-    js.eval("later('arraybuffer', 'data:text/plain,abc', function (x) { x.responseType = 'arraybuffer'; }, function (x) { return String(x.response) + ' ' + x.status; });");
+    // 9. A binary response is an ArrayBuffer containing the original bytes.
+    js.eval("later('arraybuffer', 'data:text/plain,abc', function (x) { x.responseType = 'arraybuffer'; },"
+            "function (x) { return String(x.response instanceof ArrayBuffer) + ' ' + x.response.byteLength + ' ' +"
+            "new Uint8Array(x.response).join(',') + ' ' + x.status; });");
 
     // 10. The XML parser's limits hold here as they do for DOMParser: a
     //     document that expands without end gives no document, at once.
@@ -11295,7 +11312,17 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
                          "x.responseXML.documentElement.childNodes.length + ' ' + x.responseText.length + ' ' + (Date.now() - t0 < ") +
              big_xhr_budget + ")") == "200000 2800007 true");
 
+    js.eval(R"JS(
+        var blobBinary = '';
+        new Blob(["A\u0000\u00e9"]).arrayBuffer().then(function (buffer) {
+            var bytes = new Uint8Array(buffer);
+            blobBinary = (buffer instanceof ArrayBuffer) + ':' + buffer.byteLength + ':' +
+                bytes[0] + ',' + bytes[1] + ',' + bytes[2] + ',' + bytes[3];
+        });
+    )JS");
+
     settle();
+    assert(S("blobBinary") == "true:4:65,0,195,169");
     assert(S("results['text type']") == "state 1, loadstart, state 2, state 3, progress 51/0, state 4, load 51/0, loadend | 65533");
     assert(S("results.aborted + ' / ' + requests.aborted.seen.length + ' ' + requests.aborted.x.readyState") ==
            "state 1, loadstart, state 2, state 3, state 4, abort, loadend / 7 0");
@@ -11311,7 +11338,7 @@ TEST(xml_http_request_answers_data_urls_and_nothing_else) {
     assert(S("results.blob") == failed + "0");
     assert(S("results.about") == failed + "0");
     assert(S("results.javascript") == failed + "0 undefined");
-    assert(S("results.arraybuffer") == "state 1, loadstart, state 2, state 3, progress 3/0, state 4, load 3/0, loadend | null 200");
+    assert(S("results.arraybuffer") == "state 1, loadstart, state 2, state 3, progress 3/0, state 4, load 3/0, loadend | true 3 97,98,99 200");
     std::remove(secret_path.c_str());
 }
 
@@ -29075,6 +29102,108 @@ if (failures.length) throw new Error(failures.join('\n'));
     )JS");
 }
 
+TEST(annex_b_string_html_methods) {
+    using namespace litebird;
+    // Phase 149, finding 154. ECMA-262 Annex B §B.2.3: thirteen methods that
+    // wrap the string in an HTML element, all of them `B.2.3.1 CreateHTML`,
+    // and `trimLeft`/`trimRight` as the *same function objects* as
+    // `trimStart`/`trimEnd`. The expectations are the standard's; the 86
+    // tests this phase adds to `annexB/built-ins/String` are the suite's,
+    // written by nobody who has seen this engine.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var failures = [];
+        function report(what, got, want) {
+            var a = JSON.stringify(got), b = JSON.stringify(want);
+            if (a !== b) failures.push(what + ': got ' + a + ', expected ' + b);
+        }
+        function check(what, f, want) {
+            var got;
+            try { got = f(); } catch (e) { got = 'throws ' + e.name; }
+            report(what, got, want);
+        }
+        // The same, for a function that is expected to throw.
+        function checkThrows(what, f, name) {
+            try { f(); } catch (e) { report(what, e.name, name); return; }
+            report(what, 'no throw', name);
+        }
+
+        check('anchor names the element it wraps', function () {
+            return ['_'.anchor('b'), '<'.anchor('<'), '_'.anchor(0x2A), '_'.anchor('\x22')];
+        }, ['<a name="b">_</a>', '<a name="<"><</a>', '<a name="42">_</a>', '<a name="&quot;">_</a>']);
+        check('link is an href, and its value is escaped the same way', function () {
+            return 'x'.link('a?b="c"');
+        }, '<a href="a?b=&quot;c&quot;">x</a>');
+        check('the nine element-only methods', function () {
+            return ['a'.bold(), 'a'.italics(), 'a'.fixed(), 'a'.strike(), 'a'.small(),
+                    'a'.big(), 'a'.blink(), 'a'.sub(), 'a'.sup()];
+        }, ['<b>a</b>', '<i>a</i>', '<tt>a</tt>', '<strike>a</strike>', '<small>a</small>',
+            '<big>a</big>', '<blink>a</blink>', '<sub>a</sub>', '<sup>a</sup>']);
+        check('fontcolor and fontsize are font attributes', function () {
+            return ['t'.fontcolor('red'), 't'.fontsize(12)];
+        }, ['<font color="red">t</font>', '<font size="12">t</font>']);
+        check('a missing attribute converts to the string undefined', function () {
+            return ['x'.anchor(), 'x'.fontcolor(), 'x'.fontsize(), 'x'.link()];
+        }, ['<a name="undefined">x</a>', '<font color="undefined">x</font>',
+            '<font size="undefined">x</font>', '<a href="undefined">x</a>']);
+        check('this is converted with ToString, not read as a string', function () {
+            return [String.prototype.anchor.call(0x2A, 0x2A), ''.bold()];
+        }, ['<a name="42">42</a>', '<b></b>']);
+        check('a boxed String is a this too', function () {
+            return String.prototype.bold.call(new String('ab'));
+        }, '<b>ab</b>');
+        checkThrows('a null or undefined this is a TypeError', function () {
+            return [String.prototype.anchor.call(undefined), String.prototype.anchor.call(null)];
+        }, 'TypeError');
+        check('a this whose toString throws propagates it', function () {
+            var bad = { toString: function () { throw new TypeError('mine'); } };
+            try { String.prototype.anchor.call(bad); } catch (e) { return e.message; }
+            return 'no throw';
+        }, 'mine');
+        check('an attribute whose toString throws propagates it', function () {
+            var bad = { toString: function () { throw new RangeError('mine'); } };
+            try { 'x'.anchor(bad); } catch (e) { return e.name; }
+            return 'no throw';
+        }, 'RangeError');
+        check('a surrogate pair survives on both sides', function () {
+            return '\u{1F600}'.anchor('\u{1F600}');
+        }, '<a name="\u{1F600}">\u{1F600}</a>');
+        checkThrows('the methods are not constructors', function () {
+            return new String.prototype.anchor();
+        }, 'TypeError');
+        check('length is the argument count, and name is the method', function () {
+            var names = ['anchor', 'link', 'fontcolor', 'fontsize', 'big', 'blink', 'bold',
+                         'fixed', 'italics', 'small', 'strike', 'sub', 'sup'];
+            return names.map(function (n) {
+                return n + ':' + String.prototype[n].length + ':' + String.prototype[n].name;
+            });
+        }, ['anchor:1:anchor', 'link:1:link', 'fontcolor:1:fontcolor', 'fontsize:1:fontsize',
+            'big:0:big', 'blink:0:blink', 'bold:0:bold', 'fixed:0:fixed', 'italics:0:italics',
+            'small:0:small', 'strike:0:strike', 'sub:0:sub', 'sup:0:sup']);
+        check('they are writable, not enumerable and configurable', function () {
+            var d = Object.getOwnPropertyDescriptor(String.prototype, 'bold');
+            return [d.writable, d.enumerable, d.configurable, Object.keys(String.prototype).indexOf('bold')];
+        }, [true, false, true, -1]);
+        check('trimLeft is trimStart itself', function () {
+            return [String.prototype.trimLeft === String.prototype.trimStart,
+                    String.prototype.trimLeft.name, String.prototype.trimLeft.length];
+        }, [true, 'trimStart', 0]);
+        check('trimRight is trimEnd itself', function () {
+            return [String.prototype.trimRight === String.prototype.trimEnd,
+                    String.prototype.trimRight.name, String.prototype.trimRight.length,
+                    '  a  '.trimLeft() + '|' + '  a  '.trimRight()];
+        }, [true, 'trimEnd', 0, 'a  |  a']);
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(a_functions_name_and_length_are_its_own_properties) {
     using namespace litebird;
 
@@ -29575,6 +29704,9 @@ int main() {
 
     // Phase 139: ImageData is an interface, and putImageData takes a rectangle.
     RUN_TEST(image_data_is_an_interface);
+
+    // Phase 149: the Annex B String.prototype HTML methods, and the trim aliases.
+    RUN_TEST(annex_b_string_html_methods);
 
     // Phase 119: Contextual GSUB (Type 1-7), Cursive GPOS (Type 3/7/8), and Arabic Shaping.
     RUN_TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions);

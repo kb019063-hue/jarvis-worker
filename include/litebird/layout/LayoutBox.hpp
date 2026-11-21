@@ -146,9 +146,10 @@ public:
     /// not resize its column after the first row was read.
     bool ignore_own_width{false};
 
-    /// Only the root box of an HTML document carries the solid canvas color.
-    /// It is separate from box geometry, so it can fill the viewport before
-    /// any scrolling, clipping, transforms or body chrome are applied.
+    /// Only the root box of an HTML document owns a canvas. The color can be
+    /// transparent (notably in iframes), so ownership is tracked separately.
+    /// The canvas is independent of box geometry and viewport scrolling.
+    bool has_document_canvas{false};
     Color canvas_background{Color::transparent()};
     /// The selected root/body background is painted on the canvas instead of
     /// as this box's chrome. Computed styles remain unchanged and shareable;

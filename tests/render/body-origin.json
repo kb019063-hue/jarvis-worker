@@ -2,7 +2,7 @@
   "_what_this_is": [
     "Root/body placement, solid canvas backgrounds, and the remaining general margin-collapse gap.",
     "Reference pixels were measured against Chromium 153 at 800x600.",
-    "Run by make render-conformance; kept separate while another pull request owns reftests.json."
+    "Run by make render-conformance as a separately reported root/body corpus."
   ],
   "tests": [
     {
@@ -1135,6 +1135,33 @@
           "y": 599,
           "colour": "#123456",
           "describe": "the resolved color covers the viewport"
+        }
+      ]
+    },
+    {
+      "name": "author_layer_can_make_the_body_white",
+      "html": "<!doctype html><html style=\"background:#0000ff\"><head><style>@layer base {body {background-color:#ffffff}}</style></head><body style=\"margin:20px;height:50px\"></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 0,
+          "y": 0,
+          "colour": "#0000ff",
+          "describe": "the root still supplies blue"
+        },
+        {
+          "kind": "pixel",
+          "x": 20,
+          "y": 20,
+          "colour": "#ffffff",
+          "describe": "a layered author declaration beats the UA default"
+        },
+        {
+          "kind": "pixel",
+          "x": 799,
+          "y": 599,
+          "colour": "#0000ff",
+          "describe": "the white body does not replace the root canvas"
         }
       ]
     }

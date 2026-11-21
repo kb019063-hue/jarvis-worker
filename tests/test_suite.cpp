@@ -29916,8 +29916,27 @@ TEST(document_canvas_background_is_scoped_and_keeps_computed_styles) {
         R"html(<!doctype html><html><body style="margin:20px;width:100px;height:60px;background:rgba(255,0,0,.5)">)html"
         R"(<div style="width:20px;height:20px;background:#0000ff"></div></body></html>)");
     StyleResolver resolver;
+    auto unstyled = HtmlParser::parse("<!doctype html><body></body>");
+    assert(resolver.resolve_style(unstyled->body()).background_color.is_transparent());
+    auto unstyled_root = LayoutTree::build(unstyled, resolver, 40, 60);
+    assert(unstyled_root->has_document_canvas && unstyled_root->canvas_background.is_transparent());
+    auto unstyled_list = DisplayList::build(unstyled_root);
+    assert(!unstyled_list.commands().empty() &&
+           std::holds_alternative<DrawCanvasCommand>(unstyled_list.commands().front()));
+    TerminalRenderer unstyled_terminal(4, 3, 10, 20);
+    const auto unstyled_ansi = unstyled_terminal.to_ansi_string(unstyled_list);
+    // The terminal's ordinary empty grid is dark. A document with no canvas
+    // color still has the browser's white top-level backdrop, so its dark
+    // default text remains legible after the UA body became transparent.
+    const std::string white_bg = "\033[48;2;255;255;255m";
+    std::size_t white_count = 0, white_pos = 0;
+    while ((white_pos = unstyled_ansi.find(white_bg, white_pos)) != std::string::npos) {
+        ++white_count;
+        white_pos += white_bg.size();
+    }
+    assert(white_count == 12);
     auto root = LayoutTree::build(doc, resolver, 200, 150);
-    assert(root && root->node == doc->body());
+    assert(root && root->node == doc->body() && root->has_document_canvas);
     assert(root->canvas_background == Color(255, 0, 0, 128));
     assert(root->background_propagated);
     assert(root->style->background_color == Color(255, 0, 0, 128)); // computed style did not change
@@ -29937,7 +29956,7 @@ TEST(document_canvas_background_is_scoped_and_keeps_computed_styles) {
     // The same body laid out as an arbitrary subtree has a box background,
     // not a canvas. Building it must not change the previously built root.
     auto subtree = LayoutTree::build(doc->body(), resolver, 200, 150);
-    assert(subtree && subtree->canvas_background.is_transparent());
+    assert(subtree && !subtree->has_document_canvas && subtree->canvas_background.is_transparent());
     assert(!subtree->background_propagated);
     auto sub_list = DisplayList::build(subtree);
     for (const auto& cmd : sub_list.commands()) assert(!std::holds_alternative<DrawCanvasCommand>(cmd));
@@ -29994,7 +30013,7 @@ TEST(document_canvas_background_is_scoped_and_keeps_computed_styles) {
     other_el->set_attribute("style", "width:40px;height:40px;background:#ff0000");
     other_doc->append_child(other_el);
     auto other = LayoutTree::build(other_doc, resolver, 200, 150);
-    assert(other && other->canvas_background.is_transparent());
+    assert(other && !other->has_document_canvas && other->canvas_background.is_transparent());
     const auto other_list = DisplayList::build(other);
     for (const auto& cmd : other_list.commands()) {
         assert(!std::holds_alternative<DrawCanvasCommand>(cmd));
@@ -30056,6 +30075,17 @@ TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
     while ((pos = ansi.find(blue, pos)) != std::string::npos) { ++count; pos += blue.size(); }
     assert(count == 12);
     assert(ansi.find("\033[48;2;255;0;0m") == std::string::npos);
+
+    DisplayList terminal_clip;
+    terminal_clip.add(PushClipCommand{Rect(10, 20, 20, 20)});
+    terminal_clip.add(DrawCanvasCommand{Color::red()});
+    terminal_clip.add(PopClipCommand{});
+    TerminalRenderer clipped_terminal(4, 3, 10, 20);
+    const auto clipped_ansi = clipped_terminal.to_ansi_string(terminal_clip);
+    const std::string red = "\033[48;2;255;0;0m";
+    count = 0; pos = 0;
+    while ((pos = clipped_ansi.find(red, pos)) != std::string::npos) { ++count; pos += red.size(); }
+    assert(count == 2); // two cells of the four-by-three terminal
 }
 
 TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling) {

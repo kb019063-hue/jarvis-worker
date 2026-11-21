@@ -356,7 +356,9 @@ DisplayList DisplayList::build(const std::shared_ptr<LayoutBox>& root_box) {
     if (root_box) {
         // The canvas is behind every box, including the body's shadow and
         // border, and is not subject to the body's transform or overflow.
-        if (!root_box->canvas_background.is_transparent()) {
+        // Emit even a transparent document canvas: the terminal renderer must
+        // distinguish it from an arbitrary subtree and use the white backdrop.
+        if (root_box->has_document_canvas) {
             list.add(DrawCanvasCommand{root_box->canvas_background});
         }
         build_recursive(root_box, list);

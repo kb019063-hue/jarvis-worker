@@ -243,7 +243,7 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
             // The canvas is in viewport/device space, not in the scroll or
             // element transform currently on the command stack. Clipping is
             // still applied by set_pixel, allowing an enclosing target clip.
-            fill_rect(0, 0, m_width, m_height, arg.color);
+            if (!arg.color.is_transparent()) fill_rect(0, 0, m_width, m_height, arg.color);
         } else if constexpr (std::is_same_v<T, PushTransformCommand>) {
             auto curr = current_transform();
             m_transform_stack.push_back(curr.multiply(arg.matrix));

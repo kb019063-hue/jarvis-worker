@@ -913,6 +913,12 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
         root_box = LayoutBox::create_block(nullptr, std::move(root_style));
     }
 
+    // Even an uncolored HTML document owns a transparent canvas: embedded
+    // documents preserve its alpha, while a top-level terminal needs to know
+    // that it should show the browser's white backdrop rather than its default
+    // dark grid. Subtree and non-HTML layout roots do not own one.
+    root_box->has_document_canvas = html_style.has_value();
+
     // CSS Backgrounds: the HTML root supplies the canvas unless its color is
     // transparent, in which case the first HTML body child supplies it. The
     // color's *used* value is then transparent on the source box; keep the

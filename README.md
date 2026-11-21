@@ -90,6 +90,7 @@ make diff-xml        # generated XML read here, by Expat and by libxml2; seriali
 make test            # 316<!--metrics:unit_suites/int--> engine suites + 114 cross-origin Window/Location/channel checks
 make gc-oracle       # the collector's invariants through the CLI: cycles reclaimed, the live set flat, reached data intact
 make check-numbers   # the numbers above still divide and still count, and every marked figure and floor agrees (tools/ci/check_numbers.py)
+make check-suites    # every suite that runs script begins through TestPage, so two new ones merge cleanly (tools/ci/check_suites.py)
 make verify-regexp   # RegExp Unicode 17.0 / v-mode / d-mode / ES2025 differential & spec verification
 make verify-string-unicode # all 1,114,112 code points x 11 ops + curated/fuzz strings & collation + ECMA-402 checks vs Node.js
 make bench-floats    # indexed sized-float timing guard: 1k and 10k, mixed sides/clear

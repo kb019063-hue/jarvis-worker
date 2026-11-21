@@ -29418,6 +29418,143 @@ TEST(a_functions_name_and_length_are_its_own_properties) {
     assert(failed.empty());
 }
 
+TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot) {
+    using namespace litebird;
+
+    // Phase 154, finding 159. `stack` was an own data property installed by
+    // js_make_error, so every statement below was false:
+    //
+    //   Object.getOwnPropertyDescriptor(Error.prototype, 'stack')
+    //                        -> undefined      (it is an accessor)
+    //   new Error('x').hasOwnProperty('stack')
+    //                        -> true           (it is false until assigned)
+    //   Object.getOwnPropertyNames(new Error('x'))
+    //                        -> ['message','stack']  (['message'])
+    //
+    // The standard says nothing about `stack`; the de-facto shape is the one
+    // test262 pins down and V8/JavaScriptCore expose: an accessor pair on
+    // Error.prototype that reports the text from the [[ErrorData]] internal
+    // slot, and an instance that carries no own property until something
+    // assigns one. ObjectClass::Error is that slot here.
+    //
+    // The getter answers from the slot on the *receiver*, so it survives an
+    // own `stack` that shadows it, a foreign new.target that puts the
+    // instance off Error.prototype's chain, and a subclass. The setter is
+    // SetterThatIgnoresPrototypeProperties: a non-string throws, Error.prototype
+    // itself throws, and anything else gets an ordinary own data property.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throwsT(what, f) {
+            try { f(); failures.push(what + ': no throw'); }
+            catch (e) { if (e.constructor.name !== 'TypeError') failures.push(what + ': threw ' + e.constructor.name); }
+        }
+        function desc(o, k) {
+            var d = Object.getOwnPropertyDescriptor(o, k);
+            if (!d) return 'absent';
+            return [typeof d.get, typeof d.set, String(d.value), String(d.writable),
+                    String(d.enumerable), String(d.configurable)].join(',');
+        }
+
+        // ---- the property on the prototype is an accessor ----------------
+        var d = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
+        same('descriptor is an accessor', desc(Error.prototype, 'stack'),
+             'function,function,undefined,undefined,false,true');
+        same('getter name', d.get.name, 'get stack');
+        same('getter length', d.get.length, 0);
+        same('setter name', d.set.name, 'set stack');
+        same('setter length', d.set.length, 1);
+        same('getter is not a constructor', d.get.hasOwnProperty('prototype'), false);
+        throwsT('new getter', function () { new d.get(); });
+
+        // ---- an instance has no own stack --------------------------------
+        var e = new Error('x');
+        same('own names', Object.getOwnPropertyNames(e), ['message']);
+        same('hasOwnProperty before assignment', e.hasOwnProperty('stack'), false);
+        same('descriptor is undefined', Object.getOwnPropertyDescriptor(e, 'stack'), undefined);
+        same('case', Object.keys(e).indexOf('stack'), -1);
+        same('getter still reports', typeof e.stack, 'string');
+        same('the text', e.stack, 'Error: x\n    at <anonymous>');
+        same('every native error', new TypeError('t').stack, 'TypeError: t\n    at <anonymous>');
+        same('a subclass', new (class extends Error {})('s').stack, 'Error: s\n    at <anonymous>');
+        // An empty error is just its name, as toString() is.
+        same('no message', new RangeError().stack, 'RangeError\n    at <anonymous>');
+
+        // ---- the getter reads the slot, not the prototype chain ----------
+        var o = { __proto__: new Error('o') };
+        same('getter on a proxy-ish receiver', d.get.call(o), undefined);
+        same('via the chain', o.stack, undefined);
+        same('getter on Error.prototype', d.get.call(Error.prototype), undefined);
+        same('plain object', d.get.call({}), undefined);
+        same('native error prototypes', d.get.call(TypeError.prototype), undefined);
+        throwsT('getter on undefined', function () { d.get.call(undefined); });
+        throwsT('getter on a number', function () { d.get.call(1); });
+        throwsT('setter on null', function () { d.set.call(null, 'x'); });
+
+        // ---- an own data property shadows it -----------------------------
+        var shadow = new Error('m');
+        Object.defineProperty(shadow, 'stack', { value: 'sentinel', writable: true, enumerable: true, configurable: true });
+        same('shadowed read', shadow.stack, 'sentinel');
+        same('slot survives the shadow', typeof d.get.call(shadow), 'string');
+
+        // ---- the setter installs an ordinary own property ----------------
+        var s1 = new Error('m');
+        same('setter returns undefined', d.set.call(s1, 'sentinel'), undefined);
+        same('own after set', desc(s1, 'stack'), 'undefined,undefined,sentinel,true,true,true');
+        same('read back', s1.stack, 'sentinel');
+        d.set.call(s1, '');
+        same('empty string round-trips', s1.stack, '');
+        var plain = {};
+        d.set.call(plain, 'on-plain');
+        same('plain receiver', desc(plain, 'stack'), 'undefined,undefined,on-plain,true,true,true');
+        d.set.call(TypeError.prototype, 'sub');
+        same('a native error prototype', desc(TypeError.prototype, 'stack'),
+             'undefined,undefined,sub,true,true,true');
+        delete TypeError.prototype.stack;
+        same('cleaned up', Object.getOwnPropertyDescriptor(TypeError.prototype, 'stack'), undefined);
+        var viaAssignment = Object.create(Error.prototype);
+        viaAssignment.stack = 'assigned';
+        same('assignment through the accessor', desc(viaAssignment, 'stack'),
+             'undefined,undefined,assigned,true,true,true');
+
+        // ---- an existing own property keeps its attributes ---------------
+        var kept = new Error('m');
+        Object.defineProperty(kept, 'stack', { value: 'original', writable: true, enumerable: false, configurable: false });
+        d.set.call(kept, 'updated');
+        same('only the value changes', desc(kept, 'stack'), 'undefined,undefined,updated,true,false,false');
+
+        // ---- and the ways the setter refuses -----------------------------
+        throwsT('no argument', function () { d.set.call(new Error('m')); });
+        throwsT('a number', function () { d.set.call(new Error('m'), 1); });
+        throwsT('undefined', function () { d.set.call(new Error('m'), undefined); });
+        throwsT('an object with toString', function () { d.set.call(new Error('m'), { toString: function () { return 'x'; } }); });
+        throwsT('Error.prototype itself', function () { d.set.call(Error.prototype, 'x'); });
+        throwsT('assignment to Error.prototype', function () { Error.prototype.stack = 'x'; });
+        var ro = new Error('m');
+        Object.defineProperty(ro, 'stack', { value: 'ro', writable: false, enumerable: false, configurable: true });
+        throwsT('a non-writable own property', function () { d.set.call(ro, 'x'); });
+        same('and it is untouched', ro.stack, 'ro');
+        var frozen = new Error('m');
+        Object.freeze(frozen);
+        throwsT('a frozen instance', function () { d.set.call(frozen, 'x'); });
+        same('soft delete', delete new Error('m').stack, true);
+
+        // ---- the accessor survives the refusals --------------------------
+        same('still an accessor', desc(Error.prototype, 'stack'),
+             'function,function,undefined,undefined,false,true');
+        same('and still reports', new Error('after').stack, 'Error: after\n    at <anonymous>');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(automatic_gc_threshold_and_geometric_growth) {
     using namespace litebird;
 
@@ -29977,6 +30114,9 @@ int main() {
 
     // Phase 146: name and length are own properties, with the attributes they have.
     RUN_TEST(a_functions_name_and_length_are_its_own_properties);
+
+    // Phase 154: Error.prototype.stack is an accessor over an internal slot.
+    RUN_TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot);
 
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.

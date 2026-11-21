@@ -101,8 +101,8 @@ Of the 51 `isConstructor` cases, all 51 pass; the one left is
 existing rather than on the question. The 54th case is an `instanceof`
 case that the same mark answered.
 
-Everything else unchanged: `make test` **314/314** including the suite added
-here, `make js-conformance` **1144/1158**, `make dom-conformance` **678/678**,
+Everything else unchanged: `make test` **316/316** including the suite added
+here (314 before `main` was merged into the branch), `make js-conformance` **1144/1158**, `make dom-conformance` **678/678**,
 `make metrics` and `check_numbers` clean.
 
 ## 5. What is still open

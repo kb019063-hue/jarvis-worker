@@ -26746,6 +26746,131 @@ TEST(bidi_reorders_hebrew_and_arabic_runs) {
     }
 }
 
+TEST(array_methods_over_an_exotic_receiver_ask_it_for_its_indices) {
+    using namespace litebird;
+    // Phase 129. A NodeList keeps its indices outside the object's property
+    // map, so a walk that reads only that map found none of them and
+    // `Array.prototype.slice.call(childNodes)` answered the right length full
+    // of `undefined`. `own_keys` asks the object, which is the only thing that
+    // knows what it has.
+    auto doc = HtmlParser::parse("<!DOCTYPE html><body><div id='host'><i></i><b></b></div></body>");
+    JsInterpreter js(doc);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+
+    assert(text("var d = document.getElementById('host');"
+                "Array.prototype.slice.call(d.childNodes).map(function (n) { return n.nodeName; }).join()") ==
+           "I,B");
+    assert(text("var d = document.getElementById('host');"
+                "Array.prototype.map.call(d.childNodes, function (n) { return n.nodeName; }).join()") ==
+           "I,B");
+    assert(text("var d = document.getElementById('host');"
+                "var n = 0; Array.prototype.forEach.call(d.childNodes, function () { n++; }); n") == "2");
+    // The same receiver through the methods that do not copy at all.
+    assert(text("var d = document.getElementById('host');"
+                "Array.prototype.join.call(d.childNodes, '|')") == "[object HTMLElement]|[object HTMLElement]");
+    assert(text("var d = document.getElementById('host');"
+                "Array.prototype.indexOf.call(d.childNodes, d.lastChild)") == "1");
+}
+
+TEST(array_methods_survive_a_length_they_could_never_reach) {
+    using namespace litebird;
+    // Phase 129, finding 134. Every Array.prototype method that took an
+    // array-like receiver copied it into a real array first, by reading index
+    // 0 up to its `length` before the method read a single argument. A length
+    // of Infinity is four billion reads pushing four billion values: the
+    // process ended in std::bad_alloc or was killed for the memory. A length
+    // of 2^32 was an allocation where the standard asks for a RangeError.
+    //
+    // Twenty-one cases of test262's built-ins/Array/prototype died that way.
+    // These are the shapes they test, in the engine's own suite so that the
+    // next change to these methods cannot bring the copy back quietly.
+    JsInterpreter js(nullptr);
+    auto text = [&](const char *source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- a length the method will never reach -----------------------------
+    // `every` reads index 0, calls the callback, and stops when it answers
+    // false. It never looks at index 1, so Infinity costs one callback.
+    assert(text("Array.prototype.every.call({ 0: 9, length: Infinity }, function (v) { return v > 10; })") ==
+           "false");
+    assert(text("Array.prototype.some.call({ 0: 11, 1: 12, length: 4294967297 }, function (v) { return v > 10; })") ==
+           "true");
+    // The *string* "Infinity" is ToNumber'd to Infinity and is the same case:
+    // one callback, at index 0, and then the answers run out. Measured, not
+    // assumed — an earlier draft of this test guessed it was a length of 0.
+    assert(text("var n = 0;"
+                "Array.prototype.every.call({ 0: 9, length: 'Infinity' },"
+                "  function () { n++; return true; }); n") == "1");
+    // "-Infinity" is not positive, and ToLength makes it 0: no callback.
+    assert(text("var n = 0;"
+                "Array.prototype.every.call({ 0: 9, length: '-Infinity' },"
+                "  function () { n++; return true; }); n") == "0");
+    // `indexOf` over the number Infinity still finds index 0 and stops there.
+    assert(text("Array.prototype.indexOf.call({ 0: 0, length: Infinity }, 0)") == "0");
+
+    // ---- `length` past 2^32-1 is a length, not an array -------------------
+    // `indexOf` and `lastIndexOf` are generic: a key past 2^32-1 is an
+    // ordinary property of an object, and both must find it.
+    assert(text("var o = { 0: 'a', 4294967295: 'z', length: 4294967296 };"
+                "Array.prototype.indexOf.call(o, 'z')") == "4294967295");
+    assert(text("var o = { 0: 'a', 4294967295: 'z', length: 4294967296 };"
+                "Array.prototype.lastIndexOf.call(o, 'z')") == "4294967295");
+    // A method that builds an array cannot build one that long: RangeError,
+    // before the callback runs even once.
+    assert(text("var calls = 0;"
+                "errName(function () { Array.prototype.map.call({ length: 4294967296 },"
+                "  function () { calls++; }); }) + '|' + calls") == "RangeError|0");
+    assert(text("errName(function () { Array.prototype.slice.call({ length: 4294967296 }); })") ==
+           "RangeError");
+
+    // ---- a length of 2^53-1 with one place on it --------------------------
+    // The length cannot be counted, and the place is not near the start: the
+    // answer comes from the places that are there, not from counting to it.
+    assert(text("var el = {}; var o = { length: 9007199254740991 };"
+                "o[9007199254740990] = el;"
+                "Array.prototype.indexOf.call(o, el, 9007199254740988)") == "9007199254740990");
+    // `slice` reads the places between two indices and keeps the rest holes.
+    assert(text("var o = { 9007199254740989: 'a', length: 9007199254740993 };"
+                "Array.prototype.slice.call(o, 9007199254740989).length") == "2");
+    assert(text("var o = { 9007199254740989: 'a', length: 9007199254740993 };"
+                "Array.prototype.slice.call(o, 9007199254740989)[0]") == "a");
+
+    // ---- holes are still holes, and a callback may fill one ---------------
+    assert(text("var a = [1, 2, , 4, 5]; var n = 0; a.forEach(function () { n++; }); n") == "4");
+    assert(text("var a = [1, 2, , 4, 5]; var n = 0;"
+                "a.forEach(function () { n++; a[2] = 3; }); n") == "5");
+    // map makes an own property only where the callback ran, which is why a
+    // sparse receiver maps to a sparse result rather than to `NaN`s.
+    assert(text("var r = Array.prototype.map.call({ 0: 1, length: 3 }, function (v) { return v * 2; });"
+                "r.length + '|' + r[0] + '|' + (1 in r)") == "3|2|false");
+
+    // ---- a length that shrinks under the loop ----------------------------
+    // The length is taken once, as the standard takes it, but a callback that
+    // shortens the array ends the loop early: `arr.length = 3` inside a
+    // forEach over five elements runs three callbacks.
+    assert(text("var a = [1, 2, 3, 4, 5]; var n = 0;"
+                "a.forEach(function () { n++; a.length = 3; }); n") == "3");
+
+    // ---- a String object's characters and `length` are on its prototype --
+    // `length_of` used to read `length` as an own property, so a String object
+    // answered 0 and every method over one visited nothing.
+    assert(text("var s = new String('432');"
+                "Array.prototype.every.call(s, function (v) { return parseInt(v, 10) > 1; })") == "true");
+    assert(text("var s = new String('432');"
+                "Array.prototype.indexOf.call(s, '3')") == "1");
+
+    // ---- join and toString -----------------------------------------------
+    // toString is `join` looked up on the receiver by name, not a fixed call.
+    assert(text("[1, 2].toString()") == "1,2");
+    assert(text("var o = { join: Array.prototype.join, length: 4, 1: 'x' }; o.join()") == ",x,,");
+    assert(text("var o = { join: Array.prototype.join, length: 3 }; o.join()") == ",,");
+    assert(text("Array.prototype.toString.call({ join: function () { return 'own'; } })") == "own");
+    // A string that would be longer than memory is a RangeError, not a loop
+    // that never ends: no engine builds 2^53 separators.
+    assert(text("errName(function () { Array.prototype.join.call({ length: Infinity }, '-'); })") ==
+           "RangeError");
+}
+
 TEST(array_methods_that_move_places_ask_the_index) {
     using namespace litebird;
     // Phase 116, finding 125. The seven methods that move elements inside an
@@ -28003,6 +28128,200 @@ TEST(boxed_string_own_index_descriptors) {
     assert(failed.empty());
 }
 
+TEST(image_data_is_an_interface) {
+    using namespace litebird;
+    // Phase 139, finding 144. HTML §4.12.5: `ImageData` is an interface whose
+    // `data` is a Uint8ClampedArray, `createImageData` and `getImageData`
+    // refuse a zero dimension with IndexSizeError, and `putImageData` writes
+    // the dirty rectangle it is given and nothing else. Every expectation
+    // below is the standard's; where the standard leaves a choice (the exact
+    // message) it is not asserted.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        var canvas = document.createElement('canvas');
+        canvas.width = 4;
+        canvas.height = 4;
+        var ctx = canvas.getContext('2d');
+
+        check('the interface exists', function () { return [typeof ImageData, ImageData.length, ImageData.name]; },
+              '["function",2,"ImageData"]');
+        check('the constructor makes transparent black pixels', function () {
+            var image = new ImageData(2, 2);
+            var sum = 0;
+            for (var i = 0; i < image.data.length; ++i) sum += image.data[i];
+            return [image.width, image.height, image.data.length, sum, image.data instanceof Uint8ClampedArray];
+        }, '[2,2,16,0,true]');
+        check('the prototype is the interface prototype', function () {
+            return Object.getPrototypeOf(new ImageData(1, 1)) === ImageData.prototype;
+        }, 'true');
+        check('the pixels given are the pixels held, not a copy', function () {
+            var bytes = new Uint8ClampedArray(8);
+            bytes[0] = 250;
+            var image = new ImageData(bytes, 2);
+            return [image.width, image.height, image.data === bytes, image.data[0]];
+        }, '[2,1,true,250]');
+        check('the data must be a Uint8ClampedArray', function () {
+            return [new ImageData([1, 2, 3, 4], 1, 1), new ImageData(new Uint8Array(4), 1, 1)];
+        }, 'throws TypeError');
+        check('the data must be whole pixels', function () {
+            return new ImageData(new Uint8ClampedArray(6), 1);
+        }, 'throws IndexSizeError');
+        check('the size must match the data', function () {
+            return new ImageData(new Uint8ClampedArray(16), 2, 3);
+        }, 'throws IndexSizeError');
+        check('width and height are required and must not be zero', function () {
+            return [new ImageData(1), new ImageData(0, 1), new ImageData(1, 0)];
+        }, 'throws TypeError');
+        check('a zero dimension alone is an IndexSizeError', function () {
+            return [new ImageData(0, 1), new ImageData(1, 0)];
+        }, 'throws IndexSizeError');
+        check('width and height are read-only', function () {
+            var image = new ImageData(2, 3);
+            image.width = 9;
+            image.height = 9;
+            var descriptor = Object.getOwnPropertyDescriptor(ImageData.prototype, 'width');
+            return [image.width, image.height, descriptor.set === undefined];
+        }, '[2,3,true]');
+
+        check('the colour space is sRGB, and the other one is refused', function () {
+            var image = new ImageData(1, 1);
+            image.colorSpace = 'display-p3';
+            return [image.colorSpace, new ImageData(1, 1, { colorSpace: 'srgb' }).colorSpace,
+                    ctx.getImageData(0, 0, 1, 1).colorSpace];
+        }, '["srgb","srgb","srgb"]');
+        check('a colour space this engine cannot make is a TypeError', function () {
+            return new ImageData(1, 1, { colorSpace: 'display-p3' });
+        }, 'throws TypeError');
+
+        check('createImageData gives an ImageData', function () {
+            var image = ctx.createImageData(2, 3);
+            return [image instanceof ImageData, image.width, image.height,
+                    image.data instanceof Uint8ClampedArray, image.data.length];
+        }, '[true,2,3,true,24]');
+        check('createImageData from an ImageData copies the size, not the pixels', function () {
+            var source = new ImageData(2, 2);
+            source.data[0] = 200;
+            var copy = ctx.createImageData(source);
+            return [copy === source, copy.width, copy.height, copy.data[0]];
+        }, '[false,2,2,0]');
+        check('createImageData refuses a zero dimension', function () {
+            return ctx.createImageData(0, 2);
+        }, 'throws IndexSizeError');
+
+        ctx.fillStyle = 'rgb(255, 0, 0)';
+        ctx.fillRect(0, 0, 2, 2);
+        check('getImageData reads the pixels as unpremultiplied bytes', function () {
+            var image = ctx.getImageData(0, 0, 4, 4);
+            return [image instanceof ImageData, image.width, image.height,
+                    image.data[0], image.data[1], image.data[2], image.data[3]];
+        }, '[true,4,4,255,0,0,255]');
+        check('a pixel outside the canvas is transparent black', function () {
+            var image = ctx.getImageData(3, 3, 4, 4);
+            return [image.width, image.height, image.data[12], image.data[15]];
+        }, '[4,4,0,0]');
+        check('a negative width runs left from the right edge', function () {
+            ctx.fillStyle = 'rgb(255, 0, 0)';
+            ctx.fillRect(0, 0, 2, 1);
+            ctx.fillStyle = 'rgb(0, 0, 255)';
+            ctx.fillRect(2, 0, 2, 1);
+            var image = ctx.getImageData(3, 0, -2, 1);
+            return [image.width, image.data[0], image.data[4], image.data[6]];
+        }, '[2,255,0,255]');
+        check('getImageData refuses a zero dimension', function () {
+            return ctx.getImageData(0, 0, 0, 0);
+        }, 'throws IndexSizeError');
+
+        function filled(width, height, r, g, b) {
+            var image = ctx.createImageData(width, height);
+            for (var i = 0; i < image.data.length; i += 4) {
+                image.data[i] = r;
+                image.data[i + 1] = g;
+                image.data[i + 2] = b;
+                image.data[i + 3] = 255;
+            }
+            return image;
+        }
+        check('putImageData writes the dirty rectangle and nothing else', function () {
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = 'rgb(255, 0, 0)';
+            ctx.fillRect(0, 0, 4, 4);
+            ctx.putImageData(filled(2, 2, 0, 255, 0), 0, 0, 0, 0, 1, 1);
+            var image = ctx.getImageData(0, 0, 4, 4);
+            return [image.data[0], image.data[1], image.data[20], image.data[21]];
+        }, '[0,255,255,0]');
+        check('a negative dirty width counts left from the origin of the rectangle', function () {
+            ctx.fillStyle = 'rgb(255, 0, 0)';
+            ctx.fillRect(0, 0, 4, 1);
+            ctx.putImageData(filled(2, 1, 0, 0, 255), 0, 0, 1, 0, -1, 1);
+            var image = ctx.getImageData(0, 0, 4, 1);
+            return [image.data[0], image.data[2], image.data[4], image.data[6]];
+        }, '[0,255,255,0]');
+        check('a dirty rectangle outside the image writes nothing', function () {
+            ctx.fillStyle = 'rgb(255, 0, 0)';
+            ctx.fillRect(0, 0, 4, 4);
+            ctx.putImageData(filled(1, 1, 0, 0, 255), 0, 0, 9, 9, 4, 4);
+            var image = ctx.getImageData(0, 0, 1, 1);
+            return [image.data[0], image.data[2]];
+        }, '[255,0]');
+        check('putImageData ignores the transform, globalAlpha and the clip', function () {
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalAlpha = 1;
+            ctx.fillStyle = 'rgb(255, 0, 0)';
+            ctx.fillRect(0, 0, 4, 4);
+            ctx.save();
+            ctx.setTransform(1, 0, 0, 1, 20, 20);
+            ctx.globalAlpha = 0.25;
+            ctx.beginPath();
+            ctx.rect(0, 0, 1, 1);
+            ctx.clip();
+            ctx.putImageData(filled(2, 2, 0, 0, 255), 1, 1);
+            ctx.restore();
+            ctx.setTransform(1, 0, 0, 1, 0, 0);
+            ctx.globalAlpha = 1;
+            var image = ctx.getImageData(1, 1, 2, 2);
+            return [image.data[0], image.data[2], image.data[3], image.data[12], image.data[14]];
+        }, '[0,255,255,0,255]');
+        check('putImageData takes an ImageData and nothing else', function () {
+            return ctx.putImageData({ width: 1, height: 1, data: [0, 0, 0, 0] }, 0, 0);
+        }, 'throws TypeError');
+        check('the prototype getter refuses another receiver', function () {
+            return Object.getOwnPropertyDescriptor(ImageData.prototype, 'data').get.call({});
+        }, 'throws TypeError');
+        check('a subclass is an ImageData', function () {
+            class Mine extends ImageData {}
+            var image = new Mine(2, 3);
+            return [image.width, image.height, image.data.length, image instanceof ImageData, image instanceof Mine];
+        }, '[2,3,24,true,true]');
+        check('a round trip through putImageData and getImageData is exact', function () {
+            var image = ctx.getImageData(0, 0, 4, 4);
+            for (var i = 0; i < image.data.length; i += 4) {
+                image.data[i] = i % 200;
+                image.data[i + 3] = 128;
+            }
+            ctx.putImageData(image, 0, 0);
+            var back = ctx.getImageData(0, 0, 4, 4);
+            var same = true;
+            for (var j = 0; j < image.data.length; ++j) if (image.data[j] !== back.data[j]) same = false;
+            return [same, back.data[60], back.data[63]];
+        }, '[true,60,128]');
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -28371,6 +28690,8 @@ int main() {
     RUN_TEST(bidi_reorders_hebrew_and_arabic_runs);
 
     // Phase 116: the methods that move elements ask the places for what they are.
+    RUN_TEST(array_methods_over_an_exotic_receiver_ask_it_for_its_indices);
+    RUN_TEST(array_methods_survive_a_length_they_could_never_reach);
     RUN_TEST(array_methods_that_move_places_ask_the_index);
     // Phase 114: `instanceof` asks Symbol.hasInstance, as the language says.
     RUN_TEST(instanceof_asks_symbol_has_instance);
@@ -28391,6 +28712,9 @@ int main() {
 
     // Phase 132: a boxed String exposes character indices as own descriptors.
     RUN_TEST(boxed_string_own_index_descriptors);
+
+    // Phase 139: ImageData is an interface, and putImageData takes a rectangle.
+    RUN_TEST(image_data_is_an_interface);
 
     // Phase 119: Contextual GSUB (Type 1-7), Cursive GPOS (Type 3/7/8), and Arabic Shaping.
     RUN_TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions);

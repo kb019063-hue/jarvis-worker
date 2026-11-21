@@ -1,4 +1,4 @@
-# Finding 180 — `toLocaleString` never asked the element
+# Finding 181 — `toLocaleString` never asked the element
 
 `toLocaleString` existed and looked finished, which is what made it hard to see.
 `new Uint8Array([1,2]).toLocaleString()` said "1,2", and "1,2" is the right

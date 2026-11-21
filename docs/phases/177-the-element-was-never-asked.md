@@ -1,8 +1,8 @@
-# Phase 176 — the element was never asked
+# Phase 177 — the element was never asked
 
 Task row: `DataView` and `%TypedArray%.prototype`, which after Phases 126 and
 157 lists five separable gaps. This is `toLocaleString` on a view, and the
-identity of `toString`. Finding 180.
+identity of `toString`. Finding 181.
 
 Everything here is in `src/js/TypedArray.cpp`. `Array.prototype.toLocaleString`
 has the same defect and **is not fixed by this phase** — see section 5.

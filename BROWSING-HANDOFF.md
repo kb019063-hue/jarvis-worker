@@ -27,7 +27,7 @@ These are measurements of the [tested revision `78af7ff`](https://github.com/kb0
 
 ## First steps after merging
 
-1. Check CI on the **merge SHA**, not just the PR. For example, `gh pr view 158 --json mergeCommit --jq .mergeCommit.oid`, then `gh run list --branch main --commit <sha>`. A green build is not a new browsing measurement.
+1. Check CI on the **merge SHA**, not just the PR. For example, `gh pr view 158 --json mergeCommit --jq .mergeCommit.oid`, then `gh run list --branch main --json databaseId,headSha,status,conclusion` and match `headSha`. A green build is not a new browsing measurement.
 2. To measure a changed tree, follow [the reproduction commands](tools/real_pages/README.md#rerun-on-linux-from-repository-root). Start in fresh scratch directories; run the pinned Chromium oracle, then the native probe and `strict_frames.py`. Retain before/after frames. Don't change the manifest to recover a score.
 3. Run the focused article-paint, arrow, editable-input, and `noscript` checks in [the benchmark README](tools/real_pages/README.md), plus `make test`. Record regressions against the earlier rows, including crashes, unreadable results and minor rendering differences. Put new evidence in a **new** rerun directory rather than overwriting the reports above.
 4. Pick Hextris for the missing interaction, or caret/selection painting for a visible editor improvement. Before editing, check open PR claims, especially for shared shell, layout and painting files. For broader claims, test new holdout pages rather than extrapolating from this set.

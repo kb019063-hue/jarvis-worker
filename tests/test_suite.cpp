@@ -17294,7 +17294,7 @@ TEST(length_is_inherited_from_an_array_prototype) {
 }
 
 
-// Phase 167, finding 172. The AVIF container: the boxes around the picture,
+// Phase 172, finding 172. The AVIF container: the boxes around the picture,
 // read and bounds-checked, and not the picture, which needs an AV1 decoder and
 // does not have one yet.
 //

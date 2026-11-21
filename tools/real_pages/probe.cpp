@@ -65,14 +65,17 @@ int main(int argc, char** argv) {
     bool pass=false;
     std::string note;
     if (mode=="heading") {
-        auto link=locate(selector);
-        if (!link || link->bounding_box().height<=0) click("#contents summary");
-        click(selector);
-        auto section=shell.document()->get_element_by_id(target);
-        std::shared_ptr<Element> h;
-        if(section) for(const char* tag:{"h2","h3","h4"}) if((h=section->query_selector(tag))) break;
-        float y=h?h->bounding_box().y-shell.scroll_y():-999;
-        pass=shell.status_message()=="Scrolled to #"+target && y>=-1 && y<600;
+        auto details=locate("#contents details");
+        bool disclosed=details && details->has_attribute("open");
+        if (details && !disclosed) {
+            disclosed=click("#contents summary") && details->has_attribute("open");
+        }
+        bool followed=disclosed && click(selector);
+        auto h=locate("#"+target+" > :is(h2,h3,h4)");
+        auto r=h?h->bounding_box():Rect{};
+        float x=r.x-shell.scroll_x(), y=r.y-shell.scroll_y();
+        pass=followed && shell.status_message()=="Scrolled to #"+target && h &&
+             r.width>0 && r.height>0 && x<800 && x+r.width>0 && y>=-1 && y<600;
         note=shell.status_message()+"; heading y="+std::to_string(y);
     } else if (mode=="manual") {
         click(selector);

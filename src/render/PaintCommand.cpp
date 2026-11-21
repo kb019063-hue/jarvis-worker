@@ -54,6 +54,11 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
         list.add(clip);
     }
 
+    auto end_box = [&] {
+        if (clips) list.add(PopClipCommand{});
+        if (has_t) list.add(PopTransformCommand{});
+    };
+
     // An empty cell in the separated border model paints no background,
     // shadow or borders (CSS 2.1 17.5.1.2, `empty-cells: hide`). The
     // collapsed model always paints the shared edges.
@@ -156,6 +161,7 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
                 }
             }
         }
+        end_box();
         return; // All inline children and text runs handled by IFC
     }
 
@@ -240,13 +246,7 @@ void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, Display
         build_recursive(child, list);
     }
 
-    if (clips) {
-        list.add(PopClipCommand{});
-    }
-
-    if (has_t) {
-        list.add(PopTransformCommand{});
-    }
+    end_box();
 }
 
 } // namespace litebird

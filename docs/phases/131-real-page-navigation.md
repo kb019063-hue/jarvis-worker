@@ -7,3 +7,11 @@ Hit testing now follows the painter’s decision to use inline fragments instead
 Run the commands in `tools/real_pages/README.md`: Chromium **20/20**, Litebird **12/20**, up from 7. All five Git destination headings are readable in the post-click frames. The original report is unchanged; the new screenshots and machine-readable rows are in `tools/real_pages/rerun-01/`.
 
 The five Python articles do not complete. Hextris now produces a frame but its interaction is untested; the two other driver gaps remain. No broader web coverage is claimed.
+
+### Follow-up: disclosure and the article column
+
+The Python template uses `display: table` on a section containing ordinary elements. The table grid had no rows, leaving its descendants at their initial coordinates. The box builder now groups consecutive improper children in anonymous rows and cells without touching the DOM. The table’s intrinsic-width estimate respects definite minimum and maximum widths. The cascade tests the relative selector inside `:has()` instead of treating it as an unconditional match, so a rule intended for the numerical index no longer widens every article. Closed `details` with an explicit `summary` lays out only that summary until activation opens it.
+
+Correct geometry wasn't enough: two post-click frames were blank. A box painting inline fragments returned without unwinding its clip/transform commands. That path now uses the same epilogue as the ordinary box path. The heading probe checks disclosure activation and an on-screen heading box; screenshot review still decides whether the text actually painted.
+
+`python3 tools/real_pages/check_article_layout.py build/litebird` prints **4/4**. Rerunning the unchanged frozen tasks produced **17/20** (reference **20/20**); see `tools/real_pages/rerun-02/`. Sidebar positioning, preformatted whitespace, visual disclosure markers and synthesized summaries are not complete. The two games and contenteditable input remain untested, not passes.

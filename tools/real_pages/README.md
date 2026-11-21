@@ -8,6 +8,12 @@ Five Python proposals, five Git manuals, eight Mothereff text tools and two game
 
 [PDF: results and five screenshot pairs](rerun-01/git-manuals.pdf) · [All 20 outcomes](rerun-01/litebird.json). 12 completed (previously 7); all five manual links reached readable destination headings. The five PEP tasks remain incomplete; three input tasks are untested. No process exited prematurely. Same source revisions, human tasks, selectors and expectations; no changes to the original report.
 
+## Rerun 02: Python articles
+
+[PDF: five post-click comparisons](rerun-02/python-articles.pdf) · [Litebird outcomes](rerun-02/litebird.json) · [Chromium outcomes](rerun-02/reference.json). **17/20** completed, up from 12. Each PEP task opens the contents with a real click, follows the requested link and displays the heading. We reviewed the post-click frames, not just the scroll offsets. The article column is readable, but the sticky sidebar, code whitespace and typography still differ. All twelve previous passes remain; 2048, Hextris and Punycode are still untested. The manifest and saved pages did not change.
+
+A small offline regression checks anonymous CSS table content, a bounded column, `:has()` matching and painting a sibling after a clipped text box: `python3 tools/real_pages/check_article_layout.py build/litebird` (4 pixel checks).
+
 ## Rerun on Linux (from repository root)
 
 Use an empty or trusted local scratch directory. Pinned snapshots, browsers, logs and full-resolution PNGs belong outside Git. Use an isolated disposable environment, not a machine with personal browser data. The network restriction in the probe is for repeatability, not a general-purpose security sandbox.

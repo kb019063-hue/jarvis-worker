@@ -391,7 +391,7 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         th { font-weight: 700; text-align: center; }
 
         html, body, div, p, h1, h2, h3, h4, h5, h6, ul, ol, li,
-        section, article, header, footer, nav, main, pre, blockquote {
+        section, article, header, footer, nav, main, pre, blockquote, details, summary {
             display: block;
         }
         span, a, strong, b, em, i, code {
@@ -800,6 +800,8 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
                         }
                     }
                 }
+            } else if (name == "has") {
+                if (!pc.compiled_arg || !pc.compiled_arg->matches(*element)) return false;
             } else if (name == "is" || name == "where" || name == "matches") {
                 if (pc.compiled_arg) {
                     if (!pc.compiled_arg->matches(*element)) return false;

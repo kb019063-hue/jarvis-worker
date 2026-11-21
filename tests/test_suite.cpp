@@ -27807,6 +27807,78 @@ TEST(parser_rejects_early_syntax_errors_outside_class_bodies) {
     assert(js.eval("var a = 0, b = 0; ({ x: a = 7 } = {}); [b] = [9]; a + b").to_number() == 16.0);
 }
 
+TEST(an_anonymous_class_expression_takes_its_bindings_name) {
+    using namespace litebird;
+
+    // Phase 135, finding 140. `make_function` names an anonymous function
+    // from the binding it is evaluated for — `var f = function () {}` is `f` —
+    // and the `Class` arm of `evaluate_named` did the same for a function and
+    // nothing at all for a class, so an anonymous class expression's `name`
+    // was `""` in every position, while Node answers with the binding. 121 of
+    // test262's failures were that one string.
+    //
+    // The subtlety is that an inferred name is a *name*, not a *binding*. A
+    // class that spells a name can see it inside its own body; one that is
+    // merely inferred cannot, and the body reads whatever the binding means
+    // where it was written. Getting that wrong is invisible in `name` and
+    // breaks `for (...) C = class extends C {}`, which is why the two cases at
+    // the end are here. Every expected string is what Node.js 22 printed.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            if (got !== want) failures.push(what + ': got ' + JSON.stringify(got) + ', expected ' + JSON.stringify(want));
+        }
+
+        // ---- the five positions a class expression takes a name from -----
+        var a = class {};                          same('var', a.name, 'a');
+        var o = { p: class {} };                   same('property', o.p.name, 'p');
+        var { q = class {} } = {};                 same('object pattern', q.name, 'q');
+        var [w = class {}] = [];                   same('array pattern', w.name, 'w');
+        (function () {
+            function f(x = class {}) { return x.name; }
+            same('parameter default', f(), 'x');
+        })();
+        (function () { var k; k = class {}; same('assignment', k.name, 'k'); })();
+
+        // ---- and the positions where nothing names it --------------------
+        same('a plain class expression', (class {}).name, '');
+        same('a constructor argument', (function (v) { return v.name; })(class {}), '');
+        same('a returned class', (function () { return class {}; })().name, '');
+        same('an element of an array literal', [class {}][0].name, '');
+
+        // ---- a spelled name always wins --------------------------------
+        var z = class Named {};                    same('spelled name', z.name, 'Named');
+        var p = { k: class Named {} };             same('spelled name in a property', p.k.name, 'Named');
+
+        // ---- a spelled name is a binding; an inferred one is not ---------
+        var self = class { static f() { return self; } };
+        same('the body sees a spelled name', self.f() === self, true);
+        var outer = 'outer';
+        same('the body sees the outer binding, not a copy',
+             (class { static f() { return outer; } }).f(), 'outer');
+
+        // The case that caught the first version of this phase: the heritage
+        // has to be the *previous* value, and `this === C` has to answer
+        // against the outer binding, not against an inner copy of the class.
+        var C = class { static s() { return 'base'; } static get who() { return this === C; } };
+        var first = C.who;
+        for (var i = 0; i < 20000; i++) C = class extends C {};
+        same('the first class knows itself', first, true);
+        same('the last class still answers against the outer binding', C.who, true);
+        same('and the chain is 20001 deep', (function () {
+            var d = 0, x = C;
+            while (x !== Function.prototype) { d++; x = Object.getPrototypeOf(x); }
+            return d;
+        })(), 20001);
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(reflect_describes_and_answers_extensibility) {
     using namespace litebird;
     // Phase 124, finding 129. `Reflect` had ten of its thirteen functions;
@@ -28847,6 +28919,9 @@ int main() {
     RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);
     // Phase 141: remaining early SyntaxErrors outside class bodies.
     RUN_TEST(parser_rejects_early_syntax_errors_outside_class_bodies);
+
+    // Phase 135: an anonymous class expression takes the name it is bound to.
+    RUN_TEST(an_anonymous_class_expression_takes_its_bindings_name);
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);

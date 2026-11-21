@@ -1010,7 +1010,8 @@ JsValue JsInterpreter::call_legacy_function(const JsValue& fn, const std::vector
 // Classes
 // ---------------------------------------------------------------------------
 
-JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env) {
+JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env,
+                                    const std::string& name_hint) {
     // The class name is in its own TDZ while `extends` and computed property
     // keys are evaluated, and stays immutable inside the class body.
     auto class_env = std::make_shared<JsEnvironment>(env);
@@ -1044,7 +1045,22 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
         proto.object_val->prototype = nullptr;       // `extends null`
     }
 
-    JsValue ctor = make_function(cls->constructor, class_env, cls->name);
+    // NamedEvaluation (§8.6.3 applies to a class as it does to a function):
+    // `cls->name` is the name the source *spells*, and is empty for
+    // `class {}`. A class written as an initialiser takes the name of what it
+    // is bound to instead — `var a = class {}` is named `a`, and so is
+    // `{ p: class {} }` and `function f(x = class {})`.
+    //
+    // It takes it as a *name*, not as a binding. That distinction is the whole
+    // of this phase: a class that spells a name gets a binding for it inside
+    // its own body, but one that is merely *inferred* does not, so the body
+    // still reads whatever `a` means where the class was written. Two cases in
+    // the corpus turn on it: `for (...) C = class extends C {}` has to keep
+    // extending the *previous* `C`, and a static method's `this === C` has to
+    // answer against the outer binding, not a copy of the class. An inner
+    // binding here shadows both.
+    const std::string inferred = cls->name.empty() ? name_hint : cls->name;
+    JsValue ctor = make_function(cls->constructor, class_env, inferred);
     {
         // Still unshared: safe to finish building the payload.
         auto& fd = ctor.ensure_function_data();
@@ -2190,10 +2206,7 @@ JsValue JsInterpreter::evaluate_named(const Expr* expr, const EnvPtr& env, const
         if (fn_expr->fn->name.empty()) return make_function(fn_expr->fn, env, name_hint);
     } else if (expr->kind == NodeKind::Class) {
         auto* cls_expr = static_cast<const ClassExpr*>(expr);
-        if (cls_expr->cls->name.empty()) {
-            JsValue ctor = define_class(cls_expr->cls, env);
-            return ctor;
-        }
+        if (cls_expr->cls->name.empty()) return define_class(cls_expr->cls, env, name_hint);
     }
     return evaluate(expr, env);
 }

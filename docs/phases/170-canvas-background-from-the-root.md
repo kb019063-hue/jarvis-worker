@@ -61,11 +61,12 @@ the normalizer together rather than retaining two contradictory UA rules.
 ## 3. How it was verified
 
 The base binary was built from `5f30f48`. The after tree includes main through
-#202; its `Object.assign` and `TextDecoder` suites are not results of this phase.
+#208; its `Object.assign`, `TextDecoder` and GC suites are not results of this
+phase.
 
 | Check | Before | After |
 | :--- | :--- | :--- |
-| `make test` | 319 engine suites, 114 cross-origin checks | 324 engine suites, 114 cross-origin checks |
+| `make test` | 319 engine suites, 114 cross-origin checks | 326 engine suites, 114 cross-origin checks |
 | Body-origin corpus, with **all** known markers removed | 7/40 pages | 34/40 pages; 28 newly pass, 1 formerly passed by accident and now fails |
 | `make render-conformance`, original corpus | 36/38 pages, 2 known | 36/38 pages, 2 known |
 | `make render-conformance`, body-origin corpus | 5/7 pages, 2 known on the old corpus | 34/40 pages, 6 known; none unlisted |
@@ -79,8 +80,9 @@ white before. It now incorrectly propagates the body's red; the corpus lists
 that visible regression instead of counting it as a fix. The original-corpus
 rounded scaled clip has one changed expected channel, `#ff5151` → `#ff5252`:
 all seven assertions on that page were independently checked against Chromium
-153 after correcting the renderer's rounding. The other 37 original pages and
-the two recorded failures retain their outcomes.
+153 after correcting the renderer's rounding. Against the *corrected* current
+original corpus, the base binary scores 35/38 (two known, the scaled clip an
+unlisted failure); the other 37 pages retain their outcomes.
 
 The three new unit suites check the selected canvas and unchanged computed
 style, document/subtree scope, transparent-target alpha and clipping, terminal

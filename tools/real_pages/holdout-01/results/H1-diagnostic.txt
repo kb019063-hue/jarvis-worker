@@ -1,0 +1,6 @@
+document.querySelectorAll("a[aria-label='Next chapter']").length
+Array.from(document.querySelectorAll("a[aria-label='Next chapter']")).map(e=>{const b=e.getBoundingClientRect();return [b.x,b.y,b.width,b.height].join(',')}).join(';')
+stage: open
+READ	2
+READ	20,299,760,0;0,0,0,0
+END

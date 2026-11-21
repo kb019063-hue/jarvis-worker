@@ -1,6 +1,6 @@
 # Twenty frozen browsing tasks • v1
 
-[First run: results and screenshot pairs](baseline.html) · [Fixed pages, actions and source revisions](pages.json)
+[Separate four-page holdout](holdout-01/README.md) · [First run: results and screenshot pairs](baseline.html) · [Fixed pages, actions and source revisions](pages.json)
 
 Five Python proposals, five Git manuals, eight Mothereff text tools and two games. This is deliberately a **clustered diagnostic sample**, not 20 independent sites or an estimate of web coverage. Repeated templates make shared regressions easy to see. The source archives are the publishers’ public HTML/assets, not rewritten toy pages. Third-party fonts, ads and analytics aren't replayed. Fonts may differ between engines. Both see an 800×600 viewport at 1× and the same source tree for a page under `http://snapshot.test`. Games have nondeterministic starting boards; don't score them by pixel equality.
 

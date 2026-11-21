@@ -48,7 +48,7 @@ not negotiate or speak RFC 7692 `permessage-deflate`:
 - `make security-websocket`: **38/38** live `wss://`/`ws://` checks (3 new
   `wss://` `permessage-deflate` checks), passing in release and ASan+UBSan
   (`--stress-runs 20`, 0 sanitizer findings).
-- `make test`: **320/320** engine test suites (including
+- `make test`: **321/321** engine test suites (including
   `websocket_permessage_deflate_rfc7692`) + **114/114** cross-origin checks;
   `python3 tools/ci/check_suites.py` → `ok`.
 

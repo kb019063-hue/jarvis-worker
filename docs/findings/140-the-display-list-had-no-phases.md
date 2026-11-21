@@ -93,6 +93,29 @@ and the same test against the old display list, with nothing else changed:
 The float between the two blocks is the whole bug in one line. A test that has
 not been seen to fail is a test of nothing.
 
+## 2.2 A second bug fell out: the clip that leaked
+
+The old code pushed a clip and a transform when it entered a box, and popped
+them at the end of the box — except on the inline-formatting-context path,
+which `return`ed before the pops. A block with `overflow: hidden` **and text**
+therefore left its clip on the stack, and every box painted after it, to the end
+of the document, was clipped to it:
+
+```
+$ # .p { width:100px; height:30px; overflow:hidden }   text in it
+$ # .q { width:100px; height:30px; background:#ff0000 }
+$ # the pixel at (5, 40), which is inside .q
+before: (255, 255, 255, 255)    .q was clipped away by .p's leaked clip
+after:  (255, 0, 0, 255)
+```
+
+`paint_atom` pushes and pops in one scope, so the paths cannot diverge. The
+corpus pins it with `a_clip_does_not_leak_past_the_block_that_set_it`, which was
+verified against the old binary and fails there. Another open pull request
+(#158) had found the same leak and fixed it with a `end_box()` lambda inside the
+old function; that hunk is subsumed, and the page is the claim both of them were
+making.
+
 ## 3. The regression the existing suite found
 
 The rewrite painted the text of a `<p>` **twice**, at the same point:

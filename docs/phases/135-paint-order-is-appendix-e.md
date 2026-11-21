@@ -84,7 +84,8 @@ step; run against the old display list it prints `#ff0000` (the float) between
 the two blocks and fails with the step that should have been there. That
 negative control is in finding 140 §2.1. The suite count moved 296 → 297.
 
-The corpus grew by one page and nine assertions (`27 pages, 109 assertions`);
+The corpus grew by two pages and twelve assertions (`28 pages, 112
+assertions`), and the second page is the clip leak of §3.3;
 the remaining four `known_failure` pages are the cross-axis alignment row
 (three, claimed separately) and the rounded clip.
 
@@ -107,6 +108,17 @@ children, where the child's own lines painted the same run again. The old code
 `return`ed at that point; the new one did not. Invisible in a PNG, so the pixel
 oracle could not see it — the shaping test that measures rightmost ink caught
 it. The walkers now stop at a box with line boxes. Finding 140 §3.
+
+### 3.3 A clip that leaked, fixed by construction
+
+`overflow: hidden` on a block **with text** left its clip pushed for the rest of
+the document, because the inline-formatting-context path returned before the
+pops. Everything after such a block was clipped to it — `(5,40)` of a following
+red block was white. `paint_atom` pushes and pops in one scope, so the paths
+cannot diverge; the page `a_clip_does_not_leak_past_the_block_that_set_it` was
+checked against the old binary and fails there. Open pull request #158 had found
+the same leak independently and patched it with an `end_box()` lambda in the old
+function; whichever merges second drops that hunk.
 
 ## 4. What is still open
 

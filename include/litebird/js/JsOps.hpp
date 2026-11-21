@@ -437,9 +437,15 @@ private:
 
 /// A native function carrying `name` and `length` like a script function does.
 JsValue js_make_native(const char* name, int length, JsValue::NativeFn fn);
-/// The same, but the function refuses `new`: a method or an accessor, not a
-/// constructor. Every built-in `get x`/`set x` and every prototype method is one.
+/// The same, but the function refuses `new` -- a method or an accessor, not a
+/// constructor. A MethodDefinition in the standard is an ordinary function with
+/// no [[Construct]], so every built-in method is made here and not with
+/// js_make_native: `isConstructor(Object.keys)` is false and `new
+/// Object.keys()` is a TypeError.
 JsValue js_make_method(const char* name, int length, JsValue::NativeFn fn);
+/// The same for a function value that is already made (Math's methods are
+/// built by a helper that keeps their `length`): refuse `new` from now on.
+void js_mark_as_method(JsValue& function);
 /// Defines a non-enumerable method, as built-in methods are.
 void js_define_method(JsObject* object, const char* name, int length, JsValue::NativeFn fn);
 void js_define_method(JsValue& object, const char* name, int length, JsValue::NativeFn fn);

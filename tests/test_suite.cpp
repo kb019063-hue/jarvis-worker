@@ -29715,6 +29715,116 @@ TEST(automatic_gc_reclaims_churn_without_calling_gc) {
     heap.collect_garbage();
 }
 
+TEST(a_built_in_method_is_not_a_constructor) {
+    using namespace litebird;
+
+    // Phase 158, finding 163. Every built-in *method* was a constructor, so
+    // the question test262's isConstructor.js asks by doing
+    // `Reflect.construct(function () {}, [], f)` answered `true` for 51
+    // properties it must answer `false` for:
+    //
+    //   isConstructor(Object.defineProperty)              -> true   (false)
+    //   isConstructor(Reflect.get)                        -> true   (false)
+    //   isConstructor(Object.prototype.hasOwnProperty)    -> true   (false)
+    //   new Object.keys([])                               -> {}     (TypeError)
+    //
+    // A MethodDefinition is an ordinary function object with no [[Construct]],
+    // so `Object.keys` and `{ keys() {} }` are the same kind of function. Every
+    // built-in method is installed by js_define_method, so that helper makes
+    // them with js_make_method, and a constructor -- which is registered by
+    // hand, not through js_define_method -- still constructs.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        // The harness test262 uses: is there a [[Construct]]?
+        function isConstructor(f) {
+            try { Reflect.construct(function () {}, [], f); return true; }
+            catch (e) { return false; }
+        }
+        function newThrows(what, f) {
+            try { new f(); failures.push(what + ': new did not throw'); }
+            catch (e) { if (e.constructor.name !== 'TypeError') failures.push(what + ': threw ' + e.constructor.name); }
+        }
+
+        // ---- the methods that were the 51 failures ----------------------
+        same('Object.defineProperty', isConstructor(Object.defineProperty), false);
+        same('Object.defineProperties', isConstructor(Object.defineProperties), false);
+        same('Object.keys', isConstructor(Object.keys), false);
+        same('Object.assign', isConstructor(Object.assign), false);
+        same('Object.freeze', isConstructor(Object.freeze), false);
+        same('Object.prototype.hasOwnProperty', isConstructor(Object.prototype.hasOwnProperty), false);
+        same('Object.prototype.toString', isConstructor(Object.prototype.toString), false);
+        same('Reflect.get', isConstructor(Reflect.get), false);
+        same('Reflect.construct', isConstructor(Reflect.construct), false);
+        same('Symbol.for', isConstructor(Symbol.for), false);
+        same('Symbol.keyFor', isConstructor(Symbol.keyFor), false);
+        same('Symbol.prototype.toString', isConstructor(Symbol.prototype.toString), false);
+        same('Error.prototype.toString', isConstructor(Error.prototype.toString), false);
+        same('Function.prototype.call', isConstructor(Function.prototype.call), false);
+        same('Function.prototype.bind', isConstructor(Function.prototype.bind), false);
+        newThrows('new Object.defineProperty', function () { new Object.defineProperty({}, 'x', { value: 1 }); });
+        newThrows('new Object.keys', function () { new Object.keys([]); });
+
+        // ---- and the same is true of every built-in method, not a list ---
+        same('Array.prototype.map', isConstructor(Array.prototype.map), false);
+        same('Array.prototype.sort', isConstructor(Array.prototype.sort), false);
+        same('String.prototype.slice', isConstructor(String.prototype.slice), false);
+        same('Map.prototype.get', isConstructor(Map.prototype.get), false);
+        same('JSON.parse', isConstructor(JSON.parse), false);
+        same('Math.max', isConstructor(Math.max), false);
+        same('Date.now', isConstructor(Date.now), false);
+        same('Promise.resolve', isConstructor(Promise.resolve), false);
+        same('Symbol.iterator', isConstructor(Symbol.iterator ? Symbol.iterator : function(){}), false);
+
+        // A script's own method and getter answer the same way, which is what
+        // makes "a method is not a constructor" one rule and not two. A method
+        // *definition* is the MethodDefinition production, not a `function`
+        // expression stored as a value -- `{ m: function () {} }` is an
+        // ordinary constructible function in every engine, so the two are
+        // written differently on purpose.
+        same('an object method definition', isConstructor(({ m() {} }).m), false);
+        var shorthand = { m() { return 1; } };
+        same('a shorthand method', isConstructor(shorthand.m), false);
+        same('a getter', isConstructor(Object.getOwnPropertyDescriptor({ get x() { return 1; } }, 'x').get), false);
+        same('a setter', isConstructor(Object.getOwnPropertyDescriptor({ set x(v) {} }, 'x').set), false);
+        same('a class method', isConstructor(class { m() {} }.prototype.m), false);
+
+        // ---- the constructors still construct ---------------------------
+        same('Object', isConstructor(Object), true);
+        same('Array', isConstructor(Array), true);
+        same('Error', isConstructor(Error), true);
+        same('Function', isConstructor(Function), true);
+        same('Promise', isConstructor(Promise), true);
+        same('Map', isConstructor(Map), true);
+        same('RegExp', isConstructor(RegExp), true);
+        same('Date', isConstructor(Date), true);
+        same('Boolean', isConstructor(Boolean), true);
+        same('a bound function', isConstructor(function () {}.bind(null)), true);
+        same('a class', isConstructor(class {}), true);
+        same('a function expression', isConstructor(function () {}), true);
+        same('an arrow is not', isConstructor(function () {}.bind ? (() => 1) : null), false);
+        same('a subclass of Array', isConstructor(class extends Array {}), true);
+
+        // ---- and nothing a constructor does has changed ------------------
+        same('new Object.keys is a function', typeof Object.keys, 'function');
+        same('Object.keys still works', Object.keys({ a: 1, b: 2 }), ['a', 'b']);
+        same('Object.defineProperty still works',
+             (function () { var o = {}; Object.defineProperty(o, 'x', { value: 5, enumerable: true }); return o.x; })(), 5);
+        same('Reflect.construct still works', Reflect.construct(Array, [3]).length, 3);
+        same('a constructor still returns', new (class { constructor() { this.v = 1; } })().v, 1);
+        same('a bound constructor still returns', new (function (a) { this.a = a; }.bind(null))(9).a, 9);
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -30117,6 +30227,9 @@ int main() {
 
     // Phase 154: Error.prototype.stack is an accessor over an internal slot.
     RUN_TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot);
+
+    // Phase 158: a built-in method has no [[Construct]].
+    RUN_TEST(a_built_in_method_is_not_a_constructor);
 
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.

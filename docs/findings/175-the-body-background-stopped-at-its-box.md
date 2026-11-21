@@ -23,7 +23,7 @@ non-HTML roots do not acquire the HTML canvas rule.
 
 ## 3. Evidence
 
-`make test` passes 326 engine suites and 114 cross-origin checks.
+`make test` passes 329 engine suites and 114 cross-origin checks.
 `make render-conformance` reports 36/38 original pages, 2 known, and 34/40
 body-origin pages, 6 known. Chromium 153 independently matches all 128
 body-origin reference assertions and all 12 scroll-fixture assertions; the

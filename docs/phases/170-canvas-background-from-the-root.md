@@ -61,12 +61,12 @@ the normalizer together rather than retaining two contradictory UA rules.
 ## 3. How it was verified
 
 The base binary was built from `5f30f48`. The after tree includes main through
-#208; its `Object.assign`, `TextDecoder` and GC suites are not results of this
-phase.
+#206; its `Object.assign`, `TextDecoder`, GC, WebSocket and AVIF suites are not
+results of this phase.
 
 | Check | Before | After |
 | :--- | :--- | :--- |
-| `make test` | 319 engine suites, 114 cross-origin checks | 326 engine suites, 114 cross-origin checks |
+| `make test` | 319 engine suites, 114 cross-origin checks | 329 engine suites, 114 cross-origin checks |
 | Body-origin corpus, with **all** known markers removed | 7/40 pages | 34/40 pages; 28 newly pass, 1 formerly passed by accident and now fails |
 | `make render-conformance`, original corpus | 36/38 pages, 2 known | 36/38 pages, 2 known |
 | `make render-conformance`, body-origin corpus | 5/7 pages, 2 known on the old corpus | 34/40 pages, 6 known; none unlisted |

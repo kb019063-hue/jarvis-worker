@@ -28,7 +28,7 @@ validation and property-key conversion order. The lookup pair asks
 `descriptor_for` at each level of the prototype chain and stops at the first
 own property, whether it is an accessor or data property.
 
-The ten new suite checks were run under Node.js v22.22.3 before they were
+The eleven new suite checks were run under Node.js v22.22.3 before they were
 asserted in the engine. The same script passed in both. `make test` passed all
-297 engine suites. The relevant test262 directories report 44/54; all ten
+298 engine suites. The relevant test262 directories report 44/54; all ten
 remaining failures require `Proxy`, which is not defined in the engine.

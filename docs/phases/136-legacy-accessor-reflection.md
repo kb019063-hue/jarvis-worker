@@ -45,15 +45,15 @@ entries on `Object.prototype` match the other native methods.
 
 ## 3. Verification
 
-Ten probes were run in Node.js v22.22.3 first and then as the identical script
-in the engine CLI; both reported every expectation passing. The suite
+Eleven probes were run in Node.js v22.22.3 first and then as the identical
+script in the engine CLI; both reported every expectation passing. The suite
 `object_prototype_legacy_accessor_reflection` records them: function metadata,
 getter/setter creation and preservation, inherited lookup, stopping at an own
 data property, data-to-accessor conversion, return values and descriptor
 attributes, key conversion order, non-callable and non-configurable errors,
-and a null receiver.
+a null receiver, and inherited setter lookup.
 
-- `make test`: **297 engine suites passed**, including the new suite.
+- `make test`: **298 engine suites passed**, including the new suite.
 - test262's four directories for these methods: **44/54 pass**. The ten
   remaining tests all fail because the engine has no `Proxy` global; they do
   not reach the methods under test.

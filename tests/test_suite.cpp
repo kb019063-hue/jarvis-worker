@@ -28429,6 +28429,117 @@ TEST(boxed_string_own_index_descriptors) {
     assert(failed.empty());
 }
 
+TEST(object_prototype_legacy_accessor_reflection) {
+    using namespace litebird;
+    // Phase 136, finding 141. Annex B.3.3 defines these four Object.prototype
+    // methods in terms of the descriptor operations this engine already has:
+    // defineGetter/Setter create or update an enumerable, configurable
+    // accessor; lookupGetter/Setter walk the prototype chain and stop at the
+    // first own property. Node.js v22.22.3 printed each expected JSON value
+    // below before it was added to the suite.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function shape(d) {
+            return d === undefined ? null : [typeof d.get, typeof d.set, d.enumerable, d.configurable];
+        }
+        var names = ['__defineGetter__', '__defineSetter__', '__lookupGetter__', '__lookupSetter__'];
+        var getter = function get() { return this.value; };
+        var setter = function set(v) { this.value = v; };
+
+        check('the four methods and their built-in descriptors', function () {
+            return names.map(function (k) {
+                var f = Object.prototype[k], d = Object.getOwnPropertyDescriptor(Object.prototype, k);
+                return [typeof f, f.name, f.length, d.writable, d.enumerable, d.configurable];
+            });
+        }, '[["function","__defineGetter__",2,true,false,true],' +
+           '["function","__defineSetter__",2,true,false,true],' +
+           '["function","__lookupGetter__",1,true,false,true],' +
+           '["function","__lookupSetter__",1,true,false,true]]');
+        check('defineGetter installs the accessor and returns undefined', function () {
+            var o = { value: 3 };
+            var r = o.__defineGetter__('x', getter);
+            var d = Object.getOwnPropertyDescriptor(o, 'x');
+            return [r, d.get === getter, d.set, d.enumerable, d.configurable,
+                    o.__lookupGetter__('x') === getter, o.__lookupSetter__('x')];
+        }, '[null,true,null,true,true,true,null]');
+        check('defineSetter preserves the existing getter', function () {
+            var o = { value: 3 };
+            o.__defineGetter__('x', getter);
+            var r = o.__defineSetter__('x', setter);
+            o.x = 8;
+            var d = Object.getOwnPropertyDescriptor(o, 'x');
+            return [r, o.value, o.x, o.__lookupGetter__('x') === getter,
+                    o.__lookupSetter__('x') === setter, d.enumerable, d.configurable];
+        }, '[null,8,8,true,true,true,true]');
+        check('lookup finds an inherited getter', function () {
+            var p = {};
+            p.__defineGetter__('x', getter);
+            var o = Object.create(p);
+            o.value = 11;
+            return [o.x, o.__lookupGetter__('x') === getter, o.__lookupSetter__('x'),
+                    o.hasOwnProperty('x')];
+        }, '[11,true,null,false]');
+        check('lookup stops at an own data property', function () {
+            var p = {};
+            p.__defineGetter__('x', getter);
+            var o = Object.create(p);
+            Object.defineProperty(o, 'x', { value: 1, writable: true, enumerable: true, configurable: true });
+            return [o.__lookupGetter__('x'), o.__lookupSetter__('x')];
+        }, '[null,null]');
+        check('defineGetter replaces a configurable data property', function () {
+            var o = { x: 1 };
+            o.__defineGetter__('x', getter);
+            return [o.x, shape(Object.getOwnPropertyDescriptor(o, 'x'))];
+        }, '[null,["function","undefined",true,true]]');
+        check('non-callable getter is rejected before key conversion', function () {
+            var calls = 0;
+            var key = { toString: function () { calls++; return 'x'; } };
+            var error = 'none';
+            try { Object.prototype.__defineGetter__.call({}, key, 1); } catch (e) { error = e.name; }
+            return [error, calls];
+        }, '["TypeError",0]');
+        check('a non-configurable property cannot become an accessor', function () {
+            var o = {};
+            Object.defineProperty(o, 'x', { value: 1, configurable: false });
+            var error = 'none';
+            try { o.__defineGetter__('x', getter); } catch (e) { error = e.name; }
+            return error;
+        }, '"TypeError"');
+        check('null is not a receiver', function () {
+            var error = 'none';
+            try { Object.prototype.__defineGetter__.call(null, 'x', getter); } catch (e) { error = e.name; }
+            return error;
+        }, '"TypeError"');
+        check('successful property-key conversion runs once', function () {
+            var calls = 0, o = {};
+            var key = { toString: function () { calls++; return 'x'; } };
+            o.__defineGetter__(key, getter);
+            return [calls, o.__lookupGetter__('x') === getter];
+        }, '[1,true]');
+        check('lookupSetter finds an inherited setter', function () {
+            var p = {};
+            p.__defineSetter__('x', setter);
+            var o = Object.create(p);
+            return [o.__lookupSetter__('x') === setter, o.__lookupGetter__('x')];
+        }, '[true,null]');
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(image_data_is_an_interface) {
     using namespace litebird;
     // Phase 139, finding 144. HTML §4.12.5: `ImageData` is an interface whose
@@ -29263,6 +29374,9 @@ int main() {
 
     // Phase 132: a boxed String exposes character indices as own descriptors.
     RUN_TEST(boxed_string_own_index_descriptors);
+
+    // Phase 136: Object.prototype's Annex B legacy accessor methods.
+    RUN_TEST(object_prototype_legacy_accessor_reflection);
 
     // Phase 139: ImageData is an interface, and putImageData takes a rectangle.
     RUN_TEST(image_data_is_an_interface);

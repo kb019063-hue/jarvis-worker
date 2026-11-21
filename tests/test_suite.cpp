@@ -130,6 +130,97 @@ static void give_memory_back() {}
     std::cout << "\033[32mPASSED\033[0m\n"; \
 } while(0)
 
+/// A page and an interpreter over it, which is how nearly every suite that runs
+/// script begins.
+///
+/// This exists because of what a merge did, not for brevity. A suite written as
+///
+///     TEST(mine) {
+///         auto doc = std::make_shared<Document>();
+///         doc->set_url("https://example.test/");
+///         JsInterpreter js(doc);
+///         js.load_page("<!DOCTYPE html><body></body>");
+///         js.notify_document_loaded();
+///         js.eval(...);
+///     }
+///
+/// and one written the same way on `main` differ only in their two titles and
+/// their two evals. Git sees six lines of identical text between the titles and
+/// the evals, and splits that into **two** conflicts with the boilerplate left
+/// outside both — so "take mine" and "take theirs" each produce a function with
+/// another suite's body. That happened five times merging one branch, and each
+/// time the fix was to take both functions whole from their own side of the
+/// merge and write them back in order.
+///
+/// With the boilerplate behind one call the two suites have nothing in common
+/// but the title, and the same merge is one conflict enclosing the whole
+/// function: keeping both is the whole resolution. Verified with `git
+/// merge-file` on the two shapes before this was written; the test of this
+/// helper is `tools/ci/check_suites.py` (see "the merge" in README.md).
+class TestPage {
+public:
+    /// The empty page, and "loaded" so a script sees a document rather than a
+    /// tree that is still arriving.
+    TestPage() : m_doc(std::make_shared<litebird::Document>()), js(m_doc) {
+        m_doc->set_url("https://example.test/");
+        js.load_page("<!DOCTYPE html><body></body>");
+        js.notify_document_loaded();
+    }
+
+    /// An interpreter over a document that has a URL and no page in it, which is
+    /// what a suite that builds its own tree needs; `TestPage::load` puts an
+    /// empty page in after the tree is built, where a suite wants that.
+    struct WithUrl {};
+    TestPage(WithUrl) : m_doc(std::make_shared<litebird::Document>()), js(m_doc) {
+        m_doc->set_url("https://example.test/");
+    }
+
+    /// A document to build a tree in, with the interpreter made after `build`
+    /// has run over it. A suite that needs its own nodes before any script runs
+    /// (`doc->append_child(...)`, then `new JsInterpreter(doc)`) writes
+    ///
+    ///     TestPage page(TestPage::Built([](litebird::Document& d) { ... }));
+    ///
+    /// and the order that matters — document first, interpreter second — is the
+    /// constructor's rather than the suite's, so a suite cannot get it wrong.
+    struct Built {
+        std::function<void(litebird::Document&)> build;
+        explicit Built(std::function<void(litebird::Document&)> f) : build(std::move(f)) {}
+    };
+    TestPage(Built made) : m_doc(std::make_shared<litebird::Document>()), js(make_document(made)) {}
+
+private:
+    std::shared_ptr<litebird::Document> make_document(const Built& made) {
+        m_doc->set_url("https://example.test/");
+        made.build(*m_doc);
+        return m_doc;
+    }
+
+public:
+
+    /// Parse and finish `html` in this page's document, after any tree a suite
+    /// has already built. Answers the interpreter, so `page.load(...).eval(...)`
+    /// reads in one line.
+    litebird::JsInterpreter& load(const std::string& html) {
+        js.load_page(html);
+        js.notify_document_loaded();
+        return js;
+    }
+
+    litebird::Document& document() { return *m_doc; }
+
+    /// The document, declared before `js` so that it outlives it: members are
+    /// destroyed in reverse declaration order, so the interpreter is unwound
+    /// first. The other way round is a use-after-free that segfaults
+    /// `xml_serializer_writes_a_tree_that_reads_back_the_same`, the suite that
+    /// tears down the most. The boilerplate this replaces declared `doc` before
+    /// `js` for that reason, and keeping that order is the one thing about it
+    /// that had to survive the change.
+    std::shared_ptr<litebird::Document> m_doc;
+
+    litebird::JsInterpreter js;
+};
+
 TEST(color_parsing) {
     using namespace litebird;
     Color c1 = Color::parse("#ff0000");
@@ -531,17 +622,19 @@ TEST(flexbox_layout) {
     auto item2 = flex_container->children[1];
     auto item3 = flex_container->children[2];
 
-    // Item 1 at x = 0, width = 100
-    assert(item1->dimensions.content.x == 0.0f);
+    // Offsets are relative to the flex container, not the viewport: the
+    // implied body's default margin also moves the container itself.
+    const float origin_x = flex_container->dimensions.content.x;
+    assert(item1->dimensions.content.x - origin_x == 0.0f);
     assert(item1->dimensions.content.width == 100.0f);
 
     // Item 2 at x = 100 + 20(gap) = 120, width = 200
-    assert(item2->dimensions.content.x == 120.0f);
+    assert(item2->dimensions.content.x - origin_x == 120.0f);
     assert(item2->dimensions.content.width == 200.0f);
 
     // Item 3 at x = 120 + 200 + 20(gap) = 340
     // Remaining space = 600 - (100 + 200 + 40 gaps) = 260. flex-grow: 1 takes 260!
-    assert(item3->dimensions.content.x == 340.0f);
+    assert(item3->dimensions.content.x - origin_x == 340.0f);
     assert(item3->dimensions.content.width == 260.0f);
 }
 
@@ -5307,15 +5400,14 @@ TEST(css_positioning_and_stacking_contexts) {
     assert(abs_box != nullptr);
     assert(fix_box != nullptr);
 
-    // Relative positioning offset: container content.x = 20, rel child margin=0, pad=0, so x = 20 + 15 = 35, y = 20 + 10 = 30
-    assert(rel_box->dimensions.content.x == 35.0f);
-    assert(rel_box->dimensions.content.y == 30.0f);
-    assert(rel_box->dimensions.content.y == 30.0f);
+    // Relative positioning is measured from the container's content edge,
+    // which includes the implied body's default margin as well as its padding.
+    assert(rel_box->dimensions.content.x == container_box->dimensions.content.x + 15.0f);
+    assert(rel_box->dimensions.content.y == container_box->dimensions.content.y + 10.0f);
 
-    // Absolute positioning: container padding box is x=0, y=0, w=440, h=340.
-    // abs top: 30px, left: 40px -> x = 0 + 40 = 40, y = 0 + 30 = 30
-    assert(abs_box->dimensions.content.x == 40.0f);
-    assert(abs_box->dimensions.content.y == 30.0f);
+    // Absolute insets are measured from the positioned container's padding box.
+    assert(abs_box->dimensions.content.x == container_box->dimensions.padding_box().x + 40.0f);
+    assert(abs_box->dimensions.content.y == container_box->dimensions.padding_box().y + 30.0f);
 
     // Fixed positioning: viewport 800x600, bottom: 10, right: 20, w: 120, h: 40
     // x = 800 - 20 - 120 = 660, y = 600 - 10 - 40 = 550
@@ -5404,10 +5496,11 @@ TEST(box_sizing_and_constraints) {
     // Centered: the document now parses through the spec tree builder, so the
     // snippet is wrapped in the implied <html>/<body> elements and the body's
     // 8px user-agent margin applies. Containing width is therefore 800 - 16 =
-    // 784px, and centering a 200px box yields (784 - 200) / 2 = 292px.
+    // 784px, and each margin is (784 - 200) / 2 = 292px. The body's left edge
+    // is at x=8, so the centered box begins at x=300 in the viewport.
     assert(center_box->dimensions.margin.left == 292.0f);
     assert(center_box->dimensions.margin.right == 292.0f);
-    assert(center_box->dimensions.content.x == 292.0f);
+    assert(center_box->dimensions.content.x == 300.0f);
 }
 
 TEST(javascript_prototype_chain_and_arrays) {
@@ -5784,21 +5877,24 @@ TEST(css_flex_wrapping_and_grid_layout) {
     auto item2 = flex_box->children[1];
     auto item3 = flex_box->children[2];
 
+    // Coordinates are relative to the flex container, not the body margin.
+    const float flex_x = flex_box->dimensions.content.x;
+    const float flex_y = flex_box->dimensions.content.y;
     // item1 fits on line 1 at (0, 0)
-    assert(item1->dimensions.content.x == 0.0f);
-    assert(item1->dimensions.content.y == 0.0f);
+    assert(item1->dimensions.content.x - flex_x == 0.0f);
+    assert(item1->dimensions.content.y - flex_y == 0.0f);
     assert(item1->dimensions.content.width == 180.0f);
     assert(item1->dimensions.content.height == 50.0f);
 
     // item2 overflows line 1 (180 + 150 = 330 > 300), so wraps to line 2 at (0, 50)
-    assert(item2->dimensions.content.x == 0.0f);
-    assert(item2->dimensions.content.y == 50.0f);
+    assert(item2->dimensions.content.x - flex_x == 0.0f);
+    assert(item2->dimensions.content.y - flex_y == 50.0f);
     assert(item2->dimensions.content.width == 150.0f);
     assert(item2->dimensions.content.height == 60.0f);
 
     // item3 fits on line 2 (150 + 100 = 250 <= 300) at (150, 50)
-    assert(item3->dimensions.content.x == 150.0f);
-    assert(item3->dimensions.content.y == 50.0f);
+    assert(item3->dimensions.content.x - flex_x == 150.0f);
+    assert(item3->dimensions.content.y - flex_y == 50.0f);
     assert(item3->dimensions.content.width == 100.0f);
     assert(item3->dimensions.content.height == 40.0f);
 
@@ -5821,18 +5917,20 @@ TEST(css_flex_wrapping_and_grid_layout) {
     auto g4 = grid_box->children[3];
 
     // Col 0: 100px, Col 1: (360 - 40 - 100)/3 = 73.33px, Col 2: 146.67px
-    assert(std::abs(g1->dimensions.content.x - 0.0f) < 0.1f);
+    const float grid_x = grid_box->dimensions.content.x;
+    const float grid_y = grid_box->dimensions.content.y;
+    assert(std::abs(g1->dimensions.content.x - grid_x) < 0.1f);
     assert(std::abs(g1->dimensions.content.width - 100.0f) < 0.1f);
 
-    assert(std::abs(g2->dimensions.content.x - 120.0f) < 0.1f);
+    assert(std::abs(g2->dimensions.content.x - grid_x - 120.0f) < 0.1f);
     assert(std::abs(g2->dimensions.content.width - (220.0f / 3.0f)) < 0.1f);
 
-    assert(std::abs(g3->dimensions.content.x - (120.0f + 220.0f / 3.0f + 20.0f)) < 0.1f);
+    assert(std::abs(g3->dimensions.content.x - grid_x - (120.0f + 220.0f / 3.0f + 20.0f)) < 0.1f);
     assert(std::abs(g3->dimensions.content.width - (440.0f / 3.0f)) < 0.1f);
 
     // g4 wraps to next row!
-    assert(std::abs(g4->dimensions.content.x - 0.0f) < 0.1f);
-    assert(std::abs(g4->dimensions.content.y - (40.0f + 20.0f)) < 0.1f);
+    assert(std::abs(g4->dimensions.content.x - grid_x) < 0.1f);
+    assert(std::abs(g4->dimensions.content.y - grid_y - (40.0f + 20.0f)) < 0.1f);
 }
 
 TEST(dom_3phase_events_and_form_controls) {
@@ -9248,9 +9346,8 @@ TEST(page_scripts_run_by_the_rules_of_a_page_load) {
     using namespace litebird;
     // Which <script> elements are JavaScript to run, and when: each one as
     // the parser reaches its end tag, seeing the page up to itself.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><head><title>T</title>"
         "<script id=first>window.log = ['first:' + document.currentScript.id + ':' + document.readyState + ':' +"
@@ -9351,9 +9448,8 @@ TEST(get_element_by_id_answers_from_an_index) {
     // (Document::get_element_by_id), so every question here is asked twice:
     // once of the walk and once of the index, and after every kind of change
     // that must make the index forget. jsdom prints the same line.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><body><p id=\"a\" class=\"first\">x</p><span id=\"dup\" class=\"one\"></span><div id=\"b\"></div>"
         "<span id=\"dup\" class=\"two\"></span><em id=\"null\"></em><template><s id=\"intemplate\"></s></template></body>");
@@ -9408,9 +9504,8 @@ TEST(computed_style_answers_for_every_property) {
     // initial values, specificity, colours, lengths, the defaults of HTML
     // elements, shorthands, inherit and initial). Here is what those cannot
     // hold, because jsdom answers something else and CSS says this.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>"
         "#a { line-height: 200%; font-size: 20px; border: 0.6px solid; outline: 2px dotted green; word-spacing: 0.5em }"
@@ -9504,9 +9599,8 @@ TEST(ranges_follow_the_tree) {
     // cases of the DOM corpus hold the rules (tests/dom-conformance/
     // ranges.dat). Here: the two answers jsdom gets wrong, and trees and
     // numbers of ranges no person writes.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><p id=p></p><div id=d><span>one</span><span>two</span></div></body>");
     js.notify_document_loaded();
 
@@ -9573,9 +9667,8 @@ TEST(dom_follows_the_standard_where_jsdom_does_not) {
     // and the HTML and DOM standards differ, so the corpus stays away from
     // them (tests/dom-conformance/README.md) and the standard's answer is
     // asserted here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><body><div id=d tabindex='junk'></div><button id=b tabindex='junk'>b</button>"
         "<a id=a href='#x' tabindex='junk'>a</a><span id=s></span>"
@@ -10060,9 +10153,8 @@ TEST(xml_documents_in_the_dom) {
 
 TEST(xml_serializer_writes_a_tree_that_reads_back_the_same) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body></body>");
     js.notify_document_loaded();
     js.eval(R"JS(
@@ -10192,11 +10284,8 @@ TEST(xml_serializer_writes_a_tree_that_reads_back_the_same) {
 
 TEST(inner_html_of_an_xml_document_is_xml) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var P = new DOMParser();
         function xml(text) { return P.parseFromString(text, 'application/xml'); }
@@ -10248,11 +10337,8 @@ TEST(inner_html_of_an_xml_document_is_xml) {
 
 TEST(dom_names_are_checked_by_the_dom_standard) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var X = document.implementation.createDocument(null, null);
         function each(list, f) { return list.map(function (item) { try { return String(f(item)); } catch (e) { return e.name; } }).join(' '); }
@@ -10302,11 +10388,8 @@ TEST(dom_names_are_checked_by_the_dom_standard) {
 
 TEST(a_document_keeps_one_doctype_and_one_element_in_that_order) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var S = new XMLSerializer(), I = document.implementation;
         function caught(f) { try { f(); return 'ok'; } catch (e) { return e.name; } }
@@ -10353,9 +10436,8 @@ TEST(a_document_keeps_one_doctype_and_one_element_in_that_order) {
 
 TEST(foreign_attributes_from_the_html_parser_have_namespaces) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     // The HTML parser gives eleven attributes of SVG and MathML elements a
     // namespace ("adjust foreign attributes"). They used to be stored under
     // the names of the html5lib test format ("xlink href"), so no script
@@ -10397,7 +10479,7 @@ TEST(foreign_attributes_from_the_html_parser_have_namespaces) {
     assert(S("var copy = document.createElement('div'); copy.innerHTML = s.outerHTML; names(copy.querySelector('a')) === names(lnk) && copy.innerHTML === s.outerHTML") == "true");
 
     // The tree dump of the html5lib tests still writes them its way.
-    const std::string dump = dump_tree_webplatform(*doc);
+    const std::string dump = dump_tree_webplatform(page.document());
     assert(dump.find("xlink href=\"#x\"") != std::string::npos);
     assert(dump.find("xml lang=\"en\"") != std::string::npos);
     assert(dump.find("xmlns xlink=\"http://www.w3.org/1999/xlink\"") != std::string::npos);
@@ -10410,11 +10492,8 @@ TEST(xml_dom_follows_the_standard_where_jsdom_does_not) {
     // places jsdom and the standards differ, so the corpus stays away from
     // them (tests/dom-conformance/README.md) and the standard's answer is
     // asserted here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var P = new DOMParser(), S = new XMLSerializer();
         function xml(text, type) { return P.parseFromString(text, type || 'application/xml'); }
@@ -10476,9 +10555,8 @@ TEST(xml_dom_follows_the_standard_where_jsdom_does_not) {
 
 TEST(selectors_know_namespaces) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><svg><a xlink:href=\"#x\"></a></svg><a href=\"#y\"></a></body>");
     js.notify_document_loaded();
     js.eval("function count(d, selector) { try { return d.querySelectorAll(selector).length; } catch (e) { return e.name; } }"
@@ -10618,11 +10696,8 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
 
     // 3. From a script: 50,000 attributes set, read, half of them removed,
     //    and the order is still the order they were added in.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     const auto start = std::chrono::steady_clock::now();
     assert(js.eval("var e = document.createElement('div'); for (var i = 0; i < 50000; i++) e.setAttribute('a' + i, i);"
                    "var sum = 0; for (var i = 0; i < 50000; i++) sum += Number(e.getAttribute('a' + i));"
@@ -10642,9 +10717,8 @@ TEST(attribute_lists_keep_their_order_and_stay_fast) {
 
 TEST(attributes_are_kept_by_namespace_and_local_name) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><div id=\"host\"></div></body>");
     js.notify_document_loaded();
     auto S = [&](const char* expression) { return js.eval(expression).to_string(); };
@@ -13993,8 +14067,8 @@ TEST(strict_equality_does_not_coerce) {
     // one: `document` was undefined, every DOM line below silently evaluated to
     // undefined, and `undefined === undefined` made the identity assertions
     // pass without a single DOM node being involved.
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
 
     js.eval_ast(R"(
         var n_eq = (1 === 1);
@@ -16029,11 +16103,8 @@ TEST(fetch_relative_requests_use_the_document_base_url) {
 
 TEST(regexp_vm_handles_deep_nesting_and_long_inputs) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var deepNonCap = new RegExp("(?:".repeat(250) + "abc" + ")".repeat(250));
@@ -16136,11 +16207,8 @@ TEST(css_cascade_layers_supports_combinators_and_mq_l4) {
 
 TEST(inline_style_cssom_shorthands_and_aliases) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var el = document.createElement('div');
@@ -16178,9 +16246,8 @@ TEST(cssom_sheets_rules_insert_amounts_and_fonts) {
     //
     // Every assertion is a comparison made in the page (`ok(...)`), because
     // what a script sees is the thing being tested.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>#target { color: red } .gone { display: none }</style></head>"
         "<body><div id=\"target\">x</div><p class=\"gone\">y</p></body></html>");
@@ -16322,9 +16389,8 @@ TEST(cssom_media_rules_and_the_cascade_inside_them) {
     // is asked where the cascade reads it — against the window the page is in
     // (1024x768, a light screen with a mouse), which is what `matchMedia` and
     // `innerWidth` already answered with.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>"
         "#target { color: red }"
@@ -16472,9 +16538,8 @@ TEST(keyframes_are_rules_of_the_cssom) {
     // next one's index, and `insertRule('@keyframes …')` was a `SyntaxError`.
     // A browser lists the block as a `CSSKeyframesRule` whose frames are a
     // `CSSRuleList` of their own.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page(
         "<!DOCTYPE html><html><head><style>"
         "@keyframes slide { 0% { left: 0px } 50%, 100% { left: 10px; opacity: .5 } }"
@@ -16600,9 +16665,8 @@ TEST(array_holes_are_not_elements) {
     // Every assertion is a comparison made in the page, and the whole set was
     // run through this engine and through Node.js first: the same text, the
     // same 38 lines. Where they must differ it is said so in a comment.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><html><body><p id=t>x</p></body></html>");
     js.notify_document_loaded();
 
@@ -16778,11 +16842,8 @@ TEST(cssom_a_sheet_a_script_constructs) {
     // rule of its own. What is new is `replace`/`replaceSync` and the
     // constructor. Every line was compared against jsdom before it was
     // written down.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var failures = [];
@@ -16915,9 +16976,8 @@ TEST(destructuring_asks_the_value_for_its_iterator) {
     // Every assertion is a comparison made in the page. The whole script was
     // run under Node.js first and prints the same lines there; where this
     // engine must differ it is said so.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><html><body></body></html>");
     js.notify_document_loaded();
 
@@ -17045,11 +17105,8 @@ TEST(a_hole_is_a_place_the_prototype_can_fill) {
     //
     // Every assertion is compared in the page, and the whole set was run
     // through this engine and through Node.js first: the same lines.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     // The find family visits every place, holes included.
     js.eval(R"JS(
@@ -17237,11 +17294,8 @@ TEST(length_is_inherited_from_an_array_prototype) {
 
 TEST(html5_date_time_inputs_validation_and_stepping) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         function inp(t, v) { var e = document.createElement('input'); e.type = t; if (v !== undefined) e.value = v; return e; }
@@ -17724,8 +17778,8 @@ TEST(web_browser_server_and_http11_gzip_chunked_cors_and_gui_e2e) {
     // 2. CORS enforcement on cross-origin XHR & fetch()
     {
         auto doc = std::make_shared<Document>();
-        doc->set_url("https://webapp.example/index.html");
-        JsInterpreter js(doc);
+    doc->set_url("https://webapp.example/index.html");
+    JsInterpreter js(doc);
         js.load_page("<script>window.openRes = ''; window.closedErr = false;</script>");
         js.notify_document_loaded();
 
@@ -18056,8 +18110,8 @@ TEST(js_classes_compiled_to_es5_run) {
 TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype) {
     using namespace litebird;
 
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.eval_ast(R"(
         class MyEvent extends Event { constructor(type, extra) { super(type); this.extra = extra; } }
         class Bus extends EventTarget { emit(name) { return this.dispatchEvent(new MyEvent(name, 7)); } }
@@ -18324,11 +18378,8 @@ TEST(attribute_list_front_removal_is_linear_in_practice) {
     assert(direct.empty());
     assert(direct_seconds < 5.0);
 
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     start = std::chrono::steady_clock::now();
     assert(js.eval(
@@ -20887,8 +20938,8 @@ TEST(iframe_cross_realm_wrappers_gc_and_subdocument_rendering) {
     for (int round = 0; round < 3; ++round) {
         {
             auto doc = std::make_shared<Document>();
-            doc->set_url("https://gc.example.test/root.html");
-            JsInterpreter js(doc);
+    doc->set_url("https://gc.example.test/root.html");
+    JsInterpreter js(doc);
             js.load_page(R"html(<!doctype html><html><body>
               <iframe id="child" srcdoc="<div id='item'>from-child</div><iframe srcdoc='<p>leaf</p>'></iframe><script>class CustomBox {} window.box = new CustomBox();</script>"></iframe>
             </body></html>)html", true);
@@ -22738,9 +22789,8 @@ TEST(cloning_for_selectedcontent_keeps_attribute_namespaces) {
     // `clone_node_tree`). An attribute carries its own namespace since Phase
     // 51 — there is no side table to copy — so a clone that copied only names
     // and values would lose the namespaces of `xml:lang` and `xlink:href`.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><select><button><selectedcontent></selectedcontent></button>"
                  "<option selected>x<svg xml:lang=\"en\"><use xlink:href=\"#i\"/></svg></option></select>");
     js.notify_document_loaded();
@@ -22893,8 +22943,9 @@ TEST(select_selectedcontent_cloning_and_edge_cases) {
     assert(contains(with_tpl_child, "<selectedcontent>\n|           <template>\n|             content\n|               <span>\n|                 \"T\"\n|           \"Label\"\n"));
 
     {
-        auto doc = std::make_shared<Document>();
-        JsInterpreter js(doc);
+            auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
         js.load_page(
             "<!doctype html><select><button><selectedcontent id='sc'></button>"
             "<option id='o1'>First</option>"
@@ -22990,8 +23041,8 @@ TEST(regexp_unicode17_tables_and_parse_time_validation) {
 
 TEST(regexp_unicode_sets_v_mode_case_folding_and_has_indices) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var r = new RegExp("[\\p{Decimal_Number}--[0-9]]+", "v");
         var v_checks = [
@@ -23031,8 +23082,8 @@ TEST(regexp_unicode_sets_v_mode_case_folding_and_has_indices) {
 
 TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols) {
     using namespace litebird;
-    auto doc = std::make_shared<Document>();
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         // ES2025 inline modifiers (?ims-ims:...)
         var mod_ok =
@@ -26350,11 +26401,8 @@ TEST(an_accessor_on_an_array_index_is_its_property) {
     // methods that move elements in place (`reverse`, `sort`, `shift`,
     // `unshift`, `splice`, `fill`, `copyWithin`) and array destructuring move
     // and read the places and not what an accessor makes of them (AGENTS.md).
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -27008,11 +27056,8 @@ TEST(array_destructuring_reads_the_place_not_the_vector) {
     //
     // Every case was run through Node.js first, and the expected text of each
     // is what it printed.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -27270,11 +27315,8 @@ TEST(array_methods_that_move_places_ask_the_index) {
     //
     // Every case was run through Node.js first, and the expected text of each
     // is what it printed.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
 var failures = [];
 function check(what, f, want) {
@@ -27439,9 +27481,8 @@ TEST(instanceof_asks_symbol_has_instance) {
     // `r instanceof Response` answers false where the language says true; the
     // operator does not throw for them, because a native function with no
     // `prototype` is left answering false (AGENTS.md).
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><div id=\"d\"></div></body>");
     js.notify_document_loaded();
     auto none_failed = [&]() {
@@ -27605,11 +27646,8 @@ TEST(a_strict_delete_refuses_what_it_cannot_remove) {
     // still be deleted; and `arguments` prints as `#<Array>` in the message
     // because its prototype is `Array.prototype` here, which is its own
     // divergence.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -28042,6 +28080,146 @@ TEST(class_bodies_reject_what_the_grammar_does_not_allow) {
     assert(js.eval("new (class extends Object { x = 1; constructor() { super(); } })().x").to_string() == "1");
 }
 
+TEST(parser_rejects_early_syntax_errors_outside_class_bodies) {
+    using namespace litebird;
+
+    // Phase 141, finding 146. Early SyntaxErrors outside class bodies across
+    // object literals, function declarations/expressions/methods/arrows,
+    // assignment/update targets, destructuring rest/cover grammar, directive
+    // prologues, and non-method `super` property lookups. Every expectation
+    // below was verified against Node.js v22.22.3.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function rejects(what, src) {
+            try {
+                (0, eval)(src);
+                failures.push(what + ': accepted, expected SyntaxError');
+            } catch (e) {
+                if (!(e instanceof SyntaxError)) failures.push(what + ': threw ' + e.name);
+            }
+        }
+        function accepts(what, src) {
+            try { (0, eval)(src); }
+            catch (e) { failures.push(what + ': threw ' + e.name + ' ' + e.message); }
+        }
+
+        // ---- directive prologue & strict params / bindings ----------------
+        rejects('use strict in default-param fn', 'function f(a = 1) { "use strict"; }');
+        rejects('use strict in destructuring-param fn', 'function f({a}) { "use strict"; }');
+        rejects('use strict in rest-param fn', 'function f(...a) { "use strict"; }');
+        rejects('retroactive strict fn named eval', 'function eval() { "use strict"; }');
+        rejects('retroactive strict fn named arguments', 'function arguments() { "use strict"; }');
+        rejects('retroactive strict param eval', 'function f(eval) { "use strict"; }');
+        rejects('retroactive strict param arguments', 'function f(arguments) { "use strict"; }');
+        rejects('retroactive strict dup params', 'function f(a, a) { "use strict"; }');
+        rejects('strict fn decl named eval', '"use strict"; function eval() {}');
+        rejects('strict fn expr named eval', '"use strict"; (function eval() {})');
+        rejects('strict var eval', '"use strict"; var eval = 1;');
+        rejects('strict let arguments', '"use strict"; let arguments = 1;');
+        rejects('strict const [eval]', '"use strict"; const [eval] = [1];');
+        rejects('strict catch arguments', '"use strict"; try {} catch (arguments) {}');
+        rejects('strict class decl eval', '"use strict"; class eval {}');
+        rejects('strict class expr arguments', '"use strict"; (class arguments {})');
+        accepts('escaped use strict is not directive', 'function f(a = 1) { "\\x75se strict"; var eval = 1; return eval; } f();');
+        accepts('concatenated use strict is not directive', 'function f(a = 1) { "use strict" + ""; var eval = 1; return eval; } f();');
+        accepts('member after use strict is not directive', 'function f(a = 1) { "use strict"\n.length; var eval = 1; return eval; } f();');
+        accepts('sloppy fn duplicate params', 'function f(a, a) { return a; }');
+        accepts('sloppy fn named eval', '(function() { function eval() { return 1; } return eval(); })()');
+        accepts('sloppy fn named arguments', '(function() { function arguments() { return 1; } return arguments(); })()');
+        accepts('strict member named eval/arguments', '"use strict"; var o = {}; o.eval = 1; o.arguments = 2;');
+
+        // ---- duplicate params & param vs body lexical redeclaration -------
+        rejects('dup param before default', 'function f(a, a = 1) {}');
+        rejects('dup param after default', 'function f(a = 1, a) {}');
+        rejects('dup param with pattern', 'function f({a}, a) {}');
+        rejects('arrow dup params', 'var f = (a, a) => a;');
+        rejects('method dup params', 'var o = { m(a, a) {} };');
+        rejects('fn param shadowed by body let', 'function f(p) { let p; }');
+        rejects('fn param shadowed by body const', 'function f(p) { const p = 1; }');
+        rejects('method param shadowed by body let', 'var o = { m(p) { let p; } };');
+        rejects('arrow param shadowed by body let', 'var f = p => { let p; };');
+        rejects('fn expr param shadowed by body const', 'var f = function(a, b) { const b = 1; };');
+        accepts('param shadowed inside inner block', 'function f(p) { { let p = 2; return p; } }');
+
+        // ---- parameter default yield / await ------------------------------
+        rejects('yield expr in generator param', 'function* g(a = yield 1) {}');
+        rejects('await expr in async param', 'async function f(a = await 1) {}');
+        rejects('yield expr in method generator param', 'var o = { *m(a = yield 1) {} };');
+        rejects('await expr in async method param', 'var o = { async m(a = await 1) {} };');
+        rejects('await expr in class-ish method param', 'var o = { m(x = await 1) {} };');
+        accepts('yield inside inner arrow in generator param', 'function* g(a = () => yield) { return a; }');
+        accepts('await inside inner arrow in async param', 'async function f(a = () => await) { return a; }');
+
+        // ---- object literal, accessor & class member early errors ---------
+        rejects('duplicate __proto__ keys', 'var o = { __proto__: 1, __proto__: 2 };');
+        rejects('string + bare __proto__ keys', 'var o = { "__proto__": 1, __proto__: 2 };');
+        rejects('cover init in var initializer', 'var o = { a = 1 };');
+        rejects('standalone cover init', '({ a = 1 });');
+        rejects('object getter with param', 'var o = { get a(x) {} };');
+        rejects('object getter with default param', 'var o = { get a(x = 1) {} };');
+        rejects('object setter with 0 params', 'var o = { set a() {} };');
+        rejects('object setter with 2 params', 'var o = { set a(a, b) {} };');
+        rejects('object setter with rest param', 'var o = { set a(...a) {} };');
+        rejects('async getter on object', 'var o = { async get a() {} };');
+        rejects('generator setter on object', 'var o = { *set a(v) {} };');
+        rejects('class getter with default param', 'class C { get a(x = 1) {} }');
+        rejects('static field named constructor', 'class C { static constructor; }');
+        rejects('static string field named constructor', 'class C { static "constructor" = 1; }');
+        accepts('mixed valid __proto__ forms', 'var o = { __proto__: {}, ["__proto__"]: 2, __proto__() {} };');
+        accepts('shorthand plus explicit __proto__', 'var __proto__ = 1; var o = { __proto__, __proto__: {} };');
+        accepts('strict object methods named eval/arguments', '"use strict"; var o = { eval() {}, arguments() {} };');
+        accepts('static method named constructor', 'class C { static constructor() {} }');
+
+        // ---- rest, destructuring cover grammar & assignment targets -------
+        rejects('non-final rest in fn param pattern', 'function f([...x, y]) {}');
+        rejects('non-final rest in array decl', 'var [...x, y] = [];');
+        rejects('non-final rest in object decl', 'var {...rest, a} = {};');
+        rejects('non-final rest in array assign', 'var x, y; [...x, y] = [];');
+        rejects('trailing comma after rest in array assign', 'var x; [...x,] = [];');
+        rejects('trailing comma after rest in object assign', 'var rest; ({ ...rest, } = {});');
+        rejects('non-final rest in object assign', 'var rest, a; ({ ...rest, a } = {});');
+        rejects('default inside object rest assign', 'var a; ({ ...a = 1 } = {});');
+        rejects('grouped array target', 'var a; ([a]) = [];');
+        rejects('grouped object target', 'var a; ({ a }) = {};');
+        rejects('grouped assign inside array target', 'var a; ([(a = 1)] = []);');
+        rejects('grouped object nested target', 'var b; ({ a: ({ b = 1 }) } = {});');
+        rejects('strict assign eval', '"use strict"; eval = 1;');
+        rejects('strict grouped assign arguments', '"use strict"; (arguments) = 20;');
+        rejects('strict prefix ++eval', '"use strict"; ++eval;');
+        rejects('strict postfix arguments--', '"use strict"; arguments--;');
+        rejects('strict destructuring [arguments]', '"use strict"; [arguments] = [];');
+        rejects('strict destructuring {eval}', '"use strict"; ({ eval } = {});');
+        rejects('strict destructuring {eval=0}', '"use strict"; ({ eval = 0 } = {});');
+        rejects('assign to this', 'this = 1;');
+        rejects('grouped assign to this', '(this) = 1;');
+        rejects('prefix ++this', '++this;');
+        rejects('postfix this--', 'this--;');
+        rejects('destructuring [this]', '[this] = [];');
+        rejects('for-of this', 'for (this of [1]) {}');
+        accepts('cover init resolved to object destructuring', 'var a; ({ a = 1 } = {});');
+        accepts('duplicate __proto__ in object destructuring', 'var a, b; ({ __proto__: a, __proto__: b } = {});');
+        accepts('cover init in for-of head', 'var a; for ({ a = 1 } of [{}]) {}');
+        accepts('grouped simple ident in array pattern', 'var a; [(a) = 1] = []; [(a)] = [2];');
+
+        // ---- super property outside home-object methods -----------------
+        rejects('top-level super.x', 'super.x;');
+        rejects('plain function super.x', 'function f() { return super.x; }');
+        rejects('top-level arrow super[0]', 'var f = () => super[0];');
+        rejects('nested function inside method super.x', 'class C { m() { function inner() { return super.x; } } }');
+        accepts('arrow inside object method super.toString', 'var o = { m() { return (() => super.toString)(); } };');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+
+    // Sanity check runtime values for accepted constructs.
+    assert(js.eval("var o = { get x() { return 4; }, m() { return super.toString === Object.prototype.toString; } }; o.x + ':' + o.m()").to_string() == "4:true");
+    assert(js.eval("var a = 0, b = 0; ({ x: a = 7 } = {}); [b] = [9]; a + b").to_number() == 16.0);
+}
+
 TEST(an_anonymous_class_expression_takes_its_bindings_name) {
     using namespace litebird;
 
@@ -28132,9 +28310,8 @@ TEST(reflect_describes_and_answers_extensibility) {
     // Object.getOwnPropertyDescriptor either. Neither is asserted here; the
     // suite would fail on the engine and pass on Node, and a test of a bug
     // that is out of the task's files is the next task, not this one.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
     js.load_page("<!DOCTYPE html><body><div id=\"d\"></div></body>");
     js.notify_document_loaded();
     auto none_failed = [&]() {
@@ -28311,11 +28488,8 @@ TEST(object_integrity_levels_ask_every_property) {
     // The suite it was found in (Phase 124) wrote this case down and did not
     // assert it, because the bug was outside that task's files; this is the
     // task that owns them.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     auto none_failed = [&]() {
         const std::string failed = js.eval("failures.join('\\n')").to_string();
         if (!failed.empty()) std::cerr << failed << "\n";
@@ -28444,6 +28618,7 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
         assert(item->dimensions.content.height == 32.0f);
     }
 
+    // Position assertions below are relative to the container, not the body.
     // A stated height is not stretched — `stretch` has nothing to do when the
     // cross size is definite, and overwriting it would be a different bug.
     {
@@ -28451,7 +28626,7 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
                           R"(<div style="width: 50px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
         assert(item->dimensions.content.height == 20.0f);
-        assert(item->dimensions.content.y == 0.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 0.0f);
     }
 
     // `center` and `flex-end` place the item in the line, not at its top.
@@ -28460,14 +28635,14 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
                           R"(width: 100px; height: 100px">)"
                           R"(<div style="width: 50px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.y == 40.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 40.0f);
     }
     {
         auto root = build(R"(<body><div style="display: flex; align-items: flex-end; )"
                           R"(width: 100px; height: 100px">)"
                           R"(<div style="width: 50px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.y == 80.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 80.0f);
     }
 
     // A column container's cross axis is the width.
@@ -28476,14 +28651,14 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
                           R"(align-items: center; width: 100px; height: 100px">)"
                           R"(<div style="width: 40px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.x == 30.0f);
+        assert(item->dimensions.content.x - root->children[0]->dimensions.content.x == 30.0f);
     }
     {
         auto root = build(R"(<body><div style="display: flex; flex-direction: column; )"
                           R"(align-items: flex-end; width: 100px; height: 100px">)"
                           R"(<div style="width: 40px; height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.x == 60.0f);
+        assert(item->dimensions.content.x - root->children[0]->dimensions.content.x == 60.0f);
     }
 
     // Grid: the item's area is its rows, and stretch fills it. Both items are
@@ -28496,14 +28671,14 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
         assert(g->children.size() == 2);
         assert(g->children[0]->dimensions.content.height == 30.0f);
         assert(g->children[1]->dimensions.content.height == 30.0f);
-        assert(g->children[1]->dimensions.content.x == 60.0f);
+        assert(g->children[1]->dimensions.content.x - g->dimensions.content.x == 60.0f);
     }
     {
         auto root = build(R"(<body><div style="display: grid; align-items: center; )"
                           R"(grid-template-columns: 60px; grid-template-rows: 40px">)"
                           R"(<div style="height: 20px"></div></div></body>)");
         auto item = root->children[0]->children[0];
-        assert(item->dimensions.content.y == 10.0f);
+        assert(item->dimensions.content.y - root->children[0]->dimensions.content.y == 10.0f);
         assert(item->dimensions.content.height == 20.0f);
     }
 }
@@ -28516,11 +28691,8 @@ TEST(boxed_string_own_index_descriptors) {
     // exotic object own, enumerable, non-writable, non-configurable index
     // properties too. Every expected JSON value below was printed by Node.js
     // v22.22.3 before being asserted here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var failures = [];
         function check(what, f, want) {
@@ -28579,11 +28751,8 @@ TEST(object_prototype_legacy_accessor_reflection) {
     // accessor; lookupGetter/Setter walk the prototype chain and stop at the
     // first own property. Node.js v22.22.3 printed each expected JSON value
     // below before it was added to the suite.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var failures = [];
@@ -28690,11 +28859,8 @@ TEST(image_data_is_an_interface) {
     // the dirty rectangle it is given and nothing else. Every expectation
     // below is the standard's; where the standard leaves a choice (the exact
     // message) it is not asserted.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
     js.eval(R"JS(
         var failures = [];
         function check(what, f, want) {
@@ -28958,11 +29124,8 @@ TEST(text_codec_a_decoder_and_an_encoder_in_script) {
     //
     // Every assertion below was run through Node first, as a standalone script;
     // its output is identical there and here.
-    auto doc = std::make_shared<Document>();
-    doc->set_url("https://example.test/");
-    JsInterpreter js(doc);
-    js.load_page("<!DOCTYPE html><body></body>");
-    js.notify_document_loaded();
+    TestPage page;
+    JsInterpreter& js = page.js;
 
     js.eval(R"JS(
         var failures = [];
@@ -29278,6 +29441,143 @@ TEST(a_functions_name_and_length_are_its_own_properties) {
     assert(failed.empty());
 }
 
+TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot) {
+    using namespace litebird;
+
+    // Phase 154, finding 159. `stack` was an own data property installed by
+    // js_make_error, so every statement below was false:
+    //
+    //   Object.getOwnPropertyDescriptor(Error.prototype, 'stack')
+    //                        -> undefined      (it is an accessor)
+    //   new Error('x').hasOwnProperty('stack')
+    //                        -> true           (it is false until assigned)
+    //   Object.getOwnPropertyNames(new Error('x'))
+    //                        -> ['message','stack']  (['message'])
+    //
+    // The standard says nothing about `stack`; the de-facto shape is the one
+    // test262 pins down and V8/JavaScriptCore expose: an accessor pair on
+    // Error.prototype that reports the text from the [[ErrorData]] internal
+    // slot, and an instance that carries no own property until something
+    // assigns one. ObjectClass::Error is that slot here.
+    //
+    // The getter answers from the slot on the *receiver*, so it survives an
+    // own `stack` that shadows it, a foreign new.target that puts the
+    // instance off Error.prototype's chain, and a subclass. The setter is
+    // SetterThatIgnoresPrototypeProperties: a non-string throws, Error.prototype
+    // itself throws, and anything else gets an ordinary own data property.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throwsT(what, f) {
+            try { f(); failures.push(what + ': no throw'); }
+            catch (e) { if (e.constructor.name !== 'TypeError') failures.push(what + ': threw ' + e.constructor.name); }
+        }
+        function desc(o, k) {
+            var d = Object.getOwnPropertyDescriptor(o, k);
+            if (!d) return 'absent';
+            return [typeof d.get, typeof d.set, String(d.value), String(d.writable),
+                    String(d.enumerable), String(d.configurable)].join(',');
+        }
+
+        // ---- the property on the prototype is an accessor ----------------
+        var d = Object.getOwnPropertyDescriptor(Error.prototype, 'stack');
+        same('descriptor is an accessor', desc(Error.prototype, 'stack'),
+             'function,function,undefined,undefined,false,true');
+        same('getter name', d.get.name, 'get stack');
+        same('getter length', d.get.length, 0);
+        same('setter name', d.set.name, 'set stack');
+        same('setter length', d.set.length, 1);
+        same('getter is not a constructor', d.get.hasOwnProperty('prototype'), false);
+        throwsT('new getter', function () { new d.get(); });
+
+        // ---- an instance has no own stack --------------------------------
+        var e = new Error('x');
+        same('own names', Object.getOwnPropertyNames(e), ['message']);
+        same('hasOwnProperty before assignment', e.hasOwnProperty('stack'), false);
+        same('descriptor is undefined', Object.getOwnPropertyDescriptor(e, 'stack'), undefined);
+        same('case', Object.keys(e).indexOf('stack'), -1);
+        same('getter still reports', typeof e.stack, 'string');
+        same('the text', e.stack, 'Error: x\n    at <anonymous>');
+        same('every native error', new TypeError('t').stack, 'TypeError: t\n    at <anonymous>');
+        same('a subclass', new (class extends Error {})('s').stack, 'Error: s\n    at <anonymous>');
+        // An empty error is just its name, as toString() is.
+        same('no message', new RangeError().stack, 'RangeError\n    at <anonymous>');
+
+        // ---- the getter reads the slot, not the prototype chain ----------
+        var o = { __proto__: new Error('o') };
+        same('getter on a proxy-ish receiver', d.get.call(o), undefined);
+        same('via the chain', o.stack, undefined);
+        same('getter on Error.prototype', d.get.call(Error.prototype), undefined);
+        same('plain object', d.get.call({}), undefined);
+        same('native error prototypes', d.get.call(TypeError.prototype), undefined);
+        throwsT('getter on undefined', function () { d.get.call(undefined); });
+        throwsT('getter on a number', function () { d.get.call(1); });
+        throwsT('setter on null', function () { d.set.call(null, 'x'); });
+
+        // ---- an own data property shadows it -----------------------------
+        var shadow = new Error('m');
+        Object.defineProperty(shadow, 'stack', { value: 'sentinel', writable: true, enumerable: true, configurable: true });
+        same('shadowed read', shadow.stack, 'sentinel');
+        same('slot survives the shadow', typeof d.get.call(shadow), 'string');
+
+        // ---- the setter installs an ordinary own property ----------------
+        var s1 = new Error('m');
+        same('setter returns undefined', d.set.call(s1, 'sentinel'), undefined);
+        same('own after set', desc(s1, 'stack'), 'undefined,undefined,sentinel,true,true,true');
+        same('read back', s1.stack, 'sentinel');
+        d.set.call(s1, '');
+        same('empty string round-trips', s1.stack, '');
+        var plain = {};
+        d.set.call(plain, 'on-plain');
+        same('plain receiver', desc(plain, 'stack'), 'undefined,undefined,on-plain,true,true,true');
+        d.set.call(TypeError.prototype, 'sub');
+        same('a native error prototype', desc(TypeError.prototype, 'stack'),
+             'undefined,undefined,sub,true,true,true');
+        delete TypeError.prototype.stack;
+        same('cleaned up', Object.getOwnPropertyDescriptor(TypeError.prototype, 'stack'), undefined);
+        var viaAssignment = Object.create(Error.prototype);
+        viaAssignment.stack = 'assigned';
+        same('assignment through the accessor', desc(viaAssignment, 'stack'),
+             'undefined,undefined,assigned,true,true,true');
+
+        // ---- an existing own property keeps its attributes ---------------
+        var kept = new Error('m');
+        Object.defineProperty(kept, 'stack', { value: 'original', writable: true, enumerable: false, configurable: false });
+        d.set.call(kept, 'updated');
+        same('only the value changes', desc(kept, 'stack'), 'undefined,undefined,updated,true,false,false');
+
+        // ---- and the ways the setter refuses -----------------------------
+        throwsT('no argument', function () { d.set.call(new Error('m')); });
+        throwsT('a number', function () { d.set.call(new Error('m'), 1); });
+        throwsT('undefined', function () { d.set.call(new Error('m'), undefined); });
+        throwsT('an object with toString', function () { d.set.call(new Error('m'), { toString: function () { return 'x'; } }); });
+        throwsT('Error.prototype itself', function () { d.set.call(Error.prototype, 'x'); });
+        throwsT('assignment to Error.prototype', function () { Error.prototype.stack = 'x'; });
+        var ro = new Error('m');
+        Object.defineProperty(ro, 'stack', { value: 'ro', writable: false, enumerable: false, configurable: true });
+        throwsT('a non-writable own property', function () { d.set.call(ro, 'x'); });
+        same('and it is untouched', ro.stack, 'ro');
+        var frozen = new Error('m');
+        Object.freeze(frozen);
+        throwsT('a frozen instance', function () { d.set.call(frozen, 'x'); });
+        same('soft delete', delete new Error('m').stack, true);
+
+        // ---- the accessor survives the refusals --------------------------
+        same('still an accessor', desc(Error.prototype, 'stack'),
+             'function,function,undefined,undefined,false,true');
+        same('and still reports', new Error('after').stack, 'Error: after\n    at <anonymous>');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(automatic_gc_threshold_and_geometric_growth) {
     using namespace litebird;
 
@@ -29436,6 +29736,792 @@ TEST(automatic_gc_reclaims_churn_without_calling_gc) {
     }
 
     heap.collect_garbage();
+}
+
+TEST(document_body_margins_place_boxes_from_the_viewport) {
+    using namespace litebird;
+    // Reference rectangles were measured in Chromium 153 at 800x600. The
+    // HTML root box and general margin collapsing remain separate work; these
+    // cases deliberately include both a top-margin chain and its boundaries.
+    struct Example {
+        const char* name;
+        const char* html;
+        Rect body;
+        Rect child;
+        const char* other_id = nullptr;
+        Rect other{};
+    };
+    const Example examples[] = {
+        {"user-agent margin", R"(<body><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {8, 8, 784, 20}, {8, 8, 100, 20}},
+        {"zero margin", R"(<body style="margin:0"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {0, 0, 800, 20}, {0, 0, 100, 20}},
+        {"forty pixels", R"(<body style="margin:40px"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {40, 40, 720, 20}, {40, 40, 100, 20}},
+        {"different margins, padding and border",
+         R"(<body style="margin:11px 29px 17px 23px;padding:5px 7px 9px 13px;border:3px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {23, 11, 748, 40}, {39, 19, 100, 20}},
+        {"percentages use viewport width",
+         R"(<body style="margin:2.5% 5%;padding:1% 2%;border:2px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {40, 20, 720, 40}, {58, 30, 100, 20}},
+        {"two auto margins", R"(<body style="width:100px;margin:10px auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {350, 10, 100, 20}, {350, 10, 50, 20}},
+        {"one auto margin", R"(<body style="width:100px;margin:10px 25px 0 auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {675, 10, 100, 20}, {675, 10, 50, 20}},
+        {"auto longhands with auto width", R"(<body style="margin-left:auto;margin-right:auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {0, 8, 800, 20}, {0, 8, 50, 20}},
+        {"one auto longhand with auto width", R"(<body style="margin-left:auto;margin-right:25px"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {0, 8, 775, 20}, {0, 8, 50, 20}},
+        {"vertical auto margin", R"(<body style="margin-top:auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {8, 0, 784, 20}, {8, 0, 50, 20}},
+        {"negative margins", R"(<body style="margin:-12px 20px 5px -7px"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {-7, -12, 787, 20}, {-7, -12, 100, 20}},
+        {"flex body",
+         R"(<body style="display:flex;margin:11px 29px 17px 23px;padding:5px 7px 9px 13px;border:3px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {23, 11, 748, 40}, {39, 19, 100, 20}},
+        {"grid body",
+         R"(<body style="display:grid;margin:11px 29px 17px 23px;padding:5px 7px 9px 13px;border:3px solid blue"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {23, 11, 748, 40}, {39, 19, 100, 20}},
+        {"auto margin on flex body",
+         R"(<body style="display:flex;width:100px;margin:10px 25px 0 auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {675, 10, 100, 20}, {675, 10, 50, 20}},
+        {"auto margins on grid body",
+         R"(<body style="display:grid;width:100px;margin:10px auto"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {350, 10, 100, 20}, {350, 10, 50, 20}},
+        {"relative body", R"(<body style="margin:40px;position:relative;left:11px;top:12px"><div id="kid" style="width:100px;height:20px"></div></body>)",
+         {51, 52, 720, 20}, {51, 52, 100, 20}},
+        {"absolute body", R"(<body style="position:absolute;left:30px;top:25px;margin:8px;width:100px"><div id="kid" style="width:50px;height:20px"></div></body>)",
+         {38, 33, 100, 20}, {38, 33, 50, 20}},
+        {"child margin larger than body", R"(<body><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 30, 784, 20}, {8, 30, 100, 20}},
+        {"body margin larger, with sibling",
+         R"(<body style="margin:40px"><div id="kid" style="margin:10px 0 0;width:100px;height:20px"></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {40, 40, 720, 30}, {40, 40, 100, 20}, "other", {40, 60, 100, 10}},
+        {"positive and negative collapse",
+         R"(<body style="margin:20px 8px 8px"><div id="kid" style="margin:-30px 0 0;width:100px;height:20px"></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, -10, 784, 30}, {8, -10, 100, 20}, "other", {8, 10, 100, 10}},
+        {"two negative margins", R"(<body style="margin:-10px 8px 8px"><div id="kid" style="margin:-20px 0 0;width:100px;height:20px"></div></body>)",
+         {8, -20, 784, 20}, {8, -20, 100, 20}},
+        {"padding prevents top collapse", R"(<body style="margin:8px;padding-top:1px"><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 8, 784, 51}, {8, 39, 100, 20}},
+        {"flex prevents top collapse", R"(<body style="display:flex;margin:8px"><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 8, 784, 50}, {8, 38, 100, 20}},
+        {"definite body height", R"(<body style="margin:8px;height:100px"><div id="kid" style="margin:30px 0 0;width:100px;height:20px"></div></body>)",
+         {8, 30, 784, 100}, {8, 30, 100, 20}},
+        {"nested first-child chain",
+         R"(<body><div id="kid" style="margin:0"><div id="other" style="margin:30px 0 0;width:100px;height:20px"></div></div></body>)",
+         {8, 30, 784, 20}, {8, 30, 784, 20}, "other", {8, 30, 100, 20}},
+        {"nested collapse moves the following sibling",
+         R"(<body><div id="kid" style="margin:0"><div style="margin:30px 0 0;width:100px;height:20px"></div></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, 30, 784, 30}, {8, 30, 784, 20}, "other", {8, 50, 100, 10}},
+        {"nested mixed margins",
+         R"(<body style="margin:10px"><div id="kid" style="margin:-20px 0 0"><div id="other" style="margin:30px 0 0;width:100px;height:20px"></div></div></body>)",
+         {10, 10, 780, 20}, {10, 10, 780, 20}, "other", {10, 10, 100, 20}},
+        {"definite height stops height propagation",
+         R"(<body><div id="kid" style="margin:20px 0 0;height:100px"><div id="other" style="margin:30px 0 0;width:100px;height:20px"></div></div></body>)",
+         {8, 30, 784, 100}, {8, 30, 784, 100}, "other", {8, 30, 100, 20}},
+        {"negative nested margin grows ancestor and moves sibling",
+         R"(<body><div id="kid" style="margin:0"><div style="margin:-30px 0 0;width:100px;height:20px"></div></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, -22, 784, 30}, {8, -22, 784, 20}, "other", {8, -2, 100, 10}},
+        {"fixed-height child keeps following sibling",
+         R"(<body><div id="kid" style="margin:20px 0 0;height:100px"><div style="margin:30px 0 0;width:100px;height:20px"></div></div><div id="other" style="width:100px;height:10px"></div></body>)",
+         {8, 30, 784, 110}, {8, 30, 784, 100}, "other", {8, 130, 100, 10}},
+    };
+    auto check_rect = [](const char* example, const char* what, const Rect& got, const Rect& want) {
+        const bool correct = std::fabs(got.x - want.x) < 0.001f && std::fabs(got.y - want.y) < 0.001f &&
+                             std::fabs(got.width - want.width) < 0.001f && std::fabs(got.height - want.height) < 0.001f;
+        if (!correct) {
+            std::fprintf(stderr, "      %s %s: got (%g,%g %gx%g), expected (%g,%g %gx%g)\n",
+                         example, what, got.x, got.y, got.width, got.height,
+                         want.x, want.y, want.width, want.height);
+        }
+        assert(correct);
+    };
+    for (const auto& example : examples) {
+        auto doc = HtmlParser::parse(std::string("<!doctype html>") + example.html);
+        StyleResolver resolver;
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        auto child = doc->get_element_by_id("kid");
+        assert(root && doc->body() && child);
+        check_rect(example.name, "body", doc->body()->bounding_box(), example.body);
+        check_rect(example.name, "child", child->bounding_box(), example.child);
+        if (example.other_id) {
+            auto other = doc->get_element_by_id(example.other_id);
+            assert(other);
+            check_rect(example.name, "other", other->bounding_box(), example.other);
+        }
+    }
+    std::printf("      [body origin] %zu Chromium-derived geometry cases\n", std::size(examples));
+}
+
+TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(
+        R"(<!doctype html><body style="margin:40px;padding:5px;border:3px solid blue;position:relative">)"
+        R"(<div id="kid" style="width:100px;height:30px;background:red"></div>)"
+        R"(<div id="abs" style="position:absolute;left:0;top:0;width:10px;height:10px;background:green"></div>)"
+        R"(<div id="fixed" style="position:fixed;left:0;top:0;width:10px;height:10px;background:black"></div></body>)");
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    auto kid = doc->get_element_by_id("kid");
+    auto abs = doc->get_element_by_id("abs");
+    auto fixed = doc->get_element_by_id("fixed");
+    assert(root && kid && abs && fixed);
+    assert(kid->bounding_box().x == 48.0f && kid->bounding_box().y == 48.0f);
+    assert(abs->bounding_box().x == 43.0f && abs->bounding_box().y == 43.0f);
+    assert(fixed->bounding_box().x == 0.0f && fixed->bounding_box().y == 0.0f);
+
+    BitmapRenderer bmp(160, 100);
+    bmp.clear(Color::parse("#ffffff"));
+    bmp.render(DisplayList::build(root));
+    assert(bmp.get_pixel(0, 0) == Color::parse("#000000"));    // fixed at the viewport
+    assert(bmp.get_pixel(40, 40) == Color::parse("#0000ff"));  // body border
+    assert(bmp.get_pixel(43, 43) == Color::parse("#008000"));  // body's padding box
+    assert(bmp.get_pixel(60, 55) == Color::parse("#ff0000"));  // in-flow child
+    assert(bmp.get_pixel(39, 39) == Color::parse("#ffffff"));  // outside the body
+
+    // A document relayout must replace the offset, not accumulate it, and
+    // getBoundingClientRect must report the same geometry as the painter.
+    auto live_doc = std::make_shared<Document>();
+    live_doc->set_viewport_size(800.0f, 600.0f);
+    JsInterpreter js(live_doc);
+    js.load_page(R"(<!doctype html><body><div id="kid" style="width:100px;height:20px"></div></body>)");
+    js.notify_document_loaded();
+    auto geometry = [&]() {
+        return js.eval("var b=document.body.getBoundingClientRect(), k=document.getElementById('kid').getBoundingClientRect(); [b.left,b.top,b.width,k.left,k.top].join(',')").to_string();
+    };
+    assert(geometry() == "8,8,784,8,8");
+    js.eval("document.body.style.margin = '40px'");
+    assert(geometry() == "40,40,720,40,40");
+    js.eval("document.body.style.margin = '0px'");
+    assert(geometry() == "0,0,800,0,0");
+    js.eval("document.getElementById('kid').style.marginTop = '30px'");
+    assert(geometry() == "0,30,800,0,30");
+
+    // Inline fragments move with their body; their font-dependent height is
+    // not a body-margin oracle.
+    auto inline_doc = HtmlParser::parse(
+        R"(<!doctype html><body style="margin:15px;padding:5px;border:3px solid blue"><span id="kid">text</span></body>)");
+    auto inline_root = LayoutTree::build(inline_doc, resolver, 800.0f, 600.0f);
+    auto span = inline_doc->get_element_by_id("kid");
+    assert(inline_root && span && !inline_root->line_boxes.empty());
+    assert(span->bounding_box().x == 23.0f && span->bounding_box().y == 23.0f);
+}
+
+TEST(a_built_in_method_is_not_a_constructor) {
+    using namespace litebird;
+
+    // Phase 158, finding 163. Every built-in *method* was a constructor, so
+    // the question test262's isConstructor.js asks by doing
+    // `Reflect.construct(function () {}, [], f)` answered `true` for 51
+    // properties it must answer `false` for:
+    //
+    //   isConstructor(Object.defineProperty)              -> true   (false)
+    //   isConstructor(Reflect.get)                        -> true   (false)
+    //   isConstructor(Object.prototype.hasOwnProperty)    -> true   (false)
+    //   new Object.keys([])                               -> {}     (TypeError)
+    //
+    // A MethodDefinition is an ordinary function object with no [[Construct]],
+    // so `Object.keys` and `{ keys() {} }` are the same kind of function. Every
+    // built-in method is installed by js_define_method, so that helper makes
+    // them with js_make_method, and a constructor -- which is registered by
+    // hand, not through js_define_method -- still constructs.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        // The harness test262 uses: is there a [[Construct]]?
+        function isConstructor(f) {
+            try { Reflect.construct(function () {}, [], f); return true; }
+            catch (e) { return false; }
+        }
+        function newThrows(what, f) {
+            try { new f(); failures.push(what + ': new did not throw'); }
+            catch (e) { if (e.constructor.name !== 'TypeError') failures.push(what + ': threw ' + e.constructor.name); }
+        }
+
+        // ---- the methods that were the 51 failures ----------------------
+        same('Object.defineProperty', isConstructor(Object.defineProperty), false);
+        same('Object.defineProperties', isConstructor(Object.defineProperties), false);
+        same('Object.keys', isConstructor(Object.keys), false);
+        same('Object.assign', isConstructor(Object.assign), false);
+        same('Object.freeze', isConstructor(Object.freeze), false);
+        same('Object.prototype.hasOwnProperty', isConstructor(Object.prototype.hasOwnProperty), false);
+        same('Object.prototype.toString', isConstructor(Object.prototype.toString), false);
+        same('Reflect.get', isConstructor(Reflect.get), false);
+        same('Reflect.construct', isConstructor(Reflect.construct), false);
+        same('Symbol.for', isConstructor(Symbol.for), false);
+        same('Symbol.keyFor', isConstructor(Symbol.keyFor), false);
+        same('Symbol.prototype.toString', isConstructor(Symbol.prototype.toString), false);
+        same('Error.prototype.toString', isConstructor(Error.prototype.toString), false);
+        same('Function.prototype.call', isConstructor(Function.prototype.call), false);
+        same('Function.prototype.bind', isConstructor(Function.prototype.bind), false);
+        newThrows('new Object.defineProperty', function () { new Object.defineProperty({}, 'x', { value: 1 }); });
+        newThrows('new Object.keys', function () { new Object.keys([]); });
+
+        // ---- and the same is true of every built-in method, not a list ---
+        same('Array.prototype.map', isConstructor(Array.prototype.map), false);
+        same('Array.prototype.sort', isConstructor(Array.prototype.sort), false);
+        same('String.prototype.slice', isConstructor(String.prototype.slice), false);
+        same('Map.prototype.get', isConstructor(Map.prototype.get), false);
+        same('JSON.parse', isConstructor(JSON.parse), false);
+        same('Math.max', isConstructor(Math.max), false);
+        same('Date.now', isConstructor(Date.now), false);
+        same('Promise.resolve', isConstructor(Promise.resolve), false);
+        same('Symbol.iterator', isConstructor(Symbol.iterator ? Symbol.iterator : function(){}), false);
+
+        // A script's own method and getter answer the same way, which is what
+        // makes "a method is not a constructor" one rule and not two. A method
+        // *definition* is the MethodDefinition production, not a `function`
+        // expression stored as a value -- `{ m: function () {} }` is an
+        // ordinary constructible function in every engine, so the two are
+        // written differently on purpose.
+        same('an object method definition', isConstructor(({ m() {} }).m), false);
+        var shorthand = { m() { return 1; } };
+        same('a shorthand method', isConstructor(shorthand.m), false);
+        same('a getter', isConstructor(Object.getOwnPropertyDescriptor({ get x() { return 1; } }, 'x').get), false);
+        same('a setter', isConstructor(Object.getOwnPropertyDescriptor({ set x(v) {} }, 'x').set), false);
+        same('a class method', isConstructor(class { m() {} }.prototype.m), false);
+
+        // ---- the constructors still construct ---------------------------
+        same('Object', isConstructor(Object), true);
+        same('Array', isConstructor(Array), true);
+        same('Error', isConstructor(Error), true);
+        same('Function', isConstructor(Function), true);
+        same('Promise', isConstructor(Promise), true);
+        same('Map', isConstructor(Map), true);
+        same('RegExp', isConstructor(RegExp), true);
+        same('Date', isConstructor(Date), true);
+        same('Boolean', isConstructor(Boolean), true);
+        same('a bound function', isConstructor(function () {}.bind(null)), true);
+        same('a class', isConstructor(class {}), true);
+        same('a function expression', isConstructor(function () {}), true);
+        same('an arrow is not', isConstructor(function () {}.bind ? (() => 1) : null), false);
+        same('a subclass of Array', isConstructor(class extends Array {}), true);
+
+        // ---- and nothing a constructor does has changed ------------------
+        same('new Object.keys is a function', typeof Object.keys, 'function');
+        same('Object.keys still works', Object.keys({ a: 1, b: 2 }), ['a', 'b']);
+        same('Object.defineProperty still works',
+             (function () { var o = {}; Object.defineProperty(o, 'x', { value: 5, enumerable: true }); return o.x; })(), 5);
+        same('Reflect.construct still works', Reflect.construct(Array, [3]).length, 3);
+        same('a constructor still returns', new (class { constructor() { this.v = 1; } })().v, 1);
+        same('a bound constructor still returns', new (function (a) { this.a = a; }.bind(null))(9).a, 9);
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+// Phase 157, finding 162: ES2024 ArrayBuffer.prototype.transfer(),
+// transferToFixedLength(), detached, resizable, maxByteLength, resize(), and
+// length-tracking / out-of-bounds TypedArray and DataView behaviour.
+TEST(arraybuffer_transfer_detach_and_resize) {
+    using namespace litebird;
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // 1. Fixed ArrayBuffer transfer() & detached semantics.
+    assert(text(R"JS(
+        var b1 = new ArrayBuffer(8);
+        var u1 = new Uint8Array(b1, 2, 4);
+        var d1 = new DataView(b1, 2, 4);
+        u1.set([10, 20, 30, 40]);
+        var before = [b1.byteLength, b1.maxByteLength, b1.resizable, b1.detached].join(',');
+        var b2 = b1.transfer();
+        var after1 = [b1.byteLength, b1.maxByteLength, b1.resizable, b1.detached].join(',');
+        var after2 = [b2.byteLength, b2.maxByteLength, b2.resizable, b2.detached].join(',');
+        var bytes = new Uint8Array(b2).join(',');
+        before + '|' + after1 + '|' + after2 + '|' + bytes;
+    )JS") == "8,8,false,false|0,0,false,true|8,8,false,false|0,0,10,20,30,40,0,0");
+
+    // 2. Detached views: TypedArray zeroes length/byteLength/byteOffset and
+    // drops indices; DataView throws TypeError on byteLength/byteOffset/reads.
+    assert(text(R"JS(
+        [u1.length, u1.byteLength, u1.byteOffset, u1.buffer === b1,
+         String(u1[0]), 0 in u1, Object.keys(u1).length,
+         d1.buffer === b1].join(',');
+    )JS") == "0,0,0,true,undefined,false,0,true");
+    assert(text("errName(function () { return d1.byteLength; })") == "TypeError");
+    assert(text("errName(function () { return d1.byteOffset; })") == "TypeError");
+    assert(text("errName(function () { return d1.getUint8(0); })") == "TypeError");
+    assert(text("errName(function () { d1.setUint8(0, 1); })") == "TypeError");
+    assert(text("errName(function () { return new DataView(b1); })") == "TypeError");
+    assert(text("errName(function () { return new Uint8Array(b1); })") == "TypeError");
+    assert(text("errName(function () { return u1.slice(); })") == "TypeError");
+    assert(text("errName(function () { return u1.subarray(); })") == "TypeError");
+    assert(text("errName(function () { return b1.slice(0); })") == "TypeError");
+    assert(text("errName(function () { return b1.transfer(); })") == "TypeError");
+    assert(text("errName(function () { return b1.transferToFixedLength(); })") == "TypeError");
+
+    // 3. Shrink & grow (zero-fill) through transfer().
+    assert(text(R"JS(
+        var b3 = b2.transfer(4);
+        var s1 = [b2.detached, b3.byteLength, b3.maxByteLength, new Uint8Array(b3).join(',')].join('|');
+        var b4 = b3.transfer(6);
+        var s2 = [b3.detached, b4.byteLength, b4.maxByteLength, new Uint8Array(b4).join(',')].join('|');
+        s1 + '||' + s2;
+    )JS") == "true|4|4|0,0,10,20||true|6|6|0,0,10,20,0,0");
+
+    // 4. Resizable ArrayBuffer + length-tracking & fixed views + odd lengths + OOB/regrow.
+    assert(text(R"JS(
+        var rb = new ArrayBuffer(4, { maxByteLength: 12 });
+        var rt = new Uint16Array(rb);
+        var rto = new Uint16Array(rb, 2);
+        var rf = new Uint16Array(rb, 0, 2);
+        var rd = new DataView(rb);
+        var rdo = new DataView(rb, 2);
+        var rdf = new DataView(rb, 0, 4);
+        rt[0] = 0x1122; rt[1] = 0x3344;
+        rb.resize(8);
+        var g8 = [rt.length, rto.length, rf.length, rd.byteLength, rdo.byteLength, rdf.byteLength, rt.join(',')].join('|');
+        rb.resize(5);
+        var g5 = [rt.length, rt.byteLength, rto.length, rd.byteLength, rdo.byteLength, rf.length].join(',');
+        rb.resize(2);
+        var g2 = [rt.length, rto.length, rf.length, rf.byteOffset, String(rf[0]),
+                  errName(function () { return rf.slice(); }),
+                  errName(function () { return rdf.byteLength; }),
+                  errName(function () { return rdf.byteOffset; })].join(',');
+        rb.resize(1);
+        var g1 = [rto.length, rto.byteOffset, errName(function () { return rdo.byteLength; })].join(',');
+        rb.resize(6);
+        var g6 = [rt.length, rto.length, rf.length, rf.byteOffset, rdf.byteLength, new Uint8Array(rb).join(',')].join('|');
+        g8 + '||' + g5 + '||' + g2 + '||' + g1 + '||' + g6;
+    )JS") == "4|3|2|8|6|4|4386,13124,0,0||2,4,1,5,3,2||1,0,0,0,undefined,TypeError,TypeError,TypeError||0,0,TypeError||3|2|2|0|4|34,0,0,0,0,0");
+
+    // 5. subarray() preserves length-tracking when end is omitted.
+    assert(text(R"JS(
+        var x = new ArrayBuffer(4, { maxByteLength: 8 });
+        var v = new Uint8Array(x);
+        var sTrack = v.subarray(1);
+        var sFix = v.subarray(1, 3);
+        x.resize(6);
+        sTrack.length + ',' + sFix.length;
+    )JS") == "5,2");
+
+    // 6. transfer() preserves resizability; transferToFixedLength() fixes it.
+    assert(text(R"JS(
+        var rCopy = rb.transfer(10);
+        var sOrig = [rb.detached, rb.byteLength, rb.maxByteLength, rb.resizable].join(',');
+        var sCopy = [rCopy.detached, rCopy.byteLength, rCopy.maxByteLength, rCopy.resizable].join(',');
+        var rFixed = rCopy.transferToFixedLength(4);
+        var sFix = [rFixed.detached, rFixed.byteLength, rFixed.maxByteLength, rFixed.resizable,
+                    errName(function () { rFixed.resize(4); })].join(',');
+        sOrig + '|' + sCopy + '|' + sFix;
+    )JS") == "true,0,0,true|false,10,12,true|false,4,4,false,TypeError");
+
+    // 7. Re-entrancy, argument errors, iterator detach, non-constructor methods, descriptors.
+    assert(text("errName(function () { new ArrayBuffer(-1); })") == "RangeError");
+    assert(text("errName(function () { new ArrayBuffer(8, { maxByteLength: 4 }); })") == "RangeError");
+    assert(text(R"JS(
+        var y = new ArrayBuffer(4, { maxByteLength: 8 });
+        var e1 = errName(function () { y.transfer(12); });
+        e1 + ',' + y.detached + ',' + y.byteLength;
+    )JS") == "RangeError,false,4");
+    assert(text(R"JS(
+        var z = new ArrayBuffer(4);
+        errName(function () { z.transfer({ valueOf: function () { z.transfer(); return 4; } }); });
+    )JS") == "TypeError");
+    assert(text(R"JS(
+        var z2 = new ArrayBuffer(4);
+        var a2 = new Uint8Array(z2);
+        var it = a2.values();
+        z2.transfer();
+        errName(function () { it.next(); });
+    )JS") == "TypeError");
+    assert(text(R"JS(
+        var z3 = new ArrayBuffer(4);
+        var dv3 = new DataView(z3);
+        errName(function () { dv3.getUint8({ valueOf: function () { z3.transfer(); return 0; } }); });
+    )JS") == "TypeError");
+    assert(text(R"JS(
+        var z4 = new ArrayBuffer(4);
+        var a4 = new Uint8Array(z4);
+        a4.set([3, 1, 2, 0]);
+        String(a4.sort(function () { if (!z4.detached) z4.transfer(); return 0; }).length);
+    )JS") == "0");
+    assert(text(R"JS(
+        var z5 = new ArrayBuffer(3, { maxByteLength: 6 });
+        var a5 = new Uint8Array(z5);
+        a5.set([10, 20, 30]);
+        var seen = [];
+        a5.reduce(function (acc, val, idx) {
+            seen.push(String(val));
+            if (idx === 0) z5.resize(1);
+            return acc;
+        }, 0);
+        seen.join(',');
+    )JS") == "10,undefined,undefined");
+    assert(text("errName(function () { new ArrayBuffer.prototype.transfer(); })") == "TypeError");
+    assert(text("errName(function () { new ArrayBuffer.prototype.transferToFixedLength(); })") == "TypeError");
+    assert(text("errName(function () { new ArrayBuffer.prototype.resize(); })") == "TypeError");
+    assert(text(R"JS(
+        ['byteLength', 'maxByteLength', 'resizable', 'detached'].map(function (k) {
+            var d = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, k);
+            return k + ':' + (typeof d.get) + ',' + d.enumerable + ',' + d.configurable;
+        }).join('|');
+    )JS") == "byteLength:function,false,true|maxByteLength:function,false,true|resizable:function,false,true|detached:function,false,true");
+    assert(text("errName(function () { Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'detached').get.call({}); })") == "TypeError");
+}
+
+// Phase 161 (finding 166): WebSocket binary frames — send(ArrayBuffer |
+// TypedArray | DataView | Blob | File) and binaryType "blob" / "arraybuffer"
+// delivery (single and fragmented frames, detached/OOB rejection, synchronous
+// snapshotting, and Blob BufferSource parts).
+TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob) {
+    struct WireFrame {
+        uint8_t opcode{0};
+        bool masked{false};
+        std::string payload;
+    };
+    std::mutex wire_mu;
+    std::vector<WireFrame> wire_frames;
+
+    auto read_exact = [](int fd, uint8_t* dst, size_t n) -> bool {
+        size_t got = 0;
+        while (got < n) {
+            ssize_t r = ::recv(fd, dst + got, n - got, 0);
+            if (r <= 0) return false;
+            got += static_cast<size_t>(r);
+        }
+        return true;
+    };
+    auto send_all = [](int fd, const uint8_t* src, size_t n) -> bool {
+        size_t sent = 0;
+        while (sent < n) {
+            ssize_t w = ::send(fd, src + sent, n - sent, MSG_NOSIGNAL);
+            if (w <= 0) return false;
+            sent += static_cast<size_t>(w);
+        }
+        return true;
+    };
+    auto send_ws_frame = [&](int fd, uint8_t opcode, const std::string& payload, bool fin = true) {
+        std::vector<uint8_t> out;
+        out.push_back(static_cast<uint8_t>((fin ? 0x80u : 0x00u) | (opcode & 0x0Fu)));
+        const size_t n = payload.size();
+        if (n <= 125) {
+            out.push_back(static_cast<uint8_t>(n));
+        } else if (n <= 65535) {
+            out.push_back(126u);
+            out.push_back(static_cast<uint8_t>((n >> 8) & 0xFFu));
+            out.push_back(static_cast<uint8_t>(n & 0xFFu));
+        } else {
+            out.push_back(127u);
+            for (int i = 7; i >= 0; --i) out.push_back(static_cast<uint8_t>((n >> (i * 8)) & 0xFFu));
+        }
+        out.insert(out.end(), payload.begin(), payload.end());
+        (void)send_all(fd, out.data(), out.size());
+    };
+
+    auto srv = WebSocketObject::start_loopback_server([&](int cfd) {
+        std::string req;
+        char chunk[1024];
+        while (req.find("\r\n\r\n") == std::string::npos) {
+            ssize_t n = ::recv(cfd, chunk, sizeof(chunk), 0);
+            if (n <= 0) { ::close(cfd); return; }
+            req.append(chunk, static_cast<size_t>(n));
+        }
+        const std::string key_hdr = "Sec-WebSocket-Key: ";
+        const size_t kp = req.find(key_hdr);
+        if (kp == std::string::npos) { ::close(cfd); return; }
+        const size_t ke = req.find("\r\n", kp);
+        const std::string accept = WebSocketObject::calculate_accept_key(
+            req.substr(kp + key_hdr.size(), ke - kp - key_hdr.size()));
+        const std::string resp =
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
+        (void)send_all(cfd, reinterpret_cast<const uint8_t*>(resp.data()), resp.size());
+
+        while (true) {
+            uint8_t hdr[2];
+            if (!read_exact(cfd, hdr, 2)) break;
+            const uint8_t opcode = hdr[0] & 0x0Fu;
+            const bool masked = (hdr[1] & 0x80u) != 0;
+            uint64_t plen = hdr[1] & 0x7Fu;
+            if (plen == 126) {
+                uint8_t ext[2];
+                if (!read_exact(cfd, ext, 2)) break;
+                plen = (static_cast<uint64_t>(ext[0]) << 8) | ext[1];
+            } else if (plen == 127) {
+                uint8_t ext[8];
+                if (!read_exact(cfd, ext, 8)) break;
+                plen = 0;
+                for (int i = 0; i < 8; ++i) plen = (plen << 8) | ext[i];
+            }
+            uint8_t mask[4]{};
+            if (masked && !read_exact(cfd, mask, 4)) break;
+            std::string payload(static_cast<size_t>(plen), '\0');
+            if (plen > 0 && !read_exact(cfd, reinterpret_cast<uint8_t*>(payload.data()), static_cast<size_t>(plen))) {
+                break;
+            }
+            if (masked) {
+                for (size_t i = 0; i < payload.size(); ++i) {
+                    payload[i] = static_cast<char>(static_cast<uint8_t>(payload[i]) ^ mask[i % 4]);
+                }
+            }
+            if (opcode == 0x08u) {
+                std::string close_payload(2, '\0');
+                close_payload[0] = static_cast<char>(1000 >> 8);
+                close_payload[1] = static_cast<char>(1000 & 0xFF);
+                send_ws_frame(cfd, 0x08u, close_payload, true);
+                break;
+            }
+            {
+                std::lock_guard<std::mutex> lock(wire_mu);
+                wire_frames.push_back(WireFrame{opcode, masked, payload});
+            }
+            if (opcode == 0x01u && payload == "FRAG") {
+                send_ws_frame(cfd, 0x02u, std::string("\x00\xff", 2), false);
+                send_ws_frame(cfd, 0x00u, std::string("\xfe\x80", 2), false);
+                send_ws_frame(cfd, 0x00u, std::string("\x01\x02", 2), true);
+            } else {
+                send_ws_frame(cfd, opcode, payload, true);
+            }
+        }
+        ::close(cfd);
+    });
+    assert(srv && srv->port != 0);
+
+    TestPage page;
+    auto& js = page.js;
+    js.eval(R"JS(
+        function toHex(ab) {
+            var u = new Uint8Array(ab);
+            var s = '';
+            for (var i = 0; i < u.length; i++) s += (u[i] < 16 ? '0' : '') + u[i].toString(16);
+            return s;
+        }
+        function errName(fn) {
+            try { fn(); return 'ok'; } catch (e) { return e && e.name ? e.name : String(e); }
+        }
+        var res = {};
+        var done = false;
+        var blobPromiseDone = false;
+        var detBuf = new ArrayBuffer(4);
+        detBuf.transfer();
+        res.blobDetached = errName(function () { new Blob([detBuf]); });
+
+        var ws = new WebSocket("ws://127.0.0.1:)JS" + std::to_string(srv->port) + R"JS(/bin");
+        res.initBinaryType = ws.binaryType;
+        res.connDetached = errName(function () { ws.send(detBuf); });
+
+        ws.onopen = function () {
+            res.openDetachedAB = errName(function () { ws.send(detBuf); });
+            var ab2 = new ArrayBuffer(4);
+            var view2 = new Uint8Array(ab2);
+            var dv2 = new DataView(ab2);
+            ab2.transfer();
+            res.openDetachedView = errName(function () { ws.send(view2); });
+            res.openDetachedDV = errName(function () { ws.send(dv2); });
+
+            var rab = new ArrayBuffer(8, { maxByteLength: 16 });
+            var rfixed = new Uint8Array(rab, 4, 2);
+            var rtrack = new Uint8Array(rab);
+            rtrack.set([1, 2, 3, 4, 5, 6, 7, 8]);
+            rab.resize(3);
+            res.openOobView = errName(function () { ws.send(rfixed); });
+
+            // 1. ArrayBuffer (received while binaryType === "blob") + immediate mutation
+            var b1 = new Uint8Array([0, 255, 254, 128, 65]);
+            ws.send(b1.buffer);
+            b1[0] = 99;
+            b1[1] = 99;
+
+            // 2. TypedArray subarray (non-zero byteOffset + window length)
+            var b2 = new Uint8Array([10, 20, 30, 40, 50]);
+            ws.send(b2.subarray(1, 4));
+
+            // 3. DataView (non-zero byteOffset + window length)
+            ws.send(new DataView(b2.buffer, 2, 2));
+
+            // 4. Blob composed of TypedArray subarray + DataView + NUL string
+            var blob = new Blob([b2.subarray(0, 2), new DataView(b2.buffer, 3, 2), "\x00Z"]);
+            ws.send(blob);
+
+            // 5. File (subclass of Blob)
+            var file = new File([new Uint8Array([171, 0, 205])], "sample.bin", { type: "application/octet-stream" });
+            ws.send(file);
+
+            // 6. Length-tracking view over a resized ArrayBuffer (live 3 bytes)
+            ws.send(rtrack);
+
+            // 7. Empty binary frame (0 bytes, opcode 0x02)
+            ws.send(new Uint8Array(0));
+
+            // 8. 3-fragment binary message from server
+            ws.send("FRAG");
+
+            // 9. Text frame while binaryType === "arraybuffer" (non-string coerced)
+            ws.send(null);
+        };
+
+        var count = 0;
+        ws.onmessage = function (e) {
+            count++;
+            if (count === 1) {
+                var okBlob = (e.data instanceof Blob) && e.data.size === 5 && e.data.type === "";
+                ws.binaryType = "arraybuffer";
+                e.data.arrayBuffer().then(function (ab) {
+                    res.m1 = okBlob + ":" + (ab instanceof ArrayBuffer) + ":" + toHex(ab);
+                    blobPromiseDone = true;
+                });
+            } else if (count >= 2 && count <= 8) {
+                res["m" + count] = (e.data instanceof ArrayBuffer) + ":" + e.data.resizable + ":" + e.data.byteLength + ":" + toHex(e.data);
+            } else if (count === 9) {
+                res.m9 = (typeof e.data) + ":" + e.data;
+                ws.close(1000, "bin-done");
+            }
+        };
+        ws.onclose = function (e) {
+            res.close = e.code + ":" + e.wasClean;
+            done = true;
+        };
+    )JS");
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+        if (js.eval("done && blobPromiseDone").is_truthy()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    assert(js.eval("done && blobPromiseDone").is_truthy());
+
+    assert(js.eval("res.blobDetached").to_string() == "TypeError");
+    assert(js.eval("res.initBinaryType").to_string() == "blob");
+    assert(js.eval("res.connDetached").to_string() == "InvalidStateError");
+    assert(js.eval("res.openDetachedAB").to_string() == "TypeError");
+    assert(js.eval("res.openDetachedView").to_string() == "TypeError");
+    assert(js.eval("res.openDetachedDV").to_string() == "TypeError");
+    assert(js.eval("res.openOobView").to_string() == "TypeError");
+
+    assert(js.eval("res.m1").to_string() == "true:true:00fffe8041");
+    assert(js.eval("res.m2").to_string() == "true:false:3:141e28");
+    assert(js.eval("res.m3").to_string() == "true:false:2:1e28");
+    assert(js.eval("res.m4").to_string() == "true:false:6:0a142832005a");
+    assert(js.eval("res.m5").to_string() == "true:false:3:ab00cd");
+    assert(js.eval("res.m6").to_string() == "true:false:3:010203");
+    assert(js.eval("res.m7").to_string() == "true:false:0:");
+    assert(js.eval("res.m8").to_string() == "true:false:6:00fffe800102");
+    assert(js.eval("res.m9").to_string() == "string:null");
+    assert(js.eval("res.close").to_string() == "1000:true");
+    assert(js.eval("ws.bufferedAmount").to_number() == 0);
+
+    // Verify wire opcodes, masking, and raw payload bytes recorded by the server.
+    std::lock_guard<std::mutex> lock(wire_mu);
+    assert(wire_frames.size() == 9);
+    for (const auto& f : wire_frames) assert(f.masked);
+    assert(wire_frames[0].opcode == 0x02u && wire_frames[0].payload == std::string("\x00\xff\xfe\x80" "A", 5));
+    assert(wire_frames[1].opcode == 0x02u && wire_frames[1].payload == std::string("\x14\x1e\x28", 3));
+    assert(wire_frames[2].opcode == 0x02u && wire_frames[2].payload == std::string("\x1e\x28", 2));
+    assert(wire_frames[3].opcode == 0x02u && wire_frames[3].payload == std::string("\x0a\x14\x28\x32\x00" "Z", 6));
+    assert(wire_frames[4].opcode == 0x02u && wire_frames[4].payload == std::string("\xab\x00\xcd", 3));
+    assert(wire_frames[5].opcode == 0x02u && wire_frames[5].payload == std::string("\x01\x02\x03", 3));
+    assert(wire_frames[6].opcode == 0x02u && wire_frames[6].payload.empty());
+    assert(wire_frames[7].opcode == 0x01u && wire_frames[7].payload == "FRAG");
+    assert(wire_frames[8].opcode == 0x01u && wire_frames[8].payload == "null");
+}
+
+TEST(a_definition_names_the_function_it_makes) {
+    using namespace litebird;
+
+    // Phase 159, finding 164. `name` inference was right for a string key and
+    // wrong for everything else a definition can be written with:
+    //
+    //   ({ [Symbol('m')]() {} })[Symbol('m')].name   -> ''   ('[m]')
+    //   Object.getOwnPropertyDescriptor({ get id() {} }, 'id').get.name
+    //                                                -> 'id' ('get id')
+    //
+    // §15.4.4/§15.4.5 (SetFunctionName) put the name in the production's hands:
+    // a property key, a symbol key as `[` + description + `]` (and nothing at
+    // all when the description is empty), and `get `/`set ` in front of it for
+    // an accessor. The parser gives a method its key as a name, which is right
+    // by default; the cases it cannot know are written down at the definition
+    // site instead, by `name_function`.
+    //
+    // Every expected string was printed by Node.js 22 for the same source.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function N(f) { return f.name; }
+        var anon = Symbol(), named = Symbol('test262'), m = Symbol('method');
+
+        // ---- a function or class written as a value -----------------------
+        var values = { id: function () {}, [anon]: function () {}, [named]: function () {}, xId: function x() {} };
+        same('a function value', N(values.id), 'id');
+        same('an unnamed symbol value', N(values[anon]), '');
+        same('a named symbol value', N(values[named]), '[test262]');
+        same('an explicit name wins', N(values.xId), 'x');
+
+        // ---- accessors take the prefix ------------------------------------
+        var g = { get id() {}, get [anon]() {}, get [named]() {}, set id(v) {}, set [named](v) {} };
+        same('a getter', N(Object.getOwnPropertyDescriptor(g, 'id').get), 'get id');
+        same('an unnamed symbol getter', N(Object.getOwnPropertyDescriptor(g, anon).get), 'get ');
+        same('a symbol getter', N(Object.getOwnPropertyDescriptor(g, named).get), 'get [test262]');
+        same('a setter', N(Object.getOwnPropertyDescriptor(g, 'id').set), 'set id');
+        same('a symbol setter', N(Object.getOwnPropertyDescriptor(g, named).set), 'set [test262]');
+
+        // ---- methods, including generators and async methods --------------
+        var methods = { [m]() {}, id() {}, [anon]() {}, *[m]() {}, *id() {}, async id() {} };
+        same('a symbol method', N(methods[m]), '[method]');
+        same('a method', N(methods.id), 'id');
+        same('an unnamed symbol method', N(methods[anon]), '');
+
+        // ---- and in a class, static and not -------------------------------
+        class C {
+            m() {}
+            static s() {}
+            get g() {}
+            set g(v) {}
+            [m]() {}
+            static [named]() {}
+            *[m]() {}
+            static #p() {}
+        }
+        same('a class method', N(C.prototype.m), 'm');
+        same('a static class method', N(C.s), 's');
+        same('a class getter', N(Object.getOwnPropertyDescriptor(C.prototype, 'g').get), 'get g');
+        same('a class setter', N(Object.getOwnPropertyDescriptor(C.prototype, 'g').set), 'set g');
+        same('a symbol class method', N(C.prototype[m]), '[method]');
+        same('a static symbol class method', N(C[named]), '[test262]');
+        // A private name is not reachable from outside the class, which is the
+        // point; the method asks its own name from inside.
+        class D { static #m() {} static n() { return D.#m.name; } static get #g() { return 1; } }
+        same('a private method is spelled as written', D.n(), '#m');
+
+        // ---- the assignment form that is *not* a named evaluation ---------
+        var plain;
+        plain = function () {};
+        same('an assignment names it after the binding', N(plain), 'plain');
+        var grouped;
+        (grouped) = function () {};
+        same('a grouped target does not', N(grouped), '');
+
+        // ---- and the values are still the same functions ------------------
+        same('a method is still callable', typeof methods.id, 'function');
+        same('a getter still runs', (function () { var o = { get v() { return 7; } }; return o.v; })(), 7);
+        same('a symbol method is still reachable', typeof methods[m], 'function');
+        same('a class still constructs', new C() instanceof C, true);
+        same('a name is still not writable', (function () {
+            var f = values.id; f.name = 'zz'; return f.name;
+        })(), 'id');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
 }
 
 int main() {
@@ -29829,12 +30915,23 @@ int main() {
 
     // Phase 128: the six regular grammar rules of a class body.
     RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);
+    // Phase 141: remaining early SyntaxErrors outside class bodies.
+    RUN_TEST(parser_rejects_early_syntax_errors_outside_class_bodies);
 
     // Phase 135: an anonymous class expression takes the name it is bound to.
     RUN_TEST(an_anonymous_class_expression_takes_its_bindings_name);
 
     // Phase 146: name and length are own properties, with the attributes they have.
     RUN_TEST(a_functions_name_and_length_are_its_own_properties);
+
+    // Phase 154: Error.prototype.stack is an accessor over an internal slot.
+    RUN_TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot);
+
+    // Phase 158: a built-in method has no [[Construct]].
+    RUN_TEST(a_built_in_method_is_not_a_constructor);
+
+    // Phase 159: a definition names the function it makes.
+    RUN_TEST(a_definition_names_the_function_it_makes);
 
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
@@ -29870,6 +30967,16 @@ int main() {
     // Phase 145: automatic per-agent allocation-threshold garbage collection at safe points.
     RUN_TEST(automatic_gc_threshold_and_geometric_growth);
     RUN_TEST(automatic_gc_reclaims_churn_without_calling_gc);
+
+    // Phase 152: place the document body, its margins, and its descendants.
+    RUN_TEST(document_body_margins_place_boxes_from_the_viewport);
+    RUN_TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry);
+
+    // Phase 157: ArrayBuffer.prototype.transfer(), transferToFixedLength(), detached, and resize().
+    RUN_TEST(arraybuffer_transfer_detach_and_resize);
+
+    // Phase 161: WebSocket binary frames — ArrayBuffer, TypedArray, DataView, and Blob.
+    RUN_TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

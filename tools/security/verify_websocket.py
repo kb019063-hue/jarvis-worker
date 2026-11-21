@@ -28,6 +28,7 @@ import base64
 import hashlib
 import os
 import pathlib
+import re
 import socket
 import ssl
 import struct
@@ -342,14 +343,17 @@ class DualProtocolServer:
             "selected": selected_proto,
             "cookie": headers.get("cookie"),
             "messages": [],
+            "binary_messages": [],
             "masks_ok": True,
             "close_code": None,
             "close_reason": None,
         }
 
         # Worker endpoints proactively push a greeting then close cleanly.
-        if path.startswith("/worker"):
+        if path == "/worker-ok":
             conn.sendall(build_ws_frame(0x01, b"wss-worker-ok"))
+        elif path == "/worker-bin":
+            conn.sendall(build_ws_frame(0x02, b"\x00\xfe\xff\x80"))
 
         conn.settimeout(2.5)
         try:
@@ -362,6 +366,7 @@ class DualProtocolServer:
                     rec["messages"].append(text)
                     conn.sendall(build_ws_frame(0x01, f"echo:{text}".encode("utf-8")))
                 elif opcode == 0x02:
+                    rec["binary_messages"].append(payload)
                     conn.sendall(build_ws_frame(0x02, payload))
                 elif opcode == 0x09:
                     conn.sendall(build_ws_frame(0x0A, payload))
@@ -425,6 +430,24 @@ def main() -> int:
     checks = 0
     failures = 0
 
+    def refused_before_close(record: str | None) -> bool:
+        """An error event followed by an unclean 1006 close, in that order."""
+        record = record or ""
+        return record.startswith("err") and record.endswith(",close:1006:false")
+
+    def tls_refusal_code(record: str | None) -> int | None:
+        """The X509_V_ERR code a wss:// refusal named, from the page's own event.
+
+        A refusal on a socket does not reach the engine's stderr: it surfaces as
+        the error event's message, which the page logs. A first version of this
+        check searched stderr and found nothing, so it was blind in exactly the
+        way it was written to cure. Every refusal used to say only
+        "certificate verification failed"; the code is what separates an
+        expired certificate from an untrusted issuer from a wrong name.
+        """
+        match = re.search(r"certificate verification failed \(code (\d+)", record or "")
+        return int(match.group(1)) if match else None
+
     def check(label: str, cond: bool, detail: str = "") -> None:
         nonlocal checks, failures
         checks += 1
@@ -450,6 +473,29 @@ def main() -> int:
                     f"var ws = new WebSocket('wss://127.0.0.1:{wss_valid.port}/worker-ok');\n"
                     f"ws.onmessage = function(e) {{ postMessage('W:' + e.data); ws.close(1000, 'wdone'); }};\n"
                     f"ws.onerror = function() {{ postMessage('W:ERR'); }};\n"
+                ).encode("utf-8"),
+            )
+            https_srv.routes["/worker-bin-ws.js"] = (
+                "application/javascript",
+                (
+                    f"var ws = new WebSocket('wss://127.0.0.1:{wss_valid.port}/worker-bin');\n"
+                    "ws.binaryType = 'arraybuffer';\n"
+                    "var step = 0;\n"
+                    "ws.onmessage = function(e) {\n"
+                    "  step++;\n"
+                    "  if (step === 1) {\n"
+                    "    var u = new Uint8Array(e.data);\n"
+                    "    var ok1 = (e.data instanceof ArrayBuffer) && u.length === 4 && u[0] === 0 && u[1] === 254 && u[2] === 255 && u[3] === 128;\n"
+                    "    ws.binaryType = 'blob';\n"
+                    "    ws.send(new Uint8Array([9, 0, 255]).buffer);\n"
+                    "    ws._ok1 = ok1;\n"
+                    "  } else if (step === 2) {\n"
+                    "    var ok2 = (e.data instanceof Blob) && e.data.size === 3 && e.data.type === '';\n"
+                    "    postMessage('WB:' + ws._ok1 + ':' + ok2);\n"
+                    "    ws.close(1000, 'wbdone');\n"
+                    "  }\n"
+                    "};\n"
+                    "ws.onerror = function() { postMessage('WB:ERR'); };\n"
                 ).encode("utf-8"),
             )
 
@@ -545,7 +591,7 @@ function expectTlsFail(tag, url) {{
   pending++;
   var seq = [];
   var s = new WebSocket(url);
-  s.onerror = function() {{ seq.push('err'); }};
+  s.onerror = function(e) {{ seq.push('err[' + (e && e.message ? e.message : 'no-msg') + ']'); }};
   s.onclose = function(e) {{
     seq.push('close:' + e.code + ':' + e.wasClean);
     log(tag, seq.join(','));
@@ -567,6 +613,68 @@ wk.onmessage = function(e) {{
 }};
 wk.onerror = function(e) {{
   log('worker_err', e.message || 'err');
+  pending--;
+}};
+
+// Binary wss:// round-trip (ArrayBuffer, TypedArray subarray, DataView, Blob, detached TypeError)
+pending++;
+var wsBin = new WebSocket('wss://127.0.0.1:{wss_valid.port}/wss-bin');
+var binResults = [];
+var binStep = 0;
+function toHex(ab) {{
+  var u = new Uint8Array(ab);
+  var s = '';
+  for (var i = 0; i < u.length; i++) s += (u[i] < 16 ? '0' : '') + u[i].toString(16);
+  return s;
+}}
+wsBin.onopen = function() {{
+  var det = new ArrayBuffer(4);
+  det.transfer();
+  try {{ wsBin.send(det); log('bin_detached', 'NO_THROW'); }}
+  catch (e) {{ log('bin_detached', e.name); }}
+
+  var b1 = new Uint8Array([0, 255, 254, 128, 65]);
+  wsBin.send(b1.buffer);
+  b1[0] = 99; // synchronous snapshot check
+  var b2 = new Uint8Array([10, 20, 30, 40, 50]);
+  wsBin.send(b2.subarray(1, 4));
+  wsBin.send(new DataView(b2.buffer, 2, 2));
+  wsBin.send(new Blob([b2.subarray(0, 2), new DataView(b2.buffer, 3, 2), '\\x00Z']));
+  wsBin.send(new Uint8Array(0));
+}};
+wsBin.onmessage = function(e) {{
+  binStep++;
+  if (binStep === 1) {{
+    var isBlob = (e.data instanceof Blob) && e.data.size === 5 && e.data.type === '';
+    wsBin.binaryType = 'arraybuffer';
+    pending++;
+    e.data.arrayBuffer().then(function(ab) {{
+      log('bin_blob', isBlob + ':' + toHex(ab));
+      pending--;
+    }});
+  }} else {{
+    binResults.push((e.data instanceof ArrayBuffer) + ':' + toHex(e.data));
+    if (binStep === 5) {{
+      log('bin_ab', binResults.join('|'));
+      wsBin.close(1000);
+    }}
+  }}
+}};
+wsBin.onclose = function(e) {{
+  log('bin_close', e.code + ':' + e.wasClean);
+  pending--;
+}};
+
+// Worker binary wss:// (ArrayBuffer + Blob) inside HTTPS page
+pending++;
+var wkBin = new Worker('/worker-bin-ws.js');
+wkBin.onmessage = function(e) {{
+  log('worker_bin_msg', e.data);
+  pending--;
+  wkBin.terminate();
+}};
+wkBin.onerror = function(e) {{
+  log('worker_bin_err', e.message || 'err');
   pending--;
 }};
 
@@ -616,20 +724,33 @@ setTimeout(pump, 1);
                   r1.get("loop_msg") == "echo:hi-loop" and r1.get("loop_close") == "1000:true",
                   f"{r1.get('loop_msg')} / {r1.get('loop_close')}")
             check("wss:// untrusted CA rejected fail-closed with 0 upgrades",
-                  r1.get("tls_untrusted") == "err,close:1006:false" and len(wss_untrusted.upgrades) == 0,
+                  refused_before_close(r1.get("tls_untrusted")) and len(wss_untrusted.upgrades) == 0
+                  and tls_refusal_code(r1.get("tls_untrusted")) == 18,
                   str(r1.get("tls_untrusted")))
             check("wss:// wrong SAN rejected fail-closed with 0 upgrades",
-                  r1.get("tls_wronghost") == "err,close:1006:false" and len(wss_wrong.upgrades) == 0,
+                  refused_before_close(r1.get("tls_wronghost")) and len(wss_wrong.upgrades) == 0
+                  and tls_refusal_code(r1.get("tls_wronghost")) == 64,
                   str(r1.get("tls_wronghost")))
             check("wss:// expired cert rejected fail-closed with 0 upgrades",
-                  r1.get("tls_expired") == "err,close:1006:false" and len(wss_expired.upgrades) == 0,
+                  refused_before_close(r1.get("tls_expired")) and len(wss_expired.upgrades) == 0
+                  and tls_refusal_code(r1.get("tls_expired")) == 10,
                   str(r1.get("tls_expired")))
             check("wss:// plaintext TCP peer rejected fail-closed",
-                  r1.get("tls_plaintext") == "err,close:1006:false",
+                  refused_before_close(r1.get("tls_plaintext"))
+                  and tls_refusal_code(r1.get("tls_plaintext")) is None,
                   str(r1.get("tls_plaintext")))
             check("Worker inherits Origin and completes wss:// roundtrip",
                   r1.get("worker_msg") == "W:wss-worker-ok",
                   str(r1.get("worker_msg")))
+            check("wss:// binary send(ArrayBuffer/TypedArray/DataView/Blob) & detached TypeError",
+                  r1.get("bin_detached") == "TypeError"
+                  and r1.get("bin_blob") == "true:00fffe8041"
+                  and r1.get("bin_ab") == "true:141e28|true:1e28|true:0a142832005a|true:"
+                  and r1.get("bin_close") == "1000:true",
+                  f"det={r1.get('bin_detached')} blob={r1.get('bin_blob')} ab={r1.get('bin_ab')} close={r1.get('bin_close')}")
+            check("Worker completes wss:// binary ArrayBuffer & Blob roundtrip",
+                  r1.get("worker_bin_msg") == "WB:true:true",
+                  str(r1.get("worker_bin_msg")))
 
             # Server-side wire assertions for HTTPS upgrades
             with wss_valid.lock:
@@ -644,6 +765,17 @@ setTimeout(pump, 1);
                   wss_cookie_up is not None and "wss_secure=1" in (wss_cookie_up["cookie"] or "")
                   and r1.get("wss_cookie_close") == "1000:true",
                   f"cookie={wss_cookie_up and wss_cookie_up['cookie']} close={r1.get('wss_cookie_close')}")
+            wss_bin_up = next((u for u in wss_upgrades if u["path"] == "/wss-bin"), None)
+            check("wss:// binary frames arrive on wire as opcode 0x02 with exact raw bytes",
+                  wss_bin_up is not None
+                  and wss_bin_up["binary_messages"] == [
+                      b"\x00\xff\xfe\x80A",
+                      b"\x14\x1e\x28",
+                      b"\x1e\x28",
+                      b"\x0a\x14\x28\x32\x00Z",
+                      b"",
+                  ],
+                  f"bin_msgs={wss_bin_up and [m.hex() for m in wss_bin_up['binary_messages']]}")
 
             keys = [u["key"] for u in wss_upgrades + https_upgrades + plain_upgrades]
             decoded_key_lens = [len(base64.b64decode(k)) for k in keys if k]

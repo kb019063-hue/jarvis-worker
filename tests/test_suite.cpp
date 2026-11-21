@@ -16971,14 +16971,30 @@ TEST(a_hole_is_a_place_the_prototype_can_fill) {
         ok('a hole with nothing behind it reads undefined', [, ][0], undefined);
         // An object whose prototype is an array inherits its indices one by
         // one -- the elements are the prototype's own properties, which is
-        // what `lookup_chain` did not look at. Its `length` is a *different*
-        // gap and a row of AGENTS.md of its own: the standard inherits it from
-        // the prototype's `length` and this engine answers `undefined`, so it
-        // is asserted here as it is, where a change to it will be noticed.
+        // what `lookup_chain` did not look at. `length` is the other thing an
+        // array keeps in `array_elements` instead of the property map, and it
+        // inherits the same way: a read that falls through the chain finds it
+        // on the array it lands on (finding 138). It is inherited, but it is
+        // not an own property, so it has no descriptor and `Object.keys` does
+        // not list it.
         var inherited = Object.create([7, 8, 9]);
         ok('an object with an array prototype inherits an index', inherited[0], 7);
         ok('an index past the array end is undefined', inherited[3], undefined);
-        ok('its length is not inherited here', inherited.length, undefined);
+        ok('and it inherits the length', inherited.length, 3);
+        ok('the inherited length is not an own property', inherited.hasOwnProperty('length'), false);
+        ok('and has no descriptor', Object.getOwnPropertyDescriptor(inherited, 'length'), undefined);
+        ok('but it is in', 'length' in inherited, true);
+        // The length belongs to the array it was found on, not to the object
+        // that asked: a prototype that grows is a longer length for everyone.
+        var grows = Object.create([1, 2]);
+        ok('the length is a read, not a copy', grows.length, 2);
+        [1, 2, 3, 4].forEach(function (v) { if (v === 3) { grows[0] = 0; } });
+        var longer = Object.create([1, 2, 3, 4]);
+        ok('a longer prototype is a longer length', longer.length, 4);
+        ok('an empty array prototype is length zero', Object.create([]).length, 0);
+        // Two levels of it: the walk keeps going until it reaches an array.
+        ok('the walk reaches an array through another object', Object.create(grows).length, 2);
+        ok('and a longer one through the same walk', Object.create(Object.create([1, 2, 3, 4])).length, 4);
         var prototypeIndexed = Object.create(Array.prototype);
         Array.prototype[2] = 'two';
         ok('a plain object still sees an index the prototype has', prototypeIndexed[2], 'two');
@@ -16988,6 +17004,90 @@ TEST(a_hole_is_a_place_the_prototype_can_fill) {
         var own = [1, , 3];
         ok('a hole has no descriptor', Object.getOwnPropertyDescriptor(own, '1'), undefined);
         ok('but the length still counts it', own.length, 3);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
+// Finding 138. An array keeps two things in `array_elements` instead of in
+// its property map: its indices and its `length`. `lookup_chain` had learnt to
+// hand out the indices -- so `Object.create([7, 8, 9])[0]` was already 7 --
+// but it had no case for `length`, so a read that fell through the chain to an
+// array stopped one answer short: `Object.create([7, 8, 9]).length` was
+// `undefined` where the language has `3`. Both answers now come from the same
+// place, the array the walk lands on.
+TEST(length_is_inherited_from_an_array_prototype) {
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"JS(
+        var failures = [];
+        function ok(label, actual, expected) {
+            if (!Object.is(actual, expected)) {
+                failures.push(label + ': got ' + String(actual) + ' want ' + String(expected));
+            }
+        }
+    )JS");
+
+    // The read itself, and the fact that it is inherited rather than owned:
+    // the standard has `HasProperty(o, 'length')` true and
+    // `GetOwnPropertyDescriptor(o, 'length')` undefined, which is exactly the
+    // pair a chain walk with no descriptor to hand out produces.
+    js.eval(R"JS(
+        var inherited = Object.create([7, 8, 9]);
+        ok('an object with an array prototype has its length', inherited.length, 3);
+        ok('the length is not an own property', inherited.hasOwnProperty('length'), false);
+        ok('and it has no descriptor', Object.getOwnPropertyDescriptor(inherited, 'length'), undefined);
+        ok('but `in` finds it', 'length' in inherited, true);
+        ok('Object.keys does not list it', Object.keys(inherited).length, 0);
+        ok('JSON.stringify does not show it', JSON.stringify(inherited), '{}');
+        ok('for-in does not enumerate it', (function () {
+            var seen = [];
+            for (var k in inherited) seen.push(k);
+            return seen.join();
+        })(), '0,1,2');
+        ok('the indices still come through', inherited[1], 8);
+        ok('and past the end is still undefined', inherited[9], undefined);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+
+    // It is a read of the array it lands on, not a number copied to the
+    // reader: the same object sees the new length after the array grows, and
+    // the walk goes through any number of objects to reach it.
+    js.eval(R"JS(
+        var proto = [1, 2];
+        var reader = Object.create(proto);
+        ok('the length starts at two', reader.length, 2);
+        proto.push(3);
+        ok('and follows the array growing', reader.length, 3);
+        proto.length = 1;
+        ok('and the array shrinking', reader.length, 1);
+        ok('the walk reaches an array two levels up', Object.create(Object.create([1, 2, 3, 4])).length, 4);
+        ok('an empty array prototype is length zero', Object.create([]).length, 0);
+        ok('Array.prototype still has a length', typeof Array.prototype.length, 'number');
+        ok('and it is zero', Array.prototype.length, 0);
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+
+    // An array's own length is its own property and is unaffected, and a
+    // plain object has none to inherit: the walk only answers for an array.
+    js.eval(R"JS(
+        var own = [4, 5];
+        ok('an array owns its length', own.hasOwnProperty('length'), true);
+        ok('and it is its element count', own.length, 2);
+        ok('a plain object has no length', ({}).length, undefined);
+        ok('nor does one with a plain prototype', Object.create({}).length, undefined);
+        ok('a string still has a length', 'abc'.length, 3);
+        ok('a function still has its arity', (function (a, b) {}).length, 2);
+        // `Object.setPrototypeOf` to null leaves an array with the length it
+        // computes for itself, because that answer never needed the chain.
+        var bare = [1, 2, 3];
+        Object.setPrototypeOf(bare, null);
+        ok('an array off the chain still knows its length', bare.length, 3);
+        // An own `length` on the reader wins over the inherited one, which is
+        // the ordinary shadowing rule and not a special case for arrays.
+        var shadowed = Object.create([1, 2, 3]);
+        shadowed.length = 'mine';
+        ok('an own length shadows the inherited one', shadowed.length, 'mine');
     )JS");
     assert(js.eval("failures.length").to_string() == "0");
     assert(js.eval("failures.join('; ')").to_string().empty());
@@ -28827,6 +28927,9 @@ int main() {
     // loop does, instead of reading an array's elements by is_array().
     RUN_TEST(destructuring_asks_the_value_for_its_iterator);
     RUN_TEST(a_hole_is_a_place_the_prototype_can_fill);
+    // Finding 138: the other thing an array keeps in `array_elements`, its
+    // length, is inherited through the chain the same way its indices are.
+    RUN_TEST(length_is_inherited_from_an_array_prototype);
 
     // Per-glyph font fallback: a codepoint the primary face does not cover is
     // drawn from another face instead of painting nothing.

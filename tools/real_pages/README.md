@@ -42,6 +42,14 @@ python3 tools/real_pages/check_noscript.py build/litebird   # enabled AND disabl
 python3 tools/real_pages/strict_frames.py "$R/results"     # after the full rerun; requires Pillow
 ```
 
+## Rerun 05: Hextris start (workspace follow-up)
+
+[PDF: start and play screens](rerun-05/hextris.pdf) · [Litebird outcomes](rerun-05/litebird.json) · [Chromium reference](rerun-05/reference.json) · [exact post-action pixel comparisons](rerun-05/strict-frames.json).
+
+**20/20 frozen interactions, not 20/20 visual matches.** The native probe hit the actual start target. It required `gameState` 0 → 1, the start box to disappear and the pause button to become visible and hit-testable; an independent PNG decoder checks for the board and pause glyph colors. The before/after screenshots confirm that the title and play glyph give way to the board, instructions and pause control. This task stops at start: it does not verify rotation, pause/resume or a whole game. In an intermediate run all the expected ink was visible but the pause hit returned no element. That run did **not** count.
+
+**Rendering:** none of 19 comparable frames was pixel-identical. Random 2048 boards are excluded. Hextris differed on 102,391 of 480,000 pixels in this pair, including animation timing. The pause button is 60×60 rather than 72×72; type weight, badges and spacing also differ. See the [investigation](hextris-investigation/README.md) for the separate geometry, mouse and clipping controls. Do not treat this workspace follow-up as a result measured on `main`.
+
 ## Rerun on Linux (from repository root)
 
 Use an empty or trusted local scratch directory. Pinned snapshots, browsers, logs and full-resolution PNGs belong outside Git. Use an isolated disposable environment, not a machine with personal browser data. The network restriction in the probe is for repeatability, not a general-purpose security sandbox.
@@ -65,6 +73,6 @@ python3 "$T/run.py" "$R/sites" "$R/results" "$R/probe"
 
 Reference: fresh browser context per task, real mouse/keyboard, intercept requests to replay only the pinned tree. `reference.json` must validate the task before the probe attempts it. The initial oracle was calibrated **in Chromium**: open the collapsed PEP contents before following its link, allow scrolling to settle, and preserve the binary converter’s trailing separator. The human tasks did not change.
 
-Litebird: fresh native process per task, origin mapped to the same tree, new sockets disabled before navigation. Scroll/hit-test/click/type through `BrowserShell`; inspect DOM only to locate a control or read the result. The probe locates targets using Litebird’s script-facing selector engine, not the native simple-name helper. It does not navigate directly to the expected result. The shell delivers arrow keydowns and edits plain single-text-node contenteditable hosts, but has no page mousedown adapter; do not substitute calls to a page’s handlers. Treat an exit before the first frame separately from an untestable input. Each task has a 45-second wall budget (not a speed benchmark).
+Litebird: fresh native process per task, origin mapped to the same tree, new sockets disabled before navigation. Scroll/hit-test/click/type through `BrowserShell`; inspect DOM only to locate a control or read the result. The probe locates targets using Litebird’s script-facing selector engine, not the native simple-name helper. It does not navigate directly to the expected result. The shell delivers arrow keydowns, primary mouse clicks (press, release, click), and edits plain single-text-node contenteditable hosts; do not substitute calls to a page’s handlers. Treat an exit before the first frame separately from an untestable input. Each task has a 45-second wall budget (not a speed benchmark).
 
 `litebird.json` contains **candidate** interaction outcomes. Review the before/after PNGs for readability and visible results before publishing the count. A readable output with broken layout can pass interaction but not visual fidelity. Record missing frames, incomplete actions, crashes and blocked reference cases separately. Never drop them from the 20-row table. Keep v1 fixed when tuning the engine; use fresh holdout sites for broader claims.

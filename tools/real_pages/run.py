@@ -28,6 +28,20 @@ for i, t in enumerate(manifest['pages'], 1):
         lines = proc.stdout.decode(errors='replace').splitlines()
         marks = [line[6:] for line in lines if line.startswith('BENCH ')]
         row['result'] = marks[-1] if proc.returncode == 0 and marks else f'probe exited {proc.returncode}'
+        if t.get('game') == 'hex' and row['result'].startswith('pass:'):
+            # DOM state alone passed in an experimental build with an invisible board.
+            # Decode the actual shell PNG; check ink inside the board and the button.
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'conformance'))
+            from render_check import read_png
+            png = read_png(out / f'lite-{i}-after.png')
+            x,y,w,h = map(float, next(line[12:] for line in lines if line.startswith('BENCH-PAUSE ')).split())
+            board = png.region(384, 284, 32, 32)
+            button = png.region(int(x), int(y), int(w), int(h))
+            ink = (44,62,80,255)
+            row['pauseRect'] = [x,y,w,h]
+            row['visibleInk'] = ink in board and ink in button and (255,255,255,255) in button
+            if not row['visibleInk']:
+                row['result'] = 'not-completed: board or pause ink missing from frame'
         if t.get('click') == '#decoded':
             row['edits'] = [line.removeprefix('BENCH-EDIT ') for line in lines if line.startswith('BENCH-EDIT ')]
             selected = [line.removeprefix('BENCH-SELECT ') for line in lines if line.startswith('BENCH-SELECT ')]

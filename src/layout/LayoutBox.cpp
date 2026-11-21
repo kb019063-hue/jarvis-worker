@@ -686,10 +686,11 @@ void LayoutBox::layout_block(float containing_width) {
         // Relative positioning offset
         const ComputedStyle& post_cs = *child->style;
         if (post_cs.position == Position::Relative) {
-            if (post_cs.has_left) new_x += post_cs.left;
-            else if (post_cs.has_right) new_x -= post_cs.right;
-            if (post_cs.has_top) new_y += post_cs.top;
-            else if (post_cs.has_bottom) new_y -= post_cs.bottom;
+            const auto inset = post_cs.used_insets(dimensions.content.width, std::max(0.0f, definite_height));
+            if (post_cs.has_left) new_x += inset.left;
+            else if (post_cs.has_right) new_x -= inset.right;
+            if (post_cs.has_top) new_y += inset.top;
+            else if (post_cs.has_bottom) new_y -= inset.bottom;
         }
 
         float dx = new_x - child->dimensions.content.x;
@@ -942,10 +943,11 @@ void LayoutBox::layout_flex(float containing_width) {
                               child->dimensions.margin.top + child->dimensions.border.top + child->dimensions.padding.top;
 
                 if (cs.position == Position::Relative) {
-                    if (cs.has_left) new_x += cs.left;
-                    else if (cs.has_right) new_x -= cs.right;
-                    if (cs.has_top) new_y += cs.top;
-                    else if (cs.has_bottom) new_y -= cs.bottom;
+                    const auto inset = cs.used_insets(dimensions.content.width, std::max(0.0f, s.height));
+                    if (cs.has_left) new_x += inset.left;
+                    else if (cs.has_right) new_x -= inset.right;
+                    if (cs.has_top) new_y += inset.top;
+                    else if (cs.has_bottom) new_y -= inset.bottom;
                 }
 
                 float dx = new_x - child->dimensions.content.x;
@@ -1009,10 +1011,11 @@ void LayoutBox::layout_flex(float containing_width) {
 
             const ComputedStyle& cs = *child->style;
             if (cs.position == Position::Relative) {
-                if (cs.has_left) new_x += cs.left;
-                else if (cs.has_right) new_x -= cs.right;
-                if (cs.has_top) new_y += cs.top;
-                else if (cs.has_bottom) new_y -= cs.bottom;
+                const auto inset = cs.used_insets(dimensions.content.width, std::max(0.0f, s.height));
+                if (cs.has_left) new_x += inset.left;
+                else if (cs.has_right) new_x -= inset.right;
+                if (cs.has_top) new_y += inset.top;
+                else if (cs.has_bottom) new_y -= inset.bottom;
             }
 
             float dx = new_x - child->dimensions.content.x;
@@ -1274,10 +1277,13 @@ void LayoutBox::layout_grid(float containing_width) {
 
         const ComputedStyle& post_cs = *child->style;
         if (post_cs.position == Position::Relative) {
-            if (post_cs.has_left) new_x += post_cs.left;
-            else if (post_cs.has_right) new_x -= post_cs.right;
-            if (post_cs.has_top) new_y += post_cs.top;
-            else if (post_cs.has_bottom) new_y -= post_cs.bottom;
+            const size_t ce = std::min(placements[i].c_end, num_cols);
+            const float area_w = ce > cs ? col_x[ce-1] + col_widths[ce-1] - col_x[cs] : 0.0f;
+            const auto inset = post_cs.used_insets(area_w, area_h);
+            if (post_cs.has_left) new_x += inset.left;
+            else if (post_cs.has_right) new_x -= inset.right;
+            if (post_cs.has_top) new_y += inset.top;
+            else if (post_cs.has_bottom) new_y -= inset.bottom;
         }
 
         float dx = new_x - child->dimensions.content.x;
@@ -1829,10 +1835,12 @@ void LayoutBox::resolve_out_of_flow_positions(const std::shared_ptr<LayoutBox>& 
 
         if (box->style->is_out_of_flow()) {
             Rect cb;
-            if (box->style->position == Position::Fixed) {
+            // Without a positioned ancestor, absolute offsets and sizes use the
+            // initial containing block, not the height of in-flow body content.
+            if (box->style->position == Position::Fixed || !positioned_ancestor) {
                 cb = Rect(0.0f, 0.0f, viewport_w, viewport_h);
             } else {
-                auto cb_box = positioned_ancestor ? positioned_ancestor : root;
+                const auto& cb_box = positioned_ancestor;
                 cb.x = cb_box->dimensions.content.x - cb_box->dimensions.padding.left;
                 cb.y = cb_box->dimensions.content.y - cb_box->dimensions.padding.top;
                 cb.width = cb_box->dimensions.padding_box().width;
@@ -1842,55 +1850,30 @@ void LayoutBox::resolve_out_of_flow_positions(const std::shared_ptr<LayoutBox>& 
             box->layout(cb.width, cb.height);
             const ComputedStyle& bs = *box->style;
 
+            const auto inset = bs.used_insets(cb.width, cb.height);
+
             // If both insets are given and dimension is auto, size to insets
             if (bs.has_left && bs.has_right && bs.width < 0.0f) {
                 float total_h = box->dimensions.margin.left + box->dimensions.margin.right +
                                 box->dimensions.border.left + box->dimensions.border.right +
                                 box->dimensions.padding.left + box->dimensions.padding.right;
-                box->dimensions.content.width = std::max(0.0f, cb.width - bs.left - bs.right - total_h);
+                box->dimensions.content.width = std::max(0.0f, cb.width - inset.left - inset.right - total_h);
             }
             if (bs.has_top && bs.has_bottom && bs.height < 0.0f) {
                 float total_v = box->dimensions.margin.top + box->dimensions.margin.bottom +
                                 box->dimensions.border.top + box->dimensions.border.bottom +
                                 box->dimensions.padding.top + box->dimensions.padding.bottom;
-                box->dimensions.content.height = std::max(0.0f, cb.height - bs.top - bs.bottom - total_v);
+                box->dimensions.content.height = std::max(0.0f, cb.height - inset.top - inset.bottom - total_v);
             }
 
-            // Position X
-            if (bs.has_left) {
-                box->dimensions.content.x = cb.x + bs.left +
-                                            box->dimensions.margin.left +
-                                            box->dimensions.border.left +
-                                            box->dimensions.padding.left;
-            } else if (bs.has_right) {
-                box->dimensions.content.x = cb.x + cb.width - bs.right -
-                                            box->dimensions.margin.right -
-                                            box->dimensions.border.right -
-                                            box->dimensions.padding.right -
-                                            box->dimensions.content.width;
-            } else {
-                box->dimensions.content.x = cb.x + box->dimensions.margin.left +
-                                            box->dimensions.border.left +
-                                            box->dimensions.padding.left;
-            }
-
-            // Position Y
-            if (bs.has_top) {
-                box->dimensions.content.y = cb.y + bs.top +
-                                            box->dimensions.margin.top +
-                                            box->dimensions.border.top +
-                                            box->dimensions.padding.top;
-            } else if (bs.has_bottom) {
-                box->dimensions.content.y = cb.y + cb.height - bs.bottom -
-                                            box->dimensions.margin.bottom -
-                                            box->dimensions.border.bottom -
-                                            box->dimensions.padding.bottom -
-                                            box->dimensions.content.height;
-            } else {
-                box->dimensions.content.y = cb.y + box->dimensions.margin.top +
-                                            box->dimensions.border.top +
-                                            box->dimensions.padding.top;
-            }
+            const auto& d = box->dimensions;
+            float x = cb.x + d.margin.left + d.border.left + d.padding.left;
+            float y = cb.y + d.margin.top + d.border.top + d.padding.top;
+            if (bs.has_left) x += inset.left;
+            else if (bs.has_right) x = (cb.x + cb.width) - inset.right - d.margin.right - d.border.right - d.padding.right - d.content.width;
+            if (bs.has_top) y += inset.top;
+            else if (bs.has_bottom) y = (cb.y + cb.height) - inset.bottom - d.margin.bottom - d.border.bottom - d.padding.bottom - d.content.height;
+            box->shift_position(x - box->dimensions.content.x, y - box->dimensions.content.y);
         }
 
         std::shared_ptr<LayoutBox> next_positioned = positioned_ancestor;

@@ -4,6 +4,7 @@
 #include "board2048.hpp"
 #include <fstream>
 #include <iostream>
+#include <thread>
 #include <stdexcept>
 #include <linux/filter.h>
 #include <linux/seccomp.h>
@@ -140,9 +141,30 @@ int main(int argc, char** argv) {
                 }
             }
         }
+    } else if (mode=="game" && target=="hex") {
+        auto start=locate("#startBtn"), pause=locate("#pauseBtn");
+        auto state=[&] { return shell.js_engine()->eval("window.gameState").to_string(); };
+        auto hit_center=[&](const std::shared_ptr<Element>& el) {
+            const auto r=el->bounding_box();
+            return r.width>0 && r.height>0 && r.x>=0 && r.y>=0 && r.right()<=800 && r.bottom()<=600 &&
+                   shell.element_at(r.x+r.width/2,r.y+r.height/2)==el;
+        };
+        const auto before=state();
+        if (start && pause && before=="0" && hit_center(start) && pause->bounding_box().width==0) {
+            const auto r=start->bounding_box();
+            bool clicked=shell.click_at(r.x+r.width/2,r.y+r.height/2);
+            auto until=std::chrono::steady_clock::now()+std::chrono::seconds(1);
+            do {
+                shell.tick();
+                std::this_thread::sleep_for(std::chrono::milliseconds(16));
+            } while (std::chrono::steady_clock::now()<until);
+            pass=clicked && state()=="1" && start->bounding_box().width==0 && hit_center(pause);
+            auto p=pause->bounding_box();
+            std::cout<<"BENCH-PAUSE "<<p.x<<' '<<p.y<<' '<<p.width<<' '<<p.height<<'\n';
+        }
+        note="game state "+before+" -> "+state()+"; start hidden and pause hit-test required";
     } else {
-        // The shell still has no page mousedown adapter for Hextris.
-        std::cout<<"BENCH not-tested: shell has no game input adapter\n"; return 0;
+        throw std::runtime_error("unknown benchmark task");
     }
     shot("-after");
     std::cout<<"BENCH "<<(pass?"pass: ":"not-completed: ")<<note.substr(0,140)<<'\n';

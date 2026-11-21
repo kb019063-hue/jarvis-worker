@@ -91,6 +91,19 @@ SharedComputedStyle resolve_element_style(
             }
         }
     }
+    // CSS Overflow: with visible overflow on the HTML root, the first
+    // body's overflow applies to the viewport, not to its own padding box.
+    // An absolutely positioned canvas can fill the viewport even if almost
+    // nothing contributes to the body's in-flow height. Keep ordinary clips
+    // and containment intact; the framebuffer itself bounds viewport paint.
+    if (tag == "body" && !element->is_foreign() && computed.overflow != Overflow::Visible && !computed.containment) {
+        auto doc = element->owner_document();
+        auto html = doc ? doc->document_element() : nullptr;
+        if (html && !html->is_foreign() && html->tag_name() == "html" && element->parent() == html && doc->body() == element) {
+            const auto root_style = resolver.resolve_style(html, nullptr);
+            if (root_style.overflow == Overflow::Visible && !root_style.containment) computed.overflow = Overflow::Visible;
+        }
+    }
     if (computed.is_none()) return nullptr;
     return pool.intern(std::move(computed));
 }

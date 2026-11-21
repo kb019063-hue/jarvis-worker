@@ -16,6 +16,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cstring>
+#include <unordered_set>
 
 #include <termios.h>
 #include <unistd.h>
@@ -427,20 +428,25 @@ std::shared_ptr<Element> BrowserShell::element_at(float x, float y) const {
             // The painter emits these line fragments *instead of* painting
             // their backing child boxes. The latter have unfragmented bounds
             // and can steal a hit from a neighbouring, visibly painted link.
-            if (!box->line_boxes.empty()) return;
+        }
+        if (!box->line_boxes.empty()) return;
 
-            for (const auto& ch : box->children) {
-                search(ch);
-            }
+        // A fixed descendant can escape an anonymous wrapper with no area.
+        // Its parent need not cover the point. Only prune a subtree at a
+        // clip, not merely because the cursor lies outside its border box.
+        if (!inside && (box->style->overflow != Overflow::Visible || box->style->contains_paint())) return;
+        // Visit overlapping siblings in the same stable z order as paint.
+        auto z = [](const auto& child) {
+            const auto& style = *child->style;
+            return style.is_positioned() && style.has_z_index ? style.z_index : 0;
+        };
+        auto below = [&](const auto& a, const auto& b) { return z(a) < z(b); };
+        if (std::is_sorted(box->children.begin(), box->children.end(), below)) {
+            for (const auto& ch : box->children) search(ch);
         } else {
-            // Table layout flattens row groups: their painted rows and
-            // cells have bounds, but the group itself may have none.
-            // Out-of-flow children can also escape their parent box.
-            for (const auto& ch : box->children) {
-                if (ch && (box->style->is_table_row_group() || ch->style->is_out_of_flow())) {
-                    search(ch);
-                }
-            }
+            auto ordered = box->children;
+            std::stable_sort(ordered.begin(), ordered.end(), below);
+            for (const auto& ch : ordered) search(ch);
         }
     };
 
@@ -452,45 +458,58 @@ bool BrowserShell::click_at(float x, float y) {
     auto el = element_at(x, y);
     if (!el) return false;
 
-    if (dom::plain_editable(*el)) {
-        el->focus();
-        dom::select_edit_text(*el, false);
-    } else {
-        const std::string tag = el->tag_name();
-        if (tag == "input" || tag == "textarea" || tag == "select" || tag == "button" ||
-            el->has_attribute("tabindex")) {
+    auto send_mouse = [&](const std::shared_ptr<Element>& target, const char* type, int buttons, bool click) {
+        if (auto* realm = dom::realm_if_any(*target)) {
+            JsIntrinsics::set_current(realm->intrinsics);
+            JsScriptScope scope;
+            std::vector<dom::EventField> fields{
+                {"view", dom::window_of(*realm)}, {"clientX", JsValue::make_number(x)},
+                {"clientY", JsValue::make_number(y)}, {"button", JsValue::make_number(0)},
+                {"buttons", JsValue::make_number(buttons)}, {"detail", JsValue::make_number(1)}
+            };
+            if (click) {
+                fields.push_back({"pointerType", JsValue::make_string("mouse")});
+                fields.push_back({"pointerId", JsValue::make_number(1)});
+                fields.push_back({"isPrimary", JsValue::make_boolean(true)});
+            }
+            auto ev = dom::make_event(*realm, click ? "PointerEvent" : "MouseEvent", type, true, true,
+                                      std::move(fields), true);
+            return dom::dispatch(*realm, dom::wrap(*realm, *target), ev, true);
+        }
+        return click ? target->click() : target->dispatch_event(std::make_shared<Event>(type, true, true));
+    };
+    // This entry point models one primary click at a single viewport point,
+    // not a drag. A canceled press suppresses focus, not release or click.
+    if (send_mouse(el, "mousedown", 1, false) && el->is_connected()) {
+        if (dom::plain_editable(*el)) {
             el->focus();
+            dom::select_edit_text(*el, false);
+        } else {
+            const auto& tag = el->tag_name();
+            if (tag == "input" || tag == "textarea" || tag == "select" || tag == "button" ||
+                el->has_attribute("tabindex")) el->focus();
         }
     }
-
-    // Dispatch click event first so page JS handlers (and `preventDefault()`) run.
-    bool canceled = false;
-    if (dom::Realm* realm = dom::realm_if_any(*el)) {
-        JsIntrinsics::set_current(realm->intrinsics);
-        JsScriptScope scope;
-        JsValue ev = dom::make_event(
-            *realm,
-            "PointerEvent",
-            "click",
-            true,
-            true,
-            {
-                {"view", dom::window_of(*realm)},
-                {"clientX", JsValue::make_number(x)},
-                {"clientY", JsValue::make_number(y)},
-                {"pageX", JsValue::make_number(x + m_scroll_x)},
-                {"pageY", JsValue::make_number(y + m_scroll_y)},
-            },
-            true
-        );
-        canceled = !dom::dispatch(*realm, dom::wrap(*realm, *el), ev, false);
-    } else {
-        canceled = !el->click();
+    // A press listener can hide/move the target before the release. Do not
+    // activate a stale link simply because it was under the initial press.
+    rebuild_layout();
+    auto up = element_at(x, y);
+    bool canceled = true;
+    if (up) {
+        send_mouse(up, "mouseup", 0, false);
+        if (up != el) {
+            std::unordered_set<const Node*> ancestors;
+            for (auto at = el->parent(); at; at = at->parent()) ancestors.insert(at.get());
+            auto common = std::static_pointer_cast<Node>(up);
+            while (common && !ancestors.count(common.get()) && common != el) common = common->parent();
+            el = std::dynamic_pointer_cast<Element>(common);
+        }
+        if (el && el->is_connected()) canceled = !send_mouse(el, "click", 0, true);
     }
 
     EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(100));
 
-    if (!canceled) {
+    if (!canceled && el->is_connected()) {
         std::shared_ptr<Node> curr = el;
         while (curr) {
             if (auto elem = std::dynamic_pointer_cast<Element>(curr)) {
@@ -522,7 +541,7 @@ bool BrowserShell::click_at(float x, float y) {
         }
     }
 
-    m_status_message = "Clicked <" + el->tag_name() + (el->id().empty() ? "" : ("#" + el->id())) + ">";
+    m_status_message = el ? "Clicked <" + el->tag_name() + (el->id().empty() ? "" : ("#" + el->id())) + ">" : "Released";
     rebuild_layout();
     m_dirty = true;
     return true;

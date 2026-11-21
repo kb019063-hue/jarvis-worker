@@ -102,7 +102,7 @@ with `RSV1` set) with a fatal protocol error:
   from 35 → **38/38** checks (adding 3 live `wss://` `permessage-deflate`
   end-to-end checks against Python `zlib`), passing in both release and
   ASan+UBSan (`--stress-runs 20`, 0 sanitizer findings).
-- **Unit test suite:** `make test` → **321/321** engine test suites (new
+- **Unit test suite:** `make test` → **322/322** engine test suites (new
   `websocket_permessage_deflate_rfc7692` using `TestPage` covering RFC 7692
   §7.2 codec vectors, `window_bits=9` distance enforcement, context takeover vs
   reset, >70 KiB multi-block stored fallback, bomb `OutputLimitExceeded`, §7.1

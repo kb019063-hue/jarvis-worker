@@ -75,15 +75,18 @@ std::vector<std::string> reflected_own_keys(const JsValue& object, bool include_
 /// cannot see a symbol key or are the very thing that must not. The ones that
 /// copy every key (`Object.assign`, spread, `Object.getOwnPropertyDescriptors`)
 /// have to add the symbols themselves; this is that list.
-std::vector<std::string> assign_keys(const JsValue& object) {
-    std::vector<std::string> keys = reflected_own_keys(object, false);
+std::vector<std::string> assign_keys(const JsValue& object, bool enumerable_only = true) {
+    std::vector<std::string> keys = reflected_own_keys(object, !enumerable_only);
     if (JsObject* cell = object.property_cell()) {
         // The table is walked twice — once by `own_keys` above and once here —
         // rather than counted first: the count a symbol key would have to be
         // compared against is not `keys.size()`, because an array's indices
         // are elements and not table entries.
         for (const auto& entry : cell->properties) {
-            if (!(entry.flags & PropertyMap::Enumerable)) continue;
+            // `Object.assign` copies only the enumerable symbols; the
+            // `[[OwnPropertyKeys]]` a caller like `Reflect.ownKeys` asks for
+            // reports every one of them.
+            if (enumerable_only && !(entry.flags & PropertyMap::Enumerable)) continue;
             JsValue symbol;
             if (!js_symbol_from_key(entry.first, symbol)) continue;
             keys.push_back(entry.first);
@@ -1020,7 +1023,24 @@ void install_object_builtins(JsIntrinsics& realm) {
     // ---- Reflect ----------------------------------------------------------
     JsValue reflect = JsValue::make_object();
     js_define_method(reflect, "ownKeys", 1, [](Args args) {
-        return make_string_array(reflected_own_keys(require_object(js_arg(args, 0), "Reflect.ownKeys"), true));
+        // §28.1.11 is [[OwnPropertyKeys]], which includes the symbols; the array
+        // it answers with holds the symbols themselves, not their descriptions.
+        // `assign_keys` is the list that knows the order (every string key, then
+        // the symbols in creation order) and `reflected_own_keys` is the one that
+        // knows the cross-origin Window/Location rule, so this takes the
+        // cross-origin answer first and falls back to the copy list.
+        JsValue object = require_object(js_arg(args, 0), "Reflect.ownKeys");
+        std::vector<std::string> keys;
+        if (!litebird::dom::cross_origin_own_keys(object, true, keys)) keys = assign_keys(object, false);
+        std::vector<JsValue> values;
+        values.reserve(keys.size());
+        for (const std::string& key : keys) {
+            // A symbol key's internal text resolves back to the symbol itself.
+            JsValue symbol;
+            if (js_symbol_from_key(key, symbol)) values.push_back(symbol);
+            else values.push_back(JsValue::make_string(key));
+        }
+        return JsValue::make_array(values);
     });
     js_define_method(reflect, "has", 2, [](Args args) {
         return JsValue::make_boolean(require_object(js_arg(args, 0), "Reflect.has")

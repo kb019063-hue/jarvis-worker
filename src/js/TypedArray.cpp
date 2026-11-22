@@ -331,6 +331,15 @@ std::optional<std::size_t> parse_index(const std::string& name) {
 
 std::shared_ptr<ArrayBufferData> buffer_of(const JsValue& value);
 std::shared_ptr<TypedArrayData> view_of(const JsValue& value);
+
+bool typed_array_view_is_out_of_bounds(const JsValue& value) {
+    if (!is_buffer_source(value) || !value.is_object()) return false;
+    // A DataView or an ArrayBuffer is not a typed array; only a view has the
+    // typed-array length a detached buffer makes unknowable.
+    auto data = view_of(value);
+    return data && is_out_of_bounds(*data);
+}
+
 std::shared_ptr<DataViewData> dataview_of(const JsValue& value);
 JsValue make_buffer_object(const std::shared_ptr<ArrayBufferData>& bytes);
 /// The one script object for a buffer, so two views of it are `===`.
@@ -1479,20 +1488,42 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
         return JsValue::make_boolean(false);
     });
 
-    js_define_method(proto, "toString", 0, [](Args) {
-        auto data = require_view(JsValue::current_this(), "TypedArray.prototype.toString");
-        const std::size_t len = effective_length(*data);
-        std::string out;
-        for (std::size_t i = 0; i < len; ++i) {
-            if (i) out += ",";
-            const double element =
-                load_element(elements_of_const(*data) + i * element_size(data->type), data->type);
-            // A typed array has no holes, so a NaN is a value to print and
-            // not an empty slot: `new Float32Array([NaN]).join()` is "NaN".
-            out += js_number_to_string(element);
-        }
-        return JsValue::make_string(out);
-    });
+    // §23.2.3.30: `%TypedArray%.prototype.toString` *is* the function object
+    // `Array.prototype.toString` — the same value, not a copy that answers the
+    // same text. `Uint8Array.prototype.toString === Array.prototype.toString`
+    // is therefore true, as it is in a browser and in Node. Array's asks the
+    // receiver for `join` by name, and a typed array inherits `join` from this
+    // very prototype, so the text is unchanged (`new Float32Array([NaN])
+    // .join()` is still "NaN", because a typed array has no holes).
+    {
+        JsValue array_proto_value = JsValue::make_object(JsIntrinsics::get().array_proto);
+        js_define_hidden(proto, "toString", array_proto_value.get_property("toString"));
+        // §23.2.3.29, and *not* the same function as Array's: the receiver
+        // must be a typed array, so `call(42)`, `call({length:1,0:5})`, an
+        // ArrayBuffer and a DataView are TypeErrors where Array's boxes the
+        // primitive and joins it.
+        js_define_hidden(proto, "toLocaleString", js_make_method("toLocaleString", 0, [](Args) {
+            auto data = require_view(JsValue::current_this(), "TypedArray.prototype.toLocaleString");
+            // [[ArrayLength]], the internal slot, never a `length` property a
+            // script may have redefined (test262's
+            // get-length-uses-internal-arraylength).
+            const std::size_t len = effective_length(*data);
+            std::string out;
+            for (std::size_t i = 0; i < len; ++i) {
+                if (i) out += ",";
+                // Invoke boxes the element, so a method that answers
+                // `typeof this` sees "number" and not "object".
+                JsValue boxed = js_to_object(read_live(*data, i));
+                JsValue method = boxed.get_property("toLocaleString");
+                if (!method.is_function()) {
+                    js_throw_type_error(
+                        "TypedArray.prototype.toLocaleString: the element has no toLocaleString");
+                }
+                out += js_to_string(method.call_with_this(boxed, {}));
+            }
+            return JsValue::make_string(out);
+        }));
+    }
 
     js_define_method(proto, "join", 1, [](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.join");
@@ -1888,6 +1919,10 @@ void install_one(JsEnvironment& global, ElementType type) {
 
 bool is_buffer_source(const JsValue& value) {
     return view_of(value) || dataview_of(value) || buffer_of(value);
+}
+
+bool view_is_typed_array(const JsValue& value) {
+    return value.is_object() && view_of(value) != nullptr;
 }
 
 bool typed_array_bytes(const JsValue& value, std::string& out) {

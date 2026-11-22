@@ -2714,13 +2714,14 @@ const Node* tree_root_of(const Node& node) {
 
 const char* default_display(const Element& element) {
     if (element.is_foreign()) return "inline";
+    if (element.tag_name() == "dialog") return element.has_attribute("open") ? "block" : "none";
     static const std::unordered_map<std::string, const char*> s_table = [] {
         std::unordered_map<std::string, const char*> table;
         for (const char* tag : {"html", "body", "div", "p", "ul", "ol", "dl", "dt", "dd", "h1", "h2", "h3", "h4",
                                 "h5", "h6", "section", "article", "aside", "header", "footer", "nav", "main",
                                 "form", "fieldset", "legend", "pre", "blockquote", "figure", "figcaption", "hr",
                                 "address", "details", "summary", "center", "dir", "menu", "hgroup", "optgroup",
-                                "option", "search", "dialog", "listing", "xmp", "plaintext", "frameset", "frame"}) {
+                                "option", "search", "listing", "xmp", "plaintext", "frameset", "frame"}) {
             table[tag] = "block";
         }
         for (const char* tag : {"head", "script", "style", "title", "meta", "link", "base", "template", "noscript",

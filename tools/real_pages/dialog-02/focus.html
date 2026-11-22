@@ -1,0 +1,45 @@
+<!doctype html><meta charset="utf-8"><title>Dialog focus probe</title>
+<style>
+  body { margin: 8px }
+  button { display:block; margin:4px 0 }
+</style>
+<button id="first-open">Open first</button>
+<button id="auto-open">Open autofocus</button>
+<button id="empty-open">Open empty</button>
+<button id="nonmodal-open">Toggle nonmodal</button>
+<div id="gone-wrap"><button id="gone-open">Open doomed</button></div>
+<dialog id="first">
+  <button id="first-a">A</button>
+  <button id="first-b">B</button>
+  <button id="first-cancel">Cancel</button>
+</dialog>
+<dialog id="auto">
+  <button id="auto-b">B</button>
+  <button id="auto-focused" autofocus>Focused</button>
+  <button id="auto-cancel">Cancel</button>
+</dialog>
+<dialog id="empty"><p>No control here</p></dialog>
+<dialog id="nonmodal"><button id="nonmodal-a">Inside</button></dialog>
+<dialog id="doomed"><button id="doomed-cancel">Cancel</button></dialog>
+<script>
+  function openModal(id) {
+    return function () { document.getElementById(id).showModal(); };
+  }
+  document.getElementById('first-open').addEventListener('click', openModal('first'));
+  document.getElementById('auto-open').addEventListener('click', openModal('auto'));
+  document.getElementById('empty-open').addEventListener('click', openModal('empty'));
+  document.getElementById('gone-open').addEventListener('click', openModal('doomed'));
+  document.getElementById('nonmodal-open').addEventListener('click', function () {
+    var dialog = document.getElementById('nonmodal');
+    if (dialog.open) dialog.close(); else dialog.show();
+  });
+  document.getElementById('first-cancel').addEventListener('click', function () {
+    document.getElementById('first').close();
+  });
+  document.getElementById('auto-cancel').addEventListener('click', function () {
+    document.getElementById('auto').close();
+  });
+  document.getElementById('doomed-cancel').addEventListener('click', function () {
+    document.getElementById('doomed').close();
+  });
+</script>

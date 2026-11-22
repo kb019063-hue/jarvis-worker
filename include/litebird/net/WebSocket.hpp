@@ -77,7 +77,8 @@ public:
     const std::string& url() const { return m_url; }
     std::string protocol() const;
     std::string js_protocol() const;
-    std::string extensions() const { return {}; }
+    std::string extensions() const;
+    std::string js_extensions() const;
     std::string binary_type() const;
     void set_binary_type(std::string_view type);
     uint64_t buffered_amount() const { return m_buffered_amount.load(std::memory_order_acquire); }
@@ -122,6 +123,13 @@ public:
     static void random_bytes(uint8_t* dst, size_t len);
 
 private:
+    struct OutboundMessage {
+        uint8_t opcode{0};
+        std::vector<uint8_t> payload;
+        bool is_data{false};
+        bool is_close{false};
+    };
+
     struct OutboundFrame {
         std::vector<uint8_t> bytes;
         size_t payload_bytes{0};
@@ -136,7 +144,8 @@ private:
     void enqueue_frame(uint8_t opcode, const uint8_t* data, size_t len, bool is_data, bool is_close = false);
     void wake_io_thread();
     void receiver_thread_loop();
-    void dispatch_open_on_owner(const std::string& selected_protocol);
+    void dispatch_open_on_owner(const std::string& selected_protocol,
+                                const std::string& selected_extensions);
     void dispatch_message_on_owner(const std::string& payload, bool is_binary);
     void dispatch_error_and_close_on_owner(const std::string& err_msg, int close_code,
                                            const std::string& close_reason, bool was_clean,
@@ -177,12 +186,14 @@ private:
     mutable std::mutex m_state_mutex;
     std::string m_selected_protocol;
     std::string m_js_selected_protocol;
+    std::string m_selected_extensions;
+    std::string m_js_selected_extensions;
     std::string m_binary_type{"blob"};
     int m_pending_close_code{1000};
     std::string m_pending_close_reason;
 
     std::mutex m_outbox_mutex;
-    std::vector<OutboundFrame> m_outbox;
+    std::vector<OutboundMessage> m_outbox;
 
     std::mutex m_thread_mutex;
     std::thread m_receiver_thread;

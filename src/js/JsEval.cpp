@@ -189,6 +189,7 @@ public:
 
     /// The next value, or undefined once the source is exhausted.
     JsValue pull() {
+        m_next_threw = false;
         if (m_done) return JsValue::make_undefined();
         switch (m_mode) {
             case Mode::Array: {
@@ -220,7 +221,18 @@ public:
                 return JsValue::make_string(piece);
             }
             case Mode::Protocol: {
-                JsValue step = js_call(m_next, m_iterator, {});
+                // A `next` that throws is *not* an abrupt completion the
+                // pattern must close the iterator for: 7.4.8 step 7 leaves the
+                // close to the caller only because this step is not reached,
+                // so `[ , ] = iterable` with a throwing `next` calls `return`
+                // zero times, while the same pattern with a throwing *default*
+                // calls it once.
+                JsValue step;
+                bool completed = js_capture_throw([&] { step = js_call(m_next, m_iterator, {}); }, m_thrown);
+                if (!completed) {
+                    m_next_threw = true;
+                    throw JsThrow{m_thrown};
+                }
                 if (!step.is_object_like()) js_throw_type_error("Iterator result is not an object");
                 if (step.get_property("done").is_truthy()) {
                     m_done = true;
@@ -233,6 +245,8 @@ public:
     }
 
     bool done() const { return m_done; }
+    /// True when the last `pull()` threw from `next` itself; see pull().
+    bool next_threw() const { return m_next_threw; }
 
     /// Tells an iterator that will not be drained. IteratorClose (ECMA-262
     /// 7.4.11) checks what `return` is and what it gives back, but not a
@@ -250,6 +264,23 @@ public:
         }
     }
 
+    /// IteratorClose (ECMA-262 7.4.11) with an **existing** abrupt completion,
+    /// which is the case a pattern that fails part way through is in: the
+    /// iterator is told it will not be drained, and whatever that says is
+    /// discarded — the pattern's own throw is what the script sees. A throwing
+    /// `return`, a `return` that is not callable and a `return` that answers a
+    /// primitive are all swallowed here, where `close()` above reports them
+    /// (a pattern that simply bound fewer names than the iterator holds has
+    /// not failed, so *that* close must not hide a broken `return`).
+    void close_quietly() {
+        try {
+            close();
+        } catch (const JsThrow&) {
+        } catch (const std::exception& ex) {
+            if (js_is_internal_unwind(ex)) throw;
+        }
+    }
+
 private:
     enum class Mode { Array, Units, Protocol };
     JsValue m_source;
@@ -259,6 +290,8 @@ private:
     JsValue m_next;
     size_t m_index{0};
     bool m_done{false};
+    bool m_next_threw{false};
+    JsValue m_thrown;
 };
 
 [[noreturn]] void throw_tdz_error(const std::string& name) {
@@ -1843,7 +1876,8 @@ void JsInterpreter::set_member(const JsValue& base, const std::string& key, cons
     target.set_property(key, value);
 }
 
-JsInterpreter::Reference JsInterpreter::resolve_reference(const Expr* target, const EnvPtr& env) {
+JsInterpreter::Reference JsInterpreter::resolve_reference(const Expr* target, const EnvPtr& env,
+                                                            bool throw_on_nullish) {
     Reference ref;
     switch (target->kind) {
         case NodeKind::Identifier:
@@ -1884,12 +1918,15 @@ JsInterpreter::Reference JsInterpreter::resolve_reference(const Expr* target, co
         default:
             js_throw_error(JsErrorKind::SyntaxError, "Invalid assignment target");
     }
-    if (ref.base.is_nullish()) {
-        js_throw_type_error(std::string("Cannot set properties of ") +
-                            (ref.base.type == JsType::Null ? "null" : "undefined") +
-                            " (setting '" + ref.name + "')");
-    }
+    if (throw_on_nullish) check_reference_base(ref);
     return ref;
+}
+
+void JsInterpreter::check_reference_base(const Reference& ref) {
+    if (!ref.is_property || !ref.base.is_nullish()) return;
+    js_throw_type_error(std::string("Cannot set properties of ") +
+                        (ref.base.type == JsType::Null ? "null" : "undefined") +
+                        " (setting '" + ref.name + "')");
 }
 
 JsValue JsInterpreter::read_reference(const Reference& ref, const EnvPtr& env) {
@@ -1967,25 +2004,35 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
                 js_throw_type_error(js_describe_thrown(value) + " is not iterable");
             }
             IterationCursor cursor(value);
-            for (const auto& element : pattern.elements) {
-                if (element.rest) {
-                    std::vector<JsValue> rest;
-                    while (true) {
-                        JsValue item = cursor.pull();
-                        if (cursor.done()) break;
-                        rest.push_back(std::move(item));
+            // Every way out of this loop other than `cursor.close()` at the
+            // end — a throwing default, a target that throws, a `return` that
+            // cannot be reached — must still tell the iterator it will not be
+            // drained (7.4.11, an abrupt completion), and must let the
+            // original throw through even when that close throws too.
+            try {
+                for (const auto& element : pattern.elements) {
+                    if (element.rest) {
+                        std::vector<JsValue> rest;
+                        while (true) {
+                            JsValue item = cursor.pull();
+                            if (cursor.done()) break;
+                            rest.push_back(std::move(item));
+                        }
+                        bind_pattern(*element.target, JsValue::make_array(rest), env, mode);
+                        break;
                     }
-                    bind_pattern(*element.target, JsValue::make_array(rest), env, mode);
-                    break;
+                    JsValue item = cursor.pull();
+                    if (!element.target) continue;       // hole: `[a, , b]`
+                    if (item.is_undefined() && element.default_value) {
+                        item = element.target->kind == Pattern::Kind::Identifier
+                            ? evaluate_named(element.default_value.get(), env, element.target->name)
+                            : evaluate(element.default_value.get(), env);
+                    }
+                    bind_pattern(*element.target, item, env, mode);
                 }
-                JsValue item = cursor.pull();
-                if (!element.target) continue;       // hole: `[a, , b]`
-                if (item.is_undefined() && element.default_value) {
-                    item = element.target->kind == Pattern::Kind::Identifier
-                        ? evaluate_named(element.default_value.get(), env, element.target->name)
-                        : evaluate(element.default_value.get(), env);
-                }
-                bind_pattern(*element.target, item, env, mode);
+            } catch (...) {
+                if (!cursor.next_threw()) cursor.close_quietly();
+                throw;
             }
             cursor.close();
             return;
@@ -2794,11 +2841,16 @@ JsValue JsInterpreter::eval_assign(const AssignExpr* expr, const EnvPtr& env) {
             assign_identifier(name, value, env);
             return value;
         }
-        // The object and key are evaluated before the right-hand side.
-        Reference ref = resolve_reference(target, env);
-        JsValue value = evaluate(expr->value.get(), env);
-        write_reference(ref, value, env);
-        return value;
+            // The object and key are evaluated before the right-hand side, and
+            // a base that is null or undefined is only an error *then*: the
+            // right-hand side still runs, because the reference it would be
+            // assigned to is resolved before it (§13.15.2). `base.prop =
+            // count += 1` throws and leaves `count` at 1.
+            Reference ref = resolve_reference(target, env, /*throw_on_nullish=*/false);
+            JsValue value = evaluate(expr->value.get(), env);
+            check_reference_base(ref);
+            write_reference(ref, value, env);
+            return value;
     }
 
     Reference ref = resolve_reference(target, env);

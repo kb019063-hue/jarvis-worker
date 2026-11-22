@@ -916,6 +916,97 @@ void setup_media(Iface& I) {
     M.method("canPlayType", 1, [](Realm&, Element&, Args) { return str(""); });
 }
 
+struct OffscreenCanvasState : JsExotic {
+    int width = 0;
+    int height = 0;
+    decltype(std::declval<Element>().get_or_create_canvas_context_2d()) context;
+    JsValue context_obj = JsValue::make_undefined();
+};
+
+int clamp_offscreen_dim(const JsValue& value) {
+    const double asked = to_double(value);
+    return asked >= 1.0 ? static_cast<int>(std::min(asked, 2147483647.0)) : 0;
+}
+
+JsValue construct_offscreen_canvas(Realm& r, const InterfaceDef&, Args args, const JsValue* derived) {
+    require_args(args, 2, "OffscreenCanvas");
+    auto state = std::make_shared<OffscreenCanvasState>();
+    state->width = clamp_offscreen_dim(args[0]);
+    state->height = clamp_offscreen_dim(args[1]);
+    return r.make("OffscreenCanvas", state, derived);
+}
+
+void setup_offscreen_canvas(Iface& I) {
+    I.accessor("width",
+        [](Realm&) { return num(static_cast<double>(this_state<OffscreenCanvasState>("OffscreenCanvas").width)); },
+        [](Realm&, const JsValue& val) {
+            auto& st = this_state<OffscreenCanvasState>("OffscreenCanvas");
+            st.width = clamp_offscreen_dim(val);
+            if (st.context) st.context->resize(std::max(st.width, 1), st.context->height());
+        });
+    I.accessor("height",
+        [](Realm&) { return num(static_cast<double>(this_state<OffscreenCanvasState>("OffscreenCanvas").height)); },
+        [](Realm&, const JsValue& val) {
+            auto& st = this_state<OffscreenCanvasState>("OffscreenCanvas");
+            st.height = clamp_offscreen_dim(val);
+            if (st.context) st.context->resize(st.context->width(), std::max(st.height, 1));
+        });
+    I.method("getContext", 1, [](Realm& r, Args args) {
+        require_args(args, 1, "OffscreenCanvas.getContext");
+        auto& st = this_state<OffscreenCanvasState>("OffscreenCanvas");
+        if (ascii_lower(to_str(args[0])) != "2d") return null();
+        if (!st.context) {
+            using CtxPtr = decltype(st.context);
+            st.context = std::make_shared<CtxPtr::element_type>(std::max(st.width, 1), std::max(st.height, 1));
+            JsValue object = st.context->to_js_value(st.context);
+            install_image_data_methods(r, object, st.context);
+            st.context_obj = object;
+        }
+        return st.context_obj;
+    });
+    I.method("convertToBlob", 0, [](Realm& r, Args args) {
+        auto& st = this_state<OffscreenCanvasState>("OffscreenCanvas");
+        std::string type = "image/png";
+        if (!args.empty() && args[0].is_object_like()) {
+            JsValue t = args[0].get_property("type");
+            if (!t.is_undefined()) type = to_str(t);
+        }
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const std::string& name, const std::string& msg) {
+            JsValue err = make_dom_exception(r, name, msg);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        std::string canonical;
+        if (!png_mime_type(type, canonical)) {
+            return reject_with("EncodingError", "OffscreenCanvas.convertToBlob: unsupported type '" + type + "'.");
+        }
+        if (st.width <= 0 || st.height <= 0 ||
+            !RasterBudget::allows(static_cast<std::int64_t>(st.width), static_cast<std::int64_t>(st.height))) {
+            return reject_with("IndexSizeError", "OffscreenCanvas.convertToBlob: canvas has invalid or over-budget dimensions.");
+        }
+        std::shared_ptr<ImageData> bitmap;
+        if (st.context) {
+            bitmap = st.context->image_data();
+            if (!bitmap || bitmap->width != st.width || bitmap->height != st.height) {
+                return reject_with("IndexSizeError", "OffscreenCanvas.convertToBlob: backing store size mismatch.");
+            }
+        } else {
+            bitmap = std::make_shared<ImageData>();
+            bitmap->width = st.width;
+            bitmap->height = st.height;
+            bitmap->pixels.assign(static_cast<std::size_t>(st.width) * static_cast<std::size_t>(st.height), 0);
+        }
+        std::vector<uint8_t> png;
+        if (!ImageDecoder::encode_png(*bitmap, png)) {
+            return reject_with("EncodingError", "OffscreenCanvas.convertToBlob: PNG encoding failed.");
+        }
+        JsValue blob = make_blob(r, std::string(reinterpret_cast<const char*>(png.data()), png.size()), canonical);
+        if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {blob});
+        return undefined();
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Tables
 // ---------------------------------------------------------------------------
@@ -1252,6 +1343,38 @@ void setup_slot(Iface& I) {
     S.method("assign", 0, [](Realm&, Element&, Args) { return undefined(); });
 }
 
+namespace {
+
+/// The dialog focusing steps: a descendant with `autofocus`, else the first
+/// focusable descendant in tree order, else the dialog itself, which is given
+/// `tabindex="-1"` so that it can hold the focus and Tab can still leave it.
+/// A dialog that is not in the document takes nothing (is_focusable says so).
+void focus_dialog(Realm& r, Element& dialog) {
+    Element* autofocus = nullptr;
+    Element* first = nullptr;
+    for_each_descendant(dialog, [&](Node& node) {
+        if (!node.is_element()) return true;
+        auto& element = static_cast<Element&>(node);
+        if (!is_focusable(element)) return true;
+        if (!first) first = &element;
+        if (!element.has_attribute("autofocus")) return true;
+        autofocus = &element;
+        return false;
+    });
+    if (autofocus) {
+        focus_element(r, autofocus);
+        return;
+    }
+    if (first) {
+        focus_element(r, first);
+        return;
+    }
+    if (!dialog.has_attribute("tabindex")) dialog.set_attribute("tabindex", "-1");
+    focus_element(r, &dialog);
+}
+
+} // namespace
+
 void setup_dialog(Iface& I) {
     ElementMembers<&is_dialog> D(I);
     reflect(I, "b:open");
@@ -1261,21 +1384,49 @@ void setup_dialog(Iface& I) {
             return value ? *value : str("");
         },
         [](Realm& r, Element& el, const JsValue& value) { set_slot(wrap(r, el), "returnValue", str(to_str(value))); });
-    D.method("show", 0, [](Realm&, Element& el, Args) {
-        if (!el.has_attribute("open")) el.set_attribute("open", "");
+    D.method("show", 0, [](Realm& r, Element& el, Args) {
+        // An ordinary dialog that is already open is an error; a modal one is
+        // not, and re-running the focusing steps there would take the focus
+        // away from inside the dialog.
+        if (el.has_attribute("open")) {
+            if (!el.is_modal_dialog()) throw_dom(r, "InvalidStateError", "The dialog is already open.");
+            return undefined();
+        }
+        el.set_attribute("open", "");
+        focus_dialog(r, el);
         return undefined();
     });
     D.method("showModal", 0, [](Realm& r, Element& el, Args) {
         if (el.has_attribute("open")) throw_dom(r, "InvalidStateError", "The dialog is already open.");
         if (!el.is_connected()) throw_dom(r, "InvalidStateError", "The dialog is not in a document.");
+        // The top layer is not painted; the flag is what close() reads back,
+        // and what a painter and a hit test will consult when they exist.
+        el.set_modal_dialog(true);
+        std::shared_ptr<Element> previous;
+        if (auto document = document_of(r, el)) previous = document->focused_element();
+        if (previous && !previous->is_connected()) previous.reset();
         el.set_attribute("open", "");
+        focus_dialog(r, el);
+        el.set_dialog_previously_focused(std::move(previous));
         return undefined();
     });
     D.method("close", 0, [](Realm& r, Element& el, Args args) {
         if (!el.has_attribute("open")) return undefined();
-        el.remove_attribute("open");
         JsValue self = wrap(r, el);
         if (!js_arg(args, 0).is_undefined()) set_slot(self, "returnValue", str(to_str(args[0])));
+        const bool was_modal = el.is_modal_dialog();
+        auto previous = el.dialog_previously_focused();
+        el.set_modal_dialog(false);
+        el.set_dialog_previously_focused(nullptr);
+        el.remove_attribute("open");
+        // A modal dialog gives the focus back to the element that had it when
+        // it opened. Anything else unfocuses: the dialog's own control is
+        // hidden now, so keeping the focus on it would be a focus on nothing.
+        if (was_modal && previous && previous->is_connected() && is_focusable(*previous)) {
+            focus_element(r, previous.get());
+        } else {
+            focus_element(r, nullptr, document_of(r, el));
+        }
         // The close event comes as a task, after the caller has finished.
         Realm* realm = &r;
         EventLoop::default_loop().post_task([realm, self]() {
@@ -1424,6 +1575,7 @@ void register_html_interfaces() {
     register_interface({"HTMLImageElement", "HTMLElement", setup_image, element_ctor, 0, nullptr});
     register_interface({"HTMLScriptElement", "HTMLElement", setup_script, element_ctor, 0, nullptr});
     register_interface({"HTMLCanvasElement", "HTMLElement", setup_canvas, element_ctor, 0, nullptr});
+    register_interface({"OffscreenCanvas", nullptr, setup_offscreen_canvas, construct_offscreen_canvas, 2, nullptr});
     register_interface({"ImageData", nullptr, setup_image_data, construct_image_data, 2, nullptr});
     register_interface({"HTMLMediaElement", "HTMLElement", setup_media, element_ctor, 0, nullptr});
     register_interface({"HTMLAudioElement", "HTMLMediaElement", nullptr, element_ctor, 0, nullptr});

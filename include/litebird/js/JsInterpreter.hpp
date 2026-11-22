@@ -643,7 +643,13 @@ private:
     void assign_identifier(const std::string& name, const JsValue& value, const EnvPtr& env);
     JsValue get_member(const JsValue& base, const std::string& key);
     void set_member(const JsValue& base, const std::string& key, const JsValue& value);
-    Reference resolve_reference(const Expr* target, const EnvPtr& env);
+    /// Resolves an assignment target to a reference. `throw_on_nullish` is
+    /// false for a plain `=`, whose right-hand side must be evaluated before
+    /// a null or undefined base is reported (§13.15.2); the caller asks
+    /// `check_reference_base` once the value is in hand.
+    Reference resolve_reference(const Expr* target, const EnvPtr& env, bool throw_on_nullish = true);
+    /// Throws the TypeError a write to a member of null or undefined makes.
+    void check_reference_base(const Reference& ref);
     JsValue read_reference(const Reference& ref, const EnvPtr& env);
     void write_reference(const Reference& ref, const JsValue& value, const EnvPtr& env);
     void bind_pattern(const Pattern& pattern, const JsValue& value, const EnvPtr& env, BindMode mode);

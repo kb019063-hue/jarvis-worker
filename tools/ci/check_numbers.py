@@ -741,8 +741,8 @@ def main(argv: list[str]) -> int:
     if suites:
         print(f"  FAIL  tests/test_suite.cpp registers {registered} suites")
     elif behind:
-        print(f"  note  tests/test_suite.cpp registers {registered} suites and README.md is behind:"
-              f" the landing session refreshes that count, a pull request leaves it alone"
+        print(f"  note  tests/test_suite.cpp registers {registered} suites and README.md says another"
+              f" number in {len(behind)} place(s): leave it, the landing session refreshes that count"
               f" (AGENTS.md, \"Working together\")")
     else:
         print(f"  ok    tests/test_suite.cpp registers {registered} suites, as README.md says")

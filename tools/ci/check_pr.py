@@ -52,6 +52,8 @@ A pull request whose title begins with `BOARD:` or `WATCH:` claims nothing
 and is left out of the claims: the first is where finished pull requests are
 handed over, the second is the landing session's own, which holds the heads
 of the pull requests it is testing together and none of their files.
+`merge N` says "not ready" for the board whatever else is true of it: it is
+never merged.
 
 Documents, and the 28 minutes they used to cost
 ------------------------------------------------
@@ -152,6 +154,9 @@ REPO = "repos/{owner}/{repo}"      # `gh api` fills the two in from the clone
 # The board and a watch (AGENTS.md, "Working together") are pull requests and
 # claim nothing: no task, no numbers, no files.
 NOT_A_CLAIM_RE = re.compile(r"^(?:BOARD|WATCH):")
+# The board is never merged: it would be closed by it, and it is where the
+# agents find each other.
+NEVER_MERGED_RE = re.compile(r"^BOARD:")
 # `Agent: Heron`: the name an agent gave itself, the same in all its pull requests.
 AGENT_RE = re.compile(r"^Agent:\s*([^\s,;.]+)")
 
@@ -795,6 +800,13 @@ def check_merge(number: int) -> int:
     report = Report()
     if pr["state"] != "OPEN":
         sys.exit(f"#{number} is {pr['state'].lower()}")
+    if NEVER_MERGED_RE.match(pr["title"]):
+        # Asked of #219 on 22 November, every question below answered "ok" and
+        # the last line was "ready: gh pr merge 219 --merge".
+        report.no(f"#{number} is the board: it is never merged, and never closed "
+                  "(AGENTS.md, \"Working together\")")
+        print("\nnot ready")
+        return 1
     head = pr["headRefOid"]
 
     if pr["title"].startswith("WIP"):
@@ -954,6 +966,9 @@ def self_test() -> int:
         ("the board and a watch are not claims",
          [bool(NOT_A_CLAIM_RE.match(t)) for t in ("BOARD: hand-overs", "WATCH: 22 November", "WIP: a board", "Board games")],
          [True, True, False, False]),
+        ("the board is never merged; a watch is, by the landing session, at its end",
+         [bool(NEVER_MERGED_RE.match(t)) for t in ("BOARD: hand-overs", "WATCH: 22 November", "Land #140")],
+         [True, False, False]),
         ("a claim with numbers is called by them", numbers_of(numbered), "Phase 5, finding 7"),
     ]
 

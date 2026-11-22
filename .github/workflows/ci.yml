@@ -16,10 +16,11 @@ on:
 # to the same pull request while they were still going. Nobody reads the result
 # of a run on a commit that is no longer the head, and the jobs it holds are jobs
 # another pull request waits for.
-# A run on `main`, and one started by hand, is alone in its group (the commit),
-# so each commit of `main` still gets its whole run.
+# A run that is not a pull request's (a push to `main`, one started by hand) is
+# alone in its group, which is its own run id: nothing stops it, and each commit
+# of `main` still gets its whole run.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
 
 jobs:

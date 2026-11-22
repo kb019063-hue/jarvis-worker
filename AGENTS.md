@@ -601,12 +601,13 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   either, and a pull request that conflicts with `main` gets none at all.
 - **A session's login to GitHub ends after eight hours.** A turn can last
   longer: one waited, in calls of ten minutes, for 8 hours 14 minutes on
-  21 November and ended itself. But from 8 hours 9 minutes in, every write
-  and every push was refused ("Requires authentication"), while reading
-  went on working, and the next day's turn had a login again. A watch is
-  seven and a half hours for that reason. (The record is a comment on
-  #179.) A single call that waits more than five minutes is sometimes cut
-  short without the turn ending: twice in some fifty.
+  21 November and ended itself. But its last write that worked was 7 hours
+  59 minutes in; ten minutes later, and from then on, every write and every
+  push was refused ("Requires authentication"), while reading went on
+  working, and the next day's turn had a login again. A watch is seven and
+  a half hours for that reason. (The record is a comment on #179.) A single
+  call that waits more than five minutes is sometimes cut short without the
+  turn ending: twice in some fifty.
 - **An agent can open an issue and can neither comment on it nor edit
   it** (#196: the session that opened it could not correct it). It can
   comment on a pull request and rewrite its own comment

@@ -1581,6 +1581,13 @@ void setup_request(Iface& I) {
 
 const char kBase64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
+struct ImageBitmapState : JsExotic {
+    int width = 0;
+    int height = 0;
+    std::vector<uint32_t> pixels;
+    bool closed = false;
+};
+
 void setup_window(Iface& I) {
     for (const char* name : {"window", "self", "frames", "globalThis"}) {
         I.getter(name, [](Realm& r) {
@@ -1850,6 +1857,53 @@ void setup_window(Iface& I) {
     I.method("cancelIdleCallback", 1, [](Realm&, Args args) {
         const double id = to_double(js_arg(args, 0));
         if (id >= 1 && id <= 4294967295.0) EventLoop::default_loop().clear_timer(static_cast<uint32_t>(id));
+        return undefined();
+    });
+    I.method("createImageBitmap", 1, [](Realm& r, Args args) {
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const std::string& name, const std::string& msg) {
+            JsValue err = make_dom_exception(r, name, msg);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        if (args.empty()) {
+            return reject_with("TypeError", "createImageBitmap: 1 argument required.");
+        }
+        const JsValue& src = args[0];
+        auto state = std::make_shared<ImageBitmapState>();
+        if (ImageBitmapState* bm = state_of<ImageBitmapState>(src)) {
+            if (bm->closed) {
+                return reject_with("InvalidStateError", "createImageBitmap: source ImageBitmap is closed.");
+            }
+            state->width = bm->width;
+            state->height = bm->height;
+            state->pixels = bm->pixels;
+        } else if (std::shared_ptr<Element> el = element_of(src); el && el->tag_name() == "canvas") {
+            const std::string* w_attr = el->attribute("width");
+            const std::string* h_attr = el->attribute("height");
+            int w = w_attr ? std::atoi(w_attr->c_str()) : 300;
+            int h = h_attr ? std::atoi(h_attr->c_str()) : 150;
+            if (w <= 0 || h <= 0) {
+                return reject_with("InvalidStateError", "createImageBitmap: canvas has zero dimensions.");
+            }
+            state->width = w;
+            state->height = h;
+            state->pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), 0);
+        } else if (src.is_object_like() && src.get_property("width").type == JsType::Number &&
+                   src.get_property("height").type == JsType::Number && src.get_property("data").is_object_like()) {
+            int w = static_cast<int>(to_double(src.get_property("width")));
+            int h = static_cast<int>(to_double(src.get_property("height")));
+            if (w <= 0 || h <= 0) {
+                return reject_with("InvalidStateError", "createImageBitmap: ImageData has zero dimensions.");
+            }
+            state->width = w;
+            state->height = h;
+            state->pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), 0);
+        } else {
+            return reject_with("TypeError", "createImageBitmap: unsupported image source.");
+        }
+        JsValue bitmap = r.make("ImageBitmap", state);
+        if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {bitmap});
         return undefined();
     });
     I.method("btoa", 1, [](Realm& r, Args args) {
@@ -2671,8 +2725,28 @@ JsValue iframe_content_document(Realm& caller_realm, Element& iframe) {
     return wrap(child_realm, child_realm.document);
 }
 
+void setup_image_bitmap(Iface& I) {
+    I.getter("width", [](Realm&) {
+        auto& st = this_state<ImageBitmapState>("ImageBitmap");
+        return num(static_cast<double>(st.closed ? 0 : st.width));
+    });
+    I.getter("height", [](Realm&) {
+        auto& st = this_state<ImageBitmapState>("ImageBitmap");
+        return num(static_cast<double>(st.closed ? 0 : st.height));
+    });
+    I.method("close", 0, [](Realm&, Args) {
+        auto& st = this_state<ImageBitmapState>("ImageBitmap");
+        st.closed = true;
+        st.width = 0;
+        st.height = 0;
+        st.pixels.clear();
+        return undefined();
+    });
+}
+
 void register_window_interfaces() {
     register_interface({"Window", "EventTarget", setup_window, nullptr, 0, nullptr});
+    register_interface({"ImageBitmap", nullptr, setup_image_bitmap, nullptr, 0, nullptr});
     register_interface({"Location", nullptr, setup_location, nullptr, 0, nullptr});
     register_interface({"MessageChannel", nullptr, setup_message_channel, construct_message_channel, 0, nullptr});
     register_interface({"MessagePort", "EventTarget", setup_message_port, nullptr, 0, nullptr});

@@ -634,6 +634,8 @@ def main() -> int:
         print("Task: <the row of the table>")
         print("Files: <what it will change>")
         print(f"Phase {phase}, finding {finding}")
+        # The fourth line since 22 November 2026: AGENTS.md, "Working together".
+        print("Agent: <the name you gave yourself>")
     else:
         print(f"next phase:   {phase}")
         print(f"next finding: {finding}")

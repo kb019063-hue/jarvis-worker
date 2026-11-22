@@ -6447,6 +6447,47 @@ TEST(offscreen_canvas_draws_and_converts_to_blob) {
     assert(interp.eval("rejZero === 'IndexSizeError'").is_truthy());
 }
 
+TEST(image_bitmap_and_create_image_bitmap) {
+    auto doc = HtmlParser::parse(
+        "<!doctype html><html><body>"
+        "<canvas id='c' width='5' height='4'></canvas>"
+        "<canvas id='zero' width='0' height='2'></canvas>"
+        "</body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    assert(interp.eval("typeof ImageBitmap === 'function'").is_truthy());
+    assert(interp.eval("typeof createImageBitmap === 'function'").is_truthy());
+
+    interp.eval(R"(
+        var c = document.getElementById('c');
+        var ctx = c.getContext('2d');
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, 5, 4);
+        var bm = null;
+        createImageBitmap(c).then(function(b) { bm = b; });
+    )");
+    assert(interp.eval("bm instanceof ImageBitmap").is_truthy());
+    assert(interp.eval("bm.width === 5 && bm.height === 4").is_truthy());
+
+    // Cloning an ImageBitmap
+    interp.eval("var bm2 = null; createImageBitmap(bm).then(function(b) { bm2 = b; });");
+    assert(interp.eval("bm2 instanceof ImageBitmap && bm2.width === 5 && bm2.height === 4").is_truthy());
+
+    // close() resets width/height to 0 and rejects subsequent createImageBitmap(bm)
+    interp.eval("bm.close(); var rejClosed = null; createImageBitmap(bm).catch(function(e) { rejClosed = e.name; });");
+    assert(interp.eval("bm.width === 0 && bm.height === 0").is_truthy());
+    assert(interp.eval("rejClosed === 'InvalidStateError'").is_truthy());
+
+    // Zero-size canvas rejects
+    interp.eval("var rejZero = null; createImageBitmap(document.getElementById('zero')).catch(function(e) { rejZero = e.name; });");
+    assert(interp.eval("rejZero === 'InvalidStateError'").is_truthy());
+
+    // Unsupported source rejects
+    interp.eval("var rejBad = null; createImageBitmap(123).catch(function(e) { rejBad = e.name; });");
+    assert(interp.eval("rejBad === 'TypeError'").is_truthy());
+}
+
 void test_css_media_queries() {
     using namespace litebird;
     std::string css = R"(
@@ -33382,6 +33423,7 @@ int main() {
     RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
     RUN_TEST(crypto_get_random_values_and_random_uuid);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
+    RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
     RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);

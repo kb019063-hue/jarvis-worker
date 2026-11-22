@@ -32764,6 +32764,308 @@ TEST(fetch_request_loopback_http_worker_and_abort) {
     assert(hit_count->load() == 3);
 }
 
+TEST(direct_eval_inherits_context_and_checks_declarations_before_mutating) {
+    TestPage page;
+
+    page.js.eval(R"JS(
+        var failures = [];
+        function eq(label, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(label + ': got ' + g + ', expected ' + w);
+        }
+        function throwsName(label, expectedName, fn) {
+            try {
+                fn();
+                failures.push(label + ': did not throw');
+            } catch (e) {
+                if (!e || e.name !== expectedName) {
+                    failures.push(label + ': got ' + (e ? e.name : String(e)) + ', expected ' + expectedName);
+                }
+            }
+        }
+
+        // Direct eval inherits strictness (parse + runtime) and super/new.target through arrows.
+        (function () {
+            'use strict';
+            throwsName('strict eval duplicate param', 'SyntaxError', function () { eval('function dup(a, a) {}'); });
+            throwsName('strict eval reserved word', 'SyntaxError', function () { eval('var public = 1;'); });
+            throwsName('strict eval delete identifier', 'SyntaxError', function () { eval('var x; delete x;'); });
+            throwsName('strict eval assign to eval', 'SyntaxError', function () { eval('eval = 1;'); });
+            throwsName('strict eval undeclared write', 'ReferenceError', function () { eval('undecl_171 = 1;'); });
+            eq('strict undecl not leaked', typeof undecl_171, 'undefined');
+        })();
+
+        class Base171 {
+            #secret = 41;
+            m() { return 10; }
+            reveal() { return (() => eval('this.#secret'))(); }
+        }
+        class Sub171 extends Base171 {
+            constructor() {
+                var res = (() => eval('super(); [super.m(), new.target === Sub171]'))();
+                this.res = res;
+            }
+        }
+        var sub171 = new Sub171();
+        eq('direct eval arrow super and new.target', sub171.res, [10, true]);
+        eq('direct eval arrow private field', sub171.reveal(), 41);
+
+        // Indirect eval runs in its own non-strict global lexical env and rejects super / new.target.
+        (function () {
+            'use strict';
+            var indirectOut = (0, eval)('let z_ind = 42; with_ok_171 = 7; z_ind + with_ok_171');
+            eq('indirect eval sloppy result', indirectOut, 49);
+            eq('indirect eval lexical private', typeof z_ind, 'undefined');
+            eq('indirect eval global write', globalThis.with_ok_171, 7);
+            throwsName('indirect eval rejects new.target', 'SyntaxError', function () {
+                (0, eval)('new.target');
+            });
+        })();
+        class IndirectSuperCheck171 {
+            m() {
+                throwsName('indirect eval rejects super', 'SyntaxError', function () {
+                    (0, eval)('super.x');
+                });
+            }
+        }
+        new IndirectSuperCheck171().m();
+
+        // EvalDeclarationInstantiation checks collisions atomically before mutating anything.
+        // Note: eval() must run directly in the block (not inside a helper callback, which would create
+        // its own function var scope).
+        (function () {
+            let conflict = 10;
+            try {
+                eval('var okBefore = 1; var conflict = 2;');
+                failures.push('eval collision with outer let: did not throw');
+            } catch (e) {
+                if (!e || e.name !== 'SyntaxError') {
+                    failures.push('eval collision with outer let: got ' + (e ? e.name : String(e)));
+                }
+            }
+            eq('eval rollback leaves prior var unbound', typeof okBefore, 'undefined');
+            eq('eval rollback preserves let value', conflict, 10);
+
+            const fnConflict = 3;
+            try {
+                eval('var okFnBefore = 1; function fnConflict() {}');
+                failures.push('eval function collision with outer const: did not throw');
+            } catch (e) {
+                if (!e || e.name !== 'SyntaxError') {
+                    failures.push('eval function collision with outer const: got ' + (e ? e.name : String(e)));
+                }
+            }
+            eq('eval function rollback leaves var unbound', typeof okFnBefore, 'undefined');
+
+            // Inside an inner function, `var conflict` stops at the inner function's var scope.
+            (function () {
+                eval('var conflict = 2;');
+                eq('inner function var stops at function boundary', conflict, 2);
+            })();
+            eq('outer let still untouched', conflict, 10);
+        })();
+
+        // Annex B.3.5: simple catch(e) allows direct eval var and function over the catch parameter.
+        var catchVar171 = 'outer';
+        var catchLog = [];
+        try {
+            throw 'caught';
+        } catch (catchVar171) {
+            eval('var catchVar171 = 123;');
+            catchLog.push(catchVar171);
+        }
+        catchLog.push(catchVar171);
+        try {
+            throw 'caught2';
+        } catch (catchFn171) {
+            eval('function catchFn171() { return 7; }');
+            catchLog.push(typeof catchFn171);
+        }
+        catchLog.push(typeof catchFn171, catchFn171());
+        eq('annex B.3.5 catch eval var and function', catchLog, [123, 'outer', 'string', 'function', 7]);
+
+        // Non-simple catch destructuring still blocks var collision.
+        try {
+            throw { a: 1 };
+        } catch ({ a }) {
+            try {
+                eval('var a = 2;');
+                failures.push('non-simple catch blocks eval var: did not throw');
+            } catch (e) {
+                if (!e || e.name !== 'SyntaxError') {
+                    failures.push('non-simple catch blocks eval var: got ' + (e ? e.name : String(e)));
+                }
+            }
+        }
+
+        // Global var / eval configurability, delete, and global lexical conflict.
+        eval('var evalGlobalVar171 = 55;');
+        var dEval = Object.getOwnPropertyDescriptor(globalThis, 'evalGlobalVar171');
+        eq('eval global var is configurable', dEval && dEval.configurable, true);
+        eq('delete eval global var succeeds', delete evalGlobalVar171, true);
+        eq('deleted eval global var gone', typeof evalGlobalVar171, 'undefined');
+
+        (function () {
+            eval('var localEvalVar171 = 9;');
+            eq('sloppy local eval var visible', localEvalVar171, 9);
+            eq('sloppy local eval var deletable', delete localEvalVar171, true);
+            eq('deleted sloppy local eval var gone', typeof localEvalVar171, 'undefined');
+        })();
+    )JS");
+
+    page.js.eval("var scriptVar171 = 1; let globalLex171 = 1;");
+    page.js.eval(R"JS(
+        var dScript = Object.getOwnPropertyDescriptor(globalThis, 'scriptVar171');
+        eq('script global var is non-configurable', dScript && dScript.configurable, false);
+        eq('delete script global var returns false', delete scriptVar171, false);
+        try {
+            eval('var globalLex171 = 2;');
+            failures.push('eval var cannot shadow global let: did not throw');
+        } catch (e) {
+            if (!e || e.name !== 'SyntaxError') {
+                failures.push('eval var cannot shadow global let: got ' + (e ? e.name : String(e)));
+            }
+        }
+        throwsName('indirect eval function cannot shadow global let', 'SyntaxError', function () {
+            (0, eval)('function globalLex171() {}');
+        });
+        eq('global let untouched after rejected eval', globalLex171, 1);
+
+        var failuresStr = failures.join('\n');
+    )JS");
+
+    const std::string failed = page.js.eval("failuresStr").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+TEST(parameter_scopes_loop_completions_class_fields_and_early_syntax_errors) {
+    TestPage page;
+
+    page.js.eval(R"JS(
+        var failures = [];
+        function eq(label, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(label + ': got ' + g + ', expected ' + w);
+        }
+        function throwsName(label, expectedName, fn) {
+            try {
+                fn();
+                failures.push(label + ': did not throw');
+            } catch (e) {
+                if (!e || e.name !== expectedName) {
+                    failures.push(label + ': got ' + (e ? e.name : String(e)) + ', expected ' + expectedName);
+                }
+            }
+        }
+
+        // Parameter-expression scopes stay separate from body var and lexical scopes,
+        // while hoisted body functions bind in body_var_env and close over body_lex_env.
+        function splitParam(a = 1, b = function () { return a; }) {
+            var a = 99;
+            return [a, b()];
+        }
+        function splitParamEval(p = eval('var px = 7'), q = function () { return px; }) {
+            var px = 2;
+            return [px, q()];
+        }
+        function bodyClosureHoist() {
+            let captured = 1;
+            {
+                function inner() { return captured; }
+                var res = inner();
+            }
+            return res;
+        }
+        eq('param default sees param not body var', splitParam(), [99, 1]);
+        eq('param eval var isolated from body var', splitParamEval(), [2, 7]);
+        eq('body function hoisted in body_var_env sees body_lex_env', bodyClosureHoist(), 1);
+
+        // Iteration statements reset completion values to undefined.
+        eq('while(false) completion', eval('1; while (false) {}') === undefined, true);
+        eq('for(;false;) completion', eval('1; for (; false;) {}') === undefined, true);
+        eq('for-of empty completion', eval('1; for (var k of []) {}') === undefined, true);
+        eq('for-in empty completion', eval('1; for (var p in {}) {}') === undefined, true);
+        eq('do-while body completion', eval('1; do { 2; } while (false)'), 2);
+        eq('do-while immediate break completion', eval('1; do { break; } while (false)') === undefined, true);
+
+        // Early syntax errors for break, continue, labels, top-level return, and new.target.
+        // Run directly at global scope (no function wrapper, which would allow `return` and `new.target`).
+        var syntaxCases = [
+            'break;',
+            'continue;',
+            'lbl: { continue lbl; }',
+            'lbl: { lbl: 1; }',
+            'break missing;',
+            'return 1;',
+            'new.target;',
+            '() => new.target;',
+        ];
+        for (var i = 0; i < syntaxCases.length; i++) {
+            try {
+                eval(syntaxCases[i]);
+                failures.push('early syntax: ' + syntaxCases[i] + ': did not throw');
+            } catch (e) {
+                if (!e || e.name !== 'SyntaxError') {
+                    failures.push('early syntax: ' + syntaxCases[i] + ': got ' + (e ? e.name : String(e)));
+                }
+            }
+        }
+        // Inside a function, direct eval inherits allow_new_target while indirect eval rejects new.target.
+        (function () {
+            eq('direct eval in function sees new.target === undefined', eval('new.target') === undefined, true);
+            throwsName('indirect eval rejects () => new.target', 'SyntaxError', function () {
+                (0, eval)('() => new.target;');
+            });
+        })();
+
+        // Class static 'prototype' rejection and field initializer rules.
+        throwsName('computed static prototype method', 'TypeError', function () {
+            eval("class A { static ['prototype']() {} }");
+        });
+        throwsName('computed static prototype getter', 'TypeError', function () {
+            eval("class B { static get ['prototype']() { return 1; } }");
+        });
+        throwsName('computed static prototype field', 'TypeError', function () {
+            eval("class C { static ['prototype'] = 1; }");
+        });
+        throwsName('class field direct eval forbids arguments', 'SyntaxError', function () {
+            eval('class D { static x = eval("arguments"); }');
+        });
+        class FieldCheck171 {
+            nt = new.target;
+            val = (function () { var fv = 5; return fv; })();
+        }
+        var fc = new FieldCheck171();
+        eq('field new.target is undefined', fc.nt === undefined, true);
+        eq('field var stays isolated', [fc.val, typeof fv], [5, 'undefined']);
+
+        // Nested functions inside loops, switches, and labels exercise parser stack growth.
+        var loopOut = [];
+        for (var j = 0; j < 3; j++) {
+            (function () {
+                var inner = (function (x) { return function () { return x * 2; }; })(j);
+                loopOut.push(inner());
+            })();
+        }
+        outerLoop: for (var k = 0; k < 2; k++) {
+            switch (k) {
+                case 0:
+                    (function () { loopOut.push('c0'); })();
+                    continue outerLoop;
+                case 1:
+                    (function () { loopOut.push('c1'); })();
+                    break outerLoop;
+            }
+        }
+        eq('nested functions inside loops/switch/labels', loopOut, [0, 2, 4, 'c0', 'c1']);
+    )JS");
+
+    const std::string failed = page.js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(flex_and_grid_box_alignment_properties) {
     using namespace litebird;
     // Phase 180, finding 184: CSS Box Alignment Level 3 in flex and grid —
@@ -33480,6 +33782,11 @@ int main() {
     // Phase 173: Fetch Request constructor, Body mixin, clone(), AbortSignal linking, and fetch(Request, init).
     RUN_TEST(fetch_request_constructor_validation_body_clone_and_signal);
     RUN_TEST(fetch_request_loopback_http_worker_and_abort);
+
+    // Phase 171: direct eval context propagation, EvalDeclarationInstantiation,
+    // parameter/body scope splitting, loop completions, class fields, and early syntax errors.
+    RUN_TEST(direct_eval_inherits_context_and_checks_declarations_before_mutating);
+    RUN_TEST(parameter_scopes_loop_completions_class_fields_and_early_syntax_errors);
 
     // Phase 180: CSS Box Alignment (`align-self`, `align-content`, `justify-items`/`self`,
     // `place-*`, and column flex `justify-content`).

@@ -32711,6 +32711,233 @@ TEST(fetch_request_loopback_http_worker_and_abort) {
     assert(hit_count->load() == 3);
 }
 
+TEST(flex_and_grid_box_alignment_properties) {
+    using namespace litebird;
+    // Phase 180, finding 184: CSS Box Alignment Level 3 in flex and grid —
+    // `align-self`, `align-content`, `justify-items`, `justify-self`,
+    // `place-*` shorthands, and main-axis `justify-content` + `flex-grow` +
+    // wrapping in column flex containers.
+    auto build = [](const std::string& html) {
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        return LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    };
+    auto approx = [](float a, float b) { return std::fabs(a - b) < 0.05f; };
+
+    // 1. Row flex: `align-self` overrides `align-items` per item (including
+    // `stretch` on an auto-height item and `auto` inheriting container default).
+    {
+        auto root = build(
+            R"(<body><div style="display: flex; align-items: flex-start; width: 200px; height: 100px">)"
+            R"(<div style="width: 30px; height: 20px"></div>)"
+            R"(<div style="width: 30px; height: 20px; align-self: center"></div>)"
+            R"(<div style="width: 30px; height: 20px; align-self: flex-end"></div>)"
+            R"(<div style="width: 30px; align-self: stretch"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cy = c->dimensions.content.y;
+        assert(approx(c->children[0]->dimensions.content.y - cy, 0.0f));
+        assert(approx(c->children[1]->dimensions.content.y - cy, 40.0f));
+        assert(approx(c->children[2]->dimensions.content.y - cy, 80.0f));
+        assert(approx(c->children[3]->dimensions.content.y - cy, 0.0f));
+        assert(approx(c->children[3]->dimensions.content.height, 100.0f));
+        // Distinct align-self values must produce distinct ComputedStyle hashes
+        // so style interning never collapses them together.
+        assert(*c->children[0]->style != *c->children[2]->style);
+        assert(c->children[0]->style->hash() != c->children[2]->style->hash());
+    }
+
+    // 2. Row flex `align-content` on multi-line (`flex-wrap: wrap`):
+    //    stretch, flex-start, flex-end, center, space-between, space-around, space-evenly.
+    {
+        // Default `align-content: stretch`: 2 lines of 20px in 100px -> each line becomes 50px.
+        auto root = build(
+            R"(<body><div style="display: flex; flex-wrap: wrap; width: 100px; height: 100px">)"
+            R"(<div style="width: 60px; height: 20px"></div>)"
+            R"(<div style="width: 60px; height: 20px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cy = c->dimensions.content.y;
+        assert(approx(c->children[0]->dimensions.content.y - cy, 0.0f));
+        assert(approx(c->children[1]->dimensions.content.y - cy, 50.0f));
+    }
+    {
+        auto check_ac = [&](const char* val, float y0, float y1) {
+            std::string html = std::string(
+                R"(<body><div style="display: flex; flex-wrap: wrap; align-content: )") + val +
+                R"(; width: 100px; height: 100px">)"
+                R"(<div style="width: 60px; height: 20px"></div>)"
+                R"(<div style="width: 60px; height: 20px"></div>)"
+                R"(</div></body>)";
+            auto root = build(html);
+            auto c = root->children[0];
+            float cy = c->dimensions.content.y;
+            assert(approx(c->children[0]->dimensions.content.y - cy, y0));
+            assert(approx(c->children[1]->dimensions.content.y - cy, y1));
+        };
+        check_ac("flex-start", 0.0f, 20.0f);
+        check_ac("flex-end", 60.0f, 80.0f);
+        check_ac("center", 30.0f, 50.0f);
+        check_ac("space-between", 0.0f, 80.0f);
+        check_ac("space-around", 15.0f, 65.0f);
+        check_ac("space-evenly", 20.0f, 60.0f);
+    }
+
+    // 3. Single-line (`flex-wrap: nowrap`) ignores `align-content` (CSS Flexbox §9.6):
+    //    the sole line still spans the container's definite height (100px).
+    {
+        auto root = build(
+            R"(<body><div style="display: flex; align-content: flex-end; align-items: flex-start; width: 100px; height: 100px">)"
+            R"(<div style="width: 40px; height: 20px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        assert(approx(c->children[0]->dimensions.content.y - c->dimensions.content.y, 0.0f));
+    }
+
+    // 4. `row-reverse` and `wrap-reverse`.
+    {
+        auto root = build(
+            R"(<body><div style="display: flex; flex-direction: row-reverse; justify-content: flex-start; width: 100px; height: 40px">)"
+            R"(<div style="width: 30px; height: 20px"></div>)"
+            R"(<div style="width: 40px; height: 20px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cx = c->dimensions.content.x;
+        // Main start is the right edge: item 0 sits at 70..100, item 1 at 30..70.
+        assert(approx(c->children[0]->dimensions.content.x - cx, 70.0f));
+        assert(approx(c->children[1]->dimensions.content.x - cx, 30.0f));
+    }
+    {
+        auto root = build(
+            R"(<body><div style="display: flex; flex-wrap: wrap-reverse; align-content: flex-start; width: 100px; height: 100px">)"
+            R"(<div style="width: 60px; height: 20px"></div>)"
+            R"(<div style="width: 60px; height: 30px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cy = c->dimensions.content.y;
+        // Line 1 (height 30) is placed before line 0 (height 20).
+        assert(approx(c->children[1]->dimensions.content.y - cy, 0.0f));
+        assert(approx(c->children[0]->dimensions.content.y - cy, 30.0f));
+    }
+
+    // 5. Column flex: `justify-content` (all 6 modes), `flex-grow`, `align-self`,
+    //    `column-reverse`, and multi-column `flex-wrap: wrap` + `align-content`.
+    {
+        auto check_col_jc = [&](const char* val, float y0, float y1) {
+            std::string html = std::string(
+                R"(<body><div style="display: flex; flex-direction: column; justify-content: )") + val +
+                R"(; width: 100px; height: 100px">)"
+                R"(<div style="width: 40px; height: 20px"></div>)"
+                R"(<div style="width: 40px; height: 20px"></div>)"
+                R"(</div></body>)";
+            auto root = build(html);
+            auto c = root->children[0];
+            float cy = c->dimensions.content.y;
+            assert(approx(c->children[0]->dimensions.content.y - cy, y0));
+            assert(approx(c->children[1]->dimensions.content.y - cy, y1));
+        };
+        check_col_jc("flex-start", 0.0f, 20.0f);
+        check_col_jc("flex-end", 60.0f, 80.0f);
+        check_col_jc("center", 30.0f, 50.0f);
+        check_col_jc("space-between", 0.0f, 80.0f);
+        check_col_jc("space-around", 15.0f, 65.0f);
+        check_col_jc("space-evenly", 20.0f, 60.0f);
+    }
+    {
+        // Column `flex-grow` and `align-self`.
+        auto root = build(
+            R"(<body><div style="display: flex; flex-direction: column; align-items: flex-start; width: 100px; height: 100px">)"
+            R"(<div style="width: 40px; height: 20px; align-self: center"></div>)"
+            R"(<div style="width: 40px; height: 20px; flex-grow: 1; align-self: flex-end"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cx = c->dimensions.content.x;
+        float cy = c->dimensions.content.y;
+        assert(approx(c->children[0]->dimensions.content.x - cx, 30.0f));
+        assert(approx(c->children[0]->dimensions.content.y - cy, 0.0f));
+        assert(approx(c->children[1]->dimensions.content.x - cx, 60.0f));
+        assert(approx(c->children[1]->dimensions.content.y - cy, 20.0f));
+        assert(approx(c->children[1]->dimensions.content.height, 80.0f));
+    }
+    {
+        // Column multi-line wrapping with `align-content: space-between`.
+        auto root = build(
+            R"(<body><div style="display: flex; flex-direction: column; flex-wrap: wrap; align-content: space-between; width: 100px; height: 100px">)"
+            R"(<div style="width: 30px; height: 60px"></div>)"
+            R"(<div style="width: 30px; height: 60px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cx = c->dimensions.content.x;
+        assert(approx(c->children[0]->dimensions.content.x - cx, 0.0f));
+        assert(approx(c->children[1]->dimensions.content.x - cx, 70.0f));
+    }
+    {
+        // `column-reverse` with `justify-content: flex-start` packs from bottom.
+        auto root = build(
+            R"(<body><div style="display: flex; flex-direction: column-reverse; justify-content: flex-start; width: 100px; height: 100px">)"
+            R"(<div style="width: 40px; height: 20px"></div>)"
+            R"(<div style="width: 40px; height: 30px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cy = c->dimensions.content.y;
+        assert(approx(c->children[0]->dimensions.content.y - cy, 80.0f));
+        assert(approx(c->children[1]->dimensions.content.y - cy, 50.0f));
+    }
+
+    // 6. CSS Grid: `justify-items`, `justify-self`, `align-self`, `place-items`,
+    //    `place-self`, `justify-content`, `align-content`, and `place-content`.
+    {
+        auto root = build(
+            R"(<body><div style="display: grid; grid-template-columns: 100px 100px; grid-template-rows: 60px; width: 200px; height: 60px; place-items: center flex-start">)"
+            R"(<div style="width: 40px; height: 20px"></div>)"
+            R"(<div style="width: 40px; height: 20px; place-self: flex-end center"></div>)"
+            R"(</div></body>)");
+        auto g = root->children[0];
+        float gx = g->dimensions.content.x;
+        float gy = g->dimensions.content.y;
+        // Cell 0 inherits place-items (align: center -> y=20, justify: flex-start -> x=0).
+        assert(approx(g->children[0]->dimensions.content.x - gx, 0.0f));
+        assert(approx(g->children[0]->dimensions.content.y - gy, 20.0f));
+        // Cell 1 overrides via place-self (align: flex-end -> y=40, justify: center -> x=130).
+        assert(approx(g->children[1]->dimensions.content.x - gx, 130.0f));
+        assert(approx(g->children[1]->dimensions.content.y - gy, 40.0f));
+    }
+    {
+        // Grid `place-content: space-between center` on fixed tracks inside a larger container.
+        auto root = build(
+            R"(<body><div style="display: grid; grid-template-columns: 30px 30px; grid-template-rows: 20px 20px; width: 100px; height: 100px; place-content: space-between center">)"
+            R"(<div></div><div></div><div></div><div></div>)"
+            R"(</div></body>)");
+        auto g = root->children[0];
+        float gx = g->dimensions.content.x;
+        float gy = g->dimensions.content.y;
+        // Columns centered: total 60px in 100px -> start at x=20 and x=50.
+        // Rows space-between: total 40px in 100px -> y=0 and y=80.
+        assert(approx(g->children[0]->dimensions.content.x - gx, 20.0f));
+        assert(approx(g->children[0]->dimensions.content.y - gy, 0.0f));
+        assert(approx(g->children[1]->dimensions.content.x - gx, 50.0f));
+        assert(approx(g->children[1]->dimensions.content.y - gy, 0.0f));
+        assert(approx(g->children[2]->dimensions.content.x - gx, 20.0f));
+        assert(approx(g->children[2]->dimensions.content.y - gy, 80.0f));
+        assert(approx(g->children[3]->dimensions.content.x - gx, 50.0f));
+        assert(approx(g->children[3]->dimensions.content.y - gy, 80.0f));
+    }
+    {
+        // Grid `align-content: stretch` stretches auto-sized rows, not fixed rows.
+        auto root = build(
+            R"(<body><div style="display: grid; grid-template-columns: 50px; width: 50px; height: 100px">)"
+            R"(<div style="height: 20px"></div>)"
+            R"(<div></div>)"
+            R"(</div></body>)");
+        auto g = root->children[0];
+        float gy = g->dimensions.content.y;
+        // 2 auto rows: row 0 starts at 20, row 1 at 0; remaining 80px split +40 each -> row 0 = 60, row 1 = 40.
+        assert(approx(g->children[0]->dimensions.content.y - gy, 0.0f));
+        assert(approx(g->children[1]->dimensions.content.y - gy, 60.0f));
+        assert(approx(g->children[1]->dimensions.content.height, 40.0f));
+    }
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -33200,6 +33427,10 @@ int main() {
     // Phase 173: Fetch Request constructor, Body mixin, clone(), AbortSignal linking, and fetch(Request, init).
     RUN_TEST(fetch_request_constructor_validation_body_clone_and_signal);
     RUN_TEST(fetch_request_loopback_http_worker_and_abort);
+
+    // Phase 180: CSS Box Alignment (`align-self`, `align-content`, `justify-items`/`self`,
+    // `place-*`, and column flex `justify-content`).
+    RUN_TEST(flex_and_grid_box_alignment_properties);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

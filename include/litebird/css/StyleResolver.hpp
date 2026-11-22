@@ -127,6 +127,14 @@ enum class AlignContent : uint8_t {
     SpaceEvenly
 };
 
+enum class AlignSelf : uint8_t {
+    Auto,
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center
+};
+
 enum class Position : uint8_t {
     Static,
     Relative,
@@ -352,6 +360,9 @@ struct ComputedStyle {
     JustifyContent justify_content{JustifyContent::FlexStart};
     AlignItems align_items{AlignItems::Stretch};
     AlignContent align_content{AlignContent::Stretch};
+    AlignSelf align_self{AlignSelf::Auto};
+    AlignItems justify_items{AlignItems::Stretch};
+    AlignSelf justify_self{AlignSelf::Auto};
     float gap{0.0f};
     float flex_grow{0.0f};
     float flex_shrink{1.0f};

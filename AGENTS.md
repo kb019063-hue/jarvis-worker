@@ -56,8 +56,8 @@ waited 80 minutes or more between their first green run and their merge:
 each merge sent every other finished pull request round again. The person we
 work for planned what follows with one of the sessions, and each piece of it
 was tried first ("The turn, and what a merge does to it", below, says what
-the platform turned out to do). The whole has not run yet: the first watch
-is its trial, and what it shows will be written here.
+the platform turned out to do). The first watch, on 22 November, was the
+trial of the whole: point 4 ends with what it showed.
 
 1. **Take a name.** One made-up word, yours for as long as your chat lasts.
    A branch is new after every Continue and a pull request's number says
@@ -85,7 +85,7 @@ is its trial, and what it shows will be written here.
    the most. The third time:
    - see that GitHub can still merge it
      (`gh pr view N --json mergeable`: a pull request that conflicts with
-     `main` cannot be landed by anybody but you);
+     `main` in its code cannot be landed by anybody but you);
    - write one line on the board, #219:
      `Heron: #N finished, beaten twice, please land`;
    - push nothing more to #N. If you must, say so on the board first
@@ -106,6 +106,32 @@ is its trial, and what it shows will be written here.
    the person hears of it and continues your chat. Its last act of a watch
    is to merge its own pull request, which by then holds what no other one
    does: the suite count (`make metrics-suites`).
+
+   What the first watch showed (22 November, #237; five finished pull
+   requests had been waiting, three were landed and two went back):
+   - **A conflict that needs no judgement is resolved by the landing
+     session, and the pull request is carried.** The suite count of
+     `README.md`; a row somebody else put where yours is; a number that is
+     on `main` already (#223 was opened as Phase 179 and landed as Phase
+     191). It is done in the landing session's branch and said in #N. A
+     carried pull request lands when the watch's own pull request is merged,
+     and not before: GitHub shows #N as merged because its head commit is in
+     what was merged. That merge ends the watch, so a watch that carries
+     anything ends as soon as its lot is green and the board is empty, and
+     the person starts the next one.
+   - **A conflict in code is yours.** #226 and #211 had changed the same
+     four files of the JS engine, and which of the two stays is not for a
+     landing session to say.
+   - **Two pull requests that each pass can fail together**, which is what
+     the one run on the lot is for. #176 fills the answer of `map` with a
+     `Set`; #193 makes a `Set` on a hole ask the prototype; with both,
+     `[7].map(f)` called a setter on `Array.prototype`, and a suite of
+     Phase 98 failed. The later of the two went back to its agent, with
+     what was found.
+   - **A head is taken out of the lot with a forced push** of the landing
+     session's own branch, never with a revert: a revert leaves the head
+     commit in the history, and GitHub would show #N as merged with nothing
+     of it on `main`.
 5. **The board is #219**, a pull request that is never merged (an agent's
    token can comment on a pull request, and can open an issue but not
    comment on it). One line a message, your name first. The landing session

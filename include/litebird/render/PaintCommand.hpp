@@ -19,6 +19,13 @@ struct DrawCanvasCommand {
     Color color;
 };
 
+/// The UA's `::backdrop`: a colour over the whole viewport, painted behind a
+/// modal dialog and in front of everything the document drew. The page cannot
+/// style it — there is no `::backdrop` selector — so the colour is the UA's.
+struct DrawBackdropCommand {
+    Color color;
+};
+
 struct DrawRectCommand {
     Rect rect;
     Color color;
@@ -97,7 +104,7 @@ struct PushClipCommand {
 
 struct PopClipCommand {};
 
-using PaintCommand = std::variant<DrawCanvasCommand, DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand, DrawImageCommand, PushTransformCommand, PopTransformCommand, PushClipCommand, PopClipCommand>;
+using PaintCommand = std::variant<DrawCanvasCommand, DrawBackdropCommand, DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand, DrawImageCommand, PushTransformCommand, PopTransformCommand, PushClipCommand, PopClipCommand>;
 
 class DisplayList {
 public:
@@ -114,10 +121,12 @@ public:
 
     const std::vector<PaintCommand>& commands() const { return m_commands; }
 
-    static DisplayList build(const std::shared_ptr<LayoutBox>& root_box);
+    /// `top_layer` is the element a modal dialog puts above everything else —
+    /// its box is left out of the document walk and painted last, behind a
+    /// backdrop. Null when no modal dialog is open.
+    static DisplayList build(const std::shared_ptr<LayoutBox>& root_box, const Node* top_layer = nullptr);
 
 private:
-    static void build_recursive(const std::shared_ptr<LayoutBox>& box, DisplayList& list);
     std::vector<PaintCommand> m_commands;
 };
 

@@ -82,6 +82,7 @@ SRCS = src/common/Color.cpp \
        src/js/DomHtmlBindings.cpp \
        src/js/DomFormBindings.cpp \
        src/js/DomFileBindings.cpp \
+       src/js/DomCryptoBindings.cpp \
        src/js/DomUrlBindings.cpp \
        src/js/DomObserverBindings.cpp \
        src/js/DomWindowBindings.cpp \
@@ -168,7 +169,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full gc-oracle deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket check-suites help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full gc-oracle deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics metrics-suites bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket check-suites help
 
 all: $(TARGET)
 
@@ -218,9 +219,10 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@./$(CROSS_ORIGIN_TARGET)
 
 ## The numbers the documents publish: every "A / B (P%)" must divide, the two
-## corpus totals must equal the cases on disk, "214 suites" must be the suites
-## tests/test_suite.cpp registers, and every figure a document marks with
-## `<!--metrics:key/shape-->` must equal docs/metrics.json or the tree.
+## corpus totals must equal the cases on disk, and every figure a document marks
+## with `<!--metrics:key/shape-->` must equal docs/metrics.json or the tree.
+## The suite count ("214 suites") is reported when README.md is behind and fails
+## nothing: no pull request edits it (AGENTS.md, "Working together").
 ## See tools/ci/check_numbers.py.
 check-numbers:
 	@python3 tools/ci/check_numbers.py
@@ -237,10 +239,17 @@ check-suites:
 
 ## Refresh every marked figure from docs/metrics.json and the tree, and raise the
 ## `--min-pass` floors in ci.yml to the scores the tree reaches. This is what to
-## run after merging main, instead of editing the counts by hand in six files.
+## run when a pull request has moved a score or a corpus.
 ## It never lowers a floor: that is a regression, and it is reported instead.
+## It leaves the suite count of README.md as it is written: see `metrics-suites`.
 metrics:
 	@python3 tools/ci/check_numbers.py --write
+
+## The same, and the suite count of README.md with it. For the landing session,
+## as the last act of a watch (AGENTS.md, "Working together"): a pull request
+## that rewrote the count would be in conflict with every other one that did.
+metrics-suites:
+	@python3 tools/ci/check_numbers.py --write --suites
 
 ## Float-index speed guard: the old sweep needs >5 s for 10k packed floats
 ## and >12 s for mixed sides; the new index needs ~0.1 s per page locally.

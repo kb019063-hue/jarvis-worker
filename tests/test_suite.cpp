@@ -6383,6 +6383,33 @@ TEST(canvas_to_data_url_is_the_png_it_painted) {
                 "jpeg/webp/gif/malformed answer data:,\n", bytes.size());
 }
 
+TEST(crypto_get_random_values_and_random_uuid) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    assert(interp.eval("typeof Crypto === 'function'").is_truthy());
+    // randomUUID returns a valid v4 UUID string
+    assert(interp.eval(
+        "/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(crypto.randomUUID())"
+    ).is_truthy());
+    assert(interp.eval("crypto.randomUUID() !== crypto.randomUUID()").is_truthy());
+
+    // getRandomValues fills Uint8Array / Int32Array and returns the same array
+    assert(interp.eval(R"(
+        (() => {
+            const a = new Uint8Array(16);
+            const ret = crypto.getRandomValues(a);
+            if (ret !== a) return false;
+            let anyNonZero = false;
+            for (let i = 0; i < a.length; i++) if (a[i] !== 0) anyNonZero = true;
+            return anyNonZero;
+        })()
+    )").is_truthy());
+
+    // Non-TypedArray and >65536 bytes are validated in DomCryptoBindings.cpp.
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -6418,6 +6445,47 @@ TEST(offscreen_canvas_draws_and_converts_to_blob) {
     )");
     assert(interp.eval("rejType === 'EncodingError'").is_truthy());
     assert(interp.eval("rejZero === 'IndexSizeError'").is_truthy());
+}
+
+TEST(image_bitmap_and_create_image_bitmap) {
+    auto doc = HtmlParser::parse(
+        "<!doctype html><html><body>"
+        "<canvas id='c' width='5' height='4'></canvas>"
+        "<canvas id='zero' width='0' height='2'></canvas>"
+        "</body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    assert(interp.eval("typeof ImageBitmap === 'function'").is_truthy());
+    assert(interp.eval("typeof createImageBitmap === 'function'").is_truthy());
+
+    interp.eval(R"(
+        var c = document.getElementById('c');
+        var ctx = c.getContext('2d');
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, 5, 4);
+        var bm = null;
+        createImageBitmap(c).then(function(b) { bm = b; });
+    )");
+    assert(interp.eval("bm instanceof ImageBitmap").is_truthy());
+    assert(interp.eval("bm.width === 5 && bm.height === 4").is_truthy());
+
+    // Cloning an ImageBitmap
+    interp.eval("var bm2 = null; createImageBitmap(bm).then(function(b) { bm2 = b; });");
+    assert(interp.eval("bm2 instanceof ImageBitmap && bm2.width === 5 && bm2.height === 4").is_truthy());
+
+    // close() resets width/height to 0 and rejects subsequent createImageBitmap(bm)
+    interp.eval("bm.close(); var rejClosed = null; createImageBitmap(bm).catch(function(e) { rejClosed = e.name; });");
+    assert(interp.eval("bm.width === 0 && bm.height === 0").is_truthy());
+    assert(interp.eval("rejClosed === 'InvalidStateError'").is_truthy());
+
+    // Zero-size canvas rejects
+    interp.eval("var rejZero = null; createImageBitmap(document.getElementById('zero')).catch(function(e) { rejZero = e.name; });");
+    assert(interp.eval("rejZero === 'InvalidStateError'").is_truthy());
+
+    // Unsupported source rejects
+    interp.eval("var rejBad = null; createImageBitmap(123).catch(function(e) { rejBad = e.name; });");
+    assert(interp.eval("rejBad === 'TypeError'").is_truthy());
 }
 
 void test_css_media_queries() {
@@ -9534,6 +9602,127 @@ TEST(get_element_by_id_answers_from_an_index) {
     assert(js.eval("found").to_number() == 20000);
 }
 
+TEST(computed_width_and_height_are_used_values) {
+    using namespace litebird;
+    // CSSOM's "resolved values": for `width` and `height`, when the property
+    // applies and `display` is neither `none` nor `contents`, the resolved
+    // value is the *used* value. The engine answered the computed one, so
+    // `width: 100px` with 10px of padding read back `"100px"` where a browser
+    // reports the box it actually made, and `width: auto` read back `"auto"`:
+    // a block's used width was unreachable through getComputedStyle.
+    //
+    // What the used value *is* depends on `box-sizing`, because that is what
+    // the `width` declaration controls: the content box under `content-box`
+    // (the default) and the border box under `border-box`. Measured in
+    // Chromium 156 for the same declarations.
+    // The default page: an empty body that has been laid out, which is what a
+    // used value needs.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    js.eval(R"JS(
+        function styleOf(css) {
+            var d = document.createElement('div');
+            d.setAttribute('style', css);
+            document.body.appendChild(d);
+            return d;
+        }
+        // The invariant that cannot be faked: whatever getComputedStyle says
+        // the width is, it is the size of a box the layout produced.
+        function agrees(d) {
+            var cs = getComputedStyle(d);
+            var want = parseFloat(cs.width);
+            var rect = d.getBoundingClientRect();
+            var pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+            var bdr = parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth);
+            var box = cs.boxSizing === 'border-box' ? rect.width : rect.width - pad - bdr;
+            return Math.abs(want - box) < 0.01;
+        }
+        var cases = {};
+        cases.padded = styleOf('width:100px;height:20px;padding:10px;border:5px solid red');
+        cases.plain = styleOf('width:100px;height:20px');
+        cases.borderBox = styleOf('box-sizing:border-box;width:100px;height:20px;padding:10px;border:5px solid red');
+        cases.percent = styleOf('width:50%;height:20px');
+        cases.autoBlock = styleOf('padding:3px;height:20px');
+        cases.clamped = styleOf('width:500px;max-width:100px;height:20px');
+        cases.hidden = styleOf('display:none;width:100px');
+        cases.absolute = styleOf('position:absolute;left:0;top:0;width:100px;height:20px;padding:10px');
+        var agreesAll = true;
+        for (var k in cases) if (k !== 'hidden' && !agrees(cases[k])) agreesAll = false;
+        var out = [];
+    )JS");
+    auto cs = [&](const char* var) {
+        return js.eval(std::string("getComputedStyle(cases.") + var + ").width").to_string();
+    };
+    auto rect = [&](const char* var) {
+        return js.eval(std::string("cases.") + var + ".getBoundingClientRect().width").to_number();
+    };
+
+    // The box is 130 wide and `clientWidth` 120, because `width` sized the
+    // content: `content-box` says so and the declaration is what it says.
+    assert(cs("padded") == "100px" && rect("padded") == 130);
+    assert(cs("plain") == "100px" && rect("plain") == 100);
+    // Under `border-box` the declaration sizes the whole box, so the 100 is
+    // still the answer even though the content is only 70 wide.
+    assert(cs("borderBox") == "100px" && rect("borderBox") == 100);
+    // A percentage resolves against the containing block, which for the body
+    // is the viewport width of the page fixture. The exact number is the
+    // layout's, and the invariant above checks the arithmetic.
+    assert(js.eval("String(parseFloat(getComputedStyle(cases.percent).width) > 0)").to_string() == "true");
+    assert(js.eval("String(getComputedStyle(cases.percent).width.indexOf('%') < 0)").to_string() == "true");
+    // `width: auto` on a block is the containing block less its own edges.
+    assert(std::round(rect("autoBlock")) == std::round(std::stod(cs("autoBlock")) + 6));
+    // A `max-width` the layout honoured is what the used value reports.
+    assert(cs("clamped") == "100px" && rect("clamped") == 100);
+    // `display: none` has no box, so the resolved value is the computed one.
+    assert(cs("hidden") == "100px");
+    assert(cs("absolute") == "100px" && rect("absolute") == 120);
+    // Nothing here is a computed value standing in for a box.
+    assert(js.eval("String(agreesAll)").to_string() == "true");
+
+    // A detached element has no box and no computed style at all, and an
+    // inline box's `width` is left to its content (CSS 2.1 §10.3.1), so both
+    // keep answering what they always did.
+    assert(js.eval(R"JS((function () {
+        var d = document.createElement('div');
+        d.style.width = '77px';
+        return getComputedStyle(d).width;
+    })())JS").to_string() == "");
+    assert(js.eval(R"JS((function () {
+        var s = document.createElement('span');
+        s.textContent = 'hello';
+        document.body.appendChild(s);
+        return getComputedStyle(s).width;
+    })())JS").to_string() == "auto");
+
+    // A getComputedStyle object taken before the layout is still live: the
+    // same object answers the new size once the box changes.
+    js.eval(R"JS(
+        var live = styleOf('width:30px;height:20px');
+        var liveStyle = getComputedStyle(live);
+    )JS");
+    assert(js.eval("liveStyle.width").to_string() == "30px");
+    js.eval("live.style.width = '45px';");
+    assert(js.eval("liveStyle.width").to_string() == "45px");
+
+    // `height` is resolved by the same rule, and a `height: auto` box that
+    // wrapped its text reports the height the layout gave it.
+    js.eval(R"JS(
+        var tall = styleOf('width:40px');
+        tall.textContent = 'w w w w w w w w w w w w w w w w w w w w';
+        var tallHeight = getComputedStyle(tall).height;
+        var tallRect = tall.getBoundingClientRect().height;
+    )JS");
+    assert(js.eval("String(tallHeight === tallRect + 'px')").to_string() == "true");
+
+    // The computed value is still what `el.style` and a `calc()` that needs a
+    // layout basis report: the two are different questions.
+    assert(js.eval("cases.padded.style.width").to_string() == "100px");
+    assert(js.eval(R"JS((function () {
+        var d = styleOf('width:calc(100% - 20px);height:10px');
+        return getComputedStyle(d).width;
+    })())JS").to_string() == "calc(100% - 20px)");
+}
+
 TEST(computed_style_answers_for_every_property) {
     using namespace litebird;
     // getComputedStyle answered "" for a property nobody had declared and took
@@ -9599,6 +9788,9 @@ TEST(computed_style_answers_for_every_property) {
     // calc(): lengths are added up; a percentage needs layout and stays; a
     // unit nothing here knows (the viewport's) leaves the value as declared.
     assert(cs("c", "height") == "22px" && cs("e", "font-size") == "20px");
+    // `width` is the *used* value since Phase 188 (CSSOM "resolved values"),
+    // but a `calc()` still keeps its text: a percentage in it needs a layout
+    // basis this code does not have, which stays a gap.
     assert(cs("c", "width") == "calc(100% - 20px)" && cs("c", "margin-top") == "calc(10% + 10px)");
     assert(cs("c", "top") == "calc(100vh - 1px)");
     // Eight bits of alpha that two decimals give back exactly.
@@ -26200,6 +26392,59 @@ TEST(http_authentication_basic_and_digest_challenges) {
     assert(ResourceLoader::auth_sha512_256_hex("abc") !=
            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a");    // SHA-512's first 256 bits
 
+    // 1b. RFC 7616 §3.4.1: "the username and password ... SHOULD be in
+    //     Normalization Form C". A password typed with a combining accent and
+    //     the same password precomposed are the same password to a person and
+    //     different octets to a digest, so the response must not depend on
+    //     which one was typed. The expected hexes were taken from Node.js v22
+    //     computing the MD5 by hand for each spelling:
+    //       e9 spelled precomposed -> 2248d1d270e12f8fbd985df11111d87e
+    //       e + U+0301            -> f2c9481685a393d1e7e27bdcd73f31c7 (the wrong octets)
+    //     and the engine must answer the first for both.
+    {
+        const std::string realm = "r@example.test";
+        const std::string nonce = "n0nce";
+        std::string precomposed, combining, again;
+        assert(ResourceLoader::auth_Digest_response("MD5", "\xC3\xA9", "pw", realm, nonce, "GET", "/x",
+                                                    "auth", "c", "00000001", precomposed));
+        assert(ResourceLoader::auth_Digest_response("MD5", "e\xCC\x81", "pw", realm, nonce, "GET", "/x",
+                                                    "auth", "c", "00000001", combining));
+        assert(precomposed == "2248d1d270e12f8fbd985df11111d87e");
+        assert(combining == precomposed);
+
+        // The same for the password: e2035f3d… is the precomposed spelling,
+        // 63b92bfc… the combining one.
+        std::string pass_pre, pass_comb;
+        assert(ResourceLoader::auth_Digest_response("MD5", "u", "\xC3\xA9", realm, nonce, "GET", "/x",
+                                                    "auth", "c", "00000001", pass_pre));
+        assert(ResourceLoader::auth_Digest_response("MD5", "u", "e\xCC\x81", realm, nonce, "GET", "/x",
+                                                    "auth", "c", "00000001", pass_comb));
+        assert(pass_pre == "e2035f3d116dbeadfccde7d61c193e81");
+        assert(pass_comb == pass_pre);
+
+        // A credential already in NFC is digested as its own octets: the RFC
+        // 7616 example above still answers 8ca523f5…, and ASCII is untouched.
+        assert(ResourceLoader::auth_Digest_response("MD5", "Mufasa", "Circle of Life",
+                                                    "http-auth@example.org",
+                                                    "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v", "GET",
+                                                    "/dir/index.html", "auth",
+                                                    "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ",
+                                                    "00000001", again));
+        assert(again == "8ca523f5e9506fed4657c9700eebdbec");
+
+        // And `userhash` hashes the normalized name too, so a server that
+        // precomposed its user list and one that did not agree.
+        std::string hashed_pre, hashed_comb;
+        const auto userhash = [&](const std::string& user, std::string& out) {
+            return ResourceLoader::auth_Digest_build(
+                "MD5", user, "pw", realm, nonce, /*opaque=*/"", "GET", "/x", "auth", "c", "00000001",
+                /*entity_body=*/std::string_view(), /*hash_username=*/true, out);
+        };
+        assert(userhash("\xC3\xA9", hashed_pre));
+        assert(userhash("e\xCC\x81", hashed_comb));
+        assert(hashed_pre == hashed_comb);
+    }
+
     // 2. RFC 7616 §3.9.1's example, reproduced field for field: the RFC's own
     //    cnonce and nc, so the expected hex is the RFC's and not this code's.
     {
@@ -29921,6 +30166,131 @@ TEST(a_functions_name_and_length_are_its_own_properties) {
     assert(failed.empty());
 }
 
+TEST(a_subclass_is_made_by_the_builtin_it_was_called_on) {
+    using namespace litebird;
+    // Phase 140, finding 145. `Array.from`, `Array.of` and every method that
+    // makes an array built it with `JsValue::make_array`, so a subclass of
+    // Array could never be made by the built-in it was called on: `new
+    // List().map(f)` was a plain Array. The standard routes all of them
+    // through ArraySpeciesCreate (ECMA-262 §10.4.2.3), which asks the
+    // object's `constructor` for `Symbol.species` — so `class Plain extends Array { static get
+    // [Symbol.species]() { return Array; } }` is the case that proves the
+    // property is *read* and not merely present.
+    //
+    // Every expected string below is what Node.js v22.22.3 printed for the
+    // same script, checked line for line against a second run in Node. The
+    // non-constructor receivers make a plain array, as the standard specifies:
+    // `Array.from.call({}, [1])` is an Array rather than a TypeError.
+    TestPage page;
+    JsInterpreter& js = page.js;
+
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        class List extends Array {}
+        class Plain extends Array { static get [Symbol.species]() { return Array; } }
+        class Traced extends Array { constructor(n) { super(n); Traced.given = n; } }
+        function list() { var l = new List(); l.push(1, 2, 3); return l; }
+        function plain() { var p = new Plain(); p.push(1); return p; }
+
+        // The static methods make the constructor they were called on.
+        check('List.from', function () { return [List.from([1, 2]) instanceof List, List.from([1, 2]).length]; }, '[true,2]');
+        check('List.of', function () { return [List.of(1, 2) instanceof List, List.of(1, 2).length]; }, '[true,2]');
+        check('Array.from is still an Array', function () { return Array.from([1, 2]) instanceof Array; }, 'true');
+
+        // The species-aware methods make their result through the species.
+        check('map', function () { return list().map(function (x) { return x; }) instanceof List; }, 'true');
+        check('filter', function () { return list().filter(Boolean) instanceof List; }, 'true');
+        check('slice', function () { return list().slice(1) instanceof List; }, 'true');
+        check('concat', function () { return list().concat([4]) instanceof List; }, 'true');
+        check('flat', function () { return list().flat() instanceof List; }, 'true');
+        check('flatMap', function () { return list().flatMap(function (x) { return [x]; }) instanceof List; }, 'true');
+        check('splice', function () { return list().splice(1, 1) instanceof List; }, 'true');
+
+        // ... and `Symbol.species` is read, not ignored: this subclass says
+        // Array, so the method must make an Array.
+        check('a species of Array', function () {
+            var made = plain().map(function (x) { return x; });
+            return [made instanceof Array, made instanceof Plain];
+        }, '[true,false]');
+
+        // The getters the standard installs, on every constructor that has one.
+        check('the species getters', function () {
+            return [typeof Array[Symbol.species], Array[Symbol.species] === Array,
+                    typeof Map[Symbol.species], Map[Symbol.species] === Map,
+                    typeof Set[Symbol.species], typeof Promise[Symbol.species],
+                    typeof RegExp[Symbol.species]];
+        }, '["function",true,"function",true,"function","function","function"]');
+
+        // A receiver that is not an array makes a plain array: IsArray is the
+        // first question ArraySpeciesCreate asks, so `constructor` is not read.
+        check('an array-like receiver', function () {
+            return Array.prototype.map.call({ length: 2, 0: 'a', 1: 'b' }, function (x) { return x + '!'; });
+        }, '["a!","b!"]');
+
+        // A hole stays a hole: the result is filled with CreateDataProperty.
+        check('holes', function () {
+            var mapped = [1, , 3].map(function (x) { return x; });
+            return [mapped.length, 1 in mapped];
+        }, '[3,false]');
+
+        // The length the array-like path passes to the constructor, and the
+        // one the iterable path does not (it constructs with no argument).
+        check('a constructor is told the length', function () {
+            var made = Traced.from({ length: 3, 0: 'a', 1: 'b', 2: 'c' });
+            return [Traced.given, made.length, made instanceof Traced];
+        }, '[3,3,true]');
+
+        // A receiver that is not a constructor makes a plain array,
+        // and a constructed object when the receiver is a constructor.
+        check('a receiver that is not a constructor', function () {
+            var from = Array.from.call({}, [1]);
+            var of = Array.of.call({}, 1, 2);
+            var made = Array.from.call(function () {}, [1]);
+            return [from instanceof Array, from.length, of instanceof Array, made instanceof Array, made.length];
+        }, '[true,1,true,false,1]');
+
+        // Change-array-by-copy methods deliberately do not consult species.
+        check('copying methods ignore species', function () {
+            class NoSpecies extends Array {
+                static get [Symbol.species]() { throw new Error('species was read'); }
+            }
+            var a = new NoSpecies(3, 1, 2);
+            return [a.toSorted().constructor === Array, a.toReversed().constructor === Array,
+                    a.toSpliced(1, 1).constructor === Array, a.with(0, 4).constructor === Array];
+        }, '[true,true,true,true]');
+
+        // A species constructor that refuses the write is a TypeError, not a
+        // silently lost element.
+        check('a frozen species result', function () {
+            class Frozen extends Array {
+                static get [Symbol.species]() { return function (n) { return Object.freeze(new Array(n)); }; }
+            }
+            var f = new Frozen(); f.push(1, 2);
+            return f.map(function (x) { return x; });
+        }, 'throws TypeError');
+
+        // The arithmetic still works: the values, not just the prototypes.
+        check('values and holes survive', function () {
+            var l = list();
+            return [l.map(function (x) { return x * 2; }).join(','),
+                    l.filter(function (x) { return x > 1; }).join(','),
+                    l.slice(1).join(','), l.concat([4]).join(','),
+                    [1, [2, [3]]].flat().join(','), [1, , 3].splice(0, 3).length];
+        }, '["2,4,6","2,3","2,3","1,2,3,4","1,2,3",3]');
+
+        failures;
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot) {
     using namespace litebird;
 
@@ -30598,6 +30968,70 @@ TEST(document_canvas_background_is_scoped_and_keeps_computed_styles) {
         assert(!std::holds_alternative<DrawCanvasCommand>(cmd));
     }
     assert(DisplayList::build(nullptr).commands().empty());
+}
+
+// Phase 190 / finding 194. Before this the resolver had no `contents` value,
+// so the declaration fell through the display chain and the element kept
+// `block`: it generated a box, its padding and border painted, and a boxless
+// body leaked its background onto the canvas. Both halves are asserted here
+// because the row recorded the canvas half as a regression of the same gap.
+TEST(display_contents_generates_no_box_and_splices_its_children) {
+    using namespace litebird;
+    // getComputedStyle must still answer with the declared keyword; a value the
+    // engine understands must not be reported as something it is not.
+    auto doc = HtmlParser::parse(
+        R"(<!doctype html><html><head><style>body{margin:0}#wrap{display:contents;background:#ff0000;padding:50px;border:9px solid #0000ff}#a{width:100px;height:20px;background:#00ff00}#b{width:120px;height:30px;background:#0000ff}</style></head><body><div id="wrap"><div id="a"></div><div id="b"></div></div></body></html>)");
+    // The document's own `<style>` sheet is what states `contents`, so it has to
+    // be collected the way layout collects it -- a bare resolver sees no sheet.
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 800.0f, 600.0f);
+    auto root = LayoutTree::build(doc, resolver, 800, 600);
+    assert(root);
+    const auto wrap_element = doc->get_element_by_id("wrap");
+    assert(wrap_element);
+    const ComputedStyle wrap_style = resolver.resolve_style(wrap_element, nullptr);
+    assert(wrap_style.display == Display::Contents);
+    assert(wrap_style.is_contents());
+    assert(!wrap_style.is_block());
+    assert(!wrap_style.is_none());
+
+    // The splice: `#wrap` has no box, and its two blocks sit in `body` as if
+    // they were its children -- no 50px padding, no 9px border, so #b starts
+    // exactly where #a ends at y=20.
+    assert(root->children.size() == 2);
+    const LayoutBox* box_a = root->children[0].get();
+    const LayoutBox* box_b = root->children[1].get();
+    assert(box_a->node && box_a->node->as_element()->get_attribute("id") == "a");
+    assert(box_b->node && box_b->node->as_element()->get_attribute("id") == "b");
+    assert(box_a->dimensions.content.x == 0.0f && box_a->dimensions.content.y == 0.0f);
+    assert(box_a->dimensions.content.width == 100.0f);
+    assert(box_b->dimensions.content.y == 20.0f);
+    assert(box_b->dimensions.content.width == 120.0f);
+
+    // Nothing paints the spliced-away element's own background, padding or
+    // border: x=150 y=0 is past both children and inside the old padding box.
+    BitmapRenderer bitmap(800, 600);
+    bitmap.clear(Color::white());
+    bitmap.render(DisplayList::build(root));
+    // Color::green() is CSS `green` (#008000), not the #00ff00 the probe paints.
+    assert(bitmap.get_pixel(10, 10) == Color(0, 255, 0));
+    assert(bitmap.get_pixel(10, 25) == Color::blue());
+    assert(bitmap.get_pixel(150, 10) == Color::white());
+    assert(bitmap.get_pixel(160, 70) == Color::white());
+
+    // A boxless body must not colour the canvas: Chromium leaves it white
+    // (tests/render/body-origin.json, a_body_with_display_contents_has_no_canvas_color).
+    auto bodyless = HtmlParser::parse(
+        R"(<!doctype html><body style="display:contents;background:#ff0000;color:transparent">hello</body>)");
+    StyleResolver bodyless_resolver = DocumentStyles::build_resolver(*bodyless, nullptr, 200.0f, 150.0f);
+    auto bodyless_root = LayoutTree::build(bodyless, bodyless_resolver, 200, 150);
+    assert(bodyless_root && bodyless_root->has_document_canvas);
+    assert(bodyless_root->canvas_background.is_transparent());
+    assert(!bodyless_root->background_propagated);
+    BitmapRenderer bodyless_bitmap(200, 150);
+    bodyless_bitmap.clear(Color::white());
+    bodyless_bitmap.render(DisplayList::build(bodyless_root));
+    assert(bodyless_bitmap.get_pixel(0, 0) == Color::white());
+    assert(bodyless_bitmap.get_pixel(199, 149) == Color::white());
 }
 
 TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
@@ -32587,6 +33021,535 @@ TEST(fetch_request_loopback_http_worker_and_abort) {
     assert(hit_count->load() == 3);
 }
 
+TEST(direct_eval_inherits_context_and_checks_declarations_before_mutating) {
+    TestPage page;
+
+    page.js.eval(R"JS(
+        var failures = [];
+        function eq(label, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(label + ': got ' + g + ', expected ' + w);
+        }
+        function throwsName(label, expectedName, fn) {
+            try {
+                fn();
+                failures.push(label + ': did not throw');
+            } catch (e) {
+                if (!e || e.name !== expectedName) {
+                    failures.push(label + ': got ' + (e ? e.name : String(e)) + ', expected ' + expectedName);
+                }
+            }
+        }
+
+        // Direct eval inherits strictness (parse + runtime) and super/new.target through arrows.
+        (function () {
+            'use strict';
+            throwsName('strict eval duplicate param', 'SyntaxError', function () { eval('function dup(a, a) {}'); });
+            throwsName('strict eval reserved word', 'SyntaxError', function () { eval('var public = 1;'); });
+            throwsName('strict eval delete identifier', 'SyntaxError', function () { eval('var x; delete x;'); });
+            throwsName('strict eval assign to eval', 'SyntaxError', function () { eval('eval = 1;'); });
+            throwsName('strict eval undeclared write', 'ReferenceError', function () { eval('undecl_171 = 1;'); });
+            eq('strict undecl not leaked', typeof undecl_171, 'undefined');
+        })();
+
+        class Base171 {
+            #secret = 41;
+            m() { return 10; }
+            reveal() { return (() => eval('this.#secret'))(); }
+        }
+        class Sub171 extends Base171 {
+            constructor() {
+                var res = (() => eval('super(); [super.m(), new.target === Sub171]'))();
+                this.res = res;
+            }
+        }
+        var sub171 = new Sub171();
+        eq('direct eval arrow super and new.target', sub171.res, [10, true]);
+        eq('direct eval arrow private field', sub171.reveal(), 41);
+
+        // Indirect eval runs in its own non-strict global lexical env and rejects super / new.target.
+        (function () {
+            'use strict';
+            var indirectOut = (0, eval)('let z_ind = 42; with_ok_171 = 7; z_ind + with_ok_171');
+            eq('indirect eval sloppy result', indirectOut, 49);
+            eq('indirect eval lexical private', typeof z_ind, 'undefined');
+            eq('indirect eval global write', globalThis.with_ok_171, 7);
+            throwsName('indirect eval rejects new.target', 'SyntaxError', function () {
+                (0, eval)('new.target');
+            });
+        })();
+        class IndirectSuperCheck171 {
+            m() {
+                throwsName('indirect eval rejects super', 'SyntaxError', function () {
+                    (0, eval)('super.x');
+                });
+            }
+        }
+        new IndirectSuperCheck171().m();
+
+        // EvalDeclarationInstantiation checks collisions atomically before mutating anything.
+        // Note: eval() must run directly in the block (not inside a helper callback, which would create
+        // its own function var scope).
+        (function () {
+            let conflict = 10;
+            try {
+                eval('var okBefore = 1; var conflict = 2;');
+                failures.push('eval collision with outer let: did not throw');
+            } catch (e) {
+                if (!e || e.name !== 'SyntaxError') {
+                    failures.push('eval collision with outer let: got ' + (e ? e.name : String(e)));
+                }
+            }
+            eq('eval rollback leaves prior var unbound', typeof okBefore, 'undefined');
+            eq('eval rollback preserves let value', conflict, 10);
+
+            const fnConflict = 3;
+            try {
+                eval('var okFnBefore = 1; function fnConflict() {}');
+                failures.push('eval function collision with outer const: did not throw');
+            } catch (e) {
+                if (!e || e.name !== 'SyntaxError') {
+                    failures.push('eval function collision with outer const: got ' + (e ? e.name : String(e)));
+                }
+            }
+            eq('eval function rollback leaves var unbound', typeof okFnBefore, 'undefined');
+
+            // Inside an inner function, `var conflict` stops at the inner function's var scope.
+            (function () {
+                eval('var conflict = 2;');
+                eq('inner function var stops at function boundary', conflict, 2);
+            })();
+            eq('outer let still untouched', conflict, 10);
+        })();
+
+        // Annex B.3.5: simple catch(e) allows direct eval var and function over the catch parameter.
+        var catchVar171 = 'outer';
+        var catchLog = [];
+        try {
+            throw 'caught';
+        } catch (catchVar171) {
+            eval('var catchVar171 = 123;');
+            catchLog.push(catchVar171);
+        }
+        catchLog.push(catchVar171);
+        try {
+            throw 'caught2';
+        } catch (catchFn171) {
+            eval('function catchFn171() { return 7; }');
+            catchLog.push(typeof catchFn171);
+        }
+        catchLog.push(typeof catchFn171, catchFn171());
+        eq('annex B.3.5 catch eval var and function', catchLog, [123, 'outer', 'string', 'function', 7]);
+
+        // Non-simple catch destructuring still blocks var collision.
+        try {
+            throw { a: 1 };
+        } catch ({ a }) {
+            try {
+                eval('var a = 2;');
+                failures.push('non-simple catch blocks eval var: did not throw');
+            } catch (e) {
+                if (!e || e.name !== 'SyntaxError') {
+                    failures.push('non-simple catch blocks eval var: got ' + (e ? e.name : String(e)));
+                }
+            }
+        }
+
+        // Global var / eval configurability, delete, and global lexical conflict.
+        eval('var evalGlobalVar171 = 55;');
+        var dEval = Object.getOwnPropertyDescriptor(globalThis, 'evalGlobalVar171');
+        eq('eval global var is configurable', dEval && dEval.configurable, true);
+        eq('delete eval global var succeeds', delete evalGlobalVar171, true);
+        eq('deleted eval global var gone', typeof evalGlobalVar171, 'undefined');
+
+        (function () {
+            eval('var localEvalVar171 = 9;');
+            eq('sloppy local eval var visible', localEvalVar171, 9);
+            eq('sloppy local eval var deletable', delete localEvalVar171, true);
+            eq('deleted sloppy local eval var gone', typeof localEvalVar171, 'undefined');
+        })();
+    )JS");
+
+    page.js.eval("var scriptVar171 = 1; let globalLex171 = 1;");
+    page.js.eval(R"JS(
+        var dScript = Object.getOwnPropertyDescriptor(globalThis, 'scriptVar171');
+        eq('script global var is non-configurable', dScript && dScript.configurable, false);
+        eq('delete script global var returns false', delete scriptVar171, false);
+        try {
+            eval('var globalLex171 = 2;');
+            failures.push('eval var cannot shadow global let: did not throw');
+        } catch (e) {
+            if (!e || e.name !== 'SyntaxError') {
+                failures.push('eval var cannot shadow global let: got ' + (e ? e.name : String(e)));
+            }
+        }
+        throwsName('indirect eval function cannot shadow global let', 'SyntaxError', function () {
+            (0, eval)('function globalLex171() {}');
+        });
+        eq('global let untouched after rejected eval', globalLex171, 1);
+
+        var failuresStr = failures.join('\n');
+    )JS");
+
+    const std::string failed = page.js.eval("failuresStr").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+TEST(parameter_scopes_loop_completions_class_fields_and_early_syntax_errors) {
+    TestPage page;
+
+    page.js.eval(R"JS(
+        var failures = [];
+        function eq(label, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(label + ': got ' + g + ', expected ' + w);
+        }
+        function throwsName(label, expectedName, fn) {
+            try {
+                fn();
+                failures.push(label + ': did not throw');
+            } catch (e) {
+                if (!e || e.name !== expectedName) {
+                    failures.push(label + ': got ' + (e ? e.name : String(e)) + ', expected ' + expectedName);
+                }
+            }
+        }
+
+        // Parameter-expression scopes stay separate from body var and lexical scopes,
+        // while hoisted body functions bind in body_var_env and close over body_lex_env.
+        function splitParam(a = 1, b = function () { return a; }) {
+            var a = 99;
+            return [a, b()];
+        }
+        function splitParamEval(p = eval('var px = 7'), q = function () { return px; }) {
+            var px = 2;
+            return [px, q()];
+        }
+        function bodyClosureHoist() {
+            let captured = 1;
+            {
+                function inner() { return captured; }
+                var res = inner();
+            }
+            return res;
+        }
+        eq('param default sees param not body var', splitParam(), [99, 1]);
+        eq('param eval var isolated from body var', splitParamEval(), [2, 7]);
+        eq('body function hoisted in body_var_env sees body_lex_env', bodyClosureHoist(), 1);
+
+        // Iteration statements reset completion values to undefined.
+        eq('while(false) completion', eval('1; while (false) {}') === undefined, true);
+        eq('for(;false;) completion', eval('1; for (; false;) {}') === undefined, true);
+        eq('for-of empty completion', eval('1; for (var k of []) {}') === undefined, true);
+        eq('for-in empty completion', eval('1; for (var p in {}) {}') === undefined, true);
+        eq('do-while body completion', eval('1; do { 2; } while (false)'), 2);
+        eq('do-while immediate break completion', eval('1; do { break; } while (false)') === undefined, true);
+
+        // Early syntax errors for break, continue, labels, top-level return, and new.target.
+        // Run directly at global scope (no function wrapper, which would allow `return` and `new.target`).
+        var syntaxCases = [
+            'break;',
+            'continue;',
+            'lbl: { continue lbl; }',
+            'lbl: { lbl: 1; }',
+            'break missing;',
+            'return 1;',
+            'new.target;',
+            '() => new.target;',
+        ];
+        for (var i = 0; i < syntaxCases.length; i++) {
+            try {
+                eval(syntaxCases[i]);
+                failures.push('early syntax: ' + syntaxCases[i] + ': did not throw');
+            } catch (e) {
+                if (!e || e.name !== 'SyntaxError') {
+                    failures.push('early syntax: ' + syntaxCases[i] + ': got ' + (e ? e.name : String(e)));
+                }
+            }
+        }
+        // Inside a function, direct eval inherits allow_new_target while indirect eval rejects new.target.
+        (function () {
+            eq('direct eval in function sees new.target === undefined', eval('new.target') === undefined, true);
+            throwsName('indirect eval rejects () => new.target', 'SyntaxError', function () {
+                (0, eval)('() => new.target;');
+            });
+        })();
+
+        // Class static 'prototype' rejection and field initializer rules.
+        throwsName('computed static prototype method', 'TypeError', function () {
+            eval("class A { static ['prototype']() {} }");
+        });
+        throwsName('computed static prototype getter', 'TypeError', function () {
+            eval("class B { static get ['prototype']() { return 1; } }");
+        });
+        throwsName('computed static prototype field', 'TypeError', function () {
+            eval("class C { static ['prototype'] = 1; }");
+        });
+        throwsName('class field direct eval forbids arguments', 'SyntaxError', function () {
+            eval('class D { static x = eval("arguments"); }');
+        });
+        class FieldCheck171 {
+            nt = new.target;
+            val = (function () { var fv = 5; return fv; })();
+        }
+        var fc = new FieldCheck171();
+        eq('field new.target is undefined', fc.nt === undefined, true);
+        eq('field var stays isolated', [fc.val, typeof fv], [5, 'undefined']);
+
+        // Nested functions inside loops, switches, and labels exercise parser stack growth.
+        var loopOut = [];
+        for (var j = 0; j < 3; j++) {
+            (function () {
+                var inner = (function (x) { return function () { return x * 2; }; })(j);
+                loopOut.push(inner());
+            })();
+        }
+        outerLoop: for (var k = 0; k < 2; k++) {
+            switch (k) {
+                case 0:
+                    (function () { loopOut.push('c0'); })();
+                    continue outerLoop;
+                case 1:
+                    (function () { loopOut.push('c1'); })();
+                    break outerLoop;
+            }
+        }
+        eq('nested functions inside loops/switch/labels', loopOut, [0, 2, 4, 'c0', 'c1']);
+    )JS");
+
+    const std::string failed = page.js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+TEST(flex_and_grid_box_alignment_properties) {
+    using namespace litebird;
+    // Phase 180, finding 184: CSS Box Alignment Level 3 in flex and grid —
+    // `align-self`, `align-content`, `justify-items`, `justify-self`,
+    // `place-*` shorthands, and main-axis `justify-content` + `flex-grow` +
+    // wrapping in column flex containers.
+    auto build = [](const std::string& html) {
+        auto doc = HtmlParser::parse(html);
+        StyleResolver resolver;
+        return LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+    };
+    auto approx = [](float a, float b) { return std::fabs(a - b) < 0.05f; };
+
+    // 1. Row flex: `align-self` overrides `align-items` per item (including
+    // `stretch` on an auto-height item and `auto` inheriting container default).
+    {
+        auto root = build(
+            R"(<body><div style="display: flex; align-items: flex-start; width: 200px; height: 100px">)"
+            R"(<div style="width: 30px; height: 20px"></div>)"
+            R"(<div style="width: 30px; height: 20px; align-self: center"></div>)"
+            R"(<div style="width: 30px; height: 20px; align-self: flex-end"></div>)"
+            R"(<div style="width: 30px; align-self: stretch"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cy = c->dimensions.content.y;
+        assert(approx(c->children[0]->dimensions.content.y - cy, 0.0f));
+        assert(approx(c->children[1]->dimensions.content.y - cy, 40.0f));
+        assert(approx(c->children[2]->dimensions.content.y - cy, 80.0f));
+        assert(approx(c->children[3]->dimensions.content.y - cy, 0.0f));
+        assert(approx(c->children[3]->dimensions.content.height, 100.0f));
+        // Distinct align-self values must produce distinct ComputedStyle hashes
+        // so style interning never collapses them together.
+        assert(*c->children[0]->style != *c->children[2]->style);
+        assert(c->children[0]->style->hash() != c->children[2]->style->hash());
+    }
+
+    // 2. Row flex `align-content` on multi-line (`flex-wrap: wrap`):
+    //    stretch, flex-start, flex-end, center, space-between, space-around, space-evenly.
+    {
+        // Default `align-content: stretch`: 2 lines of 20px in 100px -> each line becomes 50px.
+        auto root = build(
+            R"(<body><div style="display: flex; flex-wrap: wrap; width: 100px; height: 100px">)"
+            R"(<div style="width: 60px; height: 20px"></div>)"
+            R"(<div style="width: 60px; height: 20px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cy = c->dimensions.content.y;
+        assert(approx(c->children[0]->dimensions.content.y - cy, 0.0f));
+        assert(approx(c->children[1]->dimensions.content.y - cy, 50.0f));
+    }
+    {
+        auto check_ac = [&](const char* val, float y0, float y1) {
+            std::string html = std::string(
+                R"(<body><div style="display: flex; flex-wrap: wrap; align-content: )") + val +
+                R"(; width: 100px; height: 100px">)"
+                R"(<div style="width: 60px; height: 20px"></div>)"
+                R"(<div style="width: 60px; height: 20px"></div>)"
+                R"(</div></body>)";
+            auto root = build(html);
+            auto c = root->children[0];
+            float cy = c->dimensions.content.y;
+            assert(approx(c->children[0]->dimensions.content.y - cy, y0));
+            assert(approx(c->children[1]->dimensions.content.y - cy, y1));
+        };
+        check_ac("flex-start", 0.0f, 20.0f);
+        check_ac("flex-end", 60.0f, 80.0f);
+        check_ac("center", 30.0f, 50.0f);
+        check_ac("space-between", 0.0f, 80.0f);
+        check_ac("space-around", 15.0f, 65.0f);
+        check_ac("space-evenly", 20.0f, 60.0f);
+    }
+
+    // 3. Single-line (`flex-wrap: nowrap`) ignores `align-content` (CSS Flexbox §9.6):
+    //    the sole line still spans the container's definite height (100px).
+    {
+        auto root = build(
+            R"(<body><div style="display: flex; align-content: flex-end; align-items: flex-start; width: 100px; height: 100px">)"
+            R"(<div style="width: 40px; height: 20px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        assert(approx(c->children[0]->dimensions.content.y - c->dimensions.content.y, 0.0f));
+    }
+
+    // 4. `row-reverse` and `wrap-reverse`.
+    {
+        auto root = build(
+            R"(<body><div style="display: flex; flex-direction: row-reverse; justify-content: flex-start; width: 100px; height: 40px">)"
+            R"(<div style="width: 30px; height: 20px"></div>)"
+            R"(<div style="width: 40px; height: 20px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cx = c->dimensions.content.x;
+        // Main start is the right edge: item 0 sits at 70..100, item 1 at 30..70.
+        assert(approx(c->children[0]->dimensions.content.x - cx, 70.0f));
+        assert(approx(c->children[1]->dimensions.content.x - cx, 30.0f));
+    }
+    {
+        auto root = build(
+            R"(<body><div style="display: flex; flex-wrap: wrap-reverse; align-content: flex-start; width: 100px; height: 100px">)"
+            R"(<div style="width: 60px; height: 20px"></div>)"
+            R"(<div style="width: 60px; height: 30px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cy = c->dimensions.content.y;
+        // Line 1 (height 30) is placed before line 0 (height 20).
+        assert(approx(c->children[1]->dimensions.content.y - cy, 0.0f));
+        assert(approx(c->children[0]->dimensions.content.y - cy, 30.0f));
+    }
+
+    // 5. Column flex: `justify-content` (all 6 modes), `flex-grow`, `align-self`,
+    //    `column-reverse`, and multi-column `flex-wrap: wrap` + `align-content`.
+    {
+        auto check_col_jc = [&](const char* val, float y0, float y1) {
+            std::string html = std::string(
+                R"(<body><div style="display: flex; flex-direction: column; justify-content: )") + val +
+                R"(; width: 100px; height: 100px">)"
+                R"(<div style="width: 40px; height: 20px"></div>)"
+                R"(<div style="width: 40px; height: 20px"></div>)"
+                R"(</div></body>)";
+            auto root = build(html);
+            auto c = root->children[0];
+            float cy = c->dimensions.content.y;
+            assert(approx(c->children[0]->dimensions.content.y - cy, y0));
+            assert(approx(c->children[1]->dimensions.content.y - cy, y1));
+        };
+        check_col_jc("flex-start", 0.0f, 20.0f);
+        check_col_jc("flex-end", 60.0f, 80.0f);
+        check_col_jc("center", 30.0f, 50.0f);
+        check_col_jc("space-between", 0.0f, 80.0f);
+        check_col_jc("space-around", 15.0f, 65.0f);
+        check_col_jc("space-evenly", 20.0f, 60.0f);
+    }
+    {
+        // Column `flex-grow` and `align-self`.
+        auto root = build(
+            R"(<body><div style="display: flex; flex-direction: column; align-items: flex-start; width: 100px; height: 100px">)"
+            R"(<div style="width: 40px; height: 20px; align-self: center"></div>)"
+            R"(<div style="width: 40px; height: 20px; flex-grow: 1; align-self: flex-end"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cx = c->dimensions.content.x;
+        float cy = c->dimensions.content.y;
+        assert(approx(c->children[0]->dimensions.content.x - cx, 30.0f));
+        assert(approx(c->children[0]->dimensions.content.y - cy, 0.0f));
+        assert(approx(c->children[1]->dimensions.content.x - cx, 60.0f));
+        assert(approx(c->children[1]->dimensions.content.y - cy, 20.0f));
+        assert(approx(c->children[1]->dimensions.content.height, 80.0f));
+    }
+    {
+        // Column multi-line wrapping with `align-content: space-between`.
+        auto root = build(
+            R"(<body><div style="display: flex; flex-direction: column; flex-wrap: wrap; align-content: space-between; width: 100px; height: 100px">)"
+            R"(<div style="width: 30px; height: 60px"></div>)"
+            R"(<div style="width: 30px; height: 60px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cx = c->dimensions.content.x;
+        assert(approx(c->children[0]->dimensions.content.x - cx, 0.0f));
+        assert(approx(c->children[1]->dimensions.content.x - cx, 70.0f));
+    }
+    {
+        // `column-reverse` with `justify-content: flex-start` packs from bottom.
+        auto root = build(
+            R"(<body><div style="display: flex; flex-direction: column-reverse; justify-content: flex-start; width: 100px; height: 100px">)"
+            R"(<div style="width: 40px; height: 20px"></div>)"
+            R"(<div style="width: 40px; height: 30px"></div>)"
+            R"(</div></body>)");
+        auto c = root->children[0];
+        float cy = c->dimensions.content.y;
+        assert(approx(c->children[0]->dimensions.content.y - cy, 80.0f));
+        assert(approx(c->children[1]->dimensions.content.y - cy, 50.0f));
+    }
+
+    // 6. CSS Grid: `justify-items`, `justify-self`, `align-self`, `place-items`,
+    //    `place-self`, `justify-content`, `align-content`, and `place-content`.
+    {
+        auto root = build(
+            R"(<body><div style="display: grid; grid-template-columns: 100px 100px; grid-template-rows: 60px; width: 200px; height: 60px; place-items: center flex-start">)"
+            R"(<div style="width: 40px; height: 20px"></div>)"
+            R"(<div style="width: 40px; height: 20px; place-self: flex-end center"></div>)"
+            R"(</div></body>)");
+        auto g = root->children[0];
+        float gx = g->dimensions.content.x;
+        float gy = g->dimensions.content.y;
+        // Cell 0 inherits place-items (align: center -> y=20, justify: flex-start -> x=0).
+        assert(approx(g->children[0]->dimensions.content.x - gx, 0.0f));
+        assert(approx(g->children[0]->dimensions.content.y - gy, 20.0f));
+        // Cell 1 overrides via place-self (align: flex-end -> y=40, justify: center -> x=130).
+        assert(approx(g->children[1]->dimensions.content.x - gx, 130.0f));
+        assert(approx(g->children[1]->dimensions.content.y - gy, 40.0f));
+    }
+    {
+        // Grid `place-content: space-between center` on fixed tracks inside a larger container.
+        auto root = build(
+            R"(<body><div style="display: grid; grid-template-columns: 30px 30px; grid-template-rows: 20px 20px; width: 100px; height: 100px; place-content: space-between center">)"
+            R"(<div></div><div></div><div></div><div></div>)"
+            R"(</div></body>)");
+        auto g = root->children[0];
+        float gx = g->dimensions.content.x;
+        float gy = g->dimensions.content.y;
+        // Columns centered: total 60px in 100px -> start at x=20 and x=50.
+        // Rows space-between: total 40px in 100px -> y=0 and y=80.
+        assert(approx(g->children[0]->dimensions.content.x - gx, 20.0f));
+        assert(approx(g->children[0]->dimensions.content.y - gy, 0.0f));
+        assert(approx(g->children[1]->dimensions.content.x - gx, 50.0f));
+        assert(approx(g->children[1]->dimensions.content.y - gy, 0.0f));
+        assert(approx(g->children[2]->dimensions.content.x - gx, 20.0f));
+        assert(approx(g->children[2]->dimensions.content.y - gy, 80.0f));
+        assert(approx(g->children[3]->dimensions.content.x - gx, 50.0f));
+        assert(approx(g->children[3]->dimensions.content.y - gy, 80.0f));
+    }
+    {
+        // Grid `align-content: stretch` stretches auto-sized rows, not fixed rows.
+        auto root = build(
+            R"(<body><div style="display: grid; grid-template-columns: 50px; width: 50px; height: 100px">)"
+            R"(<div style="height: 20px"></div>)"
+            R"(<div></div>)"
+            R"(</div></body>)");
+        auto g = root->children[0];
+        float gy = g->dimensions.content.y;
+        // 2 auto rows: row 0 starts at 20, row 1 at 0; remaining 80px split +40 each -> row 0 = 60, row 1 = 40.
+        assert(approx(g->children[0]->dimensions.content.y - gy, 0.0f));
+        assert(approx(g->children[1]->dimensions.content.y - gy, 60.0f));
+        assert(approx(g->children[1]->dimensions.content.height, 40.0f));
+    }
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -32647,7 +33610,9 @@ int main() {
     RUN_TEST(web_storage_and_cookies);
     RUN_TEST(html5_canvas_2d_context);
     RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
+    RUN_TEST(crypto_get_random_values_and_random_uuid);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
+    RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
     RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);
@@ -33013,6 +33978,9 @@ int main() {
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
+
+    // Phase 140: a subclass is made by the built-in it was called on (species).
+    RUN_TEST(a_subclass_is_made_by_the_builtin_it_was_called_on);
     RUN_TEST(object_integrity_levels_ask_every_property);
 
     // Phase 132: a boxed String exposes character indices as own descriptors.
@@ -33050,10 +34018,14 @@ int main() {
 
     // Phase 152: place the document body, its margins, and its descendants.
     RUN_TEST(document_body_margins_place_boxes_from_the_viewport);
+
+    // Phase 188: getComputedStyle's width and height are used values.
+    RUN_TEST(computed_width_and_height_are_used_values);
     RUN_TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry);
 
     // Phase 170: root/body canvas color, compositing, scoping and scrolling.
     RUN_TEST(document_canvas_background_is_scoped_and_keeps_computed_styles);
+    RUN_TEST(display_contents_generates_no_box_and_splices_its_children);
     RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
     RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
 
@@ -33073,6 +34045,15 @@ int main() {
     // Phase 173: Fetch Request constructor, Body mixin, clone(), AbortSignal linking, and fetch(Request, init).
     RUN_TEST(fetch_request_constructor_validation_body_clone_and_signal);
     RUN_TEST(fetch_request_loopback_http_worker_and_abort);
+
+    // Phase 171: direct eval context propagation, EvalDeclarationInstantiation,
+    // parameter/body scope splitting, loop completions, class fields, and early syntax errors.
+    RUN_TEST(direct_eval_inherits_context_and_checks_declarations_before_mutating);
+    RUN_TEST(parameter_scopes_loop_completions_class_fields_and_early_syntax_errors);
+
+    // Phase 180: CSS Box Alignment (`align-self`, `align-content`, `justify-items`/`self`,
+    // `place-*`, and column flex `justify-content`).
+    RUN_TEST(flex_and_grid_box_alignment_properties);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

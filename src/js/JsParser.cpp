@@ -338,12 +338,23 @@ bool is_directive_prologue_terminator(const JsToken& next) {
 // Program and statements
 // ---------------------------------------------------------------------------
 
+static bool pattern_contains_expression(const Pattern& pat) {
+    for (const auto& el : pat.elements) {
+        if (el.default_value || el.computed_key) return true;
+        if (el.target && pattern_contains_expression(*el.target)) return true;
+    }
+    return false;
+}
+
 std::unique_ptr<Program> JsParser::parse_program() {
     auto program = std::make_unique<Program>();
     FunctionContext ctx;
     ctx.var_names = &program->var_names;
+    ctx.strict = m_context.strict;
     ctx.allow_super_property = m_context.allow_super_property;
     ctx.allow_super_call = m_context.allow_super_call;
+    ctx.allow_new_target = m_context.allow_new_target;
+    ctx.forbid_arguments = m_context.forbid_arguments;
     m_functions.push_back(ctx);
     m_blocks.push_back(program.get());
     parse_statement_list(*program, false);
@@ -444,6 +455,19 @@ std::unique_ptr<Stmt> JsParser::parse_declaration_or_statement() {
                 std::string label = advance().text;
                 validate_identifier(label, is_strict());
                 advance();
+                const auto& active_labels = m_functions.back().labels;
+                for (const auto& entry : active_labels) {
+                    if (entry.name == label) fail("Label '" + label + "' has already been declared");
+                }
+                size_t look = 0;
+                while (peek(look).type == JsTokenType::Identifier && peek(look + 1).type == JsTokenType::Colon) {
+                    look += 2;
+                }
+                const JsTokenType target_tok = peek(look).type;
+                const bool is_iteration = target_tok == JsTokenType::While ||
+                                          target_tok == JsTokenType::Do ||
+                                          target_tok == JsTokenType::For;
+                LabelScope label_guard(m_functions, label, is_iteration);
                 auto body = parse_declaration_or_statement();
                 result = std::make_unique<LabeledStmt>(std::move(label), std::move(body));
                 break;
@@ -497,6 +521,26 @@ std::unique_ptr<Stmt> JsParser::parse_statement() {
                  check(JsTokenType::Await) || check(JsTokenType::Let)) && !peek().newline_before) {
                 label = advance().text;
                 validate_identifier(label, is_strict());
+            }
+            const auto& ctx = m_functions.back();
+            if (label.empty()) {
+                if (is_break) {
+                    if (ctx.loop_depth == 0 && ctx.switch_depth == 0) fail("Illegal break statement");
+                } else {
+                    if (ctx.loop_depth == 0) fail("Illegal continue statement: no surrounding iteration statement");
+                }
+            } else {
+                const LabelInfo* target = nullptr;
+                for (auto it = ctx.labels.rbegin(); it != ctx.labels.rend(); ++it) {
+                    if (it->name == label) {
+                        target = &*it;
+                        break;
+                    }
+                }
+                if (!target) fail("Undefined label '" + label + "'");
+                if (!is_break && !target->is_iteration) {
+                    fail("Illegal continue statement: '" + label + "' does not denote an iteration statement");
+                }
             }
             consume_semicolon();
             if (is_break) return std::make_unique<BreakStmt>(std::move(label));
@@ -587,6 +631,7 @@ std::unique_ptr<Stmt> JsParser::parse_switch_statement() {
     // the function declarations to hoist.
     BlockStmt scratch;
     m_blocks.push_back(&scratch);
+    DepthGuard switch_guard(m_functions, &FunctionContext::switch_depth);
 
     std::vector<SwitchCase> cases;
     bool saw_default = false;
@@ -621,12 +666,17 @@ std::unique_ptr<Stmt> JsParser::parse_while_statement() {
     consume(JsTokenType::OpenParen, "Expected '(' after while.");
     auto condition = parse_expression();
     consume(JsTokenType::CloseParen, "Expected ')' after while condition.");
+    DepthGuard loop_guard(m_functions, &FunctionContext::loop_depth);
     auto body = parse_declaration_or_statement();
     return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
 }
 
 std::unique_ptr<Stmt> JsParser::parse_do_while_statement() {
-    auto body = parse_declaration_or_statement();
+    std::unique_ptr<Stmt> body;
+    {
+        DepthGuard loop_guard(m_functions, &FunctionContext::loop_depth);
+        body = parse_declaration_or_statement();
+    }
     consume(JsTokenType::While, "Expected 'while' after do body.");
     consume(JsTokenType::OpenParen, "Expected '(' after while.");
     auto condition = parse_expression();
@@ -655,6 +705,7 @@ std::unique_ptr<Stmt> JsParser::parse_for_statement() {
         // `for (x of a, b)` is not allowed; `for (x in a, b)` is.
         stmt->iterable = is_of ? parse_assignment() : parse_expression();
         consume(JsTokenType::CloseParen, "Expected ')' after for-in/of clause.");
+        DepthGuard loop_guard(m_functions, &FunctionContext::loop_depth);
         stmt->body = parse_declaration_or_statement();
         return stmt;
     };
@@ -693,7 +744,10 @@ std::unique_ptr<Stmt> JsParser::parse_for_statement() {
     consume(JsTokenType::Semicolon, "Expected ';' after for-loop condition.");
     if (!check(JsTokenType::CloseParen)) stmt->update = parse_expression();
     consume(JsTokenType::CloseParen, "Expected ')' after for-loop clauses.");
-    stmt->body = parse_declaration_or_statement();
+    {
+        DepthGuard loop_guard(m_functions, &FunctionContext::loop_depth);
+        stmt->body = parse_declaration_or_statement();
+    }
 
     if (init && init->kind == NodeKind::VarDecl) {
         auto* var_decl = static_cast<VarDeclStmt*>(init.get());
@@ -732,6 +786,9 @@ std::unique_ptr<Stmt> JsParser::parse_try_statement() {
 }
 
 std::unique_ptr<Stmt> JsParser::parse_return_statement() {
+    if (m_functions.empty() || !m_functions.back().allow_return) {
+        fail("Illegal return statement");
+    }
     std::unique_ptr<Expr> value;
     // A line break after `return` ends the statement (restricted production).
     if (!check(JsTokenType::Semicolon) && !check(JsTokenType::CloseBrace) && !is_at_end() &&
@@ -799,11 +856,15 @@ void JsParser::validate_function_early_errors(const FunctionNode& fn, bool body_
 
 void JsParser::finish_params(FunctionNode& fn) {
     fn.simple_params = true;
+    fn.has_parameter_expressions = false;
     fn.length = 0;
     bool counting = true;
     for (const auto& p : fn.params) {
         if (p.rest || p.default_value || !p.target || p.target->kind != Pattern::Kind::Identifier) {
             fn.simple_params = false;
+        }
+        if (p.default_value || (p.target && pattern_contains_expression(*p.target))) {
+            fn.has_parameter_expressions = true;
         }
         if (p.rest || p.default_value) counting = false;
         if (counting) fn.length++;
@@ -855,6 +916,8 @@ void JsParser::parse_params_and_body(FunctionNode& fn, bool allow_super_property
     ctx.strict = m_functions.empty() ? false : m_functions.back().strict;
     ctx.allow_super_property = allow_super_property;
     ctx.allow_super_call = allow_super_call;
+    ctx.allow_new_target = true;
+    ctx.allow_return = true;
     m_functions.push_back(ctx);
     parse_params(fn);
     parse_function_body(fn);
@@ -921,6 +984,8 @@ std::shared_ptr<FunctionNode> JsParser::parse_arrow_function(bool is_async) {
     ctx.forbid_yield = !m_functions.empty() && (m_functions.back().is_generator || m_functions.back().forbid_yield);
     ctx.allow_super_property = !m_functions.empty() && m_functions.back().allow_super_property;
     ctx.allow_super_call = !m_functions.empty() && m_functions.back().allow_super_call;
+    ctx.allow_new_target = !m_functions.empty() && m_functions.back().allow_new_target;
+    ctx.allow_return = true;
     m_functions.push_back(ctx);
 
     if (check(JsTokenType::OpenParen)) {
@@ -1101,6 +1166,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
                 ctx.forbid_arguments = true;
                 ctx.forbid_await = true;
                 ctx.allow_super_property = true;
+                ctx.allow_new_target = true;
                 ctx.in_class_field = true;
                 m_functions.push_back(ctx);
                 parse_function_body(*fn);
@@ -1218,6 +1284,7 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
                 ctx.strict = true;
                 ctx.forbid_arguments = true;
                 ctx.allow_super_property = true;
+                ctx.allow_new_target = true;
                 ctx.in_class_field = true;
                 m_functions.push_back(ctx);
                 member.value = parse_assignment();
@@ -1783,6 +1850,9 @@ std::unique_ptr<Expr> JsParser::parse_new() {
     advance();
     if (match(JsTokenType::Dot)) {
         if (!match_identifier("target")) fail_unexpected();
+        if (m_functions.empty() || !m_functions.back().allow_new_target) {
+            fail("'new.target' expression is not allowed here");
+        }
         if (auto* fn = nearest_non_arrow_function()) fn->uses_new_target = true;
         return std::make_unique<NewTargetExpr>();
     }
@@ -1862,6 +1932,8 @@ std::unique_ptr<Expr> JsParser::parse_call_or_member() {
                 if (!m_functions.empty()) {
                     call->direct_eval_allows_super_property = m_functions.back().allow_super_property;
                     call->direct_eval_allows_super_call = m_functions.back().allow_super_call;
+                    call->direct_eval_allows_new_target = m_functions.back().allow_new_target;
+                    call->direct_eval_forbid_arguments = m_functions.back().forbid_arguments;
                 }
                 if (auto* fn = nearest_non_arrow_function()) {
                     fn->uses_arguments = true;

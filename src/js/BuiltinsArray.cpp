@@ -407,40 +407,39 @@ static bool walk_present_indices(const JsValue& object, size_t limit, bool chain
     return true;
 }
 
-/// The places `begin` up to `end` of `object`, as an array: `Array.prototype.
-/// slice`, and the shape every method that copies wants. A place the source
-/// has is its value; a place it does not have is a hole.
+/// Set(O, k, v, true), defined below where the write helpers live: the copy
+/// that writes into an array a species constructor made needs it first.
+void set_place_or_throw(JsValue object, size_t index, const JsValue& value);
 
-static JsValue copy_places(const JsValue& object, size_t begin, size_t end, const char* method) {
+/// The places `begin` up to `end` of `object`, written into `target` — the
+/// array `Array.prototype.slice` had made for it by ArraySpeciesCreate. A
+/// place the source has is its value; a place it does not have is a hole.
+
+static void copy_places_into(const JsValue& object, size_t begin, size_t end, const char* method,
+                             JsValue target) {
     const size_t count = end - begin;
-    if (dense_path(object) && !object.object_val->array_holes && end <= elements_of(object).size()) {
+    // The dense source and a dense result of the same length: the places are
+    // copied as places, and the result is no longer the holes it was made with.
+    if (dense_path(object) && !object.object_val->array_holes && end <= elements_of(object).size() &&
+        target.is_array() && elements_of(target).size() == count) {
         const auto& elements = elements_of(object);
-        JsValue result = JsValue::make_array();
-        result.object_val->array_elements.assign(elements.begin() + static_cast<std::ptrdiff_t>(begin),
-                                                 elements.begin() + static_cast<std::ptrdiff_t>(end));
-        return result;
+        auto& into = elements_of(target);
+        std::copy(elements.begin() + static_cast<std::ptrdiff_t>(begin),
+                  elements.begin() + static_cast<std::ptrdiff_t>(end), into.begin());
+        for (size_t i = 0; i < count; ++i) target.clear_array_hole(i);
+        return;
     }
     const IndexWalk walk = present_indices(object, end);
-    // Every place between `begin` and `end` is laid out, and the ones the walk
-    // did not name are holes. A range too long to lay out is the RangeError of
-    // ArrayCreate, before anything is allocated.
-    array_result_length(count, method);
+    // Every place between `begin` and `end` is asked for: the walk says which
+    // ones exist, and a place it did not name stays the hole it is.
     if (count > kMaxWalkedIndices) {
         js_throw_range_error(std::string("Array.prototype.") + method +
                              ": the result would be too long to build");
     }
-    // Fill first, then make the array: `make_array` copies the vector, so a
-    // write after it would go to a vector the array no longer holds.
-    std::vector<JsValue> kept(count, JsValue::make_undefined());
-    std::vector<bool> holes(count, true);
     for (size_t index : walk.indices) {
         if (index < begin || index >= end) continue;
-        kept[index - begin] = get_index(object, index);
-        holes[index - begin] = false;
+        set_place_or_throw(target, index - begin, get_index(object, index));
     }
-    JsValue result = JsValue::make_array(kept);
-    for (size_t i = 0; i < count; ++i) if (holes[i]) result.set_array_hole(i);
-    return result;
 }
 
 
@@ -535,14 +534,57 @@ JsValue make_holey_array(size_t length) {
     return array;
 }
 
-/// `result[k] = value` for an array the method itself made: the dense write,
-/// and the place is no longer a hole.
-void put_place(JsValue& array, size_t index, const JsValue& value) {
-    auto& elements = array.object_val->array_elements;
-    if (index < elements.size()) {
-        elements[index] = value;
-        array.clear_array_hole(index);
+/// The `%Array%` of this realm: what ArraySpeciesCreate falls back to when the
+/// object names no species of its own.
+JsValue array_intrinsic() {
+    const JsValue* ctor = JsIntrinsics::get().find_global("Array");
+    return ctor ? *ctor : JsValue::make_undefined();
+}
+
+/// ArraySpeciesCreate(originalArray, length) — ECMA-262 §10.4.2.3.
+///
+/// A receiver that is not an array makes a plain array: the standard asks
+/// `IsArray` first, so `Array.prototype.map.call({length: 2, ...})` does *not*
+/// consult `Object.prototype.constructor`. An array asks its `constructor` for
+/// `Symbol.species`, and that constructor is asked for a new array of `length`.
+/// This is what makes `new List().map(f)` a `List`: the engine used to build
+/// every result with `JsValue::make_array`, so a subclass could never be made
+/// by the built-in it was called on.
+JsValue array_species_create(const JsValue& original, size_t length, const char* method) {
+    // The two paths that make the array here are ArrayCreate(length): its own
+    // limit of 2^32 - 1 places, and the RangeError comes before any
+    // allocation. A species constructor of the script's is asked for a length
+    // and may answer however it likes, so the limit is not applied to it.
+    if (!original.is_array()) {
+        array_result_length(length, method);
+        return make_holey_array(length);
     }
+    JsValue ctor = species_constructor(original, array_intrinsic());
+    if (js_same_value(ctor, array_intrinsic())) {
+        array_result_length(length, method);
+        return make_holey_array(length);
+    }
+    JsValue made = js_construct(ctor, {JsValue::make_number(static_cast<double>(length))});
+    if (!made.is_object_like()) {
+        js_throw_type_error(std::string("Array.prototype.") + method +
+                            ": the species constructor did not return an object");
+    }
+    return made;
+}
+
+/// Fills an array a species constructor made: CreateDataPropertyOrThrow at
+/// every place that has a value, a hole left alone, then the length
+/// (§23.1.3.2 steps f–h and the same three steps in its relatives). A species
+/// constructor can hand back anything an object can be — a frozen array, an
+/// object with setters — and its refusals reach the script as type errors.
+JsValue fill_species_result(JsValue target, const std::vector<JsValue>& values,
+                            const std::vector<bool>& holes) {
+    for (size_t i = 0; i < values.size(); ++i) {
+        if (holes[i]) continue;
+        set_place_or_throw(target, i, values[i]);
+    }
+    set_length_or_throw(target, values.size());
+    return target;
 }
 
 // Array iteration uses ToLength on the original receiver. In particular,
@@ -808,12 +850,42 @@ void install_array_builtins(JsIntrinsics& realm) {
     });
     array_ctor.define_property("prototype", js_object_value(ap), 0);
     js_define_hidden(ap, "constructor", array_ctor);
+    // Array[Symbol.species] (§23.1.2.5): the constructor itself, so that a
+    // subclass which names nothing gets its own constructor back from
+    // SpeciesConstructor and `Array.prototype.map` makes one of *it*.
+    JsValue species_getter = js_make_native("get [Symbol.species]", 0, [](Args) { return self(); });
+    // A getter has [[Call]] and not [[Construct]]: without this the species
+    // getter could be `new`-ed, and the standard says it cannot.
+    species_getter.function_cell()->not_constructor = true;
+    array_ctor.define_accessor(kSymbolSpeciesKey, species_getter,
+                               JsValue::make_undefined(), PropertyMap::Configurable);
 
     js_define_method(array_ctor, "isArray", 1, [](Args args) {
         const JsValue& value = js_arg(args, 0);
         return JsValue::make_boolean(value.is_array() && value.object_val->klass != ObjectClass::Arguments);
     });
-    js_define_method(array_ctor, "of", 0, [](Args args) { return JsValue::make_array(args); });
+    // Array.of ( ...items ) (§23.1.2.3): the *constructor* the method was
+    // called on makes the result, so `List.of(1)` is a `List` and
+    // `Array.of(1)` is an `Array`. `this` is asked before the first place is
+    // written, and what it makes is filled with CreateDataPropertyOrThrow.
+    js_define_method(array_ctor, "of", 0, [](Args args) {
+        const JsValue ctor = self();
+        // A receiver that is not a constructor makes a plain array rather than
+        // a TypeError: that is what V8 does, and Node is this corpus's
+        // reference engine (`Array.of.call({}, 1, 2)` is `[1, 2]` there).
+        JsValue made;
+        if (!js_is_constructor(ctor)) {
+            array_result_length(args.size(), "of");
+            made = make_holey_array(args.size());
+        } else {
+            made = js_construct(ctor, {JsValue::make_number(static_cast<double>(args.size()))});
+        }
+        if (!made.is_object_like()) {
+            js_throw_type_error("Array.of: the constructor did not return an object");
+        }
+        std::vector<JsValue> values(args.begin(), args.end());
+        return fill_species_result(made, values, std::vector<bool>(values.size(), false));
+    });
     js_define_method(array_ctor, "from", 1, [](Args args) {
         // Array.from ( items [ , mapfn [ , thisArg ] ] ), in the order of the
         // standard: the mapper is checked, then the source is *asked* for its
@@ -827,6 +899,29 @@ void install_array_builtins(JsIntrinsics& realm) {
         const JsValue& this_arg = js_arg(args, 2);
         const bool mapping = !map_fn.is_undefined();
         if (mapping && !map_fn.is_function()) js_throw_type_error("Array.from: mapper is not a function");
+        // `this` is the constructor that makes the result (§23.1.2.1 step 2).
+        // A receiver that is not a constructor makes a plain array, which is
+        // what V8 does and what this corpus is measured against.
+        const JsValue ctor = self();
+        const bool constructible = js_is_constructor(ctor);
+        // The iterable path constructs with no arguments and grows the result
+        // one place at a time; the array-like path knows its length first and
+        // constructs with it. Both are in the standard, and the difference is
+        // visible to a constructor that looks at its argument.
+        auto make_result = [&](size_t length) {
+            if (!constructible) {
+                const size_t plain_length = length == static_cast<size_t>(-1) ? 0 : length;
+                array_result_length(plain_length, "from");
+                return make_holey_array(plain_length);
+            }
+            JsValue made = length == static_cast<size_t>(-1)
+                               ? js_construct(ctor, {})
+                               : js_construct(ctor, {JsValue::make_number(static_cast<double>(length))});
+            if (!made.is_object_like()) {
+                js_throw_type_error("Array.from: the constructor did not return an object");
+            }
+            return made;
+        };
 
         auto mapped = [&](const JsValue& value, size_t index) {
             if (!mapping) return value;
@@ -840,10 +935,15 @@ void install_array_builtins(JsIntrinsics& realm) {
             // Mapped as each value arrives, not after the last one: a mapper
             // that throws closes the iterator, and an iterator without an end
             // costs one value, not all of them.
+            JsValue made = make_result(static_cast<size_t>(-1));
             js_iterate(source, [&](const JsValue& value) {
-                items.push_back(mapped(value, items.size()));
+                const JsValue item = mapped(value, items.size());
+                set_place_or_throw(made, items.size(), item);
+                items.push_back(item);
                 return true;
             });
+            set_length_or_throw(made, items.size());
+            return made;
         } else {
             // ToObject(items), then ToLength(Get(items, "length")), then each
             // index as a property — which a string answers one code unit at a
@@ -854,11 +954,15 @@ void install_array_builtins(JsIntrinsics& realm) {
             if (!(length > 0)) length = 0;
             if (length > 9007199254740991.0) length = 9007199254740991.0; // 2^53 - 1
             if (length > (1u << 26)) js_throw_range_error("Invalid array length");
+            JsValue made = make_result(static_cast<size_t>(length));
             for (double i = 0; i < length; ++i) {
-                items.push_back(mapped(source.get_property(js_number_to_string(i)), static_cast<size_t>(i)));
+                const JsValue item = mapped(source.get_property(js_number_to_string(i)), static_cast<size_t>(i));
+                set_place_or_throw(made, static_cast<size_t>(i), item);
+                items.push_back(item);
             }
+            set_length_or_throw(made, items.size());
+            return made;
         }
-        return JsValue::make_array(items);
     });
     realm.add_global("Array", array_ctor);
 
@@ -993,8 +1097,11 @@ void install_array_builtins(JsIntrinsics& realm) {
         const size_t length = array_like_length(source, "slice");
         const size_t begin = relative_index(js_arg(args, 0), length, 0);
         const size_t end = relative_index(js_arg(args, 1), length, length);
-        if (begin >= end) return JsValue::make_array();
-        return copy_places(source, begin, end, "slice");
+        const size_t count = begin >= end ? 0 : end - begin;
+        JsValue kept = array_species_create(source, count, "slice");
+        if (count > 0) copy_places_into(source, begin, end, "slice", kept);
+        set_length_or_throw(kept, count);
+        return kept;
     });
     auto splice_impl = []<typename Seq>(Seq& elements, Args args) {
         size_t start = relative_index(js_arg(args, 0), elements.size(), 0);
@@ -1025,7 +1132,9 @@ void install_array_builtins(JsIntrinsics& realm) {
             // `splice()` removes nothing, but step 19 still writes `length`,
             // and that write is the one a read-only `length` refuses.
             set_length_or_throw(array, length);
-            return JsValue::make_array();
+            JsValue none = array_species_create(array, 0, "splice");
+            set_length_or_throw(none, 0);
+            return none;
         }
         const size_t start = relative_index(js_arg(args, 0), length, 0);
         size_t dropped = 0;
@@ -1046,10 +1155,13 @@ void install_array_builtins(JsIntrinsics& realm) {
             // the places that move are read and written one at a time (so a
             // getter runs, in the order the standard names), and a place the
             // object does not have is deleted where it lands.
-            JsValue removed = make_holey_array(dropped);
+            // ArraySpeciesCreate(O, actualDeleteCount), before the places move
+            // (§23.1.3.31 step 14).
+            JsValue removed = array_species_create(array, dropped, "splice");
             for (size_t i = 0; i < dropped; ++i) {
-                if (has_place(array, start + i)) put_place(removed, i, get_place(array, start + i));
+                if (has_place(array, start + i)) set_place_or_throw(removed, i, get_place(array, start + i));
             }
+            set_length_or_throw(removed, dropped);
             if (inserted < dropped) {
                 for (size_t k = start; k < length - dropped; ++k) {
                     if (has_place(array, k + dropped)) {
@@ -1085,11 +1197,8 @@ void install_array_builtins(JsIntrinsics& realm) {
             }
             for (size_t i = start; i < start + dropped; ++i) array.clear_array_hole(i);
         }
-        JsValue result = JsValue::make_array(splice_impl(elements_of(array), args));
-        for (size_t i = 0; i < removed_holes.size() && i < result.object_val->array_elements.size(); ++i) {
-            if (removed_holes[i]) result.set_array_hole(i);
-        }
-        return result;
+        JsValue result = array_species_create(array, removed_holes.size(), "splice");
+        return fill_species_result(result, splice_impl(elements_of(array), args), removed_holes);
     });
     js_define_method(ap, "toSpliced", 2, [](Args args) {
         // The length, then where to start and how many to drop, then the
@@ -1158,9 +1267,10 @@ void install_array_builtins(JsIntrinsics& realm) {
             if (given.is_array()) append_places(given);
             else { values.push_back(given); holes.push_back(false); }
         }
-        JsValue joined = JsValue::make_array(values);
-        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) joined.set_array_hole(i);
-        return joined;
+        // ArraySpeciesCreate(O, 0), and each element written into the result
+        // the species constructor made (§23.1.3.2 steps 5–9).
+        JsValue joined = array_species_create(source, 0, "concat");
+        return fill_species_result(joined, values, holes);
     });
     js_define_method(ap, "join", 1, [](Args args) {
         JsValue array = receiver("join");
@@ -1540,12 +1650,12 @@ void install_array_builtins(JsIntrinsics& realm) {
     });
     js_define_method(ap, "flat", 0, [](Args args) {
         double depth = js_arg(args, 0).is_undefined() ? 1 : js_to_integer(js_to_number(js_arg(args, 0)));
+        JsValue array = receiver("flat");
         std::vector<JsValue> result;
         std::vector<bool> holes;
-        flatten_into(result, holes, receiver("flat"), depth);
-        JsValue flat = JsValue::make_array(result);
-        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) flat.set_array_hole(i);
-        return flat;
+        flatten_into(result, holes, array, depth);
+        // ArraySpeciesCreate(O, 0), one place per flattened element (§23.1.3.13).
+        return fill_species_result(array_species_create(array, 0, "flat"), result, holes);
     });
     js_define_method(ap, "at", 1, [](Args args) {
         JsValue array = receiver("at");
@@ -1697,15 +1807,15 @@ void install_array_builtins(JsIntrinsics& realm) {
         // source is the RangeError of ArrayCreate, thrown before the first
         // callback rather than after four billion of them.
         array_result_length(length, "map");
-        std::vector<JsValue> result(length, JsValue::make_undefined());
-        std::vector<bool> holes(length, true);
+        // The result is made by the species constructor, not by this file
+        // (§23.1.3.2 step 5): `new List().map(f)` is a `List`, and a place the
+        // source did not have stays a hole in it.
+        JsValue mapped = array_species_create(array, length, "map");
         walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
-            result[i] = callback.call_with_this(this_arg, {get_index(array, i), JsValue::make_number(static_cast<double>(i)), array});
-            holes[i] = false;
+            set_place_or_throw(mapped, i, callback.call_with_this(this_arg, {get_index(array, i), JsValue::make_number(static_cast<double>(i)), array}));
             return true;
         });
-        JsValue mapped = JsValue::make_array(result);
-        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) mapped.set_array_hole(i);
+        set_length_or_throw(mapped, length);
         return mapped;
     });
     js_define_method(ap, "filter", 1, [](Args args) {
@@ -1713,15 +1823,19 @@ void install_array_builtins(JsIntrinsics& realm) {
         const size_t length = array_like_length(array, "filter");
         JsValue callback = require_callback(js_arg(args, 0), "filter");
         const JsValue this_arg = js_arg(args, 1);
-        std::vector<JsValue> result;
+        // ArraySpeciesCreate(O, 0) and one place per kept element (§23.1.3.3).
+        JsValue kept = array_species_create(array, 0, "filter");
+        size_t count = 0;
         walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
             JsValue item = get_index(array, i);
             if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
-                result.push_back(item);
+                set_place_or_throw(kept, count, item);
+                ++count;
             }
             return true;
         });
-        return JsValue::make_array(result);
+        set_length_or_throw(kept, count);
+        return kept;
     });
     js_define_method(ap, "flatMap", 1, [](Args args) {
         JsValue array = receiver("flatMap");
@@ -1742,9 +1856,9 @@ void install_array_builtins(JsIntrinsics& realm) {
             }
             return true;
         });
-        JsValue flattened = JsValue::make_array(result);
-        for (size_t i = 0; i < holes.size(); ++i) if (holes[i]) flattened.set_array_hole(i);
-        return flattened;
+        // flatMap is a map that flattens one level, and its result is made the
+        // same way: by the species constructor (§23.1.3.11 step 7).
+        return fill_species_result(array_species_create(array, 0, "flatMap"), result, holes);
     });
     js_define_method(ap, "some", 1, [](Args args) {
         JsValue array = receiver("some");

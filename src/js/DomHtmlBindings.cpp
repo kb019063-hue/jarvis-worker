@@ -1399,11 +1399,15 @@ void setup_dialog(Iface& I) {
     D.method("showModal", 0, [](Realm& r, Element& el, Args) {
         if (el.has_attribute("open")) throw_dom(r, "InvalidStateError", "The dialog is already open.");
         if (!el.is_connected()) throw_dom(r, "InvalidStateError", "The dialog is not in a document.");
-        // The top layer is not painted; the flag is what close() reads back,
-        // and what a painter and a hit test will consult when they exist.
+        // The top layer is not painted; the flag and the document's record of
+        // it are what the hit test, the Tab order and close() read back.
         el.set_modal_dialog(true);
         std::shared_ptr<Element> previous;
-        if (auto document = document_of(r, el)) previous = document->focused_element();
+        auto document = document_of(r, el);
+        if (document) {
+            previous = document->focused_element();
+            document->set_modal_dialog(shared(el));
+        }
         if (previous && !previous->is_connected()) previous.reset();
         el.set_attribute("open", "");
         focus_dialog(r, el);
@@ -1418,6 +1422,8 @@ void setup_dialog(Iface& I) {
         auto previous = el.dialog_previously_focused();
         el.set_modal_dialog(false);
         el.set_dialog_previously_focused(nullptr);
+        auto document = document_of(r, el);
+        if (document && document->modal_dialog().get() == &el) document->set_modal_dialog(nullptr);
         el.remove_attribute("open");
         // A modal dialog gives the focus back to the element that had it when
         // it opened. Anything else unfocuses: the dialog's own control is
@@ -1425,7 +1431,7 @@ void setup_dialog(Iface& I) {
         if (was_modal && previous && previous->is_connected() && is_focusable(*previous)) {
             focus_element(r, previous.get());
         } else {
-            focus_element(r, nullptr, document_of(r, el));
+            focus_element(r, nullptr, document);
         }
         // The close event comes as a task, after the caller has finished.
         Realm* realm = &r;

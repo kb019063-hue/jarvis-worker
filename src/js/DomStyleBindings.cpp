@@ -26,8 +26,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstdio>
-#include <cstdlib>
 #include <functional>
 #include <map>
 #include <unordered_set>
@@ -4163,10 +4161,86 @@ std::string computed_longhand(Realm& realm, const Element& element, const Block&
     return resolved(realm, element, *from, *from_block, name, value, depth);
 }
 
+// The used content-box size, from the layout box the element already has.
+//
+// CSSOM's resolved value for `width` and `height` is *not* the computed value:
+// if the property applies and `display` is neither `none` nor `contents`, the
+// resolved value is the **used** value -- for these two, the content-box size
+// in pixels (CSSOM "resolved values"). The engine answered the computed
+// value, so `width: 100px` with 10px of padding and a 5px border read back
+// `"100px"` where a browser says `"130px"`, and `width: auto` read back
+// `"auto"` where a browser says the block's used width.
+//
+// The layout box is the border box, and the border and padding widths are kept
+// beside it (Element::layout_border, Element::layout_padding).
+//
+// An element with no box is answered by its computed value, which is what the
+// spec says for `display: none` and what a browser does for a `display:
+// contents` element: every `getComputedStyle` value for one reads as it is
+// declared. Non-replaced inline boxes keep the computed value too (CSS 2.1
+// §10.3.1 leaves their width to the content), which is what a browser
+// reports.
+bool used_content_size(const Element& element, const Block& block, bool horizontal, float& out) {
+    if (!element.is_connected()) return false;
+    if (element.is_foreign()) return false;                 // no CSS box model in SVG
+    // A used size needs a layout, and asking for one is what a browser does
+    // here (the forced synchronous layout every style read costs). It is
+    // version-guarded, so it is a comparison when nothing has changed.
+    if (auto document = element.owner_document()) document->ensure_layout();
+    if (!element.has_layout_box()) return false;
+    // The cascade's own answer for `display`, not the inline declaration: a
+    // `display: none` from a style sheet is as good as one from `style=`.
+    const std::string display = ascii_lower(block.get("display", true));
+    if (display == "none" || display == "contents") return false;
+    // A non-replaced inline box takes its width from its content, so CSS 2.1
+    // §10.3.1 leaves the declaration computable and browsers report it. An
+    // inline *replaced* element (an `img`, an `inline-block`) is atomic and
+    // has a used width of its own; the engine's own layout box says which is
+    // which: a non-replaced inline element's box is assembled from fragments.
+    if (display == "inline" && element.layout_box_from_fragments()) return false;
+    const Rect border_box = element.bounding_box();
+    // What the used `width` measures depends on `box-sizing`, and the answer is
+    // the box `width` controls: the content box under `content-box` (the
+    // default), the border box under `border-box`. So
+    // `width: 100px; padding: 10px; border: 5px solid` reads `"100px"` either
+    // way -- the box is 130 wide under `content-box` and 100 under
+    // `border-box`, and in both the content box is what the declaration sized.
+    if (ascii_lower(block.get("box-sizing", true)) == "border-box") {
+        out = horizontal ? border_box.width : border_box.height;
+        return out >= 0.0f;
+    }
+    const EdgeSizes border = element.layout_border();
+    const EdgeSizes padding = element.layout_padding();
+    out = horizontal ? border_box.width - border.left - border.right - padding.left - padding.right
+                     : border_box.height - border.top - border.bottom - padding.top - padding.bottom;
+    return out >= 0.0f;
+}
+
 // What getComputedStyle answers for `name`.
 std::string computed_value(Realm& realm, const Element& element, const Block& block, const std::string& name,
                            int depth) {
     if (depth > 4) return std::string();
+    // Only `width` and `height` are resolved to a used value here. The other
+    // CSS 2.1 legacy properties CSSOM also names (`top`, `right`, `bottom`,
+    // `left`, `margin-*`, `padding-*`) still answer their computed value; the
+    // widths above are the ones a page reaches for first, and the ones the
+    // DOM corpus could not ask.
+    if (depth == 0 && (name == "width" || name == "height")) {
+        const std::string computed = computed_longhand(realm, element, block, name, depth + 1);
+        // A value that is still a `calc()` after the cascade is left as text,
+        // and for two different reasons. One is that a percentage in it needs
+        // a layout basis this code does not have -- the gap the computed value
+        // has always had, and one that stays. The other is a `calc()` nested
+        // past what the resolver reduces: the layout does not re-resolve such
+        // a declaration, so its box is still the *previous* declaration's, and
+        // reporting that box as this declaration's used value would be a lie.
+        // Neither is a used value this code can stand behind, so both keep
+        // the computed text.
+        if (ascii_lower(computed).find("calc(") != std::string::npos) return computed;
+        float used = 0.0f;
+        if (used_content_size(element, block, name == "width", used)) return px_text(used);
+        return computed;
+    }
     if (const Shorthand* shorthand = find_shorthand(name)) {
         if (shorthand->kind == ShorthandKind::Background) {
             // Only the colour of a background is known here.

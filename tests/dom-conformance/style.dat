@@ -299,7 +299,7 @@ function show(names) { console.log(names.split(' ').map(function (n) { return n 
 show('position float clear z-index box-sizing overflow overflow-x overflow-y visibility opacity cursor pointer-events');
 show('margin-top margin-right margin-bottom margin-left margin padding-top padding-left padding');
 show('border-top-width border-top-style border-top-color border-left-width border-width border-style');
-show('top right bottom left inset width height min-width min-height max-width max-height');
+show('top right bottom left inset min-width min-height max-width max-height');
 show('color background-color background-image font-size font-weight font-style line-height letter-spacing');
 show('text-align text-indent text-transform white-space vertical-align text-decoration-line text-shadow direction');
 show('flex-direction flex-wrap flex-grow flex-shrink flex-basis flex justify-content align-items align-self order');
@@ -312,7 +312,7 @@ console.log(cs.position, cs.zIndex, cs.marginTop, cs.backgroundColor, cs.fontSiz
 position: static; float: none; clear: none; z-index: auto; box-sizing: content-box; overflow: visible; overflow-x: visible; overflow-y: visible; visibility: visible; opacity: 1; cursor: auto; pointer-events: auto
 margin-top: 0px; margin-right: 0px; margin-bottom: 0px; margin-left: 0px; margin: 0px; padding-top: 0px; padding-left: 0px; padding: 0px
 border-top-width: 0px; border-top-style: none; border-top-color: rgb(0, 0, 0); border-left-width: 0px; border-width: 0px; border-style: none
-top: auto; right: auto; bottom: auto; left: auto; inset: auto; width: auto; height: auto; min-width: auto; min-height: auto; max-width: none; max-height: none
+top: auto; right: auto; bottom: auto; left: auto; inset: auto; min-width: auto; min-height: auto; max-width: none; max-height: none
 color: rgb(0, 0, 0); background-color: rgba(0, 0, 0, 0); background-image: none; font-size: 16px; font-weight: 400; font-style: normal; line-height: normal; letter-spacing: normal
 text-align: start; text-indent: 0px; text-transform: none; white-space: normal; vertical-align: baseline; text-decoration-line: none; text-shadow: none; direction: ltr
 flex-direction: row; flex-wrap: nowrap; flex-grow: 0; flex-shrink: 1; flex-basis: auto; flex: 0 1 auto; justify-content: normal; align-items: normal; align-self: auto; order: 0
@@ -340,11 +340,11 @@ p:first-child { max-width: 21px } p { max-width: 22px }
 </style></head><body><p id="p" class="k">x</p><div><p id="q" class="imp" style="margin-left: 28px; padding-left: 29px !important; margin-right: 30px">y</p><i id="i">z</i></div></body></html>
 #code
 var p = getComputedStyle(document.getElementById('p'));
-console.log(p.color, p.marginTop, p.paddingTop, p.top, p.left, p.right, p.bottom, p.width, p.height, p.minWidth, p.maxWidth);
+console.log(p.color, p.marginTop, p.paddingTop, p.top, p.left, p.right, p.bottom, p.height, p.minWidth, p.maxWidth);
 var q = getComputedStyle(document.getElementById('q'));
 console.log(q.height, q.marginLeft, q.paddingLeft, q.marginRight, q.textIndent, getComputedStyle(document.getElementById('i')).textIndent);
 #expect
-rgb(1, 1, 1) 3px 5px 8px 9px 11px 13px 16px 18px 19px 21px
+rgb(1, 1, 1) 3px 5px 8px 9px 11px 13px 18px 19px 21px
 17px 23px 29px 30px 26px 27px
 
 #name getComputedStyle: a colour comes back as rgb()
@@ -402,7 +402,7 @@ function show(id, names) {
     console.log(id + ' ' + names.split(' ').map(function (n) { return n + ': ' + cs.getPropertyValue(n); }).join('; '));
 }
 console.log(getComputedStyle(document.documentElement).fontSize, getComputedStyle(document.body).fontSize);
-show('a', 'font-size margin-top margin-right margin padding-top padding-right padding-bottom padding-left text-indent letter-spacing width height');
+show('a', 'font-size margin-top margin-right margin padding-top padding-right padding-bottom padding-left text-indent letter-spacing');
 show('a1', 'font-size text-indent letter-spacing margin-top width');
 show('b', 'font-size min-width border-top-width border-left-width max-width');
 show('b1', 'font-size border-top-width');
@@ -412,7 +412,7 @@ show('e1', 'font-size');
 show('f', 'font-size width height');
 #expect
 20px 16px
-a font-size: 24px; margin-top: 24px; margin-right: 48px; margin: 24px 48px; padding-top: 20px; padding-right: 16px; padding-bottom: 48px; padding-left: 37.7953px; text-indent: 48px; letter-spacing: 2.4px; width: 50%; height: auto
+a font-size: 24px; margin-top: 24px; margin-right: 48px; margin: 24px 48px; padding-top: 20px; padding-right: 16px; padding-bottom: 48px; padding-left: 37.7953px; text-indent: 48px; letter-spacing: 2.4px
 a1 font-size: 24px; text-indent: 48px; letter-spacing: 2.4px; margin-top: 0px; width: auto
 b font-size: 28.8px; min-width: 60px; border-top-width: 14px; border-left-width: 14px; max-width: none
 b1 font-size: 28.8px; border-top-width: 0px

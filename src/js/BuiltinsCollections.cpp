@@ -297,6 +297,14 @@ void install_collection_builtins(JsIntrinsics& realm) {
     map_ctor.define_property("prototype", js_object_value(mp), 0);
     js_define_hidden(mp, "constructor", map_ctor);
     js_define_hidden(mp, "@@toStringTag", JsValue::make_string("Map"));
+    {
+        // Map_ctor[Symbol.species] (§24.1.2.5, §24.2.2.5): the constructor itself.
+        JsValue species_getter = js_make_native("get [Symbol.species]", 0, [](Args) { return JsValue::current_this(); });
+        species_getter.function_cell()->not_constructor = true;
+        map_ctor.define_accessor(kSymbolSpeciesKey, species_getter, JsValue::make_undefined(),
+                           PropertyMap::Configurable);
+    }
+
 
     js_define_method(mp, "get", 1, [](Args args) {
         auto* entry = data_of(self(), ObjectClass::Map, "Map.prototype.get")->find(js_arg(args, 0));
@@ -402,6 +410,14 @@ void install_collection_builtins(JsIntrinsics& realm) {
     set_ctor.define_property("prototype", js_object_value(sp), 0);
     js_define_hidden(sp, "constructor", set_ctor);
     js_define_hidden(sp, "@@toStringTag", JsValue::make_string("Set"));
+    {
+        // Set_ctor[Symbol.species] (§24.1.2.5, §24.2.2.5): the constructor itself.
+        JsValue species_getter = js_make_native("get [Symbol.species]", 0, [](Args) { return JsValue::current_this(); });
+        species_getter.function_cell()->not_constructor = true;
+        set_ctor.define_accessor(kSymbolSpeciesKey, species_getter, JsValue::make_undefined(),
+                           PropertyMap::Configurable);
+    }
+
 
     js_define_method(sp, "add", 1, [](Args args) {
         JsValue set = self();

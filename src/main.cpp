@@ -547,7 +547,7 @@ int main(int argc, char* argv[]) {
     auto layout_root = litebird::LayoutTree::build(doc, resolver, viewport_w, viewport_h);
 
     // 5. Display List Generation
-    auto display_list = litebird::DisplayList::build(layout_root);
+    auto display_list = litebird::DisplayList::build(layout_root, doc->modal_dialog().get());
 
     // Outputs requested by flags
     if (dump_dom) {

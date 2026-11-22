@@ -9534,6 +9534,127 @@ TEST(get_element_by_id_answers_from_an_index) {
     assert(js.eval("found").to_number() == 20000);
 }
 
+TEST(computed_width_and_height_are_used_values) {
+    using namespace litebird;
+    // CSSOM's "resolved values": for `width` and `height`, when the property
+    // applies and `display` is neither `none` nor `contents`, the resolved
+    // value is the *used* value. The engine answered the computed one, so
+    // `width: 100px` with 10px of padding read back `"100px"` where a browser
+    // reports the box it actually made, and `width: auto` read back `"auto"`:
+    // a block's used width was unreachable through getComputedStyle.
+    //
+    // What the used value *is* depends on `box-sizing`, because that is what
+    // the `width` declaration controls: the content box under `content-box`
+    // (the default) and the border box under `border-box`. Measured in
+    // Chromium 156 for the same declarations.
+    // The default page: an empty body that has been laid out, which is what a
+    // used value needs.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    js.eval(R"JS(
+        function styleOf(css) {
+            var d = document.createElement('div');
+            d.setAttribute('style', css);
+            document.body.appendChild(d);
+            return d;
+        }
+        // The invariant that cannot be faked: whatever getComputedStyle says
+        // the width is, it is the size of a box the layout produced.
+        function agrees(d) {
+            var cs = getComputedStyle(d);
+            var want = parseFloat(cs.width);
+            var rect = d.getBoundingClientRect();
+            var pad = parseFloat(cs.paddingLeft) + parseFloat(cs.paddingRight);
+            var bdr = parseFloat(cs.borderLeftWidth) + parseFloat(cs.borderRightWidth);
+            var box = cs.boxSizing === 'border-box' ? rect.width : rect.width - pad - bdr;
+            return Math.abs(want - box) < 0.01;
+        }
+        var cases = {};
+        cases.padded = styleOf('width:100px;height:20px;padding:10px;border:5px solid red');
+        cases.plain = styleOf('width:100px;height:20px');
+        cases.borderBox = styleOf('box-sizing:border-box;width:100px;height:20px;padding:10px;border:5px solid red');
+        cases.percent = styleOf('width:50%;height:20px');
+        cases.autoBlock = styleOf('padding:3px;height:20px');
+        cases.clamped = styleOf('width:500px;max-width:100px;height:20px');
+        cases.hidden = styleOf('display:none;width:100px');
+        cases.absolute = styleOf('position:absolute;left:0;top:0;width:100px;height:20px;padding:10px');
+        var agreesAll = true;
+        for (var k in cases) if (k !== 'hidden' && !agrees(cases[k])) agreesAll = false;
+        var out = [];
+    )JS");
+    auto cs = [&](const char* var) {
+        return js.eval(std::string("getComputedStyle(cases.") + var + ").width").to_string();
+    };
+    auto rect = [&](const char* var) {
+        return js.eval(std::string("cases.") + var + ".getBoundingClientRect().width").to_number();
+    };
+
+    // The box is 130 wide and `clientWidth` 120, because `width` sized the
+    // content: `content-box` says so and the declaration is what it says.
+    assert(cs("padded") == "100px" && rect("padded") == 130);
+    assert(cs("plain") == "100px" && rect("plain") == 100);
+    // Under `border-box` the declaration sizes the whole box, so the 100 is
+    // still the answer even though the content is only 70 wide.
+    assert(cs("borderBox") == "100px" && rect("borderBox") == 100);
+    // A percentage resolves against the containing block, which for the body
+    // is the viewport width of the page fixture. The exact number is the
+    // layout's, and the invariant above checks the arithmetic.
+    assert(js.eval("String(parseFloat(getComputedStyle(cases.percent).width) > 0)").to_string() == "true");
+    assert(js.eval("String(getComputedStyle(cases.percent).width.indexOf('%') < 0)").to_string() == "true");
+    // `width: auto` on a block is the containing block less its own edges.
+    assert(std::round(rect("autoBlock")) == std::round(std::stod(cs("autoBlock")) + 6));
+    // A `max-width` the layout honoured is what the used value reports.
+    assert(cs("clamped") == "100px" && rect("clamped") == 100);
+    // `display: none` has no box, so the resolved value is the computed one.
+    assert(cs("hidden") == "100px");
+    assert(cs("absolute") == "100px" && rect("absolute") == 120);
+    // Nothing here is a computed value standing in for a box.
+    assert(js.eval("String(agreesAll)").to_string() == "true");
+
+    // A detached element has no box and no computed style at all, and an
+    // inline box's `width` is left to its content (CSS 2.1 §10.3.1), so both
+    // keep answering what they always did.
+    assert(js.eval(R"JS((function () {
+        var d = document.createElement('div');
+        d.style.width = '77px';
+        return getComputedStyle(d).width;
+    })())JS").to_string() == "");
+    assert(js.eval(R"JS((function () {
+        var s = document.createElement('span');
+        s.textContent = 'hello';
+        document.body.appendChild(s);
+        return getComputedStyle(s).width;
+    })())JS").to_string() == "auto");
+
+    // A getComputedStyle object taken before the layout is still live: the
+    // same object answers the new size once the box changes.
+    js.eval(R"JS(
+        var live = styleOf('width:30px;height:20px');
+        var liveStyle = getComputedStyle(live);
+    )JS");
+    assert(js.eval("liveStyle.width").to_string() == "30px");
+    js.eval("live.style.width = '45px';");
+    assert(js.eval("liveStyle.width").to_string() == "45px");
+
+    // `height` is resolved by the same rule, and a `height: auto` box that
+    // wrapped its text reports the height the layout gave it.
+    js.eval(R"JS(
+        var tall = styleOf('width:40px');
+        tall.textContent = 'w w w w w w w w w w w w w w w w w w w w';
+        var tallHeight = getComputedStyle(tall).height;
+        var tallRect = tall.getBoundingClientRect().height;
+    )JS");
+    assert(js.eval("String(tallHeight === tallRect + 'px')").to_string() == "true");
+
+    // The computed value is still what `el.style` and a `calc()` that needs a
+    // layout basis report: the two are different questions.
+    assert(js.eval("cases.padded.style.width").to_string() == "100px");
+    assert(js.eval(R"JS((function () {
+        var d = styleOf('width:calc(100% - 20px);height:10px');
+        return getComputedStyle(d).width;
+    })())JS").to_string() == "calc(100% - 20px)");
+}
+
 TEST(computed_style_answers_for_every_property) {
     using namespace litebird;
     // getComputedStyle answered "" for a property nobody had declared and took
@@ -9599,6 +9720,9 @@ TEST(computed_style_answers_for_every_property) {
     // calc(): lengths are added up; a percentage needs layout and stays; a
     // unit nothing here knows (the viewport's) leaves the value as declared.
     assert(cs("c", "height") == "22px" && cs("e", "font-size") == "20px");
+    // `width` is the *used* value since Phase 188 (CSSOM "resolved values"),
+    // but a `calc()` still keeps its text: a percentage in it needs a layout
+    // basis this code does not have, which stays a gap.
     assert(cs("c", "width") == "calc(100% - 20px)" && cs("c", "margin-top") == "calc(10% + 10px)");
     assert(cs("c", "top") == "calc(100vh - 1px)");
     // Eight bits of alpha that two decimals give back exactly.
@@ -33277,6 +33401,9 @@ int main() {
 
     // Phase 152: place the document body, its margins, and its descendants.
     RUN_TEST(document_body_margins_place_boxes_from_the_viewport);
+
+    // Phase 188: getComputedStyle's width and height are used values.
+    RUN_TEST(computed_width_and_height_are_used_values);
     RUN_TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry);
 
     // Phase 170: root/body canvas color, compositing, scoping and scrolling.

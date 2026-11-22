@@ -97,6 +97,7 @@ leaves the text so that what it writes can be read back.
 | A synchronous request | `readystatechange`, `load`, `loadend`; the total is 0 with no `Content-Length` | A `progress` event as well, and the total is what was loaded |
 | `abort()` while the response is arriving | `readystatechange`, `abort`, `loadend`, and nothing after | One more `progress` |
 | `Object.getPrototypeOf(EventTarget) === Function.prototype`, `HTMLDivElement instanceof Function`, `Object.getPrototypeOf(DOMException) === Function.prototype` | `true`, all three: an interface object is a function of the realm its script runs in | `false`, all three: jsdom's interface objects are made in Node's realm and the script runs in another, so they are functions whose `Function.prototype` is not the script's. `interfaces.dat` asks for `typeof` and for the walk from one interface object to the next, which are the same in both |
+| `getComputedStyle(el).width` and `height` of a box with a width of its own | The **used** value (CSSOM "resolved values"): the box the layout made, 784px for `width:auto` in a 784px block and the wrapped height for `height:auto` | The declared value or `auto`, since jsdom lays nothing out (every box is 0 by 0). The cases here ask these two only where the answer is the declaration — `display:none`, a non-replaced inline box, and a box with no padding or border — and the used value itself is asserted in `tests/test_suite.cpp` (`computed_width_and_height_are_used_values`) |
 
 Interfaces constructed with a `new.target` (`js_compiled_custom_elements_are_constructed`):
 

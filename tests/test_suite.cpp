@@ -6383,6 +6383,33 @@ TEST(canvas_to_data_url_is_the_png_it_painted) {
                 "jpeg/webp/gif/malformed answer data:,\n", bytes.size());
 }
 
+TEST(crypto_get_random_values_and_random_uuid) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    assert(interp.eval("typeof Crypto === 'function'").is_truthy());
+    // randomUUID returns a valid v4 UUID string
+    assert(interp.eval(
+        "/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(crypto.randomUUID())"
+    ).is_truthy());
+    assert(interp.eval("crypto.randomUUID() !== crypto.randomUUID()").is_truthy());
+
+    // getRandomValues fills Uint8Array / Int32Array and returns the same array
+    assert(interp.eval(R"(
+        (() => {
+            const a = new Uint8Array(16);
+            const ret = crypto.getRandomValues(a);
+            if (ret !== a) return false;
+            let anyNonZero = false;
+            for (let i = 0; i < a.length; i++) if (a[i] !== 0) anyNonZero = true;
+            return anyNonZero;
+        })()
+    )").is_truthy());
+
+    // Non-TypedArray and >65536 bytes are validated in DomCryptoBindings.cpp.
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -6418,6 +6445,47 @@ TEST(offscreen_canvas_draws_and_converts_to_blob) {
     )");
     assert(interp.eval("rejType === 'EncodingError'").is_truthy());
     assert(interp.eval("rejZero === 'IndexSizeError'").is_truthy());
+}
+
+TEST(image_bitmap_and_create_image_bitmap) {
+    auto doc = HtmlParser::parse(
+        "<!doctype html><html><body>"
+        "<canvas id='c' width='5' height='4'></canvas>"
+        "<canvas id='zero' width='0' height='2'></canvas>"
+        "</body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    assert(interp.eval("typeof ImageBitmap === 'function'").is_truthy());
+    assert(interp.eval("typeof createImageBitmap === 'function'").is_truthy());
+
+    interp.eval(R"(
+        var c = document.getElementById('c');
+        var ctx = c.getContext('2d');
+        ctx.fillStyle = '#ff0000';
+        ctx.fillRect(0, 0, 5, 4);
+        var bm = null;
+        createImageBitmap(c).then(function(b) { bm = b; });
+    )");
+    assert(interp.eval("bm instanceof ImageBitmap").is_truthy());
+    assert(interp.eval("bm.width === 5 && bm.height === 4").is_truthy());
+
+    // Cloning an ImageBitmap
+    interp.eval("var bm2 = null; createImageBitmap(bm).then(function(b) { bm2 = b; });");
+    assert(interp.eval("bm2 instanceof ImageBitmap && bm2.width === 5 && bm2.height === 4").is_truthy());
+
+    // close() resets width/height to 0 and rejects subsequent createImageBitmap(bm)
+    interp.eval("bm.close(); var rejClosed = null; createImageBitmap(bm).catch(function(e) { rejClosed = e.name; });");
+    assert(interp.eval("bm.width === 0 && bm.height === 0").is_truthy());
+    assert(interp.eval("rejClosed === 'InvalidStateError'").is_truthy());
+
+    // Zero-size canvas rejects
+    interp.eval("var rejZero = null; createImageBitmap(document.getElementById('zero')).catch(function(e) { rejZero = e.name; });");
+    assert(interp.eval("rejZero === 'InvalidStateError'").is_truthy());
+
+    // Unsupported source rejects
+    interp.eval("var rejBad = null; createImageBitmap(123).catch(function(e) { rejBad = e.name; });");
+    assert(interp.eval("rejBad === 'TypeError'").is_truthy());
 }
 
 void test_css_media_queries() {
@@ -30098,6 +30166,131 @@ TEST(a_functions_name_and_length_are_its_own_properties) {
     assert(failed.empty());
 }
 
+TEST(a_subclass_is_made_by_the_builtin_it_was_called_on) {
+    using namespace litebird;
+    // Phase 140, finding 145. `Array.from`, `Array.of` and every method that
+    // makes an array built it with `JsValue::make_array`, so a subclass of
+    // Array could never be made by the built-in it was called on: `new
+    // List().map(f)` was a plain Array. The standard routes all of them
+    // through ArraySpeciesCreate (ECMA-262 §10.4.2.3), which asks the
+    // object's `constructor` for `Symbol.species` — so `class Plain extends Array { static get
+    // [Symbol.species]() { return Array; } }` is the case that proves the
+    // property is *read* and not merely present.
+    //
+    // Every expected string below is what Node.js v22.22.3 printed for the
+    // same script, checked line for line against a second run in Node. The
+    // non-constructor receivers make a plain array, as the standard specifies:
+    // `Array.from.call({}, [1])` is an Array rather than a TypeError.
+    TestPage page;
+    JsInterpreter& js = page.js;
+
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        class List extends Array {}
+        class Plain extends Array { static get [Symbol.species]() { return Array; } }
+        class Traced extends Array { constructor(n) { super(n); Traced.given = n; } }
+        function list() { var l = new List(); l.push(1, 2, 3); return l; }
+        function plain() { var p = new Plain(); p.push(1); return p; }
+
+        // The static methods make the constructor they were called on.
+        check('List.from', function () { return [List.from([1, 2]) instanceof List, List.from([1, 2]).length]; }, '[true,2]');
+        check('List.of', function () { return [List.of(1, 2) instanceof List, List.of(1, 2).length]; }, '[true,2]');
+        check('Array.from is still an Array', function () { return Array.from([1, 2]) instanceof Array; }, 'true');
+
+        // The species-aware methods make their result through the species.
+        check('map', function () { return list().map(function (x) { return x; }) instanceof List; }, 'true');
+        check('filter', function () { return list().filter(Boolean) instanceof List; }, 'true');
+        check('slice', function () { return list().slice(1) instanceof List; }, 'true');
+        check('concat', function () { return list().concat([4]) instanceof List; }, 'true');
+        check('flat', function () { return list().flat() instanceof List; }, 'true');
+        check('flatMap', function () { return list().flatMap(function (x) { return [x]; }) instanceof List; }, 'true');
+        check('splice', function () { return list().splice(1, 1) instanceof List; }, 'true');
+
+        // ... and `Symbol.species` is read, not ignored: this subclass says
+        // Array, so the method must make an Array.
+        check('a species of Array', function () {
+            var made = plain().map(function (x) { return x; });
+            return [made instanceof Array, made instanceof Plain];
+        }, '[true,false]');
+
+        // The getters the standard installs, on every constructor that has one.
+        check('the species getters', function () {
+            return [typeof Array[Symbol.species], Array[Symbol.species] === Array,
+                    typeof Map[Symbol.species], Map[Symbol.species] === Map,
+                    typeof Set[Symbol.species], typeof Promise[Symbol.species],
+                    typeof RegExp[Symbol.species]];
+        }, '["function",true,"function",true,"function","function","function"]');
+
+        // A receiver that is not an array makes a plain array: IsArray is the
+        // first question ArraySpeciesCreate asks, so `constructor` is not read.
+        check('an array-like receiver', function () {
+            return Array.prototype.map.call({ length: 2, 0: 'a', 1: 'b' }, function (x) { return x + '!'; });
+        }, '["a!","b!"]');
+
+        // A hole stays a hole: the result is filled with CreateDataProperty.
+        check('holes', function () {
+            var mapped = [1, , 3].map(function (x) { return x; });
+            return [mapped.length, 1 in mapped];
+        }, '[3,false]');
+
+        // The length the array-like path passes to the constructor, and the
+        // one the iterable path does not (it constructs with no argument).
+        check('a constructor is told the length', function () {
+            var made = Traced.from({ length: 3, 0: 'a', 1: 'b', 2: 'c' });
+            return [Traced.given, made.length, made instanceof Traced];
+        }, '[3,3,true]');
+
+        // A receiver that is not a constructor makes a plain array,
+        // and a constructed object when the receiver is a constructor.
+        check('a receiver that is not a constructor', function () {
+            var from = Array.from.call({}, [1]);
+            var of = Array.of.call({}, 1, 2);
+            var made = Array.from.call(function () {}, [1]);
+            return [from instanceof Array, from.length, of instanceof Array, made instanceof Array, made.length];
+        }, '[true,1,true,false,1]');
+
+        // Change-array-by-copy methods deliberately do not consult species.
+        check('copying methods ignore species', function () {
+            class NoSpecies extends Array {
+                static get [Symbol.species]() { throw new Error('species was read'); }
+            }
+            var a = new NoSpecies(3, 1, 2);
+            return [a.toSorted().constructor === Array, a.toReversed().constructor === Array,
+                    a.toSpliced(1, 1).constructor === Array, a.with(0, 4).constructor === Array];
+        }, '[true,true,true,true]');
+
+        // A species constructor that refuses the write is a TypeError, not a
+        // silently lost element.
+        check('a frozen species result', function () {
+            class Frozen extends Array {
+                static get [Symbol.species]() { return function (n) { return Object.freeze(new Array(n)); }; }
+            }
+            var f = new Frozen(); f.push(1, 2);
+            return f.map(function (x) { return x; });
+        }, 'throws TypeError');
+
+        // The arithmetic still works: the values, not just the prototypes.
+        check('values and holes survive', function () {
+            var l = list();
+            return [l.map(function (x) { return x * 2; }).join(','),
+                    l.filter(function (x) { return x > 1; }).join(','),
+                    l.slice(1).join(','), l.concat([4]).join(','),
+                    [1, [2, [3]]].flat().join(','), [1, , 3].splice(0, 3).length];
+        }, '["2,4,6","2,3","2,3","1,2,3,4","1,2,3",3]');
+
+        failures;
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot) {
     using namespace litebird;
 
@@ -33353,7 +33546,9 @@ int main() {
     RUN_TEST(web_storage_and_cookies);
     RUN_TEST(html5_canvas_2d_context);
     RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
+    RUN_TEST(crypto_get_random_values_and_random_uuid);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
+    RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
     RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);
@@ -33719,6 +33914,9 @@ int main() {
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
+
+    // Phase 140: a subclass is made by the built-in it was called on (species).
+    RUN_TEST(a_subclass_is_made_by_the_builtin_it_was_called_on);
     RUN_TEST(object_integrity_levels_ask_every_property);
 
     // Phase 132: a boxed String exposes character indices as own descriptors.

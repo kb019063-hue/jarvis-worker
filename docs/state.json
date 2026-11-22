@@ -17,6 +17,10 @@
     },
     {
       "date": "2026-11-21",
+      "what": "Phase 140 and finding 145 documented the array half of a subclass: `SpeciesConstructor` (ECMA-262 \u00a77.3.21) is one function in `src/js/JsOps.cpp` that both the array methods and the RegExp ones ask, `ArraySpeciesCreate` makes the result of `map`, `filter`, `slice`, `concat`, `flat`, `flatMap` and `splice` with the species constructor, `Array.from`/`Array.of` make `this`, and `Array`, `Map`, `Set` and `Promise` each carry their `[Symbol.species]` getter. Non-constructor receivers make a plain array, as specified. `prototypes.dat` is 70/76 and `js-conformance` 1144/1158; the row keeps the `Promise` half, whose subclass instances are not promises internally. The change-by-copy methods correctly make plain arrays. The JS conformance floor rose with the score."
+    },
+    {
+      "date": "2026-11-21",
       "what": "Phase 134 and finding 139 documented cross-axis alignment: a flex line now takes the container's inner cross size when it is alone in a container of definite height (CSS Flexbox \u00a79.4, with `align-content: stretch` as the default), so `align-items` finally has a size to align in and to stretch into; a column container's cross axis is the width; and a grid item is given the height of the rows it spans. Eight reftests were added \u2014 six that pass, two recording the bugs found on the way \u2014 and three recorded ones lost their `known_failure` entries (34 pages, 121 assertions). Two neighbouring gaps found on the way were left as rows, each with a failing page: `justify-content` in a column container, and `align-self`/`align-content`. The floors are unchanged."
     },
     {

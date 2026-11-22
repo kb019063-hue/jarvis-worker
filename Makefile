@@ -82,6 +82,7 @@ SRCS = src/common/Color.cpp \
        src/js/DomHtmlBindings.cpp \
        src/js/DomFormBindings.cpp \
        src/js/DomFileBindings.cpp \
+       src/js/DomCryptoBindings.cpp \
        src/js/DomUrlBindings.cpp \
        src/js/DomObserverBindings.cpp \
        src/js/DomWindowBindings.cpp \

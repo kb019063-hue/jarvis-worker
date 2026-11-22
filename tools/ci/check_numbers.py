@@ -741,8 +741,10 @@ def main(argv: list[str]) -> int:
     if suites:
         print(f"  FAIL  tests/test_suite.cpp registers {registered} suites")
     elif behind:
+        # No count of the places: the two checks above read the same lines, and
+        # `len(behind)` said ten where README.md has six.
         print(f"  note  tests/test_suite.cpp registers {registered} suites and README.md says another"
-              f" number in {len(behind)} place(s): leave it, the landing session refreshes that count"
+              f" number: leave it, the landing session refreshes that count"
               f" (AGENTS.md, \"Working together\")")
     else:
         print(f"  ok    tests/test_suite.cpp registers {registered} suites, as README.md says")

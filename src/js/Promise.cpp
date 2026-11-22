@@ -429,6 +429,17 @@ void install_promise_builtins(JsIntrinsics& realm) {
     js_define_hidden(pp, "constructor", ctor);
     js_define_hidden(pp, "@@toStringTag", JsValue::make_string("Promise"));
 
+    // Promise[Symbol.species] (§27.2.4.7): the constructor itself. `then` does
+    // not consult it yet — that is the half of this row still open (see
+    // AGENTS.md) — but the property is the standard's, and a script that reads
+    // it gets a function rather than `undefined`.
+    {
+        JsValue species_getter = js_make_native("get [Symbol.species]", 0, [](Args) { return JsValue::current_this(); });
+        species_getter.function_cell()->not_constructor = true;
+        ctor.define_accessor(kSymbolSpeciesKey, species_getter, JsValue::make_undefined(),
+                             PropertyMap::Configurable);
+    }
+
     // ---- Promise.prototype ------------------------------------------------
     js_define_method(pp, "then", 2, [](Args args) {
         auto data = this_promise("then");

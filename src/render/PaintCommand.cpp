@@ -213,24 +213,40 @@ if (box->image) {
 }
 }
 
-void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list);
-void paint_phases(const std::shared_ptr<LayoutBox>& box, DisplayList& list);
+/// The one box that is not painted where the document walk reaches it: the
+/// modal dialog's, which `DisplayList::build` paints last, behind a backdrop.
+/// The walk leaves it out and fills in `box` when it passes it.
+struct TopLayer {
+    const Node* node{nullptr};
+    std::shared_ptr<LayoutBox> box;
+    /// True when `candidate` is the top-layer box, which is remembered here so
+    /// that `DisplayList::build` can paint it after everything else.
+    bool take(const std::shared_ptr<LayoutBox>& candidate) {
+        if (!node || candidate->node.get() != node) return false;
+        if (!box) box = candidate;
+        return true;
+    }
+};
+
+void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top);
+void paint_phases(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top);
 
 // Step 3: the backgrounds and borders of in-flow, non-positioned block-level
 // descendants, in document order. Floats and out-of-flow boxes are not here:
 // they belong to steps 5 and 8.
-void paint_block_backgrounds(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
+void paint_block_backgrounds(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top) {
     // A box that established an inline formatting context painted its
     // children into its lines, so its subtree is not walked again.
     if (!box->line_boxes.empty()) return;
     for (const auto& child : box->children) {
+        if (top.take(child)) continue;   // the modal dialog: painted last
         switch (paint_role(*child)) {
             case PaintRole::Block:
                 emit_chrome(child, list);
-                paint_block_backgrounds(child, list);
+                paint_block_backgrounds(child, list, top);
                 break;
             case PaintRole::AtomicBlock:
-                paint_atom(child, list);
+                paint_atom(child, list, top);
                 break;
             default:
                 break;
@@ -242,17 +258,18 @@ void paint_block_backgrounds(const std::shared_ptr<LayoutBox>& box, DisplayList&
 // as a stacking context of its own. This is the step that was missing: a float
 // used to be painted where the tree walk found it, which is under the
 // background of the block that follows it.
-void paint_floats(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
+void paint_floats(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top) {
     // A box that established an inline formatting context painted its
     // children into its lines, so its subtree is not walked again.
     if (!box->line_boxes.empty()) return;
     for (const auto& child : box->children) {
+        if (top.take(child)) continue;   // the modal dialog: painted last
         switch (paint_role(*child)) {
             case PaintRole::Float:
-                paint_atom(child, list);
+                paint_atom(child, list, top);
                 break;
             case PaintRole::Block:
-                paint_floats(child, list);
+                paint_floats(child, list, top);
                 break;
             default:
                 break;
@@ -261,18 +278,19 @@ void paint_floats(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
 }
 
 // Step 7: the inline content of in-flow blocks, in document order.
-void paint_inline_contents(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
+void paint_inline_contents(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top) {
     // A box that established an inline formatting context painted its
     // children into its lines, so its subtree is not walked again.
     if (!box->line_boxes.empty()) return;
     for (const auto& child : box->children) {
+        if (top.take(child)) continue;   // the modal dialog: painted last
         switch (paint_role(*child)) {
             case PaintRole::Block:
                 emit_contents(child, list);
-                paint_inline_contents(child, list);
+                paint_inline_contents(child, list, top);
                 break;
             case PaintRole::Inline:
-                paint_atom(child, list);
+                paint_atom(child, list, top);
                 break;
             default:
                 break;
@@ -284,13 +302,14 @@ void paint_inline_contents(const std::shared_ptr<LayoutBox>& box, DisplayList& l
 // within each z-index, ascending. `negative` selects step 2 (behind the
 // backgrounds) from steps 8 and 9 (in front of everything in flow).
 void paint_stacking_contexts(const std::shared_ptr<LayoutBox>& box, DisplayList& list,
-                             bool negative) {
+                             bool negative, TopLayer& top) {
     std::vector<std::shared_ptr<LayoutBox>> pending;
     std::vector<std::pair<int, const LayoutBox*>> order;
     std::function<void(const std::shared_ptr<LayoutBox>&)> collect =
         [&](const std::shared_ptr<LayoutBox>& parent) {
             if (!parent->line_boxes.empty()) return;
             for (const auto& child : parent->children) {
+                if (top.take(child)) continue;   // the modal dialog: painted last
                 if (paint_role(*child) == PaintRole::OutOfFlow) {
                     const int z = child->style->has_z_index ? child->style->z_index : 0;
                     if ((z < 0) == negative) {
@@ -309,21 +328,24 @@ void paint_stacking_contexts(const std::shared_ptr<LayoutBox>& box, DisplayList&
     std::stable_sort(indices.begin(), indices.end(), [&](size_t a, size_t b) {
         return order[a].first < order[b].first;
     });
-    for (const size_t i : indices) paint_atom(pending[i], list);
+    for (const size_t i : indices) paint_atom(pending[i], list, top);
 }
 
-void paint_phases(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
-    paint_stacking_contexts(box, list, /*negative=*/true);   // step 2
-    paint_block_backgrounds(box, list);                      // step 3
-    paint_floats(box, list);                                 // step 5
-    paint_inline_contents(box, list);                        // step 7
-    paint_stacking_contexts(box, list, /*negative=*/false);   // steps 8 and 9
+void paint_phases(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top) {
+    paint_stacking_contexts(box, list, /*negative=*/true, top);   // step 2
+    paint_block_backgrounds(box, list, top);                 // step 3
+    paint_floats(box, list, top);                            // step 5
+    paint_inline_contents(box, list, top);                   // step 7
+    paint_stacking_contexts(box, list, /*negative=*/false, top);   // steps 8 and 9
 }
 
 // One box painted as a unit: its own chrome and ink, then its children in
 // Appendix E order, all of it inside the box's transform and clip.
-void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
+void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top) {
     if (!box) return;
+    // The modal dialog is not painted where the walk reaches it; it is painted
+    // after everything the document drew, with a backdrop behind it.
+    if (top.take(box)) return;
     // The box tree is only as deep as the stack allowed when it was built, but
     // a level of painting is not a level of building: ask again.
     if (stack_is_exhausted()) return;
@@ -344,14 +366,14 @@ void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
     emit_contents(box, list);
     // A box that established an inline formatting context painted all of its
     // children into its lines; there is nothing left to walk.
-    if (box->line_boxes.empty()) paint_phases(box, list);
+    if (box->line_boxes.empty()) paint_phases(box, list, top);
 
     if (clips) list.add(PopClipCommand{});
     if (has_t) list.add(PopTransformCommand{});
 }
 } // namespace
 
-DisplayList DisplayList::build(const std::shared_ptr<LayoutBox>& root_box) {
+DisplayList DisplayList::build(const std::shared_ptr<LayoutBox>& root_box, const Node* top_layer) {
     DisplayList list;
     if (root_box) {
         // The canvas is behind every box, including the body's shadow and
@@ -361,13 +383,19 @@ DisplayList DisplayList::build(const std::shared_ptr<LayoutBox>& root_box) {
         if (root_box->has_document_canvas) {
             list.add(DrawCanvasCommand{root_box->canvas_background});
         }
-        build_recursive(root_box, list);
+        TopLayer top{top_layer, nullptr};
+        paint_atom(root_box, list, top);
+        if (top.box) {
+            // The top layer: the UA's `::backdrop` over the whole viewport, and
+            // then the dialog's own subtree in front of it. Author styles reach
+            // the dialog but not the backdrop, which is why its colour is here
+            // and not in a stylesheet.
+            list.add(DrawBackdropCommand{Color(0, 0, 0, 26)});
+            TopLayer none;
+            paint_atom(top.box, list, none);
+        }
     }
     return list;
-}
-
-void DisplayList::build_recursive(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
-    paint_atom(box, list);
 }
 
 } // namespace litebird

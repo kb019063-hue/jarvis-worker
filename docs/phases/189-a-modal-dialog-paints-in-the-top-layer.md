@@ -1,0 +1,13 @@
+## Phase 189 — A modal dialog paints in the top layer
+
+Phase 186 made a modal dialog put the page out of reach; it was still drawn where it sat in the document, and the page behind it looked untouched. A box with `z-index` painted over the dialog. Nothing dimmed the page, because there was no `::backdrop` at all.
+
+The display list now has a top layer. `DisplayList::build()` takes the element that is modal, and the walk leaves that box out wherever it would have painted it — in the block-background phase, the float phase, the inline phase, or the stacking-context phase that a positioned box reaches — remembering it instead. After the whole document has been emitted, the list gets a `DrawBackdropCommand` and then the dialog's own subtree, painted in full.
+
+The backdrop is the UA's: 10% black over the whole viewport, which in this renderer's integer source-over is 229 in each channel over white. There is no `::backdrop` selector in this engine, so a page cannot restyle it — the colour is written in `DisplayList::build()` and nowhere else. The bitmap renderer fills the surface; the terminal renderer composites the same colour over each cell's background, since a cell has no alpha to blend with.
+
+`make -j2 build/litebird && tools/real_pages/dialog-04/check.sh`: **16/16 top-layer paint checks passed**, against **13/16** on the engine at this branch's parent. The fixture samples three fixed points — the page block, the white page, and a point inside both the dialog and a `z-index: 5` box behind it — before opening, while modal, after closing, and while an ordinary `show()` dialog is open. A modal dialog dims all three of the first kind of point and covers the `z-index` box; an ordinary one does neither.
+
+`make render-conformance` prints **45/45** and **34/41 with 7 recorded**, canvas 45,016/45,016 — the same as `main`; `make -j2 test` 337/337 suites and 114 cross-origin checks; `dialog-01`, `dialog-02` and `dialog-03` still print 28/28, 32/32 and 22/22.
+
+**What is still open.** The dialog is not moved. A browser's UA stylesheet makes a modal dialog `position: fixed` with `inset: 0` and `margin: auto`, so it lands in the middle of the viewport; here it stays where the page's own CSS puts it, and the fixture has to position it. The UA sheet still gives `dialog` no background, so an unstyled dialog lets the backdrop show through it (Chrome's UA is white). The backdrop is the viewport and not the scrollable page, which is what the spec asks, but nothing here tests a scrolled page with a dialog open; the terminal's version dims cells, which no test asserts. `Escape`/`cancel` and `form method="dialog"` are still missing.

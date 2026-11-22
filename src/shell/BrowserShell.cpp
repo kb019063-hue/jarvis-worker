@@ -265,7 +265,7 @@ void BrowserShell::rebuild_layout() {
     );
     m_layout_root = LayoutTree::build(m_document, m_resolver, m_viewport_w, m_viewport_h);
     if (m_layout_root) {
-        m_display_list = DisplayList::build(m_layout_root);
+        m_display_list = DisplayList::build(m_layout_root, m_document->modal_dialog().get());
         m_content_height = m_layout_root->dimensions.border_box().height;
     } else {
         m_content_height = 0.0f;

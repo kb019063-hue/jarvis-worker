@@ -834,7 +834,20 @@ void install_object_builtins(JsIntrinsics& realm) {
     js_define_method(object_ctor, "getOwnPropertyDescriptors", 1, [](Args args) {
         const JsValue& object = js_arg(args, 0);
         JsValue result = JsValue::make_object();
-        for (const auto& key : reflected_own_keys(object, true)) result.set_property(key, descriptor_for(object, key));
+        // §20.1.2.9 walks `[[OwnPropertyKeys]]`, so a symbol key gets a
+        // symbol-keyed descriptor entry: the same list `Reflect.ownKeys`
+        // reports, strings and then symbols, and every key rather than the
+        // enumerable ones `Object.assign` copies.
+        for (const auto& key : assign_keys(object, false)) {
+            JsValue descriptor = descriptor_for(object, key);
+            // `assign_keys` answers the internal key a symbol is stored under;
+            // `js_to_property_key` is what turns a symbol back into it, so the
+            // descriptor lands under the symbol rather than under its text.
+            JsValue symbol;
+            const std::string& property_key =
+                js_symbol_from_key(key, symbol) ? js_to_property_key(symbol) : key;
+            result.set_property(property_key, descriptor);
+        }
         return result;
     });
     js_define_method(object_ctor, "fromEntries", 1, [](Args args) {

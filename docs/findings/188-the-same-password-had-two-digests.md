@@ -27,7 +27,7 @@ ASCII returns the input unchanged, so the common path is a scan.
 
 ## 3. Evidence
 
-`make test` **335/335**. Six assertions in
+`make test` **336/336**. Six assertions in
 `http_authentication_basic_and_digest_challenges`, with the expected digest
 computed by hand in Node.js v22.22.3:
 

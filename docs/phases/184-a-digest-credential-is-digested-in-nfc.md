@@ -59,7 +59,7 @@ The expectation is not this code's: each digest below was computed by hand in
 was asked for the same credential in both spellings.
 
 ```bash
-make test      # All 335 engine test suites passed successfully!
+make test      # All 336 engine test suites passed successfully!
 ```
 
 Six assertions were added to the existing `http_authentication_basic_and_digest_challenges`

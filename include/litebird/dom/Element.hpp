@@ -336,6 +336,22 @@ public:
     bool is_active() const { return m_is_active; }
     void set_active(bool a) { m_is_active = a; }
 
+    /// A dialog `showModal()` opened. The flag is what `close()` reads to
+    /// decide whether the focus goes back: an ordinary `show()` takes no
+    /// "previously focused element", so there is nothing for it to give back.
+    /// The top layer itself is not implemented — this is the state that a
+    /// painter and a hit test would consult, and the only reader today is the
+    /// dialog's own close.
+    bool is_modal_dialog() const { return m_modal_dialog; }
+    void set_modal_dialog(bool value) { m_modal_dialog = value; }
+
+    /// The element that had the focus when `showModal()` ran, held until the
+    /// dialog closes. Empty for a dialog opened with `show()`.
+    const std::shared_ptr<Element>& dialog_previously_focused() const { return m_dialog_previous_focus; }
+    void set_dialog_previously_focused(std::shared_ptr<Element> element) {
+        m_dialog_previous_focus = std::move(element);
+    }
+
     /// With script bindings attached this is `element.click()`: the listeners
     /// run and then what the click does (a checkbox toggles, a submit button
     /// submits). Without them: one click event.
@@ -406,6 +422,8 @@ public:
     bool m_is_hovered{false};
     bool m_is_focused{false};
     bool m_is_active{false};
+    bool m_modal_dialog{false};
+    std::shared_ptr<Element> m_dialog_previous_focus;
     bool m_has_layout_box{false};
     bool m_layout_from_fragments{false};
 };

@@ -415,6 +415,10 @@ void focus_element(Realm& realm, Element* element, const std::shared_ptr<Documen
     std::shared_ptr<Document> document = element ? document_of(realm, *element)
                                                  : (blur_in ? blur_in : realm.document);
     if (!document) return;
+    // A modal dialog puts the rest of the document out of reach, and that
+    // includes `element.focus()`: a script cannot move the focus out from
+    // under it. Blurring (no element) is still allowed.
+    if (element && document->is_inert(*element)) return;
     auto old_focus = document->focused_element();
     if (old_focus && !old_focus->is_connected()) old_focus.reset();
     std::shared_ptr<Element> new_focus = element ? shared(*element) : nullptr;

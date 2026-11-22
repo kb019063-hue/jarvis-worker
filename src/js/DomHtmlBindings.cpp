@@ -1343,6 +1343,38 @@ void setup_slot(Iface& I) {
     S.method("assign", 0, [](Realm&, Element&, Args) { return undefined(); });
 }
 
+namespace {
+
+/// The dialog focusing steps: a descendant with `autofocus`, else the first
+/// focusable descendant in tree order, else the dialog itself, which is given
+/// `tabindex="-1"` so that it can hold the focus and Tab can still leave it.
+/// A dialog that is not in the document takes nothing (is_focusable says so).
+void focus_dialog(Realm& r, Element& dialog) {
+    Element* autofocus = nullptr;
+    Element* first = nullptr;
+    for_each_descendant(dialog, [&](Node& node) {
+        if (!node.is_element()) return true;
+        auto& element = static_cast<Element&>(node);
+        if (!is_focusable(element)) return true;
+        if (!first) first = &element;
+        if (!element.has_attribute("autofocus")) return true;
+        autofocus = &element;
+        return false;
+    });
+    if (autofocus) {
+        focus_element(r, autofocus);
+        return;
+    }
+    if (first) {
+        focus_element(r, first);
+        return;
+    }
+    if (!dialog.has_attribute("tabindex")) dialog.set_attribute("tabindex", "-1");
+    focus_element(r, &dialog);
+}
+
+} // namespace
+
 void setup_dialog(Iface& I) {
     ElementMembers<&is_dialog> D(I);
     reflect(I, "b:open");
@@ -1352,21 +1384,55 @@ void setup_dialog(Iface& I) {
             return value ? *value : str("");
         },
         [](Realm& r, Element& el, const JsValue& value) { set_slot(wrap(r, el), "returnValue", str(to_str(value))); });
-    D.method("show", 0, [](Realm&, Element& el, Args) {
-        if (!el.has_attribute("open")) el.set_attribute("open", "");
+    D.method("show", 0, [](Realm& r, Element& el, Args) {
+        // An ordinary dialog that is already open is an error; a modal one is
+        // not, and re-running the focusing steps there would take the focus
+        // away from inside the dialog.
+        if (el.has_attribute("open")) {
+            if (!el.is_modal_dialog()) throw_dom(r, "InvalidStateError", "The dialog is already open.");
+            return undefined();
+        }
+        el.set_attribute("open", "");
+        focus_dialog(r, el);
         return undefined();
     });
     D.method("showModal", 0, [](Realm& r, Element& el, Args) {
         if (el.has_attribute("open")) throw_dom(r, "InvalidStateError", "The dialog is already open.");
         if (!el.is_connected()) throw_dom(r, "InvalidStateError", "The dialog is not in a document.");
+        // The top layer is not painted; the flag and the document's record of
+        // it are what the hit test, the Tab order and close() read back.
+        el.set_modal_dialog(true);
+        std::shared_ptr<Element> previous;
+        auto document = document_of(r, el);
+        if (document) {
+            previous = document->focused_element();
+            document->set_modal_dialog(shared(el));
+        }
+        if (previous && !previous->is_connected()) previous.reset();
         el.set_attribute("open", "");
+        focus_dialog(r, el);
+        el.set_dialog_previously_focused(std::move(previous));
         return undefined();
     });
     D.method("close", 0, [](Realm& r, Element& el, Args args) {
         if (!el.has_attribute("open")) return undefined();
-        el.remove_attribute("open");
         JsValue self = wrap(r, el);
         if (!js_arg(args, 0).is_undefined()) set_slot(self, "returnValue", str(to_str(args[0])));
+        const bool was_modal = el.is_modal_dialog();
+        auto previous = el.dialog_previously_focused();
+        el.set_modal_dialog(false);
+        el.set_dialog_previously_focused(nullptr);
+        auto document = document_of(r, el);
+        if (document && document->modal_dialog().get() == &el) document->set_modal_dialog(nullptr);
+        el.remove_attribute("open");
+        // A modal dialog gives the focus back to the element that had it when
+        // it opened. Anything else unfocuses: the dialog's own control is
+        // hidden now, so keeping the focus on it would be a focus on nothing.
+        if (was_modal && previous && previous->is_connected() && is_focusable(*previous)) {
+            focus_element(r, previous.get());
+        } else {
+            focus_element(r, nullptr, document);
+        }
         // The close event comes as a task, after the caller has finished.
         Realm* realm = &r;
         EventLoop::default_loop().post_task([realm, self]() {

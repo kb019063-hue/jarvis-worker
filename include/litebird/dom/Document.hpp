@@ -106,6 +106,17 @@ public:
     /// The element that has focus; null when it is the body's by default.
     std::shared_ptr<Element> focused_element() const { return m_focused.lock(); }
     void set_focused_element(const std::shared_ptr<Element>& element) { m_focused = element; }
+    /// The dialog `showModal()` opened, while it is still open. A dialog that
+    /// was removed from the document stops being modal without telling anyone,
+    /// which is what the weak pointer is for.
+    std::shared_ptr<Element> modal_dialog() const { return m_modal_dialog.lock(); }
+    void set_modal_dialog(const std::shared_ptr<Element>& dialog) { m_modal_dialog = dialog; }
+    /// True for a node a modal dialog puts out of reach: the document has an
+    /// open modal dialog, and this node is neither it nor inside it. (HTML
+    /// calls the rest of the document "inert" while the dialog is showing.)
+    /// The dialog's own descendants answer false, and so does everything when
+    /// the dialog has left the document.
+    bool is_inert(const Node& node) const;
     /// The <script> element being run, for `document.currentScript`.
     std::shared_ptr<Element> current_script() const { return m_current_script.lock(); }
     void set_current_script(const std::shared_ptr<Element>& script) { m_current_script = script; }
@@ -225,6 +236,7 @@ private:
     std::string m_url{"about:blank"};
     std::string m_ready_state{"complete"};
     std::weak_ptr<Element> m_focused;
+    std::weak_ptr<Element> m_modal_dialog;
     std::weak_ptr<Element> m_current_script;
     std::shared_ptr<Document> m_template_document;
     bool m_has_window{false};

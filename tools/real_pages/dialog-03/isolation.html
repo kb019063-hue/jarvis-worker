@@ -1,0 +1,35 @@
+<!doctype html><meta charset="utf-8"><title>Modal input isolation probe</title>
+<style>
+  body { margin: 0 }
+  button { display:block; margin:0; width:240px; height:24px }
+  dialog { margin:0; width:240px }
+</style>
+<button id="behind">Page button</button>
+<div id="count">0</div>
+<button id="open">Open modal</button>
+<dialog id="sheet">
+  <button id="inside">Inside</button>
+  <button id="dismiss">Dismiss</button>
+</dialog>
+<button id="open2">Open ordinary</button>
+<dialog id="ordinary"><button id="ordinary-inside">Inside ordinary</button></dialog>
+<script>
+  var clicks = 0;
+  function bump() {
+    clicks += 1;
+    document.getElementById('count').textContent = String(clicks);
+  }
+  document.getElementById('behind').addEventListener('click', bump);
+  document.getElementById('open').addEventListener('click', function () {
+    document.getElementById('sheet').showModal();
+  });
+  document.getElementById('dismiss').addEventListener('click', function () {
+    document.getElementById('sheet').close();
+  });
+  document.getElementById('open2').addEventListener('click', function () {
+    document.getElementById('ordinary').show();
+  });
+  document.getElementById('ordinary-inside').addEventListener('click', function () {
+    document.getElementById('ordinary').close();
+  });
+</script>

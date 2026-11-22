@@ -22,6 +22,8 @@ tree out into a scratch directory and remove it again; no branch moves.
   - a file it names or has changed belongs to an open pull request with a
     lower number. The files every pull request changes (AGENTS.md lists
     them) do not count;
+  - (a note, not a failure) it has no `Agent:` line: AGENTS.md, "Working
+    together", asks each agent for a name of its own since 22 November;
   - it is behind `main` and no longer merges into it. This was not asked
     until a "Land #N" was opened from a base 39 commits old: every question
     above answered "correct claim", and GitHub was the first thing to say
@@ -40,9 +42,18 @@ tree out into a scratch directory and remove it again; no branch moves.
     (neither of the two is asked when the merge would put on `main`, file
     for file, the tree of a commit CI passed on: see "The same tree" below)
   - the checks that read documents fail on what would be merged (see below);
-  - its phase or finding is on `main` already;
-  - the number of unit suites README.md states is not the number in
-    tests/test_suite.cpp.
+  - its phase or finding is on `main` already.
+It no longer fails when README.md states another number of unit suites than
+tests/test_suite.cpp registers: that count is the landing session's to
+refresh (AGENTS.md, "Working together"; tools/ci/check_numbers.py says what
+it cost while every pull request edited it), and `merge N` only notes it.
+
+A pull request whose title begins with `BOARD:` or `WATCH:` claims nothing
+and is left out of the claims: the first is where finished pull requests are
+handed over, the second is the landing session's own, which holds the heads
+of the pull requests it is testing together and none of their files.
+`merge N` says "not ready" for the board whatever else is true of it: it is
+never merged.
 
 Documents, and the 28 minutes they used to cost
 ------------------------------------------------
@@ -140,6 +151,16 @@ NO_NUMBERS_RE = re.compile(
 # and the full stop, semicolon or colon of the sentence around it.
 FILE_NAME_END_RE = re.compile(r"[`.;:\s]+$")
 REPO = "repos/{owner}/{repo}"      # `gh api` fills the two in from the clone
+# The board and a watch (AGENTS.md, "Working together") are pull requests and
+# claim nothing: no task, no numbers, no files.
+NOT_A_CLAIM_RE = re.compile(r"^(?:BOARD|WATCH):")
+# The board is never merged: it would be closed by it, and it is where the
+# agents find each other.
+NEVER_MERGED_RE = re.compile(r"^BOARD:")
+# `Agent: Heron`: the name an agent gave itself, the same in all its pull requests.
+# Not `Agent: <the name you gave yourself>`, which is what `next_ids.py --pr-body`
+# prints for it to be written over.
+AGENT_RE = re.compile(r"^Agent:\s*([^\s,;.<>]+)")
 
 
 def gh(*arguments: str, check: bool = True) -> str:
@@ -188,6 +209,7 @@ def claim_of(pr: dict) -> dict:
     body = (pr.get("body") or "").replace("\r\n", "\n")
     head = body.split("\n")[:16]
     task = next((line for line in head if line.startswith("Task:")), None)
+    agent = next((m.group(1) for m in (AGENT_RE.match(line) for line in head) if m), None)
     # A change that takes no numbers says so, in place of the `Phase P, finding F`
     # line. AGENTS.md: "A change like this one -- documents, tooling, CI, nothing
     # that moves a scoreboard -- is not a phase and takes no phase or finding
@@ -237,6 +259,7 @@ def claim_of(pr: dict) -> dict:
         "number": pr["number"],
         "title": pr["title"],
         "task": task[len("Task:"):].strip() if task else None,
+        "agent": agent,
         "files": named | changed,       # what it says it will change, and what it has changed
         "has_claim_lines": task is not None and has_files_line and (numbers is not None or no_numbers),
         "phase": phase,
@@ -341,10 +364,16 @@ def on_main() -> Main:
                 int(taken.get("phase_floor", 0)), int(taken.get("finding_floor", 0)))
 
 
-def open_claims() -> list[dict]:
-    prs = gh_json("pr", "list", "--state", "open", "--limit", "100",
-                  "--json", "number,title,body,headRefOid,files")
-    return sorted((claim_of(pr) for pr in prs), key=lambda c: c["number"])
+def open_pull_requests() -> list[dict]:
+    return gh_json("pr", "list", "--state", "open", "--limit", "100",
+                   "--json", "number,title,body,headRefOid,files")
+
+
+def open_claims(prs: list[dict] | None = None) -> list[dict]:
+    """The open pull requests that claim something: all but the board and a watch."""
+    prs = open_pull_requests() if prs is None else prs
+    return sorted((claim_of(pr) for pr in prs if not NOT_A_CLAIM_RE.match(pr["title"])),
+                  key=lambda c: c["number"])
 
 
 def commit(sha: str) -> dict:
@@ -412,6 +441,9 @@ def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bo
     problems: list[tuple[bool, str]] = []
     if not claim["has_claim_lines"]:
         problems.append((True, "its text does not begin with the Task:, Files: and `Phase P, finding F` lines"))
+    if claim["has_claim_lines"] and not claim.get("agent"):
+        problems.append((False, "no `Agent:` line: give yourself a name and put it under the three lines "
+                                "(AGENTS.md, \"Working together\")"))
     others = [c for c in claims if c["number"] != claim["number"]]
     for kind, key in (("Phase", "phase"), ("finding", "finding")):
         number = claim[key]
@@ -443,17 +475,22 @@ def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bo
 
 
 def show_claims() -> int:
-    claims = open_claims()
+    prs = open_pull_requests()
+    claims = open_claims(prs)
     main = on_main()
     print(f"main: phases up to {max(main.phases)}, findings up to {max(main.findings)}")
     for claim in claims:
         pushed = hours_since(commit(claim["head"])["commit"]["committer"]["date"])
-        print(f"\n#{claim['number']}  {numbers_of(claim)}  (last commit {pushed:.1f} h ago)")
+        name = f"  [{claim['agent']}]" if claim.get("agent") else ""
+        print(f"\n#{claim['number']}{name}  {numbers_of(claim)}  (last commit {pushed:.1f} h ago)")
         print(f"    {claim['title'][:110]}")
         own = sorted(claim["files"] - SHARED)
         print("    files: " + (", ".join(own) if own else "(none)"))
         for blocking, problem in claim_problems(claim, claims, main):
             print(f"    {'!!' if blocking else '  '} {problem}")
+    for pr in sorted(prs, key=lambda pr: pr["number"]):
+        if NOT_A_CLAIM_RE.match(pr["title"]):
+            print(f"\n#{pr['number']}  not a claim: {pr['title'][:100]}")
     print(f"\nnext free: {next_pair()}")
     return 0
 
@@ -514,9 +551,13 @@ def staleness_problems(claim: dict, main_sha: str) -> list[tuple[bool, str]]:
 
 
 def check_claim(number: int) -> int:
-    claims = open_claims()
+    prs = open_pull_requests()
+    claims = open_claims(prs)
     mine = next((c for c in claims if c["number"] == number), None)
     if mine is None:
+        if any(pr["number"] == number for pr in prs):
+            print(f"ok  #{number} is the board or a watch: it claims no task, no numbers and no files")
+            return 0
         sys.exit(f"#{number} is not an open pull request")
     main = on_main()
     report = Report()
@@ -761,6 +802,13 @@ def check_merge(number: int) -> int:
     report = Report()
     if pr["state"] != "OPEN":
         sys.exit(f"#{number} is {pr['state'].lower()}")
+    if NEVER_MERGED_RE.match(pr["title"]):
+        # Asked of #219 on 22 November, every question below answered "ok" and
+        # the last line was "ready: gh pr merge 219 --merge".
+        report.no(f"#{number} is the board: it is never merged, and never closed "
+                  "(AGENTS.md, \"Working together\")")
+        print("\nnot ready")
+        return 1
     head = pr["headRefOid"]
 
     if pr["title"].startswith("WIP"):
@@ -848,7 +896,9 @@ def check_merge(number: int) -> int:
     if stated == {suites}:
         report.ok(f"README.md says {suites} unit suites, and tests/test_suite.cpp has {suites}")
     else:
-        report.no(f"tests/test_suite.cpp has {suites} unit suites; README.md says {sorted(stated)}")
+        # Not a failure since 22 November: see the top of this file.
+        report.note(f"tests/test_suite.cpp has {suites} unit suites and README.md says {sorted(stated)}: "
+                    "leave it, the landing session refreshes that count (AGENTS.md, \"Working together\")")
 
     print("\nnot ready" if report.failed
           else f"\nready: gh pr merge {number} --merge, then watch `gh run list --branch main --limit 3` to the end")
@@ -861,7 +911,9 @@ def self_test() -> int:
         return claim_of({"number": 1, "title": title, "body": body,
                          "files": [{"path": path} for path in changed]})
 
-    numbered = claim("Task: a row\nFiles: `src/a.cpp` (new), `include/a.hpp`,\n`tests/test_suite.cpp`\nPhase 5, finding 7\n\ntext, `not/a/file.cpp`")
+    named = claim("Task: a row\nFiles: `src/a.cpp`\nPhase 5, finding 7\nAgent: Heron\n\ntext")
+    named_with_remark = claim("Task: a row\nFiles: `src/a.cpp`\nPhase 5, finding 7\nAgent: Heron, since 22 November.\n")
+    numbered = claim("Task: a row\nFiles: `src/a.cpp` (new), `include/a.hpp`,\n`tests/test_suite.cpp`\nPhase 5, finding 7\nAgent: Heron\n\ntext, `not/a/file.cpp`")
     plain = claim("Task: not a row of the table.\nFiles: `ROADMAP.md`\nNo phase, no finding: documents only; no C++ changed.\n\ntext")
     other = claim("Task: something else.\nFiles: `docs/README.md`\nNo phase, no finding: tooling, nothing that moves a scoreboard.\n")
     sentence = claim("Task: a row\nFiles: `src/a.cpp`, `.github/workflows/ci.yml`, `docs/findings/64-lists.md`.\nPhase 5, finding 7\n")
@@ -907,6 +959,20 @@ def self_test() -> int:
         ("the files every pull request changes are shared by none",
          same_files({"AGENTS.md", "README.md"}, {"AGENTS.md", "README.md"}), []),
         ("a claim without numbers is called that, not `Phase None`", numbers_of(plain), "no phase, no finding"),
+        ("`Agent: Heron` is the agent's name", named["agent"], "Heron"),
+        ("a name ends at the first space or stop", named_with_remark["agent"], "Heron"),
+        ("the line `next_ids.py --pr-body` prints is not a name until it is written over",
+         claim("Task: a row\nFiles: `src/a.cpp`\nPhase 5, finding 7\nAgent: <the name you gave yourself>\n")["agent"], None),
+        ("no `Agent:` line is no name, and still a claim", (plain["agent"], plain["has_claim_lines"]), (None, True)),
+        ("...and what `claim N` says about it is a note, which stops nothing",
+         claim_problems(plain, [plain], Main({1}, {1}, {1}, {1}, 1, 1)),
+         [(False, 'no `Agent:` line: give yourself a name and put it under the three lines (AGENTS.md, "Working together")')]),
+        ("the board and a watch are not claims",
+         [bool(NOT_A_CLAIM_RE.match(t)) for t in ("BOARD: hand-overs", "WATCH: 22 November", "WIP: a board", "Board games")],
+         [True, True, False, False]),
+        ("the board is never merged; a watch is, by the landing session, at its end",
+         [bool(NEVER_MERGED_RE.match(t)) for t in ("BOARD: hand-overs", "WATCH: 22 November", "Land #140")],
+         [True, False, False]),
         ("a claim with numbers is called by them", numbers_of(numbered), "Phase 5, finding 7"),
     ]
 
@@ -914,8 +980,8 @@ def self_test() -> int:
     # floors of 6 and 8: Phase 5 and finding 7 are taken and have no write-up.
     main = Main(set(range(1, 7)), set(range(1, 9)), {1, 2, 3, 4, 6}, {1, 2, 3, 4, 5, 6, 8}, 6, 8)
     below = claim_problems(numbered, [numbered], main)
-    written = claim_problems(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 6, finding 8\n"), [], main)
-    free = claim_problems(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 7, finding 9\n"), [], main)
+    written = claim_problems(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 6, finding 8\nAgent: Heron\n"), [], main)
+    free = claim_problems(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 7, finding 9\nAgent: Heron\n"), [], main)
     cases += [
         ("a number at or below a floor that has no write-up does not stop its pull request",
          [blocking for blocking, _text in below], [False, False]),

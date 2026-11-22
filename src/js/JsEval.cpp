@@ -525,8 +525,8 @@ JsValue JsInterpreter::run_program(const Program& program, const std::shared_ptr
 
     // EvalDeclarationInstantiation (ECMA-262 §19.2.1.1.1): reject `var` /
     // `function` hoisting that would collide with an intervening lexical
-    // environment, catch parameter (unless simple catch for `var` under Annex
-    // B.3.5), or global lexical / restricted property BEFORE mutating anything.
+    // environment, catch parameter (unless simple catch under Annex B.3.5), or
+    // global lexical / restricted property BEFORE mutating anything.
     if (eval_mode && !strict_eval) {
         for (JsEnvironment* s = target.get(); s && s != var_target.get(); s = s->parent_raw()) {
             for (const auto& name : program.var_names) {
@@ -537,6 +537,7 @@ JsValue JsInterpreter::run_program(const Program& program, const std::shared_ptr
                 }
             }
             for (const auto* decl : program.functions) {
+                if (s->is_simple_catch && s->simple_catch_name == decl->fn->name) continue;
                 if (s->has_own(decl->fn->name)) {
                     js_throw_error(JsErrorKind::SyntaxError,
                                    "Identifier '" + decl->fn->name + "' has already been declared");

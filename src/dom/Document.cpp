@@ -92,6 +92,19 @@ std::shared_ptr<Element> Document::get_element_by_id(const std::string& id) cons
     return std::static_pointer_cast<Element>(found->second->shared_from_this());
 }
 
+// A modal dialog puts everything outside it out of reach. The walk up is the
+// dialog's own subtree test, and it is bounded by how deep the document is,
+// which TreeWalk's callers already accept: a click or a Tab asks this once, not
+// once per node.
+bool Document::is_inert(const Node& node) const {
+    std::shared_ptr<Element> dialog = m_modal_dialog.lock();
+    if (!dialog || !dialog->is_connected()) return false;
+    for (const Node* ancestor = &node; ancestor; ancestor = ancestor->parent().get()) {
+        if (ancestor == dialog.get()) return false;
+    }
+    return true;
+}
+
 std::vector<std::shared_ptr<Element>> Document::get_elements_by_tag_name(const std::string& tag) const {
     return descendants_with_tag(tag);
 }

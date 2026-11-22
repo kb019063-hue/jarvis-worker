@@ -10,6 +10,19 @@ on:
   # Runs the same jobs as a push to main; nothing about the checks changes.
   workflow_dispatch:
 
+# A newer run of the same pull request stops the older one. Until 22 November
+# 2026 nothing did: every push started twelve jobs that ran to their end, and on
+# 21 November 16 of the 98 runs of pull requests were overtaken by a newer push
+# to the same pull request while they were still going. Nobody reads the result
+# of a run on a commit that is no longer the head, and the jobs it holds are jobs
+# another pull request waits for.
+# A run that is not a pull request's (a push to `main`, one started by hand) is
+# alone in its group, which is its own run id: nothing stops it, and each commit
+# of `main` still gets its whole run.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     name: Build & unit tests
@@ -22,6 +35,8 @@ jobs:
         # derives what can be derived — the arithmetic, the two corpus totals,
         # the suite count — instead of trusting a sentence. Seconds, not
         # minutes: it runs before the build so a wrong number fails first.
+        # The suite count is the one it only reports: README.md is allowed to
+        # be behind, because no pull request edits that count any more.
         run: make check-numbers
       - name: Every part of the sanitizer run has a job
         # `make asan-core` is nine parts in the Makefile, and the jobs at the
@@ -277,7 +292,7 @@ jobs:
         # Raise the floor as the engine improves; it exists to catch regressions.
         run: |
           set -euo pipefail
-          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 1143
+          python3 tools/conformance/run_js_conformance.py --quiet --json build/js-conformance.json --min-pass 1146
       - name: String-heavy scripts against Node.js
         # Each script does work in step with its input (read a long string once,
         # append to one many times). The limit is 3 s and the slowest takes a
@@ -296,6 +311,8 @@ jobs:
         run: make verify-promise-iterators
       - name: Generator delegation against Node.js
         run: python3 tools/conformance/verify_async_generator.py
+      - name: Eval context, declaration instantiation, and early errors against Node.js
+        run: python3 tools/conformance/verify_eval_context.py
       - name: String results against Node.js
         # 36 subject strings through every string method and 51 regular
         # expressions: 50,580 results, each compared with what Node computes on

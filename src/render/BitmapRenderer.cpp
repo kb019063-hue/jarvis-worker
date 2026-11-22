@@ -244,6 +244,11 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
             // element transform currently on the command stack. Clipping is
             // still applied by set_pixel, allowing an enclosing target clip.
             if (!arg.color.is_transparent()) fill_rect(0, 0, m_width, m_height, arg.color);
+        } else if constexpr (std::is_same_v<T, DrawBackdropCommand>) {
+            // The UA `::backdrop`: a colour over the whole viewport, on top of
+            // everything the document has drawn so far. Not clipped by an
+            // enclosing target clip, for the same reason the canvas is not.
+            fill_rect(0, 0, m_width, m_height, arg.color);
         } else if constexpr (std::is_same_v<T, PushTransformCommand>) {
             auto curr = current_transform();
             m_transform_stack.push_back(curr.multiply(arg.matrix));

@@ -132,6 +132,18 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
                     if (inside_clip(col, row)) m_grid[row * m_cols + col].bg = background;
                 }
             }
+        } else if constexpr (std::is_same_v<T, DrawBackdropCommand>) {
+            // A terminal cell has no alpha to blend with, so the backdrop's
+            // colour is composited over whatever each cell already shows. The
+            // UA colour is 10% black, which is what makes a modal dialog's
+            // surroundings visibly dimmer here too.
+            for (int row = 0; row < m_rows; ++row) {
+                for (int col = 0; col < m_cols; ++col) {
+                    if (!inside_clip(col, row)) continue;
+                    auto& cell = m_grid[row * m_cols + col];
+                    cell.bg = over_opaque(arg.color, cell.bg);
+                }
+            }
         } else if constexpr (std::is_same_v<T, PushTransformCommand>) {
             auto curr = current_transform();
             m_transform_stack.push_back(curr.multiply(arg.matrix));

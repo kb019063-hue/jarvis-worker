@@ -36,6 +36,17 @@ suite count
     lines, the table and the command list. The phase write-ups quote the count
     they had when they were written, and keep it.
 
+    **Since 22 November 2026 a count that is behind is a note, not a failure,
+    unless ``--suites`` is given**, and ``--write`` leaves it alone unless
+    ``--suites`` is given. Nearly every pull request adds a suite, so nearly
+    every pull request edited the same six places of `README.md`: each merge
+    put every other finished pull request in conflict there, and when git saw
+    no conflict (two branches that had each written the same new number)
+    `main` failed this check after the merge: #91, #150, #146 and #170. The
+    count is the landing session's now (AGENTS.md, "Working together"): it
+    runs ``--write --suites`` as the last act of a watch. A pull request does
+    not touch the count, and nothing fails for its being behind.
+
 The ledger and the markers
 --------------------------
 ``docs/metrics.json`` holds what had to be *measured* — a score from running a
@@ -71,6 +82,8 @@ marker now; an unmarked one is history, and history is read by a person.
 
     python3 tools/ci/check_numbers.py            # check
     python3 tools/ci/check_numbers.py --write    # refresh the marked claims
+    python3 tools/ci/check_numbers.py --suites   # check, the suite count too
+    python3 tools/ci/check_numbers.py --write --suites   # refresh, the suite count too
 
 It exits 0 when every check passes and 1 when any fails.
 """
@@ -276,7 +289,14 @@ def claim_text(name: str, shape: str, values: dict[str, int]) -> tuple[str, re.P
     raise UnknownFigure(f"{shape!r} is not a shape: use int, num, pct, frac, frac_pct, of, of_pct or pair")
 
 
-def check_markers(problems: list[str], values: dict[str, int]) -> int:
+# The figure that is not a pull request's to keep right (see "suite count" at
+# the top): behind is a note unless `--suites`.
+LANDING_SESSIONS = {"unit_suites"}
+
+
+def check_markers(problems: list[str], values: dict[str, int],
+                  behind: list[str] | None = None) -> int:
+    """`behind`, when given, takes the marked suite counts that disagree."""
     checked = 0
     for path in DOCUMENTS:
         raw = read(path)
@@ -302,7 +322,8 @@ def check_markers(problems: list[str], values: dict[str, int]) -> int:
                     f" (expected {expected!r})"
                 )
             elif written.group(0) != expected:
-                problems.append(
+                late = behind if behind is not None and name in LANDING_SESSIONS else problems
+                late.append(
                     f"{where}: {written.group(0)} but the tree says {expected}"
                     f" ({name}, {shape})"
                 )
@@ -314,12 +335,16 @@ def first_number(text: str) -> int:
 
 
 def write_markers(values: dict[str, int], measured: set[str], problems: list[str],
-                  allow_lowering: bool) -> list[str]:
+                  allow_lowering: bool, suites: bool = True) -> list[str]:
     """Rewrite every marked claim; return what changed, as readable lines.
 
     A measured score is only ever *raised* by this: a marked figure that would
     go down is either a regression or a ledger that has not been re-measured,
     and both are decisions for a person, taken with `--scores`.
+
+    Without `suites` the suite count is left as it is written: it is the
+    landing session's to refresh, and a pull request that rewrote it would be
+    in conflict with every other one that did.
     """
     changes: list[str] = []
     for path in DOCUMENTS:
@@ -327,6 +352,8 @@ def write_markers(values: dict[str, int], measured: set[str], problems: list[str
         pieces: list[tuple[int, int, str]] = []
         for match in MARKER.finditer(text):
             name, shape = match.group(1), match.group(2)
+            if name in LANDING_SESSIONS and not suites:
+                continue
             where = f"{path.name}:{line_of(text, match.start())}"
             try:
                 expected, shape_re = claim_text(name, shape, values)
@@ -587,6 +614,44 @@ SELF_TEST_CASES = [
 ]
 
 
+def self_test_suite_count() -> int:
+    """A suite count that is behind: whose it is to say so, and to rewrite."""
+    import tempfile
+    global DOCUMENTS
+    failures = 0
+    kept = DOCUMENTS
+    with tempfile.TemporaryDirectory() as scratch:
+        page = Path(scratch) / "README.md"
+        text = "| Engine unit tests | 258<!--metrics:unit_suites/int--> suites |\n" \
+               "| JS | **1137 / 1156 (98.4%)<!--metrics:js/frac_pct-->** |\n"
+        page.write_text(text, encoding="utf-8")
+        DOCUMENTS = (page,)
+        try:
+            problems: list[str] = []
+            behind: list[str] = []
+            check_markers(problems, SELF_TEST_FIGURES, behind)
+            if problems or len(behind) != 1:
+                print(f"  FAIL  a suite count that is behind: {len(problems)} failure(s) and"
+                      f" {len(behind)} note(s), not 0 and 1")
+                failures += 1
+            problems = []
+            check_markers(problems, SELF_TEST_FIGURES)
+            if len(problems) != 1:
+                print(f"  FAIL  --suites: a suite count that is behind is {len(problems)} failure(s), not 1")
+                failures += 1
+            write_markers(SELF_TEST_FIGURES, set(), [], False, suites=False)
+            if page.read_text(encoding="utf-8") != text:
+                print("  FAIL  --write without --suites rewrote the suite count")
+                failures += 1
+            write_markers(SELF_TEST_FIGURES, set(), [], False, suites=True)
+            if "| 260<!--metrics:unit_suites/int-->" not in page.read_text(encoding="utf-8"):
+                print("  FAIL  --write --suites did not rewrite the suite count")
+                failures += 1
+        finally:
+            DOCUMENTS = kept
+    return failures
+
+
 def self_test() -> int:
     failures = 0
     for name, shape, expected in SELF_TEST_CASES:
@@ -613,7 +678,8 @@ def self_test() -> int:
     if first_number("1,137 / 1,156 (98.4%)") != 1137:
         print("  FAIL  first_number does not read a thousands separator")
         failures += 1
-    total = len(SELF_TEST_CASES) + 4 + 1
+    failures += self_test_suite_count()
+    total = len(SELF_TEST_CASES) + 4 + 1 + 4
     if failures:
         print(f"\ncheck_numbers --self-test: {failures} failure(s)")
         return 1
@@ -626,11 +692,13 @@ def main(argv: list[str]) -> int:
         return self_test()
     write = "--write" in argv
     allow_lowering = "--scores" in argv
+    strict_suites = "--suites" in argv
     values, measured = figures()
     if write:
         print("check_numbers: refreshing the figures the documents publish")
         lowered: list[str] = []
-        changes = write_floors(values, lowered) + write_markers(values, measured, lowered, allow_lowering)
+        changes = write_floors(values, lowered) + write_markers(values, measured, lowered, allow_lowering,
+                                                                suites=strict_suites)
         for change in changes:
             print(f"  {change}")
         for problem in lowered:
@@ -647,7 +715,12 @@ def main(argv: list[str]) -> int:
     registered = check_suite_count(suites)
 
     marked: list[str] = []
-    marks = check_markers(marked, values)
+    behind: list[str] = []
+    marks = check_markers(marked, values, None if strict_suites else behind)
+    if not strict_suites:
+        # Behind is a note: see "suite count" at the top of this file.
+        behind = suites + behind
+        suites = []
 
     floors: list[str] = []
     floor_count = check_floors(floors, values)
@@ -667,6 +740,12 @@ def main(argv: list[str]) -> int:
             )
     if suites:
         print(f"  FAIL  tests/test_suite.cpp registers {registered} suites")
+    elif behind:
+        # No count of the places: the two checks above read the same lines, and
+        # `len(behind)` said ten where README.md has six.
+        print(f"  note  tests/test_suite.cpp registers {registered} suites and README.md says another"
+              f" number: leave it, the landing session refreshes that count"
+              f" (AGENTS.md, \"Working together\")")
     else:
         print(f"  ok    tests/test_suite.cpp registers {registered} suites, as README.md says")
 

@@ -198,13 +198,20 @@ std::size_t ComputedStyle::hash() const {
         hash_combine(h, (margin_top_auto ? 1u : 0u) | (margin_bottom_auto ? 2u : 0u) |
                         (margin_left_auto ? 4u : 0u) | (margin_right_auto ? 8u : 0u));
     }
-    if (display == Display::Flex || flex_grow != 0.0f || flex_shrink != 1.0f ||
-        flex_basis >= 0.0f || gap != 0.0f) {
+    if (display == Display::Flex || display == Display::Grid ||
+        flex_grow != 0.0f || flex_shrink != 1.0f ||
+        flex_basis >= 0.0f || gap != 0.0f ||
+        align_self != AlignSelf::Auto ||
+        justify_items != AlignItems::Stretch ||
+        justify_self != AlignSelf::Auto) {
         hash_combine(h, static_cast<std::size_t>(flex_direction));
         hash_combine(h, static_cast<std::size_t>(flex_wrap));
         hash_combine(h, static_cast<std::size_t>(justify_content));
         hash_combine(h, static_cast<std::size_t>(align_items));
         hash_combine(h, static_cast<std::size_t>(align_content));
+        hash_combine(h, static_cast<std::size_t>(align_self));
+        hash_combine(h, static_cast<std::size_t>(justify_items));
+        hash_combine(h, static_cast<std::size_t>(justify_self));
         hash_combine(h, hash_float(gap));
         hash_combine(h, hash_float(flex_grow));
         hash_combine(h, hash_float(flex_shrink));
@@ -1829,6 +1836,7 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else if (val_lower == "table-row-group" || val_lower == "table-header-group" ||
                  val_lower == "table-footer-group") style.display = Display::TableRowGroup;
         else if (val_lower == "table-caption") style.display = Display::TableCaption;
+        else if (val_lower == "contents") style.display = Display::Contents;
         else if (val_lower == "table-column" || val_lower == "table-column-group") style.display = Display::None;
     } else if (prop == "float") {
         if (val == "left") style.float_type = FloatType::Left;
@@ -1869,26 +1877,117 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         if (val == "wrap") style.flex_wrap = FlexWrap::Wrap;
         else if (val == "wrap-reverse") style.flex_wrap = FlexWrap::WrapReverse;
         else if (val == "nowrap") style.flex_wrap = FlexWrap::NoWrap;
-    } else if (prop == "justify-content") {
-        if (val == "flex-start" || val == "start") style.justify_content = JustifyContent::FlexStart;
-        else if (val == "flex-end" || val == "end") style.justify_content = JustifyContent::FlexEnd;
-        else if (val == "center") style.justify_content = JustifyContent::Center;
-        else if (val == "space-between") style.justify_content = JustifyContent::SpaceBetween;
-        else if (val == "space-around") style.justify_content = JustifyContent::SpaceAround;
-        else if (val == "space-evenly") style.justify_content = JustifyContent::SpaceEvenly;
-    } else if (prop == "align-items") {
-        if (val == "stretch") style.align_items = AlignItems::Stretch;
-        else if (val == "flex-start" || val == "start") style.align_items = AlignItems::FlexStart;
-        else if (val == "flex-end" || val == "end") style.align_items = AlignItems::FlexEnd;
-        else if (val == "center") style.align_items = AlignItems::Center;
-    } else if (prop == "align-content") {
-        if (val == "stretch") style.align_content = AlignContent::Stretch;
-        else if (val == "flex-start" || val == "start") style.align_content = AlignContent::FlexStart;
-        else if (val == "flex-end" || val == "end") style.align_content = AlignContent::FlexEnd;
-        else if (val == "center") style.align_content = AlignContent::Center;
-        else if (val == "space-between") style.align_content = AlignContent::SpaceBetween;
-        else if (val == "space-around") style.align_content = AlignContent::SpaceAround;
-        else if (val == "space-evenly") style.align_content = AlignContent::SpaceEvenly;
+    } else if (prop == "justify-content" || prop == "-webkit-justify-content" ||
+               prop == "align-items" || prop == "-webkit-align-items" ||
+               prop == "align-content" || prop == "-webkit-align-content" ||
+               prop == "align-self" || prop == "-webkit-align-self" ||
+               prop == "justify-items" || prop == "justify-self" ||
+               prop == "place-items" || prop == "place-self" || prop == "place-content") {
+        auto strip_overflow_pos = [](std::string s) {
+            if (s.rfind("safe ", 0) == 0) s = s.substr(5);
+            else if (s.rfind("unsafe ", 0) == 0) s = s.substr(7);
+            while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.erase(s.begin());
+            return s;
+        };
+        auto parse_jc = [](const std::string& t, JustifyContent& out) {
+            if (t == "flex-start" || t == "start" || t == "left" || t == "normal") {
+                out = JustifyContent::FlexStart; return true;
+            }
+            if (t == "flex-end" || t == "end" || t == "right") {
+                out = JustifyContent::FlexEnd; return true;
+            }
+            if (t == "center") { out = JustifyContent::Center; return true; }
+            if (t == "space-between") { out = JustifyContent::SpaceBetween; return true; }
+            if (t == "space-around") { out = JustifyContent::SpaceAround; return true; }
+            if (t == "space-evenly") { out = JustifyContent::SpaceEvenly; return true; }
+            return false;
+        };
+        auto parse_ac = [](const std::string& t, AlignContent& out) {
+            if (t == "stretch" || t == "normal") { out = AlignContent::Stretch; return true; }
+            if (t == "flex-start" || t == "start" || t == "left") { out = AlignContent::FlexStart; return true; }
+            if (t == "flex-end" || t == "end" || t == "right") { out = AlignContent::FlexEnd; return true; }
+            if (t == "center") { out = AlignContent::Center; return true; }
+            if (t == "space-between") { out = AlignContent::SpaceBetween; return true; }
+            if (t == "space-around") { out = AlignContent::SpaceAround; return true; }
+            if (t == "space-evenly") { out = AlignContent::SpaceEvenly; return true; }
+            return false;
+        };
+        auto parse_ai = [](const std::string& t, AlignItems& out) {
+            if (t == "stretch" || t == "normal") { out = AlignItems::Stretch; return true; }
+            if (t == "flex-start" || t == "start" || t == "self-start" || t == "left") {
+                out = AlignItems::FlexStart; return true;
+            }
+            if (t == "flex-end" || t == "end" || t == "self-end" || t == "right") {
+                out = AlignItems::FlexEnd; return true;
+            }
+            if (t == "center") { out = AlignItems::Center; return true; }
+            return false;
+        };
+        auto parse_as = [](const std::string& t, AlignSelf& out) {
+            if (t == "auto") { out = AlignSelf::Auto; return true; }
+            if (t == "stretch" || t == "normal") { out = AlignSelf::Stretch; return true; }
+            if (t == "flex-start" || t == "start" || t == "self-start" || t == "left") {
+                out = AlignSelf::FlexStart; return true;
+            }
+            if (t == "flex-end" || t == "end" || t == "self-end" || t == "right") {
+                out = AlignSelf::FlexEnd; return true;
+            }
+            if (t == "center") { out = AlignSelf::Center; return true; }
+            return false;
+        };
+
+        if (prop == "justify-content" || prop == "-webkit-justify-content") {
+            parse_jc(strip_overflow_pos(val), style.justify_content);
+        } else if (prop == "align-items" || prop == "-webkit-align-items") {
+            parse_ai(strip_overflow_pos(val), style.align_items);
+        } else if (prop == "align-content" || prop == "-webkit-align-content") {
+            parse_ac(strip_overflow_pos(val), style.align_content);
+        } else if (prop == "align-self" || prop == "-webkit-align-self") {
+            parse_as(strip_overflow_pos(val), style.align_self);
+        } else if (prop == "justify-items") {
+            parse_ai(strip_overflow_pos(val), style.justify_items);
+        } else if (prop == "justify-self") {
+            parse_as(strip_overflow_pos(val), style.justify_self);
+        } else if (prop == "place-items") {
+            std::stringstream ss(val);
+            std::string first, second;
+            if (ss >> first) {
+                if (first == "safe" || first == "unsafe") ss >> first;
+                parse_ai(first, style.align_items);
+                if (ss >> second) {
+                    if (second == "safe" || second == "unsafe") ss >> second;
+                    parse_ai(second, style.justify_items);
+                } else {
+                    style.justify_items = style.align_items;
+                }
+            }
+        } else if (prop == "place-self") {
+            std::stringstream ss(val);
+            std::string first, second;
+            if (ss >> first) {
+                if (first == "safe" || first == "unsafe") ss >> first;
+                parse_as(first, style.align_self);
+                if (ss >> second) {
+                    if (second == "safe" || second == "unsafe") ss >> second;
+                    parse_as(second, style.justify_self);
+                } else {
+                    style.justify_self = style.align_self;
+                }
+            }
+        } else if (prop == "place-content") {
+            std::stringstream ss(val);
+            std::string first, second;
+            if (ss >> first) {
+                if (first == "safe" || first == "unsafe") ss >> first;
+                parse_ac(first, style.align_content);
+                if (ss >> second) {
+                    if (second == "safe" || second == "unsafe") ss >> second;
+                    parse_jc(second, style.justify_content);
+                } else if (!parse_jc(first, style.justify_content)) {
+                    style.justify_content = JustifyContent::FlexStart;
+                }
+            }
+        }
     } else if (prop == "grid-template-columns") {
         parse_grid_template(val, style.grid_template_columns, style.grid_col_track_defs,
                             style.grid_auto_fit_columns, style.grid_auto_fit_def);

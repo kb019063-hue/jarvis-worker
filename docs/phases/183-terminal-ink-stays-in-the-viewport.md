@@ -69,6 +69,7 @@ are not derived from the renderer's coordinate helper.
   mark, empty cells do not show a foreground color, and the focused element's
   ancestor overflow clips are not available at that point. This phase fixes
   viewport geometry, not the focus overlay's visual design.
-- The separate HTML `display:contents` canvas regression, nested translucent
-  inline backgrounds, background images and full root layout remain open as
-  recorded in Phase 170. CSS/layout and bitmap paint behavior are unchanged.
+- The separate HTML `display:contents` canvas regression was fixed by Phase
+  190. Nested translucent inline backgrounds, background images and full root
+  layout remain open as recorded in Phase 170. This phase does not change
+  CSS/layout or bitmap paint behavior.

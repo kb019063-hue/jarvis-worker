@@ -1,5 +1,6 @@
 #include "litebird/net/ResourceLoader.hpp"
 #include "litebird/js/JsBuiltins.hpp"
+#include "litebird/js/StringUnicodeTables.hpp"
 #include "litebird/js/Storage.hpp"
 #include "litebird/net/Brotli.hpp"
 #include "litebird/net/DataUrl.hpp"
@@ -2010,6 +2011,23 @@ std::string auth_client_nonce() {
     return auth_hex(bytes);
 }
 
+/// The UTF-8 of a username or password in Unicode Normalization Form C, which
+/// RFC 7616 §3.4.1 requires before the digest is computed: "the username and
+/// password ... MUST be encoded in UTF-8, and SHOULD be in Normalization Form
+/// C". Two encodings of `é` (U+00E9, and `e` followed by U+0301) are the same
+/// password to a person and different octets to a digest, so a credential
+/// typed with a combining accent would not match a server's precomposed one.
+/// Lone surrogates cannot come from a UTF-8 decode and are passed through.
+std::string auth_nfc(const std::string& utf8) {
+    if (utf8.empty()) return utf8;
+    const std::u16string utf16 = js_utf8_to_utf16(utf8);
+    std::u16string composed;
+    if (!unicode::normalize_utf16(utf16.data(), utf16.size(), unicode::NormForm::NFC, composed)) {
+        return utf8;      // already in NFC: the bytes are the answer
+    }
+    return js_utf16_to_utf8(composed);
+}
+
 /// RFC 7616 §3.4.1: `cnonce` is counted in the digest, so the client and the
 /// server must agree on the octet it was built from. `nc` is the request
 /// counter in eight hex digits.
@@ -2029,6 +2047,10 @@ bool auth_digest_build(const std::string& algorithm,
                        const std::string& nc,
                        std::string_view entity_body, bool hash_username,
                        std::string& out, std::string* out_response_hex = nullptr) {
+    // §3.4.1: the credential is digested in NFC, whatever form it was typed
+    // in. Everything below uses these, including the `username` field.
+    const std::string nfc_username = auth_nfc(username);
+    const std::string nfc_password = auth_nfc(password);
     std::string base;
     bool sess = false;
     if (!auth_split_algorithm(algorithm, base, sess)) return false;
@@ -2041,7 +2063,7 @@ bool auth_digest_build(const std::string& algorithm,
     // part of what is digested.
     if (!qop.empty() && (cnonce.empty() || nc.empty())) return false;
 
-    std::string a1 = username + ":" + realm + ":" + password;
+    std::string a1 = nfc_username + ":" + realm + ":" + nfc_password;
     if (sess) {
         // §3.4.2: A1 = H(username:realm:passwd) ":" nonce ":" cnonce, and H is
         // the algorithm in use — not MD5 whatever it is.
@@ -2076,7 +2098,7 @@ bool auth_digest_build(const std::string& algorithm,
     // with the same algorithm, and `userhash=true` is sent with it.
     std::string sent_username = username;
     if (hash_username) {
-        if (!auth_digest(base, username + ":" + realm, sent_username)) return false;
+        if (!auth_digest(base, nfc_username + ":" + realm, sent_username)) return false;
     }
 
     out = "Digest username=" + auth_quote(sent_username) +

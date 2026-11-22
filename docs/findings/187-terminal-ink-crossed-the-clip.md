@@ -28,5 +28,5 @@ the phase write-up gives the commands and the UBSan check.
 
 Cell-origin clipping, byte-oriented text, unsanitized terminal control
 characters, unblurred shadows, rounded clips and the focus overlay's limited
-visibility are still approximations or gaps; see the phase. The separate CSS
-`display:contents` canvas regression is not changed.
+visibility are still approximations or gaps; see the phase. Phase 190 fixed
+the separate CSS `display:contents` canvas regression.

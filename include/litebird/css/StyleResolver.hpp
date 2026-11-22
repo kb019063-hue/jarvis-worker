@@ -37,7 +37,13 @@ enum class Display : uint8_t {
     TableRow,
     TableCell,
     TableRowGroup,
-    TableCaption
+    TableCaption,
+    /// CSS Display 3 §2.7: the element generates no box of its own and its
+    /// children take part in its parent's formatting context, as if the
+    /// element had been replaced by them. It is not `None` -- `None` throws the
+    /// children away too -- and it is not `Block`, which is what the engine used
+    /// to fall back to because the value was never parsed.
+    Contents
 };
 
 /// CSS `overflow` values (only "does this establish a BFC" matters to layout).
@@ -125,6 +131,14 @@ enum class AlignContent : uint8_t {
     SpaceBetween,
     SpaceAround,
     SpaceEvenly
+};
+
+enum class AlignSelf : uint8_t {
+    Auto,
+    Stretch,
+    FlexStart,
+    FlexEnd,
+    Center
 };
 
 enum class Position : uint8_t {
@@ -352,6 +366,9 @@ struct ComputedStyle {
     JustifyContent justify_content{JustifyContent::FlexStart};
     AlignItems align_items{AlignItems::Stretch};
     AlignContent align_content{AlignContent::Stretch};
+    AlignSelf align_self{AlignSelf::Auto};
+    AlignItems justify_items{AlignItems::Stretch};
+    AlignSelf justify_self{AlignSelf::Auto};
     float gap{0.0f};
     float flex_grow{0.0f};
     float flex_shrink{1.0f};
@@ -447,6 +464,9 @@ struct ComputedStyle {
     bool is_flex() const { return display == Display::Flex; }
     bool is_grid() const { return display == Display::Grid; }
     bool is_none() const { return display == Display::None; }
+    /// `display: contents` -- no box of its own, children spliced into the
+    /// parent. See `Display::Contents`.
+    bool is_contents() const { return display == Display::Contents; }
 
     bool is_positioned() const { return position != Position::Static; }
     bool is_out_of_flow() const { return position == Position::Absolute || position == Position::Fixed; }

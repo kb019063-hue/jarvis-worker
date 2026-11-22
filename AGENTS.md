@@ -56,7 +56,8 @@ waited 80 minutes or more between their first green run and their merge:
 each merge sent every other finished pull request round again. The person we
 work for planned what follows with one of the sessions, and each piece of it
 was tried first ("The turn, and what a merge does to it", below, says what
-the platform turned out to do).
+the platform turned out to do). The whole has not run yet: the first watch
+is its trial, and what it shows will be written here.
 
 1. **Take a name.** One made-up word, yours for as long as your chat lasts.
    A branch is new after every Continue and a pull request's number says

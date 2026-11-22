@@ -312,6 +312,9 @@ void BrowserShell::scan_interactive_elements() {
     });
 
     for (const auto& el : candidates) {
+        // Tab cannot leave a modal dialog: what is behind it is not a tab stop
+        // while it is open.
+        if (m_document->is_inert(*el)) continue;
         Rect bounds = compute_element_bounds(el, m_layout_root);
         InteractiveElement item;
         item.element = el;
@@ -366,6 +369,10 @@ void BrowserShell::focus_element(int index) {
 bool BrowserShell::activate_focused() {
     auto el = focused_element();
     if (!el) return false;
+    // The ring's list is rebuilt with the layout, so it can still name an
+    // element from before a modal dialog opened. Enter on one of those reaches
+    // nothing, the way a click there does.
+    if (m_document && m_document->is_inert(*el)) return false;
 
     const auto& item = m_interactive_elements[m_focused_index];
     if (item.is_link && !item.href.empty()) {
@@ -451,6 +458,14 @@ std::shared_ptr<Element> BrowserShell::element_at(float x, float y) const {
     };
 
     search(m_layout_root);
+    // A modal dialog puts the page behind it out of reach. A point outside its
+    // subtree is the backdrop, and the backdrop's event target is the dialog
+    // itself: what is behind it is not under the pointer as far as the page can
+    // tell. The dialog is still painted where it sits (there is no top layer
+    // yet), so this is what keeps a click behind it from reaching a button.
+    if (hit_element && m_document && m_document->is_inert(*hit_element)) {
+        if (auto dialog = m_document->modal_dialog()) return dialog;
+    }
     return hit_element;
 }
 

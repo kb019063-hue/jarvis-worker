@@ -21,9 +21,10 @@
     "counts it as neither a pass nor a failure. The entry is a debt, not a",
     "silence: if the page starts passing, the run prints FIXED and exits 1, so",
     "the reason has to come out in the same commit that fixes the bug.",
-    "Five pages carry one since Phase 134 (finding 139): paint order for floats and for transformed elements, a clip that is square where the radius is round, and two found while fixing cross-axis alignment — `justify-content` in a column container and `align-self`. The three alignment pages recorded by Phase 122 (finding 127) lost their reasons here, which is the ledger working in the direction that matters.",
-    "and transformed elements, cross-axis alignment in flex and grid, and a clip",
-    "that is square where the radius is round."
+    "Zero pages carry a `known_failure` since Phase 180 (finding 184), which",
+    "cleared the final two recorded entries \u2014 `justify-content` in a column",
+    "flex container and `align-self` \u2014 alongside `align-content`, `justify-items`,",
+    "and `justify-self` in flex and grid."
   ],
   "tests": [
     {
@@ -438,7 +439,7 @@
     },
     {
       "name": "flex_wrap_puts_an_overflowing_item_on_the_next_line",
-      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; flex-wrap: wrap; width: 100px; height: 100px }.i { width: 60px; height: 20px }\n</style></head><body><div class=\"c\"><div class=\"i\" style=\"background:#ff0000\"></div><div class=\"i\" style=\"background:#00ff00\"></div><div class=\"i\" style=\"background:#0000ff\"></div></div></body></html>",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n.c { display: flex; flex-wrap: wrap; align-content: flex-start; width: 100px; height: 100px }.i { width: 60px; height: 20px }\n</style></head><body><div class=\"c\"><div class=\"i\" style=\"background:#ff0000\"></div><div class=\"i\" style=\"background:#00ff00\"></div><div class=\"i\" style=\"background:#0000ff\"></div></div></body></html>",
       "assert": [
         {
           "kind": "rect",
@@ -1180,8 +1181,7 @@
           "colour": "#ff0000",
           "describe": "`justify-content: flex-end` packs the main axis: 100-20 = 80"
         }
-      ],
-      "known_failure": "`justify-content` is ignored in a column flex container: the items are stacked from the top whatever it says. Rows distribute; the column branch has no main-axis step at all"
+      ]
     },
     {
       "name": "flex_align_self_overrides_align_items",
@@ -1196,8 +1196,7 @@
           "colour": "#ff0000",
           "describe": "`align-self` overrides the container's `align-items`: 100-20 = 80"
         }
-      ],
-      "known_failure": "`align-self` is not read: the item follows the container's `align-items: flex-start` and sits at the top. `align-content` is not read either"
+      ]
     },
     {
       "name": "a_blocks_background_does_not_cover_earlier_inline_ink",
@@ -1404,6 +1403,269 @@
           "y": 0,
           "colour": "#ff0000",
           "describe": "the straight part of the scaled top edge paints"
+        }
+      ]
+    },
+    {
+      "name": "flex_align_content_stretch_distributes_free_cross_space",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .c { display: flex; flex-wrap: wrap; width: 100px; height: 100px; background: #eeeeee }\n  .a { width: 60px; background: #ff0000 }\n  .b { width: 60px; height: 20px; background: #0000ff }\n</style></head><body><div class=\"c\"><div class=\"a\"></div><div class=\"b\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 40,
+          "colour": "#ff0000",
+          "describe": "line 0 grows from 0 to (100-20)/2 = 40px and its auto-height item stretches to fill it"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 39,
+          "colour": "#ff0000",
+          "describe": "line 0 ends at y=40"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 60,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "line 1 starts at y=40 and its 20px item keeps its definite height"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 60,
+          "colour": "#eeeeee",
+          "describe": "below the 20px item in line 1 the container shows through"
+        }
+      ]
+    },
+    {
+      "name": "flex_align_content_flex_end_packs_wrapped_lines",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .c { display: flex; flex-wrap: wrap; align-content: flex-end; width: 100px; height: 100px; background: #eeeeee }\n  .a { width: 60px; height: 20px; background: #ff0000 }\n  .b { width: 60px; height: 20px; background: #0000ff }\n</style></head><body><div class=\"c\"><div class=\"a\"></div><div class=\"b\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 59,
+          "colour": "#eeeeee",
+          "describe": "free cross space (100-40 = 60) sits above the packed lines"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 60,
+          "width": 60,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "first wrapped line starts at y=60"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 60,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "second wrapped line sits at y=80..100"
+        }
+      ]
+    },
+    {
+      "name": "flex_align_content_space_between_spreads_wrapped_lines",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .c { display: flex; flex-wrap: wrap; align-content: space-between; width: 100px; height: 100px; background: #eeeeee }\n  .a { width: 60px; height: 20px; background: #ff0000 }\n  .b { width: 60px; height: 20px; background: #0000ff }\n</style></head><body><div class=\"c\"><div class=\"a\"></div><div class=\"b\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "first line stays at y=0"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 50,
+          "colour": "#eeeeee",
+          "describe": "the 60px free space sits between the two lines"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 60,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "second line is pushed to y=80"
+        }
+      ]
+    },
+    {
+      "name": "flex_column_justify_content_space_between_spreads_items",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .c { display: flex; flex-direction: column; justify-content: space-between; width: 100px; height: 100px; background: #eeeeee }\n  .a { width: 40px; height: 20px; background: #ff0000 }\n  .b { width: 40px; height: 20px; background: #0000ff }\n</style></head><body><div class=\"c\"><div class=\"a\"></div><div class=\"b\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "first item sits at the top edge"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 50,
+          "colour": "#eeeeee",
+          "describe": "the 60px free height sits between them"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 40,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "second item sits at y=80"
+        }
+      ]
+    },
+    {
+      "name": "flex_column_align_self_overrides_align_items",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .c { display: flex; flex-direction: column; align-items: flex-start; width: 100px; height: 60px; background: #eeeeee }\n  .a { width: 40px; height: 20px; align-self: center; background: #ff0000 }\n  .b { width: 40px; height: 20px; align-self: flex-end; background: #0000ff }\n</style></head><body><div class=\"c\"><div class=\"a\"></div><div class=\"b\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 29,
+          "y": 10,
+          "colour": "#eeeeee",
+          "describe": "left of centered item is container background"
+        },
+        {
+          "kind": "rect",
+          "x": 30,
+          "y": 0,
+          "width": 40,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "align-self: center puts item at x=(100-40)/2 = 30"
+        },
+        {
+          "kind": "pixel",
+          "x": 59,
+          "y": 30,
+          "colour": "#eeeeee",
+          "describe": "left of flex-end item is container background"
+        },
+        {
+          "kind": "rect",
+          "x": 60,
+          "y": 20,
+          "width": 40,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "align-self: flex-end puts item at x=100-40 = 60"
+        }
+      ]
+    },
+    {
+      "name": "grid_align_self_and_justify_self_override_container",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .g { display: grid; grid-template-columns: 100px 100px; grid-template-rows: 60px; width: 200px; height: 60px; align-items: flex-start; justify-items: flex-start; background: #eeeeee }\n  .a { width: 40px; height: 20px; align-self: flex-end; justify-self: center; background: #ff0000 }\n  .b { width: 40px; height: 20px; place-self: center flex-end; background: #0000ff }\n</style></head><body><div class=\"g\"><div class=\"a\"></div><div class=\"b\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 29,
+          "y": 50,
+          "colour": "#eeeeee",
+          "describe": "cell 1 left margin of centered item is container background"
+        },
+        {
+          "kind": "rect",
+          "x": 30,
+          "y": 40,
+          "width": 40,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "cell 1: justify-self: center (x=30) and align-self: flex-end (y=40)"
+        },
+        {
+          "kind": "pixel",
+          "x": 159,
+          "y": 30,
+          "colour": "#eeeeee",
+          "describe": "cell 2 left of end-aligned item is container background"
+        },
+        {
+          "kind": "rect",
+          "x": 160,
+          "y": 20,
+          "width": 40,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "cell 2: place-self: center flex-end puts item at x=160, y=20"
+        }
+      ]
+    },
+    {
+      "name": "grid_justify_content_and_align_content_distribute_tracks",
+      "html": "<!doctype html><html><head><style>\n  body { margin: 0 }\n  .g { display: grid; grid-template-columns: 30px 30px; grid-template-rows: 20px 20px; width: 100px; height: 100px; justify-content: space-between; align-content: flex-end; background: #eeeeee }\n  .a { background: #ff0000 } .b { background: #00ff00 } .c { background: #0000ff } .d { background: #ff00ff }\n</style></head><body><div class=\"g\"><div class=\"a\"></div><div class=\"b\"></div><div class=\"c\"></div><div class=\"d\"></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 59,
+          "colour": "#eeeeee",
+          "describe": "align-content: flex-end leaves y=0..60 empty"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 60,
+          "width": 30,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "cell (0,0) starts at (0, 60)"
+        },
+        {
+          "kind": "pixel",
+          "x": 50,
+          "y": 70,
+          "colour": "#eeeeee",
+          "describe": "justify-content: space-between opens a 40px gap between the two 30px columns"
+        },
+        {
+          "kind": "rect",
+          "x": 70,
+          "y": 60,
+          "width": 30,
+          "height": 20,
+          "colour": "#00ff00",
+          "describe": "cell (1,0) sits at (70, 60)"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 80,
+          "width": 30,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "cell (0,1) sits at (0, 80)"
+        },
+        {
+          "kind": "rect",
+          "x": 70,
+          "y": 80,
+          "width": 30,
+          "height": 20,
+          "colour": "#ff00ff",
+          "describe": "cell (1,1) sits at (70, 80)"
         }
       ]
     }

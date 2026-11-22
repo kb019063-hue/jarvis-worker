@@ -6383,6 +6383,33 @@ TEST(canvas_to_data_url_is_the_png_it_painted) {
                 "jpeg/webp/gif/malformed answer data:,\n", bytes.size());
 }
 
+TEST(crypto_get_random_values_and_random_uuid) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    assert(interp.eval("typeof Crypto === 'function'").is_truthy());
+    // randomUUID returns a valid v4 UUID string
+    assert(interp.eval(
+        "/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(crypto.randomUUID())"
+    ).is_truthy());
+    assert(interp.eval("crypto.randomUUID() !== crypto.randomUUID()").is_truthy());
+
+    // getRandomValues fills Uint8Array / Int32Array and returns the same array
+    assert(interp.eval(R"(
+        (() => {
+            const a = new Uint8Array(16);
+            const ret = crypto.getRandomValues(a);
+            if (ret !== a) return false;
+            let anyNonZero = false;
+            for (let i = 0; i < a.length; i++) if (a[i] !== 0) anyNonZero = true;
+            return anyNonZero;
+        })()
+    )").is_truthy());
+
+    // Non-TypedArray and >65536 bytes are validated in DomCryptoBindings.cpp.
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -33353,6 +33380,7 @@ int main() {
     RUN_TEST(web_storage_and_cookies);
     RUN_TEST(html5_canvas_2d_context);
     RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
+    RUN_TEST(crypto_get_random_values_and_random_uuid);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);

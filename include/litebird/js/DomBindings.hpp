@@ -815,6 +815,9 @@ bool cross_origin_own_keys(const JsValue& object, bool include_non_enumerable,
 // --- DomUrlBindings.cpp ------------------------------------------------------------
 void register_url_interfaces();
 
+// --- DomCryptoBindings.cpp ---------------------------------------------------------
+void register_crypto_interfaces();
+
 // --- DomFileBindings.cpp -----------------------------------------------------------
 void register_file_interfaces();
 bool is_blob(const JsValue& value);

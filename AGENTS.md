@@ -47,6 +47,74 @@ document cannot prevent. So:
 A change like this one — documents, tooling, CI, nothing that moves a
 scoreboard — is not a phase and takes no phase or finding number.
 
+## Working together: a name, the hand-over, the landing session (2026-11-22)
+
+Until 22 November every agent landed its own pull request, however often
+`main` moved under it. Of 42 pull requests merged on 20 and 21 November,
+half had merged `main` three times or more (#173 sixteen times), and half
+waited 80 minutes or more between their first green run and their merge:
+each merge sent every other finished pull request round again. The person we
+work for planned what follows with one of the sessions, and each piece of it
+was tried first ("The turn, and what a merge does to it", below, says what
+the platform turned out to do).
+
+1. **Take a name.** One made-up word, yours for as long as your chat lasts.
+   A branch is new after every Continue and a pull request's number says
+   nothing about who wrote it; the person has many chats and has to know
+   which one is speaking, and which one a note is for. Not a model's name:
+   two agents can be the same model. See that it is free
+   (`gh pr list --state all --search '"Agent: Heron" in:body'` finds
+   nothing), and then:
+   - `Agent: Heron` is the fourth line of every pull request you open, under
+     the three of "Before starting";
+   - your name is the first word of every reply to the person.
+2. **Leave the suite count of `README.md` alone.** Nearly every pull request
+   adds a suite, so nearly every pull request rewrote the same six places:
+   each merge put the other finished ones in conflict there, and four times
+   git merged two that had written the same number and `main` failed on the
+   count (#91, #150, #146, #170). Now `make check-numbers` notes a count that
+   is behind and fails nothing, `make metrics` leaves the count as it is
+   written, and the landing session refreshes it at the end of a watch. Add
+   your suite and its `RUN_TEST` line; do not touch the number. If your
+   branch already changed it and now conflicts there, take `main`'s lines.
+3. **Beaten twice, hand over.** When the work is finished (the checks pass,
+   CI is green on the head, `WIP:` is off), merge as "What "done" means"
+   says. When `python3 tools/ci/check_pr.py merge N` says "not ready"
+   because `main` has moved, merge `main`, push, and wait for CI: twice at
+   the most. The third time:
+   - see that GitHub can still merge it
+     (`gh pr view N --json mergeable`: a pull request that conflicts with
+     `main` cannot be landed by anybody but you);
+   - write one line on the board, #219:
+     `Heron: #N finished, beaten twice, please land`;
+   - push nothing more to #N. If you must, say so on the board first
+     (`Heron: #N taken back`);
+   - end the turn. Tell the person your name, that #N is handed over, and
+     that your next task begins with their Continue once #N shows as merged.
+4. **The landing session lands it.** One session does this, for a *watch* of
+   up to seven and a half hours that the person starts (a session's login to
+   GitHub ends after eight). About every ten minutes it reads the board. It
+   merges `main` and the heads of the handed-over pull requests into its own
+   branch, whose pull request is titled `WATCH:` and is not merged while the
+   watch lasts, and lets CI run once on all of them together. When that run
+   passes and `main` has not moved, it merges each of them as it is
+   (`gh pr merge N --merge`), so that `main` has, file for file, the tree
+   that run passed on. Nothing is pushed to your branch and your pull request
+   is not closed. If yours conflicts, or the run fails because of it, the
+   landing session says why on the board and in #N, and #N is yours again:
+   the person hears of it and continues your chat. Its last act of a watch
+   is to merge its own pull request, which by then holds what no other one
+   does: the suite count (`make metrics-suites`).
+5. **The board is #219**, a pull request that is never merged (an agent's
+   token can comment on a pull request, and can open an issue but not
+   comment on it). One line a message, your name first. The landing session
+   writes there when a watch begins and ends, what it landed, and what it
+   could not land and why. Between watches nothing is landed, and what is
+   handed over waits for the next one.
+
+`python3 tools/ci/check_pr.py` shows each claim's name, notes a pull request
+without one, and leaves the board and a watch out of the claims.
+
 ## Before starting
 
 1. **An open pull request is a claim.** Run `gh pr list --state open` and read
@@ -61,6 +129,7 @@ scoreboard — is not a phase and takes no phase or finding number.
    Task: <the row of the table>
    Files: <what it will change>
    Phase P, finding F
+   Agent: <the name you gave yourself; "Working together", above>
    ```
 
    `P` and `F` come from `python3 tools/next_ids.py`, which reads the
@@ -96,15 +165,17 @@ the same time will both have changed them. So:
 
 1. Add a block of your own: a section, a group of tests. Do not re-wrap or
    reorder what is there.
-2. **Before merging, merge `main` into your branch.** Resolve, run
-   `make metrics` (below) rather than editing the counts by hand, run the
+2. **Before merging, merge `main` into your branch.** Resolve, run the
    checks again, push, and let CI pass on that commit. CI that passed on a
-   branch behind `main` says nothing about the merge.
+   branch behind `main` says nothing about the merge. (`make metrics`,
+   below, when your pull request moved a score or a corpus; never for the
+   suite count, which is not yours: "Working together", above.)
 
 ### The numbers are generated, not copied
 
 The counts and scores a document publishes are not typed into it by hand any
-more, and the merge step above is one command:
+more. A pull request that moved a score or a corpus refreshes them with one
+command:
 
 ```bash
 make metrics     # python3 tools/ci/check_numbers.py --write
@@ -117,7 +188,10 @@ from the tree. Counted things are derived where they are checked: the suite
 count is the `RUN_TEST` list of `tests/test_suite.cpp`, the corpus totals are
 the cases on disk. Measured things are in `docs/metrics.json` with the command
 that produced them and the day it did, so a figure can be argued with instead
-of trusted. `make check-numbers` fails when any marked figure disagrees, and
+of trusted. `make check-numbers` fails when any marked figure disagrees
+(but for the suite count, which it only notes when it is behind, and which
+`make metrics` does not write: that is `make metrics-suites`, the landing
+session's), and
 `--write` never lowers a floor — neither the `--min-pass` ones of `ci.yml` nor
 `URL_FLOOR` and `WPT_FLOOR` in the Makefile, which it also maintains: a floor
 that would go down is a regression, and it is reported instead.
@@ -179,7 +253,9 @@ asan`.
 - `python3 tools/ci/check_pr.py merge N` says "ready" right before the merge.
   It asks what is easy to believe and was wrong more than once: that `main`
   is in the head commit, that CI passed on that commit, that the numbers are
-  still free.
+  still free. When it has said "not ready" twice because `main` had moved,
+  the pull request is handed over ("Working together", above), not merged
+  into a third time.
 - **When `main` has moved, ask it before you merge `main` again.** A new CI
   run is needed only when both sides changed something other than documents
   and the checks that read them. When `main` moved by a line of README.md,
@@ -304,6 +380,9 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   of the old one, so that whichever of the two was merged first, the other
   had nothing left to run: if the agent of a pull request you carry is at
   work, carry what it pushes and leave the merging of its own to it.
+  Since 22 November one session does the landing, and without merging a
+  pull request of its own for each lot ("Working together", above); what
+  is said here is still how a pull request that conflicts is carried.
 - **A merge that compiles is not a merge that is right.** #97 added a
   member to `ComputedStyle`, and #86, which it was written without, had
   made every box share the style of any box whose style compares equal,
@@ -501,6 +580,37 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   one: a claim is a push and a pull request. So the reply after a merge
   says what is merged, and that the next task begins when they press
   Continue.
+- **Merging somebody else's pull request does not cut a session off.** On
+  22 November a session whose own branch had no pull request merged #201 at
+  15:22:43; `gh` and `git push --dry-run` answered at every look for the 27
+  minutes it went on looking, and it watched CI on `main` for that merge
+  to its end. This is what the landing session of "Working together" rests
+  on: it merges the others' pull requests and, until its watch ends, not
+  its own.
+- **Closing a pull request costs its session the branch, even for two
+  seconds.** Closing and reopening a pull request starts a CI run on its
+  head merged with `main` as it is at that moment, with no push (#201,
+  twice that day; the run's record names the base:
+  `gh api repos/OWNER/REPO/actions/runs/RUN --jq '.pull_requests[0].base.sha'`).
+  But #219 was closed at 15:41:53 and reopened at 15:41:55 by its own
+  session, which went on working for eight minutes, and the person then
+  found its chat marked "pr closed" and pressed Continue. So nobody closes
+  another agent's pull request to have it tested. Two more limits of that
+  way: a head commit with the skip marker gets no run when it is reopened
+  either, and a pull request that conflicts with `main` gets none at all.
+- **A session's login to GitHub ends after eight hours.** A turn can last
+  longer: one waited, in calls of ten minutes, for 8 hours 14 minutes on
+  21 November and ended itself. But from 8 hours 9 minutes in, every write
+  and every push was refused ("Requires authentication"), while reading
+  went on working, and the next day's turn had a login again. A watch is
+  seven and a half hours for that reason. (The record is a comment on
+  #179.) A single call that waits more than five minutes is sometimes cut
+  short without the turn ending: twice in some fifty.
+- **An agent can open an issue and can neither comment on it nor edit
+  it** (#196: the session that opened it could not correct it). It can
+  comment on a pull request and rewrite its own comment
+  (`gh api -X PATCH repos/OWNER/REPO/issues/comments/ID -F body=@FILE`),
+  so what agents have to tell each other is said on one: the board.
 
 **The sandbox**
 
@@ -563,10 +673,10 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   and one of them reached `main` (the cost paragraph of Phase 43, corrected
   in Phase 63). If the tree changes after the measurement, measure again or
   say which tree it was.
-- **When you merge, correct what counts things**: the suite count on five
-  lines of README.md (`grep -c "^    RUN_TEST(" tests/test_suite.cpp`), the
-  floors, and the rows of the table below that say your pull request holds a
-  file.
+- **When you merge, correct what counts things**: the floors, and the rows
+  of the table below that say your pull request holds a file. Not the suite
+  count of README.md any more: since 22 November it is the landing
+  session's ("Working together", above).
 
 ## Reading the queue
 

@@ -1,4 +1,4 @@
-# Finding 183: `ImageBitmap` and `createImageBitmap()` were not implemented
+# Finding 195: `ImageBitmap` and `createImageBitmap()` were not implemented
 
 ## What was found
 

@@ -149,6 +149,16 @@ int main(int argc, char** argv) {
         commands.add(shadow(Rect(20, 0, -20, 20), 0, 0, Color::red()));
         commands.add(text(inf, 0, "WRONG"));
         commands.add(text(0, nan, "WRONG"));
+        auto invalid_transform = TransformMatrix2D::identity();
+        invalid_transform.a = nan;
+        commands.add(PushTransformCommand{invalid_transform});
+        commands.add(border(Rect(0, 0, 30, 60)));
+        commands.add(shadow(Rect(0, 0, 30, 60), 0, 0, Color::red()));
+        commands.add(text(0, 0, "Z"));
+        commands.add(PushClipCommand{Rect(0, 0, 50, 80)});
+        commands.add(PopTransformCommand{});
+        commands.add(text(0, 0, "NO")); // the invalid clip stays empty after pop
+        commands.add(PopClipCommand{});
         terminal.draw_focus_ring(Rect(0, 0, 0, 20));
     } else {
         std::cerr << "unknown case: " << test << '\n';

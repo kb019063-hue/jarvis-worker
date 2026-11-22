@@ -13,6 +13,13 @@ Color over_opaque(Color src, Color dst) {
     return Color(over(src.r, dst.r), over(src.g, dst.g), over(src.b, dst.b));
 }
 
+// map_rect takes extrema of four transformed corners; std::min/max can hide
+// a NaN in one corner, so reject invalid transforms before mapping geometry.
+bool finite_transform(const TransformMatrix2D& t) {
+    return std::isfinite(t.a) && std::isfinite(t.b) && std::isfinite(t.c) &&
+           std::isfinite(t.d) && std::isfinite(t.e) && std::isfinite(t.f);
+}
+
 struct CellRange { int first_col, last_col, first_row, last_row; };
 
 // Intersect in double precision before converting to integers: huge and
@@ -131,7 +138,8 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
         } else if constexpr (std::is_same_v<T, PopTransformCommand>) {
             if (!m_transform_stack.empty()) m_transform_stack.pop_back();
         } else if constexpr (std::is_same_v<T, PushClipCommand>) {
-            if (!std::isfinite(arg.rect.x) || !std::isfinite(arg.rect.y) ||
+            if (!finite_transform(current_transform()) ||
+                !std::isfinite(arg.rect.x) || !std::isfinite(arg.rect.y) ||
                 !std::isfinite(arg.rect.width) || !std::isfinite(arg.rect.height) ||
                 arg.rect.width <= 0 || arg.rect.height <= 0) {
                 m_clip_stack.emplace_back(); // an invalid/empty clip admits no ink
@@ -141,7 +149,8 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
         } else if constexpr (std::is_same_v<T, PopClipCommand>) {
             if (!m_clip_stack.empty()) m_clip_stack.pop_back();
         } else if constexpr (std::is_same_v<T, DrawShadowCommand>) {
-            if (!std::isfinite(arg.rect.x) || !std::isfinite(arg.rect.y) ||
+            if (!finite_transform(current_transform()) ||
+                !std::isfinite(arg.rect.x) || !std::isfinite(arg.rect.y) ||
                 !std::isfinite(arg.rect.width) || !std::isfinite(arg.rect.height) ||
                 arg.rect.width <= 0 || arg.rect.height <= 0) return;
             Rect tr = current_transform().map_rect(arg.rect);
@@ -176,7 +185,8 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
                 }
             }
         } else if constexpr (std::is_same_v<T, DrawBorderCommand>) {
-            if (!std::isfinite(arg.rect.x) || !std::isfinite(arg.rect.y) ||
+            if (!finite_transform(current_transform()) ||
+                !std::isfinite(arg.rect.x) || !std::isfinite(arg.rect.y) ||
                 !std::isfinite(arg.rect.width) || !std::isfinite(arg.rect.height) ||
                 arg.rect.width <= 0 || arg.rect.height <= 0) return;
             const Rect tr = current_transform().map_rect(arg.rect);
@@ -203,7 +213,7 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
             if (m_cols <= 0 || m_rows <= 0 || m_cell_w <= 0 || m_cell_h <= 0 ||
                 !std::isfinite(m_cell_w) || !std::isfinite(m_cell_h) ||
                 !std::isfinite(m_scroll_x) || !std::isfinite(m_scroll_y) ||
-                arg.color.is_transparent()) return;
+                !finite_transform(current_transform()) || arg.color.is_transparent()) return;
             const Point tp = current_transform().map_point(arg.position);
             if (!std::isfinite(tp.x) || !std::isfinite(tp.y)) return;
             const double col0 = std::floor((static_cast<double>(tp.x) - m_scroll_x) / m_cell_w);

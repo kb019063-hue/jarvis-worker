@@ -648,19 +648,8 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   `tests/wpt/encoding/`). Do not commit that tree: `git fetch origin
   '+refs/heads/*:refs/remotes/origin/*'`, then `git reset --hard
   origin/BRANCH`. So commit and push after every step, and keep nothing that
-  matters only in `/tmp`.
-- **The clone is shallow: `git fetch --unshallow origin` before a merge, a
-  `git merge-base` or a `git log`.** It takes seconds. This file used to say
-  `git fetch --deepen=60 origin main`, and sixty commits do not reach the
-  place where a branch left `main` once `main` has moved further than that.
-  Git then cannot find the common commit, and says so in words that mean
-  something else: "refusing to merge unrelated histories", or that a commit
-  of `main` "is not an ancestor". On 22 November the agent of #226, 83
-  commits behind, read that as `main` having been rewritten, and said so on
-  the board. It had not been: the commit it missed, `e959811`, is the merge
-  of #221 and is on `main` (`git log --first-parent origin/main`). When
-  `main` looks rewritten, look at `git rev-parse --is-shallow-repository`
-  first.
+  matters only in `/tmp`. The clone is shallow: `git fetch --deepen=60 origin
+  main` before a merge or a `git log`.
 - **It can be suspended, and its clock is not.** When a turn ends, what was
   running stops where it was and goes on when the next turn begins, hours
   later by the clock. A check that measures time then reports nonsense:

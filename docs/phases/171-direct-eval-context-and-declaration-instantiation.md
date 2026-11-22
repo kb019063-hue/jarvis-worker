@@ -89,12 +89,12 @@ the final engine edit (clean `origin/main` baseline built at `/tmp/main-wt/build
 pinned `test262` at `2e58f87d8350`):
 
 - **Unit & cross-origin suites (Release + ASan/UBSan):**
-  - `make test`: **337 / 337** engine test suites passed (including two new `TestPage`
+  - `make test`: **339 / 339** engine test suites passed (including two new `TestPage`
     suites `direct_eval_inherits_context_and_checks_declarations_before_mutating` and
     `parameter_scopes_loop_completions_class_fields_and_early_syntax_errors`) + **114 / 114**
     cross-origin Window/Location/MessageChannel checks.
   - `ASAN_OPTIONS=detect_leaks=0:quarantine_size_mb=1:malloc_context_size=2 ./build-asan/test_suite`:
-    **337 / 337** passed; `ASAN_OPTIONS=detect_leaks=0 ./build-asan/cross_origin_test`:
+    **339 / 339** passed; `ASAN_OPTIONS=detect_leaks=0 ./build-asan/cross_origin_test`:
     **114 / 114** passed; `make asan-deep`: **882 runs over 315 pages at depth 10000**, 0 failed.
 - **Node.js differential oracle (`tools/conformance/verify_eval_context.py`):**
   - `python3 tools/conformance/verify_eval_context.py --binary build/litebird`:

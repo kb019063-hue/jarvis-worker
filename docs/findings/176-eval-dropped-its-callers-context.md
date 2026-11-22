@@ -44,7 +44,7 @@
   `language/eval-code` **163 → 251 / 343 (+88 / -0)**, full non-module `language/`
   **20,629 → 20,893 / 23,005 (+264 / -0)**, and `annexB` **673 → 673 / 1,086 (+0 / -0)**
   after extending the B.3.5 simple-catch exemption to `program.functions`.
-- **Unit & conformance suites:** `make test` **337 / 337** + **114 / 114** (Release and
+- **Unit & conformance suites:** `make test` **339 / 339** + **114 / 114** (Release and
   ASan+UBSan under `ASAN_OPTIONS=detect_leaks=0:quarantine_size_mb=1:malloc_context_size=2`),
   `make js-conformance` **1,145 / 1,158 (98.9%, 90 / 90 everyday)**, and `make asan-deep`
   **882 / 882** runs at depth 10,000.

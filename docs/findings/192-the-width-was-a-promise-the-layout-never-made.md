@@ -1,4 +1,4 @@
-# Finding 187 — the width was a promise the layout never made
+# Finding 192 — the width was a promise the layout never made
 
 ## What was wrong
 

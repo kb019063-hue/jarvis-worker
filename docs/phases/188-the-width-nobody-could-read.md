@@ -1,7 +1,7 @@
-# Phase 183 — the width nobody could read
+# Phase 188 — the width nobody could read
 
 Task: the row that began "`getComputedStyle(el).width` is still `auto`". Finding
-187.
+192.
 
 ## 1. What the corpus could not ask
 

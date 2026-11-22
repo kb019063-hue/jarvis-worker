@@ -9720,7 +9720,7 @@ TEST(computed_style_answers_for_every_property) {
     // calc(): lengths are added up; a percentage needs layout and stays; a
     // unit nothing here knows (the viewport's) leaves the value as declared.
     assert(cs("c", "height") == "22px" && cs("e", "font-size") == "20px");
-    // `width` is the *used* value since Phase 183 (CSSOM "resolved values"),
+    // `width` is the *used* value since Phase 188 (CSSOM "resolved values"),
     // but a `calc()` still keeps its text: a percentage in it needs a layout
     // basis this code does not have, which stays a gap.
     assert(cs("c", "width") == "calc(100% - 20px)" && cs("c", "margin-top") == "calc(10% + 10px)");
@@ -33175,7 +33175,7 @@ int main() {
     // Phase 152: place the document body, its margins, and its descendants.
     RUN_TEST(document_body_margins_place_boxes_from_the_viewport);
 
-    // Phase 183: getComputedStyle's width and height are used values.
+    // Phase 188: getComputedStyle's width and height are used values.
     RUN_TEST(computed_width_and_height_are_used_values);
     RUN_TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry);
 

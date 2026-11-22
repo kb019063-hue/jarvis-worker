@@ -199,10 +199,12 @@ public:
     std::unique_ptr<Expr> callee;
     std::vector<std::unique_ptr<Expr>> args;
     bool optional{false};   // `f?.()`
-    // A syntactic `eval(...)` records which `super` forms its source may
+    // A syntactic `eval(...)` records the enclosing context its source may
     // inherit. Runtime still checks that the value called is the realm's eval.
     bool direct_eval_allows_super_property{false};
     bool direct_eval_allows_super_call{false};
+    bool direct_eval_allows_new_target{false};
+    bool direct_eval_forbid_arguments{false};
 
     CallExpr(std::unique_ptr<Expr> c, std::vector<std::unique_ptr<Expr>> a)
         : Expr(NodeKind::Call), callee(std::move(c)), args(std::move(a)) {}
@@ -351,6 +353,7 @@ public:
     bool uses_super{false};              // `super.x` or `super(...)` appears in the body
     bool uses_new_target{false};
     bool simple_params{true};            // identifiers only: no defaults, rest or patterns
+    bool has_parameter_expressions{false}; // formal defaults or computed keys (§10.2.11)
     int length{0};                       // parameters before the first default or rest
     std::vector<std::string> var_names;  // `var` bindings hoisted to this function
 
@@ -675,11 +678,17 @@ public:
 
 /// Syntax that a direct eval inherits from the code that contains its call.
 /// `super.x` needs a home-object-capable method; `super(...)` additionally
-/// needs a derived constructor. Ordinary script parsing leaves both false.
+/// needs a derived constructor; `new.target` needs a non-arrow function,
+/// method, field initializer or static block; `forbid_arguments` rejects
+/// `arguments` inside class-field initializers and static blocks; and `strict`
+/// carries the caller's strictness. Ordinary script parsing leaves all false.
 struct JsParserContext {
     bool direct_eval{false};
+    bool strict{false};
     bool allow_super_property{false};
     bool allow_super_call{false};
+    bool allow_new_target{false};
+    bool forbid_arguments{false};
 };
 
 class JsParser {
@@ -699,6 +708,11 @@ public:
     void seed_private_names(std::vector<std::string> names);
 
 private:
+    struct LabelInfo {
+        std::string name;
+        bool is_iteration{false};
+    };
+
     struct FunctionContext {
         FunctionNode* fn{nullptr};          // null for the program
         std::vector<std::string>* var_names{nullptr};
@@ -710,9 +724,15 @@ private:
         bool forbid_await{false};
         bool forbid_yield{false};
         // Arrows inherit these from the syntactic context around them. An
-        // ordinary nested function starts with neither permission.
+        // ordinary nested function starts with neither super permission, while
+        // every non-arrow function, method, field initializer and static block
+        // enables allow_new_target.
         bool allow_super_property{false};
         bool allow_super_call{false};
+        bool allow_new_target{false};
+        // True only inside function/method/arrow bodies (not top-level scripts,
+        // eval scripts, static blocks, or field initializers).
+        bool allow_return{false};
         // True while parsing code that is written inside a class body but is
         // not a method of it: a field initialiser or a static block. Both have
         // a home object, so `super.x` follows allow_super_property, but the
@@ -723,6 +743,9 @@ private:
         // True while parsing formal parameter defaults/patterns, where
         // generator `yield` and async `await` expressions are early errors.
         bool in_params{false};
+        int loop_depth{0};
+        int switch_depth{0};
+        std::vector<LabelInfo> labels;
     };
 
     const JsToken& peek(size_t offset = 0) const;
@@ -848,6 +871,31 @@ private:
         }
         ~InParamsScope() {
             if (index < stack.size()) stack[index].in_params = saved;
+        }
+    };
+    struct DepthGuard {
+        std::vector<FunctionContext>& stack;
+        size_t index{0};
+        int FunctionContext::* field;
+        DepthGuard(std::vector<FunctionContext>& s, int FunctionContext::* f)
+            : stack(s), index(s.size() - 1), field(f) {
+            ++(stack[index].*field);
+        }
+        ~DepthGuard() {
+            if (index < stack.size()) --(stack[index].*field);
+        }
+    };
+    struct LabelScope {
+        std::vector<FunctionContext>& stack;
+        size_t index{0};
+        LabelScope(std::vector<FunctionContext>& s, std::string name, bool is_iteration)
+            : stack(s), index(s.size() - 1) {
+            stack[index].labels.push_back({std::move(name), is_iteration});
+        }
+        ~LabelScope() {
+            if (index < stack.size() && !stack[index].labels.empty()) {
+                stack[index].labels.pop_back();
+            }
         }
     };
     std::vector<PendingCoverError> m_pending_cover_errors;

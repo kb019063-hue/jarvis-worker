@@ -41,6 +41,9 @@ public:
         /// non-simple parameter) or a derived constructor's `this` is in its
         /// Temporal Dead Zone before initialisation.
         bool is_initialized{true};
+        /// True for bindings created by a sloppy direct `eval` in a local
+        /// function scope (§19.2.1.1.1), which `delete x` may remove.
+        bool is_deletable{false};
     };
 
     enum class AssignResult { Ok, NotFound, Const, ReadOnly, Uninitialized };
@@ -175,6 +178,22 @@ public:
         return const_cast<JsEnvironment*>(this)->find_own(name) != nullptr;
     }
 
+    bool remove_own(const std::string& name) {
+        for (size_t i = 0; i < m_bindings.size(); ++i) {
+            if (m_bindings[i].name == name) {
+                m_bindings.erase(m_bindings.begin() + static_cast<std::vector<Binding>::difference_type>(i));
+                m_index.clear();
+                if (m_bindings.size() > kIndexThreshold) {
+                    for (size_t k = 0; k < m_bindings.size(); ++k) {
+                        m_index[m_bindings[k].name] = static_cast<uint32_t>(k);
+                    }
+                }
+                return true;
+            }
+        }
+        return false;
+    }
+
     /// Finds `name` in this scope or an enclosing one.
     Binding* lookup(const std::string& name) {
         for (JsEnvironment* env = this; env; env = env->m_parent.get()) {
@@ -223,8 +242,21 @@ public:
     /// Legacy read: undefined when the name is not declared.
     JsValue get(const std::string& name) const {
         if (const Binding* b = const_cast<JsEnvironment*>(this)->lookup(name)) return b->value;
+        if (const Binding* g = const_cast<JsEnvironment*>(this)->find_own("globalThis")) {
+            if (g->value.is_object_like() && g->value.object_val) {
+                auto it = g->value.object_val->properties.find(name);
+                if (it != g->value.object_val->properties.end() && !(it->flags & PropertyMap::Accessor)) {
+                    return it->second;
+                }
+            }
+        }
         return JsValue::make_undefined();
     }
+
+    /// True on a simple `catch (e)` scope (ECMA-262 Annex B.3.5), where
+    /// sloppy `eval("var e")` may still hoist without colliding with `e`.
+    bool is_simple_catch{false};
+    std::string simple_catch_name;
 
     std::shared_ptr<JsEnvironment> parent() const { return m_parent; }
     JsEnvironment* parent_raw() const { return m_parent.get(); }
@@ -376,6 +408,8 @@ public:
         // Grammar permissions captured at the syntactic direct-eval call.
         bool allow_super_property{false};
         bool allow_super_call{false};
+        bool allow_new_target{false};
+        bool forbid_arguments{false};
     };
     static std::vector<EvalFrame>& eval_call_stack();
 
@@ -505,7 +539,8 @@ private:
     JsValue run_program(const Program& program);
     /// The same, in `scope` rather than the global one: what a direct eval
     /// does (see eval_source). `direct_eval` says the text is an eval's.
-    JsValue run_program(const Program& program, const std::shared_ptr<JsEnvironment>& scope, bool direct_eval);
+    JsValue run_program(const Program& program, const std::shared_ptr<JsEnvironment>& scope, bool direct_eval,
+                        bool is_eval = false);
     /// Renames a function the definition that made it has just finished with.
     /// `make_function`'s hint only reaches a function that has no name of its
     /// own, and the parser gives every method and accessor its key, so the

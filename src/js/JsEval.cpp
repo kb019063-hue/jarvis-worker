@@ -446,22 +446,22 @@ JsValue JsInterpreter::run(std::string_view source) {
 }
 
 JsValue JsInterpreter::run_program(const Program& program) {
-    return run_program(program, nullptr, false);
+    return run_program(program, nullptr, false, false);
 }
 
 JsValue JsInterpreter::run_program(const Program& program, const std::shared_ptr<JsEnvironment>& scope,
-                                   bool direct_eval) {
+                                   bool direct_eval, bool is_eval) {
     CallDepthGuard depth_guard(*this);
     JsIntrinsics::set_current(m_realm.get());
+    const bool eval_mode = direct_eval || is_eval;
     EnvPtr target = scope ? scope : m_global_env;
     EnvScope env_scope(target);
 
     // A script's strictness is its own, and for as long as it runs it is the
-    // global scope's too (the global scope is shared by every script). A
-    // direct eval inherits the strictness of the code that called it, unless
-    // its own text opens with "use strict" -- which is known only once it has
-    // been parsed, so the flag here is left alone: the caller's environment
-    // already has the right value, and run_program keeps it.
+    // global scope's too (the global scope is shared by every script). An
+    // indirect eval runs in a fresh declarative child of the global scope with
+    // strictness determined purely by its own text. A direct eval inherits the
+    // strictness of its caller unless its own text opens with "use strict".
     struct StrictScope {
         JsEnvironment& env;
         int8_t saved;
@@ -472,44 +472,141 @@ JsValue JsInterpreter::run_program(const Program& program, const std::shared_ptr
         ~StrictScope() {
             if (active) env.strict_mode = saved;
         }
-    } strict_scope(*target, program.is_strict, !direct_eval);
+    } strict_scope(*target, program.is_strict, !eval_mode);
 
-    // A direct eval's `let`, `const` and `class` are its own: they must not be
-    // visible to the caller's code after it returns, nor to a later eval in
-    // the same function. A layer over the caller's environment gives them that
-    // lifetime, and gives the eval everything the caller has beneath it -- a
-    // name in the layer shadows the caller's, so `eval('x')` still reads the
-    // caller's `x` when the eval declares no `x` of its own. The `var`s go
-    // elsewhere (below): into the caller's environment when the code is
-    // sloppy, which is what leaves them behind afterwards, and into the layer
-    // when it is strict, where they are the eval's alone.
+    // Every eval (direct or indirect) gets its own declarative environment
+    // (`layer`) for `let`, `const`, and `class` (and for `var` / `function`
+    // when strict).
     EnvPtr body = target;
     std::shared_ptr<JsEnvironment> layer;
-    const bool var_scope_own = direct_eval && (program.is_strict || target->is_strict()); // its own text, or its caller's
-    if (direct_eval) {
+    const bool strict_eval = eval_mode && (program.is_strict || (direct_eval && target->is_strict()));
+    if (eval_mode) {
         layer = std::make_shared<JsEnvironment>(target);
-        // The eval's text is as strict as it says, and otherwise as its
-        // caller's -- the caller's environment already answers that: a
-        // function's environment carries its own strictness, and so does a
-        // strict script's global one.
-        layer->strict_mode = program.is_strict ? 1 : -1;
+        layer->strict_mode = direct_eval ? (program.is_strict ? 1 : -1) : (program.is_strict ? 1 : 0);
         body = layer;
     }
     EnvScope layer_scope(layer);
 
-    // Everything declared exists before the first statement runs. A sloppy
-    // direct eval's `var`s skip any lexical loop, catch or block environment
-    // at the call site and land in the caller's variable environment.
-    EnvPtr var_target = var_scope_own ? body : target;
-    if (direct_eval && !var_scope_own) var_target = target->var_scope();
-    for (const auto& name : program.var_names) {
-        if (!var_target->has_own(name)) var_target->define(name, JsValue::make_undefined());
+    EnvPtr var_target = strict_eval ? body : target;
+    if (direct_eval && !strict_eval) var_target = target->var_scope();
+
+    // EvalDeclarationInstantiation (ECMA-262 §19.2.1.1.1): reject `var` /
+    // `function` hoisting that would collide with an intervening lexical
+    // environment, catch parameter (unless simple catch for `var` under Annex
+    // B.3.5), or global lexical / restricted property BEFORE mutating anything.
+    if (eval_mode && !strict_eval) {
+        for (JsEnvironment* s = target.get(); s && s != var_target.get(); s = s->parent_raw()) {
+            for (const auto& name : program.var_names) {
+                if (s->is_simple_catch && s->simple_catch_name == name) continue;
+                if (s->has_own(name)) {
+                    js_throw_error(JsErrorKind::SyntaxError,
+                                   "Identifier '" + name + "' has already been declared");
+                }
+            }
+            for (const auto* decl : program.functions) {
+                if (s->has_own(decl->fn->name)) {
+                    js_throw_error(JsErrorKind::SyntaxError,
+                                   "Identifier '" + decl->fn->name + "' has already been declared");
+                }
+            }
+        }
     }
+
+    const bool global_var_target = (var_target == m_global_env);
+    JsObject* global_cell = global_var_target ? m_global_object.object_val : nullptr;
+
+    auto check_global_lexical_conflict = [&](const std::string& name) {
+        if (auto* b = m_global_env->find_own(name); b && b->is_lexical) {
+            js_throw_error(JsErrorKind::SyntaxError, "Identifier '" + name + "' has already been declared");
+        }
+    };
+
+    if (global_var_target) {
+        for (const auto& name : program.var_names) {
+            check_global_lexical_conflict(name);
+            if (!m_global_env->has_own(name) && global_cell) {
+                auto it = global_cell->properties.find(name);
+                if (it == global_cell->properties.end() && !global_cell->extensible) {
+                    js_throw_type_error("Cannot define property " + name + ", object is not extensible");
+                }
+            }
+        }
+        for (const auto* decl : program.functions) {
+            const std::string& name = decl->fn->name;
+            check_global_lexical_conflict(name);
+            if (auto* b = m_global_env->find_own(name)) {
+                if (b->is_readonly) {
+                    js_throw_type_error("Cannot redefine non-configurable property '" + name + "'");
+                }
+                continue;
+            }
+            if (global_cell) {
+                auto it = global_cell->properties.find(name);
+                if (it != global_cell->properties.end()) {
+                    if (!(it->flags & PropertyMap::Configurable) &&
+                        ((it->flags & PropertyMap::Accessor) ||
+                         !(it->flags & PropertyMap::Writable) ||
+                         !(it->flags & PropertyMap::Enumerable))) {
+                        js_throw_type_error("Cannot redefine property: " + name);
+                    }
+                } else if (!global_cell->extensible) {
+                    js_throw_type_error("Cannot define property " + name + ", object is not extensible");
+                }
+            }
+        }
+    }
+
+    // Hoist functions before `var`s (ECMA-262 §19.2.1.1.1 / §16.1.7) so a `var f`
+    // without an initializer never overwrites a hoisted `function f`.
+    for (const auto* decl : program.functions) {
+        const std::string& name = decl->fn->name;
+        JsValue fn = make_function(decl->fn, body);
+        if (global_var_target) {
+            if (auto* b = m_global_env->find_own(name)) {
+                if (!b->is_readonly && !b->is_lexical) b->value = fn;
+            } else if (global_cell) {
+                auto it = global_cell->properties.find(name);
+                uint8_t flags = eval_mode
+                                    ? static_cast<uint8_t>(PropertyMap::Default)
+                                    : static_cast<uint8_t>(PropertyMap::Writable | PropertyMap::Enumerable);
+                if (it != global_cell->properties.end() && !(it->flags & PropertyMap::Configurable)) {
+                    flags = it->flags;
+                }
+                m_global_object.define_property(name, fn, flags);
+            } else {
+                var_target->define(name, fn);
+            }
+        } else {
+            const bool existed = var_target->has_own(name);
+            var_target->define(name, fn);
+            if (!existed && eval_mode && !strict_eval) {
+                if (auto* b = var_target->find_own(name)) b->is_deletable = true;
+            }
+        }
+    }
+
+    for (const auto& name : program.var_names) {
+        if (global_var_target) {
+            if (m_global_env->has_own(name)) continue;
+            if (global_cell) {
+                if (global_cell->properties.find(name) == global_cell->properties.end()) {
+                    const uint8_t flags =
+                        eval_mode ? static_cast<uint8_t>(PropertyMap::Default)
+                                  : static_cast<uint8_t>(PropertyMap::Writable | PropertyMap::Enumerable);
+                    m_global_object.define_property(name, JsValue::make_undefined(), flags);
+                }
+            } else if (!var_target->has_own(name)) {
+                var_target->define(name, JsValue::make_undefined());
+            }
+        } else if (!var_target->has_own(name)) {
+            var_target->define(name, JsValue::make_undefined());
+            if (eval_mode && !strict_eval) {
+                if (auto* b = var_target->find_own(name)) b->is_deletable = true;
+            }
+        }
+    }
+
     declare_lexicals(program.lexical_decls, body);
-    // A function declaration in sloppy eval text is var-scoped like a `var` is
-    // (ECMA-262 B.3.3.1), so it goes to the caller's variable environment; in
-    // strict text it is lexical to the eval, like a `let`.
-    hoist_functions(program.functions, var_target);
 
     Frame frame;
     frame.track_completion = true;
@@ -523,15 +620,25 @@ JsValue JsInterpreter::eval_source(const std::string& source) {
     // function value, say -- has no call site to answer for it, and is as
     // indirect as `(0, eval)` is.
     const EvalFrame frame = eval_call_stack().empty() ? EvalFrame{} : eval_call_stack().back();
-    if (!frame.direct || !frame.environment) return run(source);
+    if (!frame.direct || !frame.environment) {
+        auto text = std::make_shared<const std::string>(source);
+        JsLexer lexer(*text);
+        auto tokens = lexer.tokenize_all();
+        JsParser parser(std::move(tokens), text);
+        auto program = parser.parse_program();
+        return run_program(*program, nullptr, /*direct_eval=*/false, /*is_eval=*/true);
+    }
 
     auto text = std::make_shared<const std::string>(source);
     JsLexer lexer(*text);
     auto tokens = lexer.tokenize_all();
     JsParserContext parser_context;
     parser_context.direct_eval = true;
+    parser_context.strict = frame.environment->is_strict();
     parser_context.allow_super_property = frame.allow_super_property;
     parser_context.allow_super_call = frame.allow_super_call;
+    parser_context.allow_new_target = frame.allow_new_target;
+    parser_context.forbid_arguments = frame.forbid_arguments;
     JsParser parser(std::move(tokens), text, parser_context);
     // A direct eval written inside a class body can name that class's private
     // fields; the class put them in scope when it was evaluated, so they are
@@ -549,7 +656,7 @@ JsValue JsInterpreter::eval_source(const std::string& source) {
     // The scope has to outlive this call: the bindings its `var`s make belong
     // to the function whose code called it, and are read after it returns.
     JsEnvironment* running = const_cast<JsEnvironment*>(frame.environment);
-    return run_program(*program, running->shared_from_this(), /*direct_eval=*/true);
+    return run_program(*program, running->shared_from_this(), /*direct_eval=*/true, /*is_eval=*/true);
 }
 
 void JsInterpreter::hoist_functions(const std::vector<const FunctionDeclStmt*>& functions, const EnvPtr& env) {
@@ -788,31 +895,60 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
 
     // Everything an async function does wrong, including a throwing parameter
     // default, comes back as a rejected promise rather than a thrown error.
+    EnvPtr exec_env = env;
     auto prepare = [&] {
-        bind_parameters(*node, env, args);
+        EnvPtr param_env = env;
+        if (node->has_parameter_expressions) {
+            param_env = std::make_shared<JsEnvironment>(env);
+            param_env->strict_mode = node->is_strict ? 1 : 0;
+        }
+        {
+            EnvScope param_scope(param_env != env ? param_env : nullptr);
+            bind_parameters(*node, param_env, args);
+        }
+        EnvPtr body_var_env = env;
+        if (node->has_parameter_expressions) {
+            body_var_env = std::make_shared<JsEnvironment>(param_env);
+            body_var_env->mark_var_scope();
+            body_var_env->strict_mode = node->is_strict ? 1 : 0;
+            for (const auto& b : param_env->bindings()) {
+                body_var_env->define(b.name, b.value);
+            }
+        }
         for (const auto& name : node->var_names) {
-            if (!env->has_own(name)) env->define(name, JsValue::make_undefined());
+            if (!body_var_env->has_own(name)) body_var_env->define(name, JsValue::make_undefined());
         }
         if (node->body) {
-            declare_lexicals(node->body->lexical_decls, env);
-            hoist_functions(node->body->functions, env);
+            if (!node->body->lexical_decls.empty()) {
+                auto body_lex_env = std::make_shared<JsEnvironment>(body_var_env);
+                body_lex_env->strict_mode = node->is_strict ? 1 : 0;
+                declare_lexicals(node->body->lexical_decls, body_lex_env);
+                exec_env = body_lex_env;
+            } else {
+                exec_env = body_var_env;
+            }
+            for (const auto* decl : node->body->functions) {
+                body_var_env->define(decl->fn->name, make_function(decl->fn, exec_env));
+            }
+        } else {
+            exec_env = body_var_env;
         }
     };
     if (node->is_async && !node->is_generator) {
         JsValue thrown;
         if (!js_capture_throw(prepare, thrown)) return Promise::make_rejected(thrown);
-        return run_async_body(node, env);
+        return run_async_body(node, exec_env);
     }
     prepare();
 
-    if (node->is_generator) return make_generator(node, env);
+    if (node->is_generator) return make_generator(node, exec_env);
 
     // A base class runs its field initialisers before the constructor body; a
     // derived class runs them when super() returns.
     if (node->is_class_constructor && !node->is_derived_constructor) {
         initialize_fields(callee, this_val);
     }
-    JsValue result = run_function_body(*node, env);
+    JsValue result = run_function_body(*node, exec_env);
     // What a derived constructor made is its `this` as `super(...)` left it,
     // which need not be the object it was entered with: a parent's
     // constructor can return another (eval_super_call), and then that one
@@ -1232,11 +1368,13 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
         // defined by; an accessor with `get `/`set ` in front of it. A private
         // name is spelled as it was written, so `#m` stays `#m` and
         // `get #x` stays `get #x` — it can only be written literally.
-        const JsValue* key_value = member.is_private ? nullptr : &member_key_values[i];
         const bool key_computed = !member.is_private && member.computed_key != nullptr;
 
         switch (member.kind) {
             case ClassMember::Kind::Method: {
+                if (!member.is_private && member.is_static && key == "prototype") {
+                    js_throw_type_error("Classes may not have a static property named 'prototype'");
+                }
                 JsValue fn = make_function(member.fn, class_env);
                 // A private name is spelled as written (`#m`), never with the
                 // prefix the environment uses to keep it apart from a string.
@@ -1255,6 +1393,9 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
             }
             case ClassMember::Kind::Getter:
             case ClassMember::Kind::Setter: {
+                if (!member.is_private && member.is_static && key == "prototype") {
+                    js_throw_type_error("Classes may not have a static property named 'prototype'");
+                }
                 JsValue fn = make_function(member.fn, class_env);
                 name_function(fn, member.is_private
                                       ? std::string(member.kind == ClassMember::Kind::Getter ? "get " : "set ") +
@@ -1308,13 +1449,19 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
                 JsValue value;
                 if (member.value) {
                     auto field_env = std::make_shared<JsEnvironment>(class_env);
+                    field_env->mark_var_scope();
+                    field_env->strict_mode = 1;
                     field_env->define("this", ctor);
                     field_env->define("%home", ctor);
+                    field_env->define("%new.target", JsValue::make_undefined());
                     // A function or arrow written *in* the initialiser is
                     // named by its field, as `x = function () {}` is named
                     // `x`; that is a different question from what the member's
                     // own function is called, above.
                     value = evaluate_named(member.value.get(), field_env, member.key);
+                }
+                if (!member.is_private && key == "prototype") {
+                    js_throw_type_error("Classes may not have a static property named 'prototype'");
                 }
                 if (member.is_private) ctor.define_private(key, value, PropertyMap::Default);
                 else ctor.define_property(key, value, PropertyMap::Default);
@@ -1373,7 +1520,10 @@ void JsInterpreter::initialize_fields(const JsValue& ctor, const JsValue& instan
 
     const auto* cls = static_cast<const ClassNode*>(fd->class_node.get());
     auto field_env = std::make_shared<JsEnvironment>(fd->closure);
+    field_env->mark_var_scope();
+    field_env->strict_mode = 1;
     field_env->define("this", instance);
+    field_env->define("%new.target", JsValue::make_undefined());
     auto home = ctor_cell->properties.find("%home");
     if (home != ctor_cell->properties.end()) field_env->define("%home", home->second);
 
@@ -1779,11 +1929,22 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
                     env->initialize_lexical(pattern.name, value, true);
                     return;
                 case BindMode::Var: {
-                    // The binding was hoisted to the function scope on entry.
+                    // The binding was hoisted to the function scope on entry,
+                    // or lives as a property on the global object.
                     if (auto* binding = env->lookup(pattern.name)) {
                         if (binding->is_readonly) return;      // `var undefined = 1` at the top level
                         binding->value = value;
                         binding->is_const = false;
+                    } else if (JsObject* global = m_global_object.object_val) {
+                        if (global->properties.find(pattern.name) != global->properties.end()) {
+                            JsValue target = m_global_object;
+                            if (!target.set_property(pattern.name, value) && env->is_strict()) {
+                                js_throw_type_error("Cannot assign to read only property '" + pattern.name + "'");
+                            }
+                        } else {
+                            m_global_object.define_property(pattern.name, value,
+                                                            PropertyMap::Writable | PropertyMap::Enumerable);
+                        }
                     } else {
                         m_global_env->define(pattern.name, value);
                     }
@@ -2043,6 +2204,7 @@ LoopAction loop_action(JsInterpreter*, int flow_value, const std::string*& label
 
 JsInterpreter::Flow JsInterpreter::exec_while(const WhileStmt* stmt, const EnvPtr& env, Frame& frame,
                                               const std::vector<const std::string*>& labels) {
+    if (frame.track_completion) frame.completion = JsValue::make_undefined();
     while (evaluate(stmt->condition.get(), env).is_truthy()) {
         Flow flow = exec(stmt->body.get(), env, frame);
         LoopAction action = loop_action(this, static_cast<int>(flow), frame.label, labels);
@@ -2054,6 +2216,7 @@ JsInterpreter::Flow JsInterpreter::exec_while(const WhileStmt* stmt, const EnvPt
 
 JsInterpreter::Flow JsInterpreter::exec_do_while(const DoWhileStmt* stmt, const EnvPtr& env, Frame& frame,
                                                  const std::vector<const std::string*>& labels) {
+    if (frame.track_completion) frame.completion = JsValue::make_undefined();
     do {
         Flow flow = exec(stmt->body.get(), env, frame);
         LoopAction action = loop_action(this, static_cast<int>(flow), frame.label, labels);
@@ -2077,6 +2240,7 @@ JsInterpreter::Flow JsInterpreter::exec_for(const ForStmt* stmt, const EnvPtr& e
         for (const auto& name : names) loop_env->declare_lexical(name, is_const);
     }
     if (stmt->init) exec(stmt->init.get(), loop_env, frame);
+    if (frame.track_completion) frame.completion = JsValue::make_undefined();
 
     // `for (let i ...)` gives every iteration its own `i`, which is what makes
     // closures created in the body see the value from their own iteration.
@@ -2118,6 +2282,7 @@ JsInterpreter::Flow JsInterpreter::exec_for_each(const ForEachStmt* stmt, const 
     } else {
         subject = evaluate(stmt->iterable.get(), env);
     }
+    if (frame.track_completion) frame.completion = JsValue::make_undefined();
 
     // Binds the loop variable for one iteration and returns the scope the body
     // runs in.
@@ -2224,6 +2389,10 @@ JsInterpreter::Flow JsInterpreter::exec_try(const TryStmt* stmt, const EnvPtr& e
                 auto scope = std::make_shared<JsEnvironment>(env);
                 EnvScope env_scope(scope);
                 if (stmt->param) {
+                    if (stmt->param->kind == Pattern::Kind::Identifier) {
+                        scope->is_simple_catch = true;
+                        scope->simple_catch_name = stmt->param->name;
+                    }
                     std::vector<std::string> param_names;
                     stmt->param->collect_names(param_names);
                     for (const auto& name : param_names) scope->declare_lexical(name, false);
@@ -2566,7 +2735,20 @@ JsValue JsInterpreter::eval_unary(const UnaryExpr* expr, const EnvPtr& env) {
                 // stays; and a name that resolves to nothing is deletable,
                 // which is what `delete notDeclared` answers rather than a
                 // ReferenceError.
-                if (env->lookup(name)) return JsValue::make_boolean(false);
+                if (JsEnvironment::Binding* b = env->lookup(name)) {
+                    if (b->is_deletable) {
+                        for (JsEnvironment* e = env.get(); e; e = e->parent_raw()) {
+                            if (JsEnvironment::Binding* own = e->find_own(name)) {
+                                if (own == b) {
+                                    e->remove_own(name);
+                                    return JsValue::make_boolean(true);
+                                }
+                                break;
+                            }
+                        }
+                    }
+                    return JsValue::make_boolean(false);
+                }
                 if (JsObject* global = m_global_object.object_val) {
                     if (global->properties.find(name) != global->properties.end()) {
                         return JsValue::make_boolean(m_global_object.delete_property(name));
@@ -2728,7 +2910,9 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
     if (direct || !stack.empty()) {
         stack.push_back(EvalFrame{env.get(), direct,
                                   direct && expr->direct_eval_allows_super_property,
-                                  direct && expr->direct_eval_allows_super_call});
+                                  direct && expr->direct_eval_allows_super_call,
+                                  direct && expr->direct_eval_allows_new_target,
+                                  direct && expr->direct_eval_forbid_arguments});
         struct Pop {
             std::vector<EvalFrame>& stack;
             ~Pop() { stack.pop_back(); }

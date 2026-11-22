@@ -135,7 +135,7 @@ without one, and leaves the board and a watch out of the claims.
 
    `P` and `F` come from `python3 tools/next_ids.py`, which reads the
    documents, `docs/`, `docs/state.json` and the open pull requests and prints
-   the next free number of each; `--pr-body` prints the three lines above with
+   the next free number of each; `--pr-body` prints the four lines above with
    them filled in. It asks GitHub for `main` as well, so a tree that is hours
    old gets the same answer as a new one. (They used to be read out of
    ARCHITECTURE.md and AUDIT.md — see the notice at the top.) They are taken

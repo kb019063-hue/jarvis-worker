@@ -158,7 +158,9 @@ NOT_A_CLAIM_RE = re.compile(r"^(?:BOARD|WATCH):")
 # agents find each other.
 NEVER_MERGED_RE = re.compile(r"^BOARD:")
 # `Agent: Heron`: the name an agent gave itself, the same in all its pull requests.
-AGENT_RE = re.compile(r"^Agent:\s*([^\s,;.]+)")
+# Not `Agent: <the name you gave yourself>`, which is what `next_ids.py --pr-body`
+# prints for it to be written over.
+AGENT_RE = re.compile(r"^Agent:\s*([^\s,;.<>]+)")
 
 
 def gh(*arguments: str, check: bool = True) -> str:
@@ -959,6 +961,8 @@ def self_test() -> int:
         ("a claim without numbers is called that, not `Phase None`", numbers_of(plain), "no phase, no finding"),
         ("`Agent: Heron` is the agent's name", named["agent"], "Heron"),
         ("a name ends at the first space or stop", named_with_remark["agent"], "Heron"),
+        ("the line `next_ids.py --pr-body` prints is not a name until it is written over",
+         claim("Task: a row\nFiles: `src/a.cpp`\nPhase 5, finding 7\nAgent: <the name you gave yourself>\n")["agent"], None),
         ("no `Agent:` line is no name, and still a claim", (plain["agent"], plain["has_claim_lines"]), (None, True)),
         ("...and what `claim N` says about it is a note, which stops nothing",
          claim_problems(plain, [plain], Main({1}, {1}, {1}, {1}, 1, 1)),

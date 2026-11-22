@@ -11,6 +11,14 @@
 
 namespace litebird {
 
+/// Paint the current document's solid canvas across the target viewport.
+/// Unlike a box, the canvas does not move with the document scroll transform.
+/// Embedded documents render to their own target, so their canvas cannot spill
+/// outside the iframe. An enclosing clip, if any, still applies.
+struct DrawCanvasCommand {
+    Color color;
+};
+
 struct DrawRectCommand {
     Rect rect;
     Color color;
@@ -89,7 +97,7 @@ struct PushClipCommand {
 
 struct PopClipCommand {};
 
-using PaintCommand = std::variant<DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand, DrawImageCommand, PushTransformCommand, PopTransformCommand, PushClipCommand, PopClipCommand>;
+using PaintCommand = std::variant<DrawCanvasCommand, DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand, DrawImageCommand, PushTransformCommand, PopTransformCommand, PushClipCommand, PopClipCommand>;
 
 class DisplayList {
 public:

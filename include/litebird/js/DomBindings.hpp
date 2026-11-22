@@ -819,6 +819,8 @@ void register_url_interfaces();
 void register_file_interfaces();
 bool is_blob(const JsValue& value);
 bool is_file(const JsValue& value);
+/// Copies the raw bytes of a Blob or File into `out`. False when `value` is not a Blob/File.
+bool blob_bytes(const JsValue& value, std::string& out);
 /// A new Blob holding `bytes`.
 JsValue make_blob(Realm& realm, const std::string& bytes, const std::string& type);
 /// A new File holding `bytes`.

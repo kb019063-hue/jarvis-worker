@@ -1,0 +1,12 @@
+stage: open
+READ	true
+HIT	#updateDetails @ 58.168,10 -> button#updateDetails
+Dialog open
+READ	true
+READ	Favorite animal:
+HIT	#cancel @ 27.1016,46 -> button#cancel
+Dialog closed
+READ	true
+READ	animalNotChosen
+READ	cancel
+END

@@ -506,6 +506,13 @@ private:
     /// The same, in `scope` rather than the global one: what a direct eval
     /// does (see eval_source). `direct_eval` says the text is an eval's.
     JsValue run_program(const Program& program, const std::shared_ptr<JsEnvironment>& scope, bool direct_eval);
+    /// Renames a function the definition that made it has just finished with.
+    /// `make_function`'s hint only reaches a function that has no name of its
+    /// own, and the parser gives every method and accessor its key, so the
+    /// cases the parser cannot know -- a symbol key's description, an
+    /// accessor's `get `/`set ` -- are written down here instead.
+    void name_function(JsValue& fn, const std::string& name) const;
+
     JsValue make_function(const std::shared_ptr<FunctionNode>& node, const EnvPtr& env,
                           const std::string& name_hint = std::string());
     /// `new_target` is what `new.target` is inside when that is not the
@@ -521,7 +528,11 @@ private:
                                                       const EnvPtr& env, bool is_coroutine);
     void bind_parameters(const FunctionNode& node, const EnvPtr& env, const std::vector<JsValue>& args);
     void hoist_functions(const std::vector<const FunctionDeclStmt*>& functions, const EnvPtr& env);
-    JsValue define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env);
+    /// `name_hint` is the binding a `ClassExpression` is being evaluated for
+    /// (`var A = class {}`), which names an anonymous class the way NamedEvaluation
+    /// names an anonymous function; empty when nothing names it.
+    JsValue define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env,
+                         const std::string& name_hint = std::string());
     void initialize_fields(const JsValue& ctor, const JsValue& instance);
     /// The slot a private name stands for in the class that declared it, looked
     /// up the way the language scopes it: from the code that mentions it, out
@@ -597,7 +608,13 @@ private:
     void assign_identifier(const std::string& name, const JsValue& value, const EnvPtr& env);
     JsValue get_member(const JsValue& base, const std::string& key);
     void set_member(const JsValue& base, const std::string& key, const JsValue& value);
-    Reference resolve_reference(const Expr* target, const EnvPtr& env);
+    /// Resolves an assignment target to a reference. `throw_on_nullish` is
+    /// false for a plain `=`, whose right-hand side must be evaluated before
+    /// a null or undefined base is reported (§13.15.2); the caller asks
+    /// `check_reference_base` once the value is in hand.
+    Reference resolve_reference(const Expr* target, const EnvPtr& env, bool throw_on_nullish = true);
+    /// Throws the TypeError a write to a member of null or undefined makes.
+    void check_reference_base(const Reference& ref);
     JsValue read_reference(const Reference& ref, const EnvPtr& env);
     void write_reference(const Reference& ref, const JsValue& value, const EnvPtr& env);
     void bind_pattern(const Pattern& pattern, const JsValue& value, const EnvPtr& env, BindMode mode);

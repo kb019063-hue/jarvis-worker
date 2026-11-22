@@ -22,6 +22,7 @@
 namespace litebird {
 
 class JsObject;
+class JsIntrinsics;
 class EventLoop;
 
 // ---------------------------------------------------------------------------
@@ -43,6 +44,11 @@ private:
 enum class JsErrorKind { Error, TypeError, RangeError, SyntaxError, ReferenceError, EvalError, URIError };
 
 JsValue js_make_error(JsErrorKind kind, const std::string& message);
+/// The `stack` text an error reports, built from its own `name` and `message`
+/// when something reads `stack` for the first time.
+std::string js_error_stack_text(const JsValue& error);
+/// Installs the `get`/`set` accessor pair `Error.prototype.stack` is made of.
+void install_error_stack_accessor(JsIntrinsics& realm);
 [[noreturn]] void js_throw(JsValue value);
 [[noreturn]] void js_throw_error(JsErrorKind kind, const std::string& message);
 [[noreturn]] void js_throw_type_error(const std::string& message);
@@ -371,6 +377,9 @@ struct JsIntrinsics {
     JsObject* weakmap_proto{nullptr};
     JsObject* weakset_proto{nullptr};
     JsObject* promise_proto{nullptr};
+    /// `TextDecoder.prototype` and `TextEncoder.prototype` (TextCodec.cpp).
+    JsObject* text_decoder_proto{nullptr};
+    JsObject* text_encoder_proto{nullptr};
     JsObject* error_protos[7]{};          // indexed by JsErrorKind
 
     /// `Array.prototype[Symbol.iterator]` and `String.prototype[Symbol.iterator]`
@@ -428,6 +437,15 @@ private:
 
 /// A native function carrying `name` and `length` like a script function does.
 JsValue js_make_native(const char* name, int length, JsValue::NativeFn fn);
+/// The same, but the function refuses `new` -- a method or an accessor, not a
+/// constructor. A MethodDefinition in the standard is an ordinary function with
+/// no [[Construct]], so every built-in method is made here and not with
+/// js_make_native: `isConstructor(Object.keys)` is false and `new
+/// Object.keys()` is a TypeError.
+JsValue js_make_method(const char* name, int length, JsValue::NativeFn fn);
+/// The same for a function value that is already made (Math's methods are
+/// built by a helper that keeps their `length`): refuse `new` from now on.
+void js_mark_as_method(JsValue& function);
 /// Defines a non-enumerable method, as built-in methods are.
 void js_define_method(JsObject* object, const char* name, int length, JsValue::NativeFn fn);
 void js_define_method(JsValue& object, const char* name, int length, JsValue::NativeFn fn);

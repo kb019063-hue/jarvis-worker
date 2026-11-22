@@ -1,0 +1,82 @@
+[
+  {
+    "id": 1,
+    "result": "pass: Scrolled to #code-lay-out; heading y=12.000000"
+  },
+  {
+    "id": 2,
+    "result": "pass: Scrolled to #one-line-docstrings; heading y=10.000000"
+  },
+  {
+    "id": 3,
+    "result": "pass: Scrolled to #rationale-and-goals; heading y=12.000000"
+  },
+  {
+    "id": 4,
+    "result": "pass: Scrolled to #match-semantics; heading y=0.000000"
+  },
+  {
+    "id": 5,
+    "result": "pass: Scrolled to #motivation; heading y=12.000000"
+  },
+  {
+    "id": 6,
+    "result": "pass: http://snapshot.test/git-commit.html"
+  },
+  {
+    "id": 7,
+    "result": "pass: http://snapshot.test/git-remote.html"
+  },
+  {
+    "id": 8,
+    "result": "pass: http://snapshot.test/git-maintenance.html"
+  },
+  {
+    "id": 9,
+    "result": "pass: http://snapshot.test/git-rev-list.html"
+  },
+  {
+    "id": 10,
+    "result": "pass: http://snapshot.test/git-config.html"
+  },
+  {
+    "id": 11,
+    "result": "pass: input=hello; output=5 bytes"
+  },
+  {
+    "id": 12,
+    "result": "pass: input=x-sample; output=That\u2019s a valid custom element name."
+  },
+  {
+    "id": 13,
+    "result": "pass: input=hello; output=aGVsbG8="
+  },
+  {
+    "id": 14,
+    "result": "pass: input=A; output=01000001 "
+  },
+  {
+    "id": 15,
+    "result": "pass: input=A; output=\\x41"
+  },
+  {
+    "id": 16,
+    "result": "pass: ArrowLeft: ..../.4../..2./.... -> ..2./4.../2.../...."
+  },
+  {
+    "id": 17,
+    "result": "not-tested: shell has no game input adapter"
+  },
+  {
+    "id": 18,
+    "result": "pass: input=bird; output=drib"
+  },
+  {
+    "id": 19,
+    "result": "pass: input=<; output=&#x3C;"
+  },
+  {
+    "id": 20,
+    "result": "not-tested: shell cannot edit contenteditable text"
+  }
+]

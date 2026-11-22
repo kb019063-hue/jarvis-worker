@@ -29,6 +29,7 @@ namespace {
 struct ExtraContents {
     std::shared_ptr<PropertyMap> props;
     JsValue::Extra::Payload payload;
+    std::shared_ptr<std::vector<JsValue>> captured;
 };
 }
 
@@ -37,14 +38,15 @@ struct ExtraContents {
 // chain as long as the loop ran, and letting each payload destroy the next in
 // place would use native stack in proportion to it.
 JsValue::Extra::~Extra() {
-    if (payload.index() == 0 && !props) return;     // owns nothing
+    if (payload.index() == 0 && !props && !captured) return;     // owns nothing
     using Queue = ReleaseQueue<ExtraContents>;
     if (Queue::busy()) {
-        Queue::defer(ExtraContents{std::move(props), std::move(payload)});
+        Queue::defer(ExtraContents{std::move(props), std::move(payload), std::move(captured)});
         return;
     }
     Queue::Drain drain;
     props.reset();
+    captured.reset();
     payload.emplace<std::monostate>();
 }
 
@@ -260,6 +262,10 @@ struct CallContext {
     bool derived_asked{false};              // current_derived_this() has answered for this call
     bool is_construct{false};
     bool fresh{false};      // set by the caller, consumed by a script function on entry
+    // What the callee captures (JsValue::Extra::captured). A native entry point
+    // reads its arguments out of here, because a capture of its own would be
+    // invisible to the collector; see Extra::captured.
+    const std::vector<JsValue>* captured{nullptr};
 };
 
 thread_local CallContext t_call_context;
@@ -276,6 +282,7 @@ struct CallContextScope {
         t_call_context.derived_asked = false;
         t_call_context.is_construct = is_construct;
         t_call_context.fresh = true;
+        t_call_context.captured = callee ? callee->payload_captured() : nullptr;
     }
     ~CallContextScope() { t_call_context = std::move(saved); }
 };
@@ -330,8 +337,14 @@ bool function_implicit_property(const JsValue& fn, JsObject* cell, const std::st
     if (fn.type != JsType::Function) return false;
     const JsValue::FunctionData* fd = fn.function_data();
     if (!fd) return false;
-    if (name == "name") { out = JsValue::make_string(fd->name); return true; }
-    if (name == "length") { out = JsValue::make_number(fd->length); return true; }
+    // `name` and `length` used to be answered here, out of the payload. They
+    // are own properties now, installed by `make_function` with the attributes
+    // §10.2.9/§10.2.5 give them (Phase 146): answering them from here as well
+    // made `has_own_property` say no, `Object.getOwnPropertyNames` omit them,
+    // a write to a non-writable property go through, and a delete remove
+    // nothing. What is still implicit is the one thing that must be — a
+    // constructor's `prototype`, made on first read because most functions are
+    // never constructors.
     if (cell && name == "prototype" && fd->node && fd->is_constructor) {
         // Created on first use: most functions are never constructors.
         JsValue proto = JsValue::make_object();
@@ -345,12 +358,36 @@ bool function_implicit_property(const JsValue& fn, JsObject* cell, const std::st
     return false;
 }
 
+/// True for the one function that stores `caller` and `arguments` as `null`
+/// data properties: a sloppy ordinary function (§10.2.4).
+bool function_stores_poison_pair(const JsValue& fn) {
+    const JsValue::FunctionData* fd = fn.function_data();
+    return fd && !fd->is_arrow && !fd->is_generator && !fd->is_async && !fd->is_class_constructor &&
+           !fd->is_strict && fd->is_constructor;
+}
+
+/// §10.2.4/§10.2.6: reading `caller` or `arguments` of a function that is not
+/// a sloppy ordinary one throws a TypeError. The ordinary set is the one the
+/// standard builds the pair for; arrows, methods, generators, async functions
+/// and class constructors must not have own properties of either name at all,
+/// so the refusal has to happen on the lookup rather than by storing a getter.
+void throw_if_forbidden_property(const JsValue& fn, const std::string& name) {
+    if (name != "caller" && name != "arguments") return;
+    const JsValue::FunctionData* fd = fn.function_data();
+    if (!fd) return;
+    // A sloppy ordinary function stores these, so the lookup never gets here.
+    if (function_stores_poison_pair(fn)) return;
+    if (fd->name == "thrower") return;          // the pill must not recurse
+    js_throw_type_error("'caller', 'callee', and 'arguments' properties may not be accessed on strict "
+                        "mode functions or the arguments objects for calls to them");
+}
+
 /// True when function_implicit_property would answer `name` for `fn`.
 bool function_has_implicit_property(const JsValue& fn, const std::string& name) {
     if (fn.type != JsType::Function) return false;
     const JsValue::FunctionData* fd = fn.function_data();
     if (!fd) return false;
-    return name == "name" || name == "length" || (name == "prototype" && fd->node && fd->is_constructor);
+    return name == "prototype" && fd->node && fd->is_constructor;
 }
 
 /// Looks `name` up on `start` and then along its prototype chain. A chain
@@ -369,6 +406,20 @@ bool lookup_chain(JsObject* start, const std::string& name, const JsValue& recei
         // `Array.prototype[4] = 5` would not reach `[1, 2, 3][4]`. A hole is
         // not one of them, so the walk goes on past it.
         if (obj->is_array) {
+            // `length` is the other thing an array keeps in `array_elements`
+            // rather than in the property map, so a read that falls through
+            // to an array prototype did not find it: `Object.create([7, 8, 9])
+            // .length` was `undefined` where the language has `3` (finding
+            // 138). It is not the object's own property and has no descriptor
+            // to describe (`Object.getOwnPropertyDescriptor(o, 'length')` is
+            // `undefined`), but `HasProperty(o, 'length')` is true through the
+            // chain, so a read has to reach it. The walk stops here whichever
+            // object asked, because `length` on the array is where the
+            // standard's lookup ends.
+            if (name == "length") {
+                out = JsValue::make_number(static_cast<double>(obj->array_elements.size()));
+                return true;
+            }
             size_t index = 0;
             if (parse_array_index(name, index) && index < obj->array_elements.size()
                 && !(obj->array_holes && obj->array_holes->empty_slot(index))) {
@@ -393,6 +444,19 @@ const JsValue& JsValue::current_this() {
 
 bool JsValue::current_is_construct() {
     return t_call_context.is_construct;
+}
+
+namespace {
+// An empty capture list, so a native entry point written to take one always
+// has something to index.
+const std::vector<JsValue>& no_captures() {
+    static const std::vector<JsValue> empty;
+    return empty;
+}
+}
+
+const std::vector<JsValue>& JsValue::current_captured() {
+    return t_call_context.captured ? *t_call_context.captured : no_captures();
 }
 
 // ---------------------------------------------------------------------------
@@ -1031,9 +1095,18 @@ bool JsValue::has_property(const std::string& name) const {
         default: proto = prototype_object(); break;
     }
     int guard = 0;
+    // `caller` and `arguments` are on the prototype for every function that
+    // does not store them itself (§10.2.4), so `'caller' in f` is true even
+    // though `f` has no own property of that name — and reading it throws.
+    if (type == JsType::Function && (name == "caller" || name == "arguments")) return true;
     for (JsObject* obj = proto; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
         if (obj->properties.find(name) != obj->properties.end()) return true;
         if (obj->is_array) {
+            // `length` and the indices are both kept in `array_elements` and
+            // not in the property map, so `HasProperty` has to answer for
+            // both — the same two answers `lookup_chain` gives a read
+            // (finding 138).
+            if (name == "length") return true;
             size_t index = 0;
             if (parse_array_index(name, index) && index < obj->array_elements.size()
                 && !(obj->array_holes && obj->array_holes->empty_slot(index))) return true;
@@ -1402,6 +1475,14 @@ JsValue JsValue::get_property(const std::string& name) const {
         // starts at the parent's cell, which is how static members are
         // inherited, with this function as the receiver of a static getter.
         JsValue found;
+        if (type == JsType::Function) {
+            throw_if_forbidden_property(*this, name);
+            // And a function that is *not* sloppy does not get the pair from
+            // Object.prototype either: HasProperty is true, the value is not.
+            if ((name == "caller" || name == "arguments") && !function_stores_poison_pair(*this)) {
+                return JsValue::make_undefined();
+            }
+        }
         if (type == JsType::Function && function_implicit_property(*this, obj, name, found)) return found;
         if (lookup_chain(obj->prototype, name, *this, found)) return found;
 
@@ -1436,6 +1517,7 @@ JsValue JsValue::get_property(const std::string& name) const {
         // Function.prototype.
         JsValue found;
         if (name == "__proto__") return JsValue::make_object(JsIntrinsics::get().function_proto);
+        throw_if_forbidden_property(*this, name);
         if (function_implicit_property(*this, nullptr, name, found)) return found;
         if (lookup_chain(JsIntrinsics::get().function_proto, name, *this, found)) return found;
     }

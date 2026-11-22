@@ -177,6 +177,10 @@ public:
         bool is_arrow{false};
         bool is_class_constructor{false};
         bool is_constructor{true};     // false for arrows, methods and async/generator functions
+        // Whether the body is strict code. §10.2.4 hangs the own `caller` and
+        // `arguments` of an ordinary function on this: a sloppy one has them as
+        // `null`, a strict one must have neither, and a read of either throws.
+        bool is_strict{false};
     };
     struct Extra {
         Extra() = default;
@@ -217,6 +221,14 @@ public:
                                      std::shared_ptr<struct PromiseData>,
                                      std::shared_ptr<struct GeneratorData>>;
         Payload payload;
+        /// JsValues the entry point `native_fn` refers to, kept out of the
+        /// callable itself. A std::function's captures are invisible to the
+        /// collector: a value that lived only inside one made every copy of the
+        /// function look like the payload's one owner, so the payload became a
+        /// root and the value -- a bound function's target, say -- was never
+        /// collected. Here they are a member like any other, and the payload's
+        /// trace finds them.
+        std::shared_ptr<std::vector<JsValue>> captured;
     };
 
     JsValue() : type(JsType::Undefined) {}
@@ -427,6 +439,9 @@ public:
     static const JsValue& current_this();
     /// True when the native function currently executing was invoked with `new`.
     static bool current_is_construct();
+    /// What the function being called captures (see Extra::captured). Empty
+    /// when it captures nothing. Valid only for the duration of the call.
+    static const std::vector<JsValue>& current_captured();
     /// For a native constructor reached through `super()`: the subclass's
     /// object, which should become the thing constructed. Null otherwise.
     /// Under construct_for() the object is made by this call, the first time,
@@ -517,6 +532,22 @@ public:
     long payload_owners() const { return m_extra.use_count(); }
     /// The cell a function's payload holds a handle to, if it has one.
     JsObject* payload_cell() const { return m_extra ? m_extra->cell.get() : nullptr; }
+    /// The JsValues this value's entry point captures, or null when it
+    /// captures none.
+    const std::vector<JsValue>* payload_captured() const {
+        return (m_extra && m_extra->captured) ? m_extra->captured.get() : nullptr;
+    }
+    /// The function a bound function was made from, if this is one: a payload
+    /// member like `captured`, and counted the same way.
+    const JsValue* payload_bound_target() const {
+        return (m_extra && m_extra->bound_target) ? m_extra->bound_target.get() : nullptr;
+    }
+    /// Keeps `values` as the payload's captures. Call only while building the
+    /// function value, before it is copied, like the rest of the payload.
+    void set_payload_captured(std::vector<JsValue> values) {
+        mutable_extra().captured = std::make_shared<std::vector<JsValue>>(std::move(values));
+    }
+
     /// The payload's own property table when this payload is its only owner.
     const PropertyMap* payload_properties() const {
         return (m_extra && m_extra->props && m_extra->props.use_count() == 1) ? m_extra->props.get() : nullptr;

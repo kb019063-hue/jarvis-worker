@@ -5,6 +5,8 @@
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/JsOps.hpp"
 #include "litebird/js/Storage.hpp"
+#include "litebird/js/TypedArray.hpp"
+#include "litebird/net/Deflate.hpp"
 #include "litebird/net/UrlParser.hpp"
 
 #include <arpa/inet.h>
@@ -104,6 +106,9 @@ struct WsOpenSslApi {
     int (*SSL_shutdown_fn)(SSL*) = nullptr;
     int (*SSL_get_error_fn)(const SSL*, int) = nullptr;
     long (*SSL_get_verify_result_fn)(const SSL*) = nullptr;
+    // Optional, as in the loader: without it the message keeps the code but
+    // loses the words. It never takes the socket's TLS layer with it.
+    const char* (*X509_verify_cert_error_string_fn)(long) = nullptr;
     int (*RAND_bytes_fn)(unsigned char*, int) = nullptr;
 
     static const WsOpenSslApi& instance() {
@@ -166,6 +171,7 @@ struct WsOpenSslApi {
 
             (void)load_ssl(out->SSL_CTX_ctrl_fn, "SSL_CTX_ctrl");
             (void)load_ssl(out->SSL_pending_fn, "SSL_pending");
+            (void)load_ssl(out->X509_verify_cert_error_string_fn, "X509_verify_cert_error_string");
             (void)load_ssl(out->RAND_bytes_fn, "RAND_bytes");
             out->available = ok;
             return out;
@@ -332,6 +338,152 @@ bool header_has_token(std::string_view header_val, std::string_view token_lower)
         pos = comma + 1;
     }
     return false;
+}
+
+struct PermessageDeflateConfig {
+    bool enabled{false};
+    bool server_no_context_takeover{false};
+    bool client_no_context_takeover{false};
+    int server_max_window_bits{15};
+    int client_max_window_bits{15};
+};
+
+// RFC 7692 §7.1.2: integer in [8, 15] in decimal with no leading zeroes.
+bool parse_window_bits_value(std::string_view sv, int& out_bits) {
+    if (sv.size() == 1) {
+        if (sv[0] == '8' || sv[0] == '9') {
+            out_bits = sv[0] - '0';
+            return true;
+        }
+        return false;
+    }
+    if (sv.size() == 2 && sv[0] == '1' && sv[1] >= '0' && sv[1] <= '5') {
+        out_bits = 10 + (sv[1] - '0');
+        return true;
+    }
+    return false;
+}
+
+// Strict RFC 6455 §9.1 + RFC 7692 §7.1 parser for Sec-WebSocket-Extensions
+// response header(s) when the client offered `permessage-deflate; client_max_window_bits`.
+bool parse_permessage_deflate_response(const std::vector<std::string>& ext_headers,
+                                       PermessageDeflateConfig& cfg,
+                                       std::string& canonical_extensions) {
+    cfg = PermessageDeflateConfig{};
+    canonical_extensions.clear();
+    if (ext_headers.empty()) {
+        return true;
+    }
+
+    std::string joined;
+    for (size_t i = 0; i < ext_headers.size(); ++i) {
+        std::string part = trim_ows(ext_headers[i]);
+        if (part.empty()) return false;
+        if (i > 0) joined += ", ";
+        joined += part;
+    }
+
+    size_t pos = 0;
+    const size_t n = joined.size();
+    auto skip_ows = [&]() {
+        while (pos < n && (joined[pos] == ' ' || joined[pos] == '\t')) ++pos;
+    };
+    auto read_token = [&](std::string& tok) -> bool {
+        const size_t start = pos;
+        while (pos < n && is_http_token_char(static_cast<unsigned char>(joined[pos]))) ++pos;
+        if (pos == start) return false;
+        tok.assign(joined.data() + start, pos - start);
+        return true;
+    };
+    auto read_quoted_string = [&](std::string& val) -> bool {
+        if (pos >= n || joined[pos] != '"') return false;
+        ++pos;
+        val.clear();
+        while (pos < n) {
+            const unsigned char c = static_cast<unsigned char>(joined[pos++]);
+            if (c == '"') {
+                return true;
+            }
+            if (c == '\\') {
+                if (pos >= n) return false;
+                const unsigned char esc = static_cast<unsigned char>(joined[pos++]);
+                if (esc < 0x20u && esc != '\t') return false;
+                if (esc == 0x7Fu) return false;
+                val.push_back(static_cast<char>(esc));
+                continue;
+            }
+            if ((c < 0x20u && c != '\t') || c == 0x7Fu) return false;
+            val.push_back(static_cast<char>(c));
+        }
+        return false; // unclosed quote
+    };
+
+    skip_ows();
+    std::string ext_name;
+    if (!read_token(ext_name)) return false;
+    if (ext_name != "permessage-deflate") return false;
+
+    bool seen_server_nct = false;
+    bool seen_client_nct = false;
+    bool seen_server_mwb = false;
+    bool seen_client_mwb = false;
+
+    skip_ows();
+    while (pos < n && joined[pos] == ';') {
+        ++pos;
+        skip_ows();
+        std::string param_name;
+        if (!read_token(param_name)) return false;
+        skip_ows();
+
+        bool has_value = false;
+        std::string param_val;
+        if (pos < n && joined[pos] == '=') {
+            has_value = true;
+            ++pos;
+            skip_ows();
+            if (pos >= n) return false;
+            if (joined[pos] == '"') {
+                if (!read_quoted_string(param_val)) return false;
+            } else {
+                if (!read_token(param_val)) return false;
+            }
+            skip_ows();
+        }
+
+        if (param_name == "server_no_context_takeover") {
+            if (seen_server_nct || has_value) return false;
+            seen_server_nct = true;
+            cfg.server_no_context_takeover = true;
+        } else if (param_name == "client_no_context_takeover") {
+            if (seen_client_nct || has_value) return false;
+            seen_client_nct = true;
+            cfg.client_no_context_takeover = true;
+        } else if (param_name == "server_max_window_bits") {
+            int bits = 15;
+            if (seen_server_mwb || !has_value || !parse_window_bits_value(param_val, bits)) {
+                return false;
+            }
+            seen_server_mwb = true;
+            cfg.server_max_window_bits = bits;
+        } else if (param_name == "client_max_window_bits") {
+            int bits = 15;
+            if (seen_client_mwb || !has_value || !parse_window_bits_value(param_val, bits)) {
+                return false;
+            }
+            seen_client_mwb = true;
+            cfg.client_max_window_bits = bits;
+        } else {
+            return false;
+        }
+    }
+
+    skip_ows();
+    if (pos != n) return false; // trailing characters or second unoffered extension
+
+    cfg.enabled = true;
+    canonical_extensions = std::move(joined);
+    return true;
 }
 
 bool is_ip_literal(const std::string& host_unbracketed) {
@@ -519,6 +671,7 @@ struct WebSocketObject::JsOwnerState {
     };
 
     JsValue inst{JsValue::make_undefined()};
+    uint64_t realm_id{0};
     mutable std::mutex listeners_mutex;
     std::vector<ListenerEntry> listeners;
     std::shared_ptr<WebSocketEventSink> sink;
@@ -1040,6 +1193,16 @@ std::string WebSocketObject::js_protocol() const {
     return m_js_selected_protocol;
 }
 
+std::string WebSocketObject::extensions() const {
+    std::lock_guard<std::mutex> lock(m_state_mutex);
+    return m_selected_extensions;
+}
+
+std::string WebSocketObject::js_extensions() const {
+    std::lock_guard<std::mutex> lock(m_state_mutex);
+    return m_js_selected_extensions;
+}
+
 std::string WebSocketObject::binary_type() const {
     std::lock_guard<std::mutex> lock(m_state_mutex);
     return m_binary_type;
@@ -1111,8 +1274,9 @@ void invoke_ws_handler(const JsValue& fn, const JsValue& target, const JsValue& 
 
 } // namespace
 
-void WebSocketObject::dispatch_open_on_owner(const std::string& selected_protocol) {
-    post_to_owner([self = shared_from_this(), selected_protocol]() {
+void WebSocketObject::dispatch_open_on_owner(const std::string& selected_protocol,
+                                             const std::string& selected_extensions) {
+    post_to_owner([self = shared_from_this(), selected_protocol, selected_extensions]() {
         if (self->m_event_sink && self->m_event_sink->owner_alive &&
             !self->m_event_sink->owner_alive->load(std::memory_order_acquire)) {
             self->release_owner_js_on_owner();
@@ -1125,6 +1289,7 @@ void WebSocketObject::dispatch_open_on_owner(const std::string& selected_protoco
         {
             std::lock_guard<std::mutex> lock(self->m_state_mutex);
             self->m_js_selected_protocol = selected_protocol;
+            self->m_js_selected_extensions = selected_extensions;
         }
         if (!self->m_owner_js || self->m_owner_js->inst.is_undefined()) return;
         JsValue target = self->m_owner_js->inst;
@@ -1144,8 +1309,7 @@ void WebSocketObject::dispatch_open_on_owner(const std::string& selected_protoco
 }
 
 void WebSocketObject::dispatch_message_on_owner(const std::string& payload, bool is_binary) {
-    (void)is_binary;
-    post_to_owner([self = shared_from_this(), payload]() {
+    post_to_owner([self = shared_from_this(), payload, is_binary]() {
         if (self->m_event_sink && self->m_event_sink->owner_alive &&
             !self->m_event_sink->owner_alive->load(std::memory_order_acquire)) {
             self->release_owner_js_on_owner();
@@ -1153,10 +1317,33 @@ void WebSocketObject::dispatch_message_on_owner(const std::string& payload, bool
             return;
         }
         if (!self->m_owner_js || self->m_owner_js->inst.is_undefined()) return;
+
+        dom::Realm* realm = self->m_owner_js->realm_id ? dom::find_realm(self->m_owner_js->realm_id) : nullptr;
+        JsIntrinsics* previous_intrinsics = &JsIntrinsics::get();
+        const bool switched_realm = realm && realm->intrinsics && realm->intrinsics != previous_intrinsics;
+        if (switched_realm) JsIntrinsics::set_current(realm->intrinsics);
+        struct RestoreIntrinsics {
+            JsIntrinsics* previous;
+            bool active;
+            ~RestoreIntrinsics() {
+                if (active) JsIntrinsics::set_current(previous);
+            }
+        } restore_guard{previous_intrinsics, switched_realm};
+
+        JsValue data_val;
+        if (!is_binary) {
+            data_val = JsValue::make_string(payload);
+        } else if (self->binary_type() == "arraybuffer") {
+            data_val = array_buffer_from_bytes(payload);
+        } else {
+            dom::Realm& target_realm = realm ? *realm : dom::current_realm();
+            data_val = dom::make_blob(target_realm, payload, "");
+        }
+
         JsValue target = self->m_owner_js->inst;
         JsValue ev = JsValue::make_object(Heap::default_heap().allocate_object());
         ev.set_property("type", JsValue::make_string("message"));
-        ev.set_property("data", JsValue::make_string(payload));
+        ev.set_property("data", data_val);
         ev.set_property("origin", JsValue::make_string(self->m_event_origin));
         ev.set_property("lastEventId", JsValue::make_string(""));
         ev.set_property("source", JsValue::make_null());
@@ -1227,30 +1414,13 @@ void WebSocketObject::enqueue_frame(uint8_t opcode,
                                     size_t len,
                                     bool is_data,
                                     bool is_close) {
-    std::vector<uint8_t> frame;
-    frame.reserve(len + 14);
-    frame.push_back(static_cast<uint8_t>(0x80u | (opcode & 0x0Fu)));
-
-    if (len <= 125) {
-        frame.push_back(static_cast<uint8_t>(0x80u | len));
-    } else if (len <= 65535) {
-        frame.push_back(static_cast<uint8_t>(0x80u | 126u));
-        frame.push_back(static_cast<uint8_t>((len >> 8) & 0xFFu));
-        frame.push_back(static_cast<uint8_t>(len & 0xFFu));
-    } else {
-        frame.push_back(static_cast<uint8_t>(0x80u | 127u));
-        uint64_t ulen = static_cast<uint64_t>(len);
-        for (int i = 7; i >= 0; --i) {
-            frame.push_back(static_cast<uint8_t>((ulen >> (i * 8)) & 0xFFu));
-        }
+    OutboundMessage msg;
+    msg.opcode = opcode;
+    if (len > 0 && data) {
+        msg.payload.assign(data, data + len);
     }
-
-    uint8_t mask[4]{};
-    random_bytes(mask, 4);
-    frame.insert(frame.end(), mask, mask + 4);
-    for (size_t i = 0; i < len; ++i) {
-        frame.push_back(static_cast<uint8_t>(data[i] ^ mask[i % 4]));
-    }
+    msg.is_data = is_data;
+    msg.is_close = is_close;
 
     if (is_data) {
         m_buffered_amount.fetch_add(len, std::memory_order_acq_rel);
@@ -1258,7 +1428,7 @@ void WebSocketObject::enqueue_frame(uint8_t opcode,
 
     {
         std::lock_guard<std::mutex> lock(m_outbox_mutex);
-        m_outbox.push_back(OutboundFrame{std::move(frame), len, is_data, is_close});
+        m_outbox.push_back(std::move(msg));
     }
     wake_io_thread();
 }
@@ -1316,10 +1486,14 @@ void WebSocketObject::send(const std::string& message) {
     enqueue_frame(0x01u, reinterpret_cast<const uint8_t*>(message.data()), message.size(), true);
 }
 
-void WebSocketObject::send_binary(const std::vector<uint8_t>& data) {
+void WebSocketObject::send_binary(const uint8_t* data, size_t len) {
     if (m_ready_state.load(std::memory_order_acquire) != WebSocketReadyState::Open) return;
-    if (data.size() > kMaxMessageBytes) return;
-    enqueue_frame(0x02u, data.data(), data.size(), true);
+    if (len > kMaxMessageBytes) return;
+    enqueue_frame(0x02u, data, len, true);
+}
+
+void WebSocketObject::send_binary(const std::vector<uint8_t>& data) {
+    send_binary(data.data(), data.size());
 }
 
 void WebSocketObject::close(int code, const std::string& reason) {
@@ -1503,8 +1677,26 @@ void WebSocketObject::receiver_thread_loop() {
             break;
         }
         if (!tls_ok) {
+            // Ask why, whichever way the handshake failed. A refused
+            // certificate usually fails SSL_connect itself rather than
+            // returning 1 with a non-zero verify result, so the reason is read
+            // after the loop rather than only on the rc==1 path -- and before
+            // cleanup_transport(), which may free the SSL object it needs.
+            // This is the same message the loader prints, from the same codes.
+            const long verify_code = ssl_api.SSL_get_verify_result_fn(ssl);
             cleanup_transport();
-            finish_abnormal("TLS handshake or certificate verification failed");
+            if (verify_code != 0) {
+                std::string message = "TLS certificate verification failed (code " +
+                                      std::to_string(verify_code);
+                if (ssl_api.X509_verify_cert_error_string_fn) {
+                    message += ", ";
+                    message += ssl_api.X509_verify_cert_error_string_fn(verify_code);
+                }
+                message += ")";
+                finish_abnormal(message.c_str());
+            } else {
+                finish_abnormal("TLS handshake failed for a reason other than a certificate");
+            }
             return;
         }
     }
@@ -1522,7 +1714,8 @@ void WebSocketObject::receiver_thread_loop() {
         "Connection: Upgrade\r\n"
         "Origin: " + m_origin_header + "\r\n"
         "Sec-WebSocket-Key: " + sec_key + "\r\n"
-        "Sec-WebSocket-Version: 13\r\n";
+        "Sec-WebSocket-Version: 13\r\n"
+        "Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n";
     if (!m_cookie_url.empty()) {
         const std::string cookie_val =
             CookieJar::default_jar().get_cookie_header(m_cookie_url, m_cookie_site, false, "GET");
@@ -1644,7 +1837,7 @@ void WebSocketObject::receiver_thread_loop() {
     std::string accept_val;
     int protocol_count = 0;
     std::string selected_protocol;
-    int ext_count = 0;
+    std::vector<std::string> ext_headers;
     std::vector<std::string> set_cookies;
 
     if (line_end != std::string::npos) {
@@ -1673,7 +1866,7 @@ void WebSocketObject::receiver_thread_loop() {
                 ++protocol_count;
                 selected_protocol = std::move(val);
             } else if (name == "sec-websocket-extensions") {
-                ++ext_count;
+                ext_headers.push_back(std::move(val));
             } else if (name == "set-cookie") {
                 set_cookies.push_back(std::move(val));
             }
@@ -1691,9 +1884,16 @@ void WebSocketObject::receiver_thread_loop() {
         }
     }
 
-    if (!saw_upgrade || !saw_connection || accept_count != 1 || accept_val != expected_accept || ext_count > 0) {
+    PermessageDeflateConfig pmd_cfg;
+    std::string selected_extensions;
+    if (!saw_upgrade || !saw_connection || accept_count != 1 || accept_val != expected_accept) {
         cleanup_transport();
         finish_abnormal("WebSocket handshake validation failed");
+        return;
+    }
+    if (!parse_permessage_deflate_response(ext_headers, pmd_cfg, selected_extensions)) {
+        cleanup_transport();
+        finish_abnormal("Server returned invalid or unoffered Sec-WebSocket-Extensions");
         return;
     }
 
@@ -1732,9 +1932,10 @@ void WebSocketObject::receiver_thread_loop() {
     {
         std::lock_guard<std::mutex> lock(m_state_mutex);
         m_selected_protocol = selected_protocol;
+        m_selected_extensions = selected_extensions;
     }
     m_ready_state.store(WebSocketReadyState::Open, std::memory_order_release);
-    dispatch_open_on_owner(selected_protocol);
+    dispatch_open_on_owner(selected_protocol, selected_extensions);
 
     // 4. Single-I/O-thread multiplexed frame & socket loop
     bool client_close_queued = false;
@@ -1750,13 +1951,45 @@ void WebSocketObject::receiver_thread_loop() {
     std::chrono::steady_clock::time_point close_deadline;
 
     bool frag_active = false;
+    bool frag_compressed = false;
     uint8_t frag_opcode = 0;
     std::vector<uint8_t> frag_buf;
+
+    Deflate::DeflateStream deflate_stream(pmd_cfg.client_max_window_bits);
+    Deflate::InflateStream inflate_stream(pmd_cfg.server_max_window_bits);
 
     size_t write_offset = 0;
     std::vector<OutboundFrame> pending_write;
     bool ssl_want_write = false;
     bool peer_eof = false;
+
+    auto build_wire_frame = [](uint8_t opcode, bool rsv1, const uint8_t* data, size_t len) -> std::vector<uint8_t> {
+        std::vector<uint8_t> frame;
+        frame.reserve(len + 14);
+        frame.push_back(static_cast<uint8_t>(0x80u | (rsv1 ? 0x40u : 0x00u) | (opcode & 0x0Fu)));
+
+        if (len <= 125) {
+            frame.push_back(static_cast<uint8_t>(0x80u | len));
+        } else if (len <= 65535) {
+            frame.push_back(static_cast<uint8_t>(0x80u | 126u));
+            frame.push_back(static_cast<uint8_t>((len >> 8) & 0xFFu));
+            frame.push_back(static_cast<uint8_t>(len & 0xFFu));
+        } else {
+            frame.push_back(static_cast<uint8_t>(0x80u | 127u));
+            uint64_t ulen = static_cast<uint64_t>(len);
+            for (int i = 7; i >= 0; --i) {
+                frame.push_back(static_cast<uint8_t>((ulen >> (i * 8)) & 0xFFu));
+            }
+        }
+
+        uint8_t mask[4]{};
+        random_bytes(mask, 4);
+        frame.insert(frame.end(), mask, mask + 4);
+        for (size_t i = 0; i < len; ++i) {
+            frame.push_back(static_cast<uint8_t>(data[i] ^ mask[i % 4]));
+        }
+        return frame;
+    };
 
     auto queue_client_close = [&](int code, const std::string& reason) {
         if (client_close_queued) return;
@@ -1783,6 +2016,40 @@ void WebSocketObject::receiver_thread_loop() {
         }
     };
 
+    auto deliver_data_message = [&](uint8_t msg_opcode, bool is_compressed,
+                                    const uint8_t* ptr, size_t len) -> bool {
+        if (is_compressed) {
+            std::vector<uint8_t> inflated;
+            const Deflate::InflateStatus status =
+                inflate_stream.inflate_message(ptr, len, inflated, kMaxMessageBytes);
+            if (status == Deflate::InflateStatus::OutputLimitExceeded) {
+                trigger_protocol_fail(1009, "Compressed WebSocket message exceeded size limit");
+                return false;
+            }
+            if (status != Deflate::InflateStatus::Ok) {
+                trigger_protocol_fail(1002, "Failed to decompress permessage-deflate WebSocket message");
+                return false;
+            }
+            if (pmd_cfg.server_no_context_takeover) {
+                inflate_stream.reset();
+            }
+            std::string_view sv(reinterpret_cast<const char*>(inflated.data()), inflated.size());
+            if (msg_opcode == 0x01u && !is_valid_utf8(sv)) {
+                trigger_protocol_fail(1007, "Text frame contains invalid UTF-8");
+                return false;
+            }
+            dispatch_message_on_owner(std::string(sv), msg_opcode == 0x02u);
+            return true;
+        }
+        std::string_view sv(reinterpret_cast<const char*>(ptr), len);
+        if (msg_opcode == 0x01u && !is_valid_utf8(sv)) {
+            trigger_protocol_fail(1007, "Text frame contains invalid UTF-8");
+            return false;
+        }
+        dispatch_message_on_owner(std::string(sv), msg_opcode == 0x02u);
+        return true;
+    };
+
     while (!m_stop_requested.load(std::memory_order_acquire)) {
         if (m_wake_fds[0] >= 0) {
             char drain[64];
@@ -1800,12 +2067,36 @@ void WebSocketObject::receiver_thread_loop() {
             queue_client_close(ccode, creason);
         }
 
-        // Drain outbound queue into local pending_write list
+        // Drain outbound messages into masked wire frames in strict FIFO order.
         {
-            std::lock_guard<std::mutex> lock(m_outbox_mutex);
-            if (!m_outbox.empty()) {
-                for (auto& f : m_outbox) pending_write.push_back(std::move(f));
-                m_outbox.clear();
+            std::vector<OutboundMessage> drained;
+            {
+                std::lock_guard<std::mutex> lock(m_outbox_mutex);
+                if (!m_outbox.empty()) {
+                    drained.swap(m_outbox);
+                }
+            }
+            for (const auto& msg : drained) {
+                if (msg.is_data && pmd_cfg.enabled) {
+                    std::vector<uint8_t> compressed;
+                    deflate_stream.compress_message(msg.payload.data(), msg.payload.size(), compressed);
+                    if (pmd_cfg.client_no_context_takeover) {
+                        deflate_stream.reset();
+                    }
+                    pending_write.push_back(OutboundFrame{
+                        build_wire_frame(msg.opcode, true, compressed.data(), compressed.size()),
+                        msg.payload.size(),
+                        true,
+                        false
+                    });
+                } else {
+                    pending_write.push_back(OutboundFrame{
+                        build_wire_frame(msg.opcode, false, msg.payload.data(), msg.payload.size()),
+                        msg.payload.size(),
+                        msg.is_data,
+                        msg.is_close
+                    });
+                }
             }
         }
 
@@ -1924,14 +2215,20 @@ void WebSocketObject::receiver_thread_loop() {
             const uint8_t b1 = frame_buf[consumed + 1];
 
             const bool fin = (b0 & 0x80u) != 0;
-            const uint8_t rsv = b0 & 0x70u;
+            const bool rsv1 = (b0 & 0x40u) != 0;
+            const uint8_t rsv23 = b0 & 0x30u;
             const uint8_t opcode = b0 & 0x0Fu;
             const bool masked = (b1 & 0x80u) != 0;
             uint64_t payload_len = b1 & 0x7Fu;
             size_t header_len = 2;
 
-            if (rsv != 0) {
+            if (rsv23 != 0 || (rsv1 && !pmd_cfg.enabled)) {
                 trigger_protocol_fail(1002, "Unexpected reserved WebSocket frame bits");
+                break;
+            }
+            if (rsv1 && (opcode >= 0x08u || opcode == 0x00u)) {
+                // RFC 7692 §6: RSV1 MUST NOT be set on control or continuation frames.
+                trigger_protocol_fail(1002, "Invalid RSV1 bit on WebSocket control or continuation frame");
                 break;
             }
             if (masked) {
@@ -2015,14 +2312,12 @@ void WebSocketObject::receiver_thread_loop() {
                     break;
                 }
                 if (fin) {
-                    std::string_view sv(reinterpret_cast<const char*>(payload_ptr), plen);
-                    if (opcode == 0x01u && !is_valid_utf8(sv)) {
-                        trigger_protocol_fail(1007, "Text frame contains invalid UTF-8");
+                    if (!deliver_data_message(opcode, rsv1, payload_ptr, plen)) {
                         break;
                     }
-                    dispatch_message_on_owner(std::string(sv), opcode == 0x02u);
                 } else {
                     frag_active = true;
+                    frag_compressed = rsv1;
                     frag_opcode = opcode;
                     frag_buf.assign(payload_ptr, payload_ptr + plen);
                 }
@@ -2037,13 +2332,11 @@ void WebSocketObject::receiver_thread_loop() {
                 }
                 frag_buf.insert(frag_buf.end(), payload_ptr, payload_ptr + plen);
                 if (fin) {
-                    std::string_view sv(reinterpret_cast<const char*>(frag_buf.data()), frag_buf.size());
-                    if (frag_opcode == 0x01u && !is_valid_utf8(sv)) {
-                        trigger_protocol_fail(1007, "Fragmented text message contains invalid UTF-8");
+                    if (!deliver_data_message(frag_opcode, frag_compressed, frag_buf.data(), frag_buf.size())) {
                         break;
                     }
-                    dispatch_message_on_owner(std::string(sv), frag_opcode == 0x02u);
                     frag_active = false;
+                    frag_compressed = false;
                     frag_buf.clear();
                 }
             }
@@ -2144,7 +2437,7 @@ JsValue attach_ws_js_instance(const std::shared_ptr<WebSocketObject>& ws) {
         JsValue::make_undefined(), ro_flags);
     inst.define_accessor("extensions",
         JsValue::make_native_function([ws](const std::vector<JsValue>&) {
-            return JsValue::make_string(ws->extensions());
+            return JsValue::make_string(ws->js_extensions());
         }),
         JsValue::make_undefined(), ro_flags);
     inst.define_accessor("bufferedAmount",
@@ -2181,8 +2474,28 @@ JsValue attach_ws_js_instance(const std::shared_ptr<WebSocketObject>& ws) {
             dom::throw_dom(dom::current_realm(), "InvalidStateError",
                            "Failed to execute 'send' on 'WebSocket': Still in CONNECTING state.");
         }
+        const JsValue& arg = sargs[0];
+        if (is_buffer_source(arg)) {
+            std::string raw;
+            if (!typed_array_bytes(arg, raw)) {
+                js_throw_type_error(
+                    "Failed to execute 'send' on 'WebSocket': Cannot send a detached or out-of-bounds buffer.");
+            }
+            if (ws->ready_state() == WebSocketReadyState::Open) {
+                ws->send_binary(reinterpret_cast<const uint8_t*>(raw.data()), raw.size());
+            }
+            return JsValue::make_undefined();
+        }
+        std::string blob_raw;
+        if (dom::blob_bytes(arg, blob_raw)) {
+            if (ws->ready_state() == WebSocketReadyState::Open) {
+                ws->send_binary(reinterpret_cast<const uint8_t*>(blob_raw.data()), blob_raw.size());
+            }
+            return JsValue::make_undefined();
+        }
+        std::string text = arg.to_string();
         if (ws->ready_state() == WebSocketReadyState::Open) {
-            ws->send(sargs[0].to_string());
+            ws->send(text);
         }
         return JsValue::make_undefined();
     }));
@@ -2249,6 +2562,7 @@ JsValue WebSocketObject::create_js_instance(std::string_view url,
     }
     JsValue inst = attach_ws_js_instance(ws);
     ws->m_owner_js->inst = inst;
+    ws->m_owner_js->realm_id = dom::current_realm().id;
     ws->connect();
     return inst;
 }
@@ -2281,6 +2595,7 @@ JsValue WebSocketObject::create_constructor(std::function<WebSocketContext()> co
             }
             JsValue inst = attach_ws_js_instance(ws);
             ws->m_owner_js->inst = inst;
+            ws->m_owner_js->realm_id = dom::current_realm().id;
             ws->connect();
             return inst;
         });

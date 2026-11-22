@@ -10,6 +10,7 @@
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/SvgRenderer.hpp"
 #include <cctype>
+#include <unordered_map>
 
 namespace litebird {
 
@@ -58,6 +59,173 @@ bool is_block_level_box(const LayoutBox& box) {
            box.box_type == BoxType::TableCellNode;
 }
 
+// Auto margins must be zero while calculating an auto width. Longhand
+// `margin-left:auto` can otherwise retain the user-agent body's old 8px in
+// the style's pixel field, so resolve just this root box's auto edges before
+// layout. The final horizontal auto margins depend on the used width below.
+void prepare_document_body(LayoutBox& box) {
+    const auto& s = *box.style;
+    if (!s.margin_top_auto && !s.margin_right_auto && !s.margin_bottom_auto && !s.margin_left_auto) return;
+    ComputedStyle used = s;
+    if (s.margin_top_auto) { used.margin.top = 0.0f; used.margin_percent.top = -1.0f; }
+    if (s.margin_right_auto) { used.margin.right = 0.0f; used.margin_percent.right = -1.0f; }
+    if (s.margin_bottom_auto) { used.margin.bottom = 0.0f; used.margin_percent.bottom = -1.0f; }
+    if (s.margin_left_auto) { used.margin.left = 0.0f; used.margin_percent.left = -1.0f; }
+    box.style = std::make_shared<const ComputedStyle>(std::move(used));
+}
+
+// The document tree currently starts at <body>, not <html>. Its coordinates
+// are content-box coordinates, so laying it out at (0, 0) without placing it
+// leaves the margin, border and padding above/to the left of the viewport.
+// Do this *after* layout: percentages and auto margins need the used width.
+void place_document_body(LayoutBox& box, float viewport_width, float viewport_height,
+                         const EdgeSizes* root_margin = nullptr) {
+    auto& d = box.dimensions;
+    const auto& s = *box.style;
+
+    if (s.margin_top_auto) d.margin.top = 0.0f;
+    if (s.margin_bottom_auto) d.margin.bottom = 0.0f;
+    if (!s.is_out_of_flow() && (s.margin_left_auto || s.margin_right_auto)) {
+        const float fixed = d.content.width + d.border.left + d.border.right +
+                            d.padding.left + d.padding.right +
+                            (s.margin_left_auto ? 0.0f : d.margin.left) +
+                            (s.margin_right_auto ? 0.0f : d.margin.right);
+        const float remaining = viewport_width - fixed;
+        if (s.margin_left_auto && s.margin_right_auto) {
+            // CSS 2.1 10.3.3, for the engine's left-to-right block direction.
+            d.margin.left = std::max(0.0f, remaining / 2.0f);
+            d.margin.right = remaining - d.margin.left;
+        } else if (s.margin_left_auto) {
+            d.margin.left = remaining;
+        } else {
+            d.margin.right = remaining;
+        }
+    }
+
+    // A body's top margin can collapse through a chain of first in-flow
+    // blocks. Merely adding the body margin would move common first headings
+    // and paragraphs too far. This handles nonempty first-child chains only;
+    // empty boxes, sibling-margin collapse, bottom margins and constrained
+    // heights still need the general block-formatting algorithm.
+    struct CollapsedEdge { LayoutBox* parent; float margin; float child_height_change = 0.0f; };
+    std::vector<CollapsedEdge> top_chain;
+    float largest_positive = std::max(0.0f, d.margin.top);
+    float most_negative = std::min(0.0f, d.margin.top);
+    LayoutBox* parent = &box;
+    while (parent) {
+        const auto& ps = *parent->style;
+        const auto& pd = parent->dimensions;
+        if (parent->box_type != BoxType::BlockNode || !parent->line_boxes.empty() ||
+            ps.is_out_of_flow() || ps.is_floated() || ps.overflow != Overflow::Visible ||
+            ps.contains_layout() || ps.contains_paint() || ps.min_height >= 0.0f ||
+            ps.max_height >= 0.0f || pd.border.top != 0.0f || pd.padding.top != 0.0f ||
+            parent->children.empty()) break;
+        const auto& first = parent->children.front();
+        const auto& cs = *first->style;
+        // A nonempty block can have a nonpositive *current* height when a
+        // negative child margin was incorrectly included in it. Do not mistake
+        // that for a genuinely empty box whose margins may collapse through it.
+        const bool has_in_flow_child = std::any_of(first->children.begin(), first->children.end(),
+            [](const auto& child) { return !child->style->is_out_of_flow() && !child->style->is_floated(); });
+        const bool empty_block = first->box_type == BoxType::BlockNode && !has_in_flow_child &&
+                                 first->line_boxes.empty() && first->dimensions.border_box().height <= 0.0f;
+        if ((first->box_type != BoxType::BlockNode && first->box_type != BoxType::FlexNode &&
+             first->box_type != BoxType::GridNode) ||
+            cs.is_out_of_flow() || cs.is_floated() || cs.clear_type != ClearType::None ||
+            cs.margin_top_auto || empty_block) break;
+        const float margin = first->dimensions.margin.top;
+        top_chain.push_back({parent, margin});
+        largest_positive = std::max(largest_positive, margin);
+        most_negative = std::min(most_negative, margin);
+        parent = first.get();
+    }
+    const float body_top = largest_positive + most_negative;
+
+    // Each collapsed margin used to be included in the auto height of every
+    // ancestor up to a definite-height box. Correct heights from the inside
+    // out; a fixed height stops the correction propagating through it.
+    float height_change = 0.0f;
+    for (auto it = top_chain.rbegin(); it != top_chain.rend(); ++it) {
+        it->child_height_change = height_change;
+        auto& pd = it->parent->dimensions;
+        const float old_height = pd.content.height;
+        if (it->parent->style->height < 0.0f) {
+            pd.content.height = std::max(0.0f, old_height - it->margin - height_change);
+        }
+        height_change = old_height - pd.content.height;
+    }
+
+    float x = d.margin.left + d.border.left + d.padding.left;
+    float y = body_top + d.border.top + d.padding.top;
+
+    // The `<html>` root has no box of its own here, so its margin used to be
+    // ignored entirely: `<html style="margin:30px">` moved nothing. CSS 2.1
+    // 8.3 puts the body inside the root's content box, and a margin on the root
+    // is outside it, so both edges move by the root's used margin. A root that
+    // states no margin contributes nothing and this is the previous behaviour.
+    if (root_margin) {
+        x += root_margin->left;
+        y += root_margin->top;
+    }
+    const auto inset = s.used_insets(viewport_width, viewport_height);
+    if (s.position == Position::Relative) {
+        if (s.has_left) x += inset.left;
+        else if (s.has_right) x -= inset.right;
+        if (s.has_top) y += inset.top;
+        else if (s.has_bottom) y -= inset.bottom;
+    } else if (s.is_out_of_flow()) {
+        if (s.has_left) x += inset.left;
+        else if (s.has_right) x = viewport_width - inset.right - d.margin.right -
+                                  d.border.right - d.padding.right - d.content.width;
+        if (s.has_top) y += inset.top;
+        else if (s.has_bottom) y = viewport_height - inset.bottom - d.margin.bottom -
+                                   d.border.bottom - d.padding.bottom - d.content.height;
+    }
+    // Shift each in-flow box and its line fragments once. Descendants of a
+    // collapsing parent also lose the child's margin that layout added inside
+    // the parent. A single iterative walk avoids a quadratic set of subtree
+    // shifts for a deeply nested first-child chain. The out-of-flow pass that
+    // follows places absolute and fixed descendants against their own block.
+    std::unordered_map<const LayoutBox*, CollapsedEdge> collapsed_margins;
+    for (const auto& edge : top_chain) {
+        if (edge.margin != 0.0f || edge.child_height_change != 0.0f) {
+            collapsed_margins.emplace(edge.parent, edge);
+        }
+    }
+    if (x == d.content.x && y == d.content.y && collapsed_margins.empty()) return;
+    struct Shift { LayoutBox* box; float dx; float dy; };
+    std::vector<Shift> stack{{&box, x - d.content.x, y - d.content.y}};
+    while (!stack.empty()) {
+        const auto current = stack.back();
+        stack.pop_back();
+        current.box->dimensions.content.x += current.dx;
+        current.box->dimensions.content.y += current.dy;
+        for (auto& line : current.box->line_boxes) {
+            line.rect.x += current.dx;
+            line.rect.y += current.dy;
+            for (auto& frag : line.fragments) {
+                frag.rect.x += current.dx;
+                frag.rect.y += current.dy;
+            }
+        }
+        float child_dy = current.dy;
+        float following_dy = 0.0f;
+        if (const auto found = collapsed_margins.find(current.box); found != collapsed_margins.end()) {
+            child_dy -= found->second.margin;
+            // A nested collapse may also have shortened the first child. Its
+            // following siblings must move by that height change, but the
+            // first child's own position must not.
+            following_dy = found->second.child_height_change;
+        }
+        for (std::size_t i = 0; i < current.box->children.size(); ++i) {
+            auto& child = current.box->children[i];
+            if (!child->style->is_out_of_flow()) {
+                stack.push_back({child.get(), current.dx, child_dy - (i == 0 ? 0.0f : following_dy)});
+            }
+        }
+    }
+}
+
 SharedComputedStyle resolve_element_style(
     const std::shared_ptr<Element>& element,
     const StyleResolver& resolver,
@@ -91,6 +259,19 @@ SharedComputedStyle resolve_element_style(
             }
         }
     }
+    // CSS Overflow: with visible overflow on the HTML root, the first
+    // body's overflow applies to the viewport, not to its own padding box.
+    // An absolutely positioned canvas can fill the viewport even if almost
+    // nothing contributes to the body's in-flow height. Keep ordinary clips
+    // and containment intact; the framebuffer itself bounds viewport paint.
+    if (tag == "body" && !element->is_foreign() && computed.overflow != Overflow::Visible && !computed.containment) {
+        auto doc = element->owner_document();
+        auto html = doc ? doc->document_element() : nullptr;
+        if (html && !html->is_foreign() && html->tag_name() == "html" && element->parent() == html && doc->body() == element) {
+            const auto root_style = resolver.resolve_style(html, nullptr);
+            if (root_style.overflow == Overflow::Visible && !root_style.containment) computed.overflow = Overflow::Visible;
+        }
+    }
     if (computed.is_none()) return nullptr;
     return pool.intern(std::move(computed));
 }
@@ -101,7 +282,8 @@ void normalize_block_children(
     ComputedStylePool& pool
 ) {
     if (!box) return;
-    if (box->box_type != BoxType::BlockNode && box->box_type != BoxType::AnonymousBlock) return;
+    if (box->box_type != BoxType::BlockNode && box->box_type != BoxType::AnonymousBlock &&
+        box->box_type != BoxType::TableCellNode) return;
     if (box->children.empty()) return;
 
     bool has_block = false;
@@ -145,6 +327,51 @@ void normalize_block_children(
     for (auto& ch : box->children) {
         ch->parent = box;
     }
+}
+
+// CSS 2.1 §17.2.1. Ordinary children of a CSS table still need to enter
+// its grid. Generate layout-only rows/cells for consecutive improper boxes;
+// never invent a DOM node or split adjacent content into separate columns.
+void normalize_table_children(const std::shared_ptr<LayoutBox>& box, ComputedStylePool& pool) {
+    const bool table = box->style->is_table();
+    const bool row = box->style->is_table_row();
+    if (!table && !row && !box->style->is_table_row_group()) return;
+    auto children = std::move(box->children);
+    box->children.clear();
+    std::shared_ptr<LayoutBox> implicit_row, implicit_cell;
+    for (const auto& child : children) {
+        if (!row && (child->style->is_table_row() ||
+                (table && (child->style->is_table_caption() || child->style->is_table_row_group())))) {
+            implicit_row.reset();
+            implicit_cell.reset();
+            box->append_child(child);
+            continue;
+        }
+        if (!row && !implicit_row) {
+            implicit_row = LayoutBox::create_table_row(nullptr, pool.inherited_only(box->style, Display::TableRow));
+            box->append_child(implicit_row);
+        }
+        const auto& parent = row ? box : implicit_row;
+        if (child->style->is_table_cell()) {
+            implicit_cell.reset();
+            parent->append_child(child);
+        } else {
+            if (!implicit_cell) {
+                implicit_cell = LayoutBox::create_table_cell(nullptr, pool.inherited_only(parent->style, Display::TableCell));
+                parent->append_child(implicit_cell);
+            }
+            implicit_cell->append_child(child);
+        }
+    }
+    // A generated cell wasn't visited by build_boxes; normalize its mixed
+    // block/inline content just as for a DOM-backed cell.
+    auto finish_cells = [&](const auto& r) {
+        for (const auto& c : r->children) {
+            if (!c->node && c->box_type == BoxType::TableCellNode) normalize_block_children(c, c->style, pool);
+        }
+    };
+    if (row) finish_cells(box);
+    else for (const auto& r : box->children) if (!r->node && r->box_type == BoxType::TableRowNode) finish_cells(r);
 }
 
 // Origin-safe `<img src>` loader with per-document subresource caching.
@@ -341,7 +568,11 @@ void populate_special_element_box(
                     if (sub_root) {
                         DisplayList sub_list = DisplayList::build(sub_root);
                         BitmapRenderer bmp(rw, rh);
-                        bmp.clear(Color::white());
+                        // A child browsing context is transparent where its
+                        // document paints nothing. Flattening it onto white
+                        // here hid the embedding page and changed translucent
+                        // canvas colors before the iframe was composited.
+                        bmp.clear(Color::transparent());
                         bmp.render(sub_list);
                         img->width = rw;
                         img->height = rh;
@@ -444,6 +675,10 @@ void LayoutTree::build_boxes(
     if (node->is_element()) {
         auto element = std::static_pointer_cast<Element>(node);
         const std::string& tag = element->tag_name();
+        if (tag == "noscript" && !element->is_foreign()) {
+            auto doc = element->owner_document();
+            if (doc && doc->scripting_enabled()) return;
+        }
         if (tag == "head" || tag == "style" || tag == "script" || tag == "meta" ||
             tag == "link" || tag == "base" || tag == "title" || tag == "template") {
             return;
@@ -534,7 +769,19 @@ void LayoutTree::build_boxes(
             const auto& children_to_process =
                 element->shadow_root() ? element->shadow_root()->children() : element->children();
             std::vector<std::shared_ptr<LayoutBox>> child_boxes;
+            // With an explicit summary, a closed disclosure lays out only
+            // its first summary child. The DOM and its listeners stay intact.
+            const Node* closed_summary = nullptr;
+            if (!element->is_foreign() && tag == "details" && !element->has_attribute("open")) {
+                for (const auto& ch : children_to_process) {
+                    if (ch->is_element() && !ch->as_element()->is_foreign() && ch->as_element()->tag_name() == "summary") {
+                        closed_summary = ch.get();
+                        break;
+                    }
+                }
+            }
             for (const auto& ch : children_to_process) {
+                if (closed_summary && ch.get() != closed_summary) continue;
                 child_boxes.clear();
                 if (ch->is_element() && ch->as_element()->tag_name() == "slot") {
                     auto slot_el = std::static_pointer_cast<Element>(ch);
@@ -557,9 +804,8 @@ void LayoutTree::build_boxes(
             }
         }
 
-        if (box->box_type == BoxType::BlockNode) {
-            normalize_block_children(box, box->style, pool);
-        }
+        normalize_table_children(box, pool);
+        normalize_block_children(box, box->style, pool);
 
         if (tag == "img" || tag == "canvas" || tag == "svg" || (!element->is_foreign() && tag == "iframe")) {
             populate_special_element_box(element, box, pool);
@@ -628,10 +874,29 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
         });
     }
 
+    // Only a whole HTML document owns a canvas. In particular, building a
+    // layout for an arbitrary <body> or <div> subtree must not turn that
+    // subtree's background into a viewport-wide paint.
+    std::shared_ptr<Document> document;
+    std::shared_ptr<Element> html;
+    std::optional<ComputedStyle> html_style;
+    if (root_node && root_node->is_document()) {
+        document = std::static_pointer_cast<Document>(root_node);
+        auto element = document->document_element();
+        if (element && !element->is_foreign() && element->tag_name() == "html") {
+            html = element;
+            html_style = resolver.resolve_style(html, nullptr);
+        }
+    }
+
     ComputedStylePool pool;
     std::vector<std::shared_ptr<LayoutBox>> root_boxes;
     std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>> split_inline_blocks;
-    build_boxes(root_node, resolver, nullptr, pool, 0, root_boxes, split_inline_blocks);
+    // The tree normally starts at body, but a display:none HTML ancestor hides
+    // that whole tree, including both candidates for canvas propagation.
+    if (!html_style || !html_style->is_none()) {
+        build_boxes(root_node, resolver, nullptr, pool, 0, root_boxes, split_inline_blocks);
+    }
 
     std::shared_ptr<LayoutBox> root_box;
     if (root_boxes.size() == 1 && is_block_level_box(*root_boxes.front())) {
@@ -648,9 +913,76 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
         root_box = LayoutBox::create_block(nullptr, std::move(root_style));
     }
 
+    // Even an uncolored HTML document owns a transparent canvas: embedded
+    // documents preserve its alpha, while a top-level terminal needs to know
+    // that it should show the browser's white backdrop rather than its default
+    // dark grid. Subtree and non-HTML layout roots do not own one.
+    root_box->has_document_canvas = html_style.has_value();
+
+    // CSS Backgrounds: the HTML root supplies the canvas unless its color is
+    // transparent, in which case the first HTML body child supplies it. The
+    // color's *used* value is then transparent on the source box; keep the
+    // computed style intact and mark its boxes instead. Background images are
+    // not represented by ComputedStyle yet (see the phase's remaining work).
+    std::shared_ptr<Element> canvas_source;
+    if (html_style && !html_style->is_none()) {
+        if (!html_style->background_color.is_transparent()) {
+            root_box->canvas_background = html_style->background_color;
+            canvas_source = html;
+        } else if (auto body = document->body();
+                   body && !body->is_foreign() && body->parent() == html) {
+            const ComputedStyle body_style = resolver.resolve_style(body, &*html_style);
+            if (!body_style.is_none() && !body_style.background_color.is_transparent()) {
+                root_box->canvas_background = body_style.background_color;
+                canvas_source = body;
+            }
+        }
+    }
+    if (canvas_source) {
+        // Usually the body is the root box. An inline body can be split into
+        // multiple boxes around blocks; mark each before layout constructs its
+        // line fragments so the inline painter can preserve child backgrounds.
+        std::vector<LayoutBox*> boxes{root_box.get()};
+        while (!boxes.empty()) {
+            LayoutBox* box = boxes.back();
+            boxes.pop_back();
+            if (box->node == canvas_source) box->background_propagated = true;
+            for (auto& child : box->children) boxes.push_back(child.get());
+        }
+    }
+
+    bool document_body_root = false;
+    if (document) {
+        if (auto body = document->body(); body && root_box->node == body) document_body_root = true;
+    }
     root_box->dimensions.content.x = 0.0f;
     root_box->dimensions.content.y = 0.0f;
+    if (document_body_root) prepare_document_body(*root_box);
     root_box->layout(viewport_width, viewport_height);
+    if (document_body_root) {
+        // The root's own used margin, for the offset place_document_body adds.
+        // Only a root that states one contributes; percentages resolve against
+        // the viewport, which is the root's containing block.
+        EdgeSizes root_margin{0.0f};
+        bool has_root_margin = false;
+        if (root_node && root_node->is_document()) {
+            auto doc = std::static_pointer_cast<Document>(root_node);
+            if (auto html = doc->document_element()) {
+                if (html->tag_name() == "html") {
+                    const ComputedStyle root_style = resolver.resolve_style(html, nullptr);
+                    root_margin.top = root_style.margin_percent.top >= 0.0f
+                                          ? root_style.margin_percent.top * viewport_width / 100.0f
+                                          : root_style.margin.top;
+                    root_margin.left = root_style.margin_percent.left >= 0.0f
+                                           ? root_style.margin_percent.left * viewport_width / 100.0f
+                                           : root_style.margin.left;
+                    has_root_margin = root_margin.top != 0.0f || root_margin.left != 0.0f;
+                }
+            }
+        }
+        place_document_body(*root_box, viewport_width, viewport_height,
+                            has_root_margin ? &root_margin : nullptr);
+    }
     LayoutBox::resolve_out_of_flow_positions(root_box, viewport_width, viewport_height);
 
     // Non-recursive box-to-DOM geometry synchronization.
@@ -708,7 +1040,7 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
     if (root_node && root_node->is_document()) {
         auto doc = std::static_pointer_cast<Document>(root_node);
         if (auto doc_el = doc->document_element()) {
-            if (!doc_el->has_layout_box() && root_box) {
+            if ((!html_style || !html_style->is_none()) && !doc_el->has_layout_box() && root_box) {
                 const float h = std::max(viewport_height, root_box->dimensions.margin_box().height);
                 doc_el->set_layout_box(Rect(0.0f, 0.0f, viewport_width, h));
             }

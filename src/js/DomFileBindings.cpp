@@ -1,14 +1,15 @@
 // Blob, File and FileReader.
 //
-// A blob here is a run of bytes kept as a string. The engine has no
-// ArrayBuffer, so a blob is made from strings and other blobs and read back
-// as text or as a data: URL; `arrayBuffer()` and `stream()` do not exist,
-// which a page can test for.
+// A blob here is a run of bytes kept as a string. Its content can be read as
+// text or a data: URL, or copied into an ArrayBuffer; streaming is not
+// implemented yet.
 
+#include "litebird/common/Base64.hpp"
 #include "litebird/js/DomBindings.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/Promise.hpp"
+#include "litebird/js/TypedArray.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -40,8 +41,9 @@ std::string normalized_type(const std::string& type) {
     return ascii_lower(type);
 }
 
-// The bytes of the parts given to a constructor: strings as UTF-8, blobs as
-// their bytes, anything else as the string it converts to.
+// The bytes of the parts given to a constructor: blobs as their bytes,
+// BufferSource values (ArrayBuffer, TypedArray, DataView) as their raw bytes,
+// anything else as the UTF-8 string it converts to.
 std::string bytes_of_parts(const JsValue& parts, const char* what) {
     std::string out;
     if (parts.is_undefined()) return out;
@@ -49,8 +51,18 @@ std::string bytes_of_parts(const JsValue& parts, const char* what) {
         js_throw_type_error(std::string("Failed to construct '") + what + "': the parts must be given as a sequence.");
     }
     for (const JsValue& part : js_iterable_to_vector(parts)) {
-        if (const BlobState* blob = state_of<BlobState>(part)) out += blob->bytes;
-        else out += to_str(part);
+        if (const BlobState* blob = state_of<BlobState>(part)) {
+            out += blob->bytes;
+        } else if (is_buffer_source(part)) {
+            std::string raw;
+            if (!typed_array_bytes(part, raw)) {
+                js_throw_type_error(std::string("Failed to construct '") + what +
+                                    "': buffer source is detached or out of bounds.");
+            }
+            out += raw;
+        } else {
+            out += to_str(part);
+        }
     }
     return out;
 }
@@ -101,6 +113,10 @@ void setup_blob(Iface& I) {
         return r.make("Blob", state);
     });
     I.method("text", 0, [](Realm&, Args) { return Promise::make_resolved(str(this_blob().bytes)); });
+    I.method("arrayBuffer", 0, [](Realm&, Args) {
+        const JsValue view = typed_array_from_bytes(this_blob().bytes);
+        return Promise::make_resolved(view.get_property("buffer"));
+    });
 }
 
 void setup_file(Iface& I) {
@@ -133,23 +149,6 @@ ReaderState& this_reader() {
 
 JsValue construct_reader(Realm& realm, const InterfaceDef&, Args, const JsValue* derived) {
     return realm.make("FileReader", std::make_shared<ReaderState>(), derived);
-}
-
-const char kBase64Alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-
-std::string base64(const std::string& bytes) {
-    std::string out;
-    out.reserve((bytes.size() + 2) / 3 * 4);
-    for (std::size_t i = 0; i < bytes.size(); i += 3) {
-        const unsigned b0 = static_cast<unsigned char>(bytes[i]);
-        const unsigned b1 = i + 1 < bytes.size() ? static_cast<unsigned char>(bytes[i + 1]) : 0;
-        const unsigned b2 = i + 2 < bytes.size() ? static_cast<unsigned char>(bytes[i + 2]) : 0;
-        out += kBase64Alphabet[b0 >> 2];
-        out += kBase64Alphabet[((b0 & 3) << 4) | (b1 >> 4)];
-        out += i + 1 < bytes.size() ? kBase64Alphabet[((b1 & 15) << 2) | (b2 >> 6)] : '=';
-        out += i + 2 < bytes.size() ? kBase64Alphabet[b2 & 63] : '=';
-    }
-    return out;
 }
 
 enum class ReadAs { Text, DataUrl, BinaryString };
@@ -189,7 +188,7 @@ JsValue start_read(Realm& r, Args args, ReadAs how, const char* what) {
                 break;
             case ReadAs::DataUrl:
                 reader->result = str("data:" + (type.empty() ? std::string("application/octet-stream") : type) +
-                                     ";base64," + base64(bytes));
+                                     ";base64," + base64_encode(bytes));
                 break;
             case ReadAs::BinaryString: {
                 // One character per byte.
@@ -257,6 +256,13 @@ bool is_blob(const JsValue& value) {
 bool is_file(const JsValue& value) {
     const BlobState* state = state_of<BlobState>(value);
     return state && state->is_file;
+}
+
+bool blob_bytes(const JsValue& value, std::string& out) {
+    const BlobState* state = state_of<BlobState>(value);
+    if (!state) return false;
+    out = state->bytes;
+    return true;
 }
 
 JsValue make_blob(Realm& realm, const std::string& bytes, const std::string& type) {

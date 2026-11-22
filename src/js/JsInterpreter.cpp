@@ -914,21 +914,27 @@ void JsInterpreter::init_builtins() {
     // ArrayBuffer and the typed arrays (Wave 2 #8): the bytes a fetch() body,
     // a binary WebSocket frame and an ImageData are made of.
     install_typed_array_builtins(*m_global_env);
+    // TextDecoder and TextEncoder need the typed arrays: `encode()` answers a
+    // Uint8Array and `decode()` takes an ArrayBufferView.
+    install_text_codec_builtins(*m_global_env);
 
     m_global_env->define("Headers", HeadersObject::create_constructor());
     m_global_env->define("Response", ResponseObject::create_constructor());
+    m_global_env->define("Request", RequestObject::create_constructor(request_context));
     m_global_env->define("fetch", JsValue::make_native_function(
         [request_context](const std::vector<JsValue>& args) {
             return FetchAPI::fetch(args, request_context());
         }));
 
-    // URL and URLSearchParams. A window finds every interface by its name
-    // (see dom::attach_window); a worker, or a script run on its own, has
-    // only these two.
+    // URL, URLSearchParams, Blob, and File. A window finds every interface by
+    // its name (see dom::attach_window); a worker, or a script run on its own,
+    // also needs Blob and File because WebSocket's default binaryType is "blob".
     if (!m_document) {
         dom::Realm& dom_realm = dom::realm_of(*m_realm);
         m_global_env->define("URLSearchParams", dom_realm.ctor("URLSearchParams"));
         m_global_env->define("URL", dom_realm.ctor("URL"));
+        m_global_env->define("Blob", dom_realm.ctor("Blob"));
+        m_global_env->define("File", dom_realm.ctor("File"));
     }
 
     // Worker built-in

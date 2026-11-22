@@ -11,6 +11,7 @@
 #include <memory>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace litebird {
@@ -321,6 +322,12 @@ struct ComputedStyle {
     float right{0.0f};
     float bottom{0.0f};
     float left{0.0f};
+    // Keep the signed percentage component until the containing block is known.
+    EdgeSizes inset_percent{};
+    EdgeSizes used_insets(float width, float height) const {
+        return {top + height * inset_percent.top / 100, right + width * inset_percent.right / 100,
+                bottom + height * inset_percent.bottom / 100, left + width * inset_percent.left / 100};
+    }
     bool has_top{false};
     bool has_right{false};
     bool has_bottom{false};
@@ -534,7 +541,28 @@ private:
     float parse_length(std::string_view val, float default_val = 0.0f) const;
     EdgeSizes parse_box_edges(std::string_view val, EdgeSizes* percent_out = nullptr) const;
 
-    StyleSheet m_ua_sheet;
+    // The legacy UA sheet declares an opaque white body, although the initial
+    // CSS background is transparent. Normalize it at the same UA origin: an
+    // author rule (even `*`, or one inside a layer) must still be able to set
+    // white deliberately. Keep this correction beside the UA sheet rather
+    // than treating a computed white color as evidence of where it came from.
+    // Once the old declaration is removed from default_user_agent_stylesheet,
+    // this one-rule normalization can be removed too.
+    struct UserAgentSheet : StyleSheet {
+        explicit UserAgentSheet(StyleSheet sheet) : StyleSheet(std::move(sheet)) {
+            Rule body_reset;
+            Selector selector;
+            SimpleSelector body;
+            body.tag_name = "body";
+            selector.parts.push_back(std::move(body));
+            selector.finalize_metadata();
+            body_reset.selectors.push_back(std::move(selector));
+            body_reset.declarations.push_back({"background-color", "transparent", false});
+            rules.push_back(std::move(body_reset));
+        }
+    };
+
+    UserAgentSheet m_ua_sheet;
     std::vector<StyleSheet> m_author_sheets;
     SelectorIndex m_author_selector_index;
     std::vector<std::string> m_layer_order;

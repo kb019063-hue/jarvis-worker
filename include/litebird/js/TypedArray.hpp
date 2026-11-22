@@ -2,6 +2,9 @@
 
 #include "litebird/js/JsInterpreter.hpp"
 
+#include <cstdint>
+#include <string>
+
 namespace litebird {
 
 /// `ArrayBuffer` and the typed arrays (`Uint8Array` … `Float64Array`).
@@ -24,5 +27,36 @@ namespace litebird {
 /// `Object.getPrototypeOf(Uint8Array)`) and `%TypedArray%.prototype` into the
 /// realm's global environment.
 void install_typed_array_builtins(JsEnvironment& global);
+
+/// `TextDecoder` and `TextEncoder` (`TextCodec.cpp`). Installed with the typed
+/// arrays because they are the same subject: `encode()` answers a `Uint8Array`
+/// and `decode()` takes a view, so the two cannot exist apart.
+void install_text_codec_builtins(JsEnvironment& global);
+
+/// True when `value` is an `ArrayBuffer`, a typed-array view, or a `DataView`
+/// (even if its backing buffer is detached or the view is out of bounds).
+bool is_buffer_source(const JsValue& value);
+
+/// The bytes of an `ArrayBuffer`, any typed-array view, or a `DataView`, copied
+/// out: the whole buffer for a buffer, and the view's live window of it for a
+/// view. False when `value` is none of these, or when the buffer has been
+/// detached or resized out of bounds.
+bool typed_array_bytes(const JsValue& value, std::string& out);
+
+/// A fixed-length `ArrayBuffer` holding a copy of `bytes` in the current realm.
+JsValue array_buffer_from_bytes(const std::string& bytes);
+
+/// A `Uint8Array` over a copy of `bytes`: the object `new Uint8Array([...])`
+/// makes. This is what `TextEncoder.prototype.encode` answers with, and what a
+/// future `Response` body and `ImageData` want, so it lives beside the
+/// constructor it belongs to rather than in each caller.
+JsValue typed_array_from_bytes(const std::string& bytes);
+
+/// Writes `count` raw bytes into a typed-array view at its start, which is what
+/// `TextEncoder.prototype.encodeInto` does with what it encoded. False when the
+/// value is not a view, its buffer is detached, or it has no room — the caller
+/// has already decided how much fits, so a false answer is a bug or a detached
+/// buffer, not a short write.
+bool typed_array_write(const JsValue& view, const uint8_t* bytes, std::size_t count);
 
 } // namespace litebird

@@ -181,19 +181,24 @@ public:
         }
         // A pattern asks for the iterator and nothing else. An object that only
         // has `next` is not iterable, however much it looks like an iterator:
-        // `var [x] = { next() {} }` is a TypeError here, as it is in the
-        // language, where for...of accepts that object. (IterationCursor used
-        // to accept it too, which is the case `iteration.dat` records.)
+        // `var [x] = { next() {} }`, and `for (var x of { next() {} })` beside
+        // it, are TypeErrors. (IterationCursor used to accept the object, which
+        // is the case `iteration.dat` records.)
         js_throw_type_error(js_describe_thrown(source) + " is not iterable");
     }
 
     /// The next value, or undefined once the source is exhausted.
     JsValue pull() {
+        m_next_threw = false;
         if (m_done) return JsValue::make_undefined();
         switch (m_mode) {
             case Mode::Array: {
                 const auto& elements = m_source.object_val->array_elements;
-                if (m_index < elements.size()) return m_source.array_element(m_index++);
+                // An element is a read of the array's storage, and a hole is not
+                // undefined necessarily but whatever the index has otherwise:
+                // js_array_get is what `array[index]` gives, and what the
+                // array's own iterator yields for that index.
+                if (m_index < elements.size()) return js_array_get(m_source, m_index++);
                 m_done = true;
                 return JsValue::make_undefined();
             }
@@ -216,7 +221,18 @@ public:
                 return JsValue::make_string(piece);
             }
             case Mode::Protocol: {
-                JsValue step = js_call(m_next, m_iterator, {});
+                // A `next` that throws is *not* an abrupt completion the
+                // pattern must close the iterator for: 7.4.8 step 7 leaves the
+                // close to the caller only because this step is not reached,
+                // so `[ , ] = iterable` with a throwing `next` calls `return`
+                // zero times, while the same pattern with a throwing *default*
+                // calls it once.
+                JsValue step;
+                bool completed = js_capture_throw([&] { step = js_call(m_next, m_iterator, {}); }, m_thrown);
+                if (!completed) {
+                    m_next_threw = true;
+                    throw JsThrow{m_thrown};
+                }
                 if (!step.is_object_like()) js_throw_type_error("Iterator result is not an object");
                 if (step.get_property("done").is_truthy()) {
                     m_done = true;
@@ -229,6 +245,8 @@ public:
     }
 
     bool done() const { return m_done; }
+    /// True when the last `pull()` threw from `next` itself; see pull().
+    bool next_threw() const { return m_next_threw; }
 
     /// Tells an iterator that will not be drained. IteratorClose (ECMA-262
     /// 7.4.11) checks what `return` is and what it gives back, but not a
@@ -246,6 +264,23 @@ public:
         }
     }
 
+    /// IteratorClose (ECMA-262 7.4.11) with an **existing** abrupt completion,
+    /// which is the case a pattern that fails part way through is in: the
+    /// iterator is told it will not be drained, and whatever that says is
+    /// discarded — the pattern's own throw is what the script sees. A throwing
+    /// `return`, a `return` that is not callable and a `return` that answers a
+    /// primitive are all swallowed here, where `close()` above reports them
+    /// (a pattern that simply bound fewer names than the iterator holds has
+    /// not failed, so *that* close must not hide a broken `return`).
+    void close_quietly() {
+        try {
+            close();
+        } catch (const JsThrow&) {
+        } catch (const std::exception& ex) {
+            if (js_is_internal_unwind(ex)) throw;
+        }
+    }
+
 private:
     enum class Mode { Array, Units, Protocol };
     JsValue m_source;
@@ -255,6 +290,8 @@ private:
     JsValue m_next;
     size_t m_index{0};
     bool m_done{false};
+    bool m_next_threw{false};
+    JsValue m_thrown;
 };
 
 [[noreturn]] void throw_tdz_error(const std::string& name) {
@@ -558,6 +595,53 @@ void JsInterpreter::hoist_functions(const std::vector<const FunctionDeclStmt*>& 
 // Functions
 // ---------------------------------------------------------------------------
 
+/// The `name` a *definition* gives the function it makes.
+///
+/// §15.4.4/§15.4.5 (SetFunctionName) put the name in the hands of the
+/// production: a FunctionExpression written as the value of a property takes
+/// the property key, and an accessor takes the key with `get `/`set ` in front
+/// of it. A symbol key is not its string form -- there is no string form -- but
+/// `[` + its description + `]`, and a symbol with no description contributes
+/// nothing, so an anonymous symbol-keyed method is named `""`.
+///
+/// `key` is the key's string form and `computed` is the value a computed key
+/// evaluated to, which is the only way the key can be a symbol. Both are
+/// needed: the string form is what a symbol's opaque internal text looks like,
+/// and it is the whole answer for every other kind of key.
+static std::string defined_name(const std::string& key, const JsValue* computed, const char* prefix) {
+    std::string name = prefix;
+    if (computed && computed->type == JsType::Symbol) {
+        // The description, not `toString()`: a symbol with none contributes
+        // nothing at all, where `String(Symbol())` is the text "Symbol()".
+        // `make_symbol` keeps it in the symbol's own property table, which is
+        // where Symbol.prototype.description reads it (BuiltinsObject.cpp).
+        std::string description;
+        if (computed->properties) {
+            auto it = computed->properties->find("description");
+            if (it != computed->properties->end() && it->second.type == JsType::String) {
+                description = it->second.string_val.str();
+            }
+        }
+        if (!description.empty()) name += "[" + description + "]";
+        return name;
+    }
+    return name + key;
+}
+
+/// `fd.name`, overridden by the definition that made the function.
+///
+/// The parser gives a method or an accessor its key as a name already, because
+/// that is right by default; a definition that knows better -- a private
+/// name's spelling, an accessor's `get `/`set `, a symbol key's description --
+/// sets the name here instead of working out which case it is standing in.
+void JsInterpreter::name_function(JsValue& fn, const std::string& name) const {
+    if (auto* fd = const_cast<JsValue::FunctionData*>(fn.function_data())) fd->name = name;
+    if (JsObject* cell = fn.property_cell()) {
+        auto entry = cell->properties.find("name");
+        if (entry != cell->properties.end()) entry->second = JsValue::make_string(name);
+    }
+}
+
 JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, const EnvPtr& env,
                                      const std::string& name_hint) {
     JsValue fn;
@@ -571,6 +655,7 @@ JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, 
     fd.is_generator = node->is_generator;
     fd.is_arrow = node->is_arrow;
     fd.is_class_constructor = node->is_class_constructor;
+    fd.is_strict = node->is_strict;
     fd.is_constructor = !node->is_arrow && !node->is_method && !node->is_async && !node->is_generator;
     fd.body = node->body;
     if (node->simple_params) fd.params = node->simple_param_names();
@@ -596,6 +681,58 @@ JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, 
         return invoke_function(shared_node, closure ? closure->shared_from_this() : nullptr, callee, this_val,
                                is_construct, args, new_target);
     };
+
+    // `name` and `length` are ordinary own properties of the function, not
+    // values answered out of the payload: §10.2.9/§10.2.5 give them
+    // `{ writable: false, enumerable: false, configurable: true }`, so a write
+    // through a non-strict reference is ignored, a strict one throws, a delete
+    // removes them, and `Object.getOwnPropertyNames` lists them. They are
+    // installed here, in this order, because the standard's order *is*
+    // insertion order and Node prints `["length","name",...]`.
+    if (JsObject* cell = fn.property_cell(/*create=*/true)) {
+        cell->properties.entry("length").second = JsValue::make_number(node->length);
+        cell->properties.entry("length").flags = PropertyMap::Configurable;
+        cell->properties.entry("name").second = JsValue::make_string(fd.name);
+        cell->properties.entry("name").flags = PropertyMap::Configurable;
+        // `arguments`, `caller` and `prototype` are the three an *ordinary*
+        // function has without anyone making them (§10.2.4-6), and what the
+        // first two are depends on strictness: `null` data properties in
+        // sloppy code, and the *poison pill* accessors in strict code, where
+        // reading either throws — that is how a strict script is refused the
+        // caller of a function.
+        //
+        // The set is narrower than "every function". An arrow, a method, a
+        // generator and an async function have an exotic `%Function.prototype%`
+        // that carries the pair (that prototype is not modelled yet, so they
+        // have neither own property and read as `undefined`), and a class
+        // constructor is strict code that inherits the pair rather than owning
+        // it — Node lists `["length","name","prototype","s"]` for a class and
+        // nothing else.
+        // Only the sloppy ordinary function gets them, and only as data
+        // properties. Everything else — a strict function, an arrow, a method,
+        // a generator, an async function, a class — must have *no* own property
+        // of either name (§10.2.4: "must not be created with own properties
+        // named caller or arguments"), and reading one throws because the
+        // lookup refuses it, not because something is stored.
+        const bool sloppy_ordinary = fd.is_constructor && !node->is_class_constructor &&
+                                     !node->is_method && !node->is_arrow && !node->is_generator &&
+                                     !node->is_async && !node->is_strict;
+        if (sloppy_ordinary) {
+            for (const char* key : {"arguments", "caller"}) {
+                auto& entry = cell->properties.entry(key);
+                entry.second = JsValue::make_null();
+                entry.flags = 0;
+            }
+            auto& proto_entry = cell->properties.entry("prototype");
+            JsValue proto = JsValue::make_object();
+            // The same back-link the lazy path makes in
+            // `function_implicit_property`: `p.constructor === P` is how an
+            // instance finds the function it came from.
+            proto.define_property("constructor", fn, PropertyMap::Hidden);
+            proto_entry.second = proto;
+            proto_entry.flags = PropertyMap::Writable;
+        }
+    }
     return fn;
 }
 
@@ -1010,7 +1147,8 @@ JsValue JsInterpreter::call_legacy_function(const JsValue& fn, const std::vector
 // Classes
 // ---------------------------------------------------------------------------
 
-JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env) {
+JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const EnvPtr& env,
+                                    const std::string& name_hint) {
     // The class name is in its own TDZ while `extends` and computed property
     // keys are evaluated, and stays immutable inside the class body.
     auto class_env = std::make_shared<JsEnvironment>(env);
@@ -1044,7 +1182,22 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
         proto.object_val->prototype = nullptr;       // `extends null`
     }
 
-    JsValue ctor = make_function(cls->constructor, class_env, cls->name);
+    // NamedEvaluation (§8.6.3 applies to a class as it does to a function):
+    // `cls->name` is the name the source *spells*, and is empty for
+    // `class {}`. A class written as an initialiser takes the name of what it
+    // is bound to instead — `var a = class {}` is named `a`, and so is
+    // `{ p: class {} }` and `function f(x = class {})`.
+    //
+    // It takes it as a *name*, not as a binding. That distinction is the whole
+    // of this phase: a class that spells a name gets a binding for it inside
+    // its own body, but one that is merely *inferred* does not, so the body
+    // still reads whatever `a` means where the class was written. Two cases in
+    // the corpus turn on it: `for (...) C = class extends C {}` has to keep
+    // extending the *previous* `C`, and a static method's `this === C` has to
+    // answer against the outer binding, not a copy of the class. An inner
+    // binding here shadows both.
+    const std::string inferred = cls->name.empty() ? name_hint : cls->name;
+    JsValue ctor = make_function(cls->constructor, class_env, inferred);
     {
         // Still unshared: safe to finish building the payload.
         auto& fd = ctor.ensure_function_data();
@@ -1073,12 +1226,20 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     }
 
     std::vector<std::string> member_keys;
+    // What each computed key evaluated to, for the `name` of the function the
+    // member defines: a symbol key is named from its description, which the
+    // string form has already thrown away.
+    std::vector<JsValue> member_key_values;
     member_keys.reserve(cls->members.size());
+    member_key_values.reserve(cls->members.size());
     for (const auto& member : cls->members) {
+        JsValue computed_value;
+        if (member.computed_key) computed_value = evaluate(member.computed_key.get(), class_env);
         member_keys.push_back(member.computed_key
-                                  ? js_to_property_key(evaluate(member.computed_key.get(), class_env))
+                                  ? js_to_property_key(computed_value)
                                   : member.is_private ? private_prefix + member.key
                                                       : member.key);
+        member_key_values.push_back(std::move(computed_value));
     }
 
     if (!cls->name.empty()) class_env->initialize_lexical(cls->name, ctor, true);
@@ -1100,13 +1261,20 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
         const auto& member = cls->members[i];
         JsValue target = member.is_static ? ctor : proto;
         const std::string& key = member_keys[i];
-        // What the function is called: the source spelling for a private name,
-        // so `#m` and `get #x` print as they were written.
-        const std::string& fn_name = member.is_private ? member.key : key;
+        // What the function is called. A method is named after the key it was
+        // defined by; an accessor with `get `/`set ` in front of it. A private
+        // name is spelled as it was written, so `#m` stays `#m` and
+        // `get #x` stays `get #x` — it can only be written literally.
+        const JsValue* key_value = member.is_private ? nullptr : &member_key_values[i];
+        const bool key_computed = !member.is_private && member.computed_key != nullptr;
 
         switch (member.kind) {
             case ClassMember::Kind::Method: {
-                JsValue fn = make_function(member.fn, class_env, fn_name);
+                JsValue fn = make_function(member.fn, class_env);
+                // A private name is spelled as written (`#m`), never with the
+                // prefix the environment uses to keep it apart from a string.
+                name_function(fn, member.is_private ? member.key
+                                                    : defined_name(key, key_computed ? &member_key_values[i] : nullptr, ""));
                 if (member.fn->uses_super) fn.define_property("%home", target, PropertyMap::Hidden);
                 if (!member.is_private) {
                     target.define_property(key, fn, PropertyMap::Hidden);
@@ -1120,7 +1288,12 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
             }
             case ClassMember::Kind::Getter:
             case ClassMember::Kind::Setter: {
-                JsValue fn = make_function(member.fn, class_env, fn_name);
+                JsValue fn = make_function(member.fn, class_env);
+                name_function(fn, member.is_private
+                                      ? std::string(member.kind == ClassMember::Kind::Getter ? "get " : "set ") +
+                                            member.key
+                                      : defined_name(key, key_computed ? &member_key_values[i] : nullptr,
+                                                     member.kind == ClassMember::Kind::Getter ? "get " : "set "));
                 if (member.fn->uses_super) fn.define_property("%home", target, PropertyMap::Hidden);
                 if (member.is_private) {
                     if (!member.is_static) {
@@ -1170,7 +1343,11 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
                     auto field_env = std::make_shared<JsEnvironment>(class_env);
                     field_env->define("this", ctor);
                     field_env->define("%home", ctor);
-                    value = evaluate_named(member.value.get(), field_env, fn_name);
+                    // A function or arrow written *in* the initialiser is
+                    // named by its field, as `x = function () {}` is named
+                    // `x`; that is a different question from what the member's
+                    // own function is called, above.
+                    value = evaluate_named(member.value.get(), field_env, member.key);
                 }
                 if (member.is_private) ctor.define_private(key, value, PropertyMap::Default);
                 else ctor.define_property(key, value, PropertyMap::Default);
@@ -1549,7 +1726,8 @@ void JsInterpreter::set_member(const JsValue& base, const std::string& key, cons
     target.set_property(key, value);
 }
 
-JsInterpreter::Reference JsInterpreter::resolve_reference(const Expr* target, const EnvPtr& env) {
+JsInterpreter::Reference JsInterpreter::resolve_reference(const Expr* target, const EnvPtr& env,
+                                                            bool throw_on_nullish) {
     Reference ref;
     switch (target->kind) {
         case NodeKind::Identifier:
@@ -1590,12 +1768,15 @@ JsInterpreter::Reference JsInterpreter::resolve_reference(const Expr* target, co
         default:
             js_throw_error(JsErrorKind::SyntaxError, "Invalid assignment target");
     }
-    if (ref.base.is_nullish()) {
-        js_throw_type_error(std::string("Cannot set properties of ") +
-                            (ref.base.type == JsType::Null ? "null" : "undefined") +
-                            " (setting '" + ref.name + "')");
-    }
+    if (throw_on_nullish) check_reference_base(ref);
     return ref;
+}
+
+void JsInterpreter::check_reference_base(const Reference& ref) {
+    if (!ref.is_property || !ref.base.is_nullish()) return;
+    js_throw_type_error(std::string("Cannot set properties of ") +
+                        (ref.base.type == JsType::Null ? "null" : "undefined") +
+                        " (setting '" + ref.name + "')");
 }
 
 JsValue JsInterpreter::read_reference(const Reference& ref, const EnvPtr& env) {
@@ -1662,25 +1843,35 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
                 js_throw_type_error(js_describe_thrown(value) + " is not iterable");
             }
             IterationCursor cursor(value);
-            for (const auto& element : pattern.elements) {
-                if (element.rest) {
-                    std::vector<JsValue> rest;
-                    while (true) {
-                        JsValue item = cursor.pull();
-                        if (cursor.done()) break;
-                        rest.push_back(std::move(item));
+            // Every way out of this loop other than `cursor.close()` at the
+            // end — a throwing default, a target that throws, a `return` that
+            // cannot be reached — must still tell the iterator it will not be
+            // drained (7.4.11, an abrupt completion), and must let the
+            // original throw through even when that close throws too.
+            try {
+                for (const auto& element : pattern.elements) {
+                    if (element.rest) {
+                        std::vector<JsValue> rest;
+                        while (true) {
+                            JsValue item = cursor.pull();
+                            if (cursor.done()) break;
+                            rest.push_back(std::move(item));
+                        }
+                        bind_pattern(*element.target, JsValue::make_array(rest), env, mode);
+                        break;
                     }
-                    bind_pattern(*element.target, JsValue::make_array(rest), env, mode);
-                    break;
+                    JsValue item = cursor.pull();
+                    if (!element.target) continue;       // hole: `[a, , b]`
+                    if (item.is_undefined() && element.default_value) {
+                        item = element.target->kind == Pattern::Kind::Identifier
+                            ? evaluate_named(element.default_value.get(), env, element.target->name)
+                            : evaluate(element.default_value.get(), env);
+                    }
+                    bind_pattern(*element.target, item, env, mode);
                 }
-                JsValue item = cursor.pull();
-                if (!element.target) continue;       // hole: `[a, , b]`
-                if (item.is_undefined() && element.default_value) {
-                    item = element.target->kind == Pattern::Kind::Identifier
-                        ? evaluate_named(element.default_value.get(), env, element.target->name)
-                        : evaluate(element.default_value.get(), env);
-                }
-                bind_pattern(*element.target, item, env, mode);
+            } catch (...) {
+                if (!cursor.next_threw()) cursor.close_quietly();
+                throw;
             }
             cursor.close();
             return;
@@ -2184,16 +2375,18 @@ JsInterpreter::Flow JsInterpreter::exec_switch(const SwitchStmt* stmt, const Env
 // ---------------------------------------------------------------------------
 
 JsValue JsInterpreter::evaluate_named(const Expr* expr, const EnvPtr& env, const std::string& name_hint) {
-    // `const f = function () {}` names the function after the binding.
+    // `const f = function () {}` names the function after the binding. What
+    // the parentheses around the *initialiser* are does not matter: test262
+    // asserts `[cover = (function () {})]` names it `cover`, so the named
+    // evaluation is chosen by the context, not by the expression's own
+    // grouping. Only a grouped *assignment target* changes the answer, and
+    // that is decided where the target is (see eval_assign).
     if (expr->kind == NodeKind::Function) {
         auto* fn_expr = static_cast<const FunctionExpr*>(expr);
         if (fn_expr->fn->name.empty()) return make_function(fn_expr->fn, env, name_hint);
     } else if (expr->kind == NodeKind::Class) {
         auto* cls_expr = static_cast<const ClassExpr*>(expr);
-        if (cls_expr->cls->name.empty()) {
-            JsValue ctor = define_class(cls_expr->cls, env);
-            return ctor;
-        }
+        if (cls_expr->cls->name.empty()) return define_class(cls_expr->cls, env, name_hint);
     }
     return evaluate(expr, env);
 }
@@ -2204,11 +2397,23 @@ std::vector<JsValue> JsInterpreter::eval_arguments(const std::vector<std::unique
     values.reserve(args.size());
     for (const auto& arg : args) {
         if (arg->kind == NodeKind::Spread) {
-            JsValue iterable = evaluate(static_cast<const SpreadExpr*>(arg.get())->argument.get(), env);
-            js_iterate(iterable, [&](const JsValue& item) {
-                values.push_back(item);
-                return true;
-            });
+            const auto* spread = static_cast<const SpreadExpr*>(arg.get());
+            JsValue iterable = evaluate(spread->argument.get(), env);
+            if (spread->synthesised && iterable.is_array()) {
+                // The implicit `constructor(...args) { super(...args); }` of a
+                // derived class forwards the arguments list; the language does
+                // not iterate it (ECMA-262 15.7.14), so a script that patched
+                // `Array.prototype[Symbol.iterator]` is not called by `new
+                // Derived(1, 2)`. Copying the elements is what the arguments
+                // list already holds. A spread a script wrote keeps the
+                // js_iterate path below, whatever the constructor looks like.
+                for (const JsValue& item : iterable.array_elements()) values.push_back(item);
+            } else {
+                js_iterate(iterable, [&](const JsValue& item) {
+                    values.push_back(item);
+                    return true;
+                });
+            }
         } else {
             values.push_back(evaluate(arg.get(), env));
         }
@@ -2446,15 +2651,24 @@ JsValue JsInterpreter::eval_assign(const AssignExpr* expr, const EnvPtr& env) {
     if (expr->op == JsTokenType::Equal) {
         if (target->kind == NodeKind::Identifier) {
             const std::string& name = static_cast<const IdentifierExpr*>(target)->name;
-            JsValue value = evaluate_named(expr->value.get(), env, name);
+            // `(f) = function () {}` leaves the function anonymous: the target
+            // is a parenthesised expression, not an IdentifierReference, so
+            // this is not a named evaluation (see evaluate_named).
+            JsValue value = target->explicitly_grouped ? evaluate(expr->value.get(), env)
+                                                       : evaluate_named(expr->value.get(), env, name);
             assign_identifier(name, value, env);
             return value;
         }
-        // The object and key are evaluated before the right-hand side.
-        Reference ref = resolve_reference(target, env);
-        JsValue value = evaluate(expr->value.get(), env);
-        write_reference(ref, value, env);
-        return value;
+            // The object and key are evaluated before the right-hand side, and
+            // a base that is null or undefined is only an error *then*: the
+            // right-hand side still runs, because the reference it would be
+            // assigned to is resolved before it (§13.15.2). `base.prop =
+            // count += 1` throws and leaves `count` at 1.
+            Reference ref = resolve_reference(target, env, /*throw_on_nullish=*/false);
+            JsValue value = evaluate(expr->value.get(), env);
+            check_reference_base(ref);
+            write_reference(ref, value, env);
+            return value;
     }
 
     Reference ref = resolve_reference(target, env);
@@ -2604,13 +2818,18 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
             continue;
         }
 
-        std::string key = prop.computed_key
-            ? js_to_property_key(evaluate(prop.computed_key.get(), env))
-            : prop.key;
+        // The key, and — for a computed one — the value it evaluated to, which
+        // is what an anonymous function defined by this property is named
+        // after when the key is a symbol (see defined_name).
+        JsValue key_value;
+        if (prop.computed_key) key_value = evaluate(prop.computed_key.get(), env);
+        std::string key = prop.computed_key ? js_to_property_key(key_value) : prop.key;
 
         if (prop.kind == ObjectProperty::Kind::Getter || prop.kind == ObjectProperty::Kind::Setter) {
             auto* fn_expr = static_cast<const FunctionExpr*>(prop.value.get());
-            JsValue fn = make_function(fn_expr->fn, env, key);
+            JsValue fn = make_function(fn_expr->fn, env);
+            name_function(fn, defined_name(key, prop.computed_key ? &key_value : nullptr,
+                                           prop.kind == ObjectProperty::Kind::Getter ? "get " : "set "));
             if (fn_expr->fn->uses_super) fn.define_property("%home", object, PropertyMap::Hidden);
             JsValue getter;
             JsValue setter;
@@ -2627,7 +2846,8 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
 
         if (prop.is_method) {
             auto* fn_expr = static_cast<const FunctionExpr*>(prop.value.get());
-            JsValue fn = make_function(fn_expr->fn, env, key);
+            JsValue fn = make_function(fn_expr->fn, env);
+            name_function(fn, defined_name(key, prop.computed_key ? &key_value : nullptr, ""));
             if (fn_expr->fn->uses_super) fn.define_property("%home", object, PropertyMap::Hidden);
             object.define_property(key, fn, PropertyMap::Default);
             continue;
@@ -2636,8 +2856,22 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
         // `{ __proto__: base }` sets the prototype rather than a property, so
         // a function or a class written there is not named after the key.
         const bool sets_prototype = key == "__proto__" && !prop.computed_key && !prop.shorthand;
-        JsValue value = sets_prototype ? evaluate(prop.value.get(), env)
-                                       : evaluate_named(prop.value.get(), env, key);
+        // A function or class written as the value is named after the key too
+        // (the third form SetFunctionName is applied to), and a symbol key
+        // needs the `[description]` the string form has thrown away.
+        JsValue value;
+        if (sets_prototype) {
+            value = evaluate(prop.value.get(), env);
+        } else if (prop.computed_key && key_value.type == JsType::Symbol &&
+                   (prop.value->kind == NodeKind::Function || prop.value->kind == NodeKind::Class)) {
+            value = evaluate(prop.value.get(), env);
+            if (prop.value->kind == NodeKind::Function &&
+                static_cast<const FunctionExpr*>(prop.value.get())->fn->name.empty()) {
+                name_function(value, defined_name(key, &key_value, ""));
+            }
+        } else {
+            value = evaluate_named(prop.value.get(), env, key);
+        }
         if (sets_prototype) {
             if (value.is_object_like()) {
                 if (JsObject* target = value.as_prototype()) object.object_val->prototype = target;

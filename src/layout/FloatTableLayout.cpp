@@ -209,8 +209,18 @@ float LayoutBox::min_content_width(const LayoutBox& box, float fallback) {
         return 0.0f;
     }
 
+    // A definite maximum clamps the contribution of this box to its
+    // parent's intrinsic size, not just the width it uses later in layout.
+    // Descendants may overflow the box without demanding a wider column.
+    const float edges = horizontal_spacing(box);
+    const float adjustment = bs.box_sizing == BoxSizing::BorderBox ? 0.0f : edges;
+    auto constrained_outer_width = [&](float outer) {
+        if (bs.max_width >= 0) outer = std::min(outer, bs.max_width + adjustment);
+        if (bs.min_width >= 0) outer = std::max(outer, bs.min_width + adjustment);
+        return std::max(edges, outer);
+    };
     if (bs.width >= 0.0f) {
-        return bs.width + horizontal_spacing(box) +
+        return constrained_outer_width(bs.width + adjustment) +
                box.dimensions.margin.left + box.dimensions.margin.right;
     }
 
@@ -235,7 +245,7 @@ float LayoutBox::min_content_width(const LayoutBox& box, float fallback) {
     }
 
     if (widest <= 0.0f) widest = fallback;
-    return widest + horizontal_spacing(box);
+    return constrained_outer_width(widest + edges);
 }
 
 void LayoutBox::layout_float(float containing_width) {

@@ -1,4 +1,5 @@
 #include "litebird/render/ImageDecoder.hpp"
+#include "litebird/render/AvifContainer.hpp"
 #include "litebird/net/DataUrl.hpp"
 #include "litebird/net/Deflate.hpp"
 #include "litebird/render/GifDecoder.hpp"
@@ -622,6 +623,14 @@ std::shared_ptr<ImageData> ImageDecoder::decode_bytes(
     }
     if (size >= 4 && data[0] == 'P' && (data[1] == '6' || data[1] == '3')) {
         return decode_ppm(data, size);
+    }
+    // AVIF is recognised, and refused with the reason rather than as "not an
+    // image". The container is read (Phase 167): the size a caller would lay
+    // the box out at is known, and the item that holds the picture is located,
+    // but there is no AV1 decoder to hand it to, so there is no picture. A
+    // `nullptr` here is the honest answer until `AvifContainer` has one.
+    if (AvifContainer::is_avif(data, size)) {
+        return nullptr;
     }
 
     MimeType mime;

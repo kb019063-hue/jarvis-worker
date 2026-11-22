@@ -197,6 +197,8 @@ public:
     /// Function and global environments are variable environments. Lexical
     /// block, catch and loop environments deliberately are not.
     void mark_var_scope() { m_is_var_scope = true; }
+    bool is_var_scope() const { return m_is_var_scope; }
+
     std::shared_ptr<JsEnvironment> var_scope() {
         auto scope = shared_from_this();
         while (scope->m_parent && !scope->m_is_var_scope) scope = scope->m_parent;
@@ -376,6 +378,11 @@ public:
         // Grammar permissions captured at the syntactic direct-eval call.
         bool allow_super_property{false};
         bool allow_super_call{false};
+        // The caller's strictness and its ban on `arguments`, which the eval
+        // text inherits: strict text rejects `var static`, and a class field
+        // initialiser's text cannot declare an `arguments` binding.
+        bool strict{false};
+        bool forbid_arguments{false};
     };
     static std::vector<EvalFrame>& eval_call_stack();
 

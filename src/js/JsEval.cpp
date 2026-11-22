@@ -551,6 +551,30 @@ JsValue JsInterpreter::run_program(const Program& program, const std::shared_ptr
     return std::move(frame.completion);
 }
 
+namespace {
+
+/// The lexical names the caller's code can see at `scope`, for the `var` early
+/// error of §19.2.1.3 EvalDeclarationInstantiation.
+///
+/// The walk stops at the caller's variable environment. Below it every binding
+/// is an ordinary variable of the function -- a parameter, a `var`, the
+/// function's own `arguments` -- and a `var` the eval declares replaces those
+/// rather than colliding, so `var x; eval('var x')` is legal. Above it are the
+/// enclosing lexical scopes, and those a `var` in the eval must not shadow.
+std::shared_ptr<const std::unordered_set<std::string>>
+caller_lexical_names(const JsEnvironment* scope) {
+    auto names = std::make_shared<std::unordered_set<std::string>>();
+    for (const JsEnvironment* env = scope; env; env = env->parent_raw()) {
+        for (const auto& binding : env->bindings()) {
+            if (binding.is_lexical) names->insert(binding.name);
+        }
+        if (env->is_var_scope()) break;
+    }
+    return names;
+}
+
+}  // namespace
+
 JsValue JsInterpreter::eval_source(const std::string& source) {
     // A call from outside any call expression -- a host calling `eval`'s
     // function value, say -- has no call site to answer for it, and is as
@@ -565,6 +589,11 @@ JsValue JsInterpreter::eval_source(const std::string& source) {
     parser_context.direct_eval = true;
     parser_context.allow_super_property = frame.allow_super_property;
     parser_context.allow_super_call = frame.allow_super_call;
+    // Strictness and the ban on `arguments` are the caller's: a direct eval
+    // is strict code when its caller is, and text that runs in a class field
+    // initialiser cannot declare an `arguments` binding.
+    parser_context.strict = frame.strict;
+    parser_context.forbid_arguments = frame.forbid_arguments;
     JsParser parser(std::move(tokens), text, parser_context);
     // A direct eval written inside a class body can name that class's private
     // fields; the class put them in scope when it was evaluated, so they are
@@ -579,6 +608,27 @@ JsValue JsInterpreter::eval_source(const std::string& source) {
         parser.seed_private_names(std::move(visible));
     }
     auto program = parser.parse_program();
+    // §19.2.1.3 EvalDeclarationInstantiation: a `var` (or sloppy
+    // function declaration) the eval would create in the caller's variable
+    // environment cannot share a name with a lexical binding the caller can
+    // see. `let x; eval('var x')` is a SyntaxError, thrown before any of the
+    // eval's text runs -- the check is on the declarations, not their order in
+    // the text. Only names the caller's *scope chain* declares count, so a
+    // `let` in a sibling block neither conflicts nor is seen.
+    //
+    // The check is skipped when the eval's text is strict: step 5 makes its
+    // variable environment its own lexical environment, so its `var`s shadow
+    // the caller's `let` instead of colliding with it. Strictness here is the
+    // eval's own once it has inherited its caller's, which is what
+    // `program->is_strict` holds.
+    if (!program->is_strict && !program->var_names.empty()) {
+        const auto visible = caller_lexical_names(frame.environment);
+        for (const auto& name : program->var_names) {
+            if (visible->count(name)) {
+                throw JsSyntaxError("Identifier '" + name + "' has already been declared", 1);
+            }
+        }
+    }
     // The scope has to outlive this call: the bindings its `var`s make belong
     // to the function whose code called it, and are read after it returns.
     JsEnvironment* running = const_cast<JsEnvironment*>(frame.environment);
@@ -2778,9 +2828,16 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
     // expression costs nothing.
     std::vector<EvalFrame>& stack = eval_call_stack();
     if (direct || !stack.empty()) {
-        stack.push_back(EvalFrame{env.get(), direct,
-                                  direct && expr->direct_eval_allows_super_property,
-                                  direct && expr->direct_eval_allows_super_call});
+        EvalFrame frame;
+        frame.environment = env.get();
+        frame.direct = direct;
+        frame.allow_super_property = direct && expr->direct_eval_allows_super_property;
+        frame.allow_super_call = direct && expr->direct_eval_allows_super_call;
+        if (direct) {
+            frame.strict = expr->direct_eval_from_strict_code;
+            frame.forbid_arguments = expr->direct_eval_forbids_arguments;
+        }
+        stack.push_back(std::move(frame));
         struct Pop {
             std::vector<EvalFrame>& stack;
             ~Pop() { stack.pop_back(); }

@@ -200,9 +200,12 @@ public:
     std::vector<std::unique_ptr<Expr>> args;
     bool optional{false};   // `f?.()`
     // A syntactic `eval(...)` records which `super` forms its source may
-    // inherit. Runtime still checks that the value called is the realm's eval.
+    // inherit, and whether the caller's grammar bans `arguments` or is strict.
+    // Runtime still checks that the value called is the realm's eval.
     bool direct_eval_allows_super_property{false};
     bool direct_eval_allows_super_call{false};
+    bool direct_eval_forbids_arguments{false};
+    bool direct_eval_from_strict_code{false};
 
     CallExpr(std::unique_ptr<Expr> c, std::vector<std::unique_ptr<Expr>> a)
         : Expr(NodeKind::Call), callee(std::move(c)), args(std::move(a)) {}
@@ -673,13 +676,21 @@ public:
 // Parser
 // ---------------------------------------------------------------------------
 
-/// Syntax that a direct eval inherits from the code that contains its call.
-/// `super.x` needs a home-object-capable method; `super(...)` additionally
-/// needs a derived constructor. Ordinary script parsing leaves both false.
+/// Syntax and early errors that a direct eval inherits from the code that
+/// contains its call. `super.x` needs a home-object-capable method;
+/// `super(...)` additionally needs a derived constructor. `arguments` is the
+/// caller's to forbid: a class field initialiser or static block bans it, and
+/// the text eval is handed there has no `arguments` of its own to declare.
+/// `strict` is the caller's strictness, which decides whether the eval text is
+/// strict code in its own right -- `eval('var static')` is a SyntaxError from
+/// strict code and a `var` from sloppy code. Ordinary script parsing leaves
+/// all four at their defaults.
 struct JsParserContext {
     bool direct_eval{false};
     bool allow_super_property{false};
     bool allow_super_call{false};
+    bool forbid_arguments{false};
+    bool strict{false};
 };
 
 class JsParser {
@@ -830,6 +841,10 @@ private:
     std::vector<int> m_match;        // index of the matching bracket for each opener, or -1
     size_t m_current{0};
     bool m_no_in{false};
+    // How many loop statements and `switch` statements enclose the parser's
+    // current position. A direct eval's text starts outside all of them.
+    int m_loop_depth{0};
+    int m_switch_depth{0};
     int m_closure_count{0};
     std::vector<FunctionContext> m_functions;
     std::vector<BlockStmt*> m_blocks;

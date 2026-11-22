@@ -43,14 +43,14 @@
       "date": "2026-11-20"
     },
     "test262_default_directories": {
-      "before_pass": 12657,
+      "before_pass": 14898,
       "before_of": 15686,
-      "now_pass": 13660,
+      "now_pass": 14926,
       "now_of": 15686,
-      "fixed": 1003,
+      "fixed": 28,
       "command": "python3 tools/conformance/run_test262.py --binary before=<branch point> --binary now=build/litebird",
       "date": "2026-11-20",
-      "note": "the 21 default directories; 'before' is the commit the phase started from"
+      "note": "the 21 default directories; 'before' is the commit the phase started from. Phase 182 fixed 28 with 0 lost; language/eval-code, which is NOT in this list, went 163/343 -> 196/343"
     },
     "test262_class_directories": {
       "before_pass": 6832,

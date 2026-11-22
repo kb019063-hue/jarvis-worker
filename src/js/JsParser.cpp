@@ -285,6 +285,14 @@ struct FlagScope {
     ~FlagScope() { flag = saved; }
 };
 
+/// One more loop (or `switch`) encloses the parser from here until the scope
+/// ends, for the early errors a `break` or `continue` depends on.
+struct LatchedScope {
+    int& depth;
+    explicit LatchedScope(int& d) : depth(d) { ++depth; }
+    ~LatchedScope() { --depth; }
+};
+
 bool is_directive_prologue_terminator(const JsToken& next) {
     if (next.type == JsTokenType::Semicolon || next.type == JsTokenType::CloseBrace ||
         next.type == JsTokenType::Eof) {
@@ -344,6 +352,12 @@ std::unique_ptr<Program> JsParser::parse_program() {
     ctx.var_names = &program->var_names;
     ctx.allow_super_property = m_context.allow_super_property;
     ctx.allow_super_call = m_context.allow_super_call;
+    // A direct eval's text is strict when its caller's is, even though the
+    // text itself does not say so: `eval('var static')` from strict code is a
+    // SyntaxError the same way `'use strict'; var static` is. The directive
+    // prologue below can only make this true, never false.
+    ctx.strict = m_context.strict;
+    ctx.forbid_arguments = m_context.forbid_arguments;
     m_functions.push_back(ctx);
     m_blocks.push_back(program.get());
     parse_statement_list(*program, false);
@@ -499,6 +513,17 @@ std::unique_ptr<Stmt> JsParser::parse_statement() {
                 validate_identifier(label, is_strict());
             }
             consume_semicolon();
+            // §14.8/§14.9 early errors: a `break` needs an enclosing
+            // iteration or `switch`, a `continue` an enclosing iteration.
+            // An eval's text is a Script of its own, so a loop written in the
+            // caller's code does not enclose it: `eval('break')` is a
+            // SyntaxError however the call site is placed.
+            if (m_context.direct_eval) {
+                const char* what = is_break ? "break" : "continue";
+                if (m_loop_depth == 0 && (!is_break || m_switch_depth == 0)) {
+                    fail(std::string("Illegal ") + what + " statement");
+                }
+            }
             if (is_break) return std::make_unique<BreakStmt>(std::move(label));
             return std::make_unique<ContinueStmt>(std::move(label));
         }
@@ -578,6 +603,7 @@ std::unique_ptr<Stmt> JsParser::parse_if_statement() {
 }
 
 std::unique_ptr<Stmt> JsParser::parse_switch_statement() {
+    LatchedScope switch_scope(m_switch_depth);
     consume(JsTokenType::OpenParen, "Expected '(' after switch.");
     auto discriminant = parse_expression();
     consume(JsTokenType::CloseParen, "Expected ')' after switch expression.");
@@ -621,11 +647,13 @@ std::unique_ptr<Stmt> JsParser::parse_while_statement() {
     consume(JsTokenType::OpenParen, "Expected '(' after while.");
     auto condition = parse_expression();
     consume(JsTokenType::CloseParen, "Expected ')' after while condition.");
+    LatchedScope loop(m_loop_depth);
     auto body = parse_declaration_or_statement();
     return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
 }
 
 std::unique_ptr<Stmt> JsParser::parse_do_while_statement() {
+    LatchedScope loop(m_loop_depth);
     auto body = parse_declaration_or_statement();
     consume(JsTokenType::While, "Expected 'while' after do body.");
     consume(JsTokenType::OpenParen, "Expected '(' after while.");
@@ -693,7 +721,10 @@ std::unique_ptr<Stmt> JsParser::parse_for_statement() {
     consume(JsTokenType::Semicolon, "Expected ';' after for-loop condition.");
     if (!check(JsTokenType::CloseParen)) stmt->update = parse_expression();
     consume(JsTokenType::CloseParen, "Expected ')' after for-loop clauses.");
-    stmt->body = parse_declaration_or_statement();
+    {
+        LatchedScope loop(m_loop_depth);
+        stmt->body = parse_declaration_or_statement();
+    }
 
     if (init && init->kind == NodeKind::VarDecl) {
         auto* var_decl = static_cast<VarDeclStmt*>(init.get());
@@ -732,6 +763,15 @@ std::unique_ptr<Stmt> JsParser::parse_try_statement() {
 }
 
 std::unique_ptr<Stmt> JsParser::parse_return_statement() {
+    // §14.10.1: `return` only appears in a function body. An eval's text is a
+    // Script, so the function that calls it does not make its `return` legal.
+    if (m_context.direct_eval) {
+        bool in_function = false;
+        for (const auto& ctx : m_functions) {
+            if (ctx.fn) in_function = true;
+        }
+        if (!in_function) fail("Illegal return statement");
+    }
     std::unique_ptr<Expr> value;
     // A line break after `return` ends the statement (restricted production).
     if (!check(JsTokenType::Semicolon) && !check(JsTokenType::CloseBrace) && !is_at_end() &&
@@ -853,9 +893,19 @@ void JsParser::parse_params_and_body(FunctionNode& fn, bool allow_super_property
     ctx.is_async = fn.is_async;
     ctx.is_generator = fn.is_generator;
     ctx.strict = m_functions.empty() ? false : m_functions.back().strict;
+    // An eval in a class field initialiser keeps the ban on `arguments` even
+    // where its text starts a function of its own: the ban belongs to the
+    // eval's text, not to the code that text declares. An ordinary `function`
+    // then lifts it for its own body -- it declares an `arguments` of its
+    // own, so `eval('() => arguments')` is refused while
+    // `eval('function g(){ arguments }')` is not.
+    ctx.forbid_arguments = !m_functions.empty() && m_functions.back().forbid_arguments;
     ctx.allow_super_property = allow_super_property;
     ctx.allow_super_call = allow_super_call;
     m_functions.push_back(ctx);
+    // Parameters are part of the function's own code, which does have
+    // `arguments`, so the ban stops before them.
+    m_functions.back().forbid_arguments = false;
     parse_params(fn);
     parse_function_body(fn);
     m_functions.pop_back();
@@ -1103,6 +1153,10 @@ std::shared_ptr<ClassNode> JsParser::parse_class(bool is_declaration) {
                 ctx.allow_super_property = true;
                 ctx.in_class_field = true;
                 m_functions.push_back(ctx);
+                // A static block is code, not a function body: its own ban on
+                // `arguments` applies to everything in it, a nested arrow
+                // included, and `parse_function_body` leaves it alone unless
+                // the block declares an ordinary function of its own.
                 parse_function_body(*fn);
                 m_functions.pop_back();
                 m_closure_count++;
@@ -1862,6 +1916,8 @@ std::unique_ptr<Expr> JsParser::parse_call_or_member() {
                 if (!m_functions.empty()) {
                     call->direct_eval_allows_super_property = m_functions.back().allow_super_property;
                     call->direct_eval_allows_super_call = m_functions.back().allow_super_call;
+                    call->direct_eval_forbids_arguments = m_functions.back().forbid_arguments;
+                    call->direct_eval_from_strict_code = is_strict();
                 }
                 if (auto* fn = nearest_non_arrow_function()) {
                     fn->uses_arguments = true;

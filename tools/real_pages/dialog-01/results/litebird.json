@@ -1,0 +1,153 @@
+[
+  {
+    "id": "H1",
+    "pass": false,
+    "trace": [
+      {
+        "check": "source heading",
+        "want": "Getting Started",
+        "got": "Getting Started"
+      }
+    ],
+    "exit": 0,
+    "seconds": 1.85,
+    "failures": [
+      "no clickable target: a[aria-label='Next chapter']",
+      "incomplete trace"
+    ]
+  },
+  {
+    "id": "H2",
+    "pass": false,
+    "trace": [
+      {
+        "check": "initial selection",
+        "want": "true",
+        "got": "true"
+      },
+      {
+        "hit": "#tab-1 @ 84.96,300 -> span#"
+      },
+      {
+        "check": "focused tab",
+        "want": "tab-2",
+        "got": "tab-2"
+      },
+      {
+        "check": "new selection",
+        "want": "true",
+        "got": "true"
+      },
+      {
+        "check": "old panel hidden",
+        "want": "true",
+        "got": "true"
+      },
+      {
+        "check": "visible biography",
+        "want": "true",
+        "got": "false"
+      }
+    ],
+    "exit": 0,
+    "seconds": 1.56,
+    "failures": [
+      "visible biography: 'false', wanted 'true'"
+    ]
+  },
+  {
+    "id": "H3",
+    "pass": false,
+    "trace": [
+      {
+        "check": "initially closed and hidden",
+        "want": "true",
+        "got": "true"
+      },
+      {
+        "hit": "#updateDetails @ 58.168,10 -> button#updateDetails"
+      },
+      {
+        "check": "modal open",
+        "want": "true",
+        "got": "true"
+      },
+      {
+        "check": "form visible",
+        "want": "Favorite animal:",
+        "got": "Favorite animal:"
+      },
+      {
+        "hit": "#cancel @ 27.1016,46 -> button#cancel"
+      },
+      {
+        "check": "closed and hidden",
+        "want": "true",
+        "got": "true"
+      },
+      {
+        "check": "return value",
+        "want": "animalNotChosen",
+        "got": "animalNotChosen"
+      },
+      {
+        "check": "restored focus",
+        "want": "updateDetails",
+        "got": "cancel"
+      }
+    ],
+    "exit": 0,
+    "seconds": 0.17,
+    "failures": [
+      "restored focus: 'cancel', wanted 'updateDetails'"
+    ]
+  },
+  {
+    "id": "H4",
+    "pass": false,
+    "trace": [
+      {
+        "check": "empty list",
+        "want": "0",
+        "got": "0"
+      },
+      {
+        "hit": ".new-todo @ 275,178.5 -> input#"
+      },
+      {
+        "check": "input focused",
+        "want": "true",
+        "got": "true"
+      },
+      {
+        "check": "typed value",
+        "want": "Buy mangoes",
+        "got": "Buy mangoes"
+      },
+      {
+        "check": "one item",
+        "want": "1",
+        "got": "1"
+      },
+      {
+        "check": "visible item",
+        "want": "Buy mangoes",
+        "got": "Buy mangoes"
+      },
+      {
+        "check": "input cleared",
+        "want": "",
+        "got": ""
+      },
+      {
+        "hit": ".todo-list .toggle @ 20,248 -> label#"
+      }
+    ],
+    "exit": 0,
+    "seconds": 0.42,
+    "failures": [
+      "no clickable target: .todo-list .toggle",
+      "incomplete trace"
+    ]
+  }
+]

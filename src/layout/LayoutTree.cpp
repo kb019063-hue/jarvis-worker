@@ -568,7 +568,11 @@ void populate_special_element_box(
                     if (sub_root) {
                         DisplayList sub_list = DisplayList::build(sub_root);
                         BitmapRenderer bmp(rw, rh);
-                        bmp.clear(Color::white());
+                        // A child browsing context is transparent where its
+                        // document paints nothing. Flattening it onto white
+                        // here hid the embedding page and changed translucent
+                        // canvas colors before the iframe was composited.
+                        bmp.clear(Color::transparent());
                         bmp.render(sub_list);
                         img->width = rw;
                         img->height = rh;
@@ -870,10 +874,29 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
         });
     }
 
+    // Only a whole HTML document owns a canvas. In particular, building a
+    // layout for an arbitrary <body> or <div> subtree must not turn that
+    // subtree's background into a viewport-wide paint.
+    std::shared_ptr<Document> document;
+    std::shared_ptr<Element> html;
+    std::optional<ComputedStyle> html_style;
+    if (root_node && root_node->is_document()) {
+        document = std::static_pointer_cast<Document>(root_node);
+        auto element = document->document_element();
+        if (element && !element->is_foreign() && element->tag_name() == "html") {
+            html = element;
+            html_style = resolver.resolve_style(html, nullptr);
+        }
+    }
+
     ComputedStylePool pool;
     std::vector<std::shared_ptr<LayoutBox>> root_boxes;
     std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>> split_inline_blocks;
-    build_boxes(root_node, resolver, nullptr, pool, 0, root_boxes, split_inline_blocks);
+    // The tree normally starts at body, but a display:none HTML ancestor hides
+    // that whole tree, including both candidates for canvas propagation.
+    if (!html_style || !html_style->is_none()) {
+        build_boxes(root_node, resolver, nullptr, pool, 0, root_boxes, split_inline_blocks);
+    }
 
     std::shared_ptr<LayoutBox> root_box;
     if (root_boxes.size() == 1 && is_block_level_box(*root_boxes.front())) {
@@ -890,10 +913,47 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
         root_box = LayoutBox::create_block(nullptr, std::move(root_style));
     }
 
+    // Even an uncolored HTML document owns a transparent canvas: embedded
+    // documents preserve its alpha, while a top-level terminal needs to know
+    // that it should show the browser's white backdrop rather than its default
+    // dark grid. Subtree and non-HTML layout roots do not own one.
+    root_box->has_document_canvas = html_style.has_value();
+
+    // CSS Backgrounds: the HTML root supplies the canvas unless its color is
+    // transparent, in which case the first HTML body child supplies it. The
+    // color's *used* value is then transparent on the source box; keep the
+    // computed style intact and mark its boxes instead. Background images are
+    // not represented by ComputedStyle yet (see the phase's remaining work).
+    std::shared_ptr<Element> canvas_source;
+    if (html_style && !html_style->is_none()) {
+        if (!html_style->background_color.is_transparent()) {
+            root_box->canvas_background = html_style->background_color;
+            canvas_source = html;
+        } else if (auto body = document->body();
+                   body && !body->is_foreign() && body->parent() == html) {
+            const ComputedStyle body_style = resolver.resolve_style(body, &*html_style);
+            if (!body_style.is_none() && !body_style.background_color.is_transparent()) {
+                root_box->canvas_background = body_style.background_color;
+                canvas_source = body;
+            }
+        }
+    }
+    if (canvas_source) {
+        // Usually the body is the root box. An inline body can be split into
+        // multiple boxes around blocks; mark each before layout constructs its
+        // line fragments so the inline painter can preserve child backgrounds.
+        std::vector<LayoutBox*> boxes{root_box.get()};
+        while (!boxes.empty()) {
+            LayoutBox* box = boxes.back();
+            boxes.pop_back();
+            if (box->node == canvas_source) box->background_propagated = true;
+            for (auto& child : box->children) boxes.push_back(child.get());
+        }
+    }
+
     bool document_body_root = false;
-    if (root_node && root_node->is_document()) {
-        auto doc = std::static_pointer_cast<Document>(root_node);
-        if (auto body = doc->body(); body && root_box->node == body) document_body_root = true;
+    if (document) {
+        if (auto body = document->body(); body && root_box->node == body) document_body_root = true;
     }
     root_box->dimensions.content.x = 0.0f;
     root_box->dimensions.content.y = 0.0f;
@@ -980,7 +1040,7 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
     if (root_node && root_node->is_document()) {
         auto doc = std::static_pointer_cast<Document>(root_node);
         if (auto doc_el = doc->document_element()) {
-            if (!doc_el->has_layout_box() && root_box) {
+            if ((!html_style || !html_style->is_none()) && !doc_el->has_layout_box() && root_box) {
                 const float h = std::max(viewport_height, root_box->dimensions.margin_box().height);
                 doc_el->set_layout_box(Rect(0.0f, 0.0f, viewport_width, h));
             }

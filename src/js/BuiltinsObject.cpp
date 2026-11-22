@@ -66,6 +66,35 @@ std::vector<std::string> reflected_own_keys(const JsValue& object, bool include_
     return object.own_keys(include_non_enumerable);
 }
 
+/// The own keys `[[OwnPropertyKeys]]` reports for `object`: the string keys in
+/// `own_keys`' order (indices ascending, then creation order), and after every
+/// one of them the symbols, in the order they were made.
+///
+/// `own_keys` answers with strings only — the same answer a property table
+/// gives `Object.keys`, `for...in` and JSON — because most callers either
+/// cannot see a symbol key or are the very thing that must not. The ones that
+/// copy every key (`Object.assign`, spread, `Object.getOwnPropertyDescriptors`)
+/// have to add the symbols themselves; this is that list.
+std::vector<std::string> assign_keys(const JsValue& object, bool enumerable_only = true) {
+    std::vector<std::string> keys = reflected_own_keys(object, !enumerable_only);
+    if (JsObject* cell = object.property_cell()) {
+        // The table is walked twice — once by `own_keys` above and once here —
+        // rather than counted first: the count a symbol key would have to be
+        // compared against is not `keys.size()`, because an array's indices
+        // are elements and not table entries.
+        for (const auto& entry : cell->properties) {
+            // `Object.assign` copies only the enumerable symbols; the
+            // `[[OwnPropertyKeys]]` a caller like `Reflect.ownKeys` asks for
+            // reports every one of them.
+            if (enumerable_only && !(entry.flags & PropertyMap::Enumerable)) continue;
+            JsValue symbol;
+            if (!js_symbol_from_key(entry.first, symbol)) continue;
+            keys.push_back(entry.first);
+        }
+    }
+    return keys;
+}
+
 /// The table that holds `value`'s own named properties, if it has one.
 PropertyMap* own_table(const JsValue& value, bool create) {
     if (JsObject* cell = value.property_cell(create)) return &cell->properties;
@@ -644,12 +673,33 @@ void install_object_builtins(JsIntrinsics& realm) {
         }
         return JsValue::make_array(symbols);
     });
+    /// §20.1.2.1 `Object.assign`. Four things the signature makes look optional
+    /// are not: the target is boxed with `ToObject` (so `Object.assign(12, "ab")`
+    /// returns a Number object carrying `0` and `1`, and hands back the *box*,
+    /// never the primitive); each copy is a strict `Set` — `[[Set]]`'s `false`
+    /// throws a `TypeError` instead of dropping the value; the keys of a source
+    /// are the *own* keys `[[OwnPropertyKeys]]` gives, so the symbols come too,
+    /// after every string key and in creation order; and a source whose own key
+    /// has gone missing between the key list and the read (`Proxy`) skips it
+    /// rather than copying `undefined`.
     js_define_method(object_ctor, "assign", 2, [](Args args) {
-        JsValue target = js_arg(args, 0);
-        if (target.is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
+        JsValue target = js_to_object(js_arg(args, 0));
         for (size_t i = 1; i < args.size(); ++i) {
-            if (args[i].is_nullish()) continue;
-            for (const auto& key : reflected_own_keys(args[i], false)) target.set_property(key, args[i].get_property(key));
+            const JsValue& source = args[i];
+            if (source.is_nullish()) continue;
+            // `from` is the boxed source: a string source is read through its
+            // characters, which only a String object answers for.
+            JsValue from = js_to_object(source);
+            for (const auto& key : assign_keys(from)) {
+                // A key that was there for `[[OwnPropertyKeys]]` and is gone
+                // now — a Proxy that answers differently twice — is not copied.
+                if (!from.has_own_property(key)) continue;
+                JsValue value = from.get_property(key);
+                // `Set(target, key, value, true)`: no silent failures.
+                if (!target.set_property(key, value)) {
+                    js_throw_type_error("Cannot assign to read only property '" + key + "' of object");
+                }
+            }
         }
         return target;
     });
@@ -841,15 +891,34 @@ void install_object_builtins(JsIntrinsics& realm) {
         if (!target.is_function()) js_throw_type_error("Bind must be called on a function");
         JsValue bound_this = js_arg(args, 0);
         std::vector<JsValue> bound_args(args.size() > 1 ? args.begin() + 1 : args.end(), args.end());
-        JsValue bound = JsValue::make_native_function([target, bound_this, bound_args](Args call_args) {
-            std::vector<JsValue> all = bound_args;
+        // What the entry point needs is kept where the collector can see it
+        // (see JsValue::Extra::captured). A std::function's captures are not
+        // traced: a target that lived only inside one made every copy of this
+        // bound function look like the payload's one owner, the payload became
+        // a root, and the target -- with its closure, and the variables the
+        // closure holds -- was never collected.
+        //
+        // The captures are the target, the bound `this`, then the arguments
+        // already bound, in that order.
+        JsValue bound = JsValue::make_native_function([](Args call_args) {
+            const std::vector<JsValue>& kept = JsValue::current_captured();
+            if (kept.size() < 2) return JsValue::make_undefined();
+            std::vector<JsValue> all(kept.begin() + 2, kept.end());
             all.insert(all.end(), call_args.begin(), call_args.end());
             // `new boundFn()` constructs the target and ignores the bound
             // `this`. Inside, new.target is the target, or whatever function
             // Reflect.construct or a subclass's super() named instead.
-            if (JsValue::current_is_construct()) return js_construct(target, all, JsValue::current_new_target());
-            return target.call_with_this(bound_this, all);
+            if (JsValue::current_is_construct()) {
+                return js_construct(kept[0], all, JsValue::current_new_target());
+            }
+            return kept[0].call_with_this(kept[1], all);
         });
+        std::vector<JsValue> captures;
+        captures.reserve(2 + bound_args.size());
+        captures.push_back(target);
+        captures.push_back(bound_this);
+        captures.insert(captures.end(), bound_args.begin(), bound_args.end());
+        bound.set_payload_captured(std::move(captures));
         bound.set_forwards_construct();
         // `instanceof` has no `prototype` to walk to on a bound function: the
         // language asks the target, and this is where the target is kept.
@@ -954,7 +1023,24 @@ void install_object_builtins(JsIntrinsics& realm) {
     // ---- Reflect ----------------------------------------------------------
     JsValue reflect = JsValue::make_object();
     js_define_method(reflect, "ownKeys", 1, [](Args args) {
-        return make_string_array(reflected_own_keys(require_object(js_arg(args, 0), "Reflect.ownKeys"), true));
+        // §28.1.11 is [[OwnPropertyKeys]], which includes the symbols; the array
+        // it answers with holds the symbols themselves, not their descriptions.
+        // `assign_keys` is the list that knows the order (every string key, then
+        // the symbols in creation order) and `reflected_own_keys` is the one that
+        // knows the cross-origin Window/Location rule, so this takes the
+        // cross-origin answer first and falls back to the copy list.
+        JsValue object = require_object(js_arg(args, 0), "Reflect.ownKeys");
+        std::vector<std::string> keys;
+        if (!litebird::dom::cross_origin_own_keys(object, true, keys)) keys = assign_keys(object, false);
+        std::vector<JsValue> values;
+        values.reserve(keys.size());
+        for (const std::string& key : keys) {
+            // A symbol key's internal text resolves back to the symbol itself.
+            JsValue symbol;
+            if (js_symbol_from_key(key, symbol)) values.push_back(symbol);
+            else values.push_back(JsValue::make_string(key));
+        }
+        return JsValue::make_array(values);
     });
     js_define_method(reflect, "has", 2, [](Args args) {
         return JsValue::make_boolean(require_object(js_arg(args, 0), "Reflect.has")

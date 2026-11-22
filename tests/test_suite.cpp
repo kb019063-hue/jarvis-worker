@@ -26,6 +26,7 @@
 #include "litebird/render/JpegDecoder.hpp"
 #include "litebird/render/GifDecoder.hpp"
 #include "litebird/render/WebPDecoder.hpp"
+#include "litebird/render/AvifContainer.hpp"
 #include "litebird/net/Brotli.hpp"
 #include "litebird/net/Deflate.hpp"
 #include "litebird/shell/WebBrowserServer.hpp"
@@ -7813,7 +7814,7 @@ TEST(websocket_handshake_security_and_secure_transport) {
             std::string protocol = response_kind == 6 ? "Sec-WebSocket-Protocol: unknown\r\n" :
                                    response_kind == 7 ? "Sec-WebSocket-Protocol: chat\r\n" : "";
             std::string response = status + upgrade + connection + accept_header + protocol;
-            if (response_kind == 8) response += "Sec-WebSocket-Extensions: permessage-deflate\r\n";
+            if (response_kind == 8) response += "Sec-WebSocket-Extensions: x-unoffered-ext\r\n";
             if (response_kind == 9) response += "X-Large: " + std::string(65536, 'a') + "\r\n";
             response += "\r\n";
             ::send(client, response.data(), response.size(), MSG_NOSIGNAL);
@@ -17290,6 +17291,220 @@ TEST(length_is_inherited_from_an_array_prototype) {
     )JS");
     assert(js.eval("failures.length").to_string() == "0");
     assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
+
+// Phase 172, finding 172. The AVIF container: the boxes around the picture,
+// read and bounds-checked, and not the picture, which needs an AV1 decoder and
+// does not have one yet.
+//
+// The fixtures are real AVIF files written by Pillow 13.0.0 (libavif), one 4x4
+// and one 32x32, and every number asserted below was read out of them by hand
+// first: iloc version 0 with 4-byte offsets and lengths, one av01 item, ispe
+// 4x4 and 32x32, pixi 8-bit, av1C profile 0 with 4:2:0 subsampling, and a
+// `colr` of type `nclx`.
+static const uint8_t kAvif4x4[] = {
+    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66, 0x00, 0x00, 0x00, 0x00,
+    0x61, 0x76, 0x69, 0x66, 0x6D, 0x69, 0x66, 0x31, 0x6D, 0x69, 0x61, 0x66, 0x4D, 0x41, 0x31, 0x42,
+    0x00, 0x00, 0x00, 0xEB, 0x6D, 0x65, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21,
+    0x68, 0x64, 0x6C, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0x69, 0x63, 0x74,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0E, 0x70, 0x69, 0x74, 0x6D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1E, 0x69,
+    0x6C, 0x6F, 0x63, 0x00, 0x00, 0x00, 0x00, 0x44, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x01, 0x13, 0x00, 0x00, 0x00, 0x32, 0x00, 0x00, 0x00, 0x28, 0x69, 0x69, 0x6E,
+    0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1A, 0x69, 0x6E, 0x66, 0x65, 0x02,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x61, 0x76, 0x30, 0x31, 0x43, 0x6F, 0x6C, 0x6F, 0x72,
+    0x00, 0x00, 0x00, 0x00, 0x6A, 0x69, 0x70, 0x72, 0x70, 0x00, 0x00, 0x00, 0x4B, 0x69, 0x70, 0x63,
+    0x6F, 0x00, 0x00, 0x00, 0x14, 0x69, 0x73, 0x70, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00, 0x10, 0x70, 0x69, 0x78, 0x69, 0x00, 0x00, 0x00,
+    0x00, 0x03, 0x08, 0x08, 0x08, 0x00, 0x00, 0x00, 0x0C, 0x61, 0x76, 0x31, 0x43, 0x81, 0x00, 0x0C,
+    0x00, 0x00, 0x00, 0x00, 0x13, 0x63, 0x6F, 0x6C, 0x72, 0x6E, 0x63, 0x6C, 0x78, 0x00, 0x01, 0x00,
+    0x0D, 0x00, 0x06, 0x80, 0x00, 0x00, 0x00, 0x17, 0x69, 0x70, 0x6D, 0x61, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x04, 0x01, 0x02, 0x83, 0x04, 0x00, 0x00, 0x00, 0x3A, 0x6D,
+    0x64, 0x61, 0x74, 0x12, 0x00, 0x0A, 0x08, 0x18, 0x04, 0x7D, 0xA2, 0x02, 0x1A, 0x0D, 0x08, 0x32,
+    0x24, 0x14, 0xC7, 0x87, 0x86, 0x65, 0x02, 0x08, 0x20, 0x9E, 0x55, 0x54, 0x00, 0x08, 0x48, 0x5A,
+    0xF0, 0x74, 0x44, 0xA8, 0x41, 0x45, 0x37, 0x4F, 0xE8, 0x7A, 0x79, 0xF6, 0xBB, 0xA1, 0x61, 0x1D,
+    0x44, 0x48, 0x22, 0x30, 0xD0,
+};
+
+static const uint8_t kAvif32x32[] = {
+    0x00, 0x00, 0x00, 0x20, 0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66, 0x00, 0x00, 0x00, 0x00,
+    0x61, 0x76, 0x69, 0x66, 0x6D, 0x69, 0x66, 0x31, 0x6D, 0x69, 0x61, 0x66, 0x4D, 0x41, 0x31, 0x42,
+    0x00, 0x00, 0x00, 0xEB, 0x6D, 0x65, 0x74, 0x61, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x21,
+    0x68, 0x64, 0x6C, 0x72, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x70, 0x69, 0x63, 0x74,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x0E, 0x70, 0x69, 0x74, 0x6D, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1E, 0x69,
+    0x6C, 0x6F, 0x63, 0x00, 0x00, 0x00, 0x00, 0x44, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+    0x01, 0x00, 0x00, 0x01, 0x13, 0x00, 0x00, 0x00, 0x26, 0x00, 0x00, 0x00, 0x28, 0x69, 0x69, 0x6E,
+    0x66, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x1A, 0x69, 0x6E, 0x66, 0x65, 0x02,
+    0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x61, 0x76, 0x30, 0x31, 0x43, 0x6F, 0x6C, 0x6F, 0x72,
+    0x00, 0x00, 0x00, 0x00, 0x6A, 0x69, 0x70, 0x72, 0x70, 0x00, 0x00, 0x00, 0x4B, 0x69, 0x70, 0x63,
+    0x6F, 0x00, 0x00, 0x00, 0x14, 0x69, 0x73, 0x70, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x20, 0x00, 0x00, 0x00, 0x20, 0x00, 0x00, 0x00, 0x10, 0x70, 0x69, 0x78, 0x69, 0x00, 0x00, 0x00,
+    0x00, 0x03, 0x08, 0x08, 0x08, 0x00, 0x00, 0x00, 0x0C, 0x61, 0x76, 0x31, 0x43, 0x81, 0x00, 0x0C,
+    0x00, 0x00, 0x00, 0x00, 0x13, 0x63, 0x6F, 0x6C, 0x72, 0x6E, 0x63, 0x6C, 0x78, 0x00, 0x01, 0x00,
+    0x0D, 0x00, 0x06, 0x80, 0x00, 0x00, 0x00, 0x17, 0x69, 0x70, 0x6D, 0x61, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x04, 0x01, 0x02, 0x83, 0x04, 0x00, 0x00, 0x00, 0x2E, 0x6D,
+    0x64, 0x61, 0x74, 0x12, 0x00, 0x0A, 0x09, 0x18, 0x11, 0x3F, 0xF6, 0x88, 0x08, 0x68, 0x34, 0x20,
+    0x32, 0x17, 0x1E, 0xC7, 0x87, 0x85, 0x59, 0xDF, 0xFF, 0xFF, 0xE2, 0xC0, 0x00, 0x00, 0x8B, 0x31,
+    0xF6, 0xEB, 0x6E, 0xD1, 0x8E, 0xEC, 0xA7, 0x86, 0xC0,
+};
+
+static void check_avif_is_read(const uint8_t* bytes, size_t size, uint32_t width, uint32_t height,
+                               size_t payload_bytes, const char* label) {
+    using namespace litebird;
+    assert(AvifContainer::is_avif(bytes, size));
+    auto file = AvifContainer::parse(bytes, size);
+    assert(file.status == AvifContainer::Status::Ok);
+    assert(file.error.empty());
+    assert(file.major_brand == "avif");
+    assert(file.has_primary());
+    const auto& p = file.primary;
+    assert(p.type == "av01");
+    assert(p.has_ispe && p.width == width && p.height == height);
+    // `pixi` lists every plane the image has, subsampled ones included: a
+    // 4:2:0 image has three planes at 8 bits, not one. Asserting one plane
+    // here is what a reader who had only seen RGB would write.
+    assert(p.has_pixi && p.bit_depth.size() == 3);
+    assert(p.bit_depth[0] == 8 && p.bit_depth[1] == 8 && p.bit_depth[2] == 8);
+    assert(p.has_av1c);
+    assert(p.av1c.seq_profile == 0);
+    assert(!p.av1c.high_bitdepth && !p.av1c.twelve_bit && !p.av1c.monochrome);
+    assert(p.av1c.subsampling_x && p.av1c.subsampling_y);     // 4:2:0
+    assert(p.colour.present && p.colour.is_nclx);
+    // The bytes are the item's own: an AVIF's mdat holds exactly the extent
+    // `iloc` names, so the payload is the whole of it and nothing else.
+    assert(p.payload.size() == payload_bytes);
+    // The first byte of an AV1 payload is an OBU header, and the AV1 Image
+    // File Format requires the sequence header first: OBU_TEMPORAL_DELIMITER
+    // (type 2) or OBU_SEQUENCE_HEADER (type 1), never a reserved type.
+    const uint8_t obu_type = static_cast<uint8_t>((p.payload[0] >> 3) & 0x0f);
+    assert(obu_type == 2 || obu_type == 1);
+    (void)label;
+}
+
+TEST(avif_container_is_read_and_the_picture_is_not_decoded) {
+    using namespace litebird;
+
+    check_avif_is_read(kAvif4x4, sizeof(kAvif4x4), 4, 4, 50, "4x4");
+    check_avif_is_read(kAvif32x32, sizeof(kAvif32x32), 32, 32, 38, "32x32");
+
+    // The payload is byte-for-byte what the mdat box holds: find the box and
+    // compare, rather than trusting the length alone.
+    {
+        auto file = AvifContainer::parse(kAvif4x4, sizeof(kAvif4x4));
+        size_t mdat = 0;
+        for (size_t i = 0; i + 4 < sizeof(kAvif4x4); ++i) {
+            if (std::memcmp(kAvif4x4 + i, "mdat", 4) == 0) { mdat = i - 4; break; }
+        }
+        assert(mdat != 0);
+        const uint32_t msize = (static_cast<uint32_t>(kAvif4x4[mdat]) << 24) |
+                               (static_cast<uint32_t>(kAvif4x4[mdat + 1]) << 16) |
+                               (static_cast<uint32_t>(kAvif4x4[mdat + 2]) << 8) |
+                               static_cast<uint32_t>(kAvif4x4[mdat + 3]);
+        assert(msize == 58);
+        std::vector<uint8_t> expected(kAvif4x4 + mdat + 8, kAvif4x4 + mdat + msize);
+        assert(file.primary.payload == expected);
+
+        // The same bytes parse the same way twice.
+        auto again = AvifContainer::parse(kAvif4x4, sizeof(kAvif4x4));
+        assert(again.primary.payload == file.primary.payload);
+        assert(again.primary.width == file.primary.width);
+    }
+
+    // The generic image entry point knows an AVIF and still hands back no
+    // picture, because there is no AV1 decoder behind it. That is the honest
+    // answer and it is asserted, so that the day a decoder lands this test
+    // fails and says the row is done.
+    {
+        std::vector<uint8_t> bytes(kAvif4x4, kAvif4x4 + sizeof(kAvif4x4));
+        assert(ImageDecoder::decode(bytes, "image/avif") == nullptr);
+        assert(ImageDecoder::decode(bytes, "") == nullptr);
+    }
+
+    // What is not an AVIF is not one: a PNG, a WebP, a JPEG header and plain
+    // text all answer false, so the brand check is not merely "has a ftyp".
+    {
+        const uint8_t png[] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0};
+        assert(!AvifContainer::is_avif(png, sizeof(png)));
+        const uint8_t riff[] = {'R', 'I', 'F', 'F', 0, 0, 0, 0, 'W', 'E', 'B', 'P'};
+        assert(!AvifContainer::is_avif(riff, sizeof(riff)));
+        const uint8_t text[] = "this is a text file, not an image at all";
+        assert(!AvifContainer::is_avif(text, sizeof(text) - 1));
+        // An ISO base media file with the wrong brand: `ftyp` and `mp42`.
+        const uint8_t mp4[] = {0, 0, 0, 0x10, 'f', 't', 'y', 'p', 'm', 'p', '4', '2',
+                               0, 0, 0, 0, 'm', 'p', '4', '2'};
+        assert(!AvifContainer::is_avif(mp4, sizeof(mp4)));
+        assert(AvifContainer::parse(mp4, sizeof(mp4)).status == AvifContainer::Status::NotAvif);
+    }
+    assert(std::string(AvifContainer::status_string(AvifContainer::Status::Ok)) == "ok");
+}
+
+TEST(avif_container_refuses_what_it_cannot_read_instead_of_guessing) {
+    using namespace litebird;
+
+    auto status_of = [](std::vector<uint8_t> bytes) {
+        return AvifContainer::parse(bytes.data(), bytes.size()).status;
+    };
+    std::vector<uint8_t> base(kAvif4x4, kAvif4x4 + sizeof(kAvif4x4));
+
+    // Too short to hold anything, and empty.
+    assert(status_of({}) == AvifContainer::Status::NotAvif);
+    assert(status_of(std::vector<uint8_t>(base.begin(), base.begin() + 11)) == AvifContainer::Status::NotAvif);
+
+    // A box that claims more bytes than the file has, and a file cut off
+    // inside its meta box: malformed, not a crash and not a guess.
+    {
+        auto b = base; b[3] = 0xF0;
+        assert(status_of(b) == AvifContainer::Status::Malformed);
+    }
+    {
+        auto b = base; b.resize(200);
+        assert(status_of(b) == AvifContainer::Status::Malformed);
+    }
+    {
+        auto b = base; b.resize(40);
+        assert(status_of(b) == AvifContainer::Status::Malformed);
+    }
+
+    // A structure this parser does not read is `Unsupported` with a reason,
+    // which is different from `Malformed`: the file may be perfectly good.
+    {
+        auto b = base;
+        size_t at = 0;
+        for (size_t i = 0; i + 4 < b.size(); ++i) {
+            if (std::memcmp(b.data() + i, "iloc", 4) == 0) { at = i; break; }
+        }
+        assert(at != 0);
+        b[at + 4] = 9;                       // an iloc version that does not exist yet
+        assert(status_of(b) == AvifContainer::Status::Unsupported);
+    }
+
+    // An extent that points outside the file is refused even though every box
+    // fits: this is the one that would otherwise read past the buffer.
+    {
+        auto b = base;
+        size_t at = 0;
+        for (size_t i = 0; i + 4 < b.size(); ++i) {
+            if (std::memcmp(b.data() + i, "iloc", 4) == 0) { at = i; break; }
+        }
+        // The extent offset is the last 8 bytes of the iloc payload here
+        // (4-byte offset, 4-byte length); make it point far past the end.
+        b[at + 4 + 24] = 0x7F;
+        assert(status_of(b) != AvifContainer::Status::Ok);
+    }
+
+    // A `meta` box that says it is smaller than the boxes inside it.
+    {
+        auto b = base;
+        size_t at = 0;
+        for (size_t i = 0; i + 4 < b.size(); ++i) {
+            if (std::memcmp(b.data() + i, "meta", 4) == 0) { at = i - 4; break; }
+        }
+        assert(at != 0);
+        b[at + 3] = 40;                      // 235 was the real size; the boxes stay
+        assert(status_of(b) != AvifContainer::Status::Ok);
+    }
 }
 
 TEST(html5_date_time_inputs_validation_and_stepping) {
@@ -27982,6 +28197,89 @@ TEST(dataview_and_the_iterating_typed_array_methods) {
     assert(text("class L extends Int16Array {}; var l = new L([3, 1]); l.toSorted() instanceof L") == "true");
 }
 
+TEST(a_typed_array_to_locale_string_asks_every_element)
+{
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- the element is asked, so a patched method shows ------------------
+    // §23.1.3.28 is not `join`: every element is asked for its own
+    // `toLocaleString` and that method is called. The engine formatted the
+    // numbers itself, so this said "1,2" for two years.
+    assert(text("Number.prototype.toLocaleString = function () { return 'X'; };"
+                "new Uint8Array([1,2]).toLocaleString()") == "X,X");
+    assert(text("new Float64Array([1.5, 2.5]).toLocaleString()") == "X,X");
+    assert(text("delete Number.prototype.toLocaleString;"
+                "new Uint8Array([1,2]).toLocaleString()") == "1,2");
+    // A typed array has no holes: every element is a value, so every element is
+    // asked, including a NaN.
+    assert(text("Number.prototype.toLocaleString = function () { return 'X'; };"
+                "new Float32Array([NaN]).toLocaleString()") == "X");
+
+    // ---- the two are different function objects that behave differently ---
+    // §23.2.3.29 gives the typed array its own, and it validates the receiver
+    // where Array's boxes a primitive.
+    assert(text("Uint8Array.prototype.toLocaleString === Array.prototype.toLocaleString") == "false");
+    // The typed array's refuses everything Array's accepts: the receiver must
+    // be a typed array, so a primitive, a plain object, an ArrayBuffer and a
+    // DataView are all TypeErrors.
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(42); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call('1'); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(true); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(null); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call({length:1,0:5}); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(new ArrayBuffer(4)); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(new DataView(new ArrayBuffer(4))); })") == "TypeError");
+
+    // ---- the length is the internal one, not a `length` property ----------
+    // test262's get-length-uses-internal-arraylength: a redefined `length` is
+    // not what a typed-array method reads. The method is put back first, so
+    // this measures [[ArrayLength]] and not the patch two lines above.
+    assert(text("delete Number.prototype.toLocaleString;"
+                "var v = new Uint8Array([1,2,3]); Object.defineProperty(v, 'length', {value: 9});"
+                "v.length + '|' + v.toLocaleString()") == "9|1,2,3");
+    assert(text("new Uint8Array(0).toLocaleString() + '|' + new Uint8Array([7]).toLocaleString()") == "|7");
+    assert(text("new Int32Array([-5]).toLocaleString()") == "-5");
+    // A typed array has no holes, so NaN is a value to print.
+    assert(text("new Float32Array([NaN]).toLocaleString()") == "NaN");
+    assert(text("Array.prototype.toLocaleString.length + '|' + Uint8Array.prototype.toLocaleString.length") == "0|0");
+}
+
+TEST(a_typed_array_toString_is_arrays_own_function)
+{
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // §23.2.3.30: the same function object, not a copy that answers the same
+    // text. `Uint8Array.prototype.toString === Array.prototype.toString` was
+    // false because the typed array had its own.
+    assert(text("Uint8Array.prototype.toString === Array.prototype.toString") == "true");
+    assert(text("Float64Array.prototype.toString === Array.prototype.toString") == "true");
+    // Every constructor's prototype is the same %TypedArray%.prototype%
+    // object, so the identity holds for all nine.
+    assert(text("Int8Array.prototype.toString === Uint16Array.prototype.toString") == "true");
+    // It asks the receiver for `join` by name, and a typed array inherits
+    // `join` from %TypedArray%.prototype%, so the text is what it was.
+    assert(text("new Uint8Array([1,2]).toString()") == "1,2");
+    assert(text("new Uint8Array([1,2]).toString() === new Uint8Array([1,2]).join()") == "true");
+    assert(text("new Float32Array([NaN]).toString()") == "NaN");
+    // A subclass inherits it through the typed-array prototype, not own.
+    assert(text("class S extends Uint8Array {};"
+                "Object.getPrototypeOf(S.prototype).toString === Array.prototype.toString") == "true");
+    assert(text("Object.prototype.hasOwnProperty.call(Uint8Array.prototype, 'toString')") == "false");
+    // And `toString` on a detached view is a TypeError, as Array's join is.
+    assert(text("var b = new ArrayBuffer(4); var v = new Uint8Array(b); b.transfer();"
+                "errName(function () { v.toString(); })") == "TypeError");
+    assert(text("var b = new ArrayBuffer(4); var v = new Uint8Array(b); b.transfer();"
+                "errName(function () { v.toLocaleString(); })") == "TypeError");
+}
+
 TEST(class_bodies_reject_what_the_grammar_does_not_allow) {
     using namespace litebird;
 
@@ -29738,6 +30036,105 @@ TEST(automatic_gc_reclaims_churn_without_calling_gc) {
     heap.collect_garbage();
 }
 
+TEST(gc_reclaims_a_bound_functions_target) {
+    using namespace litebird;
+
+    // A bound function held the target, the bound `this`, the bound arguments
+    // and (for `instanceof`) a second copy of the target inside the
+    // std::function the collector cannot look into. Those copies are invisible
+    // to it, so every copy of the bound function counted as the payload's one
+    // owner; the payload looked held from outside, became a root, and the
+    // target, its closure and every variable the closure held stayed alive for
+    // good. `o.b = f.bind(null)` in a loop leaked three cells an iteration and
+    // `o.b = f.bind(o)` -- the row's own example -- six.
+    //
+    // What the entry point needs now lives in the payload (Extra::captured,
+    // Extra::bound_target), which the collector counts and marks like any
+    // other reference. Every function the test calls is defined once, up
+    // front, so that a measurement is not confused with the globals an
+    // eval_ast() would add.
+    Heap& heap = Heap::default_heap();
+
+    {
+        JsInterpreter js;
+        js.eval_ast(R"(
+            // Nothing but a bound function's payload refers to the target: the
+            // closure's only escape is the bound function, and the object is
+            // reachable only through the bound `this`.
+            function churnCycle(n) {
+                for (var i = 0; i < n; i++) {
+                    var o = {};
+                    o.b = (function () { return i; }).bind(o);
+                }
+            }
+            // The same without a cycle: the leak did not need one.
+            function churnDetached(n) {
+                for (var i = 0; i < n; i++) { var k = {}; k.b = (function () {}).bind(null); }
+            }
+            churnCycle(200);
+        )");
+        heap.collect_garbage();
+        const size_t settled = heap.stats().alive_cells;
+
+        js.eval_ast("churnCycle(500);");
+        heap.collect_garbage();
+        // Before the fix this was +3000: six cells per iteration.
+        assert(heap.stats().alive_cells == settled);
+
+        js.eval_ast("churnDetached(500);");
+        heap.collect_garbage();
+        // Before the fix this was +1500: three cells per iteration.
+        assert(heap.stats().alive_cells == settled);
+
+        // A target the collector must still keep alive: the bound function is
+        // reachable, so it and everything it refers to survive a collection.
+        js.eval_ast(R"(
+            var boundNow = (function () { return { tag: "target-alive" }; }).bind(null);
+        )");
+        heap.collect_garbage();
+        assert(js.global_env()->get("boundNow").call({}).get_property("tag").to_string() == "target-alive");
+    }
+    heap.collect_garbage();
+}
+
+TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour) {
+    using namespace litebird;
+
+    // The values `bind` used to capture are read from the payload now, so the
+    // order they are stored in is part of the contract: target, bound `this`,
+    // then the arguments already bound. These are the answers Node.js
+    // v22.22.3 gives (checked against it directly).
+    JsInterpreter js;
+    JsValue r = js.eval(R"(
+        function greet(a, b) { return this.who + ":" + a + ":" + b; }
+        var g = greet.bind({ who: "obj" }, 1);
+
+        function three(a, b, c) {}
+        function Point(x, y) { this.x = x; this.y = y; }
+        var BP = Point.bind(null, 10);
+        var p = new BP(20);
+
+        function T() { this.nt = typeof new.target; }
+        function sum() { var s = 0; for (var i = 0; i < arguments.length; i++) s += arguments[i]; return s; }
+
+        [
+            g(2),
+            g.name,
+            g.length,
+            three.bind(null, 1).length,
+            three.bind(null, 1, 2, 3, 4).length,
+            p.x + "," + p.y,
+            p instanceof Point,
+            p instanceof BP,
+            new (T.bind(null))().nt,
+            g.bind({ who: "no" }, "x")("y"),
+            sum.bind(null, 1, 2, 3)(4, 5)
+        ].join("|");
+    )");
+    assert(r.to_string() ==
+           "obj:1:2|bound greet|1|2|0|10,20|true|true|function|obj:1:x|15");
+}
+
 TEST(document_body_margins_place_boxes_from_the_viewport) {
     using namespace litebird;
     // Reference rectangles were measured in Chromium 153 at 800x600. The
@@ -29906,6 +30303,298 @@ TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry) {
     auto span = inline_doc->get_element_by_id("kid");
     assert(inline_root && span && !inline_root->line_boxes.empty());
     assert(span->bounding_box().x == 23.0f && span->bounding_box().y == 23.0f);
+}
+
+// Phase 170: a document's solid root/body background belongs to its canvas,
+// not to a root box's geometry. Pixel expectations are from Chromium 153.
+TEST(document_canvas_background_is_scoped_and_keeps_computed_styles) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(
+        R"html(<!doctype html><html><body style="margin:20px;width:100px;height:60px;background:rgba(255,0,0,.5)">)html"
+        R"(<div style="width:20px;height:20px;background:#0000ff"></div></body></html>)");
+    StyleResolver resolver;
+    auto unstyled = HtmlParser::parse("<!doctype html><body></body>");
+    assert(resolver.resolve_style(unstyled->body()).background_color.is_transparent());
+    auto unstyled_root = LayoutTree::build(unstyled, resolver, 40, 60);
+    assert(unstyled_root->has_document_canvas && unstyled_root->canvas_background.is_transparent());
+    auto unstyled_list = DisplayList::build(unstyled_root);
+    assert(!unstyled_list.commands().empty() &&
+           std::holds_alternative<DrawCanvasCommand>(unstyled_list.commands().front()));
+    TerminalRenderer unstyled_terminal(4, 3, 10, 20);
+    const auto unstyled_ansi = unstyled_terminal.to_ansi_string(unstyled_list);
+    // The terminal's ordinary empty grid is dark. A document with no canvas
+    // color still has the browser's white top-level backdrop, so its dark
+    // default text remains legible after the UA body became transparent.
+    const std::string white_bg = "\033[48;2;255;255;255m";
+    std::size_t white_count = 0, white_pos = 0;
+    while ((white_pos = unstyled_ansi.find(white_bg, white_pos)) != std::string::npos) {
+        ++white_count;
+        white_pos += white_bg.size();
+    }
+    assert(white_count == 12);
+    auto root = LayoutTree::build(doc, resolver, 200, 150);
+    assert(root && root->node == doc->body() && root->has_document_canvas);
+    assert(root->canvas_background == Color(255, 0, 0, 128));
+    assert(root->background_propagated);
+    assert(root->style->background_color == Color(255, 0, 0, 128)); // computed style did not change
+    auto list = DisplayList::build(root);
+    assert(!list.commands().empty() && std::holds_alternative<DrawCanvasCommand>(list.commands().front()));
+    int canvases = 0;
+    for (const auto& cmd : list.commands()) if (std::holds_alternative<DrawCanvasCommand>(cmd)) ++canvases;
+    assert(canvases == 1);
+    BitmapRenderer bitmap(200, 150);
+    bitmap.clear(Color::white());
+    bitmap.render(list);
+    assert(bitmap.get_pixel(0, 0) == Color(255, 127, 127));
+    assert(bitmap.get_pixel(30, 30) == Color::blue());
+    assert(bitmap.get_pixel(50, 30) == Color(255, 127, 127)); // no second body layer
+    assert(bitmap.get_pixel(199, 149) == Color(255, 127, 127));
+
+    // The same body laid out as an arbitrary subtree has a box background,
+    // not a canvas. Building it must not change the previously built root.
+    auto subtree = LayoutTree::build(doc->body(), resolver, 200, 150);
+    assert(subtree && !subtree->has_document_canvas && subtree->canvas_background.is_transparent());
+    assert(!subtree->background_propagated);
+    auto sub_list = DisplayList::build(subtree);
+    for (const auto& cmd : sub_list.commands()) assert(!std::holds_alternative<DrawCanvasCommand>(cmd));
+    BitmapRenderer sub_bitmap(200, 150);
+    sub_bitmap.clear(Color::white());
+    sub_bitmap.render(sub_list);
+    assert(sub_bitmap.get_pixel(50, 10) == Color(255, 127, 127));
+    assert(sub_bitmap.get_pixel(199, 149) == Color::white());
+    assert(root->canvas_background == Color(255, 0, 0, 128));
+
+    // With a nontransparent root, the body retains its ordinary box paint.
+    auto both = HtmlParser::parse(
+        R"(<!doctype html><html style="background:#0000ff"><body style="margin:20px;height:50px;background:#ff0000"></body></html>)");
+    auto both_root = LayoutTree::build(both, resolver, 200, 150);
+    assert(both_root->canvas_background == Color::blue() && !both_root->background_propagated);
+    BitmapRenderer layered(200, 150);
+    layered.clear(Color::white());
+    layered.render(DisplayList::build(both_root));
+    assert(layered.get_pixel(0, 0) == Color::blue());
+    assert(layered.get_pixel(20, 20) == Color::red());
+    assert(layered.get_pixel(199, 149) == Color::blue());
+
+    // A document whose HTML element has no body still paints the root color
+    // only once, even though in that case the root element has a layout box.
+    auto root_only_doc = std::make_shared<Document>();
+    root_only_doc->set_content_type("text/html");
+    auto html = root_only_doc->create_element("html");
+    html->set_attribute("style", "background:rgba(0,0,255,.5);height:50px");
+    root_only_doc->append_child(html);
+    auto root_only = LayoutTree::build(root_only_doc, resolver, 200, 150);
+    assert(root_only && root_only->node == html && root_only->background_propagated);
+    BitmapRenderer one_layer(200, 150);
+    one_layer.clear(Color::white());
+    one_layer.render(DisplayList::build(root_only));
+    assert(one_layer.get_pixel(0, 0) == Color(127, 127, 255));
+    assert(one_layer.get_pixel(199, 149) == Color(127, 127, 255));
+
+    auto hidden_root_doc = HtmlParser::parse(
+        R"(<!doctype html><html style="display:none;background:blue"><body style="background:red"><div id="child"></div></body></html>)");
+    auto hidden_root = LayoutTree::build(hidden_root_doc, resolver, 200, 150);
+    assert(hidden_root->canvas_background.is_transparent());
+    assert(!hidden_root_doc->document_element()->has_layout_box());
+    assert(!hidden_root_doc->body()->has_layout_box());
+    assert(!hidden_root_doc->get_element_by_id("child")->has_layout_box());
+    BitmapRenderer hidden_bitmap(200, 150);
+    hidden_bitmap.clear(Color::white());
+    hidden_bitmap.render(DisplayList::build(hidden_root));
+    assert(hidden_bitmap.get_pixel(0, 0) == Color::white());
+    assert(hidden_bitmap.get_pixel(199, 149) == Color::white());
+
+    // A non-HTML document root and a null tree do not acquire HTML-body rules.
+    auto other_doc = std::make_shared<Document>();
+    auto other_el = other_doc->create_element("section");
+    other_el->set_attribute("style", "width:40px;height:40px;background:#ff0000");
+    other_doc->append_child(other_el);
+    auto other = LayoutTree::build(other_doc, resolver, 200, 150);
+    assert(other && !other->has_document_canvas && other->canvas_background.is_transparent());
+    const auto other_list = DisplayList::build(other);
+    for (const auto& cmd : other_list.commands()) {
+        assert(!std::holds_alternative<DrawCanvasCommand>(cmd));
+    }
+    assert(DisplayList::build(nullptr).commands().empty());
+}
+
+TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
+    using namespace litebird;
+    BitmapRenderer child(40, 30);
+    child.clear(Color::transparent());
+    DisplayList inner;
+    inner.add(DrawCanvasCommand{Color(255, 0, 0, 128)});
+    inner.add(DrawRectCommand{Rect(5, 5, 10, 10), Color(0, 0, 255, 128)});
+    child.render(inner);
+    assert(child.get_pixel(0, 0) == Color(255, 0, 0, 128));
+    assert(child.get_pixel(6, 6) == Color(85, 0, 170, 192));
+
+    auto image = std::make_shared<ImageData>();
+    image->width = 40;
+    image->height = 30;
+    for (int y = 0; y < 30; ++y) for (int x = 0; x < 40; ++x)
+        image->pixels.push_back(child.get_pixel(x, y).to_argb());
+    BitmapRenderer parent(40, 30);
+    parent.clear(Color::blue());
+    DisplayList image_list;
+    image_list.add(DrawImageCommand{Rect(0, 0, 40, 30), image});
+    parent.render(image_list);
+    assert(parent.get_pixel(0, 0) == Color(128, 0, 127));
+    assert(parent.get_pixel(6, 6) == Color(64, 0, 191));
+
+    // Scroll transforms move document boxes, not the canvas. An explicit clip
+    // around the whole target still confines the canvas to that clip.
+    BitmapRenderer clipped(40, 30);
+    clipped.clear(Color::white());
+    DisplayList commands;
+    commands.add(PushClipCommand{Rect(5, 5, 10, 10)});
+    commands.add(PushTransformCommand{TransformMatrix2D::translation(-100, -100)});
+    commands.add(DrawCanvasCommand{Color::red()});
+    commands.add(PopTransformCommand{});
+    commands.add(PopClipCommand{});
+    clipped.render(commands);
+    assert(clipped.get_pixel(5, 5) == Color::red());
+    assert(clipped.get_pixel(14, 14) == Color::red());
+    assert(clipped.get_pixel(0, 0) == Color::white());
+    assert(clipped.get_pixel(15, 15) == Color::white());
+
+    // The terminal viewport does not scroll its canvas either, and an
+    // offscreen body box must not be clamped back onto the first row.
+    auto doc = HtmlParser::parse(
+        R"(<!doctype html><html style="background:#0000ff"><body style="margin:0;width:40px;height:20px;background:#ff0000"></body></html>)");
+    StyleResolver resolver;
+    auto list = DisplayList::build(LayoutTree::build(doc, resolver, 40, 60));
+    TerminalRenderer terminal(4, 3, 10, 20);
+    terminal.set_scroll(0, 100);
+    const std::string ansi = terminal.to_ansi_string(list);
+    const std::string blue = "\033[48;2;0;0;255m";
+    std::size_t count = 0, pos = 0;
+    while ((pos = ansi.find(blue, pos)) != std::string::npos) { ++count; pos += blue.size(); }
+    assert(count == 12);
+    assert(ansi.find("\033[48;2;255;0;0m") == std::string::npos);
+
+    // A body box over a different root canvas stops at exclusive cell edges.
+    // Before this correction a 20-by-20 box on a 10-by-20 grid colored six
+    // cells instead of two, hiding the canvas in the following row and column.
+    auto bounded_doc = HtmlParser::parse(
+        R"(<!doctype html><html style="background:#0000ff"><body style="margin:0;width:20px;height:20px;background:#ff0000"></body></html>)");
+    auto bounded_list = DisplayList::build(LayoutTree::build(bounded_doc, resolver, 40, 60));
+    TerminalRenderer bounded_terminal(4, 3, 10, 20);
+    const auto bounded_ansi = bounded_terminal.to_ansi_string(bounded_list);
+    const std::string red_bg = "\033[48;2;255;0;0m";
+    count = 0; pos = 0;
+    while ((pos = bounded_ansi.find(red_bg, pos)) != std::string::npos) { ++count; pos += red_bg.size(); }
+    assert(count == 2);
+    count = 0; pos = 0;
+    while ((pos = bounded_ansi.find(blue, pos)) != std::string::npos) { ++count; pos += blue.size(); }
+    assert(count == 10);
+
+    // A translucent iframe bitmap is a terminal image: only the two covered
+    // cells should blend with the blue canvas, and a scrolled-off image must
+    // not be clamped back onto row zero. A surrounding clip also confines it.
+    auto solid = std::make_shared<ImageData>();
+    solid->width = 20;
+    solid->height = 20;
+    solid->pixels.assign(400, Color(255, 0, 0, 128).to_argb());
+    DisplayList frame_list;
+    frame_list.add(DrawCanvasCommand{Color::blue()});
+    frame_list.add(DrawImageCommand{Rect(0, 0, 20, 20), solid});
+    const std::string purple = "\033[48;2;128;0;127m";
+    TerminalRenderer frame_terminal(4, 3, 10, 20);
+    const auto frame_ansi = frame_terminal.to_ansi_string(frame_list);
+    count = 0; pos = 0;
+    while ((pos = frame_ansi.find(purple, pos)) != std::string::npos) { ++count; pos += purple.size(); }
+    assert(count == 2);
+    TerminalRenderer scrolled_frame(4, 3, 10, 20);
+    scrolled_frame.set_scroll(0, 100);
+    const auto scrolled_frame_ansi = scrolled_frame.to_ansi_string(frame_list);
+    assert(scrolled_frame_ansi.find(purple) == std::string::npos);
+
+    auto stripes = std::make_shared<ImageData>();
+    stripes->width = 20;
+    stripes->height = 20;
+    for (int y = 0; y < 20; ++y) {
+        for (int x = 0; x < 20; ++x) {
+            stripes->pixels.push_back((x < 10 ? Color::red() : Color(0, 255, 0)).to_argb());
+        }
+    }
+    DisplayList stripe_list;
+    stripe_list.add(DrawCanvasCommand{Color::blue()});
+    stripe_list.add(DrawImageCommand{Rect(0, 0, 20, 20), stripes});
+    TerminalRenderer scrolled_stripes(4, 3, 10, 20);
+    scrolled_stripes.set_scroll(10, 0);
+    const auto stripe_ansi = scrolled_stripes.to_ansi_string(stripe_list);
+    assert(stripe_ansi.find("\033[48;2;0;255;0m") != std::string::npos);
+    assert(stripe_ansi.find(red_bg) == std::string::npos);
+
+    DisplayList clipped_frame_list;
+    clipped_frame_list.add(DrawCanvasCommand{Color::blue()});
+    clipped_frame_list.add(PushClipCommand{Rect(0, 0, 10, 20)});
+    clipped_frame_list.add(DrawImageCommand{Rect(0, 0, 20, 20), solid});
+    clipped_frame_list.add(PopClipCommand{});
+    TerminalRenderer clipped_frame(4, 3, 10, 20);
+    const auto clipped_frame_ansi = clipped_frame.to_ansi_string(clipped_frame_list);
+    count = 0; pos = 0;
+    while ((pos = clipped_frame_ansi.find(purple, pos)) != std::string::npos) { ++count; pos += purple.size(); }
+    assert(count == 1);
+
+    DisplayList terminal_clip;
+    terminal_clip.add(PushClipCommand{Rect(10, 20, 20, 20)});
+    terminal_clip.add(DrawCanvasCommand{Color::red()});
+    terminal_clip.add(PopClipCommand{});
+    TerminalRenderer clipped_terminal(4, 3, 10, 20);
+    const auto clipped_ansi = clipped_terminal.to_ansi_string(terminal_clip);
+    const std::string red = "\033[48;2;255;0;0m";
+    count = 0; pos = 0;
+    while ((pos = clipped_ansi.find(red, pos)) != std::string::npos) { ++count; pos += red.size(); }
+    assert(count == 2); // two cells of the four-by-three terminal
+}
+
+TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling) {
+    using namespace litebird;
+    BrowserShell shell(200, 150, 20, 10);
+    assert(shell.navigate_to("tests/render/canvas-scroll.html"));
+    auto frame = [&]() {
+        const auto bytes = shell.render_png_frame();
+        auto img = ImageDecoder::decode_png(bytes.data(), bytes.size());
+        assert(img && img->is_valid());
+        return img;
+    };
+    auto top = frame();
+    assert(top->width == 200 && top->height == 150);
+    assert(top->get_pixel_color(0, 0) == Color(127, 127, 255));
+    assert(top->get_pixel_color(20, 20) == Color(0, 255, 0));
+    assert(top->get_pixel_color(50, 20) == Color(191, 63, 127));
+    assert(top->get_pixel_color(150, 20) == Color(127, 127, 255));
+    assert(top->get_pixel_color(199, 149) == Color(127, 127, 255));
+
+    shell.scroll_to(15, 300);
+    assert(shell.scroll_x() == 15 && shell.scroll_y() == 300);
+    auto scrolled = frame();
+    assert(scrolled->get_pixel_color(0, 0) == Color(127, 127, 255));
+    assert(scrolled->get_pixel_color(15, 0) == Color(0, 255, 0));
+    assert(scrolled->get_pixel_color(50, 0) == Color(191, 63, 127));
+    assert(scrolled->get_pixel_color(150, 0) == Color(127, 127, 255));
+    assert(scrolled->get_pixel_color(199, 149) == Color(127, 127, 255));
+
+    // Relayout after live styles changes the selected source and does not
+    // leave stale metadata behind; resizing fills the new viewport as well.
+    shell.js_engine()->eval("document.documentElement.style.backgroundColor = 'transparent'");
+    shell.relayout();
+    auto body_canvas = frame();
+    assert(body_canvas->get_pixel_color(0, 0) == Color(255, 127, 127));
+    assert(body_canvas->get_pixel_color(50, 0) == Color(255, 127, 127));
+    assert(body_canvas->get_pixel_color(199, 149) == Color(255, 127, 127));
+    shell.js_engine()->eval("document.body.style.display = 'none'");
+    shell.relayout();
+    auto hidden = frame();
+    assert(hidden->get_pixel_color(0, 0) == Color::white());
+    assert(hidden->get_pixel_color(199, 149) == Color::white());
+    shell.js_engine()->eval("document.body.style.display = 'block'");
+    shell.set_viewport_size(240, 180);
+    auto resized = frame();
+    assert(resized->width == 240 && resized->height == 180);
+    assert(resized->get_pixel_color(239, 179) == Color(255, 127, 127));
 }
 
 TEST(a_built_in_method_is_not_a_constructor) {
@@ -30429,6 +31118,489 @@ TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob) {
     assert(wire_frames[8].opcode == 0x01u && wire_frames[8].payload == "null");
 }
 
+// Phase 169 (finding 174): RFC 7692 permessage-deflate — stateful RFC 1951
+// DeflateStream/InflateStream vectors, Sec-WebSocket-Extensions negotiation &
+// fail-closed rejection, context takeover & window_bits bounds, RSV1/UTF-8
+// protocol errors, decompression bomb cap, and live JS WebSocket roundtrips.
+TEST(websocket_permessage_deflate_rfc7692) {
+    using namespace litebird;
+
+    // 1. Direct RFC 7692 §7.2.3.1 / §7.2.3.2 / §7.2.3.4 wire vectors & codec bounds.
+    {
+        Deflate::InflateStream inf(15);
+        // §7.2.3.1: single-frame "Hello"
+        const uint8_t v1[] = {0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00};
+        std::vector<uint8_t> out;
+        assert(inf.inflate_message(v1, sizeof(v1), out) == Deflate::InflateStatus::Ok);
+        assert(std::string(out.begin(), out.end()) == "Hello");
+
+        // §7.2.3.2: second "Hello" reusing sliding-window context from first
+        const uint8_t v2[] = {0xf2, 0x00, 0x11, 0x00, 0x00};
+        out.clear();
+        assert(inf.inflate_message(v2, sizeof(v2), out) == Deflate::InflateStatus::Ok);
+        assert(std::string(out.begin(), out.end()) == "Hello");
+
+        // Reset clears history, so v2 (which back-references history) now fails.
+        inf.reset();
+        out.clear();
+        assert(inf.inflate_message(v2, sizeof(v2), out) == Deflate::InflateStatus::CorruptData);
+
+        // §7.2.3.4: empty compressed message (0x00), BFINAL=0 empty fixed (0x02 0x00),
+        // BFINAL=1 empty fixed (0x03 0x00), and corrupt 0-byte payload.
+        const uint8_t empty_sync[] = {0x00};
+        assert(inf.inflate_message(empty_sync, sizeof(empty_sync), out) == Deflate::InflateStatus::Ok && out.empty());
+        const uint8_t empty_f0[] = {0x02, 0x00};
+        assert(inf.inflate_message(empty_f0, sizeof(empty_f0), out) == Deflate::InflateStatus::Ok && out.empty());
+        const uint8_t empty_f1[] = {0x03, 0x00};
+        assert(inf.inflate_message(empty_f1, sizeof(empty_f1), out) == Deflate::InflateStatus::Ok && out.empty());
+        assert(inf.inflate_message(empty_sync, 0, out) == Deflate::InflateStatus::CorruptData);
+
+        // DeflateStream context takeover, window_bits=9 enforcement, and multi-block stored fallback.
+        Deflate::DeflateStream def15(15);
+        std::vector<uint8_t> c1, c2;
+        const std::string rep = "permessage-deflate-context-takeover-sample-";
+        def15.compress_message(reinterpret_cast<const uint8_t*>(rep.data()), rep.size(), c1);
+        def15.compress_message(reinterpret_cast<const uint8_t*>(rep.data()), rep.size(), c2);
+        assert(c2.size() < c1.size()); // context takeover shrinks second identical message
+
+        Deflate::InflateStream inf15(15);
+        std::vector<uint8_t> d1, d2;
+        assert(inf15.inflate_message(c1.data(), c1.size(), d1) == Deflate::InflateStatus::Ok);
+        assert(inf15.inflate_message(c2.data(), c2.size(), d2) == Deflate::InflateStatus::Ok);
+        assert(std::string(d1.begin(), d1.end()) == rep);
+        assert(std::string(d2.begin(), d2.end()) == rep);
+
+        // Enforce server_max_window_bits=9 (512B): back-reference at distance > 512 is rejected.
+        std::string dist_msg = "UNIQUE_MARKER_ABCDEF0123456789";
+        for (int i = 0; i < 600; ++i) dist_msg.push_back(static_cast<char>('A' + (i * 7 + (i / 13)) % 26));
+        dist_msg += "UNIQUE_MARKER_ABCDEF0123456789";
+        std::vector<uint8_t> c_bigwin;
+        Deflate::DeflateStream def_big(15);
+        def_big.compress_message(reinterpret_cast<const uint8_t*>(dist_msg.data()), dist_msg.size(), c_bigwin);
+        Deflate::InflateStream inf_w9(9);
+        std::vector<uint8_t> bad_out;
+        assert(inf_w9.inflate_message(c_bigwin.data(), c_bigwin.size(), bad_out) == Deflate::InflateStatus::CorruptData);
+
+        // DeflateStream(9) stays strictly within 512B window so InflateStream(9) decodes it.
+        Deflate::DeflateStream def_w9(9);
+        std::vector<uint8_t> c_w9, d_w9;
+        def_w9.compress_message(reinterpret_cast<const uint8_t*>(dist_msg.data()), dist_msg.size(), c_w9);
+        Deflate::InflateStream inf_w9_ok(9);
+        assert(inf_w9_ok.inflate_message(c_w9.data(), c_w9.size(), d_w9) == Deflate::InflateStatus::Ok);
+        assert(std::string(d_w9.begin(), d_w9.end()) == dist_msg);
+
+        // Stored-block fallback on >70 KiB pseudo-random incompressible data (spans 2 stored blocks).
+        std::vector<uint8_t> rnd(70000);
+        uint32_t rng = 0x9E3779B9u;
+        for (size_t i = 0; i < rnd.size(); ++i) {
+            rng ^= (rng << 13);
+            rng ^= (rng >> 17);
+            rng ^= (rng << 5);
+            rnd[i] = static_cast<uint8_t>(rng & 0xFFu);
+        }
+        std::vector<uint8_t> c_rnd, d_rnd;
+        Deflate::DeflateStream def_rnd(15);
+        def_rnd.compress_message(rnd.data(), rnd.size(), c_rnd);
+        assert(c_rnd.size() <= rnd.size() + 16);
+        Deflate::InflateStream inf_rnd(15);
+        assert(inf_rnd.inflate_message(c_rnd.data(), c_rnd.size(), d_rnd) == Deflate::InflateStatus::Ok);
+        assert(d_rnd == rnd);
+
+        // Decompression bomb cap returns OutputLimitExceeded cleanly without growing `out`.
+        std::vector<uint8_t> zeros(65536, 0x41u);
+        std::vector<uint8_t> c_bomb, d_bomb;
+        Deflate::DeflateStream def_bomb(15);
+        def_bomb.compress_message(zeros.data(), zeros.size(), c_bomb);
+        assert(c_bomb.size() < 2048);
+        Deflate::InflateStream inf_bomb(15);
+        assert(inf_bomb.inflate_message(c_bomb.data(), c_bomb.size(), d_bomb, 4096) ==
+               Deflate::InflateStatus::OutputLimitExceeded);
+        assert(d_bomb.empty());
+    }
+
+    // 2. RFC 7692 §7.1 Sec-WebSocket-Extensions negotiation matrix (accept & fail-closed).
+    auto test_negotiation = [](const std::string& ext_header, bool expect_open, const std::string& expect_ext) {
+        struct NegState {
+            std::mutex mu;
+            std::string observed_req;
+            std::atomic<bool> release{false};
+            std::atomic<bool> done{false};
+        };
+        auto st = std::make_shared<NegState>();
+        auto srv = WebSocketObject::start_loopback_server([st, ext_header](int fd) {
+            std::string req;
+            char ch = 0;
+            while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
+                req += ch;
+                if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+            }
+            {
+                std::lock_guard<std::mutex> lock(st->mu);
+                st->observed_req = req;
+            }
+            const std::string key_hdr = "Sec-WebSocket-Key: ";
+            size_t k = req.find(key_hdr);
+            std::string key = k == std::string::npos ? "" : req.substr(k + key_hdr.size(), req.find("\r\n", k) - k - key_hdr.size());
+            std::string resp =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: " + WebSocketObject::calculate_accept_key(key) + "\r\n";
+            if (!ext_header.empty()) {
+                resp += ext_header;
+            }
+            resp += "\r\n";
+            (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+            auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+            while (!st->release.load() && std::chrono::steady_clock::now() < deadline) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            st->done.store(true);
+        });
+        assert(srv != nullptr);
+        auto ws = std::make_shared<WebSocketObject>("ws://127.0.0.1:" + std::to_string(srv->port) + "/neg");
+        ws->connect();
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (ws->ready_state() == WebSocketReadyState::Connecting &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const bool opened = ws->ready_state() == WebSocketReadyState::Open;
+        const std::string got_ext = ws->extensions();
+        if (opened) ws->close();
+        st->release.store(true);
+        ws->join_for_shutdown();
+        auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!st->done.load() && std::chrono::steady_clock::now() < done_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        std::string observed_req;
+        {
+            std::lock_guard<std::mutex> lock(st->mu);
+            observed_req = st->observed_req;
+        }
+        assert(observed_req.find("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n") != std::string::npos);
+        assert(opened == expect_open);
+        if (expect_open) assert(got_ext == expect_ext);
+    };
+
+    // Valid responses
+    test_negotiation("", true, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate\r\n", true, "permessage-deflate");
+    test_negotiation(
+        "Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; client_no_context_takeover; server_max_window_bits=9; client_max_window_bits=10\r\n",
+        true,
+        "permessage-deflate; server_no_context_takeover; client_no_context_takeover; server_max_window_bits=9; client_max_window_bits=10");
+    test_negotiation(
+        "Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=\"12\"; client_max_window_bits=\"8\"\r\n",
+        true,
+        "permessage-deflate; server_max_window_bits=\"12\"; client_max_window_bits=\"8\"");
+
+    // Invalid responses — all MUST fail closed
+    test_negotiation("Sec-WebSocket-Extensions: x-custom-ext\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate, x-other\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate, permessage-deflate\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: Permessage-Deflate\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; unknown_param=1\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover; server_no_context_takeover\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_no_context_takeover=1\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; client_no_context_takeover=1\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=7\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=16\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; client_max_window_bits=08\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate;\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: permessage-deflate; server_max_window_bits=\"12\r\n", false, "");
+    test_negotiation("Sec-WebSocket-Extensions: \r\n", false, "");
+
+    // 3. Protocol error matrix over live loopback server:
+    //    (a) RSV1=1 without negotiation -> 1002
+    //    (b) RSV1=1 on Ping control frame -> 1002
+    //    (c) RSV1=1 on Continuation frame -> 1002
+    //    (d) Corrupt DEFLATE bytes in RSV1=1 data frame -> 1002
+    //    (e) Valid DEFLATE bytes inflating to invalid UTF-8 in text frame -> 1007
+    auto send_srv_frame = [](int fd, uint8_t opcode, bool fin, bool rsv1, const uint8_t* data, size_t len) {
+        std::vector<uint8_t> out;
+        out.push_back(static_cast<uint8_t>((fin ? 0x80u : 0x00u) | (rsv1 ? 0x40u : 0x00u) | (opcode & 0x0Fu)));
+        if (len <= 125) {
+            out.push_back(static_cast<uint8_t>(len));
+        } else {
+            out.push_back(126u);
+            out.push_back(static_cast<uint8_t>((len >> 8) & 0xFFu));
+            out.push_back(static_cast<uint8_t>(len & 0xFFu));
+        }
+        if (len > 0 && data) out.insert(out.end(), data, data + len);
+        (void)::send(fd, out.data(), out.size(), MSG_NOSIGNAL);
+    };
+
+    auto recv_client_frame = [](int fd, uint8_t& opcode, bool& rsv1, bool& masked, std::vector<uint8_t>& payload) -> bool {
+        auto rx = [&](uint8_t* dst, size_t n) -> bool {
+            size_t got = 0;
+            while (got < n) {
+                ssize_t r = ::recv(fd, dst + got, n - got, 0);
+                if (r <= 0) return false;
+                got += static_cast<size_t>(r);
+            }
+            return true;
+        };
+        uint8_t hdr[2]{};
+        if (!rx(hdr, 2)) return false;
+        rsv1 = (hdr[0] & 0x40u) != 0;
+        opcode = hdr[0] & 0x0Fu;
+        masked = (hdr[1] & 0x80u) != 0;
+        uint64_t plen = hdr[1] & 0x7Fu;
+        if (plen == 126) {
+            uint8_t e[2]{};
+            if (!rx(e, 2)) return false;
+            plen = (static_cast<uint64_t>(e[0]) << 8) | e[1];
+        } else if (plen == 127) {
+            uint8_t e[8]{};
+            if (!rx(e, 8)) return false;
+            plen = 0;
+            for (int i = 0; i < 8; ++i) plen = (plen << 8) | e[i];
+        }
+        uint8_t mask[4]{};
+        if (masked && !rx(mask, 4)) return false;
+        payload.resize(static_cast<size_t>(plen));
+        if (plen > 0 && !rx(payload.data(), static_cast<size_t>(plen))) return false;
+        if (masked) {
+            for (size_t i = 0; i < payload.size(); ++i) payload[i] ^= mask[i % 4];
+        }
+        return true;
+    };
+
+    auto test_protocol_error = [send_srv_frame, recv_client_frame](bool negotiate_pmd, int scenario, int expect_close_code) {
+        struct ErrState {
+            std::atomic<int> peer_got_code{0};
+            std::atomic<bool> done{false};
+        };
+        auto st = std::make_shared<ErrState>();
+        auto srv = WebSocketObject::start_loopback_server([st, negotiate_pmd, scenario, send_srv_frame, recv_client_frame](int fd) {
+            std::string req;
+            char ch = 0;
+            while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
+                req += ch;
+                if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+            }
+            const std::string key_hdr = "Sec-WebSocket-Key: ";
+            size_t k = req.find(key_hdr);
+            std::string key = k == std::string::npos ? "" : req.substr(k + key_hdr.size(), req.find("\r\n", k) - k - key_hdr.size());
+            std::string resp =
+                "HTTP/1.1 101 Switching Protocols\r\n"
+                "Upgrade: websocket\r\n"
+                "Connection: Upgrade\r\n"
+                "Sec-WebSocket-Accept: " + WebSocketObject::calculate_accept_key(key) + "\r\n";
+            if (negotiate_pmd) resp += "Sec-WebSocket-Extensions: permessage-deflate\r\n";
+            resp += "\r\n";
+            (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+
+            if (scenario == 0) { // RSV1=1 without negotiation
+                const uint8_t v[] = {0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00};
+                send_srv_frame(fd, 0x01u, true, true, v, sizeof(v));
+            } else if (scenario == 1) { // RSV1=1 on Ping control frame
+                const uint8_t p[] = {'p', 'i', 'n', 'g'};
+                send_srv_frame(fd, 0x09u, true, true, p, sizeof(p));
+            } else if (scenario == 2) { // RSV1=1 on Continuation frame
+                const uint8_t f1[] = {0xf2, 0x48};
+                const uint8_t f2[] = {0xcd, 0xc9, 0xc9, 0x07, 0x00};
+                send_srv_frame(fd, 0x01u, false, true, f1, sizeof(f1));
+                send_srv_frame(fd, 0x00u, true, true, f2, sizeof(f2));
+            } else if (scenario == 3) { // Corrupt DEFLATE bytes (BTYPE=3 invalid)
+                const uint8_t bad[] = {0x06u, 0xffu, 0xffu};
+                send_srv_frame(fd, 0x01u, true, true, bad, sizeof(bad));
+            } else if (scenario == 4) { // Valid DEFLATE inflating to invalid UTF-8 (0xFF 0xFE) in text frame
+                Deflate::DeflateStream ds(15);
+                const uint8_t bad_utf8[] = {0xffu, 0xfeu, 0x80u};
+                std::vector<uint8_t> comp;
+                ds.compress_message(bad_utf8, sizeof(bad_utf8), comp);
+                send_srv_frame(fd, 0x01u, true, true, comp.data(), comp.size());
+            }
+
+            uint8_t op = 0;
+            bool rsv1 = false, masked = false;
+            std::vector<uint8_t> pl;
+            if (recv_client_frame(fd, op, rsv1, masked, pl) && op == 0x08u && pl.size() >= 2) {
+                st->peer_got_code.store((static_cast<int>(pl[0]) << 8) | pl[1]);
+                send_srv_frame(fd, 0x08u, true, false, pl.data(), 2);
+            }
+            st->done.store(true);
+        });
+        assert(srv != nullptr);
+        auto ws = std::make_shared<WebSocketObject>("ws://127.0.0.1:" + std::to_string(srv->port) + "/err");
+        ws->connect();
+        auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (ws->ready_state() != WebSocketReadyState::Closed &&
+               std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        ws->join_for_shutdown();
+        auto done_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        while (!st->done.load() && std::chrono::steady_clock::now() < done_deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        assert(st->peer_got_code.load() == expect_close_code);
+    };
+
+    test_protocol_error(false, 0, 1002);
+    test_protocol_error(true, 1, 1002);
+    test_protocol_error(true, 2, 1002);
+    test_protocol_error(true, 3, 1002);
+    test_protocol_error(true, 4, 1007);
+
+    // 4. End-to-end JS TestPage roundtrip with permessage-deflate negotiated:
+    //    verifies ws.extensions, client RSV1=1 compression + context takeover,
+    //    fragmented compressed delivery with interleaved Ping/Pong (Pong RSV1=0),
+    //    uncompressed RSV1=0 message interleaved, binary ArrayBuffer + Blob, and clean close.
+    struct WireRec {
+        uint8_t opcode{0};
+        bool rsv1{false};
+        bool masked{false};
+        size_t wire_len{0};
+        std::string plain;
+    };
+    struct WireState {
+        std::mutex mu;
+        std::vector<WireRec> log;
+        std::atomic<bool> done{false};
+    };
+    auto wire = std::make_shared<WireState>();
+
+    auto srv = WebSocketObject::start_loopback_server([wire, send_srv_frame, recv_client_frame](int fd) {
+        std::string req;
+        char ch = 0;
+        while (req.size() < 16384 && ::recv(fd, &ch, 1, 0) == 1) {
+            req += ch;
+            if (req.size() >= 4 && req.compare(req.size() - 4, 4, "\r\n\r\n") == 0) break;
+        }
+        const std::string key_hdr = "Sec-WebSocket-Key: ";
+        size_t k = req.find(key_hdr);
+        std::string key = k == std::string::npos ? "" : req.substr(k + key_hdr.size(), req.find("\r\n", k) - k - key_hdr.size());
+        std::string resp =
+            "HTTP/1.1 101 Switching Protocols\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            "Sec-WebSocket-Accept: " + WebSocketObject::calculate_accept_key(key) + "\r\n"
+            "Sec-WebSocket-Extensions: permessage-deflate\r\n\r\n";
+        (void)::send(fd, resp.data(), resp.size(), MSG_NOSIGNAL);
+
+        // Push RFC 7692 §7.2.3.1 + §7.2.3.2 vectors, fragmented compressed + interleaved Ping,
+        // and an uncompressed RSV1=0 message.
+        const uint8_t v1[] = {0xf2, 0x48, 0xcd, 0xc9, 0xc9, 0x07, 0x00};
+        const uint8_t v2[] = {0xf2, 0x00, 0x11, 0x00, 0x00};
+        send_srv_frame(fd, 0x01u, true, true, v1, sizeof(v1));
+        send_srv_frame(fd, 0x01u, true, true, v2, sizeof(v2));
+
+        Deflate::DeflateStream srv_def(15);
+        std::vector<uint8_t> frag_c;
+        const std::string frag_plain = "fragmented-compressed-message-1234567890-1234567890";
+        srv_def.compress_message(reinterpret_cast<const uint8_t*>(frag_plain.data()), frag_plain.size(), frag_c);
+        const size_t mid = frag_c.size() / 2;
+        send_srv_frame(fd, 0x01u, false, true, frag_c.data(), mid);
+        const uint8_t ping_b[] = {'o', 'k'};
+        send_srv_frame(fd, 0x09u, true, false, ping_b, sizeof(ping_b));
+        send_srv_frame(fd, 0x00u, true, false, frag_c.data() + mid, frag_c.size() - mid);
+
+        const std::string rsv0_msg = "uncompressed-interleaved";
+        send_srv_frame(fd, 0x01u, true, false, reinterpret_cast<const uint8_t*>(rsv0_msg.data()), rsv0_msg.size());
+
+        Deflate::InflateStream srv_inf(15);
+        while (true) {
+            uint8_t op = 0;
+            bool rsv1 = false, masked = false;
+            std::vector<uint8_t> pl;
+            if (!recv_client_frame(fd, op, rsv1, masked, pl)) break;
+            if (op == 0x0Au) { // Pong
+                std::lock_guard<std::mutex> lock(wire->mu);
+                wire->log.push_back(WireRec{op, rsv1, masked, pl.size(), std::string(pl.begin(), pl.end())});
+                continue;
+            }
+            if (op == 0x08u) {
+                send_srv_frame(fd, 0x08u, true, false, pl.data(), std::min<size_t>(pl.size(), 2));
+                break;
+            }
+            std::vector<uint8_t> plain_bytes;
+            if (rsv1) {
+                assert(srv_inf.inflate_message(pl.data(), pl.size(), plain_bytes) == Deflate::InflateStatus::Ok);
+            } else {
+                plain_bytes = pl;
+            }
+            {
+                std::lock_guard<std::mutex> lock(wire->mu);
+                wire->log.push_back(WireRec{op, rsv1, masked, pl.size(), std::string(plain_bytes.begin(), plain_bytes.end())});
+            }
+            std::vector<uint8_t> reply_c;
+            srv_def.compress_message(plain_bytes.data(), plain_bytes.size(), reply_c);
+            send_srv_frame(fd, op, true, true, reply_c.data(), reply_c.size());
+        }
+        wire->done.store(true);
+    });
+    assert(srv != nullptr);
+
+    TestPage page;
+    auto& js = page.js;
+    js.eval(
+        "var log = []; var done = false; var extBefore = '';\n"
+        "var ws = new WebSocket('ws://127.0.0.1:" + std::to_string(srv->port) + "/pmd');\n"
+        "extBefore = ws.extensions;\n"
+        "ws.binaryType = 'arraybuffer';\n"
+        "ws.onopen = function() {\n"
+        "  log.push('EXT:' + ws.extensions);\n"
+        "  ws.send('deflate-alpha-beta-gamma-'.repeat(40));\n"
+        "  ws.send('deflate-alpha-beta-gamma-'.repeat(40));\n"
+        "  var bin = new Uint8Array([0, 255, 1, 2, 0, 255, 1, 2, 0, 255, 1, 2]);\n"
+        "  ws.send(bin);\n"
+        "};\n"
+        "ws.onmessage = function(e) {\n"
+        "  if (typeof e.data === 'string') {\n"
+        "    log.push('S:' + e.data.length + ':' + e.data.slice(0, 14));\n"
+        "  } else {\n"
+        "    var u = new Uint8Array(e.data);\n"
+        "    log.push('B:' + u.length + ':' + u[0] + ',' + u[1] + ',' + u[11]);\n"
+        "  }\n"
+        "  if (log.length === 8) ws.close(1000, 'ok');\n"
+        "};\n"
+        "ws.onclose = function(e) { log.push('C:' + e.code + ':' + e.wasClean); done = true; };\n"
+    );
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!js.eval("done").is_truthy() && std::chrono::steady_clock::now() < deadline) {
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+        std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+    assert(js.eval("done").is_truthy());
+    assert(js.eval("extBefore").to_string().empty());
+    assert(js.eval("log.join('|')").to_string() ==
+           "EXT:permessage-deflate|"
+           "S:5:Hello|"
+           "S:5:Hello|"
+           "S:51:fragmented-com|"
+           "S:24:uncompressed-i|"
+           "S:1000:deflate-alpha-|"
+           "S:1000:deflate-alpha-|"
+           "B:12:0,255,2|"
+           "C:1000:true");
+
+    auto wire_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!wire->done.load() && std::chrono::steady_clock::now() < wire_deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    std::lock_guard<std::mutex> lock(wire->mu);
+    // Find the 3 data frames + 1 pong frame recorded on the wire.
+    std::vector<WireRec> data_recs;
+    bool saw_pong_rsv0 = false;
+    for (const auto& r : wire->log) {
+        assert(r.masked);
+        if (r.opcode == 0x0Au && !r.rsv1 && r.plain == "ok") saw_pong_rsv0 = true;
+        if (r.opcode == 0x01u || r.opcode == 0x02u) data_recs.push_back(r);
+    }
+    assert(saw_pong_rsv0);
+    assert(data_recs.size() == 3);
+    assert(data_recs[0].opcode == 0x01u && data_recs[0].rsv1 && data_recs[0].wire_len < 100 && data_recs[0].plain.size() == 1000);
+    assert(data_recs[1].opcode == 0x01u && data_recs[1].rsv1 && data_recs[1].wire_len <= data_recs[0].wire_len && data_recs[1].plain.size() == 1000);
+    assert(data_recs[2].opcode == 0x02u && data_recs[2].rsv1 && data_recs[2].plain.size() == 12);
+}
+
 TEST(a_definition_names_the_function_it_makes) {
     using namespace litebird;
 
@@ -30522,6 +31694,715 @@ TEST(a_definition_names_the_function_it_makes) {
     const std::string failed = js.eval("failures.join('\\n')").to_string();
     if (!failed.empty()) std::cerr << failed << "\n";
     assert(failed.empty());
+}
+
+TEST(textdecoder_reaches_script_in_pieces) {
+    using namespace litebird;
+    // Phase 163, finding 168. WHATWG Encoding §11.1.1: a `{stream: true}`
+    // decode is the same decoder as a one-shot one, asked to keep the bytes a
+    // chunk ends inside of for the next chunk instead of answering U+FFFD for
+    // them. The checks below are of three kinds, and the second is the one
+    // that cannot be satisfied by writing a second, worse decoder: a stream
+    // split anywhere must produce exactly what one call produces.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+    js.eval(R"JS(
+        var failures = [];
+        function report(what, got, want) {
+            var a = JSON.stringify(got), b = JSON.stringify(want);
+            if (a !== b) failures.push(what + ': got ' + a + ', expected ' + b);
+        }
+        function bytes(a) { return new Uint8Array(a); }
+        function stream(enc, parts, options) {
+            var d = new TextDecoder(enc, options);
+            var out = '';
+            for (var i = 0; i < parts.length; i++) out += d.decode(bytes(parts[i]), {stream: true});
+            return out + d.decode();
+        }
+
+        // ---- one character per encoding, split at every byte --------------
+        report('UTF-8 three bytes, split after one', stream('utf-8', [[0xE2], [0x82, 0xAC]]), '\u20AC');
+        report('UTF-8 four bytes, split after two', stream('utf-8', [[0xF0, 0x9F], [0x98, 0x80]]), '\u{1F600}');
+        report('UTF-16LE one unit, split', stream('utf-16le', [[0x41], [0x00, 0x42, 0x00]]), 'AB');
+        report('UTF-16LE surrogate pair, split inside it',
+               stream('utf-16le', [[0x00, 0xD8], [0x00, 0xDC]]), '\u{10000}');
+        report('Big5 two bytes, split', stream('big5', [[0xA4], [0x40]]), '\u4E00');
+        report('Shift_JIS two bytes, split', stream('shift_jis', [[0x82], [0xA0]]), '\u3042');
+        report('EUC-JP two bytes, split', stream('euc-jp', [[0xA4], [0xA2]]), '\u3042');
+        report('EUC-JP three-byte JIS0212 form, split twice',
+               stream('euc-jp', [[0x8F], [0xA1], [0xA1]]), new TextDecoder('euc-jp').decode(bytes([0x8F, 0xA1, 0xA1])));
+        report('EUC-KR two bytes, split', stream('euc-kr', [[0xB0], [0xA1]]), '\uAC00');
+        report('gb18030 four-byte form, split twice',
+               stream('gb18030', [[0x81], [0x30], [0x81, 0x30]]),
+               new TextDecoder('gb18030').decode(bytes([0x81, 0x30, 0x81, 0x30])));
+        // ISO-2022-JP's mode is the one piece of decoder state that has to
+        // cross a chunk boundary: the escape says how to read what follows.
+        report('ISO-2022-JP escape in one chunk, its text in the next',
+               stream('iso-2022-jp', [[0x1B, 0x24, 0x42], [0x24, 0x22, 0x1B, 0x28, 0x42]]), '\u3042');
+        report('ISO-2022-JP split inside the escape',
+               stream('iso-2022-jp', [[0x1B], [0x24], [0x42, 0x24, 0x22]]), '\u3042');
+
+        // ---- a stream split anywhere answers what one call answers --------
+        // The bytes are the encodings' own, including a lead byte with no trail
+        // and a lone continuation, which a one-shot call answers U+FFFD for.
+        var cases = [
+            ['utf-8', [0x41, 0xE2, 0x82, 0xAC, 0xFF, 0xC3, 0xA9]],
+            ['utf-8', [0xE2, 0x28, 0xA1]],
+            ['utf-16le', [0x41, 0x00, 0x00, 0xD8, 0x00, 0xDC, 0x42, 0x00]],
+            ['utf-16be', [0x00, 0x41, 0xD8, 0x00, 0xDC, 0x00]],
+            ['gb18030', [0x81, 0x30, 0x81, 0x30, 0x41, 0x84, 0x31, 0xA4, 0x39]],
+            ['big5', [0xA4, 0x40, 0x41, 0x88, 0x62]],
+            ['shift_jis', [0x82, 0xA0, 0x41, 0x81, 0x60]],
+            ['euc-jp', [0xA4, 0xA2, 0x8F, 0xA1, 0xA1, 0x8E, 0xA2, 0x41]],
+            ['euc-kr', [0xB0, 0xA1, 0x41]],
+            ['iso-2022-jp', [0x1B, 0x24, 0x42, 0x24, 0x22, 0x24, 0x24, 0x1B, 0x28, 0x42, 0x41]],
+            ['windows-1252', [0xE9, 0x80, 0x41]],
+            ['koi8-r', [0xC1, 0x41]]
+        ];
+        var splits = 0, differ = 0;
+        for (var c = 0; c < cases.length; c++) {
+            var enc = cases[c][0], data = cases[c][1];
+            for (var fatal = 0; fatal < 2; fatal++) {
+                var whole;
+                try { whole = 'ok:' + new TextDecoder(enc, {fatal: !!fatal}).decode(bytes(data)); }
+                catch (e) { whole = 'throw:' + e.name; }
+                for (var cut = 0; cut <= data.length; cut++) {
+                    var got;
+                    try {
+                        var d = new TextDecoder(enc, {fatal: !!fatal});
+                        got = 'ok:' + d.decode(bytes(data.slice(0, cut)), {stream: true})
+                                            + d.decode(bytes(data.slice(cut)), {stream: true}) + d.decode();
+                    } catch (e2) { got = 'throw:' + e2.name; }
+                    ++splits;
+                    if (got !== whole) {
+                        if (differ === 0) failures.push('stream differs: ' + enc + ' ' + JSON.stringify(data) + ' cut ' + cut);
+                        ++differ;
+                    }
+                }
+            }
+        }
+        // 12 cases, two error modes, every cut from before the first byte to
+        // after the last: the sum of (length + 1) over the cases, twice.
+        report('a stream split anywhere is the one-shot answer', [splits, differ], [164, 0]);
+
+        // ---- the BOM, the fatal flag and the flush ------------------------
+        report('a one-byte BOM piece is waited for', stream('utf-8', [[0xEF], [0xBB, 0xBF, 0x41]]), 'A');
+        report('a BOM is stripped once, in a stream too',
+               stream('utf-8', [[0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF, 0x41]]), '\uFEFFA');
+        report('ignoreBOM keeps it', stream('utf-8', [[0xEF], [0xBB, 0xBF, 0x41]], {ignoreBOM: true}), '\uFEFFA');
+        var oneShot = new TextDecoder();
+        report('a one-shot call flushes what a stream would hold', oneShot.decode(bytes([0xE2])), '\uFFFD');
+        var flushing = new TextDecoder('utf-8', {fatal: true});
+        flushing.decode(bytes([0xE2]), {stream: true});
+        var threw = 'no throw';
+        try { flushing.decode(); } catch (e) { threw = e.name; }
+        report('a fatal stream that ends inside a character throws on the flush', threw, 'TypeError');
+        report('decode() with no argument flushes an empty decoder',
+               new TextDecoder().decode(undefined, {stream: false}), '');
+        // A stream restarts: a decode() with stream false ends it, and the
+        // next one sniffs its own BOM again.
+        var restart = new TextDecoder();
+        restart.decode(bytes([0x41]), {stream: true});
+        report('a decode() without stream ends the stream', restart.decode(bytes([0xEF, 0xBB, 0xBF, 0x42])), '\uFEFFB');
+        // x-user-defined carries every byte: nothing is ever held back.
+        report('x-user-defined holds nothing', stream('x-user-defined', [[0x80], [0x81]]),
+               '\uF780\uF781');
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+TEST(object_assign_boxes_throws_and_copies_every_own_key) {
+    using namespace litebird;
+
+    // Phase 167, finding 169. `Object.assign` had been three lines that did
+    // what the signature suggests and not what §20.1.2.1 says:
+    //
+    //   Object.assign('test', { a: 1 }).a   -> undefined   (the write was
+    //                                          dropped on the primitive)
+    //   Object.assign(frozen, { a: 2 })     -> no throw    (Set must throw)
+    //   Object.assign({}, { [sym]: 1 })     -> no symbol   (own *keys*, not
+    //                                          own string keys)
+    //
+    // Each part of the fix is one sentence of the spec: the target is boxed by
+    // `ToObject`; every copy is a strict `Set`, whose `false` throws; the keys
+    // are `[[OwnPropertyKeys]]` — the string keys in their order, then the
+    // symbols, which `own_keys` never reported at all.
+    //
+    // Every expected value was printed by Node.js 22 for the same source.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throws(what, f) {
+            try { f(); failures.push(what + ': did not throw'); }
+            catch (e) { if (!(e instanceof TypeError)) failures.push(what + ': threw ' + e); }
+        }
+
+        // ---- ToObject on the target ---------------------------------------
+        var fromString = Object.assign('test', { a: 1 });
+        same('a string target is boxed', typeof fromString, 'object');
+        same('and the write lands on the box', fromString.a, 1);
+        same('the box still knows its string', fromString.valueOf(), 'test');
+        same('assign of one argument boxes too', typeof Object.assign('a'), 'object');
+        same('a number target', Object.assign(12, 'aaa').valueOf(), 12);
+        same('and takes the characters', Object.getOwnPropertyNames(Object.assign(12, 'aaa')).join(','), '0,1,2');
+        same('a boolean target', Object.assign(true, { a: 1 }).valueOf(), true);
+        same('a symbol target', Object.assign(Symbol('foo'), { a: 1 }).toString(), 'Symbol(foo)');
+        same('an object target is returned as it is',
+             (function () { var o = {}; return Object.assign(o, { a: 1 }) === o; })(), true);
+        throws('a null target', function () { Object.assign(null, {}); });
+        throws('an undefined target', function () { Object.assign(undefined, {}); });
+
+        // ---- Set(target, key, value, true) ---------------------------------
+        throws('a non-writable data property', function () {
+            var o = {}; Object.defineProperty(o, 'attr', { writable: false });
+            Object.assign(o, { attr: 1 });
+        });
+        throws('a frozen data property', function () {
+            Object.assign(Object.freeze({ foo: 1 }), { foo: 2 });
+        });
+        throws('creating a property on a sealed target', function () {
+            Object.assign(Object.seal({}), { foo: 2 });
+        });
+        throws('creating a property on a non-extensible target', function () {
+            Object.assign(Object.preventExtensions({}), { foo: 2 });
+        });
+
+        // ...and a setter is still a setter, however frozen its object is.
+        var seen = [];
+        var frozenAccessor = { set foo(v) { seen.push(v); } };
+        Object.freeze(frozenAccessor);
+        Object.assign(frozenAccessor, { foo: 2 });
+        same('a frozen accessor is still called', seen, [2]);
+
+        var sym = Symbol('s'), symSeen = [];
+        var sealedAccessor = { set [sym](v) { symSeen.push(v); } };
+        Object.seal(sealedAccessor);
+        var symbolSource = {}; symbolSource[sym] = 3;
+        Object.assign(sealedAccessor, symbolSource);
+        same('a sealed symbol accessor is still called', symSeen, [3]);
+
+        // An existing property of a non-extensible target can still be set.
+        var loose = Object.preventExtensions({ foo: 1 });
+        Object.assign(loose, { foo: 2 });
+        same('an existing property of a non-extensible target', loose.foo, 2);
+        var looseSymbol = {}; looseSymbol[sym] = 1;
+        Object.preventExtensions(looseSymbol);
+        var second = {}; second[sym] = 2;
+        Object.assign(looseSymbol, second);
+        same('an existing symbol property of a non-extensible target', looseSymbol[sym], 2);
+
+        // A source that is null or undefined is skipped, not refused.
+        same('a null source', Object.assign({ a: 1 }, null, { b: 2 }).b, 2);
+
+        // ---- [[OwnPropertyKeys]]: strings first, then symbols --------------
+        var s1 = Symbol('x'), s2 = Symbol('y'), log = [];
+        var ordered = {};
+        Object.defineProperty(ordered, s1, { get: function () { log.push('sym1'); }, enumerable: true });
+        Object.defineProperty(ordered, 'a', { get: function () { log.push('a'); }, enumerable: true });
+        Object.defineProperty(ordered, s2, { get: function () { log.push('sym2'); }, enumerable: true });
+        Object.defineProperty(ordered, 'b', { get: function () { log.push('b'); }, enumerable: true });
+        Object.assign({}, ordered);
+        same('the order is strings then symbols', log, ['a', 'b', 'sym1', 'sym2']);
+
+        var copied = Object.assign({}, ordered);
+        same('the symbols were copied', Object.getOwnPropertySymbols(copied).length, 2);
+
+        // A non-enumerable key is not one, and a string source copies its
+        // characters rather than its `length`.
+        var hidden = {}; Object.defineProperty(hidden, 'h', { value: 1, enumerable: false });
+        same('a non-enumerable key is skipped', Object.keys(Object.assign({}, hidden)).length, 0);
+        same('a string source copies characters', Object.getOwnPropertyNames(Object.assign({}, 'ab')).join(','), '0,1');
+
+        // ---- and the methods that read the same key list are unchanged -----
+        same('Object.keys still reports strings only', Object.keys(ordered).join(','), 'a,b');
+        same('for-in still reports strings only', (function () {
+            var out = []; for (var k in ordered) out.push(k); return out.join(',');
+        })(), 'a,b');
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+TEST(an_abrupt_completion_in_a_pattern_closes_the_iterator) {
+    using namespace litebird;
+
+    // Phase 176, finding 180. Two ways an assignment jumps out before it is
+    // finished, and the standard orders both of them:
+    //
+    //   base.prop = count += 1      with `base` null
+    //     The reference is resolved *first* (§13.15.2), but a null or
+    //     undefined base is only an error once the right-hand side has run,
+    //     so `count` is 1. This engine reported the TypeError first and left
+    //     `count` at 0: the RHS was never evaluated. (Node 22 prints 1.)
+    //
+    //   [ {}[thrower()] ] = iterable
+    //     A pattern that fails part way through must still close the
+    //     iterator (7.4.11) — and must discard whatever that `return` says,
+    //     because the pattern's own throw is what the script sees. A `next`
+    //     that throws is the one case that does *not* close (7.4.8 step 7),
+    //     which is why `[ , ] = throwingNext` calls `return` zero times while
+    //     the same pattern with a throwing target calls it once.
+    //
+    // Every expected value was printed by Node.js 22 for the same source.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throws(what, kind, f) {
+            try { f(); failures.push(what + ': did not throw'); }
+            catch (e) { if (!(e instanceof kind)) failures.push(what + ': threw ' + e); }
+        }
+
+        // ---- the right-hand side runs before a nullish base is reported ----
+        var count = 0, nullBase = null;
+        throws('a write to a member of null', TypeError, function () { nullBase.prop = count += 1; });
+        same('the right-hand side still ran', count, 1);
+
+        var undef = 0, undefinedBase;
+        throws('a write to a member of undefined', TypeError, function () { undefinedBase.prop = undef += 1; });
+        same('and for undefined too', undef, 1);
+
+        var plain = 0;
+        throws('a literal null base', TypeError, function () { null.p = (plain += 1); });
+        same('a literal null base runs it as well', plain, 1);
+
+        // The write itself is unchanged for a base that is there.
+        var target = {}; var v = 0;
+        target.p = v += 1;
+        same('an ordinary write', [target.p, v], [1, 1]);
+        throws('an index of null', TypeError, function () { var n = null; n[0] = 1; });
+
+        // ---- IteratorClose on an abrupt completion -------------------------
+        function iterableThatCounts(nextBody, returnBody) {
+            var counts = { next: 0, ret: 0 };
+            var iterator = {
+                next: function () { counts.next += 1; return nextBody(); },
+                return: function () { counts.ret += 1; return returnBody(); }
+            };
+            var source = {};
+            source[Symbol.iterator] = function () { return iterator; };
+            return { counts: counts, source: source };
+        }
+        var thrower = function () { throw new RangeError('stop'); };
+
+        // a target that throws while the pattern is being bound
+        var a = iterableThatCounts(function () { return { done: false, value: undefined }; },
+                                   function () { return {}; });
+        throws('a throwing target', RangeError, function () {
+            var out; [ out = 0, {}[thrower()] ] = a.source;
+        });
+        same('the iterator was closed once', a.counts, { next: 2, ret: 1 });
+
+        // a default value that throws
+        var b = iterableThatCounts(function () { return { done: false, value: undefined }; },
+                                   function () { return {}; });
+        throws('a throwing default', RangeError, function () {
+            var x; [ x = thrower() ] = b.source;
+        });
+        same('a throwing default closes it too', b.counts, { next: 1, ret: 1 });
+
+        // a `return` that throws is discarded: the pattern's throw wins
+        var c = iterableThatCounts(function () { return { done: false, value: undefined }; },
+                                   function () { throw new SyntaxError('from return'); });
+        throws('the pattern keeps its own throw', RangeError, function () {
+            var y; [ y = thrower() ] = c.source;
+        });
+        same('the throwing return was still called', c.counts, { next: 1, ret: 1 });
+
+        // ...and so is a `return` that is not callable
+        var notCallable = {};
+        notCallable[Symbol.iterator] = function () {
+            return { next: function () { return { done: false }; }, return: 42 };
+        };
+        throws('a return that is not callable is discarded', RangeError, function () {
+            var z; [ z = thrower() ] = notCallable;
+        });
+
+        // a `next` that throws is *not* closed (7.4.8 step 7)
+        var d = iterableThatCounts(thrower, function () { return {}; });
+        throws('a throwing next', RangeError, function () { var w; [ , ] = d.source; });
+        same('a throwing next does not close the iterator', d.counts, { next: 1, ret: 0 });
+
+        // A pattern that finds the iterator already done does not close it:
+        // there is nothing left to tell. The `return` is only called for an
+        // iterator that still had values in it when the pattern stopped.
+        var e = iterableThatCounts(function () { return { done: true }; }, function () { return {}; });
+        var q; [ q ] = e.source;
+        same('an exhausted iterator is not closed', e.counts, { next: 1, ret: 0 });
+
+        // A pattern that stops early on an iterator that is *not* done does
+        // close — here the second element is never pulled.
+        var g = iterableThatCounts(function () { return { done: false, value: 1 }; },
+                                   function () { return {}; });
+        var first; [ first ] = g.source;
+        same('a pattern that stops early closes it', g.counts, { next: 1, ret: 1 });
+
+        // A drained iterator is not told anything (it said it was done).
+        var f = iterableThatCounts(function () { return { done: true }; }, function () { return {}; });
+        var rest; [...rest] = f.source;
+        same('a drained iterator is not closed', f.counts, { next: 1, ret: 0 });
+
+        // A `return` that answers a primitive is an error on the plain
+        // close — that is what `iterator-return-is-not-an-object` asserts,
+        // and it is a TypeError rather than silence.
+        // The iterator still has values (done: false), so the pattern's own
+        // close runs and reports the bad answer.
+        var bad = {};
+        bad[Symbol.iterator] = function () {
+            return { next: function () { return { done: false, value: 1 }; },
+                     return: function () { return 1; } };
+        };
+        throws('a return that answers a primitive is an error', TypeError, function () {
+            var t; [ t ] = bad;
+        });
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+TEST(fetch_request_constructor_validation_body_clone_and_signal) {
+    using namespace litebird;
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://app.example/dir/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><head><base href='https://app.example/base/sub/'></head><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(label, cond) { if (!cond) failures.push(label); }
+        function eq(label, got, want) {
+            if (got !== want) failures.push(label + ': got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want));
+        }
+        function throwsTypeError(label, fn) {
+            try { fn(); failures.push(label + ': did not throw'); }
+            catch (e) { if (!e || e.name !== 'TypeError') failures.push(label + ': wrong error ' + String(e)); }
+        }
+
+        // Identity, prototype, defaults, relative URL against <base href>
+        var r0 = new Request('items?q=1');
+        eq('ctor name', Request.name, 'Request');
+        eq('ctor length', Request.length, 1);
+        ok('instanceof Request', r0 instanceof Request);
+        ok('instanceof Headers', r0.headers instanceof Headers);
+        ok('instanceof AbortSignal', r0.signal instanceof AbortSignal);
+        eq('toStringTag', Object.prototype.toString.call(r0), '[object Request]');
+        ok('same headers identity', r0.headers === r0.headers);
+        ok('same signal identity', r0.signal === r0.signal);
+        eq('resolved base href', r0.url, 'https://app.example/base/sub/items?q=1');
+        eq('default method', r0.method, 'GET');
+        eq('default mode', r0.mode, 'cors');
+        eq('default credentials', r0.credentials, 'same-origin');
+        eq('default cache', r0.cache, 'default');
+        eq('default redirect', r0.redirect, 'follow');
+        eq('default referrer', r0.referrer, 'about:client');
+        eq('default referrerPolicy', r0.referrerPolicy, '');
+        eq('default integrity', r0.integrity, '');
+        eq('default keepalive', r0.keepalive, false);
+        eq('default destination', r0.destination, '');
+        eq('default bodyUsed', r0.bodyUsed, false);
+        eq('default signal.aborted', r0.signal.aborted, false);
+
+        // URL object & validation errors
+        var u = new URL('https://api.example/v1/../v2?a=b#frag');
+        eq('URL input', new Request(u).url, 'https://api.example/v2?a=b#frag');
+        throwsTypeError('no new', function () { Request('https://api.example/'); });
+        throwsTypeError('no args', function () { new Request(); });
+        throwsTypeError('credentials user:pass', function () { new Request('https://u:p@api.example/'); });
+        throwsTypeError('credentials user only', function () { new Request('https://u@api.example/'); });
+        throwsTypeError('non-object init', function () { new Request('https://api.example/', 'bad'); });
+        throwsTypeError('window non-null', function () { new Request('https://api.example/', { window: {} }); });
+        throwsTypeError('mode navigate', function () { new Request('https://api.example/', { mode: 'navigate' }); });
+        throwsTypeError('mode invalid', function () { new Request('https://api.example/', { mode: 'bogus' }); });
+        throwsTypeError('credentials invalid', function () { new Request('https://api.example/', { credentials: 'bogus' }); });
+        throwsTypeError('cache invalid', function () { new Request('https://api.example/', { cache: 'bogus' }); });
+        throwsTypeError('only-if-cached cors', function () { new Request('https://api.example/', { cache: 'only-if-cached' }); });
+        throwsTypeError('redirect invalid', function () { new Request('https://api.example/', { redirect: 'bogus' }); });
+        throwsTypeError('referrerPolicy invalid', function () { new Request('https://api.example/', { referrerPolicy: 'bogus' }); });
+        throwsTypeError('forbidden CONNECT', function () { new Request('https://api.example/', { method: 'connect' }); });
+        throwsTypeError('forbidden TRACE', function () { new Request('https://api.example/', { method: 'TRACE' }); });
+        throwsTypeError('forbidden TRACK', function () { new Request('https://api.example/', { method: 'Track' }); });
+        throwsTypeError('invalid token method', function () { new Request('https://api.example/', { method: 'BAD METHOD' }); });
+        throwsTypeError('no-cors PUT', function () { new Request('https://api.example/', { mode: 'no-cors', method: 'PUT' }); });
+        throwsTypeError('GET with body', function () { new Request('https://api.example/', { method: 'GET', body: 'x' }); });
+        throwsTypeError('HEAD with body', function () { new Request('https://api.example/', { method: 'HEAD', body: 'x' }); });
+        throwsTypeError('invalid signal', function () { new Request('https://api.example/', { signal: {} }); });
+        throwsTypeError('invalid header name', function () { new Request('https://api.example/', { headers: { 'bad name': '1' } }); });
+        throwsTypeError('malformed header pair', function () { new Request('https://api.example/', { headers: [['only-one']] }); });
+        throwsTypeError('illegal getter receiver', function () { Object.getOwnPropertyDescriptor(Request.prototype, 'url').get.call({}); });
+        throwsTypeError('illegal clone receiver', function () { Request.prototype.clone.call({}); });
+
+        // Detached ArrayBuffer throws TypeError
+        var abDet = new ArrayBuffer(4);
+        abDet.transfer();
+        throwsTypeError('detached ArrayBuffer body', function () {
+            new Request('https://api.example/', { method: 'POST', body: abDet });
+        });
+
+        // Method normalization
+        eq('norm delete', new Request('https://api.example/', { method: 'delete' }).method, 'DELETE');
+        eq('norm post', new Request('https://api.example/', { method: 'post' }).method, 'POST');
+        eq('preserve patch', new Request('https://api.example/', { method: 'patch' }).method, 'patch');
+
+        // Browser forbidden request header guard & no-cors safelist guard
+        var rGuard = new Request('https://api.example/', {
+            headers: {
+                'Host': 'evil.example',
+                'Origin': 'https://evil.example',
+                'Cookie': 'sid=1',
+                'Sec-Fetch-Mode': 'cors',
+                'Proxy-Authorization': 'Basic x',
+                'X-Allowed': 'ok'
+            }
+        });
+        eq('guard strips Host', rGuard.headers.get('host'), null);
+        eq('guard strips Origin', rGuard.headers.get('origin'), null);
+        eq('guard strips Cookie', rGuard.headers.get('cookie'), null);
+        eq('guard strips Sec-*', rGuard.headers.get('sec-fetch-mode'), null);
+        eq('guard strips Proxy-*', rGuard.headers.get('proxy-authorization'), null);
+        eq('guard keeps X-Allowed', rGuard.headers.get('x-allowed'), 'ok');
+
+        var rNoCors = new Request('https://api.example/', {
+            mode: 'no-cors',
+            headers: { 'Accept': 'text/plain', 'X-Custom': 'no', 'Content-Type': 'application/json' }
+        });
+        eq('no-cors keeps Accept', rNoCors.headers.get('accept'), 'text/plain');
+        eq('no-cors drops X-Custom', rNoCors.headers.get('x-custom'), null);
+        eq('no-cors drops json CT', rNoCors.headers.get('content-type'), null);
+
+        // Request-from-Request, clone(), bodyUsed, AbortSignal linking
+        var ac = new AbortController();
+        var src = new Request('https://api.example/data', {
+            method: 'POST',
+            headers: { 'X-Tag': 'v1' },
+            body: 'body-1',
+            signal: ac.signal
+        });
+        var cloned = src.clone();
+        cloned.headers.set('X-Tag', 'v2');
+        eq('clone isolates headers', src.headers.get('x-tag'), 'v1');
+        eq('clone header updated', cloned.headers.get('x-tag'), 'v2');
+
+        var unlinked = new Request(src, { body: 'body-2', signal: null });
+        eq('override body keeps src unused', src.bodyUsed, false);
+
+        var inherited = new Request(src);
+        eq('inherit body disturbs src', src.bodyUsed, true);
+        throwsTypeError('reuse disturbed Request', function () { new Request(src); });
+        throwsTypeError('clone disturbed Request', function () { src.clone(); });
+        throwsTypeError('post Request -> GET throws', function () { new Request(cloned, { method: 'GET' }); });
+
+        ok('signal is dependent copy', src.signal !== ac.signal);
+        ac.abort('cancel-42');
+        eq('src signal aborted', src.signal.aborted, true);
+        eq('src signal reason', src.signal.reason, 'cancel-42');
+        eq('cloned signal aborted', cloned.signal.aborted, true);
+        eq('inherited signal aborted', inherited.signal.aborted, true);
+        eq('unlinked signal not aborted', unlinked.signal.aborted, false);
+
+        // Async body consumers
+        var asyncDone = false;
+        var rBin = new Request('https://api.example/', { method: 'POST', body: new Uint8Array([0, 65, 255]) });
+        var rSp = new Request('https://api.example/', { method: 'POST', body: new URLSearchParams('x=1&y=2') });
+        var rBlob = new Request('https://api.example/', { method: 'POST', body: new Blob(['csv,1'], { type: 'text/csv' }) });
+        var rJson = new Request('https://api.example/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"v":7}' });
+        eq('URLSearchParams CT', rSp.headers.get('content-type'), 'application/x-www-form-urlencoded;charset=UTF-8');
+        eq('Blob CT', rBlob.headers.get('content-type'), 'text/csv');
+        eq('Uint8Array no CT', rBin.headers.get('content-type'), null);
+        eq('explicit JSON CT', rJson.headers.get('content-type'), 'application/json');
+
+        Promise.all([
+            rBin.bytes(),
+            rSp.text(),
+            rBlob.blob(),
+            rJson.json(),
+            r0.text(),
+            cloned.text()
+        ]).then(function (vals) {
+            eq('bytes len', vals[0].length, 3);
+            eq('bytes[0]', vals[0][0], 0);
+            eq('bytes[1]', vals[0][1], 65);
+            eq('bytes[2]', vals[0][2], 255);
+            eq('sp text', vals[1], 'x=1&y=2');
+            eq('blob size', vals[2].size, 5);
+            eq('blob type', vals[2].type, 'text/csv');
+            eq('json v', vals[3].v, 7);
+            eq('empty GET text', vals[4], '');
+            eq('empty GET still unused', r0.bodyUsed, false);
+            eq('cloned text', vals[5], 'body-1');
+            return rBin.text().then(
+                function () { failures.push('second read should reject'); asyncDone = true; },
+                function (e) { eq('second read TypeError', e.name, 'TypeError'); asyncDone = true; }
+            );
+        });
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.eval("asyncDone").is_truthy());
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+
+    // GC reclamation of cyclic Request <-> Headers <-> AbortSignal graphs.
+    js.eval(R"JS(
+        for (var i = 0; i < 64; i++) {
+            var c = new AbortController();
+            var rq = new Request('https://api.example/gc/' + i, {
+                method: 'POST',
+                headers: { 'X-I': String(i) },
+                body: 'gc-body-' + i,
+                signal: c.signal
+            });
+            rq.headers.owner = rq;
+            rq.signal.owner = rq;
+        }
+    )JS");
+    Heap::default_heap().collect_garbage();
+
+    // Bytecode VM exposes Request with identical semantics.
+    VM vm(doc);
+    JsValue vm_ctor = vm.get_global("Request");
+    assert(vm_ctor.is_callable());
+    JsValue vm_req = vm_ctor.construct({
+        JsValue::make_string("https://vm.example/path"),
+        js.eval("({ method: 'post', body: 'vm' })")
+    });
+    assert(vm_req.get_property("method").to_string() == "POST");
+    assert(vm_req.get_property("url").to_string() == "https://vm.example/path");
+    assert(vm_req.get_property("headers").get_property("get")
+               .call_with_this(vm_req.get_property("headers"), {JsValue::make_string("content-type")})
+               .to_string() == "text/plain;charset=UTF-8");
+}
+
+TEST(fetch_request_loopback_http_worker_and_abort) {
+    using namespace litebird;
+    CookieJar::default_jar().clear();
+    ResourceLoader::clear_http_cache();
+
+    auto last_method = std::make_shared<std::string>();
+    auto last_body = std::make_shared<std::string>();
+    auto last_token = std::make_shared<std::string>();
+    auto hit_count = std::make_shared<std::atomic<int>>(0);
+
+    LoopbackHttpTestServer server([last_method, last_body, last_token, hit_count](
+                                      const HttpServerRequest& req, HttpServerResponse& resp) {
+        if (req.path == "/worker.js") {
+            resp.status = 200;
+            resp.content_type = "application/javascript";
+            resp.body =
+                "var wr = new Request('/api/worker', { method: 'POST', headers: { 'X-Token': 'from-worker' }, body: 'w-payload' });"
+                "fetch(wr).then(function(r) { return r.json(); }).then(function(j) {"
+                "  postMessage(JSON.stringify({ url: wr.url, used: wr.bodyUsed, method: j.method, body: j.body, token: j.token }));"
+                "}, function(e) { postMessage('ERR:' + String(e)); });";
+            return;
+        }
+        if (req.path.rfind("/api/", 0) == 0) {
+            ++(*hit_count);
+            *last_method = req.method;
+            *last_body = req.body;
+            *last_token = req.headers.count("x-token") ? req.headers.at("x-token") : "";
+            resp.status = 200;
+            resp.content_type = "application/json";
+            resp.body = "{\"method\":\"" + req.method + "\",\"path\":\"" + req.path +
+                        "\",\"body\":\"" + req.body + "\",\"token\":\"" + *last_token +
+                        "\",\"len\":" + std::to_string(req.body.size()) + "}";
+            return;
+        }
+        resp.status = 404;
+        resp.status_text = "Not Found";
+    });
+
+    const std::string base = "http://127.0.0.1:" + std::to_string(server.port);
+    auto doc = std::make_shared<Document>();
+    doc->set_url(base + "/index.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(
+        "var results = {};\n"
+        "var req1 = new Request('/api/one', { method: 'POST', headers: { 'X-Token': 't1' }, body: 'hello-1' });\n"
+        "fetch(req1).then(function(res1) {\n"
+        "  results.res1Instanceof = (res1 instanceof Response);\n"
+        "  results.req1Used = req1.bodyUsed;\n"
+        "  return res1.json();\n"
+        "}).then(function(j1) {\n"
+        "  results.j1 = j1.method + ':' + j1.path + ':' + j1.body + ':' + j1.token;\n"
+        "  return fetch(req1).then(\n"
+        "    function() { results.reuse = 'UNEXPECTED'; },\n"
+        "    function(e) { results.reuse = e.name; }\n"
+        "  );\n"
+        "}).then(function() {\n"
+        "  var req2 = new Request('/api/two', { method: 'POST', headers: { 'X-Token': 'old' }, body: 'old' });\n"
+        "  return fetch(req2, { method: 'PUT', headers: { 'X-Token': 'new' }, body: new Uint8Array([65, 66, 67]) })\n"
+        "    .then(function(r2) { results.req2Used = req2.bodyUsed; return r2.json(); });\n"
+        "}).then(function(j2) {\n"
+        "  results.j2 = j2.method + ':' + j2.path + ':' + j2.body + ':' + j2.token + ':' + j2.len;\n"
+        "  var acPre = new AbortController();\n"
+        "  var reqPre = new Request('/api/aborted', { signal: acPre.signal });\n"
+        "  acPre.abort('pre-cancel');\n"
+        "  return fetch(reqPre).then(\n"
+        "    function() { results.preAbort = 'UNEXPECTED'; },\n"
+        "    function(e) { results.preAbort = String(e); }\n"
+        "  );\n"
+        "}).then(function() {\n"
+        "  var acLate = new AbortController();\n"
+        "  var reqLate = new Request('/api/aborted2', { signal: acLate.signal });\n"
+        "  var p = fetch(reqLate);\n"
+        "  acLate.abort('late-cancel');\n"
+        "  return p.then(\n"
+        "    function() { results.lateAbort = 'UNEXPECTED'; },\n"
+        "    function(e) { results.lateAbort = String(e); }\n"
+        "  );\n"
+        "}).then(function() { results.done = true; });\n"
+        "var w = new Worker('/worker.js');\n"
+        "w.onmessage = function(e) { results.worker = String(e.data); };\n"
+        "w.onerror = function(e) { results.worker = 'ERR:' + e.message; };\n"
+    );
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+        if (js.eval("Boolean(results.done && results.worker)").is_truthy()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    js.eval("w.terminate();");
+
+    assert(js.eval("results.done").is_truthy());
+    assert(js.eval("results.res1Instanceof").is_truthy());
+    assert(js.eval("results.req1Used").is_truthy());
+    assert(js.eval("results.j1").to_string() == "POST:/api/one:hello-1:t1");
+    assert(js.eval("results.reuse").to_string() == "TypeError");
+    assert(!js.eval("results.req2Used").is_truthy());
+    assert(js.eval("results.j2").to_string() == "PUT:/api/two:ABC:new:3");
+    assert(js.eval("results.preAbort").to_string() == "pre-cancel");
+    assert(js.eval("results.lateAbort").to_string() == "late-cancel");
+    const std::string worker_out = js.eval("results.worker").to_string();
+    assert(worker_out.find("\"used\":true") != std::string::npos);
+    assert(worker_out.find("\"method\":\"POST\"") != std::string::npos);
+    assert(worker_out.find("\"body\":\"w-payload\"") != std::string::npos);
+    assert(worker_out.find("\"token\":\"from-worker\"") != std::string::npos);
+    // Aborted fetches must not hit the server: only /api/one, /api/two, /api/worker = 3 hits.
+    assert(hit_count->load() == 3);
 }
 
 int main() {
@@ -30749,6 +32630,9 @@ int main() {
     // Phase 57: lossy WebP, bit-exact against libwebp.
     RUN_TEST(webp_lossy_vp8_decodes_bit_exactly);
     RUN_TEST(webp_lossy_alpha_plane_and_container_consistency);
+    // Finding 172: the AVIF container, read; the picture is still open.
+    RUN_TEST(avif_container_is_read_and_the_picture_is_not_decoded);
+    RUN_TEST(avif_container_refuses_what_it_cannot_read_instead_of_guessing);
     RUN_TEST(canvas_text_filltext_stroketext_measuretext_and_font_state);
     RUN_TEST(canvas2d_ctm_scanline_thick_stroke_clip_and_js_bindings);
     RUN_TEST(svg_real_world_paths_arcs_gradients_use_clip_and_guards);
@@ -30912,6 +32796,8 @@ int main() {
     // Phase 106: ArrayBuffer and the typed arrays.
     RUN_TEST(arraybuffer_and_typed_arrays);
     RUN_TEST(dataview_and_the_iterating_typed_array_methods);
+    RUN_TEST(a_typed_array_to_locale_string_asks_every_element);
+    RUN_TEST(a_typed_array_toString_is_arrays_own_function);
 
     // Phase 128: the six regular grammar rules of a class body.
     RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);
@@ -30933,6 +32819,14 @@ int main() {
     // Phase 159: a definition names the function it makes.
     RUN_TEST(a_definition_names_the_function_it_makes);
 
+    // Phase 167: Object.assign boxes its target, throws on a refused Set, and
+    // copies the symbols.
+    RUN_TEST(object_assign_boxes_throws_and_copies_every_own_key);
+
+    // Phase 176: an abrupt completion closes the iterator, and the RHS of an
+    // assignment runs before a nullish base is reported.
+    RUN_TEST(an_abrupt_completion_in_a_pattern_closes_the_iterator);
+
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
@@ -30949,6 +32843,9 @@ int main() {
 
     // Phase 149: the Annex B String.prototype HTML methods, and the trim aliases.
     RUN_TEST(annex_b_string_html_methods);
+
+    // Phase 163: TextDecoder's `{stream: true}`, and the bytes it holds back.
+    RUN_TEST(textdecoder_reaches_script_in_pieces);
 
     // Phase 119: Contextual GSUB (Type 1-7), Cursive GPOS (Type 3/7/8), and Arabic Shaping.
     RUN_TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions);
@@ -30972,11 +32869,27 @@ int main() {
     RUN_TEST(document_body_margins_place_boxes_from_the_viewport);
     RUN_TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry);
 
+    // Phase 170: root/body canvas color, compositing, scoping and scrolling.
+    RUN_TEST(document_canvas_background_is_scoped_and_keeps_computed_styles);
+    RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
+    RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
+
     // Phase 157: ArrayBuffer.prototype.transfer(), transferToFixedLength(), detached, and resize().
     RUN_TEST(arraybuffer_transfer_detach_and_resize);
 
     // Phase 161: WebSocket binary frames — ArrayBuffer, TypedArray, DataView, and Blob.
     RUN_TEST(websocket_binary_frames_arraybuffer_typedarray_and_blob);
+
+    // Phase 168: what a native entry point captures is traced by the collector.
+    RUN_TEST(gc_reclaims_a_bound_functions_target);
+    RUN_TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour);
+
+    // Phase 169: WebSocket permessage-deflate (RFC 7692) & stateful DEFLATE/INFLATE codec.
+    RUN_TEST(websocket_permessage_deflate_rfc7692);
+
+    // Phase 173: Fetch Request constructor, Body mixin, clone(), AbortSignal linking, and fetch(Request, init).
+    RUN_TEST(fetch_request_constructor_validation_body_clone_and_signal);
+    RUN_TEST(fetch_request_loopback_http_worker_and_abort);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

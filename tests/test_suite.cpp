@@ -26200,6 +26200,59 @@ TEST(http_authentication_basic_and_digest_challenges) {
     assert(ResourceLoader::auth_sha512_256_hex("abc") !=
            "ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a");    // SHA-512's first 256 bits
 
+    // 1b. RFC 7616 §3.4.1: "the username and password ... SHOULD be in
+    //     Normalization Form C". A password typed with a combining accent and
+    //     the same password precomposed are the same password to a person and
+    //     different octets to a digest, so the response must not depend on
+    //     which one was typed. The expected hexes were taken from Node.js v22
+    //     computing the MD5 by hand for each spelling:
+    //       e9 spelled precomposed -> 2248d1d270e12f8fbd985df11111d87e
+    //       e + U+0301            -> f2c9481685a393d1e7e27bdcd73f31c7 (the wrong octets)
+    //     and the engine must answer the first for both.
+    {
+        const std::string realm = "r@example.test";
+        const std::string nonce = "n0nce";
+        std::string precomposed, combining, again;
+        assert(ResourceLoader::auth_Digest_response("MD5", "\xC3\xA9", "pw", realm, nonce, "GET", "/x",
+                                                    "auth", "c", "00000001", precomposed));
+        assert(ResourceLoader::auth_Digest_response("MD5", "e\xCC\x81", "pw", realm, nonce, "GET", "/x",
+                                                    "auth", "c", "00000001", combining));
+        assert(precomposed == "2248d1d270e12f8fbd985df11111d87e");
+        assert(combining == precomposed);
+
+        // The same for the password: e2035f3d… is the precomposed spelling,
+        // 63b92bfc… the combining one.
+        std::string pass_pre, pass_comb;
+        assert(ResourceLoader::auth_Digest_response("MD5", "u", "\xC3\xA9", realm, nonce, "GET", "/x",
+                                                    "auth", "c", "00000001", pass_pre));
+        assert(ResourceLoader::auth_Digest_response("MD5", "u", "e\xCC\x81", realm, nonce, "GET", "/x",
+                                                    "auth", "c", "00000001", pass_comb));
+        assert(pass_pre == "e2035f3d116dbeadfccde7d61c193e81");
+        assert(pass_comb == pass_pre);
+
+        // A credential already in NFC is digested as its own octets: the RFC
+        // 7616 example above still answers 8ca523f5…, and ASCII is untouched.
+        assert(ResourceLoader::auth_Digest_response("MD5", "Mufasa", "Circle of Life",
+                                                    "http-auth@example.org",
+                                                    "7ypf/xlj9XXwfDPEoM4URrv/xwf94BcCAzFZH4GiTo0v", "GET",
+                                                    "/dir/index.html", "auth",
+                                                    "f2/wE4q74E6zIJEtWaHKaf5wv/H5QzzpXusqGemxURZJ",
+                                                    "00000001", again));
+        assert(again == "8ca523f5e9506fed4657c9700eebdbec");
+
+        // And `userhash` hashes the normalized name too, so a server that
+        // precomposed its user list and one that did not agree.
+        std::string hashed_pre, hashed_comb;
+        const auto userhash = [&](const std::string& user, std::string& out) {
+            return ResourceLoader::auth_Digest_build(
+                "MD5", user, "pw", realm, nonce, /*opaque=*/"", "GET", "/x", "auth", "c", "00000001",
+                /*entity_body=*/std::string_view(), /*hash_username=*/true, out);
+        };
+        assert(userhash("\xC3\xA9", hashed_pre));
+        assert(userhash("e\xCC\x81", hashed_comb));
+        assert(hashed_pre == hashed_comb);
+    }
+
     // 2. RFC 7616 §3.9.1's example, reproduced field for field: the RFC's own
     //    cnonce and nc, so the expected hex is the RFC's and not this code's.
     {

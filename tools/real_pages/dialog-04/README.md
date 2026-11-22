@@ -26,4 +26,6 @@ The rows use the renderer's integer source-over: `(0*26 + 255*229 + 127) / 255` 
 
 ## What this does not show
 
+The terminal renderer does not draw the backdrop — `TerminalRenderer.cpp` belongs to open PR #227, so the command is left unhandled there and the terminal shows no dimming.
+
 The dialog is positioned by the fixture's own CSS — the engine has no UA `position: fixed; inset: 0; margin: auto` for a modal dialog, so an unstyled one stays where the flow put it. Pages cannot style the backdrop (`::backdrop` does not exist), and a dialog with no background of its own lets the backdrop show through it. A scrolled page with a dialog open is not tested.

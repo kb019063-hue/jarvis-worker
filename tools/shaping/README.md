@@ -100,3 +100,32 @@ script coverage. A font lacking a script cannot test that script. Run with
 additional covered fonts before drawing conclusions about Indic or other
 scripts. Engine fixes, broader font fixtures and visual equivalence checks
 are separate work.
+
+## Hebrew discrepancy reduced to three codepoints
+
+Run the diagnostic with the same CLI and font as the main comparator:
+
+```sh
+build/shaping-venv/bin/python tools/shaping/hebrew_diagnostic.py \
+  --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
+  --output build/hebrew-report.json
+```
+
+On the DejaVu Sans hash above, four of five cases have the same placement.
+The failing minimal input is **U+05E9 U+05B8 U+05C1** (SHIN, QAMATS, SHIN
+DOT). Qamats (glyph 1305) has absolute x=0 in HarfBuzz and x=127 in
+Litebird. Removing either mark makes placement agree. Swapping the marks to
+**U+05E9 U+05C1 U+05B8** also makes placement agree. HarfBuzz produces the
+same output for both mark orders, whereas Litebird changes its placement.
+The two strings are canonically equivalent (combining classes 18 and 24).
+This establishes an order-sensitive shaping discrepancy, not just an RTL
+output-array convention or an advance-width disagreement.
+
+Source inspection points to the interaction of mark ordering and attachment:
+`shape_glyphs` passes the input order into substitutions/positioning, resolves
+mark attachment chains, then reorders RTL clusters. This investigation does
+not isolate a particular lookup as the sole cause, nor prove that sorting by
+canonical combining class would fix it (the failing input is already in
+that order). A Hebrew-specific preprocessing/attachment investigation is
+needed before changing the engine. These five probes preserve the evidence
+for that separate fix; no engine behavior or expected answer was changed.

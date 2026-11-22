@@ -53,6 +53,7 @@ void ensure_registered() {
         register_html_interfaces();
         register_form_interfaces();
         register_file_interfaces();
+        register_crypto_interfaces();
         register_url_interfaces();
         register_observer_interfaces();
         register_window_interfaces();
@@ -248,6 +249,9 @@ JsObject* Realm::proto(const std::string& name) {
 
     Iface iface(*this, *def, cell, constructor);
     if (def->setup) def->setup(iface);
+    if (name == "Window" && window.is_object() && !window.has_own_property("crypto")) {
+        window.set_property("crypto", make("Crypto"));
+    }
     return cell;
 }
 

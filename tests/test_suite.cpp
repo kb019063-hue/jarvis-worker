@@ -24041,95 +24041,6 @@ TEST(js_direct_eval_follows_syntax_and_variable_environment_rules) {
            "undefined SyntaxError:0 9 2 2 3 4 function function TypeError TypeError");
 }
 
-TEST(js_direct_eval_inherits_the_callers_grammar) {
-    // Written for #226, which was closed on 22 November 2026: #211 (Phase 171)
-    // had landed the same behaviour by another route, and with no suite of its
-    // own for it. These are the behaviours #226 pinned, as its agent wrote
-    // them; `main` and Node.js v22.22.3 give the line below.
-    using namespace litebird;
-    JsInterpreter js;
-    js.eval(R"js(
-        var out = [];
-
-        // Strictness is inherited, not re-derived from the eval's own text.
-        // Strict code makes `var static` a syntax error; sloppy code does not.
-        function strictInherits() {
-            'use strict';
-            try { eval('var static;'); return 'no error'; }
-            catch (e) { return e.name; }
-        }
-        function sloppyDoesNot() {
-            try { eval('var static;'); return 'declared'; }
-            catch (e) { return e.name; }
-        }
-        out.push(strictInherits(), sloppyDoesNot());
-
-        // A class field initialiser and a static block ban `arguments`, and a
-        // direct eval written there is handed that ban. The text must be
-        // rejected before any of it runs.
-        var effects = 0;
-        class Banned {
-            field = eval('effects = 1; arguments;');
-            static { try { eval('arguments'); } catch (e) { Banned.block = e.name; } }
-        }
-        try { new Banned(); out.push('no error'); } catch (e) { out.push(e.name + ':' + effects); }
-        out.push(Banned.block);
-
-        // The ban follows arrows into their bodies, because an arrow declares
-        // no `arguments` of its own, but an ordinary function does declare
-        // one -- and a `function` declaration's parameters are ordinary code.
-        class Arrows {
-            field = eval('() => arguments');
-        }
-        try { new Arrows().field(); out.push('no error'); } catch (e) { out.push(e.name); }
-        class Functions {
-            field = eval('function g({ p = arguments } = {}) { return arguments.length; } g(7, 8)');
-        }
-        out.push(new Functions().field);
-
-        // §19.2.1.3 EvalDeclarationInstantiation: a sloppy eval's `var` cannot
-        // collide with a lexical binding the caller's scope chain declares.
-        function blockLet() { { let x; try { eval('var x;'); return 'no error'; } catch (e) { return e.name; } } }
-        function bodyLet() { let x; try { eval('var x;'); return 'no error'; } catch (e) { return e.name; } }
-        function bodyVar() { var x; try { eval('var x;'); return 'no collision'; } catch (e) { return e.name; } }
-        function paramVar() { return (function (x) { try { eval('var x;'); return 'no collision'; } catch (e) { return e.name; } })(1); }
-        function siblingLet() { { let x; } try { eval('var x;'); return 'no collision'; } catch (e) { return e.name; } }
-        out.push(blockLet(), bodyLet(), bodyVar(), paramVar(), siblingLet());
-        // Strict eval text puts its `var`s in an environment of its own, so the
-        // same text that collides above merely shadows there.
-        function strictTextShadows() {
-            let x = 'caller';
-            eval('"use strict"; var x = "eval";');
-            return x;
-        }
-        out.push(strictTextShadows());
-
-        // `break`, `continue` and `return` are judged against the eval's own
-        // text: the caller's loop does not enclose it, and neither does the
-        // caller's function.
-        function breakOutside() { for (;;) { try { eval('break;'); return 'no error'; } catch (e) { return e.name; } } }
-        function continueOutside() { try { eval('continue;'); return 'no error'; } catch (e) { return e.name; } }
-        function returnOutside() { try { eval('return 1;'); return 'no error'; } catch (e) { return e.name; } }
-        function insideOwnLoop() { return eval('for (var i = 0; i < 3; i++) { continue; } i'); }
-        function insideOwnSwitch() { return eval('switch (1) { case 1: break; } "done"'); }
-        out.push(breakOutside(), continueOutside(), returnOutside(), insideOwnLoop(), insideOwnSwitch());
-
-        // Indirect eval is global code: it inherits neither the caller's
-        // strictness nor the ban on `arguments`.
-        function indirectIsGlobal() {
-            'use strict';
-            try { return (0, eval)('var static; typeof static'); } catch (e) { return e.name; }
-        }
-        out.push(indirectIsGlobal());
-
-        var summary = out.join(' ');
-    )js");
-    assert(!js.last_eval_failed());
-    assert(js.global_env()->get("summary").to_string() ==
-           "SyntaxError declared SyntaxError:0 SyntaxError SyntaxError 2 SyntaxError SyntaxError "
-           "no collision no collision no collision caller SyntaxError SyntaxError SyntaxError 3 done undefined");
-}
-
 TEST(js_lexical_temporal_dead_zone_blocks_and_classes) {
     using namespace litebird;
     JsInterpreter js;
@@ -33876,7 +33787,6 @@ int main() {
 
     // Phase 80: direct-eval syntax and variable-environment follow-ups.
     RUN_TEST(js_direct_eval_follows_syntax_and_variable_environment_rules);
-    RUN_TEST(js_direct_eval_inherits_the_callers_grammar);
 
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);

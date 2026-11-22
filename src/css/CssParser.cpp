@@ -314,7 +314,7 @@ bool CssParser::supports_declaration(std::string_view decl) const {
         static const std::unordered_set<std::string> disp = {
             "block", "inline", "inline-block", "flex", "inline-flex", "grid", "inline-grid",
             "table", "table-row", "table-cell", "table-row-group", "table-header-group",
-            "table-footer-group", "none", "list-item", "inherit", "initial", "unset"
+            "table-footer-group", "none", "list-item", "contents", "inherit", "initial", "unset"
         };
         return disp.count(val) > 0;
     }

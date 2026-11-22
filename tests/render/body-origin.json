@@ -978,7 +978,6 @@
     {
       "name": "a_body_with_display_contents_has_no_canvas_color",
       "html": "<!doctype html><body style=\"display:contents;background:#ff0000;color:transparent\">hello</body>",
-      "known_failure": "display:contents is not represented by the layout display enum. Chromium leaves the canvas white when the body generates no box; Litebird treats it as a block and propagates red.",
       "assert": [
         {
           "kind": "pixel",

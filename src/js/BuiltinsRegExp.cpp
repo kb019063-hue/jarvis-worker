@@ -2686,18 +2686,6 @@ JsValue regexp_exec_abstract(const JsValue& rx, const JsString& subject_string) 
     return build_match_array(*program, subject, result.captures);
 }
 
-JsValue species_constructor(const JsValue& obj, const JsValue& default_ctor) {
-    JsValue c = obj.get_property("constructor");
-    if (c.is_undefined()) return default_ctor;
-    if (!c.is_object_like()) {
-        js_throw_type_error("constructor property is not an object");
-    }
-    JsValue s = c.get_property(kSymbolSpeciesKey);
-    if (s.is_nullish()) return default_ctor;
-    if (!s.is_function()) js_throw_type_error("Symbol.species is not a constructor");
-    return s;
-}
-
 std::string escape_source(const std::string& source) {
     if (source.empty()) return "(?:)";
     std::string out;

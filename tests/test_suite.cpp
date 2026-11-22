@@ -30166,6 +30166,131 @@ TEST(a_functions_name_and_length_are_its_own_properties) {
     assert(failed.empty());
 }
 
+TEST(a_subclass_is_made_by_the_builtin_it_was_called_on) {
+    using namespace litebird;
+    // Phase 140, finding 145. `Array.from`, `Array.of` and every method that
+    // makes an array built it with `JsValue::make_array`, so a subclass of
+    // Array could never be made by the built-in it was called on: `new
+    // List().map(f)` was a plain Array. The standard routes all of them
+    // through ArraySpeciesCreate (ECMA-262 §10.4.2.3), which asks the
+    // object's `constructor` for `Symbol.species` — so `class Plain extends Array { static get
+    // [Symbol.species]() { return Array; } }` is the case that proves the
+    // property is *read* and not merely present.
+    //
+    // Every expected string below is what Node.js v22.22.3 printed for the
+    // same script, checked line for line against a second run in Node. The
+    // non-constructor receivers make a plain array, as the standard specifies:
+    // `Array.from.call({}, [1])` is an Array rather than a TypeError.
+    TestPage page;
+    JsInterpreter& js = page.js;
+
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        class List extends Array {}
+        class Plain extends Array { static get [Symbol.species]() { return Array; } }
+        class Traced extends Array { constructor(n) { super(n); Traced.given = n; } }
+        function list() { var l = new List(); l.push(1, 2, 3); return l; }
+        function plain() { var p = new Plain(); p.push(1); return p; }
+
+        // The static methods make the constructor they were called on.
+        check('List.from', function () { return [List.from([1, 2]) instanceof List, List.from([1, 2]).length]; }, '[true,2]');
+        check('List.of', function () { return [List.of(1, 2) instanceof List, List.of(1, 2).length]; }, '[true,2]');
+        check('Array.from is still an Array', function () { return Array.from([1, 2]) instanceof Array; }, 'true');
+
+        // The species-aware methods make their result through the species.
+        check('map', function () { return list().map(function (x) { return x; }) instanceof List; }, 'true');
+        check('filter', function () { return list().filter(Boolean) instanceof List; }, 'true');
+        check('slice', function () { return list().slice(1) instanceof List; }, 'true');
+        check('concat', function () { return list().concat([4]) instanceof List; }, 'true');
+        check('flat', function () { return list().flat() instanceof List; }, 'true');
+        check('flatMap', function () { return list().flatMap(function (x) { return [x]; }) instanceof List; }, 'true');
+        check('splice', function () { return list().splice(1, 1) instanceof List; }, 'true');
+
+        // ... and `Symbol.species` is read, not ignored: this subclass says
+        // Array, so the method must make an Array.
+        check('a species of Array', function () {
+            var made = plain().map(function (x) { return x; });
+            return [made instanceof Array, made instanceof Plain];
+        }, '[true,false]');
+
+        // The getters the standard installs, on every constructor that has one.
+        check('the species getters', function () {
+            return [typeof Array[Symbol.species], Array[Symbol.species] === Array,
+                    typeof Map[Symbol.species], Map[Symbol.species] === Map,
+                    typeof Set[Symbol.species], typeof Promise[Symbol.species],
+                    typeof RegExp[Symbol.species]];
+        }, '["function",true,"function",true,"function","function","function"]');
+
+        // A receiver that is not an array makes a plain array: IsArray is the
+        // first question ArraySpeciesCreate asks, so `constructor` is not read.
+        check('an array-like receiver', function () {
+            return Array.prototype.map.call({ length: 2, 0: 'a', 1: 'b' }, function (x) { return x + '!'; });
+        }, '["a!","b!"]');
+
+        // A hole stays a hole: the result is filled with CreateDataProperty.
+        check('holes', function () {
+            var mapped = [1, , 3].map(function (x) { return x; });
+            return [mapped.length, 1 in mapped];
+        }, '[3,false]');
+
+        // The length the array-like path passes to the constructor, and the
+        // one the iterable path does not (it constructs with no argument).
+        check('a constructor is told the length', function () {
+            var made = Traced.from({ length: 3, 0: 'a', 1: 'b', 2: 'c' });
+            return [Traced.given, made.length, made instanceof Traced];
+        }, '[3,3,true]');
+
+        // A receiver that is not a constructor makes a plain array,
+        // and a constructed object when the receiver is a constructor.
+        check('a receiver that is not a constructor', function () {
+            var from = Array.from.call({}, [1]);
+            var of = Array.of.call({}, 1, 2);
+            var made = Array.from.call(function () {}, [1]);
+            return [from instanceof Array, from.length, of instanceof Array, made instanceof Array, made.length];
+        }, '[true,1,true,false,1]');
+
+        // Change-array-by-copy methods deliberately do not consult species.
+        check('copying methods ignore species', function () {
+            class NoSpecies extends Array {
+                static get [Symbol.species]() { throw new Error('species was read'); }
+            }
+            var a = new NoSpecies(3, 1, 2);
+            return [a.toSorted().constructor === Array, a.toReversed().constructor === Array,
+                    a.toSpliced(1, 1).constructor === Array, a.with(0, 4).constructor === Array];
+        }, '[true,true,true,true]');
+
+        // A species constructor that refuses the write is a TypeError, not a
+        // silently lost element.
+        check('a frozen species result', function () {
+            class Frozen extends Array {
+                static get [Symbol.species]() { return function (n) { return Object.freeze(new Array(n)); }; }
+            }
+            var f = new Frozen(); f.push(1, 2);
+            return f.map(function (x) { return x; });
+        }, 'throws TypeError');
+
+        // The arithmetic still works: the values, not just the prototypes.
+        check('values and holes survive', function () {
+            var l = list();
+            return [l.map(function (x) { return x * 2; }).join(','),
+                    l.filter(function (x) { return x > 1; }).join(','),
+                    l.slice(1).join(','), l.concat([4]).join(','),
+                    [1, [2, [3]]].flat().join(','), [1, , 3].splice(0, 3).length];
+        }, '["2,4,6","2,3","2,3","1,2,3,4","1,2,3",3]');
+
+        failures;
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
 TEST(error_prototype_stack_is_an_accessor_over_an_internal_slot) {
     using namespace litebird;
 
@@ -33789,6 +33914,9 @@ int main() {
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
     RUN_TEST(reflect_describes_and_answers_extensibility);
+
+    // Phase 140: a subclass is made by the built-in it was called on (species).
+    RUN_TEST(a_subclass_is_made_by_the_builtin_it_was_called_on);
     RUN_TEST(object_integrity_levels_ask_every_property);
 
     // Phase 132: a boxed String exposes character indices as own descriptors.

@@ -33,7 +33,7 @@ standard now makes, which is 1,967 of the 1,973.
 | :--- | :--- | :--- |
 | **DOM tree-construction conformance** | **1973 / 1973 (100.0%)** | the corpus as web-platform-tests publishes it (`html/syntax/parsing/resources/`, vendored at `37cfee8`, 62 files), run by `make conformance`. All six `scripted_*.dat` cases, where a script must edit the document while the page is parsed, pass since Phase 101 |
 | Trees for random pages | 6,000 of 6,000 equal to the ones parse5 builds once nine rules of parse5 are corrected to the standard; 5,951 equal to parse5 as published | `make diff-trees` (needs Node.js) |
-| **JavaScript corpus** | **1143 / 1158 (98.7%)<!--metrics:js/frac_pct-->**; of the 15 that fail, seven are what a function or a class still lacks (Phase 34), five are iteration gaps (Phases 63, 94 and 102), and one each is `Proxy`, `BigInt` and `typeof` | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
+| **JavaScript corpus** | **1146 / 1158 (99.0%)<!--metrics:js/frac_pct-->**; of the 12 that fail, six are what a function or a class still lacks (Phase 34, `Symbol.species` off that list since Phase 140), three are iteration gaps (Phases 63, 94 and 102), one is a collection iterator, and one each is a number and an operator case | `tests/js-conformance`, expected output recorded from Node.js, run by `make js-conformance` |
 | **DOM corpus** (what a script sees) | **678 / 678<!--metrics:dom/frac-->**; 61 of 572 before Phase 27 | `tests/dom-conformance`, expected output recorded from jsdom, run by `make dom-conformance` |
 | **web-platform-tests** (`dom/nodes`, `domparsing`, `encoding`, `css-flexbox`, `css-grid`) | **9567 / 9824<!--metrics:wpt.pass/frac--> subtests** across 190 files; the 257 others listed with a reason (0 `frames` failures since Phase 42). 1,127 before Phase 28, 5421 before Phase 47, 7998 before CSS Grid/Flexbox parsing, 9550 before the CSS Object Model of Phase 72 | `tests/wpt`, the tests browsers share, with their own harness, run by `make wpt` |
 | **XML parser** | **1718 / 1718** of the W3C suite's documents that apply; 2,585 run (1702 until Phase 47 read the last 16 encodings) | downloaded by `make xml-conformance` |
@@ -154,9 +154,10 @@ Read the number for what it is:
   a row of the task table).
 - **Five of the 24 failures are whole features that do not exist**: BigInt
   (2 cases), `Proxy`, typed arrays, and holes in arrays. The other 19 were
-  recorded to fail. Eight are in `prototypes.dat`: what classes still lack
-  after Phase 34 (`Symbol.species`, `Symbol.hasInstance`, and six smaller
-  things; ARCHITECTURE.md, Phase 34, section 9). Eleven are in
+  recorded to fail. Seven are in `prototypes.dat`: what classes still lack
+  after Phase 34 (`Symbol.hasInstance` and six smaller things; ARCHITECTURE.md,
+  Phase 34, section 9) — `Symbol.species` was the eighth and passes since
+  Phase 140. Eleven are in
   `iteration.dat`: the places that still read an array without asking it
   for its iterator (array destructuring, `Array.from`), the default constructor
   spread, and what built-in iterators get wrong (Phase 63, section 6).
@@ -1098,8 +1099,9 @@ make js-conformance      # 974 / 989; prototypes.dat 68 / 76
 make test262             # the standard's own tests on functions, classes and objects: 12,316 of 15,686
 ```
 
-What is still missing around classes (`Symbol.species`,
-`Symbol.hasInstance`) is in `ARCHITECTURE.md`, Phase 34, section 9, with a
+What is still missing around classes (`Promise`'s species, which needs a
+subclass's instances to be promises; `Symbol.hasInstance` is done) is in
+`ARCHITECTURE.md`, Phase 34, section 9, with a
 failing case each; the design and what it costs are in the same place, and
 `AUDIT.md`, finding 41, says what found what. `new.target` in a parent's
 constructor and custom elements compiled by Babel, which were on that list,

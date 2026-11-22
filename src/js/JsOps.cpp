@@ -19,6 +19,22 @@ namespace litebird {
 const char* const kIteratorKey = "@@iterator";
 const char* const kAsyncIteratorKey = "@@asyncIterator";
 
+/// SpeciesConstructor(O, defaultConstructor) — ECMA-262 §7.3.21. Shared by
+/// every built-in that makes an instance of the receiver's kind: an array's
+/// `map` and a RegExp's `[Symbol.split]` ask the same three questions, in the
+/// same order, and the standard says so by naming this one operation.
+JsValue species_constructor(const JsValue& obj, const JsValue& default_ctor) {
+    JsValue c = obj.get_property("constructor");
+    if (c.is_undefined()) return default_ctor;
+    if (!c.is_object_like()) {
+        js_throw_type_error("constructor property is not an object");
+    }
+    JsValue s = c.get_property(kSymbolSpeciesKey);
+    if (s.is_nullish()) return default_ctor;
+    if (!s.is_function()) js_throw_type_error("Symbol.species is not a constructor");
+    return s;
+}
+
 // ---------------------------------------------------------------------------
 // Exceptions
 // ---------------------------------------------------------------------------

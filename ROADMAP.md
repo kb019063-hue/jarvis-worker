@@ -34,7 +34,7 @@ WPT-grade HTML/DOM/XML parsing for the covered corpora (tree construction
 text by UAX #9 (`make bidi-conformance` 861,948/861,948 of Unicode's own
 suites), without `direction` or `unicode-bidi`; JavaScript
 interpreted on a tree-walking evaluator (plus a half-finished bytecode VM),
-1,143<!--metrics:js.pass/num-->/1,158<!--metrics:js.total/num--> on its recorded corpus and 31,220<!--metrics:t262.full.pass/num-->/47,967<!--metrics:t262.full.total/num--> of test262; TrueType
+1,146<!--metrics:js.pass/num-->/1,158<!--metrics:js.total/num--> on its recorded corpus and 31,220<!--metrics:t262.full.pass/num-->/47,967<!--metrics:t262.full.total/num--> of test262; TrueType
 rasterization with an 8×8 bitmap fallback when no `.ttf` exists on the host;
 a terminal/ANSI renderer; `http://` **and `https://`** (OpenSSL loaded at run
 time, certificate and hostname verified); `fetch()` and `XMLHttpRequest` over

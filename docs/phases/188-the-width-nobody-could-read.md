@@ -144,6 +144,7 @@ numbers: for every case, `getComputedStyle().width` must equal the box
 answer in the box cannot both be hidden that way.
 
 The one pre-existing assertion that changed is a comment: it read "`width` is
-`calc(100% - 20px)`" and still does. 336 suites pass (was 335); the new
-`computed_width_and_height_are_used_values` aborts on the engine of `d51ed33`
-and passes on this one.
+`calc(100% - 20px)`" and still does. 337 suites pass: 335 at the branch point,
+plus the one added here and one that `main` added while this was in review. The
+new `computed_width_and_height_are_used_values` aborts on the engine of
+`d51ed33` and passes on this one.

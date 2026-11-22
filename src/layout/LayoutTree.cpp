@@ -995,7 +995,7 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
         if (box->box_type != BoxType::InlineNode && box->node && box->node->is_element()) {
             Element* el = box->node->as_element();
             if (!el->has_layout_box()) {
-                el->set_layout_box(box->dimensions.border_box(), box->dimensions.border);
+                el->set_layout_box(box->dimensions.border_box(), box->dimensions.border, box->dimensions.padding);
             } else {
                 el->union_layout_box(box->dimensions.border_box());
             }
@@ -1007,7 +1007,7 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
                 for (const auto& frag : line.fragments) {
                     if (!frag.box || frag.is_space) continue;
                     if (frag.box->box_type == BoxType::ImageNode && frag.box->node && frag.box->node->is_element()) {
-                        frag.box->node->as_element()->set_layout_box(frag.rect, frag.box->dimensions.border);
+                        frag.box->node->as_element()->set_layout_box(frag.rect, frag.box->dimensions.border, frag.box->dimensions.padding);
                     }
                     std::shared_ptr<LayoutBox> cur = frag.box;
                     int hops = 0;

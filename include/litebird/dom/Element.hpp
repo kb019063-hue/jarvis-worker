@@ -95,12 +95,22 @@ public:
         m_has_layout_box = (r.width > 0.0f || r.height > 0.0f || r.x != 0.0f || r.y != 0.0f);
     }
     bool has_layout_box() const { return m_has_layout_box; }
+    /// True when the box above was assembled from inline fragments rather than
+    /// being one box the layout made: a non-replaced inline element. CSSOM's
+    /// resolved `width` is the computed value for one of those (CSS 2.1
+    /// §10.3.1 leaves its width to its content), which is what browsers do.
+    bool layout_box_from_fragments() const { return m_layout_from_fragments; }
     void clear_layout_box() {
         m_bounding_box = Rect();
         m_has_layout_box = false;
-        if (m_rare) m_rare->layout_border = EdgeSizes();
+        m_layout_from_fragments = false;
+        if (m_rare) {
+            m_rare->layout_border = EdgeSizes();
+            m_rare->layout_padding = EdgeSizes();
+        }
     }
-    void set_layout_box(const Rect& border_box, const EdgeSizes& border = EdgeSizes()) {
+    void set_layout_box(const Rect& border_box, const EdgeSizes& border = EdgeSizes(),
+                        const EdgeSizes& padding = EdgeSizes()) {
         m_bounding_box = border_box;
         m_has_layout_box = true;
         if (border.top != 0.0f || border.right != 0.0f || border.bottom != 0.0f || border.left != 0.0f) {
@@ -108,8 +118,17 @@ public:
         } else if (m_rare) {
             m_rare->layout_border = EdgeSizes();
         }
+        // The padding is kept for the same reason the border is: the content
+        // box is what CSSOM's resolved `width` and `height` are, and it is the
+        // border box minus both edges.
+        if (padding.top != 0.0f || padding.right != 0.0f || padding.bottom != 0.0f || padding.left != 0.0f) {
+            rare().layout_padding = padding;
+        } else if (m_rare) {
+            m_rare->layout_padding = EdgeSizes();
+        }
     }
     void union_layout_box(const Rect& r) {
+        m_layout_from_fragments = true;
         if (!m_has_layout_box) {
             m_bounding_box = r;
             m_has_layout_box = true;
@@ -123,6 +142,9 @@ public:
     }
     EdgeSizes layout_border() const {
         return m_rare ? m_rare->layout_border : EdgeSizes();
+    }
+    EdgeSizes layout_padding() const {
+        return m_rare ? m_rare->layout_padding : EdgeSizes();
     }
     Rect padding_box() const {
         const EdgeSizes b = layout_border();
@@ -366,6 +388,7 @@ public:
         std::string other_namespace;
         /// Layout border widths (stored only when non-zero so Element pays 0 bytes).
         EdgeSizes layout_border;
+        EdgeSizes layout_padding;
         /// Weak reference to nested browsing context Document for `<iframe>` layout/paint.
         std::weak_ptr<Document> content_document;
     };
@@ -384,6 +407,7 @@ public:
     bool m_is_focused{false};
     bool m_is_active{false};
     bool m_has_layout_box{false};
+    bool m_layout_from_fragments{false};
 };
 
 } // namespace litebird

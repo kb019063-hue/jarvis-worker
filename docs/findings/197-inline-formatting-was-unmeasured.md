@@ -19,7 +19,7 @@ on host font glyphs. The PNG reader is separate from the engine's writer.
 
 `make render-conformance` reports 47/48 original pages passing and the new
 nowrap page as a recorded failure; the separate body-origin corpus remains
-34/41 with seven recorded failures. `tools/conformance/verify_body_pixels.cjs`
+35/41 with six recorded failures after merging Phase 190. `tools/conformance/verify_body_pixels.cjs`
 compared the three pages with HeadlessChrome/153.0.8010.0: **11/11** pixel
 assertions match the independent browser. Negative controls made each passing
 case fail when its expected colour was changed, and exposed both nowrap

@@ -38,12 +38,13 @@ of them, including the expected overflow on the known failure.
 ```
 $ make render-conformance
 Render reftests: 47/48 pages match their reference pixels; 1 more fail as recorded, with a reason in the corpus (48 of 48 accounted for)
-Render reftests: 34/41 pages match their reference pixels; 7 more fail as recorded, with a reason in the corpus (41 of 41 accounted for)
+Render reftests: 35/41 pages match their reference pixels; 6 more fail as recorded, with a reason in the corpus (41 of 41 accounted for)
 Canvas toDataURL: 45016/45016 checks agree (45008 pixels read back by render_check.py's own PNG reader)
 ```
 
 The original corpus was 45/45 with no known failure before this change; the
-separate body-origin corpus was 34/41 with seven recorded failures. The three
+separate body-origin corpus was 34/41 with seven recorded failures. Main
+then merged Phase 190, which fixed one body-origin page (35/41). The three
 new pages take the combined count from 86 to 89 and assertions from 310 to
 321. They do not change the body-origin corpus or the canvas harness.
 

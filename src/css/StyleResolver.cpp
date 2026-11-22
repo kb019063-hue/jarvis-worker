@@ -1836,6 +1836,7 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else if (val_lower == "table-row-group" || val_lower == "table-header-group" ||
                  val_lower == "table-footer-group") style.display = Display::TableRowGroup;
         else if (val_lower == "table-caption") style.display = Display::TableCaption;
+        else if (val_lower == "contents") style.display = Display::Contents;
         else if (val_lower == "table-column" || val_lower == "table-column-group") style.display = Display::None;
     } else if (prop == "float") {
         if (val == "left") style.float_type = FloatType::Left;

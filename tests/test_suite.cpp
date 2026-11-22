@@ -30970,6 +30970,70 @@ TEST(document_canvas_background_is_scoped_and_keeps_computed_styles) {
     assert(DisplayList::build(nullptr).commands().empty());
 }
 
+// Phase 190 / finding 194. Before this the resolver had no `contents` value,
+// so the declaration fell through the display chain and the element kept
+// `block`: it generated a box, its padding and border painted, and a boxless
+// body leaked its background onto the canvas. Both halves are asserted here
+// because the row recorded the canvas half as a regression of the same gap.
+TEST(display_contents_generates_no_box_and_splices_its_children) {
+    using namespace litebird;
+    // getComputedStyle must still answer with the declared keyword; a value the
+    // engine understands must not be reported as something it is not.
+    auto doc = HtmlParser::parse(
+        R"(<!doctype html><html><head><style>body{margin:0}#wrap{display:contents;background:#ff0000;padding:50px;border:9px solid #0000ff}#a{width:100px;height:20px;background:#00ff00}#b{width:120px;height:30px;background:#0000ff}</style></head><body><div id="wrap"><div id="a"></div><div id="b"></div></div></body></html>)");
+    // The document's own `<style>` sheet is what states `contents`, so it has to
+    // be collected the way layout collects it -- a bare resolver sees no sheet.
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 800.0f, 600.0f);
+    auto root = LayoutTree::build(doc, resolver, 800, 600);
+    assert(root);
+    const auto wrap_element = doc->get_element_by_id("wrap");
+    assert(wrap_element);
+    const ComputedStyle wrap_style = resolver.resolve_style(wrap_element, nullptr);
+    assert(wrap_style.display == Display::Contents);
+    assert(wrap_style.is_contents());
+    assert(!wrap_style.is_block());
+    assert(!wrap_style.is_none());
+
+    // The splice: `#wrap` has no box, and its two blocks sit in `body` as if
+    // they were its children -- no 50px padding, no 9px border, so #b starts
+    // exactly where #a ends at y=20.
+    assert(root->children.size() == 2);
+    const LayoutBox* box_a = root->children[0].get();
+    const LayoutBox* box_b = root->children[1].get();
+    assert(box_a->node && box_a->node->as_element()->get_attribute("id") == "a");
+    assert(box_b->node && box_b->node->as_element()->get_attribute("id") == "b");
+    assert(box_a->dimensions.content.x == 0.0f && box_a->dimensions.content.y == 0.0f);
+    assert(box_a->dimensions.content.width == 100.0f);
+    assert(box_b->dimensions.content.y == 20.0f);
+    assert(box_b->dimensions.content.width == 120.0f);
+
+    // Nothing paints the spliced-away element's own background, padding or
+    // border: x=150 y=0 is past both children and inside the old padding box.
+    BitmapRenderer bitmap(800, 600);
+    bitmap.clear(Color::white());
+    bitmap.render(DisplayList::build(root));
+    // Color::green() is CSS `green` (#008000), not the #00ff00 the probe paints.
+    assert(bitmap.get_pixel(10, 10) == Color(0, 255, 0));
+    assert(bitmap.get_pixel(10, 25) == Color::blue());
+    assert(bitmap.get_pixel(150, 10) == Color::white());
+    assert(bitmap.get_pixel(160, 70) == Color::white());
+
+    // A boxless body must not colour the canvas: Chromium leaves it white
+    // (tests/render/body-origin.json, a_body_with_display_contents_has_no_canvas_color).
+    auto bodyless = HtmlParser::parse(
+        R"(<!doctype html><body style="display:contents;background:#ff0000;color:transparent">hello</body>)");
+    StyleResolver bodyless_resolver = DocumentStyles::build_resolver(*bodyless, nullptr, 200.0f, 150.0f);
+    auto bodyless_root = LayoutTree::build(bodyless, bodyless_resolver, 200, 150);
+    assert(bodyless_root && bodyless_root->has_document_canvas);
+    assert(bodyless_root->canvas_background.is_transparent());
+    assert(!bodyless_root->background_propagated);
+    BitmapRenderer bodyless_bitmap(200, 150);
+    bodyless_bitmap.clear(Color::white());
+    bodyless_bitmap.render(DisplayList::build(bodyless_root));
+    assert(bodyless_bitmap.get_pixel(0, 0) == Color::white());
+    assert(bodyless_bitmap.get_pixel(199, 149) == Color::white());
+}
+
 TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
     using namespace litebird;
     BitmapRenderer child(40, 30);
@@ -33961,6 +34025,7 @@ int main() {
 
     // Phase 170: root/body canvas color, compositing, scoping and scrolling.
     RUN_TEST(document_canvas_background_is_scoped_and_keeps_computed_styles);
+    RUN_TEST(display_contents_generates_no_box_and_splices_its_children);
     RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
     RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
 

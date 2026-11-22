@@ -690,6 +690,26 @@ void LayoutTree::build_boxes(
         SharedComputedStyle style = resolve_element_style(element, resolver, parent_style, pool);
         if (!style) return;
 
+        // CSS Display 3 §2.7 `display: contents`: the element generates no box
+        // of its own and its children take part in its parent's formatting
+        // context, as if the element had been replaced by them. `None` would
+        // throw the children away as well, and the engine used to fall through
+        // to `block` because the value was never parsed -- which is the row's
+        // documented regression (a boxless body wrongly coloured the canvas).
+        //
+        // The children are built against the *parent's* style, not this
+        // element's: with no box there is nothing for them to inherit through
+        // in layout, and the element's own inherited properties have already
+        // been passed down by `resolve_element_style` when it resolved them.
+        if (style->is_contents()) {
+            const auto& contents_children =
+                element->shadow_root() ? element->shadow_root()->children() : element->children();
+            for (const auto& ch : contents_children) {
+                build_boxes(ch, resolver, parent_style, pool, depth + 1, out, split_inline_blocks);
+            }
+            return;
+        }
+
         std::shared_ptr<LayoutBox> box;
         if (style->is_table()) {
             box = LayoutBox::create_table(element, style);
@@ -932,7 +952,14 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
         } else if (auto body = document->body();
                    body && !body->is_foreign() && body->parent() == html) {
             const ComputedStyle body_style = resolver.resolve_style(body, &*html_style);
-            if (!body_style.is_none() && !body_style.background_color.is_transparent()) {
+            // CSS Display 3 §2.7: an element with `display: contents` generates
+            // no box, and CSS Backgrounds 3 propagates the canvas color from the
+            // *body element's* background only when it is a box that paints it.
+            // Chromium leaves the canvas white for a boxless body; before this
+            // check the resolver had no `contents` value at all, so the body
+            // stayed `block` and red leaked onto the canvas (finding 194).
+            if (!body_style.is_none() && !body_style.is_contents() &&
+                !body_style.background_color.is_transparent()) {
                 root_box->canvas_background = body_style.background_color;
                 canvas_source = body;
             }

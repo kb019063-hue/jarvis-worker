@@ -26587,6 +26587,151 @@ TEST(http_authentication_basic_and_digest_challenges) {
         ResourceLoader::clear_auth_credentials();
         assert(ResourceLoader::auth_next_nonce_for_testing(base, "nonced").empty());
     }
+
+    // 9. A Digest `stale=true` challenge means the old nonce expired, not that
+    //    the password was refused. Its replacement overrides an older saved
+    //    nextnonce, is retried once, and starts a fresh count.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 5) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::vector<std::string> requested;
+        std::thread server_thread([server, &requested]() {
+            for (int i = 0; i < 5; ++i) {
+                const int client = accept(server, nullptr, nullptr);
+                if (client < 0) return;
+                std::string request;
+                char buffer[4096];
+                while (request.find("\r\n\r\n") == std::string::npos) {
+                    const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+                    if (count <= 0) break;
+                    request.append(buffer, static_cast<std::size_t>(count));
+                }
+                requested.push_back(request);
+                const std::string reply = i == 0
+                    ? "HTTP/1.1 401 Unauthorized\r\n"
+                      "WWW-Authenticate: Digest realm=\"stale\", nonce=\"seed\", "
+                      "algorithm=SHA-256, qop=\"auth\"\r\n"
+                      "Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    : i == 1
+                        ? "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                          "Authentication-Info: nextnonce=\"remembered\", qop=auth\r\n"
+                          "Connection: close\r\n\r\nok"
+                        : i == 2
+                            ? "HTTP/1.1 401 Unauthorized\r\n"
+                              "WWW-Authenticate: Digest realm=\"stale\", nonce=\"one\", "
+                              "algorithm=SHA-256, qop=\"auth\"\r\n"
+                              "Content-Length: 0\r\nConnection: close\r\n\r\n"
+                            : i == 3
+                                ? "HTTP/1.1 401 Unauthorized\r\n"
+                                  "WWW-Authenticate: Digest realm=\"stale\", nonce=\"two\", "
+                                  "algorithm=SHA-256, qop=\"auth\", stale=true\r\n"
+                                  "Content-Length: 0\r\nConnection: close\r\n\r\n"
+                                : "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n"
+                                  "Authentication-Info: nextnonce=\"after-stale\", qop=auth\r\n"
+                                  "Connection: close\r\n\r\nok";
+                (void)::send(client, reply.data(), reply.size(), 0);
+                ::close(client);
+            }
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceLoader::set_auth_credentials(base, "stale", "u", "p");
+        const ResourceResponse seed = ResourceLoader::load_http(base + "/seed", "GET", {}, "");
+        assert(seed.status_code == 200);
+        assert(ResourceLoader::auth_next_nonce_for_testing(base, "stale") == "remembered");
+        ResourceLoader::clear_http_cache();
+        const ResourceResponse resp = ResourceLoader::load_http(base + "/", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(resp.status_code == 200);
+        assert(requested.size() == 5);
+        assert(requested[0].find("\r\nAuthorization:") == std::string::npos);
+        assert(requested[1].find("nonce=\"seed\"") != std::string::npos);
+        assert(requested[1].find("nc=00000001") != std::string::npos);
+        assert(requested[2].find("\r\nAuthorization:") == std::string::npos);
+        assert(requested[3].find("nonce=\"remembered\"") != std::string::npos);
+        assert(requested[4].find("nonce=\"two\"") != std::string::npos);
+        assert(requested[4].find("nonce=\"remembered\"") == std::string::npos);
+        assert(requested[4].find("nc=00000001") != std::string::npos);
+        assert(ResourceLoader::has_credentials(base, "stale"));
+        assert(ResourceLoader::auth_next_nonce_for_testing(base, "stale") == "after-stale");
+        ResourceLoader::clear_auth_credentials();
+    }
+
+    // 10. A server cannot make the loader loop forever by returning stale=true
+    //     again. The second stale challenge is remembered for the next load,
+    //     while the credential remains available because neither nonce refused it.
+    {
+        ResourceLoader::clear_auth_credentials();
+        ResourceLoader::clear_http_cache();
+        const int server = ::socket(AF_INET, SOCK_STREAM, 0);
+        assert(server >= 0);
+        int reuse = 1;
+        setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+        sockaddr_in address{};
+        address.sin_family = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port = 0;
+        assert(bind(server, reinterpret_cast<sockaddr*>(&address), sizeof(address)) == 0);
+        assert(listen(server, 3) == 0);
+        socklen_t address_size = sizeof(address);
+        assert(getsockname(server, reinterpret_cast<sockaddr*>(&address), &address_size) == 0);
+        const auto port = ntohs(address.sin_port);
+
+        std::vector<std::string> requested;
+        std::thread server_thread([server, &requested]() {
+            for (int i = 0; i < 3; ++i) {
+                const int client = accept(server, nullptr, nullptr);
+                if (client < 0) return;
+                std::string request;
+                char buffer[4096];
+                while (request.find("\r\n\r\n") == std::string::npos) {
+                    const ssize_t count = recv(client, buffer, sizeof(buffer), 0);
+                    if (count <= 0) break;
+                    request.append(buffer, static_cast<std::size_t>(count));
+                }
+                requested.push_back(request);
+                const std::string nonce = (i == 0) ? "one" : (i == 1) ? "two" : "three";
+                const std::string reply =
+                    "HTTP/1.1 401 Unauthorized\r\n"
+                    "WWW-Authenticate: Digest realm=\"stale-loop\", nonce=\"" + nonce +
+                    "\", algorithm=SHA-256, qop=\"auth\"" + (i == 0 ? "" : ", stale=true") +
+                    "\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                (void)::send(client, reply.data(), reply.size(), 0);
+                ::close(client);
+            }
+        });
+
+        const std::string base = "http://127.0.0.1:" + std::to_string(port);
+        ResourceLoader::set_auth_credentials(base, "stale-loop", "u", "p");
+        const ResourceResponse resp = ResourceLoader::load_http(base + "/", "GET", {}, "");
+        server_thread.join();
+        ::close(server);
+
+        assert(resp.status_code == 401);
+        assert(requested.size() == 3);
+        assert(requested[0].find("\r\nAuthorization:") == std::string::npos);
+        assert(requested[1].find("nonce=\"one\"") != std::string::npos);
+        assert(requested[2].find("nonce=\"two\"") != std::string::npos);
+        assert(ResourceLoader::has_credentials(base, "stale-loop"));
+        assert(ResourceLoader::auth_next_nonce_for_testing(base, "stale-loop") == "three");
+        ResourceLoader::clear_auth_credentials();
+    }
 }
 
 // ---------------------------------------------------------------------------

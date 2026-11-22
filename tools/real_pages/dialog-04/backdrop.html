@@ -1,0 +1,22 @@
+<!doctype html><meta charset="utf-8"><title>Modal backdrop probe</title>
+<style>
+  html, body { margin:0; background:#ffffff }
+  #page { width:800px; height:200px; background:#ff0000 }
+  #late { position:absolute; left:0; top:120px; width:100px; height:40px; background:#0000ff; z-index:5 }
+  dialog { position:absolute; left:20px; top:120px; width:200px; height:80px;
+           margin:0; padding:0; border:0; background:#00ff00 }
+  button { display:block; margin:0; width:160px; height:20px }
+</style>
+<div id="page"></div>
+<div id="late"></div>
+<button id="open">Open modal</button>
+<button id="open-ordinary">Open ordinary</button>
+<dialog id="sheet"></dialog>
+<script>
+  document.getElementById('open').addEventListener('click', function () {
+    document.getElementById('sheet').showModal();
+  });
+  document.getElementById('open-ordinary').addEventListener('click', function () {
+    document.getElementById('sheet').show();
+  });
+</script>

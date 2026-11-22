@@ -119,8 +119,11 @@ with `RSV1` set) with a fatal protocol error:
 ## 4. What is still open
 
 - HTTP proxy tunneling (`CONNECT`) for `ws://` / `wss://`.
-- Standalone `CloseEvent` / `MessageEvent` constructors and `WebSocket.prototype`
-  (tracked in the host-constructor row of `AGENTS.md`).
+- `WebSocket.prototype` completeness (tracked in the host-constructor row of
+  `AGENTS.md`).
+- WebSocket `message`/`close` delivery now uses real `MessageEvent` /
+  `CloseEvent` instances (Phase 187); WebSocket `open`/`error` and Worker
+  `message` delivery remain unchanged.
 - Dynamic Huffman block emission in `DeflateStream` (currently uses LZ77 +
   fixed Huffman with automatic stored-block fallback, which is fully RFC 1951 /
   RFC 7692 compliant and interoperable with zlib/browsers).

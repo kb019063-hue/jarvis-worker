@@ -190,11 +190,30 @@ std::vector<const EventClass*> class_chain(const std::string& name) {
     return {chain.rbegin(), chain.rend()};
 }
 
+/// A `FrozenArray` as WebIDL makes one: an ordinary array that is frozen, so
+/// the array a script reads cannot be grown or written and `Object.isFrozen`
+/// answers true.
+///
+/// HTML §9.1 declares `ports` as `FrozenArray<MessagePort>`, and the engine
+/// handed scripts a plain mutable array: `event.ports.push(1)` grew it to one
+/// element where a browser throws a TypeError. `Object.isFrozen` said `false`.
+JsValue frozen_array(const std::vector<JsValue>& elements) {
+    JsValue array = JsValue::make_array(elements);
+    if (JsObject* cell = array.property_cell(false)) {
+        cell->frozen = true;
+        cell->sealed = true;
+        cell->extensible = false;
+    }
+    return array;
+}
+
 void fill_defaults(EventState& state, const std::string& iface) {
     for (const EventClass* cls : class_chain(iface)) {
         for (const auto& def : cls->fields) state.set_field(def.name, default_of(def));
     }
-    if (iface == "MessageEvent") state.set_field("ports", JsValue::make_array());
+    // `ports` is stored as the elements it was built from and frozen when it is
+    // read, so each read is a fresh array as the IDL requires.
+    if (iface == "MessageEvent") state.set_field("ports", frozen_array({}));
 }
 
 JsValue new_event(Realm& realm, const std::string& iface, const JsValue* derived) {
@@ -317,6 +336,47 @@ void setup_event_class(Iface& I) {
         I.getter(name, [name](Realm&) { return field_value(name); });
     }
     const std::string name = cls->name;
+    if (name == "MessageEvent") {
+        // HTML §9.1: `ports` is a `FrozenArray<MessagePort>`. WebIDL says the
+        // attribute "must return the value it was initialized to", so it is
+        // **one** frozen array, not a fresh one per read: Node answers
+        // `e.ports === e.ports` true and `Object.isFrozen(e.ports)` true, and
+        // so does this. The generic field getter would hand back the same array
+        // too, but an unfrozen one; this replaces it so the array a script gets
+        // cannot be grown (`e.ports.push(1)` is a TypeError).
+        I.getter("ports", [](Realm&) {
+            JsValue* stored = this_event().field("ports");
+            return stored ? *stored : frozen_array({});
+        });
+        // HTML §9.1 `initMessageEvent(type, bubbles, cancelable, data, origin,
+        // lastEventId, source, ports)`. It was declared by the standard and
+        // absent from the engine: `new MessageEvent("x").initMessageEvent`
+        // was `undefined`, so a script that initialized an existing event — the
+        // only reason the method exists — hit a TypeError.
+        I.method("initMessageEvent", 0, [](Realm&, Args args) {
+            EventState& state = this_event();
+            // HTML §9.1: "If the dispatch flag is set, or the *initialized
+            // flag* is set, then return." A constructor sets initialized, so
+            // `new MessageEvent("x").initMessageEvent("y", ...)` does nothing
+            // at all — Node answers type "x" and data null, and so must this.
+            // The method exists for `document.createEvent("[Message]Event")`,
+            // which leaves the flag unset.
+            if (state.dispatching || state.initialized) return undefined();
+            state.type = to_str(js_arg(args, 0));
+            state.bubbles = to_bool(js_arg(args, 1));
+            state.cancelable = to_bool(js_arg(args, 2));
+            state.set_field("data", js_arg(args, 3));
+            state.set_field("origin", str(to_str(js_arg(args, 4))));
+            state.set_field("lastEventId", str(to_str(js_arg(args, 5))));
+            JsValue source = js_arg(args, 6);
+            state.set_field("source", source.is_nullish() ? null() : source);
+            state.set_field("ports", frozen_array({}));
+            // `initialized` is what `dispatchEvent` refuses an event without;
+            // initMessageEvent leaves it set, as initEvent does.
+            state.initialized = true;
+            return undefined();
+        });
+    }
     if (name == "UIEvent") {
         I.getter("which", [](Realm&) {
             EventState& state = this_event();

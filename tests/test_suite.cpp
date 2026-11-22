@@ -18483,6 +18483,75 @@ TEST(js_classes_compiled_to_es5_run) {
            "TypeError");
 }
 
+TEST(a_message_event_carries_a_frozen_ports_array_and_can_be_initialized)
+{
+    using namespace litebird;
+
+    TestPage page(TestPage::WithUrl {});
+    JsInterpreter& js = page.js;
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- the constructor and its dictionary -------------------------------
+    // HTML §9.1 MessageEventInit: `data` defaults to null, not undefined, and
+    // every member the dictionary declares reaches the getter it names.
+    assert(text("new MessageEvent('message', {data: 42, origin: 'https://x', lastEventId: '7'})"
+                ".data") == "42");
+    assert(text("new MessageEvent('m', {origin: 'https://x'}).origin") == "https://x");
+    assert(text("new MessageEvent('m', {lastEventId: '7'}).lastEventId") == "7");
+    assert(text("String(new MessageEvent('m').data)") == "null");
+    assert(text("String(new MessageEvent('m').source)") == "null");
+    assert(text("new MessageEvent('m').type") == "m");
+    assert(text("errName(function () { new MessageEvent(); })") == "TypeError");
+    assert(text("(new MessageEvent('m') instanceof Event) + '|' +"
+                "(Object.getPrototypeOf(new MessageEvent('m')) === MessageEvent.prototype)") == "true|true");
+
+    // ---- `ports` is a FrozenArray, and it is ONE array --------------------
+    // §9.1 declares `readonly attribute FrozenArray<MessagePort> ports`, and
+    // WebIDL says the attribute returns "the value it was initialized to": the
+    // same frozen array on every read. The engine handed out a plain mutable
+    // array, so `e.ports.push(1)` grew it where a browser throws.
+    assert(text("var e = new MessageEvent('m'); e.ports === e.ports") == "true");
+    assert(text("Object.isFrozen(new MessageEvent('m').ports)") == "true");
+    assert(text("Array.isArray(new MessageEvent('m').ports)") == "true");
+    assert(text("new MessageEvent('m').ports.length") == "0");
+    assert(text("errName(function () { new MessageEvent('m').ports.push(1); })") == "TypeError");
+    // A sloppy write to a frozen index is ignored and a strict one throws —
+    // Node v22.22.3 answers the same, and both are checked so the test says
+    // which rule it is asserting.
+    assert(text("var p = new MessageEvent('m').ports; p[0] = 1; p.length") == "0");
+    assert(text("var p = new MessageEvent('m').ports;"
+                "errName(function () { 'use strict'; p[0] = 1; })") == "TypeError");
+
+    // ---- initMessageEvent is a no-op once the event is initialized --------
+    // HTML §9.1: "If the dispatch flag is set, or the initialized flag is set,
+    // then return." A constructor sets the flag, so this call changes nothing —
+    // which is what Node v22.22.3 answers.
+    assert(text("var m = new MessageEvent('x');"
+                "m.initMessageEvent('y', true, true, 9, 'o', 'id');"
+                "m.type + '|' + String(m.data) + '|' + m.bubbles") == "x|null|false");
+    assert(text("typeof new MessageEvent('m').initMessageEvent") == "function");
+
+    // ---- and it is what `createEvent` leaves a use for --------------------
+    // createEvent makes an event whose initialized flag is unset, which is the
+    // only receiver initMessageEvent has any effect on.
+    assert(text("var d = document.createEvent('MessageEvent');"
+                "d.initMessageEvent('z', true, false, {a: 1}, 'org', 'lid');"
+                "d.type + '|' + d.bubbles + '|' + JSON.stringify(d.data) + '|' + d.origin") ==
+           "z|true|{\"a\":1}|org");
+
+    // ---- CloseEvent, the other constructor the row named ------------------
+    // §6 of the WebSockets standard: `code` defaults to 0, `reason` to "" and
+    // `wasClean` to false; all three are read back verbatim.
+    assert(text("var c = new CloseEvent('close', {code: 1000, reason: 'bye', wasClean: true});"
+                "c.code + '|' + c.reason + '|' + c.wasClean") == "1000|bye|true");
+    assert(text("var c = new CloseEvent('close');"
+                "c.code + '|' + c.reason.length + '|' + c.wasClean") == "0|0|false");
+    assert(text("(new CloseEvent('c') instanceof Event) + '|' +"
+                "(Object.getPrototypeOf(new CloseEvent('c')) === CloseEvent.prototype)") == "true|true");
+    assert(text("errName(function () { new CloseEvent(); })") == "TypeError");
+}
+
 TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype) {
     using namespace litebird;
 
@@ -33137,6 +33206,7 @@ int main() {
     RUN_TEST(js_classes_and_their_parents_are_collected);
     RUN_TEST(js_classes_compiled_to_es5_run);
     RUN_TEST(js_a_class_that_extends_a_dom_interface_has_it_as_prototype);
+    RUN_TEST(a_message_event_carries_a_frozen_ports_array_and_can_be_initialized);
     RUN_TEST(js_interface_objects_are_collected_with_their_page);
 
     // Phase 36: usable real-world browser & Finding 44 security tests.

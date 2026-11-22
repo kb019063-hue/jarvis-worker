@@ -28234,6 +28234,89 @@ TEST(dataview_and_the_iterating_typed_array_methods) {
     assert(text("class L extends Int16Array {}; var l = new L([3, 1]); l.toSorted() instanceof L") == "true");
 }
 
+TEST(a_typed_array_to_locale_string_asks_every_element)
+{
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- the element is asked, so a patched method shows ------------------
+    // §23.1.3.28 is not `join`: every element is asked for its own
+    // `toLocaleString` and that method is called. The engine formatted the
+    // numbers itself, so this said "1,2" for two years.
+    assert(text("Number.prototype.toLocaleString = function () { return 'X'; };"
+                "new Uint8Array([1,2]).toLocaleString()") == "X,X");
+    assert(text("new Float64Array([1.5, 2.5]).toLocaleString()") == "X,X");
+    assert(text("delete Number.prototype.toLocaleString;"
+                "new Uint8Array([1,2]).toLocaleString()") == "1,2");
+    // A typed array has no holes: every element is a value, so every element is
+    // asked, including a NaN.
+    assert(text("Number.prototype.toLocaleString = function () { return 'X'; };"
+                "new Float32Array([NaN]).toLocaleString()") == "X");
+
+    // ---- the two are different function objects that behave differently ---
+    // §23.2.3.29 gives the typed array its own, and it validates the receiver
+    // where Array's boxes a primitive.
+    assert(text("Uint8Array.prototype.toLocaleString === Array.prototype.toLocaleString") == "false");
+    // The typed array's refuses everything Array's accepts: the receiver must
+    // be a typed array, so a primitive, a plain object, an ArrayBuffer and a
+    // DataView are all TypeErrors.
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(42); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call('1'); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(true); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(null); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call({length:1,0:5}); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(new ArrayBuffer(4)); })") == "TypeError");
+    assert(text("errName(function () { Uint8Array.prototype.toLocaleString.call(new DataView(new ArrayBuffer(4))); })") == "TypeError");
+
+    // ---- the length is the internal one, not a `length` property ----------
+    // test262's get-length-uses-internal-arraylength: a redefined `length` is
+    // not what a typed-array method reads. The method is put back first, so
+    // this measures [[ArrayLength]] and not the patch two lines above.
+    assert(text("delete Number.prototype.toLocaleString;"
+                "var v = new Uint8Array([1,2,3]); Object.defineProperty(v, 'length', {value: 9});"
+                "v.length + '|' + v.toLocaleString()") == "9|1,2,3");
+    assert(text("new Uint8Array(0).toLocaleString() + '|' + new Uint8Array([7]).toLocaleString()") == "|7");
+    assert(text("new Int32Array([-5]).toLocaleString()") == "-5");
+    // A typed array has no holes, so NaN is a value to print.
+    assert(text("new Float32Array([NaN]).toLocaleString()") == "NaN");
+    assert(text("Array.prototype.toLocaleString.length + '|' + Uint8Array.prototype.toLocaleString.length") == "0|0");
+}
+
+TEST(a_typed_array_toString_is_arrays_own_function)
+{
+    using namespace litebird;
+
+    JsInterpreter js(nullptr);
+    auto text = [&](const char* source) { return js.eval(source).to_string(); };
+    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // §23.2.3.30: the same function object, not a copy that answers the same
+    // text. `Uint8Array.prototype.toString === Array.prototype.toString` was
+    // false because the typed array had its own.
+    assert(text("Uint8Array.prototype.toString === Array.prototype.toString") == "true");
+    assert(text("Float64Array.prototype.toString === Array.prototype.toString") == "true");
+    // Every constructor's prototype is the same %TypedArray%.prototype%
+    // object, so the identity holds for all nine.
+    assert(text("Int8Array.prototype.toString === Uint16Array.prototype.toString") == "true");
+    // It asks the receiver for `join` by name, and a typed array inherits
+    // `join` from %TypedArray%.prototype%, so the text is what it was.
+    assert(text("new Uint8Array([1,2]).toString()") == "1,2");
+    assert(text("new Uint8Array([1,2]).toString() === new Uint8Array([1,2]).join()") == "true");
+    assert(text("new Float32Array([NaN]).toString()") == "NaN");
+    // A subclass inherits it through the typed-array prototype, not own.
+    assert(text("class S extends Uint8Array {};"
+                "Object.getPrototypeOf(S.prototype).toString === Array.prototype.toString") == "true");
+    assert(text("Object.prototype.hasOwnProperty.call(Uint8Array.prototype, 'toString')") == "false");
+    // And `toString` on a detached view is a TypeError, as Array's join is.
+    assert(text("var b = new ArrayBuffer(4); var v = new Uint8Array(b); b.transfer();"
+                "errName(function () { v.toString(); })") == "TypeError");
+    assert(text("var b = new ArrayBuffer(4); var v = new Uint8Array(b); b.transfer();"
+                "errName(function () { v.toLocaleString(); })") == "TypeError");
+}
+
 TEST(class_bodies_reject_what_the_grammar_does_not_allow) {
     using namespace litebird;
 
@@ -30259,6 +30342,298 @@ TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry) {
     assert(span->bounding_box().x == 23.0f && span->bounding_box().y == 23.0f);
 }
 
+// Phase 170: a document's solid root/body background belongs to its canvas,
+// not to a root box's geometry. Pixel expectations are from Chromium 153.
+TEST(document_canvas_background_is_scoped_and_keeps_computed_styles) {
+    using namespace litebird;
+    auto doc = HtmlParser::parse(
+        R"html(<!doctype html><html><body style="margin:20px;width:100px;height:60px;background:rgba(255,0,0,.5)">)html"
+        R"(<div style="width:20px;height:20px;background:#0000ff"></div></body></html>)");
+    StyleResolver resolver;
+    auto unstyled = HtmlParser::parse("<!doctype html><body></body>");
+    assert(resolver.resolve_style(unstyled->body()).background_color.is_transparent());
+    auto unstyled_root = LayoutTree::build(unstyled, resolver, 40, 60);
+    assert(unstyled_root->has_document_canvas && unstyled_root->canvas_background.is_transparent());
+    auto unstyled_list = DisplayList::build(unstyled_root);
+    assert(!unstyled_list.commands().empty() &&
+           std::holds_alternative<DrawCanvasCommand>(unstyled_list.commands().front()));
+    TerminalRenderer unstyled_terminal(4, 3, 10, 20);
+    const auto unstyled_ansi = unstyled_terminal.to_ansi_string(unstyled_list);
+    // The terminal's ordinary empty grid is dark. A document with no canvas
+    // color still has the browser's white top-level backdrop, so its dark
+    // default text remains legible after the UA body became transparent.
+    const std::string white_bg = "\033[48;2;255;255;255m";
+    std::size_t white_count = 0, white_pos = 0;
+    while ((white_pos = unstyled_ansi.find(white_bg, white_pos)) != std::string::npos) {
+        ++white_count;
+        white_pos += white_bg.size();
+    }
+    assert(white_count == 12);
+    auto root = LayoutTree::build(doc, resolver, 200, 150);
+    assert(root && root->node == doc->body() && root->has_document_canvas);
+    assert(root->canvas_background == Color(255, 0, 0, 128));
+    assert(root->background_propagated);
+    assert(root->style->background_color == Color(255, 0, 0, 128)); // computed style did not change
+    auto list = DisplayList::build(root);
+    assert(!list.commands().empty() && std::holds_alternative<DrawCanvasCommand>(list.commands().front()));
+    int canvases = 0;
+    for (const auto& cmd : list.commands()) if (std::holds_alternative<DrawCanvasCommand>(cmd)) ++canvases;
+    assert(canvases == 1);
+    BitmapRenderer bitmap(200, 150);
+    bitmap.clear(Color::white());
+    bitmap.render(list);
+    assert(bitmap.get_pixel(0, 0) == Color(255, 127, 127));
+    assert(bitmap.get_pixel(30, 30) == Color::blue());
+    assert(bitmap.get_pixel(50, 30) == Color(255, 127, 127)); // no second body layer
+    assert(bitmap.get_pixel(199, 149) == Color(255, 127, 127));
+
+    // The same body laid out as an arbitrary subtree has a box background,
+    // not a canvas. Building it must not change the previously built root.
+    auto subtree = LayoutTree::build(doc->body(), resolver, 200, 150);
+    assert(subtree && !subtree->has_document_canvas && subtree->canvas_background.is_transparent());
+    assert(!subtree->background_propagated);
+    auto sub_list = DisplayList::build(subtree);
+    for (const auto& cmd : sub_list.commands()) assert(!std::holds_alternative<DrawCanvasCommand>(cmd));
+    BitmapRenderer sub_bitmap(200, 150);
+    sub_bitmap.clear(Color::white());
+    sub_bitmap.render(sub_list);
+    assert(sub_bitmap.get_pixel(50, 10) == Color(255, 127, 127));
+    assert(sub_bitmap.get_pixel(199, 149) == Color::white());
+    assert(root->canvas_background == Color(255, 0, 0, 128));
+
+    // With a nontransparent root, the body retains its ordinary box paint.
+    auto both = HtmlParser::parse(
+        R"(<!doctype html><html style="background:#0000ff"><body style="margin:20px;height:50px;background:#ff0000"></body></html>)");
+    auto both_root = LayoutTree::build(both, resolver, 200, 150);
+    assert(both_root->canvas_background == Color::blue() && !both_root->background_propagated);
+    BitmapRenderer layered(200, 150);
+    layered.clear(Color::white());
+    layered.render(DisplayList::build(both_root));
+    assert(layered.get_pixel(0, 0) == Color::blue());
+    assert(layered.get_pixel(20, 20) == Color::red());
+    assert(layered.get_pixel(199, 149) == Color::blue());
+
+    // A document whose HTML element has no body still paints the root color
+    // only once, even though in that case the root element has a layout box.
+    auto root_only_doc = std::make_shared<Document>();
+    root_only_doc->set_content_type("text/html");
+    auto html = root_only_doc->create_element("html");
+    html->set_attribute("style", "background:rgba(0,0,255,.5);height:50px");
+    root_only_doc->append_child(html);
+    auto root_only = LayoutTree::build(root_only_doc, resolver, 200, 150);
+    assert(root_only && root_only->node == html && root_only->background_propagated);
+    BitmapRenderer one_layer(200, 150);
+    one_layer.clear(Color::white());
+    one_layer.render(DisplayList::build(root_only));
+    assert(one_layer.get_pixel(0, 0) == Color(127, 127, 255));
+    assert(one_layer.get_pixel(199, 149) == Color(127, 127, 255));
+
+    auto hidden_root_doc = HtmlParser::parse(
+        R"(<!doctype html><html style="display:none;background:blue"><body style="background:red"><div id="child"></div></body></html>)");
+    auto hidden_root = LayoutTree::build(hidden_root_doc, resolver, 200, 150);
+    assert(hidden_root->canvas_background.is_transparent());
+    assert(!hidden_root_doc->document_element()->has_layout_box());
+    assert(!hidden_root_doc->body()->has_layout_box());
+    assert(!hidden_root_doc->get_element_by_id("child")->has_layout_box());
+    BitmapRenderer hidden_bitmap(200, 150);
+    hidden_bitmap.clear(Color::white());
+    hidden_bitmap.render(DisplayList::build(hidden_root));
+    assert(hidden_bitmap.get_pixel(0, 0) == Color::white());
+    assert(hidden_bitmap.get_pixel(199, 149) == Color::white());
+
+    // A non-HTML document root and a null tree do not acquire HTML-body rules.
+    auto other_doc = std::make_shared<Document>();
+    auto other_el = other_doc->create_element("section");
+    other_el->set_attribute("style", "width:40px;height:40px;background:#ff0000");
+    other_doc->append_child(other_el);
+    auto other = LayoutTree::build(other_doc, resolver, 200, 150);
+    assert(other && !other->has_document_canvas && other->canvas_background.is_transparent());
+    const auto other_list = DisplayList::build(other);
+    for (const auto& cmd : other_list.commands()) {
+        assert(!std::holds_alternative<DrawCanvasCommand>(cmd));
+    }
+    assert(DisplayList::build(nullptr).commands().empty());
+}
+
+TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
+    using namespace litebird;
+    BitmapRenderer child(40, 30);
+    child.clear(Color::transparent());
+    DisplayList inner;
+    inner.add(DrawCanvasCommand{Color(255, 0, 0, 128)});
+    inner.add(DrawRectCommand{Rect(5, 5, 10, 10), Color(0, 0, 255, 128)});
+    child.render(inner);
+    assert(child.get_pixel(0, 0) == Color(255, 0, 0, 128));
+    assert(child.get_pixel(6, 6) == Color(85, 0, 170, 192));
+
+    auto image = std::make_shared<ImageData>();
+    image->width = 40;
+    image->height = 30;
+    for (int y = 0; y < 30; ++y) for (int x = 0; x < 40; ++x)
+        image->pixels.push_back(child.get_pixel(x, y).to_argb());
+    BitmapRenderer parent(40, 30);
+    parent.clear(Color::blue());
+    DisplayList image_list;
+    image_list.add(DrawImageCommand{Rect(0, 0, 40, 30), image});
+    parent.render(image_list);
+    assert(parent.get_pixel(0, 0) == Color(128, 0, 127));
+    assert(parent.get_pixel(6, 6) == Color(64, 0, 191));
+
+    // Scroll transforms move document boxes, not the canvas. An explicit clip
+    // around the whole target still confines the canvas to that clip.
+    BitmapRenderer clipped(40, 30);
+    clipped.clear(Color::white());
+    DisplayList commands;
+    commands.add(PushClipCommand{Rect(5, 5, 10, 10)});
+    commands.add(PushTransformCommand{TransformMatrix2D::translation(-100, -100)});
+    commands.add(DrawCanvasCommand{Color::red()});
+    commands.add(PopTransformCommand{});
+    commands.add(PopClipCommand{});
+    clipped.render(commands);
+    assert(clipped.get_pixel(5, 5) == Color::red());
+    assert(clipped.get_pixel(14, 14) == Color::red());
+    assert(clipped.get_pixel(0, 0) == Color::white());
+    assert(clipped.get_pixel(15, 15) == Color::white());
+
+    // The terminal viewport does not scroll its canvas either, and an
+    // offscreen body box must not be clamped back onto the first row.
+    auto doc = HtmlParser::parse(
+        R"(<!doctype html><html style="background:#0000ff"><body style="margin:0;width:40px;height:20px;background:#ff0000"></body></html>)");
+    StyleResolver resolver;
+    auto list = DisplayList::build(LayoutTree::build(doc, resolver, 40, 60));
+    TerminalRenderer terminal(4, 3, 10, 20);
+    terminal.set_scroll(0, 100);
+    const std::string ansi = terminal.to_ansi_string(list);
+    const std::string blue = "\033[48;2;0;0;255m";
+    std::size_t count = 0, pos = 0;
+    while ((pos = ansi.find(blue, pos)) != std::string::npos) { ++count; pos += blue.size(); }
+    assert(count == 12);
+    assert(ansi.find("\033[48;2;255;0;0m") == std::string::npos);
+
+    // A body box over a different root canvas stops at exclusive cell edges.
+    // Before this correction a 20-by-20 box on a 10-by-20 grid colored six
+    // cells instead of two, hiding the canvas in the following row and column.
+    auto bounded_doc = HtmlParser::parse(
+        R"(<!doctype html><html style="background:#0000ff"><body style="margin:0;width:20px;height:20px;background:#ff0000"></body></html>)");
+    auto bounded_list = DisplayList::build(LayoutTree::build(bounded_doc, resolver, 40, 60));
+    TerminalRenderer bounded_terminal(4, 3, 10, 20);
+    const auto bounded_ansi = bounded_terminal.to_ansi_string(bounded_list);
+    const std::string red_bg = "\033[48;2;255;0;0m";
+    count = 0; pos = 0;
+    while ((pos = bounded_ansi.find(red_bg, pos)) != std::string::npos) { ++count; pos += red_bg.size(); }
+    assert(count == 2);
+    count = 0; pos = 0;
+    while ((pos = bounded_ansi.find(blue, pos)) != std::string::npos) { ++count; pos += blue.size(); }
+    assert(count == 10);
+
+    // A translucent iframe bitmap is a terminal image: only the two covered
+    // cells should blend with the blue canvas, and a scrolled-off image must
+    // not be clamped back onto row zero. A surrounding clip also confines it.
+    auto solid = std::make_shared<ImageData>();
+    solid->width = 20;
+    solid->height = 20;
+    solid->pixels.assign(400, Color(255, 0, 0, 128).to_argb());
+    DisplayList frame_list;
+    frame_list.add(DrawCanvasCommand{Color::blue()});
+    frame_list.add(DrawImageCommand{Rect(0, 0, 20, 20), solid});
+    const std::string purple = "\033[48;2;128;0;127m";
+    TerminalRenderer frame_terminal(4, 3, 10, 20);
+    const auto frame_ansi = frame_terminal.to_ansi_string(frame_list);
+    count = 0; pos = 0;
+    while ((pos = frame_ansi.find(purple, pos)) != std::string::npos) { ++count; pos += purple.size(); }
+    assert(count == 2);
+    TerminalRenderer scrolled_frame(4, 3, 10, 20);
+    scrolled_frame.set_scroll(0, 100);
+    const auto scrolled_frame_ansi = scrolled_frame.to_ansi_string(frame_list);
+    assert(scrolled_frame_ansi.find(purple) == std::string::npos);
+
+    auto stripes = std::make_shared<ImageData>();
+    stripes->width = 20;
+    stripes->height = 20;
+    for (int y = 0; y < 20; ++y) {
+        for (int x = 0; x < 20; ++x) {
+            stripes->pixels.push_back((x < 10 ? Color::red() : Color(0, 255, 0)).to_argb());
+        }
+    }
+    DisplayList stripe_list;
+    stripe_list.add(DrawCanvasCommand{Color::blue()});
+    stripe_list.add(DrawImageCommand{Rect(0, 0, 20, 20), stripes});
+    TerminalRenderer scrolled_stripes(4, 3, 10, 20);
+    scrolled_stripes.set_scroll(10, 0);
+    const auto stripe_ansi = scrolled_stripes.to_ansi_string(stripe_list);
+    assert(stripe_ansi.find("\033[48;2;0;255;0m") != std::string::npos);
+    assert(stripe_ansi.find(red_bg) == std::string::npos);
+
+    DisplayList clipped_frame_list;
+    clipped_frame_list.add(DrawCanvasCommand{Color::blue()});
+    clipped_frame_list.add(PushClipCommand{Rect(0, 0, 10, 20)});
+    clipped_frame_list.add(DrawImageCommand{Rect(0, 0, 20, 20), solid});
+    clipped_frame_list.add(PopClipCommand{});
+    TerminalRenderer clipped_frame(4, 3, 10, 20);
+    const auto clipped_frame_ansi = clipped_frame.to_ansi_string(clipped_frame_list);
+    count = 0; pos = 0;
+    while ((pos = clipped_frame_ansi.find(purple, pos)) != std::string::npos) { ++count; pos += purple.size(); }
+    assert(count == 1);
+
+    DisplayList terminal_clip;
+    terminal_clip.add(PushClipCommand{Rect(10, 20, 20, 20)});
+    terminal_clip.add(DrawCanvasCommand{Color::red()});
+    terminal_clip.add(PopClipCommand{});
+    TerminalRenderer clipped_terminal(4, 3, 10, 20);
+    const auto clipped_ansi = clipped_terminal.to_ansi_string(terminal_clip);
+    const std::string red = "\033[48;2;255;0;0m";
+    count = 0; pos = 0;
+    while ((pos = clipped_ansi.find(red, pos)) != std::string::npos) { ++count; pos += red.size(); }
+    assert(count == 2); // two cells of the four-by-three terminal
+}
+
+TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling) {
+    using namespace litebird;
+    BrowserShell shell(200, 150, 20, 10);
+    assert(shell.navigate_to("tests/render/canvas-scroll.html"));
+    auto frame = [&]() {
+        const auto bytes = shell.render_png_frame();
+        auto img = ImageDecoder::decode_png(bytes.data(), bytes.size());
+        assert(img && img->is_valid());
+        return img;
+    };
+    auto top = frame();
+    assert(top->width == 200 && top->height == 150);
+    assert(top->get_pixel_color(0, 0) == Color(127, 127, 255));
+    assert(top->get_pixel_color(20, 20) == Color(0, 255, 0));
+    assert(top->get_pixel_color(50, 20) == Color(191, 63, 127));
+    assert(top->get_pixel_color(150, 20) == Color(127, 127, 255));
+    assert(top->get_pixel_color(199, 149) == Color(127, 127, 255));
+
+    shell.scroll_to(15, 300);
+    assert(shell.scroll_x() == 15 && shell.scroll_y() == 300);
+    auto scrolled = frame();
+    assert(scrolled->get_pixel_color(0, 0) == Color(127, 127, 255));
+    assert(scrolled->get_pixel_color(15, 0) == Color(0, 255, 0));
+    assert(scrolled->get_pixel_color(50, 0) == Color(191, 63, 127));
+    assert(scrolled->get_pixel_color(150, 0) == Color(127, 127, 255));
+    assert(scrolled->get_pixel_color(199, 149) == Color(127, 127, 255));
+
+    // Relayout after live styles changes the selected source and does not
+    // leave stale metadata behind; resizing fills the new viewport as well.
+    shell.js_engine()->eval("document.documentElement.style.backgroundColor = 'transparent'");
+    shell.relayout();
+    auto body_canvas = frame();
+    assert(body_canvas->get_pixel_color(0, 0) == Color(255, 127, 127));
+    assert(body_canvas->get_pixel_color(50, 0) == Color(255, 127, 127));
+    assert(body_canvas->get_pixel_color(199, 149) == Color(255, 127, 127));
+    shell.js_engine()->eval("document.body.style.display = 'none'");
+    shell.relayout();
+    auto hidden = frame();
+    assert(hidden->get_pixel_color(0, 0) == Color::white());
+    assert(hidden->get_pixel_color(199, 149) == Color::white());
+    shell.js_engine()->eval("document.body.style.display = 'block'");
+    shell.set_viewport_size(240, 180);
+    auto resized = frame();
+    assert(resized->width == 240 && resized->height == 180);
+    assert(resized->get_pixel_color(239, 179) == Color(255, 127, 127));
+}
+
 TEST(a_built_in_method_is_not_a_constructor) {
     using namespace litebird;
 
@@ -31598,6 +31973,475 @@ TEST(object_assign_boxes_throws_and_copies_every_own_key) {
     assert(failed.empty());
 }
 
+TEST(an_abrupt_completion_in_a_pattern_closes_the_iterator) {
+    using namespace litebird;
+
+    // Phase 176, finding 180. Two ways an assignment jumps out before it is
+    // finished, and the standard orders both of them:
+    //
+    //   base.prop = count += 1      with `base` null
+    //     The reference is resolved *first* (§13.15.2), but a null or
+    //     undefined base is only an error once the right-hand side has run,
+    //     so `count` is 1. This engine reported the TypeError first and left
+    //     `count` at 0: the RHS was never evaluated. (Node 22 prints 1.)
+    //
+    //   [ {}[thrower()] ] = iterable
+    //     A pattern that fails part way through must still close the
+    //     iterator (7.4.11) — and must discard whatever that `return` says,
+    //     because the pattern's own throw is what the script sees. A `next`
+    //     that throws is the one case that does *not* close (7.4.8 step 7),
+    //     which is why `[ , ] = throwingNext` calls `return` zero times while
+    //     the same pattern with a throwing target calls it once.
+    //
+    // Every expected value was printed by Node.js 22 for the same source.
+    JsInterpreter js(nullptr);
+
+    js.eval(R"JS(
+        var failures = [];
+        function same(what, got, want) {
+            var g = JSON.stringify(got), w = JSON.stringify(want);
+            if (g !== w) failures.push(what + ': got ' + g + ', expected ' + w);
+        }
+        function throws(what, kind, f) {
+            try { f(); failures.push(what + ': did not throw'); }
+            catch (e) { if (!(e instanceof kind)) failures.push(what + ': threw ' + e); }
+        }
+
+        // ---- the right-hand side runs before a nullish base is reported ----
+        var count = 0, nullBase = null;
+        throws('a write to a member of null', TypeError, function () { nullBase.prop = count += 1; });
+        same('the right-hand side still ran', count, 1);
+
+        var undef = 0, undefinedBase;
+        throws('a write to a member of undefined', TypeError, function () { undefinedBase.prop = undef += 1; });
+        same('and for undefined too', undef, 1);
+
+        var plain = 0;
+        throws('a literal null base', TypeError, function () { null.p = (plain += 1); });
+        same('a literal null base runs it as well', plain, 1);
+
+        // The write itself is unchanged for a base that is there.
+        var target = {}; var v = 0;
+        target.p = v += 1;
+        same('an ordinary write', [target.p, v], [1, 1]);
+        throws('an index of null', TypeError, function () { var n = null; n[0] = 1; });
+
+        // ---- IteratorClose on an abrupt completion -------------------------
+        function iterableThatCounts(nextBody, returnBody) {
+            var counts = { next: 0, ret: 0 };
+            var iterator = {
+                next: function () { counts.next += 1; return nextBody(); },
+                return: function () { counts.ret += 1; return returnBody(); }
+            };
+            var source = {};
+            source[Symbol.iterator] = function () { return iterator; };
+            return { counts: counts, source: source };
+        }
+        var thrower = function () { throw new RangeError('stop'); };
+
+        // a target that throws while the pattern is being bound
+        var a = iterableThatCounts(function () { return { done: false, value: undefined }; },
+                                   function () { return {}; });
+        throws('a throwing target', RangeError, function () {
+            var out; [ out = 0, {}[thrower()] ] = a.source;
+        });
+        same('the iterator was closed once', a.counts, { next: 2, ret: 1 });
+
+        // a default value that throws
+        var b = iterableThatCounts(function () { return { done: false, value: undefined }; },
+                                   function () { return {}; });
+        throws('a throwing default', RangeError, function () {
+            var x; [ x = thrower() ] = b.source;
+        });
+        same('a throwing default closes it too', b.counts, { next: 1, ret: 1 });
+
+        // a `return` that throws is discarded: the pattern's throw wins
+        var c = iterableThatCounts(function () { return { done: false, value: undefined }; },
+                                   function () { throw new SyntaxError('from return'); });
+        throws('the pattern keeps its own throw', RangeError, function () {
+            var y; [ y = thrower() ] = c.source;
+        });
+        same('the throwing return was still called', c.counts, { next: 1, ret: 1 });
+
+        // ...and so is a `return` that is not callable
+        var notCallable = {};
+        notCallable[Symbol.iterator] = function () {
+            return { next: function () { return { done: false }; }, return: 42 };
+        };
+        throws('a return that is not callable is discarded', RangeError, function () {
+            var z; [ z = thrower() ] = notCallable;
+        });
+
+        // a `next` that throws is *not* closed (7.4.8 step 7)
+        var d = iterableThatCounts(thrower, function () { return {}; });
+        throws('a throwing next', RangeError, function () { var w; [ , ] = d.source; });
+        same('a throwing next does not close the iterator', d.counts, { next: 1, ret: 0 });
+
+        // A pattern that finds the iterator already done does not close it:
+        // there is nothing left to tell. The `return` is only called for an
+        // iterator that still had values in it when the pattern stopped.
+        var e = iterableThatCounts(function () { return { done: true }; }, function () { return {}; });
+        var q; [ q ] = e.source;
+        same('an exhausted iterator is not closed', e.counts, { next: 1, ret: 0 });
+
+        // A pattern that stops early on an iterator that is *not* done does
+        // close — here the second element is never pulled.
+        var g = iterableThatCounts(function () { return { done: false, value: 1 }; },
+                                   function () { return {}; });
+        var first; [ first ] = g.source;
+        same('a pattern that stops early closes it', g.counts, { next: 1, ret: 1 });
+
+        // A drained iterator is not told anything (it said it was done).
+        var f = iterableThatCounts(function () { return { done: true }; }, function () { return {}; });
+        var rest; [...rest] = f.source;
+        same('a drained iterator is not closed', f.counts, { next: 1, ret: 0 });
+
+        // A `return` that answers a primitive is an error on the plain
+        // close — that is what `iterator-return-is-not-an-object` asserts,
+        // and it is a TypeError rather than silence.
+        // The iterator still has values (done: false), so the pattern's own
+        // close runs and reports the bad answer.
+        var bad = {};
+        bad[Symbol.iterator] = function () {
+            return { next: function () { return { done: false, value: 1 }; },
+                     return: function () { return 1; } };
+        };
+        throws('a return that answers a primitive is an error', TypeError, function () {
+            var t; [ t ] = bad;
+        });
+    )JS");
+
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
+
+TEST(fetch_request_constructor_validation_body_clone_and_signal) {
+    using namespace litebird;
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://app.example/dir/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><head><base href='https://app.example/base/sub/'></head><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(label, cond) { if (!cond) failures.push(label); }
+        function eq(label, got, want) {
+            if (got !== want) failures.push(label + ': got ' + JSON.stringify(got) + ', want ' + JSON.stringify(want));
+        }
+        function throwsTypeError(label, fn) {
+            try { fn(); failures.push(label + ': did not throw'); }
+            catch (e) { if (!e || e.name !== 'TypeError') failures.push(label + ': wrong error ' + String(e)); }
+        }
+
+        // Identity, prototype, defaults, relative URL against <base href>
+        var r0 = new Request('items?q=1');
+        eq('ctor name', Request.name, 'Request');
+        eq('ctor length', Request.length, 1);
+        ok('instanceof Request', r0 instanceof Request);
+        ok('instanceof Headers', r0.headers instanceof Headers);
+        ok('instanceof AbortSignal', r0.signal instanceof AbortSignal);
+        eq('toStringTag', Object.prototype.toString.call(r0), '[object Request]');
+        ok('same headers identity', r0.headers === r0.headers);
+        ok('same signal identity', r0.signal === r0.signal);
+        eq('resolved base href', r0.url, 'https://app.example/base/sub/items?q=1');
+        eq('default method', r0.method, 'GET');
+        eq('default mode', r0.mode, 'cors');
+        eq('default credentials', r0.credentials, 'same-origin');
+        eq('default cache', r0.cache, 'default');
+        eq('default redirect', r0.redirect, 'follow');
+        eq('default referrer', r0.referrer, 'about:client');
+        eq('default referrerPolicy', r0.referrerPolicy, '');
+        eq('default integrity', r0.integrity, '');
+        eq('default keepalive', r0.keepalive, false);
+        eq('default destination', r0.destination, '');
+        eq('default bodyUsed', r0.bodyUsed, false);
+        eq('default signal.aborted', r0.signal.aborted, false);
+
+        // URL object & validation errors
+        var u = new URL('https://api.example/v1/../v2?a=b#frag');
+        eq('URL input', new Request(u).url, 'https://api.example/v2?a=b#frag');
+        throwsTypeError('no new', function () { Request('https://api.example/'); });
+        throwsTypeError('no args', function () { new Request(); });
+        throwsTypeError('credentials user:pass', function () { new Request('https://u:p@api.example/'); });
+        throwsTypeError('credentials user only', function () { new Request('https://u@api.example/'); });
+        throwsTypeError('non-object init', function () { new Request('https://api.example/', 'bad'); });
+        throwsTypeError('window non-null', function () { new Request('https://api.example/', { window: {} }); });
+        throwsTypeError('mode navigate', function () { new Request('https://api.example/', { mode: 'navigate' }); });
+        throwsTypeError('mode invalid', function () { new Request('https://api.example/', { mode: 'bogus' }); });
+        throwsTypeError('credentials invalid', function () { new Request('https://api.example/', { credentials: 'bogus' }); });
+        throwsTypeError('cache invalid', function () { new Request('https://api.example/', { cache: 'bogus' }); });
+        throwsTypeError('only-if-cached cors', function () { new Request('https://api.example/', { cache: 'only-if-cached' }); });
+        throwsTypeError('redirect invalid', function () { new Request('https://api.example/', { redirect: 'bogus' }); });
+        throwsTypeError('referrerPolicy invalid', function () { new Request('https://api.example/', { referrerPolicy: 'bogus' }); });
+        throwsTypeError('forbidden CONNECT', function () { new Request('https://api.example/', { method: 'connect' }); });
+        throwsTypeError('forbidden TRACE', function () { new Request('https://api.example/', { method: 'TRACE' }); });
+        throwsTypeError('forbidden TRACK', function () { new Request('https://api.example/', { method: 'Track' }); });
+        throwsTypeError('invalid token method', function () { new Request('https://api.example/', { method: 'BAD METHOD' }); });
+        throwsTypeError('no-cors PUT', function () { new Request('https://api.example/', { mode: 'no-cors', method: 'PUT' }); });
+        throwsTypeError('GET with body', function () { new Request('https://api.example/', { method: 'GET', body: 'x' }); });
+        throwsTypeError('HEAD with body', function () { new Request('https://api.example/', { method: 'HEAD', body: 'x' }); });
+        throwsTypeError('invalid signal', function () { new Request('https://api.example/', { signal: {} }); });
+        throwsTypeError('invalid header name', function () { new Request('https://api.example/', { headers: { 'bad name': '1' } }); });
+        throwsTypeError('malformed header pair', function () { new Request('https://api.example/', { headers: [['only-one']] }); });
+        throwsTypeError('illegal getter receiver', function () { Object.getOwnPropertyDescriptor(Request.prototype, 'url').get.call({}); });
+        throwsTypeError('illegal clone receiver', function () { Request.prototype.clone.call({}); });
+
+        // Detached ArrayBuffer throws TypeError
+        var abDet = new ArrayBuffer(4);
+        abDet.transfer();
+        throwsTypeError('detached ArrayBuffer body', function () {
+            new Request('https://api.example/', { method: 'POST', body: abDet });
+        });
+
+        // Method normalization
+        eq('norm delete', new Request('https://api.example/', { method: 'delete' }).method, 'DELETE');
+        eq('norm post', new Request('https://api.example/', { method: 'post' }).method, 'POST');
+        eq('preserve patch', new Request('https://api.example/', { method: 'patch' }).method, 'patch');
+
+        // Browser forbidden request header guard & no-cors safelist guard
+        var rGuard = new Request('https://api.example/', {
+            headers: {
+                'Host': 'evil.example',
+                'Origin': 'https://evil.example',
+                'Cookie': 'sid=1',
+                'Sec-Fetch-Mode': 'cors',
+                'Proxy-Authorization': 'Basic x',
+                'X-Allowed': 'ok'
+            }
+        });
+        eq('guard strips Host', rGuard.headers.get('host'), null);
+        eq('guard strips Origin', rGuard.headers.get('origin'), null);
+        eq('guard strips Cookie', rGuard.headers.get('cookie'), null);
+        eq('guard strips Sec-*', rGuard.headers.get('sec-fetch-mode'), null);
+        eq('guard strips Proxy-*', rGuard.headers.get('proxy-authorization'), null);
+        eq('guard keeps X-Allowed', rGuard.headers.get('x-allowed'), 'ok');
+
+        var rNoCors = new Request('https://api.example/', {
+            mode: 'no-cors',
+            headers: { 'Accept': 'text/plain', 'X-Custom': 'no', 'Content-Type': 'application/json' }
+        });
+        eq('no-cors keeps Accept', rNoCors.headers.get('accept'), 'text/plain');
+        eq('no-cors drops X-Custom', rNoCors.headers.get('x-custom'), null);
+        eq('no-cors drops json CT', rNoCors.headers.get('content-type'), null);
+
+        // Request-from-Request, clone(), bodyUsed, AbortSignal linking
+        var ac = new AbortController();
+        var src = new Request('https://api.example/data', {
+            method: 'POST',
+            headers: { 'X-Tag': 'v1' },
+            body: 'body-1',
+            signal: ac.signal
+        });
+        var cloned = src.clone();
+        cloned.headers.set('X-Tag', 'v2');
+        eq('clone isolates headers', src.headers.get('x-tag'), 'v1');
+        eq('clone header updated', cloned.headers.get('x-tag'), 'v2');
+
+        var unlinked = new Request(src, { body: 'body-2', signal: null });
+        eq('override body keeps src unused', src.bodyUsed, false);
+
+        var inherited = new Request(src);
+        eq('inherit body disturbs src', src.bodyUsed, true);
+        throwsTypeError('reuse disturbed Request', function () { new Request(src); });
+        throwsTypeError('clone disturbed Request', function () { src.clone(); });
+        throwsTypeError('post Request -> GET throws', function () { new Request(cloned, { method: 'GET' }); });
+
+        ok('signal is dependent copy', src.signal !== ac.signal);
+        ac.abort('cancel-42');
+        eq('src signal aborted', src.signal.aborted, true);
+        eq('src signal reason', src.signal.reason, 'cancel-42');
+        eq('cloned signal aborted', cloned.signal.aborted, true);
+        eq('inherited signal aborted', inherited.signal.aborted, true);
+        eq('unlinked signal not aborted', unlinked.signal.aborted, false);
+
+        // Async body consumers
+        var asyncDone = false;
+        var rBin = new Request('https://api.example/', { method: 'POST', body: new Uint8Array([0, 65, 255]) });
+        var rSp = new Request('https://api.example/', { method: 'POST', body: new URLSearchParams('x=1&y=2') });
+        var rBlob = new Request('https://api.example/', { method: 'POST', body: new Blob(['csv,1'], { type: 'text/csv' }) });
+        var rJson = new Request('https://api.example/', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"v":7}' });
+        eq('URLSearchParams CT', rSp.headers.get('content-type'), 'application/x-www-form-urlencoded;charset=UTF-8');
+        eq('Blob CT', rBlob.headers.get('content-type'), 'text/csv');
+        eq('Uint8Array no CT', rBin.headers.get('content-type'), null);
+        eq('explicit JSON CT', rJson.headers.get('content-type'), 'application/json');
+
+        Promise.all([
+            rBin.bytes(),
+            rSp.text(),
+            rBlob.blob(),
+            rJson.json(),
+            r0.text(),
+            cloned.text()
+        ]).then(function (vals) {
+            eq('bytes len', vals[0].length, 3);
+            eq('bytes[0]', vals[0][0], 0);
+            eq('bytes[1]', vals[0][1], 65);
+            eq('bytes[2]', vals[0][2], 255);
+            eq('sp text', vals[1], 'x=1&y=2');
+            eq('blob size', vals[2].size, 5);
+            eq('blob type', vals[2].type, 'text/csv');
+            eq('json v', vals[3].v, 7);
+            eq('empty GET text', vals[4], '');
+            eq('empty GET still unused', r0.bodyUsed, false);
+            eq('cloned text', vals[5], 'body-1');
+            return rBin.text().then(
+                function () { failures.push('second read should reject'); asyncDone = true; },
+                function (e) { eq('second read TypeError', e.name, 'TypeError'); asyncDone = true; }
+            );
+        });
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    assert(js.eval("asyncDone").is_truthy());
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+
+    // GC reclamation of cyclic Request <-> Headers <-> AbortSignal graphs.
+    js.eval(R"JS(
+        for (var i = 0; i < 64; i++) {
+            var c = new AbortController();
+            var rq = new Request('https://api.example/gc/' + i, {
+                method: 'POST',
+                headers: { 'X-I': String(i) },
+                body: 'gc-body-' + i,
+                signal: c.signal
+            });
+            rq.headers.owner = rq;
+            rq.signal.owner = rq;
+        }
+    )JS");
+    Heap::default_heap().collect_garbage();
+
+    // Bytecode VM exposes Request with identical semantics.
+    VM vm(doc);
+    JsValue vm_ctor = vm.get_global("Request");
+    assert(vm_ctor.is_callable());
+    JsValue vm_req = vm_ctor.construct({
+        JsValue::make_string("https://vm.example/path"),
+        js.eval("({ method: 'post', body: 'vm' })")
+    });
+    assert(vm_req.get_property("method").to_string() == "POST");
+    assert(vm_req.get_property("url").to_string() == "https://vm.example/path");
+    assert(vm_req.get_property("headers").get_property("get")
+               .call_with_this(vm_req.get_property("headers"), {JsValue::make_string("content-type")})
+               .to_string() == "text/plain;charset=UTF-8");
+}
+
+TEST(fetch_request_loopback_http_worker_and_abort) {
+    using namespace litebird;
+    CookieJar::default_jar().clear();
+    ResourceLoader::clear_http_cache();
+
+    auto last_method = std::make_shared<std::string>();
+    auto last_body = std::make_shared<std::string>();
+    auto last_token = std::make_shared<std::string>();
+    auto hit_count = std::make_shared<std::atomic<int>>(0);
+
+    LoopbackHttpTestServer server([last_method, last_body, last_token, hit_count](
+                                      const HttpServerRequest& req, HttpServerResponse& resp) {
+        if (req.path == "/worker.js") {
+            resp.status = 200;
+            resp.content_type = "application/javascript";
+            resp.body =
+                "var wr = new Request('/api/worker', { method: 'POST', headers: { 'X-Token': 'from-worker' }, body: 'w-payload' });"
+                "fetch(wr).then(function(r) { return r.json(); }).then(function(j) {"
+                "  postMessage(JSON.stringify({ url: wr.url, used: wr.bodyUsed, method: j.method, body: j.body, token: j.token }));"
+                "}, function(e) { postMessage('ERR:' + String(e)); });";
+            return;
+        }
+        if (req.path.rfind("/api/", 0) == 0) {
+            ++(*hit_count);
+            *last_method = req.method;
+            *last_body = req.body;
+            *last_token = req.headers.count("x-token") ? req.headers.at("x-token") : "";
+            resp.status = 200;
+            resp.content_type = "application/json";
+            resp.body = "{\"method\":\"" + req.method + "\",\"path\":\"" + req.path +
+                        "\",\"body\":\"" + req.body + "\",\"token\":\"" + *last_token +
+                        "\",\"len\":" + std::to_string(req.body.size()) + "}";
+            return;
+        }
+        resp.status = 404;
+        resp.status_text = "Not Found";
+    });
+
+    const std::string base = "http://127.0.0.1:" + std::to_string(server.port);
+    auto doc = std::make_shared<Document>();
+    doc->set_url(base + "/index.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(
+        "var results = {};\n"
+        "var req1 = new Request('/api/one', { method: 'POST', headers: { 'X-Token': 't1' }, body: 'hello-1' });\n"
+        "fetch(req1).then(function(res1) {\n"
+        "  results.res1Instanceof = (res1 instanceof Response);\n"
+        "  results.req1Used = req1.bodyUsed;\n"
+        "  return res1.json();\n"
+        "}).then(function(j1) {\n"
+        "  results.j1 = j1.method + ':' + j1.path + ':' + j1.body + ':' + j1.token;\n"
+        "  return fetch(req1).then(\n"
+        "    function() { results.reuse = 'UNEXPECTED'; },\n"
+        "    function(e) { results.reuse = e.name; }\n"
+        "  );\n"
+        "}).then(function() {\n"
+        "  var req2 = new Request('/api/two', { method: 'POST', headers: { 'X-Token': 'old' }, body: 'old' });\n"
+        "  return fetch(req2, { method: 'PUT', headers: { 'X-Token': 'new' }, body: new Uint8Array([65, 66, 67]) })\n"
+        "    .then(function(r2) { results.req2Used = req2.bodyUsed; return r2.json(); });\n"
+        "}).then(function(j2) {\n"
+        "  results.j2 = j2.method + ':' + j2.path + ':' + j2.body + ':' + j2.token + ':' + j2.len;\n"
+        "  var acPre = new AbortController();\n"
+        "  var reqPre = new Request('/api/aborted', { signal: acPre.signal });\n"
+        "  acPre.abort('pre-cancel');\n"
+        "  return fetch(reqPre).then(\n"
+        "    function() { results.preAbort = 'UNEXPECTED'; },\n"
+        "    function(e) { results.preAbort = String(e); }\n"
+        "  );\n"
+        "}).then(function() {\n"
+        "  var acLate = new AbortController();\n"
+        "  var reqLate = new Request('/api/aborted2', { signal: acLate.signal });\n"
+        "  var p = fetch(reqLate);\n"
+        "  acLate.abort('late-cancel');\n"
+        "  return p.then(\n"
+        "    function() { results.lateAbort = 'UNEXPECTED'; },\n"
+        "    function(e) { results.lateAbort = String(e); }\n"
+        "  );\n"
+        "}).then(function() { results.done = true; });\n"
+        "var w = new Worker('/worker.js');\n"
+        "w.onmessage = function(e) { results.worker = String(e.data); };\n"
+        "w.onerror = function(e) { results.worker = 'ERR:' + e.message; };\n"
+    );
+
+    auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < deadline) {
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+        if (js.eval("Boolean(results.done && results.worker)").is_truthy()) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    js.eval("w.terminate();");
+
+    assert(js.eval("results.done").is_truthy());
+    assert(js.eval("results.res1Instanceof").is_truthy());
+    assert(js.eval("results.req1Used").is_truthy());
+    assert(js.eval("results.j1").to_string() == "POST:/api/one:hello-1:t1");
+    assert(js.eval("results.reuse").to_string() == "TypeError");
+    assert(!js.eval("results.req2Used").is_truthy());
+    assert(js.eval("results.j2").to_string() == "PUT:/api/two:ABC:new:3");
+    assert(js.eval("results.preAbort").to_string() == "pre-cancel");
+    assert(js.eval("results.lateAbort").to_string() == "late-cancel");
+    const std::string worker_out = js.eval("results.worker").to_string();
+    assert(worker_out.find("\"used\":true") != std::string::npos);
+    assert(worker_out.find("\"method\":\"POST\"") != std::string::npos);
+    assert(worker_out.find("\"body\":\"w-payload\"") != std::string::npos);
+    assert(worker_out.find("\"token\":\"from-worker\"") != std::string::npos);
+    // Aborted fetches must not hit the server: only /api/one, /api/two, /api/worker = 3 hits.
+    assert(hit_count->load() == 3);
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -31990,6 +32834,8 @@ int main() {
     // Phase 106: ArrayBuffer and the typed arrays.
     RUN_TEST(arraybuffer_and_typed_arrays);
     RUN_TEST(dataview_and_the_iterating_typed_array_methods);
+    RUN_TEST(a_typed_array_to_locale_string_asks_every_element);
+    RUN_TEST(a_typed_array_toString_is_arrays_own_function);
 
     // Phase 128: the six regular grammar rules of a class body.
     RUN_TEST(class_bodies_reject_what_the_grammar_does_not_allow);
@@ -32014,6 +32860,10 @@ int main() {
     // Phase 167: Object.assign boxes its target, throws on a refused Set, and
     // copies the symbols.
     RUN_TEST(object_assign_boxes_throws_and_copies_every_own_key);
+
+    // Phase 176: an abrupt completion closes the iterator, and the RHS of an
+    // assignment runs before a nullish base is reported.
+    RUN_TEST(an_abrupt_completion_in_a_pattern_closes_the_iterator);
 
 
     // Phase 124: Reflect.getOwnPropertyDescriptor / isExtensible / preventExtensions.
@@ -32057,6 +32907,11 @@ int main() {
     RUN_TEST(document_body_margins_place_boxes_from_the_viewport);
     RUN_TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry);
 
+    // Phase 170: root/body canvas color, compositing, scoping and scrolling.
+    RUN_TEST(document_canvas_background_is_scoped_and_keeps_computed_styles);
+    RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
+    RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
+
     // Phase 157: ArrayBuffer.prototype.transfer(), transferToFixedLength(), detached, and resize().
     RUN_TEST(arraybuffer_transfer_detach_and_resize);
 
@@ -32069,6 +32924,10 @@ int main() {
 
     // Phase 169: WebSocket permessage-deflate (RFC 7692) & stateful DEFLATE/INFLATE codec.
     RUN_TEST(websocket_permessage_deflate_rfc7692);
+
+    // Phase 173: Fetch Request constructor, Body mixin, clone(), AbortSignal linking, and fetch(Request, init).
+    RUN_TEST(fetch_request_constructor_validation_body_clone_and_signal);
+    RUN_TEST(fetch_request_loopback_http_worker_and_abort);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

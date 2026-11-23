@@ -5481,6 +5481,56 @@ TEST(browser_shell_navigation_and_hit_testing) {
     assert(frame.find("Litebird DevTools") != std::string::npos);
 }
 
+TEST(shell_frame_labels_cannot_inject_terminal_controls) {
+    using namespace litebird;
+    // A real navigation keeps an attacker-controlled filename unchanged,
+    // while the terminal frame prints a safe representation of it.
+    const std::string path = "/tmp/litebird-shell-" + std::to_string(getpid()) + "-\033]0;bad\007.html";
+    { std::ofstream file(path); file << "<!doctype html><button>click</button>"; }
+    BrowserShell shell(200, 150, 20, 10);
+    assert(shell.navigate_to(path));
+    std::remove(path.c_str());
+    assert(shell.current_url() == path);
+    assert(shell.status_message() == "Loaded " + path);
+    std::string frame = shell.render_terminal_frame();
+    const std::string shown = "/tmp/litebird-shell-" + std::to_string(getpid()) + "-?]0;bad?.html";
+    assert(frame.find("URL: [\033[1m" + shown + "\033[22m]") != std::string::npos);
+    assert(frame.find("Loaded " + shown) != std::string::npos);
+
+    // Exercise every byte in both the focused ID and the status text. The
+    // original DOM and status are unchanged; controls, C1 and UTF-8 bytes
+    // are replaced only when emitted. Focus updates the cached text.
+    std::string bytes, safe;
+    for (int i = 0; i != 256; ++i) {
+        bytes.push_back(static_cast<char>(i));
+        safe.push_back(i >= 0x20 && i <= 0x7e ? static_cast<char>(i) : '?');
+    }
+    auto button = shell.focused_element();
+    assert(button);
+    button->set_attribute("id", bytes);
+    button->append_child(std::make_shared<Text>(bytes));
+    shell.relayout();
+    shell.focus_next();
+    assert(shell.focused_element()->id() == bytes);
+    assert(shell.status_message().find(bytes) != std::string::npos);
+    frame = shell.render_terminal_frame(true);
+    assert(frame.find("Focus: <button#" + safe + ">") != std::string::npos);
+    assert(frame.find("Focused: <button> \"click" + safe + "\"") != std::string::npos);
+    assert(frame.find("\033]0;bad\007") == std::string::npos);
+    std::ostringstream printed;
+    shell.print_terminal_frame(printed, false);
+    assert(printed.str() == shell.render_terminal_frame(false));
+
+    // A failed navigation also includes the untrusted URL in the status.
+    const std::string missing = "/tmp/litebird-no-such-" + std::to_string(getpid()) + "-\033[2J\r";
+    assert(!shell.navigate_to(missing));
+    assert(shell.status_message().find(missing) != std::string::npos);
+    frame = shell.render_terminal_frame();
+    assert(frame.find("Error loading /tmp/litebird-no-such-") != std::string::npos);
+    assert(frame.find("?[2J?") != std::string::npos);
+    assert(frame.find("\033[2J") == std::string::npos);
+}
+
 TEST(css_positioning_and_stacking_contexts) {
     using namespace litebird;
 
@@ -35149,6 +35199,9 @@ int main() {
 
     // Phase 203: page text is not a source of terminal controls.
     RUN_TEST(terminal_page_text_cannot_inject_controls);
+
+    // Phase 212: shell chrome emits labels as text, not terminal commands.
+    RUN_TEST(shell_frame_labels_cannot_inject_terminal_controls);
 
     // Phase 195: a `calc()` percentage is of the declaration (font size,
     // line-height), not of the viewport.

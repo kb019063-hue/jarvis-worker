@@ -1298,17 +1298,31 @@ void WebSocketObject::dispatch_open_on_owner(const std::string& selected_protoco
             self->m_js_selected_extensions = selected_extensions;
         }
         if (!self->m_owner_js || self->m_owner_js->inst.is_undefined()) return;
+
+        dom::Realm* realm = self->m_owner_js->realm_id ? dom::find_realm(self->m_owner_js->realm_id) : nullptr;
+        JsIntrinsics* previous_intrinsics = &JsIntrinsics::get();
+        const bool switched_realm = realm && realm->intrinsics && realm->intrinsics != previous_intrinsics;
+        if (switched_realm) JsIntrinsics::set_current(realm->intrinsics);
+        struct RestoreIntrinsics {
+            JsIntrinsics* previous;
+            bool active;
+            ~RestoreIntrinsics() {
+                if (active) JsIntrinsics::set_current(previous);
+            }
+        } restore_guard{previous_intrinsics, switched_realm};
+
         JsValue target = self->m_owner_js->inst;
-        JsValue ev = JsValue::make_object(Heap::default_heap().allocate_object());
-        ev.set_property("type", JsValue::make_string("open"));
-        ev.set_property("target", target);
-        ev.set_property("currentTarget", target);
+        dom::Realm& event_realm = realm ? *realm : dom::current_realm();
+        JsValue ev = dom::make_event(event_realm, "Event", "open", false, false);
+        if (!dom::begin_event_dispatch_at_target(ev, target, /*trusted=*/true)) return;
+        EndAtTargetEventDispatch finish_dispatch{ev};
 
         JsValue onopen = target.get_property("onopen");
         if (onopen.is_function()) invoke_ws_handler(onopen, target, ev);
 
         auto list = self->m_owner_js->snapshot_and_consume_once("open");
         for (const auto& entry : list) {
+            if (dom::event_immediate_stopped(ev)) break;
             invoke_ws_handler(entry.callback, target, ev);
         }
     });
@@ -1390,24 +1404,27 @@ void WebSocketObject::dispatch_error_and_close_on_owner(const std::string& err_m
                                  self->m_event_sink->owner_alive->load(std::memory_order_acquire);
         if (realm_alive && self->m_owner_js && !self->m_owner_js->inst.is_undefined()) {
             JsValue target = self->m_owner_js->inst;
+            dom::Realm& event_realm = realm ? *realm : dom::current_realm();
 
             if (emit_error) {
-                JsValue err_ev = JsValue::make_object(Heap::default_heap().allocate_object());
-                err_ev.set_property("type", JsValue::make_string("error"));
+                JsValue err_ev = dom::make_event(event_realm, "Event", "error", false, false);
+                // Keep the existing diagnostic expando for callers while
+                // giving the event its proper Event interface and state.
                 err_ev.set_property("message", JsValue::make_string(err_msg));
-                err_ev.set_property("target", target);
-                err_ev.set_property("currentTarget", target);
+                if (dom::begin_event_dispatch_at_target(err_ev, target, /*trusted=*/true)) {
+                    EndAtTargetEventDispatch finish_dispatch{err_ev};
 
-                JsValue onerr = target.get_property("onerror");
-                if (onerr.is_function()) invoke_ws_handler(onerr, target, err_ev);
+                    JsValue onerr = target.get_property("onerror");
+                    if (onerr.is_function()) invoke_ws_handler(onerr, target, err_ev);
 
-                auto err_list = self->m_owner_js->snapshot_and_consume_once("error");
-                for (const auto& entry : err_list) {
-                    invoke_ws_handler(entry.callback, target, err_ev);
+                    auto err_list = self->m_owner_js->snapshot_and_consume_once("error");
+                    for (const auto& entry : err_list) {
+                        if (dom::event_immediate_stopped(err_ev)) break;
+                        invoke_ws_handler(entry.callback, target, err_ev);
+                    }
                 }
             }
 
-            dom::Realm& event_realm = realm ? *realm : dom::current_realm();
             JsValue close_ev = dom::make_event(event_realm, "CloseEvent", "close", false, false,
                                                {{"wasClean", JsValue::make_boolean(was_clean)},
                                                 {"code", JsValue::make_number(close_code)},

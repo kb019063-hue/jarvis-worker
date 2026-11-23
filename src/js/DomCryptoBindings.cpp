@@ -238,6 +238,70 @@ std::array<uint8_t, 32> sha256_bytes(const uint8_t* data, std::size_t len) {
     return out;
 }
 
+std::vector<uint8_t> digest_for_alg(const std::string& alg, const uint8_t* data, std::size_t len) {
+    if (alg == "sha-1") return sha1_bytes(data, len);
+    if (alg == "sha-256") {
+        auto d = sha256_bytes(data, len);
+        return std::vector<uint8_t>(d.begin(), d.end());
+    }
+    if (alg == "sha-384") return sha512_family_bytes(data, len, true);
+    return sha512_family_bytes(data, len, false);
+}
+
+std::vector<uint8_t> hmac_bytes(const std::string& hash_alg, const std::vector<uint8_t>& raw_key,
+                                const std::vector<uint8_t>& msg) {
+    const std::size_t block_size = (hash_alg == "sha-384" || hash_alg == "sha-512") ? 128u : 64u;
+    std::vector<uint8_t> k = raw_key;
+    if (k.size() > block_size) {
+        k = digest_for_alg(hash_alg, k.data(), k.size());
+    }
+    k.resize(block_size, 0u);
+    std::vector<uint8_t> inner(block_size + msg.size());
+    std::vector<uint8_t> outer(block_size);
+    for (std::size_t i = 0; i < block_size; ++i) {
+        inner[i] = static_cast<uint8_t>(k[i] ^ 0x36u);
+        outer[i] = static_cast<uint8_t>(k[i] ^ 0x5cu);
+    }
+    for (std::size_t i = 0; i < msg.size(); ++i) inner[block_size + i] = msg[i];
+    std::vector<uint8_t> inner_hash = digest_for_alg(hash_alg, inner.data(), inner.size());
+    outer.insert(outer.end(), inner_hash.begin(), inner_hash.end());
+    return digest_for_alg(hash_alg, outer.data(), outer.size());
+}
+
+struct CryptoKeyState : JsExotic {
+    std::string type = "secret";
+    bool extractable = false;
+    std::string hash_alg;
+    std::vector<uint8_t> key_bytes;
+};
+
+void setup_crypto_key(Iface& I) {
+    I.getter("type", [](Realm&) { return str(this_state<CryptoKeyState>("CryptoKey").type); });
+    I.getter("extractable", [](Realm&) { return boolean(this_state<CryptoKeyState>("CryptoKey").extractable); });
+}
+
+std::string ascii_lower_str(std::string s) {
+    for (char& c : s) {
+        if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+    }
+    return s;
+}
+
+bool read_buffer_source(Realm& r, const JsValue& src, std::vector<uint8_t>& out) {
+    if (!src.is_object_like() || src.get_property("byteLength").type != JsType::Number) return false;
+    JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
+    if (!u8_ctor.is_function()) return false;
+    JsValue view = src.get_property("buffer").is_object_like()
+        ? js_call(u8_ctor, u8_ctor, {src.get_property("buffer"), src.get_property("byteOffset"), src.get_property("byteLength")})
+        : js_call(u8_ctor, u8_ctor, {src});
+    const std::size_t len = static_cast<std::size_t>(to_double(view.get_property("byteLength")));
+    out.resize(len);
+    for (std::size_t i = 0; i < len; ++i) {
+        out[i] = static_cast<uint8_t>(static_cast<int>(to_double(view.get_property(std::to_string(i)))) & 0xff);
+    }
+    return true;
+}
+
 void setup_subtle_crypto(Iface& I) {
     I.method("digest", 2, [](Realm& r, Args args) {
         JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
@@ -290,6 +354,99 @@ void setup_subtle_crypto(Iface& I) {
             out_u8.set_property(std::to_string(i), num(static_cast<double>(digest[i])));
         }
         if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {out_ab});
+        return undefined();
+    });
+
+    I.method("importKey", 5, [](Realm& r, Args args) {
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const std::string& name, const std::string& msg) {
+            JsValue err = make_dom_exception(r, name, msg);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        if (args.size() < 5) return reject_with("TypeError", "SubtleCrypto.importKey: 5 arguments required.");
+        if (to_str(args[0]) != "raw") {
+            return reject_with("NotSupportedError", "SubtleCrypto.importKey: only 'raw' format is supported.");
+        }
+        std::vector<uint8_t> key_bytes;
+        if (!read_buffer_source(r, args[1], key_bytes)) {
+            return reject_with("TypeError", "SubtleCrypto.importKey: keyData must be a BufferSource.");
+        }
+        const JsValue& alg_val = args[2];
+        std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
+                                                        : ascii_lower_str(to_str(alg_val));
+        if (alg_name != "hmac" || !alg_val.is_object_like()) {
+            return reject_with("NotSupportedError", "SubtleCrypto.importKey: only HMAC is supported.");
+        }
+        JsValue hash_val = alg_val.get_property("hash");
+        std::string hash_alg = hash_val.is_object_like() ? ascii_lower_str(to_str(hash_val.get_property("name")))
+                                                         : ascii_lower_str(to_str(hash_val));
+        if (hash_alg != "sha-1" && hash_alg != "sha-256" && hash_alg != "sha-384" && hash_alg != "sha-512") {
+            return reject_with("NotSupportedError", "SubtleCrypto.importKey: unsupported HMAC hash '" + hash_alg + "'.");
+        }
+        auto state = std::make_shared<CryptoKeyState>();
+        state->extractable = args[3].is_truthy();
+        state->hash_alg = hash_alg;
+        state->key_bytes = std::move(key_bytes);
+        JsValue key = r.make("CryptoKey", state);
+        if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
+        return undefined();
+    });
+
+    I.method("sign", 3, [](Realm& r, Args args) {
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const std::string& name, const std::string& msg) {
+            JsValue err = make_dom_exception(r, name, msg);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        if (args.size() < 3) return reject_with("TypeError", "SubtleCrypto.sign: 3 arguments required.");
+        std::string alg = args[0].is_object_like() ? ascii_lower_str(to_str(args[0].get_property("name")))
+                                                   : ascii_lower_str(to_str(args[0]));
+        if (alg != "hmac") return reject_with("NotSupportedError", "SubtleCrypto.sign: only HMAC is supported.");
+        CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
+        if (!key) return reject_with("TypeError", "SubtleCrypto.sign: key must be a CryptoKey.");
+        std::vector<uint8_t> data;
+        if (!read_buffer_source(r, args[2], data)) {
+            return reject_with("TypeError", "SubtleCrypto.sign: data must be a BufferSource.");
+        }
+        std::vector<uint8_t> tag = hmac_bytes(key->hash_alg, key->key_bytes, data);
+        JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
+        JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
+        JsValue out_ab = js_construct(ab_ctor, {num(static_cast<double>(tag.size()))});
+        JsValue out_u8 = js_construct(u8_ctor, {out_ab});
+        for (std::size_t i = 0; i < tag.size(); ++i) {
+            out_u8.set_property(std::to_string(i), num(static_cast<double>(tag[i])));
+        }
+        if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {out_ab});
+        return undefined();
+    });
+
+    I.method("verify", 4, [](Realm& r, Args args) {
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const std::string& name, const std::string& msg) {
+            JsValue err = make_dom_exception(r, name, msg);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        if (args.size() < 4) return reject_with("TypeError", "SubtleCrypto.verify: 4 arguments required.");
+        std::string alg = args[0].is_object_like() ? ascii_lower_str(to_str(args[0].get_property("name")))
+                                                   : ascii_lower_str(to_str(args[0]));
+        if (alg != "hmac") return reject_with("NotSupportedError", "SubtleCrypto.verify: only HMAC is supported.");
+        CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
+        if (!key) return reject_with("TypeError", "SubtleCrypto.verify: key must be a CryptoKey.");
+        std::vector<uint8_t> sig, data;
+        if (!read_buffer_source(r, args[2], sig) || !read_buffer_source(r, args[3], data)) {
+            return reject_with("TypeError", "SubtleCrypto.verify: signature and data must be BufferSources.");
+        }
+        std::vector<uint8_t> expected = hmac_bytes(key->hash_alg, key->key_bytes, data);
+        bool ok = (sig.size() == expected.size());
+        if (ok) {
+            uint8_t diff = 0;
+            for (std::size_t i = 0; i < expected.size(); ++i) diff |= static_cast<uint8_t>(sig[i] ^ expected[i]);
+            ok = (diff == 0);
+        }
+        if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {boolean(ok)});
         return undefined();
     });
 }
@@ -352,6 +509,7 @@ void setup_crypto(Iface& I) {
 } // namespace
 
 void register_crypto_interfaces() {
+    register_interface({"CryptoKey", nullptr, setup_crypto_key, nullptr, 0, nullptr});
     register_interface({"SubtleCrypto", nullptr, setup_subtle_crypto, nullptr, 0, nullptr});
     register_interface({"Crypto", nullptr, setup_crypto, nullptr, 0, nullptr});
 }

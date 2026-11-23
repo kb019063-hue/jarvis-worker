@@ -100,6 +100,22 @@ if (!skip_cell_chrome && (bw.top > 0 || bw.right > 0 || bw.bottom > 0 || bw.left
     if (box->border_color_override) cmd.edge_colors = *box->border_color_override;
     list.add(cmd);
 }
+
+// 3. Outline. CSS 2.1 §16.3: a ring outside the border box that takes no room
+// in the layout, which is why nothing in the box model has a place for it —
+// `outline: 5px solid` on a 100px box paints 5px around it and the box is
+// still 100px. It is drawn on top of the border, so a zero offset puts it
+// over the border's own pixels; a positive offset lifts it clear, and a
+// negative one pulls it in over the padding.
+if (s.outline_drawn && s.outline_width > 0.0f && !s.outline_color.is_transparent()) {
+    const Rect box_rect = box->dimensions.border_box();
+    const float grow = s.outline_offset + s.outline_width;
+    DrawBorderCommand ring;
+    ring.rect = Rect{box_rect.x - grow, box_rect.y - grow, box_rect.width + 2 * grow, box_rect.height + 2 * grow};
+    ring.width = EdgeSizes(s.outline_width);
+    ring.color = s.outline_color;
+    list.add(ring);
+}
 }
 
 // ---------------------------------------------------------------------------

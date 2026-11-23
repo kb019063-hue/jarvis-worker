@@ -1,0 +1,9 @@
+stage: open
+Uncaught SyntaxError: Unexpected token 'import' (line 52)
+READ	true
+HIT	#tab-1 @ 116.96,300 -> span#
+READ	tab-2
+READ	true
+READ	true
+READ	false
+END

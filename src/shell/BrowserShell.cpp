@@ -167,6 +167,7 @@ bool BrowserShell::back() {
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;
+    if (m_document) m_document->set_scroll_offset(m_scroll_x, m_scroll_y);
     rebuild_layout();
     m_status_message = "Navigated Back to " + m_current_url;
     m_dirty = true;
@@ -191,6 +192,7 @@ bool BrowserShell::forward() {
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;
+    if (m_document) m_document->set_scroll_offset(m_scroll_x, m_scroll_y);
     rebuild_layout();
     m_status_message = "Navigated Forward to " + m_current_url;
     m_dirty = true;
@@ -246,6 +248,7 @@ bool BrowserShell::navigate_to(const std::string& url) {
 
     m_scroll_y = 0.0f;
     m_scroll_x = 0.0f;
+    if (m_document) m_document->set_scroll_offset(m_scroll_x, m_scroll_y);
     rebuild_layout();
     m_status_message = "Loaded " + m_current_url;
     m_dirty = true;
@@ -830,6 +833,7 @@ void BrowserShell::scroll_to(float x, float y) {
     const float visible_h = std::min(m_viewport_h, static_cast<float>(std::max(1, m_term_rows - 3)) * 20.0f);
     float max_y = std::max(0.0f, m_content_height - visible_h);
     m_scroll_y = std::clamp(y, 0.0f, max_y);
+    if (m_document) m_document->set_scroll_offset(m_scroll_x, m_scroll_y);
     m_dirty = true;
 }
 

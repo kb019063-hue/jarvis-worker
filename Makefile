@@ -169,7 +169,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full gc-oracle deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics metrics-suites bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket check-suites help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media verify-avif fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full gc-oracle deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics metrics-suites bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket check-suites help
 
 all: $(TARGET)
 
@@ -517,6 +517,7 @@ asan-unit:
 ## policy, WebSocket).
 asan-verify:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-media
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-avif
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-color
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-brotli BROTLI_VERIFY_FLAGS=--skip-node
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_regexp.py --binary build-asan/litebird --fuzz-count 200 --skip-node
@@ -638,6 +639,12 @@ security-websocket: $(TARGET)
 verify-media: $(MEDIA_CHECK_TARGET)
 	@python3 tools/conformance/verify_media_render.py --binary $(MEDIA_CHECK_TARGET)
 
+## Verifies AVIF container parsing, AV1 OBU payload extraction, hostile/malformed
+## refusals, deterministic mutation fuzzing, and libheif-backed AV1 picture pixel
+## comparison (known unimplemented until an AV1 intra-frame decoder lands).
+verify-avif: $(MEDIA_CHECK_TARGET)
+	@python3 tools/conformance/verify_avif.py --binary $(MEDIA_CHECK_TARGET)
+
 ## Mutation fuzzing of the JPEG, GIF, and SVG decoders/renderer.
 fuzz-media: $(MEDIA_CHECK_TARGET)
 	@python3 tools/fuzz/fuzz_media.py --binary $(MEDIA_CHECK_TARGET)
@@ -684,5 +691,5 @@ clean:
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, fuzz-color, verify-color, verify-brotli, fuzz-brotli, verify-gc-stress (verify-gc-stress-full), gc-oracle, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, check-suites, clean"
+	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, verify-avif, fuzz-color, verify-color, verify-brotli, fuzz-brotli, verify-gc-stress (verify-gc-stress-full), gc-oracle, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, check-suites, clean"
 	@echo "Parts of asan-core, which CI runs as jobs side by side: asan-build, asan-unit, asan-verify, asan-js, asan-dom, asan-xml, asan-wpt, asan-xml-generated, asan-fuzz"

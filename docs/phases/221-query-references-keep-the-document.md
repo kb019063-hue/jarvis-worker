@@ -32,7 +32,7 @@ against a mapped origin, as well as explicit query, fragment and empty cases.
 
 ```
 make test
-# 363 engine suites pass; cross-origin suite: 114 checks, 0 failures.
+# 365 engine suites pass; cross-origin suite: 114 checks, 0 failures.
 make verify-relative-navigation
 # Pathless reference oracle: 50/50 agree with Node URL
 ```

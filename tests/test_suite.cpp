@@ -34423,6 +34423,31 @@ void test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties() 
     )") == "0,h,i,false,1,2,false,10,false,30,40,5,6,7,1");
 }
 
+TEST(svg_class_name_is_a_live_animated_string) {
+    TestPage page;
+    auto& js = page.js;
+    auto S = [&](const char* code) { return js.eval(code).to_string(); };
+    assert(S("var s=document.createElementNS('http://www.w3.org/2000/svg','svg');"
+             "var e=document.createElementNS('http://www.w3.org/2000/svg','rect');"
+             "var a=e.className; [typeof a,a instanceof SVGAnimatedString,a===e.className,"
+             "a.baseVal,a.animVal,s.className.baseVal].join('|')") == "object|true|true|||");
+    assert(S("e.setAttribute('class','one'); [a.baseVal,a.animVal,e.classList.contains('one')].join('|')") == "one|one|true");
+    assert(S("a.baseVal='two three'; [e.getAttribute('class'),a.animVal,e.classList.contains('three')].join('|')") == "two three|two three|true");
+    assert(S("e.classList.add('four'); [a.baseVal,a.animVal].join('|')") == "two three four|two three four");
+    assert(S("e.removeAttribute('class'); [a.baseVal,a.animVal,e.hasAttribute('class')].join('|')") == "||false");
+    assert(S("a.baseVal=null; [a.baseVal,a.animVal,e.getAttribute('class')].join('|')") == "null|null|null");
+    assert(S("a.animVal='bad'; e.className='bad'; [e.className===a,a.baseVal,a.animVal].join('|')") == "true|null|null");
+    assert(S("var h=document.createElement('div'); h.className='ordinary'; [typeof h.className,h.className].join('|')") == "string|ordinary");
+    assert(S("try { Object.getOwnPropertyDescriptor(SVGAnimatedString.prototype,'baseVal').get.call({}); 'no'; } catch(e) { e.name; }") == "TypeError");
+    assert(S("try { new SVGAnimatedString(); 'no'; } catch(e) { e.name; }") == "TypeError");
+
+    // A view held on its own keeps its detached element, including its JS
+    // wrapper, alive through a collection and continues to reflect it.
+    assert(S("var v=(function(){var n=document.createElementNS('http://www.w3.org/2000/svg','g'); n.setAttribute('class','kept'); return n.className;})(); e=null; a=null; 'ok'") == "ok");
+    litebird::Heap::default_heap().collect_garbage();
+    assert(S("[v.baseVal,v.animVal,(v.baseVal='after'),v.animVal].join('|')") == "kept|kept|after|after");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -34954,6 +34979,9 @@ int main() {
     // Phase 202: a box's outline is a ring outside the border box that takes
     // no room; it is stored by the cascade and painted.
     RUN_TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for);
+
+    // Phase 214: SVG className is a live, retained SVGAnimatedString.
+    RUN_TEST(svg_class_name_is_a_live_animated_string);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

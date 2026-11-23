@@ -65,7 +65,7 @@ and that a page which focused a `tabindex` div before the ring was built still
 hears that div's `blur`.
 
 ```bash
-make test      # All 373 engine test suites passed successfully!
+make test      # All 384 engine test suites passed successfully!   (373 before main's own 11 suites arrived in the merge)
 ```
 
 Nothing else moved:
@@ -76,11 +76,11 @@ Nothing else moved:
 | `make conformance` / `make dom-conformance` | 1973/1973 · 678/678 |
 | `make wpt` | 9567/9824, the same 257 listed |
 | `make url-conformance` / `make xml-conformance` | 1188/1188 · 1718/1718 |
-| `make render-conformance` | 55/64 and 35/41, the same recorded 9 and 6 |
+| `make render-conformance` | 56/66 and 35/41, the same recorded 10 and 6 (main's corpus grew by two pages and one recorded failure) |
 | `make diff-trees` / `make diff-xml` | 1500/1500 trees equal, no crash |
 | `make deep` | 1332 runs, 0 failed |
 | `make verify-terminal-shell-safety` / `verify-relative-navigation` / `verify-gc-stress` | 1/1 · 50/50 · 11830 |
-| `make security-fetch` / `-worker` / `-https` / `-websocket` | 3/3 · 17/17 · 20/20 · 40/40 |
+| `make security-fetch` / `-worker` / `-https` / `-websocket` | 3/3 · 17/17 · 20/20 · 44/44 |
 | a probe of the same page under `-fsanitize=address,undefined` | unchanged answers, no sanitizer report |
 
 Negative control: with `BrowserShell.cpp` and its header as `main` has them and

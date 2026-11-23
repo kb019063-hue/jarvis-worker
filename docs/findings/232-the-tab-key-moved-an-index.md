@@ -31,7 +31,7 @@ one behaviour the change keeps on purpose.
 
 ## 3. Evidence
 
-`make test` **373/373**. `tests/suites/228-tab-moves-the-focus.cpp` walks three
+`make test` **384/384**. `tests/suites/228-tab-moves-the-focus.cpp` walks three
 stops forwards and back, checks `document.activeElement` and the page's own log
 of `focus`/`blur`/`focusin`/`focusout` after each press, checks `:focus`, and
 covers the two reconciliations. On `main`'s `BrowserShell.cpp` the same suite

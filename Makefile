@@ -178,6 +178,11 @@ all: $(TARGET)
 verify-relative-navigation: $(BUILD_DIR)/relative_navigation_fixture
 	@python3 tools/conformance/verify_relative_navigation.py --binary $(BUILD_DIR)/relative_navigation_fixture
 
+## Compare path-bearing URL references against Node's URL implementation.
+.PHONY: verify-path-resolution
+verify-path-resolution: $(BUILD_DIR)/relative_navigation_fixture
+	@python3 tools/conformance/verify_path_resolution.py --binary $(BUILD_DIR)/relative_navigation_fixture
+
 $(BUILD_DIR)/relative_navigation_fixture: $(OBJS) tools/conformance/relative_navigation_fixture.cpp
 	$(CXX) $(CXXFLAGS) $(OBJS) tools/conformance/relative_navigation_fixture.cpp -o $@
 
@@ -304,9 +309,9 @@ bench-collections: $(TARGET)
 SHAPING_PYTHON ?= python3
 SHAPING_FONT ?=
 .PHONY: shaping-oracle shaping-oracle-self-test
-$(BUILD_DIR)/shaping-probe: tools/shaping/probe.cpp src/render/FontRenderer.cpp include/litebird/render/FontRenderer.hpp
+$(BUILD_DIR)/shaping-probe: tools/shaping/probe.cpp src/render/FontRenderer.cpp src/js/StringUnicodeTables.cpp include/litebird/render/FontRenderer.hpp include/litebird/js/StringUnicodeTables.hpp
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) tools/shaping/probe.cpp src/render/FontRenderer.cpp -o $@
+	$(CXX) $(CXXFLAGS) tools/shaping/probe.cpp src/render/FontRenderer.cpp src/js/StringUnicodeTables.cpp -o $@
 
 shaping-oracle: $(BUILD_DIR)/shaping-probe
 	$(SHAPING_PYTHON) tools/shaping/compare.py --probe $(BUILD_DIR)/shaping-probe --font "$(SHAPING_FONT)" --output $(BUILD_DIR)/shaping-report.json
@@ -540,6 +545,7 @@ asan-unit:
 asan-verify:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-media
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-avif
+	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_media_webgl_codecs.py --binary build-asan/litebird
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-color
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" verify-brotli BROTLI_VERIFY_FLAGS=--skip-node
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/conformance/verify_regexp.py --binary build-asan/litebird --fuzz-count 200 --skip-node
@@ -666,6 +672,13 @@ verify-media: $(MEDIA_CHECK_TARGET)
 ## comparison (known unimplemented until an AV1 intra-frame decoder lands).
 verify-avif: $(MEDIA_CHECK_TARGET)
 	@python3 tools/conformance/verify_avif.py --binary $(MEDIA_CHECK_TARGET)
+
+## Spec-backed conformance oracle for HTMLMediaElement (<audio>/<video>),
+## MediaSource/Web Audio, WebCodecs, and WebGL 1/2 (25 cases with KNOWN/FIXED
+## gating and 5 built-in negative controls).
+.PHONY: verify-media-webgl-codecs
+verify-media-webgl-codecs: $(TARGET)
+	@python3 tools/conformance/verify_media_webgl_codecs.py --binary $(TARGET)
 
 ## Mutation fuzzing of the JPEG, GIF, and SVG decoders/renderer.
 fuzz-media: $(MEDIA_CHECK_TARGET)

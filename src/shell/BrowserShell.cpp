@@ -870,34 +870,79 @@ std::vector<uint8_t> BrowserShell::render_png_frame() {
             }
             const std::string& tag = el.tag_name();
             if (tag == "input" || tag == "textarea") {
-                const bool focused = (m_document->focused_element().get() == &el);
-                DrawRectCommand bg;
-                bg.rect = r;
-                bg.color = Color(255, 255, 255, 255);
-                bg.border_radius = 4.0f;
-                overlay.add(bg);
+                const std::string type = (tag == "input") ? forms::input_type(el) : std::string();
+                const bool is_checkbox = (type == "checkbox");
+                const bool is_radio = (type == "radio");
+                if (is_checkbox || is_radio) {
+                    const bool focused = (m_document->focused_element().get() == &el);
+                    const bool is_checked = forms::checked(el);
+                    // Checkbox/radio intrinsic rendering: a bordered box, not the
+                    // text-field overlay that painted the default value "on".
+                    DrawRectCommand bg;
+                    bg.rect = r;
+                    bg.color = Color(255, 255, 255, 255);
+                    bg.border_radius = is_radio ? std::min(r.width, r.height) * 0.5f : 3.0f;
+                    overlay.add(bg);
+                    DrawBorderCommand bdr;
+                    bdr.rect = r;
+                    bdr.width = focused ? EdgeSizes(2, 2, 2, 2) : EdgeSizes(1, 1, 1, 1);
+                    bdr.color = focused ? Color(37, 99, 235, 255) : Color(100, 116, 139, 255);
+                    bdr.border_radius = bg.border_radius;
+                    overlay.add(bdr);
+                    if (is_checked) {
+                        if (is_radio) {
+                            const float dot = std::min(r.width, r.height) * 0.45f;
+                            const float dx = r.x + (r.width - dot) * 0.5f;
+                            const float dy = r.y + (r.height - dot) * 0.5f;
+                            DrawRectCommand dot_rect;
+                            dot_rect.rect = Rect(dx, dy, dot, dot);
+                            dot_rect.color = Color(15, 23, 42, 255);
+                            dot_rect.border_radius = dot * 0.5f;
+                            overlay.add(dot_rect);
+                        } else {
+                            // Checkmark as two line segments via small filled rects.
+                            const float cx = r.x + r.width * 0.5f;
+                            const float cy = r.y + r.height * 0.5f;
+                            // Approximate tick with text "✓" to avoid custom path.
+                            DrawTextCommand tick;
+                            tick.position = Point(cx - 5.0f, cy - 7.0f);
+                            tick.text = "\xE2\x9C\x93";
+                            tick.color = Color(15, 23, 42, 255);
+                            tick.font_size = std::min(r.width, r.height) * 0.9f;
+                            tick.font_weight = 700;
+                            overlay.add(tick);
+                        }
+                    }
+                } else {
+                    const bool focused = (m_document->focused_element().get() == &el);
+                    DrawRectCommand bg;
+                    bg.rect = r;
+                    bg.color = Color(255, 255, 255, 255);
+                    bg.border_radius = 4.0f;
+                    overlay.add(bg);
 
-                DrawBorderCommand bdr;
-                bdr.rect = r;
-                bdr.width = focused ? EdgeSizes(2, 2, 2, 2) : EdgeSizes(1, 1, 1, 1);
-                bdr.color = focused ? Color(37, 99, 235, 255) : Color(148, 163, 184, 255);
-                bdr.border_radius = 4.0f;
-                overlay.add(bdr);
+                    DrawBorderCommand bdr;
+                    bdr.rect = r;
+                    bdr.width = focused ? EdgeSizes(2, 2, 2, 2) : EdgeSizes(1, 1, 1, 1);
+                    bdr.color = focused ? Color(37, 99, 235, 255) : Color(148, 163, 184, 255);
+                    bdr.border_radius = 4.0f;
+                    overlay.add(bdr);
 
-                std::string shown = el.value();
-                Color txt_color(15, 23, 42, 255);
-                if (shown.empty() && el.has_attribute("placeholder")) {
-                    shown = el.get_attribute("placeholder");
-                    txt_color = Color(148, 163, 184, 255);
-                }
-                if (!shown.empty()) {
-                    DrawTextCommand txt;
-                    txt.position = Point(r.x + 8.0f, r.y + std::max(2.0f, (r.height - 18.0f) * 0.5f));
-                    txt.text = shown;
-                    txt.color = txt_color;
-                    txt.font_size = 14.0f;
-                    txt.font_weight = 400;
-                    overlay.add(txt);
+                    std::string shown = el.value();
+                    Color txt_color(15, 23, 42, 255);
+                    if (shown.empty() && el.has_attribute("placeholder")) {
+                        shown = el.get_attribute("placeholder");
+                        txt_color = Color(148, 163, 184, 255);
+                    }
+                    if (!shown.empty()) {
+                        DrawTextCommand txt;
+                        txt.position = Point(r.x + 8.0f, r.y + std::max(2.0f, (r.height - 18.0f) * 0.5f));
+                        txt.text = shown;
+                        txt.color = txt_color;
+                        txt.font_size = 14.0f;
+                        txt.font_weight = 400;
+                        overlay.add(txt);
+                    }
                 }
             } else if (m_document->focused_element().get() == &el) {
                 DrawBorderCommand focus_ring;

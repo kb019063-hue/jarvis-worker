@@ -55,6 +55,8 @@ jobs:
         run: make verify-terminal-shell-safety
       - name: Pathless URL references agree with Node
         run: make verify-relative-navigation
+      - name: Path-bearing URL references agree with Node
+        run: make verify-path-resolution
       - name: GC invariants hold through the shell
         # Unreachable cycles and closure captures must be reclaimed, churn
         # must not grow the live set, what a global names must stay intact.
@@ -128,6 +130,11 @@ jobs:
           make verify-media
           make verify-avif
           make fuzz-media
+      - name: Audio/Video, WebCodecs, and WebGL spec conformance oracle
+        # Runs 25 spec-backed cases across HTMLMediaElement (<audio>/<video>),
+        # MediaSource/Web Audio, WebCodecs, and WebGL 1/2 with KNOWN/FIXED gating
+        # and 5 built-in negative controls.
+        run: make verify-media-webgl-codecs
       - name: CSS Color 4/5 rational oracle, WPT vectors, and fuzzing
         # Cross-checks all 15 color spaces against an independent exact-rational
         # Python W3C CSS Color 4 oracle, verifies §13.2 OKLCH gamut mapping,

@@ -3,15 +3,57 @@
 
     python3 tools/ci/check_pr.py             # the claims, the numbers taken, the next free pair
     python3 tools/ci/check_pr.py claim N     # after opening #N: are its numbers and its files free
-    python3 tools/ci/check_pr.py merge N     # before `gh pr merge N --merge`
-    python3 tools/ci/check_pr.py --self-test # how a claim is read, on fixed texts; no network
+    python3 tools/ci/check_pr.py merge N     # when #N is finished: merge it, or leave it to the watch
+    python3 tools/ci/check_pr.py landed N    # during a watch: wait for the landing session's answer
+    python3 tools/ci/check_pr.py watch       # is a watch on, and what would it take now
+    python3 tools/ci/check_pr.py --self-test # how a claim and the board are read, on fixed texts; no network
 
 AGENTS.md says what a claim is and what has to be true before a merge. Each
 of those was missed at least once by an agent that had read it, because each
 is a thing to look up at a moment when the work feels finished. This looks
-them up. It reads; it changes nothing on GitHub. In the clone it fetches
-`main` and the pull request it is asked about, and `merge N` may check a
-tree out into a scratch directory and remove it again; no branch moves.
+them up. It reads; it changes nothing on GitHub (but for the two commands of
+the landing session, below). In the clone it fetches `main` and the pull
+request it is asked about, and `merge N` may check a tree out into a scratch
+directory and remove it again; no branch moves.
+
+The watch
+---------
+While a watch is on (AGENTS.md, "Working together"), one session merges and
+no other: it tests what is finished together, in one CI run, and merges each
+pull request as it is. Whether one is on is said by one comment on the board
+(the open pull request whose title begins with `BOARD:`), which the landing
+session rewrites at every look:
+
+    Lander: WATCH ON until 2026-11-23 12:00 UTC. Last look 2026-11-23 05:00 UTC.
+    Lander: WATCH OFF since 2026-11-23 12:01 UTC. ...
+
+A watch is on when the last such comment says ON, its end has not come, and
+its last look is at most 30 minutes old. A landing session that has died
+(its login ended, its turn was cut) stops looking, and half an hour later
+every agent is told "no watch is on" without anybody having to say so.
+
+`merge N`, while a watch is on, ends with "do not merge" (exit 3) where it
+would have said "ready", and does not ask for `main` to be merged in: a
+`main` that has moved is the landing session's to deal with. `--landing`
+after it is the landing session asking, and gets the answer of no watch.
+
+`landed N` waits, up to four minutes a call (`--wait SECONDS` for another
+time), and says which of four things is true: #N has landed (exit 0); it is
+yours again, with what the landing session wrote on the board, or with the
+reason it is not something a watch takes (exit 1); no watch is on any more,
+so merge it yourself (exit 2); nothing yet, run it again (exit 3).
+
+`watch` lists the open pull requests in two groups: finished, green on the
+head and mergeable, which is what the landing session takes, with whether
+each can be merged at once (`main` is in its head) or goes into a lot; and
+the rest, each with its reason. A pull request the landing session sent back
+(`Lander: #N is yours again (head abc1234): why`, on the board) is left
+alone until its head is another commit.
+
+`watch --beat "YYYY-MM-DD HH:MM"` and `watch --off "what it did"` are the
+landing session's: they write the status comment (`--name NAME` when the
+landing session is not called Lander). They and `gh pr comment` are the only
+things here that write.
 
 `claim N` fails (exit 1) when
   - #N does not begin with the `Task:`, `Files:` and `Phase P, finding F`
@@ -49,9 +91,10 @@ refresh (AGENTS.md, "Working together"; tools/ci/check_numbers.py says what
 it cost while every pull request edited it), and `merge N` only notes it.
 
 A pull request whose title begins with `BOARD:` or `WATCH:` claims nothing
-and is left out of the claims: the first is where finished pull requests are
-handed over, the second is the landing session's own, which holds the heads
-of the pull requests it is testing together and none of their files.
+and is left out of the claims: the first is where the landing session says
+whether a watch is on and what it sent back, the second is the landing
+session's own, which holds the heads of the pull requests it is testing
+together and none of their files.
 `merge N` says "not ready" for the board whatever else is true of it: it is
 never merged.
 
@@ -1316,7 +1359,8 @@ def self_test() -> int:
         facts = dict(head="a" * 40, behind=0, main_files=[], pr_files=["src/a.cpp", "README.md"],
                      head_state="passed", head_bad=[], ran_on="a" * 40, ran_state="passed", since=[])
         facts.update(found)
-        lines, quick = ci_verdict(Evidence(**facts))
+        watch_on = facts.pop("watch_on", False)
+        lines, quick = ci_verdict(Evidence(**facts), watch_on)
         return [ok for ok, _text in lines], quick
 
     moved = dict(behind=2)
@@ -1388,6 +1432,109 @@ def self_test() -> int:
         ("...nor is a run that failed made good by the tree being the same",
          verdict(**moved, **no_run, ran_state="failed", main_files=["src/js/JsEval.cpp"], since=[], same_tree=True),
          ([False, False], False)),
+    ]
+
+    # The watch. What the board says, at a time: the last status comment decides.
+    def at(stamp: str) -> datetime:
+        return datetime.strptime(stamp, STAMP).replace(tzinfo=timezone.utc)
+
+    def said(text: str) -> dict:
+        return {"body": text, "url": "https://github.com/o/r/pull/9#issuecomment-1"}
+
+    on = said("Lander: WATCH ON until 2026-11-23 12:00 UTC. Last look 2026-11-23 05:00 UTC.\n\n"
+              + WATCH_ON_TEXT.format(quiet=QUIET_AFTER_MINUTES, name="Lander"))
+    off = said("Lander: WATCH OFF since 2026-11-23 06:01 UTC. It landed #1 and #2.")
+    back = said("Lander: #7 is yours again (head abc1234): it conflicts with main in `src/a.cpp`")
+    board = [said("Heron: a question about #7"), on, back, said("Heron: thanks")]
+    cases += [
+        ("a board without a status comment: no watch",
+         watch_state([said("Heron: hello")], at("2026-11-23 05:10")).state, "none"),
+        ("ON, looked at ten minutes ago: a watch is on, whatever was written after the status comment",
+         watch_state(board, at("2026-11-23 05:10")).state, "on"),
+        ("...and it says until when, and who looked last",
+         watch_state(board, at("2026-11-23 05:10")).says(),
+         "a watch is on until 12:00 UTC on 23 November (Lander last looked at 05:00)"),
+        (f"a last look {QUIET_AFTER_MINUTES} minutes old is still a watch",
+         watch_state(board, at("2026-11-23 05:30")).state, "on"),
+        ("one minute more and the watch has gone quiet: nobody waits for a landing session that is not there",
+         (watch_state(board, at("2026-11-23 05:31")).state, watch_state(board, at("2026-11-23 05:31")).on),
+         ("quiet", False)),
+        ("a watch whose time is up is over, however lately it looked",
+         watch_state([said("Lander: WATCH ON until 2026-11-23 12:00 UTC. Last look 2026-11-23 11:59 UTC.")],
+                     at("2026-11-23 12:00")).state, "over"),
+        ("OFF after ON: no watch", watch_state(board + [off], at("2026-11-23 06:05")).state, "off"),
+        ("ON after OFF: the later one counts", watch_state([off, on], at("2026-11-23 05:10")).state, "on"),
+        ("a line that only talks about a watch is not the status comment",
+         watch_state([said("Heron: is a WATCH ON until tomorrow?"), said("WATCH ON until 2026-11-23 12:00 UTC.")],
+                     at("2026-11-23 05:10")).state, "none"),
+        ("the name in the status comment is the landing session's",
+         watch_state([said("Osprey: WATCH OFF since 2026-11-23 06:01 UTC.")], at("2026-11-23 07:00")).name, "Osprey"),
+        ("sent back: at which head, and the whole of what was written",
+         sent_back(board, 7), ("abc1234", "Lander: #7 is yours again (head abc1234): it conflicts with main in `src/a.cpp`")),
+        ("sent back: not a pull request the board says nothing of", sent_back(board, 8), None),
+        ("sent back twice: the last one counts",
+         sent_back(board + [said("Lander: #7 is yours again (head def5678): the lot fails with it")], 7)[0], "def5678"),
+    ]
+
+    def check(name: str, conclusion: str | None, status: str = "COMPLETED", started: str = "2026-11-23T05:00:00Z") -> dict:
+        return {"__typename": "CheckRun", "name": name, "conclusion": conclusion, "status": status, "startedAt": started}
+
+    green = [check(f"job {n}", "SUCCESS") for n in range(12)]
+    cases += [
+        ("no check on the head: none", rollup([]), ("none", [])),
+        ("twelve green jobs: passed", rollup(green), ("passed", [])),
+        ("a skipped job and a neutral one are green",
+         rollup(green + [check("extra", "SKIPPED"), check("other", "NEUTRAL")]), ("passed", [])),
+        ("one job still running: running, and it is named",
+         rollup(green[:11] + [check("job 11", None, "IN_PROGRESS")]), ("running", ["job 11: in_progress"])),
+        ("one job failed and all are done: failed",
+         rollup(green[:11] + [check("job 11", "FAILURE")]), ("failed", ["job 11: failure"])),
+        ("a job that was run again: its last attempt counts",
+         rollup(green[:11] + [check("job 11", "FAILURE", started="2026-11-23T05:00:00Z"),
+                              check("job 11", "SUCCESS", started="2026-11-23T05:30:00Z")]), ("passed", [])),
+        ("a cancelled run is not a green one",
+         rollup(green[:11] + [check("job 11", "CANCELLED")])[0], "failed"),
+    ]
+
+    def waiting(title: str = "A change (Phase 5, finding 7)", checks: list[dict] | None = None, head: str = "f" * 40,
+                files: tuple[str, ...] = ("src/a.cpp", "README.md"), mergeable: str = "MERGEABLE", number: int = 7) -> dict:
+        return {"number": number, "title": title, "headRefOid": head, "mergeable": mergeable, "isDraft": False,
+                "statusCheckRollup": green if checks is None else checks, "files": [{"path": path} for path in files]}
+
+    cases += [
+        ("finished, green, mergeable: the landing session takes it, and nobody had to ask",
+         why_not_taken(waiting(), board), ""),
+        ("GitHub has not worked out yet whether it merges (UNKNOWN): taken, and git is asked",
+         why_not_taken(waiting(mergeable="UNKNOWN"), board), ""),
+        ("a title that begins with WIP: is not finished",
+         why_not_taken(waiting(title="WIP: a change"), board), "its title still begins with WIP:"),
+        ("CI still running: not yet",
+         why_not_taken(waiting(checks=green[:11] + [check("job 11", None, "QUEUED")]), board),
+         "CI is still running on its head commit"),
+        ("CI failed: not taken, and the job is named",
+         why_not_taken(waiting(checks=green[:11] + [check("job 11", "FAILURE")]), board),
+         "CI failed on its head commit (job 11: failure)"),
+        ("no run on the head of an engine change: not taken",
+         why_not_taken(waiting(checks=[]), board), "no CI run on its head commit"),
+        ("no run on the head of a change to documents only: taken, the lot's run is its run",
+         why_not_taken(waiting(checks=[], files=("AGENTS.md", "docs/phases/5-a.md")), board), ""),
+        ("in conflict with main: not taken",
+         why_not_taken(waiting(mergeable="CONFLICTING"), board), "it conflicts with main"),
+        ("sent back at this very head: left alone until the head is another one",
+         why_not_taken(waiting(head="abc1234" + "0" * 33), board),
+         "it was sent back at this head commit (abc1234) and has not changed since"),
+        ("sent back at a head before this one: taken again",
+         why_not_taken(waiting(head="1234abc" + "0" * 33), board), ""),
+        ("the board and a watch are never taken",
+         [why_not_taken(waiting(title=t), board) for t in ("BOARD: hand-overs", "WATCH: 23 November")],
+         ["it is the board or a watch"] * 2),
+        ("while a watch is on, a main that moved by engine code is the landing session's: the agent is not told to merge it",
+         verdict(**moved, main_files=["src/js/JsEval.cpp"], watch_on=True), ([True, True], False)),
+        ("...and with no watch on it is still the agent's, as it was",
+         verdict(**moved, main_files=["src/js/JsEval.cpp"]), ([False, True], False)),
+        ("...a watch does not make a failed run good",
+         verdict(**moved, main_files=["src/js/JsEval.cpp"], head_state="failed", head_bad=["Build: failure"],
+                 watch_on=True), ([True, False], False)),
     ]
 
     names_stale = ["a head with main in it: quiet",

@@ -1741,12 +1741,21 @@ void setup_window(Iface& I) {
     I.getter("innerHeight", viewport_h_getter);
     I.getter("outerHeight", viewport_h_getter);
     static const std::pair<const char*, double> kNumbers[] = {
-        {"devicePixelRatio", 1}, {"scrollX", 0}, {"scrollY", 0}, {"pageXOffset", 0}, {"pageYOffset", 0},
-        {"screenX", 0}, {"screenY", 0}, {"screenLeft", 0}, {"screenTop", 0},
+        {"devicePixelRatio", 1}, {"screenX", 0}, {"screenY", 0}, {"screenLeft", 0}, {"screenTop", 0},
     };
     for (const auto& entry : kNumbers) {
         const double value = entry.second;
         I.getter(entry.first, [value](Realm&) { return num(value); });
+    }
+    auto scroll_getter = [](Realm& r, const char* name) {
+        if (auto doc = r.document) {
+            if (std::string(name) == "scrollX" || std::string(name) == "pageXOffset") return num(std::round(doc->scroll_x()));
+            if (std::string(name) == "scrollY" || std::string(name) == "pageYOffset") return num(std::round(doc->scroll_y()));
+        }
+        return num(0);
+    };
+    for (const char* name : {"scrollX", "scrollY", "pageXOffset", "pageYOffset"}) {
+        I.getter(name, [name, scroll_getter](Realm& r) { return scroll_getter(r, name); });
     }
 
     I.method("getComputedStyle", 1, [](Realm& r, Args args) {

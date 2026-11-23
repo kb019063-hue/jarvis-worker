@@ -916,6 +916,8 @@ void register_observer_interfaces();
 void note_children_changed(Node& parent, const NodeVector& added, const NodeVector& removed,
                            const std::shared_ptr<Node>& previous, const std::shared_ptr<Node>& next);
 void note_attribute_changed(Element& element, const AttributeChange& change);
+/// Invalidate a live SVG viewBox after an external attribute mutation.
+void note_svg_view_box_changed(Element& element, const AttributeChange& change);
 void note_character_data_changed(Node& node, const std::string& old_value);
 void note_connected(Element& element, bool connected);
 /// While one of these exists, changes to the children of `parent` queue no

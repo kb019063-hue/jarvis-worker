@@ -383,6 +383,7 @@ void hook_children_changed(Node& parent, const NodeVector& added, const NodeVect
 }
 
 void hook_attribute_changed(Element& element, const AttributeChange& change) {
+    note_svg_view_box_changed(element, change);
     note_attribute_changed(element, change);
 }
 

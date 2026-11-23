@@ -10,7 +10,10 @@
 #include "litebird/render/ImageDecoder.hpp"
 #include "litebird/js/ImageBitmap.hpp"
 
+#include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 
 namespace litebird {
@@ -268,6 +271,202 @@ void setup_svg_animated_string(Iface& I) {
         const auto& state = this_state<SvgAnimatedClassState>("SVGAnimatedString");
         const auto* text = state.element->attribute("class");
         return str(text ? *text : "");
+    });
+}
+
+// A viewBox has one base rectangle and an animated rectangle. Both are live
+// views of the same element. Without SVG animation the animated value follows
+// the base, but is a distinct, read-only object.
+struct SvgViewBoxState {
+    std::shared_ptr<Element> element;
+    std::array<float, 4> values{};
+    std::string source;
+    bool has_attribute{false};
+    bool loaded{false};
+};
+
+struct SvgAnimatedRectState : JsExotic {
+    std::shared_ptr<SvgViewBoxState> box;
+    void trace(Heap& heap) override { trace_node(heap, box->element.get()); }
+};
+
+struct SvgRectState : JsExotic {
+    std::shared_ptr<SvgViewBoxState> box;
+    bool animated{false};
+    void trace(Heap& heap) override { trace_node(heap, box->element.get()); }
+};
+
+bool svg_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'; }
+bool svg_digit(char c) { return c >= '0' && c <= '9'; }
+
+// SVG's number grammar permits adjacent signs and decimal points (1-2 or
+// 1.2.3), as well as comma/whitespace separators. strtof alone is not the
+// grammar: it would also accept infinities, hex numbers, and NaN.
+// SVG's parser accumulates decimal digits in float precision, including
+// the successive powers of one tenth. This is observable for values such as
+// 0.333333; parsing directly as a double and narrowing rounds differently.
+float svg_decimal_float(const std::string& text) {
+    std::size_t at = 0;
+    bool negative = false;
+    if (text[at] == '+' || text[at] == '-') { negative = text[at] == '-'; ++at; }
+    float value = 0.0f;
+    while (at < text.size() && svg_digit(text[at])) {
+        value = value * 10.0f + static_cast<float>(text[at++] - '0');
+    }
+    if (at < text.size() && text[at] == '.') {
+        ++at;
+        float scale = 0.1f;
+        float fraction = 0.0f;
+        while (at < text.size() && svg_digit(text[at])) {
+            const float part = static_cast<float>(text[at++] - '0') * scale;
+            fraction += part;
+            scale *= 0.1f;
+        }
+        value += fraction;
+    }
+    if (at < text.size() && (text[at] == 'e' || text[at] == 'E')) {
+        const long exponent = std::strtol(text.c_str() + at + 1, nullptr, 10);
+        if (exponent < -1000) value = 0.0f;
+        else if (exponent > 1000) value = std::numeric_limits<float>::infinity();
+        else value *= std::pow(10.0f, static_cast<float>(exponent));
+    }
+    return negative ? -value : value;
+}
+
+bool parse_svg_view_box(const std::string& text, std::array<float, 4>& out) {
+    std::array<float, 4> parsed{};
+    std::size_t at = 0;
+    for (std::size_t i = 0; i < parsed.size(); ++i) {
+        while (at < text.size() && svg_space(text[at])) ++at;
+        const std::size_t start = at;
+        if (at < text.size() && (text[at] == '+' || text[at] == '-')) ++at;
+        bool digits = false;
+        while (at < text.size() && svg_digit(text[at])) { ++at; digits = true; }
+        if (at < text.size() && text[at] == '.') {
+            ++at;
+            const std::size_t fraction = at;
+            while (at < text.size() && svg_digit(text[at])) { ++at; digits = true; }
+            if (at == fraction) return false;
+        }
+        if (!digits) return false;
+        if (at < text.size() && (text[at] == 'e' || text[at] == 'E')) {
+            ++at;
+            if (at < text.size() && (text[at] == '+' || text[at] == '-')) ++at;
+            const std::size_t exponent = at;
+            while (at < text.size() && svg_digit(text[at])) ++at;
+            if (at == exponent) return false;
+        }
+        const std::string number = text.substr(start, at - start);
+        if (!std::isfinite(std::strtof(number.c_str(), nullptr))) return false;
+        parsed[i] = svg_decimal_float(number);
+        if (!std::isfinite(parsed[i])) return false;
+        while (at < text.size() && svg_space(text[at])) ++at;
+        if (i + 1 < parsed.size() && at < text.size() && text[at] == ',') ++at;
+    }
+    if (at != text.size()) return false;
+    out = parsed;
+    return true;
+}
+
+void sync_svg_view_box(SvgViewBoxState& state) {
+    const std::string* attribute = state.element->attribute("viewBox");
+    if (state.loaded && state.has_attribute == (attribute != nullptr) &&
+        (!attribute || *attribute == state.source)) return;
+    state.loaded = true;
+    state.has_attribute = attribute != nullptr;
+    state.source = attribute ? *attribute : std::string();
+    state.values = {};
+    if (attribute) parse_svg_view_box(*attribute, state.values);
+}
+
+// Chromium serializes the float with six significant digits. Fixed notation
+// is used from 1e-6 through values below 1e6; exponent notation keeps six
+// significant digits and omits leading zeroes in the exponent.
+std::string serialize_svg_float(float value) {
+    if (std::isnan(value)) return "NaN";
+    if (std::isinf(value)) return std::signbit(value) ? "-Infinity" : "Infinity";
+    if (value == 0) return "0";
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.5e", static_cast<double>(value));
+    std::string text(buffer);
+    const auto e = text.find('e');
+    const int exponent = std::atoi(text.c_str() + e + 1);
+    const bool negative = text[0] == '-';
+    std::string mantissa = text.substr(negative ? 1 : 0, e - (negative ? 1 : 0));
+    if (exponent < -6 || exponent >= 6) {
+        return (negative ? "-" : "") + mantissa + "e" + (exponent >= 0 ? "+" : "-") +
+               std::to_string(std::abs(exponent));
+    }
+    mantissa.erase(1, 1); // decimal point: six digits remain
+    const int point = exponent + 1;
+    std::string result;
+    if (point <= 0) result = "0." + std::string(static_cast<std::size_t>(-point), '0') + mantissa;
+    else if (point >= static_cast<int>(mantissa.size())) result = mantissa + std::string(point - mantissa.size(), '0');
+    else result = mantissa.substr(0, point) + "." + mantissa.substr(point);
+    if (result.find('.') != std::string::npos) {
+        while (!result.empty() && result.back() == '0') result.pop_back();
+        if (!result.empty() && result.back() == '.') result.pop_back();
+    }
+    return (negative ? "-" : "") + result;
+}
+
+void setup_svg_rect(Iface& I) {
+    static const char* names[] = {"x", "y", "width", "height"};
+    for (std::size_t i = 0; i < 4; ++i) {
+        I.accessor(names[i], [i](Realm&) {
+            auto& state = this_state<SvgRectState>("SVGRect");
+            sync_svg_view_box(*state.box);
+            return num(state.box->values[i]);
+        }, [i](Realm& realm, const JsValue& value) {
+            auto& state = this_state<SvgRectState>("SVGRect");
+            // WebIDL converts before the read-only animated rectangle refuses.
+            const double number = to_double(value);
+            const float converted = std::isfinite(number) && std::fabs(number) > std::numeric_limits<float>::max()
+                ? std::copysign(std::numeric_limits<float>::infinity(), number)
+                : static_cast<float>(number);
+            if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated rectangle is read-only.");
+            sync_svg_view_box(*state.box);
+            state.box->values[i] = converted;
+            std::string text;
+            for (float n : state.box->values) {
+                if (!text.empty()) text += ' ';
+                text += serialize_svg_float(n);
+            }
+            state.box->element->set_attribute("viewBox", text);
+            state.box->source = text;
+            state.box->has_attribute = true;
+            state.box->loaded = true;
+        });
+    }
+}
+
+void setup_svg_animated_rect(Iface& I) {
+    for (const auto& member : {std::pair<const char*, bool>{"baseVal", false}, {"animVal", true}}) {
+        const bool animated = member.second;
+        I.getter(member.first, [animated](Realm& realm) {
+            auto& state = this_state<SvgAnimatedRectState>("SVGAnimatedRect");
+            return cached(JsValue::current_this(), animated ? "svgRectAnim" : "svgRectBase", [&]() {
+                auto rect = std::make_shared<SvgRectState>();
+                rect->box = state.box;
+                rect->animated = animated;
+                return realm.make("SVGRect", rect);
+            });
+        });
+    }
+}
+
+bool is_svg_svg(const Node& node) {
+    return is_svg_node(node) && static_cast<const Element&>(node).tag_name() == "svg";
+}
+
+void setup_svg_svg_element(Iface& I) {
+    I.node_getter(&is_svg_svg, "viewBox", [](Realm& realm, Node& node) {
+        return cached(wrap(realm, node), "svgViewBox", [&]() {
+            auto state = std::make_shared<SvgAnimatedRectState>();
+            state->box = std::make_shared<SvgViewBoxState>();
+            state->box->element = shared(static_cast<Element&>(node));
+            return realm.make("SVGAnimatedRect", state);
+        });
     });
 }
 
@@ -1761,6 +1960,17 @@ void setup_link_element(Iface& I) {
 
 } // namespace
 
+void note_svg_view_box_changed(Element& element, const AttributeChange& change) {
+    if (element.element_namespace() != ElementNamespace::SVG || element.tag_name() != "svg" ||
+        change.namespace_uri || !change.local_name || *change.local_name != "viewBox") return;
+    auto* wrapper = static_cast<JsObject*>(element.script_object());
+    if (!wrapper) return;
+    auto found = wrapper->properties.find("%svgViewBox");
+    if (found == wrapper->properties.end()) return;
+    auto* state = state_of<SvgAnimatedRectState>(found->second);
+    if (state) state->box->loaded = false;
+}
+
 void reflect_attributes(Iface& I, const char* description) {
     reflect(I, description);
 }
@@ -1769,9 +1979,11 @@ void register_html_interfaces() {
     const auto element_ctor = &construct_custom_element;
     register_interface({"HTMLElement", "Element", setup_html_element, element_ctor, 0, nullptr});
     register_interface({"SVGAnimatedString", nullptr, setup_svg_animated_string, nullptr, 0, nullptr});
+    register_interface({"SVGAnimatedRect", nullptr, setup_svg_animated_rect, nullptr, 0, nullptr});
+    register_interface({"SVGRect", nullptr, setup_svg_rect, nullptr, 0, nullptr});
     register_interface({"SVGElement", "Element", setup_svg_element, nullptr, 0, nullptr});
     register_interface({"SVGGraphicsElement", "SVGElement", nullptr, nullptr, 0, nullptr});
-    register_interface({"SVGSVGElement", "SVGGraphicsElement", nullptr, nullptr, 0, nullptr});
+    register_interface({"SVGSVGElement", "SVGGraphicsElement", setup_svg_svg_element, nullptr, 0, nullptr});
     register_interface({"SVGTitleElement", "SVGElement", nullptr, nullptr, 0, nullptr});
 
     for (const auto& simple : kSimple) {

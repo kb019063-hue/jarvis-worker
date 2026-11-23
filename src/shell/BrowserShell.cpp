@@ -360,17 +360,74 @@ std::shared_ptr<Element> BrowserShell::focused_element() const {
     return nullptr;
 }
 
+namespace {
+
+/// The ring index an element holds, or -1.
+int ring_index_of(const std::vector<InteractiveElement>& items, const Element* element) {
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        if (items[i].element.get() == element) return static_cast<int>(i);
+    }
+    return -1;
+}
+
+} // namespace
+
+void BrowserShell::forget_focus_if_gone() {
+    if (m_focused_index < 0 || m_focused_index >= static_cast<int>(m_interactive_elements.size())) {
+        m_focused_index = -1;
+        return;
+    }
+    // A script can move the focus with `element.focus()`, and a modal dialog
+    // makes the rest of the document inert without relaying it out, so the
+    // index can name an element that no longer has the focus. The document's
+    // own focus is the authority: adopt it when it is a stop, and otherwise
+    // start again from nothing.
+    if (!m_document) return;
+    auto focused = m_document->focused_element();
+    const int actual = focused ? ring_index_of(m_interactive_elements, focused.get()) : -1;
+    if (actual == m_focused_index) return;
+    m_focused_index = actual;
+}
+
+// Tab moves the focus the way the platform does: the element that has it is
+// blurred, the one that gets it is focused, and the focus/blur (and
+// focusin/focusout) events are dispatched to the page's listeners. The ring
+// index is only where the walk stands between two presses.
 void BrowserShell::focus_next() {
     if (m_interactive_elements.empty()) return;
+    forget_focus_if_gone();
+    if (m_focused_index < 0) {
+        // No focus yet: start at the first stop, and let this press take it.
+        m_focused_index = 0;
+        const auto& item = m_interactive_elements[0];
+        m_status_message = "Focused: <" + item.tag + "> \"" + item.text + "\"";
+        set_document_focus(item.element);
+        m_dirty = true;
+        return;
+    }
     m_focused_index = (m_focused_index + 1) % m_interactive_elements.size();
-    m_status_message = "Focused: <" + m_interactive_elements[m_focused_index].tag + "> \"" + m_interactive_elements[m_focused_index].text + "\"";
+    const auto& item = m_interactive_elements[m_focused_index];
+    m_status_message = "Focused: <" + item.tag + "> \"" + item.text + "\"";
+    set_document_focus(item.element);
     m_dirty = true;
 }
 
 void BrowserShell::focus_prev() {
     if (m_interactive_elements.empty()) return;
+    forget_focus_if_gone();
+    if (m_focused_index < 0) {
+        // Shift+Tab with nothing focused enters at the last stop.
+        m_focused_index = static_cast<int>(m_interactive_elements.size()) - 1;
+        const auto& item = m_interactive_elements[m_focused_index];
+        m_status_message = "Focused: <" + item.tag + "> \"" + item.text + "\"";
+        set_document_focus(item.element);
+        m_dirty = true;
+        return;
+    }
     m_focused_index = (m_focused_index - 1 + m_interactive_elements.size()) % m_interactive_elements.size();
-    m_status_message = "Focused: <" + m_interactive_elements[m_focused_index].tag + "> \"" + m_interactive_elements[m_focused_index].text + "\"";
+    const auto& item = m_interactive_elements[m_focused_index];
+    m_status_message = "Focused: <" + item.tag + "> \"" + item.text + "\"";
+    set_document_focus(item.element);
     m_dirty = true;
 }
 
@@ -379,6 +436,24 @@ void BrowserShell::focus_element(int index) {
         m_focused_index = index;
         m_dirty = true;
     }
+}
+
+// The ring moved; the document follows. `focus_element` is the bindings' own
+// path -- it blurs what had the focus, boxes nothing that cannot take it, and
+// dispatches blur/focusout then focus/focusin -- so the shell asks for it
+// rather than writing the focus itself. An element with no browsing realm
+// (a document a test made, with no window) keeps the old behaviour: nothing
+// observable happens, and the ring still shows where it stands.
+void BrowserShell::set_document_focus(const std::shared_ptr<Element>& element) {
+    if (!m_document) return;
+    if (auto* realm = dom::browsing_realm_of(*m_document)) {
+        if (realm->alive) {
+            dom::focus_element(*realm, const_cast<Element*>(element.get()), m_document);
+            return;
+        }
+    }
+    for (auto& item : m_interactive_elements) item.element->set_focused(item.element == element);
+    m_document->set_focused_element(element);
 }
 
 bool BrowserShell::activate_focused() {

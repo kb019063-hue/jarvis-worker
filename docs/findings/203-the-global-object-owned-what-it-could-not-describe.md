@@ -64,9 +64,12 @@ left:
   `get_property` synthesises it. 12 test262 cases. Giving it a real accessor
   changes how assignment to `__proto__` resolves, which is a wider change
   than this phase.
-* The 190 remaining `defineProperty`/`defineProperties` cases are one hole: an
-  array index lives in `array_elements` and has no property entry, so the
-  attributes `defineProperty` sets on it are dropped. That fix wants
+* The 190 remaining `defineProperty`/`defineProperties` cases *look* like one
+  hole — an array index with no property entry, so the attributes set on it
+  are dropped — and that diagnosis is **unverified**: the source contradicts
+  it (`PropertyMap` carries per-key flags and index accessors are stored with
+  one), so it was inferred from the failure messages and should not be
+  repeated as fact. That fix wants
   `JsValue.cpp`, which another open pull request still names.
 
 Both are written up in the phase document so the next agent starts from the

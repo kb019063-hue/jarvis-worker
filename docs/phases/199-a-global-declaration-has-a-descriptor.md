@@ -1,5 +1,11 @@
 # Phase 199 — a global declaration has a descriptor
 
+> **Status: measured and handed over, not landed here.** `python3
+> tools/ci/check_pr.py claim` reports that `src/js/BuiltinsObject.cpp` was
+> claimed first by #238, so this change is out of that file and the patch is
+> on the board (#219) for whoever holds it. Everything below was measured on a
+> build that carried it: +11 test262, +1 js-conformance, 0 lost.
+
 *Finding 203.* The global object and the global environment are two things
 that have to answer as one. §9.1.1.4 makes the global declarations — `Object`,
 `Error`, `eval`, `JSON`, `undefined` — non-configurable data properties of the
@@ -108,6 +114,10 @@ The rest of `built-ins/Object/defineProperty` and `defineProperties`
 `array_elements` and by no property entry**, so the attributes
 `defineProperty` is asked to set on an index are dropped. `verifyProperty`
 then reports *"0 descriptor should not be writable"* and its relatives on
-almost every one of them. The fix is to give an index a real property entry
-when a descriptor is applied to it, which touches `JsValue.cpp` — a file an
-open pull request still names.
+almost every one of them. **The mechanism is not verified.** The symptom is measured — `verifyProperty`
+reports *"0 descriptor should not be writable"*, *"`arr.hasOwnProperty("0")`
+!== true"* and their relatives — but the diagnosis above was inferred from
+those messages and then contradicted by the source: `PropertyMap` does carry
+per-key flags, `JsValue.cpp` already stores an index accessor with a flag, and
+`descriptor_for` has a path for an index defined by a descriptor. Whoever
+takes that family should start from the failures, not from that sentence.

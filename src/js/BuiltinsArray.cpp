@@ -786,6 +786,68 @@ IteratorState& iterator_state(const JsValue& me) {
     return *static_cast<IteratorState*>(me.object_val->internal.get());
 }
 
+/// GetIteratorFromMethod + the loop over IteratorStep (ECMA-262 7.4.3,
+/// 7.4.8) for a method the caller has already looked up.
+///
+/// `js_iterate()` looks the method up itself, so a caller that has to know
+/// whether the source is iterable before it builds the result — `Array.from`
+/// does: the iterable path constructs with no argument and the array-like path
+/// with the length — read `@@iterator` twice, and a getter for it ran twice
+/// for one iteration. `[...a]`, `for (var x of a)` and `Array.from(a)` are one
+/// read each in the standard and are one read each here now.
+///
+/// The direct read of an array or a string whose method and `next` are still
+/// the realm's is kept, and runs no script.
+void iterate_with_method(const JsValue& iterable, const JsValue& method,
+                         const std::function<bool(const JsValue&)>& visit) {
+    if (js_iterates_as_builtin(iterable)) {
+        js_iterate(iterable, visit);
+        return;
+    }
+    JsValue iterator = method.call_with_this(iterable, {});
+    if (!iterator.is_object_like()) {
+        js_throw_type_error("Result of the Symbol.iterator method is not an object");
+    }
+    JsValue next = iterator.get_property("next");
+    while (true) {
+        const JsValue step = js_call(next, iterator, {});
+        if (!step.is_object_like()) {
+            js_throw_type_error("Iterator result " + js_describe_thrown(step) + " is not an object");
+        }
+        if (step.get_property("done").is_truthy()) return;
+        const JsValue value = step.get_property("value");
+        bool keep_going;
+        try {
+            keep_going = visit(value);
+        } catch (...) {
+            // IteratorClose with an error of the loop's own: that error is the
+            // one the script sees, and what `return` does is dropped.
+            try {
+                JsValue closing = iterator.get_property("return");
+                if (closing.is_function()) closing.call_with_this(iterator, {});
+            } catch (...) {
+            }
+            throw;
+        }
+        if (!keep_going) {
+            // IteratorClose for a loop that stopped: what `return` throws is
+            // thrown. Nothing here stops early — the visit always answers true
+            // — but the rule is the loop's, not the caller's.
+            JsValue closing = iterator.get_property("return");
+            if (!closing.is_nullish()) {
+                if (!closing.is_function()) {
+                    js_throw_type_error(js_describe_thrown(closing) + " is not a function");
+                }
+                const JsValue result = closing.call_with_this(iterator, {});
+                if (!result.is_object_like()) {
+                    js_throw_type_error("Iterator result " + js_describe_thrown(result) + " is not an object");
+                }
+            }
+            return;
+        }
+    }
+}
+
 } // namespace
 
 JsValue js_make_iterator(std::function<bool(JsValue& value)> step, std::vector<JsValue> roots, JsObject* proto) {
@@ -936,7 +998,7 @@ void install_array_builtins(JsIntrinsics& realm) {
             // that throws closes the iterator, and an iterator without an end
             // costs one value, not all of them.
             JsValue made = make_result(static_cast<size_t>(-1));
-            js_iterate(source, [&](const JsValue& value) {
+            iterate_with_method(source, method, [&](const JsValue& value) {
                 const JsValue item = mapped(value, items.size());
                 set_place_or_throw(made, items.size(), item);
                 items.push_back(item);

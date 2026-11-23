@@ -25779,6 +25779,85 @@ TEST(array_from_asks_the_source_for_its_iterator) {
     assert(js.eval("failures.join('; ')").to_string().empty());
 }
 
+TEST(array_from_reads_the_iterator_method_it_already_has)
+{
+    using namespace litebird;
+
+    // The other half of `array_from_asks_the_source_for_its_iterator`. That
+    // suite pins GetMethod running once, on the array-like path, where there
+    // is one read and nothing else. The iterable path had two: Array.from
+    // asked for `@@iterator` to decide which path it was on — the iterable one
+    // constructs with no argument, the array-like one with the length — and
+    // then handed the source to `js_iterate()`, which asks again. So a getter
+    // for `Symbol.iterator` ran twice for one iteration, where a spread and a
+    // `for…of` run it once and the standard has one Get per iteration.
+    // `iteration.dat` recorded the answer three years of phases ago
+    // ("a getter for the iterator on an array is read once for each
+    // iteration": `1,2 1 2 3 4`) and answered `1,2 1 2 4 5`; finding 229.
+    JsInterpreter js;
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+
+        // One read for each iteration, the same count for each of the four
+        // ways to iterate an array.
+        var a = [1, 2], reads = 0;
+        Object.defineProperty(a, Symbol.iterator, {
+            get: function () { reads++; return Array.prototype[Symbol.iterator]; }
+        });
+        var s = [...a]; var r1 = reads;
+        for (var x of a) {} var r2 = reads;
+        Array.from(a); var r3 = reads;
+        new Set(a); var r4 = reads;
+        ok('the spread', s.join(), '1,2');
+        ok('reads after each', [r1, r2, r3, r4].join(' '), '1 2 3 4');
+
+        // The value the getter hands out is iterated, not a second lookup of
+        // it: this getter returns a different iterator every time it is read.
+        var calls = 0;
+        var two = {};
+        Object.defineProperty(two, Symbol.iterator, {
+            get: function () { calls++; return function () { return [calls][Symbol.iterator](); }; }
+        });
+        ok('what the getter gave', Array.from(two).join(), '1');
+        ok('read once', calls, '1');
+
+        // An iterator is still followed for everything that is not the plain
+        // case, and `next` is read once: a protocol read is not a second
+        // method read.
+        var nextReads = 0;
+        var odd = {};
+        odd[Symbol.iterator] = function () {
+            var i = 0, it = {};
+            Object.defineProperty(it, 'next', {
+                get: function () { nextReads++; return function () { return i < 3 ? { value: i++, done: false } : { done: true }; }; }
+            });
+            return it;
+        };
+        ok('a hand-written iterator', Array.from(odd).join(), '0,1,2');
+        ok('next read once', nextReads, '1');
+
+        // The mapper still runs as each value arrives, and a throw still
+        // closes the iterator, now on the path that has the method in hand.
+        var log = [];
+        var endless = {};
+        endless[Symbol.iterator] = function () {
+            var i = 0;
+            return { next: function () { i++; return { value: i, done: false }; },
+                     return: function () { log.push('closed at ' + i); return { done: true }; } };
+        };
+        var thrown = 'none';
+        try { Array.from(endless, function (v) { if (v === 3) throw new RangeError('stop'); return v; }); }
+        catch (e) { thrown = e.name; }
+        ok('the mapper throws', thrown, 'RangeError');
+        ok('the iterator was closed', log.join(), 'closed at 3');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
 TEST(js_iteration_of_another_realms_array) {
     using namespace litebird;
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
@@ -35821,6 +35900,7 @@ int main() {
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
     RUN_TEST(array_from_asks_the_source_for_its_iterator);
+    RUN_TEST(array_from_reads_the_iterator_method_it_already_has);
     RUN_TEST(js_iteration_of_another_realms_array);
 
     // Phase 92: an iterator is a kind with a prototype a script can reach.

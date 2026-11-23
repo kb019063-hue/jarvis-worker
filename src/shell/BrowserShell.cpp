@@ -26,6 +26,17 @@ namespace litebird {
 
 namespace {
 
+// Untrusted shell labels are bytes, not terminal instructions. Match the
+// terminal renderer's conservative one-byte-per-cell ASCII policy, without
+// changing the underlying URL, DOM or status message.
+std::string terminal_label(const std::string& text) {
+    std::string safe;
+    safe.reserve(text.size());
+    for (unsigned char c : text)
+        safe.push_back(c >= 0x20 && c <= 0x7e ? static_cast<char>(c) : '?');
+    return safe;
+}
+
 struct RawTerminalMode {
     struct termios orig_termios;
     bool enabled{false};
@@ -859,7 +870,7 @@ std::string BrowserShell::render_terminal_frame(bool devtools) {
     out << (can_go_back() ? "\033[1;32m[◄ Back]\033[0;48;2;30;41;59m\033[38;2;255;255;255m " : "\033[38;2;100;116;139m[◄ Back]\033[38;2;255;255;255m ");
     out << (can_go_forward() ? "\033[1;32m[► Fwd]\033[0;48;2;30;41;59m\033[38;2;255;255;255m " : "\033[38;2;100;116;139m[► Fwd]\033[38;2;255;255;255m ");
     out << "\033[1;34m[⟳ Reload]\033[0;48;2;30;41;59m\033[38;2;255;255;255m ";
-    out << "URL: [\033[1m" << (m_current_url.empty() ? "about:blank" : m_current_url) << "\033[22m] ";
+    out << "URL: [\033[1m" << terminal_label(m_current_url.empty() ? "about:blank" : m_current_url) << "\033[22m] ";
     out << "\033[0m\n";
 
     // 2. Viewport Content
@@ -884,11 +895,11 @@ std::string BrowserShell::render_terminal_frame(bool devtools) {
     out << "Links/Btns: " << m_interactive_elements.size() << " | ";
     if (m_focused_index >= 0 && m_focused_index < static_cast<int>(m_interactive_elements.size())) {
         const auto& item = m_interactive_elements[m_focused_index];
-        out << "Focus: <" << item.tag;
-        if (!item.element->id().empty()) out << "#" << item.element->id();
+        out << "Focus: <" << terminal_label(item.tag);
+        if (!item.element->id().empty()) out << "#" << terminal_label(item.element->id());
         out << "> | ";
     }
-    out << m_status_message;
+    out << terminal_label(m_status_message);
     out << "\033[0m\n";
 
     // 4. Shortcut Help Bar

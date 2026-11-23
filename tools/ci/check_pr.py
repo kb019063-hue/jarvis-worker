@@ -111,7 +111,8 @@ import re
 import subprocess
 import sys
 import tempfile
-from datetime import datetime, timezone
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
 
@@ -161,6 +162,29 @@ NEVER_MERGED_RE = re.compile(r"^BOARD:")
 # Not `Agent: <the name you gave yourself>`, which is what `next_ids.py --pr-body`
 # prints for it to be written over.
 AGENT_RE = re.compile(r"^Agent:\s*([^\s,;.<>]+)")
+
+# The watch (AGENTS.md, "Working together"). One comment on the board says
+# whether a watch is on: the landing session writes it when the watch begins
+# and rewrites its "Last look" at every look. A watch whose last look is older
+# than this many minutes is taken to have died. On 23 November the login to
+# GitHub ended for every session in the middle of a watch, and the board went
+# on saying "a watch is on until 06:30" for an hour after nobody was looking.
+QUIET_AFTER_MINUTES = 30
+STAMP = "%Y-%m-%d %H:%M"
+WATCH_ON_RE = re.compile(r"^(\w+): WATCH ON until (\d{4}-\d\d-\d\d \d\d:\d\d) UTC\. "
+                         r"Last look (\d{4}-\d\d-\d\d \d\d:\d\d) UTC\b")
+WATCH_OFF_RE = re.compile(r"^(\w+): WATCH OFF\b")
+# What the landing session writes on the board about a pull request it cannot
+# land. The head commit is part of it: the pull request is left alone until
+# its head is another one, and nothing is compared by its time.
+YOURS_AGAIN_RE = re.compile(r"^\w+: #(\d+) is yours again \(head ([0-9a-f]{7,40})\)")
+WATCH_ON_TEXT = (
+    "While this line says ON and its last look is less than {quiet} minutes old, only the landing session "
+    "merges. A pull request that is finished (no `WIP:` in its title), green on its head commit and "
+    "mergeable is taken as it is: push nothing more to it, do not merge `main` into it, and wait with "
+    "`python3 tools/ci/check_pr.py landed N`. What cannot be landed is said here, as "
+    "`{name}: #N is yours again (head abc1234): why`. (AGENTS.md, \"Working together\".)"
+)
 
 
 def gh(*arguments: str, check: bool = True) -> str:
@@ -629,7 +653,7 @@ class Evidence(NamedTuple):
     same_tree: bool = False         # merged with main, the tree is the tree of `ran_on`, file for file
 
 
-def ci_verdict(e: Evidence) -> tuple[list[tuple[bool, str]], bool]:
+def ci_verdict(e: Evidence, watch_on: bool = False) -> tuple[list[tuple[bool, str]], bool]:
     """(the lines to report, whether the quick checks decide the rest).
 
     One rule, in three places: a step of CI says again what it said when
@@ -666,6 +690,13 @@ def ci_verdict(e: Evidence) -> tuple[list[tuple[bool, str]], bool]:
         quick = True
         lines.append((True, f"main has moved by {e.behind} commit(s), and this pull request changes only documents "
                             f"and the checks that read them ({some(e.pr_files)}): no new CI run for that"))
+    elif watch_on:
+        # While a watch is on, a `main` that has moved is the landing session's
+        # to deal with: it tests the pull request merged with `main` as it then
+        # is, with whatever else is finished, in one run. An agent that merges
+        # `main` itself starts a run of its own and moves the head under that.
+        lines.append((True, f"main has moved by {e.behind} commit(s) that are not in {head}: while a watch is on "
+                            "that is the landing session's to deal with. Do not merge main into the branch"))
     else:
         lines.append((False, f"main has moved: {e.behind} of its commits are not in {head}, and they change "
                              f"{some([f for f in e.main_files if not QUICK.search(f)] if e.main_files is not None else None)}. "
@@ -797,7 +828,267 @@ def quick_checks(tree: str, main_sha: str) -> list[str]:
     return failures
 
 
-def check_merge(number: int) -> int:
+class Watch(NamedTuple):
+    """What the board says about a watch."""
+    state: str                  # "on"; "off" and "none": no watch; "over": its time is up; "quiet": nobody is looking
+    name: str                   # the landing session's name, "" when the board has no status comment
+    until: datetime | None
+    looked: datetime | None
+    comment: dict | None        # the status comment, as `gh pr view --json comments` gives it
+
+    @property
+    def on(self) -> bool:
+        return self.state == "on"
+
+    def says(self) -> str:
+        if self.state == "on":
+            return (f"a watch is on until {self.until:%H:%M} UTC on {self.until.day} {self.until:%B} "
+                    f"({self.name} last looked at {self.looked:%H:%M})")
+        if self.state == "over":
+            return (f"no watch is on: the one {self.name} began was to end at "
+                    f"{self.until:%H:%M} UTC on {self.until.day} {self.until:%B}")
+        if self.state == "quiet":
+            return (f"no watch is on: the board says one is, but {self.name} has not looked since "
+                    f"{self.looked:%H:%M} UTC on {self.looked.day} {self.looked:%B}, "
+                    f"more than {QUIET_AFTER_MINUTES} minutes ago")
+        return "no watch is on"
+
+
+def first_line(comment: dict) -> str:
+    return (comment.get("body") or "").replace("\r\n", "\n").lstrip().split("\n", 1)[0]
+
+
+def watch_state(comments: list[dict], now: datetime) -> Watch:
+    """Whether a watch is on at `now`: the last status comment on the board decides."""
+    for comment in reversed(comments):
+        line = first_line(comment)
+        off = WATCH_OFF_RE.match(line)
+        if off:
+            return Watch("off", off.group(1), None, None, comment)
+        on = WATCH_ON_RE.match(line)
+        if on:
+            until = datetime.strptime(on.group(2), STAMP).replace(tzinfo=timezone.utc)
+            looked = datetime.strptime(on.group(3), STAMP).replace(tzinfo=timezone.utc)
+            if now >= until:
+                state = "over"
+            elif now - looked > timedelta(minutes=QUIET_AFTER_MINUTES):
+                state = "quiet"
+            else:
+                state = "on"
+            return Watch(state, on.group(1), until, looked, comment)
+    return Watch("none", "", None, None, None)
+
+
+def sent_back(comments: list[dict], number: int) -> tuple[str, str] | None:
+    """(the head commit #number was sent back at, what was written), from the last such comment."""
+    for comment in reversed(comments):
+        found = YOURS_AGAIN_RE.match(first_line(comment))
+        if found and int(found.group(1)) == number:
+            return found.group(2), (comment.get("body") or "").strip()
+    return None
+
+
+def rollup(checks: list[dict] | None) -> tuple[str, list[str]]:
+    """'passed', 'failed', 'running' or 'none' for the checks GitHub lists for a
+    pull request's head (`statusCheckRollup`), and the ones that are not green.
+
+    The same answer as `check_runs`, from the other API: `gh pr view --json`
+    asks GraphQL, whose limit is not the one `gh run view` and `gh api repos/…`
+    share (AGENTS.md, \"The turn, and what a merge does to it\").
+    """
+    latest: dict[str, dict] = {}
+    for entry in sorted(checks or [], key=lambda c: c.get("startedAt") or ""):
+        latest[entry.get("name") or entry.get("context") or "?"] = entry    # a job run again: its last attempt
+
+    def verdict(check: dict) -> str:
+        return (check.get("conclusion") or check.get("state") or "").upper()
+
+    if not latest:
+        return "none", []
+    bad = [f"{name}: {(verdict(check) or check.get('status') or 'unknown').lower()}"
+           for name, check in latest.items() if verdict(check) not in ("SUCCESS", "SKIPPED", "NEUTRAL")]
+    if not bad:
+        return "passed", []
+    if any((check.get("status") or "COMPLETED").upper() != "COMPLETED" for check in latest.values()):
+        return "running", bad
+    return "failed", bad
+
+
+def why_not_taken(pr: dict, comments: list[dict]) -> str:
+    """Why the landing session leaves a pull request alone during a watch; "" when it takes it.
+
+    Taken is: finished, green on the head, not in conflict with `main`, and
+    not sent back at this very head. Nobody has to ask: on the night of 22
+    November three finished and green pull requests stood for up to an hour
+    and three quarters while a watch was on, because their agents were to try
+    twice themselves first and then write a line, and their turns had ended.
+    """
+    if NOT_A_CLAIM_RE.match(pr["title"]):
+        return "it is the board or a watch"
+    if pr.get("isDraft") or pr["title"].startswith("WIP"):
+        return "its title still begins with WIP:"
+    state, bad = rollup(pr.get("statusCheckRollup"))
+    if state == "none":
+        files = [entry["path"] for entry in pr.get("files") or []]
+        if not (files and all_of(DOCUMENT, files)):     # documents only: the lot's run is its run
+            return "no CI run on its head commit"
+    elif state == "running":
+        return "CI is still running on its head commit"
+    elif state == "failed":
+        return "CI failed on its head commit (" + "; ".join(bad[:3]) + ")"
+    if pr.get("mergeable") == "CONFLICTING":
+        return "it conflicts with main"
+    back = sent_back(comments, pr["number"])
+    if back and pr["headRefOid"].startswith(back[0]):
+        return f"it was sent back at this head commit ({back[0][:7]}) and has not changed since"
+    return ""
+
+
+def board_number(prs: list[dict]) -> int | None:
+    return next((pr["number"] for pr in sorted(prs, key=lambda pr: pr["number"])
+                 if NEVER_MERGED_RE.match(pr["title"])), None)
+
+
+def board_comments(number: int | None) -> list[dict] | None:
+    """The comments of the board, oldest first; None when they cannot be read."""
+    if number is None:
+        return None
+    try:
+        return json.loads(gh("pr", "view", str(number), "--json", "comments", check=False))["comments"]
+    except (ValueError, KeyError):
+        return None
+
+
+def now_utc() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+WATCH_PRS = "number,title,body,headRefOid,files,isDraft,mergeable,statusCheckRollup"
+
+
+def show_watch() -> int:
+    """Whether a watch is on, and what the landing session would take now."""
+    prs = gh_json("pr", "list", "--state", "open", "--limit", "100", "--json", WATCH_PRS)
+    board = board_number(prs)
+    comments = board_comments(board)
+    if comments is None:
+        print("the board could not be read (an open pull request whose title begins with BOARD:)")
+        return 2
+    watch = watch_state(comments, now_utc())
+    print(f"{watch.says()}  (the board is #{board})")
+    main_sha = main_commit()
+    taken, left = [], []
+    for pr in sorted(prs, key=lambda pr: pr["number"]):
+        if NOT_A_CLAIM_RE.match(pr["title"]):
+            continue
+        why = why_not_taken(pr, comments)
+        how = ""
+        if not why:
+            # GitHub says UNKNOWN for most pull requests it has not been asked
+            # about lately: whether this one still merges is asked of git.
+            head = pr["headRefOid"]
+            if fetched(f"refs/pull/{pr['number']}/head") != head:
+                why = "its head commit could not be fetched"
+            else:
+                behind, conflict = staleness(head, main_sha)
+                why = conflict
+                how = ("main is in the head: it can be merged as it is, at once" if behind == 0
+                       else f"{behind} commit(s) behind main, and it merges: into the lot")
+        (left if why else taken).append((pr, why or how))
+    print("\nfinished, green and mergeable" + (": the landing session takes these" if watch.on else
+                                              ": theirs to merge, or the next watch's") + ("" if taken else "\n    (none)"))
+    for pr, text in taken:
+        print(f"    #{pr['number']} [{claim_of(pr).get('agent') or '-'}] {pr['headRefOid'][:7]}  {text}")
+    print("\nnot now" + ("" if left else "\n    (none)"))
+    for pr, text in left:
+        print(f"    #{pr['number']} [{claim_of(pr).get('agent') or '-'}] {pr['headRefOid'][:7]}  {text}")
+    return 0 if watch.on else 1
+
+
+def write_status(first: str, rest: str, same_watch) -> int:
+    """Write the status comment of the board: rewrite the one of this watch, or add one."""
+    prs = gh_json("pr", "list", "--state", "open", "--limit", "100", "--json", "number,title")
+    board = board_number(prs)
+    comments = board_comments(board)
+    if comments is None:
+        sys.exit("the board could not be read (an open pull request whose title begins with BOARD:)")
+    body = first + ("\n\n" + rest if rest else "")
+    last = watch_state(comments, now_utc())
+    if last.comment is not None and same_watch(last):
+        ident = (last.comment.get("url") or "").rsplit("issuecomment-", 1)[-1]
+        if not ident.isdigit():
+            sys.exit(f"the status comment has no number in its address: {last.comment.get('url')}")
+        gh("api", "-X", "PATCH", f"{REPO}/issues/comments/{ident}", "-f", f"body={body}", "--silent")
+    else:
+        gh("pr", "comment", str(board), "--body", body)
+    print(first)
+    return 0
+
+
+def beat(until: str, name: str) -> int:
+    """The landing session's: say that a watch is on until `until`, and that it has just looked."""
+    try:
+        end = datetime.strptime(until, STAMP).replace(tzinfo=timezone.utc)
+    except ValueError:
+        sys.exit(f"--beat takes the end of the watch as \"YYYY-MM-DD HH:MM\" (UTC), not {until!r}")
+    first = f"{name}: WATCH ON until {end:{STAMP}} UTC. Last look {now_utc():{STAMP}} UTC."
+    return write_status(first, WATCH_ON_TEXT.format(quiet=QUIET_AFTER_MINUTES, name=name),
+                        lambda last: last.state != "off" and last.until == end)
+
+
+def watch_off(text: str, name: str) -> int:
+    """The landing session's: say that the watch has ended, and what it did."""
+    first = f"{name}: WATCH OFF since {now_utc():{STAMP}} UTC. {text}".rstrip()
+    return write_status(first, "", lambda last: last.state != "off")
+
+
+def check_landed(number: int, wait: int) -> int:
+    """For the agent of #number, during a watch: wait for the landing session's answer.
+
+    0: it has landed. 1: it is yours again (sent back, or not something the
+    landing session takes), and why. 2: no watch is on, merge it yourself.
+    3: still waiting when the time given was up; run it again.
+    """
+    deadline = time.monotonic() + wait
+    while True:
+        pr = gh_json("pr", "view", str(number), "--json", WATCH_PRS + ",state,mergedAt")
+        if pr["state"] == "MERGED":
+            print(f"#{number} has landed: merged at {pr['mergedAt'][11:16]} UTC. Its branch is `pr_merged`; "
+                  "your next task begins with the person's Continue.")
+            return 0
+        if pr["state"] != "OPEN":
+            print(f"#{number} is {pr['state'].lower()}")
+            return 1
+        prs = gh_json("pr", "list", "--state", "open", "--limit", "100", "--json", "number,title")
+        comments = board_comments(board_number(prs))
+        if comments is None:
+            print("the board could not be read: no watch can be seen. Merge it yourself: "
+                  f"python3 tools/ci/check_pr.py merge {number}")
+            return 2
+        back = sent_back(comments, number)
+        if back and pr["headRefOid"].startswith(back[0]):
+            print(f"#{number} is yours again. The landing session wrote:\n\n{back[1]}\n\n"
+                  "Change it, push, and let CI pass on the new head commit: it is taken again then.")
+            return 1
+        watch = watch_state(comments, now_utc())
+        if not watch.on:
+            print(f"{watch.says()}. Merge #{number} yourself: python3 tools/ci/check_pr.py merge {number}")
+            return 2
+        why = why_not_taken(pr, comments)
+        if why and not why.startswith("CI is still running"):
+            print(f"{watch.says()}, and the landing session does not take #{number} as it is: {why}")
+            return 1
+        if time.monotonic() >= deadline:
+            print(f"{watch.says()}. #{number} has not landed yet"
+                  + (f" ({why})" if why else "") + ": run this again.")
+            return 3
+        time.sleep(min(60, max(1, deadline - time.monotonic())))
+
+
+def check_merge(number: int, landing: bool = False) -> int:
+    """`landing` is the landing session asking, about a pull request it is about
+    to merge during its own watch: the answer is then the one given when no
+    watch is on."""
     pr = gh_json("pr", "view", str(number), "--json", "number,title,body,state,mergeable,headRefOid,files")
     report = Report()
     if pr["state"] != "OPEN":
@@ -810,6 +1101,14 @@ def check_merge(number: int) -> int:
         print("\nnot ready")
         return 1
     head = pr["headRefOid"]
+
+    # Is a watch on? Then nobody merges but the landing session, and what is
+    # asked here is whether #N is something it takes. Not asked of a watch's
+    # own pull request, nor when the landing session is the one asking.
+    open_prs = open_pull_requests()
+    comments = board_comments(board_number(open_prs))
+    watch = watch_state(comments or [], now_utc())
+    watch_on = watch.on and not landing and not NOT_A_CLAIM_RE.match(pr["title"])
 
     if pr["title"].startswith("WIP"):
         report.no("the title still begins with WIP:")
@@ -845,7 +1144,7 @@ def check_merge(number: int) -> int:
     same_tree = (ran_on is not None and ran_state == "passed" and (behind > 0 or ran_on != head)
                  and merges_to_the_tree_of(number, head, main_sha, behind, ran_on))
     lines, quick = ci_verdict(Evidence(head, behind, main_files, pr_files, head_state, head_bad,
-                                       ran_on, ran_state, since, same_tree))
+                                       ran_on, ran_state, since, same_tree), watch_on)
     for ok, text in lines:
         (report.ok if ok else report.no)(text)
     if quick:
@@ -874,7 +1173,7 @@ def check_merge(number: int) -> int:
             report.ok(f"{kind} {mine} is not on main")
             if remark:
                 report.note(remark)
-    for other in open_claims():
+    for other in open_claims(open_prs):
         if other["number"] == number:
             continue
         for kind, key in (("Phase", "phase"), ("finding", "finding")):
@@ -900,9 +1199,26 @@ def check_merge(number: int) -> int:
         report.note(f"tests/test_suite.cpp has {suites} unit suites and README.md says {sorted(stated)}: "
                     "leave it, the landing session refreshes that count (AGENTS.md, \"Working together\")")
 
-    print("\nnot ready" if report.failed
-          else f"\nready: gh pr merge {number} --merge, then watch `gh run list --branch main --limit 3` to the end")
-    return 1 if report.failed else 0
+    if watch_on:
+        back = sent_back(comments or [], number)
+        if back and head.startswith(back[0]):
+            report.no(f"the landing session sent it back at this head commit ({back[0][:7]}); what it wrote is on the "
+                      f"board (`python3 tools/ci/check_pr.py landed {number}` prints it)")
+    if report.failed:
+        print("\nnot ready")
+        return 1
+    if watch_on:
+        print(f"\ndo not merge: {watch.says()}.\n"
+              f"#{number} is finished and green, and the landing session takes it as it is: push nothing more to it,\n"
+              f"do not merge main into it, and wait for the answer:  python3 tools/ci/check_pr.py landed {number}")
+        return 3
+    if watch.state in ("over", "quiet"):
+        report.note(watch.says())
+    if comments is None:
+        report.note("the board could not be read, so no watch can be seen: taken as none")
+    print(f"\nready: gh pr merge {number} --merge, then watch `gh run list --branch main --limit 3` to the end "
+          "(once a minute is enough)")
+    return 0
 
 
 def self_test() -> int:
@@ -1104,9 +1420,29 @@ def main() -> int:
         return show_claims()
     if arguments == ["--self-test"]:
         return self_test()
+    landing = "--landing" in arguments
+    arguments = [argument for argument in arguments if argument != "--landing"]
     if len(arguments) == 2 and arguments[0] in ("claim", "merge") and arguments[1].lstrip("#").isdigit():
         number = int(arguments[1].lstrip("#"))
-        return check_claim(number) if arguments[0] == "claim" else check_merge(number)
+        return check_claim(number) if arguments[0] == "claim" else check_merge(number, landing)
+    if arguments[:1] == ["landed"] and len(arguments) in (2, 4) and arguments[1].lstrip("#").isdigit():
+        wait = 240
+        if len(arguments) == 4:
+            if arguments[2] != "--wait" or not arguments[3].isdigit():
+                print(__doc__.strip(), file=sys.stderr)
+                return 2
+            wait = int(arguments[3])
+        return check_landed(int(arguments[1].lstrip("#")), wait)
+    if arguments == ["watch"]:
+        return show_watch()
+    if arguments[:1] == ["watch"] and len(arguments) in (3, 5) and arguments[1] in ("--beat", "--off"):
+        name = "Lander"
+        if len(arguments) == 5:
+            if arguments[3] != "--name" or not re.fullmatch(r"\w+", arguments[4]):
+                print(__doc__.strip(), file=sys.stderr)
+                return 2
+            name = arguments[4]
+        return beat(arguments[2], name) if arguments[1] == "--beat" else watch_off(arguments[2], name)
     print(__doc__.strip(), file=sys.stderr)
     return 2
 

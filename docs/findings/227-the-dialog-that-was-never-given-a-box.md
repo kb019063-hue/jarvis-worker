@@ -26,7 +26,7 @@ built — that is black at 10% over white, exactly the 229 the oracle has. The
 row's "no `::backdrop` as a distinct layer" was true of the *look* and not of
 the implementation: with no box to sit behind, a grey page reads as a grey page.
 
-## The four causes, none of them in one place
+## The causes, none of them in one place
 
 1. **The UA sheet had no dialog rules.** `StyleResolver::default_user_agent_stylesheet`
    begins with `table { … }` and never mentions `dialog`. The open/closed
@@ -49,13 +49,15 @@ the implementation: with no box to sit behind, a grey page reads as a grey page.
    `layout()`, because before it the content width is still zero and the box is
    centred as if it were nothing wide.
 
-A fifth cause only appeared once the others were fixed. The UA rule sets
-`overflow: auto`, and `paint_atom` pushed a clip at the **padding box before
-painting the box's own border and background**. So the moment the dialog had a
-border, the clip painted it away — a black rectangle on a black-edged page would
-have hidden the bug, and here it showed up as an unframed white box. CSS 2.1
-§11.1.1 clips a box's *contents*, not its chrome; the clip now starts after
-`emit_chrome` and wraps only what follows.
+The paint path has a further defect, which this phase did **not** fix and does
+not depend on: `paint_atom` pushes `PushClipCommand` at the padding box *before*
+`emit_chrome`, so a box that establishes an overflow clip paints its own border
+and background away (CSS 2.1 §11.1.1 clips contents, not chrome). It surfaced
+while finding out why the first version of the UA rule painted an unframed white
+rectangle, and it is why the `overflow: auto` the standard puts on
+`dialog:modal` is left out of this rule: this engine draws no scrollbars, so the
+clip buys nothing and would only hide the dialog's own border. `#273` was
+holding `src/render/PaintCommand.cpp`, and a fix there belongs to that row.
 
 ## What the fix does and does not reach
 
@@ -69,7 +71,7 @@ dialog {
   margin: auto; border: solid; padding: 1em;
   background-color: Canvas; color: CanvasText;
 }
-dialog:modal { position: fixed; overflow: auto; top: 0; bottom: 0;
+dialog:modal { position: fixed; top: 0; bottom: 0;
                max-width: calc(100% - 6px - 2em);
                max-height: calc(100% - 6px - 2em); }
 ```
@@ -93,8 +95,9 @@ one claims the chrome and the placement, not the intrinsic width.
 
 Also out of reach here: `::backdrop` is not addressable from author CSS (the
 colour lives in the painter, `PaintCommand.cpp`), `dialog::backdrop` parsing
-still lands on a pseudo-element that matches no element, and the native
-`<select>` still renders nothing.
+still lands on a pseudo-element that matches no element, the native `<select>`
+still renders nothing, and `dialog:modal` does not carry the standard's
+`overflow: auto` because the engine cannot draw a scrollbar for it.
 
 ## The measurement
 

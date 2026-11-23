@@ -41,7 +41,7 @@ because the dialog itself had no box.
             width: fit-content; height: fit-content; margin: auto;
             border: solid; padding: 1em;
             background-color: #ffffff; color: #222222; }
-   dialog:modal { position: fixed; overflow: auto; top: 0; bottom: 0;
+   dialog:modal { position: fixed; top: 0; bottom: 0;
                   max-width: calc(100% - 6px - 2em);
                   max-height: calc(100% - 6px - 2em); }
    ```
@@ -66,11 +66,15 @@ because the dialog itself had no box.
    "no renderer support yet" and dropped; and the out-of-flow pass read the
    content width before `layout()` had produced one.
 
-6. **Clip order in `paint_atom`**: `PushClipCommand` was emitted *before* the
-   box's own border and background and at the padding box, so any box that
-   clipped painted its own chrome away. CSS 2.1 §11.1.1 clips contents, not
-   chrome. This was invisible until the dialog UA rule gave the top-layer dialog
-   `overflow: auto`.
+### A defect found and not fixed
+
+`paint_atom` pushes `PushClipCommand` at the padding box *before* `emit_chrome`,
+so a box that establishes an overflow clip paints its own border and background
+away (CSS 2.1 §11.1.1 clips contents, not chrome). It surfaced while finding out
+why the first version of the UA rule painted an unframed white rectangle. It is
+not fixed here: `#273` holds `src/render/PaintCommand.cpp`, and the rule avoids
+the trigger by leaving out the standard's `overflow: auto` on `dialog:modal` —
+this engine draws no scrollbars, so the clip buys nothing.
 
 ## Measured result
 
@@ -97,7 +101,8 @@ render reftests 35/41 with the same 6 recorded failures, DOM 678/678, JS
 - **`::backdrop` from author CSS.** The colour is still the painter's, not a
   style rule; `dialog::backdrop` parses to a pseudo-element that matches nothing.
 - **The native `<select>`.** Still renders nothing, here or elsewhere.
-- **`overflow: auto` scrollbars** on a dialog that overflows.
+- **`overflow: auto`** on `dialog:modal`: left out of the UA rule (no scrollbars
+  to show for it), and the clip-order defect underneath is `#273`'s file.
 
 ## Files
 

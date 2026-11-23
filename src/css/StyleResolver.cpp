@@ -487,12 +487,14 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         }
         /* `showModal()` makes the dialog modal as well as open: fixed rather
            than absolutely positioned, solved against the block insets too (so
-           `margin: auto` centres it on both axes), scrollable, and kept off the
-           edges of a small viewport. `:modal` is what tells the two states
-           apart; a dialog opened with `show()` keeps the rule above. */
+           `margin: auto` centres it on both axes), and kept off the edges of a
+           small viewport. `:modal` is what tells the two states apart; a dialog
+           opened with `show()` keeps the rule above. The standard also says
+           `overflow: auto` here; it is left out because this engine draws no
+           scrollbars, and a clip it cannot show would only hide a dialog's own
+           border -- see finding 227 on the paint-order defect underneath. */
         dialog:modal {
             position: fixed;
-            overflow: auto;
             top: 0;
             bottom: 0;
             max-width: calc(100% - 6px - 2em);

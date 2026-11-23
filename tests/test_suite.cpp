@@ -32642,6 +32642,59 @@ TEST(textdecoder_reaches_script_in_pieces) {
         // x-user-defined carries every byte: nothing is ever held back.
         report('x-user-defined holds nothing', stream('x-user-defined', [[0x80], [0x81]]),
                '\uF780\uF781');
+
+        // ---- the byte order mark belongs to UTF-8 and UTF-16 --------------
+        // §7.1 skips the first scalar value of a decoder when it is U+FEFF,
+        // and that is the whole rule: which *bytes* are a byte order mark is
+        // the encoding's business, and the two UTF-16 ones disagree about the
+        // same two bytes. Everything below was taken from Node v22.22.3.
+        function cps(s) {
+            var out = [];
+            for (var ch of s) out.push(ch.codePointAt(0).toString(16));
+            return out.join(',');
+        }
+        report('UTF-16LE reads FE FF as U+FFFE, not as a BOM',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xFE, 0xFF, 0x00, 0x41]))), 'fffe,4100');
+        report('UTF-16BE reads FF FE as U+FFFE, not as a BOM',
+               cps(new TextDecoder('utf-16be').decode(bytes([0xFF, 0xFE, 0x41, 0x00]))), 'fffe,4100');
+        report('UTF-8 keeps FE FF as two replacements',
+               cps(new TextDecoder().decode(bytes([0xFF, 0xFE, 0x41, 0x00]))), 'fffd,fffd,41,0');
+        report('UTF-16LE does not read the UTF-8 BOM',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), 'bbef,41bf');
+        report('windows-1252 has no BOM at all',
+               cps(new TextDecoder('windows-1252').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), 'ef,bb,bf,41');
+        report('windows-1251 has no BOM at all either',
+               cps(new TextDecoder('windows-1251').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), '43f,bb,457,41');
+        report('a BOM on its own decodes to nothing',
+               new TextDecoder().decode(bytes([0xEF, 0xBB, 0xBF])), '');
+        report('a UTF-16 BOM on its own decodes to nothing',
+               new TextDecoder('utf-16le').decode(bytes([0xFF, 0xFE])), '');
+        report('only the first scalar value is asked',
+               cps(new TextDecoder().decode(bytes([0x41, 0xEF, 0xBB, 0xBF]))), '41,feff');
+        report('a second BOM in the same call is data',
+               cps(new TextDecoder().decode(bytes([0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF]))), 'feff');
+        report('a UTF-16 BOM is stripped after it is decoded',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xFF, 0xFE, 0xFF, 0xFE, 0x41, 0x00]))), 'feff,41');
+        // §7.2 step 1: a decode without {stream: true} is a new decoder, so
+        // the BOM is sniffed again; one *inside* a stream is data.
+        var bomTwice = new TextDecoder();
+        report('a new stream sniffs its own BOM',
+               bomTwice.decode(bytes([0xEF, 0xBB, 0xBF, 0x41])) + '|' +
+               bomTwice.decode(bytes([0xEF, 0xBB, 0xBF, 0x42])), 'A|B');
+        var bomMidStream = new TextDecoder();
+        report('a BOM after a stream chunk is data',
+               bomMidStream.decode(bytes([0x41]), {stream: true}) + '|' +
+               bomMidStream.decode(bytes([0xEF, 0xBB, 0xBF, 0x42])), 'A|\uFEFFB');
+        // Step 5 of §7.2: a fatal error resets the decoder, so the next call
+        // is a new one and does not continue the stream that failed.
+        var afterError = new TextDecoder('utf-8', {fatal: true});
+        try { afterError.decode(bytes([0xFF]), {stream: true}); } catch (e) {}
+        report('a fatal error resets the decoder', afterError.decode(bytes([0x41])), 'A');
+        // The ISO-2022-JP mode is decoder state too, and is reset with it.
+        var modeReset = new TextDecoder('iso-2022-jp');
+        modeReset.decode(bytes([0x1B, 0x24, 0x42, 0x21, 0x21]));
+        report('a one-shot call does not leave the escape mode behind',
+               modeReset.decode(bytes([0x41])), 'A');
         failures;
     )JS");
     const std::string failed = js.eval("failures.join('\\n')").to_string();
@@ -33890,6 +33943,125 @@ TEST(flex_and_grid_box_alignment_properties) {
     }
 }
 
+void test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties() {
+    auto eval = [](const char* src) -> std::string {
+        JsInterpreter js;
+        return js.eval(src).to_string();
+    };
+
+    // 1. Object spread copies own enumerable symbol keys alongside string keys
+    //    and skips non-enumerable symbols and strings.
+    assert(eval(R"(
+        const s1 = Symbol('a'), s2 = Symbol('b'), sHidden = Symbol('h');
+        const src = { x: 1, [s1]: 2, [s2]: 3 };
+        Object.defineProperty(src, 'ne', { value: 4, enumerable: false });
+        Object.defineProperty(src, sHidden, { value: 5, enumerable: false });
+        const copy = { ...src };
+        [copy.x, copy[s1], copy[s2], 'ne' in copy, sHidden in copy,
+         Object.getOwnPropertySymbols(copy).length, Reflect.ownKeys(copy).length].join(',');
+    )") == "1,2,3,false,false,2,3");
+
+    // 2. Object spread preserves [[OwnPropertyKeys]] order (indices, strings, symbols)
+    //    and keeps same-description symbols distinct.
+    assert(eval(R"(
+        const a = Symbol('same'), b = Symbol('same');
+        const log = [];
+        const src = {};
+        Object.defineProperty(src, a, { enumerable: true, get() { log.push('a'); return 'A'; } });
+        Object.defineProperty(src, 'z', { enumerable: true, get() { log.push('z'); return 'Z'; } });
+        Object.defineProperty(src, '2', { enumerable: true, get() { log.push('2'); return 'two'; } });
+        Object.defineProperty(src, b, { enumerable: true, get() { log.push('b'); return 'B'; } });
+        Object.defineProperty(src, '0', { enumerable: true, get() { log.push('0'); return 'zero'; } });
+        const copy = { ...src };
+        log.join(':') + '|' + [copy[0], copy[2], copy.z, copy[a], copy[b]].join(',');
+    )") == "0:2:z:a:b|zero,two,Z,A,B");
+
+    // 3. Object spread uses CreateDataProperty rather than [[Set]]: earlier own
+    //    setters and prototype setters are not invoked.
+    assert(eval(R"(
+        const s = Symbol('setter');
+        let calls = 0;
+        const proto = {};
+        Object.defineProperty(proto, 'p', { set() { calls++; } });
+        Object.defineProperty(proto, s, { set() { calls++; } });
+        const target = {
+            __proto__: proto,
+            set own(v) { calls++; },
+            set [s](v) { calls++; },
+            ...{ own: 10, p: 20, [s]: 30 }
+        };
+        const dOwn = Object.getOwnPropertyDescriptor(target, 'own');
+        const dSym = Object.getOwnPropertyDescriptor(target, s);
+        [calls, target.own, target.p, target[s], dOwn.value, dOwn.writable, dSym.value, dSym.writable].join(',');
+    )") == "0,10,20,30,10,true,30,true");
+
+    // 4. Object rest destructuring (declaration, assignment, parameter) copies own
+    //    enumerable symbols, excludes destructured computed symbol keys, and skips
+    //    non-enumerable symbols.
+    assert(eval(R"(
+        const sDrop = Symbol('drop'), sKeep = Symbol('keep'), sHidden = Symbol('h');
+        const src = { a: 1, b: 2, [sDrop]: 10, [sKeep]: 20 };
+        Object.defineProperty(src, sHidden, { value: 30, enumerable: false });
+        const { a, [sDrop]: picked, ...rest } = src;
+        let p2, assignRest;
+        ({ [sDrop]: p2, ...assignRest } = src);
+        const paramRest = (({ a: _, ...r }) => r)(src);
+        [a, picked, rest.b, sDrop in rest, rest[sKeep], sHidden in rest,
+         Object.getOwnPropertySymbols(rest).length,
+         p2, sDrop in assignRest, assignRest[sKeep],
+         paramRest[sDrop], paramRest[sKeep]].join(',');
+    )") == "1,10,2,false,20,false,1,10,false,20,10,20");
+
+    // 5. CopyDataProperties checks live own-enumerability per snapshotted key
+    //    (ECMA-262 7.3.24 step 6.c).
+    assert(eval(R"(
+        const sHide = Symbol('hide'), sReveal = Symbol('reveal'), sNew = Symbol('new');
+        const src = {};
+        Object.defineProperty(src, 'trigger', {
+            enumerable: true,
+            get() {
+                delete this.removed;
+                Object.defineProperty(this, sHide, { enumerable: false });
+                Object.defineProperty(this, sReveal, { enumerable: true });
+                this[sNew] = 99;
+                return 1;
+            }
+        });
+        src.removed = 2;
+        src[sHide] = 3;
+        Object.defineProperty(src, sReveal, { value: 4, enumerable: false, configurable: true });
+        const out = { ...src };
+        [out.trigger, 'removed' in out, sHide in out, out[sReveal], sNew in out].join(',');
+    )") == "1,false,false,4,false");
+
+    // 6. Spread and rest across strings, sparse arrays, TypedArrays, functions, nullish,
+    //    and without invoking Object.prototype setters.
+    assert(eval(R"(
+        const s = Symbol('extra');
+        function fn() {}
+        fn.x = 1; fn[s] = 2;
+        const arr = [10, , 30]; arr[s] = 40;
+        const ta = new Uint8Array([5, 6]); ta[s] = 7;
+        let protoCalls = 0;
+        Object.defineProperty(Object.prototype, s, { configurable: true, set() { protoCalls++; } });
+        let out = '';
+        try {
+            const { 0: first, ...strRest } = 'hi';
+            const { ...fnRest } = fn;
+            const arrCopy = { ...arr };
+            const taCopy = { ...ta };
+            const nullCopy = { ...null, ...undefined, ok: 1 };
+            out = [protoCalls, first, strRest[1], 'length' in strRest,
+                   fnRest.x, fnRest[s], 'name' in fnRest,
+                   arrCopy[0], '1' in arrCopy, arrCopy[2], arrCopy[s],
+                   taCopy[0], taCopy[1], taCopy[s], nullCopy.ok].join(',');
+        } finally {
+            delete Object.prototype[s];
+        }
+        out;
+    )") == "0,h,i,false,1,2,false,10,false,30,40,5,6,7,1");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -34402,6 +34574,10 @@ int main() {
     // Phase 195: a `calc()` percentage is of the declaration (font size,
     // line-height), not of the viewport.
     RUN_TEST(a_calc_percentage_is_of_the_declaration_not_the_viewport);
+
+    // Phase 198: object spread and rest destructuring copy own enumerable
+    // symbols and follow ECMA-262 §7.3.24 CopyDataProperties.
+    RUN_TEST(object_spread_and_rest_copy_symbols_and_follow_copy_data_properties);
 
     // Phase 202: a box's outline is a ring outside the border box that takes
     // no room; it is stored by the cascade and painted.

@@ -3743,9 +3743,59 @@ bool absolute_font_size(const std::string& lower, double& out) {
     return absolute_length(number, lower.substr(at), out);
 }
 
+// The value of a math function whose comparison needs the basis first:
+// `min(50%, 30px)` at a 20px parent is `min(10px, 30px)`. Every percentage is
+// replaced by its length before the expression is evaluated, which is what
+// makes the comparison possible; -1 when the text is not such an expression.
+double resolve_math_with_basis(const std::string& lower, double basis, double rem) {
+    litebird::CalcNode resolved;
+    if (!litebird::calc_parse(lower, resolved)) return -1.0;
+    std::function<bool(litebird::CalcNode&)> substitute = [&](litebird::CalcNode& node) -> bool {
+        if (node.kind == litebird::CalcNode::Dimension && node.unit == "%") {
+            node.kind = litebird::CalcNode::Dimension;
+            node.unit = "px";
+            node.number = node.number / 100.0 * basis;
+            return true;
+        }
+        for (auto& child : node.children) {
+            if (!substitute(child)) return false;
+        }
+        return true;
+    };
+    if (!substitute(resolved)) return -1.0;
+    litebird::CalcTriple triple;
+    litebird::CalcContext ctx;
+    ctx.rem = rem;
+    if (!litebird::calc_eval(resolved, ctx, triple) || !triple.dimension) return -1.0;
+    return triple.px;
+}
+
 // A font size that is said in terms of the parent's (or, for rem, the root's).
 double relative_font_size(const std::string& lower, double parent, double root) {
-    if (is_function_value(lower, "calc")) {
+    // A `calc()` here, and a `min()`/`max()`/`clamp()` too: `CalcParser` knows
+    // only sums and products, so the three comparisons used to fall through to
+    // "the parent's size" -- `font-size: max(50%, 30px)` read back as 20px
+    // while the cascade gave the element 30px -- and the line box was 40px.
+    // The typed evaluator in litebird/css/Calc.hpp is the one the cascade
+    // uses, so the two cannot disagree again.
+    static const char* const kMathFns[] = {"calc", "min", "max", "clamp"};
+    for (const char* name : kMathFns) {
+        if (!is_function_value(lower, name)) continue;
+        litebird::CalcTriple triple;
+        litebird::CalcContext ctx;
+        ctx.em = parent;
+        ctx.rem = root;
+        if (litebird::calc_eval_text(lower, ctx, triple) && triple.dimension) {
+            return triple.px + triple.percent / 100 * parent;
+        }
+        {
+            // A length-percentage this evaluator can see but not make
+            // absolute: `min(50%, 30px)` needs the two compared, and only a
+            // basis compares them. The parent's size is that basis for a
+            // font size, so the comparison happens here.
+            const double result = resolve_math_with_basis(lower, parent, root);
+            if (result >= 0.0) return result;
+        }
         CalcValue sum;
         if (!eval_calc(lower, parent, root, sum)) return parent;
         return sum.px + sum.percent / 100 * parent;
@@ -4048,6 +4098,17 @@ std::string resolved(Realm& realm, const Element& subject, const Element& from, 
         // zero one is written as it came in.
         const bool has_percent = lower.find('%') != std::string::npos;
         if (has_percent && triple.percent == 0) return value;
+        // A percentage in a `line-height` is of the element's **own** font
+        // size (CSS 2.1 §10.8.1), which this has — so the value is a length,
+        // not a calculation waiting for a containing block it never needed.
+        // The cascade computes the same length; before this, the layout used
+        // 14px for `line-height: calc(100% + 4px)` at 10px while
+        // getComputedStyle went on quoting the declaration.
+        if (name == "line-height" && triple.percent != 0) {
+            const double length = triple.px + triple.percent / 100.0 * font_size_px(realm, subject);
+            if (length >= 0.0) return px_text(length);
+            return value;  // a negative line-height is not a length anybody can use
+        }
         if (triple.percent != 0) {
             const std::string percent = format_number(triple.percent) + "%";
             if (triple.px == 0) return percent;
@@ -4069,6 +4130,24 @@ std::string resolved(Realm& realm, const Element& subject, const Element& from, 
         // was declared, and is inherited as that length.
         if (unit.empty()) return px_text(number * font_size_px(realm, subject));
         if (unit == "%") return px_text(number / 100 * font_size_px(realm, from));
+    }
+    if (name == "line-height") {
+        // `calc()`, `min()`, `max()` and `clamp()` in a `line-height` are
+        // lengths too, and a percentage in one is of this element's own font
+        // size -- the basis the three comparisons need. The branch above
+        // reads a single number and cannot see a function; `resolved()`
+        // leaves a percentage in a `calc()` as text on purpose, because for
+        // every property but these two the basis is the containing block.
+        // `line-height: max(100%, 20px)` at 10px laid out 20px while this
+        // answered the declaration, and the DOM corpus cannot see the
+        // difference because jsdom lays nothing out.
+        static const char* const kMathFns[] = {"calc", "min", "max", "clamp"};
+        for (const char* fn : kMathFns) {
+            if (!is_function_value(text, fn)) continue;
+            const double length = resolve_math_with_basis(text, font_size_px(realm, from), root_font_size(realm, from));
+            if (length >= 0.0) return px_text(length);
+            return value;  // an expression nothing here can evaluate keeps its text
+        }
     }
     if (name == "border-spacing") {
         // Two lengths, also when one was written.

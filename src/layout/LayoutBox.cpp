@@ -555,6 +555,16 @@ void LayoutBox::layout_block(float containing_width) {
         dimensions.content.width = std::max(0.0f, containing_width - total_horizontal_spacing);
     }
 
+    // `width: fit-content`: as wide as the content wants, and no wider than the
+    // space offered (CSS Sizing 3 §5.1). Measured before the children are
+    // placed, because it is the width they are placed in. Placed before the
+    // min/max clamps so that those still win, as they outrank the keyword.
+    if (s.width_fit_content) {
+        const float natural = std::max(0.0f, min_content_width(*this, 0.0f) - h_padding_border);
+        const float available = std::max(0.0f, containing_width - total_horizontal_spacing);
+        dimensions.content.width = std::min(natural, available);
+    }
+
     if (s.min_width >= 0.0f) {
         float min_w = (s.box_sizing == BoxSizing::BorderBox) ?
             std::max(0.0f, s.min_width - h_padding_border) : s.min_width;
@@ -1797,6 +1807,14 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
     } else {
         dimensions.content.width = std::max(0.0f, containing_width - total_horizontal_spacing);
     }
+    // `width: fit-content`: this entry point is the one a box whose children are
+    // all inline takes, and a dialog's usual content is exactly that. See the
+    // same block in `layout_block` for where it sits and why.
+    if (s.width_fit_content) {
+        const float natural = std::max(0.0f, min_content_width(*this, 0.0f) - h_padding_border);
+        const float available = std::max(0.0f, containing_width - total_horizontal_spacing);
+        dimensions.content.width = std::min(natural, available);
+    }
     if (s.min_width >= 0.0f) {
         float min_w = (s.box_sizing == BoxSizing::BorderBox)
                           ? std::max(0.0f, s.min_width - h_padding_border)
@@ -2108,32 +2126,70 @@ void LayoutBox::resolve_out_of_flow_positions(const std::shared_ptr<LayoutBox>& 
                 cb.height = cb_box->dimensions.padding_box().height;
             }
 
-            box->layout(cb.width, cb.height);
             const ComputedStyle& bs = *box->style;
-
             const auto inset = bs.used_insets(cb.width, cb.height);
 
-            // If both insets are given and dimension is auto, size to insets
-            if (bs.has_left && bs.has_right && bs.width < 0.0f) {
-                float total_h = box->dimensions.margin.left + box->dimensions.margin.right +
-                                box->dimensions.border.left + box->dimensions.border.right +
-                                box->dimensions.padding.left + box->dimensions.padding.right;
-                box->dimensions.content.width = std::max(0.0f, cb.width - inset.left - inset.right - total_h);
+            // CSS 2.1 §10.3.7/§10.6.4, the out-of-flow case. A box the page gave
+            // `top:0; bottom:0` and no height is solved against those insets,
+            // and a box with a width it computed itself and `margin: auto` on
+            // both sides is centred inside them. The modal dialog UA rule is
+            // exactly that shape. Before this the auto margins stayed zero and
+            // such a box sat at the top-left of the viewport.
+            float solved_width = -1.0f;
+            if (bs.has_left && bs.has_right && bs.width < 0.0f && !bs.width_fit_content) {
+                const float edges = box->dimensions.border.left + box->dimensions.border.right +
+                                    box->dimensions.padding.left + box->dimensions.padding.right;
+                solved_width = std::max(0.0f, cb.width - inset.left - inset.right - edges);
             }
-            if (bs.has_top && bs.has_bottom && bs.height < 0.0f) {
-                float total_v = box->dimensions.margin.top + box->dimensions.margin.bottom +
-                                box->dimensions.border.top + box->dimensions.border.bottom +
-                                box->dimensions.padding.top + box->dimensions.padding.bottom;
-                box->dimensions.content.height = std::max(0.0f, cb.height - inset.top - inset.bottom - total_v);
+            bool solved_height = false;
+            if (bs.has_top && bs.has_bottom && bs.height < 0.0f && !bs.height_fit_content) {
+                const float edges = box->dimensions.border.top + box->dimensions.border.bottom +
+                                    box->dimensions.padding.top + box->dimensions.padding.bottom;
+                box->dimensions.content.height = std::max(0.0f, cb.height - inset.top - inset.bottom - edges);
+                solved_height = true;
             }
+            const float solved_height_value = box->dimensions.content.height;
 
+            box->layout(cb.width, cb.height);
+
+            // `layout()` replaces both dimensions with the ones the content
+            // needs. A solved length is not the content's, so it survives the
+            // call: the content may overflow it, which is what solving means.
+            if (solved_width >= 0.0f) box->dimensions.content.width = solved_width;
+            if (solved_height) box->dimensions.content.height = solved_height_value;
+
+            // Now that the box has a size, the auto margins can be solved
+            // against it. This has to happen *after* `layout()`: before it the
+            // content width is still zero, and a box centred by `margin: auto`
+            // was being centred as if it were nothing wide. CSS 2.1 §10.3.7
+            // (horizontal) and §10.6.4 (vertical).
             const auto& d = box->dimensions;
-            float x = cb.x + d.margin.left + d.border.left + d.padding.left;
+            const float outer_w = d.content.width + d.border.left + d.border.right +
+                                  d.padding.left + d.padding.right;
+            const float outer_h = d.content.height + d.border.top + d.border.bottom +
+                                  d.padding.top + d.padding.bottom;
+            float margin_left = d.margin.left;
+            float margin_right = d.margin.right;
             float y = cb.y + d.margin.top + d.border.top + d.padding.top;
+            if (bs.has_left && bs.has_right && bs.margin_left_auto && bs.margin_right_auto &&
+                solved_width < 0.0f) {
+                const float space = cb.width - inset.left - inset.right;
+                margin_left = margin_right = std::max(0.0f, (space - outer_w) / 2.0f);
+            }
+            if (bs.has_top && bs.has_bottom && bs.margin_top_auto && bs.margin_bottom_auto &&
+                !solved_height) {
+                const float space = cb.height - inset.top - inset.bottom;
+                y = cb.y + inset.top + std::max(0.0f, (space - outer_h) / 2.0f) + d.border.top + d.padding.top;
+            } else if (bs.has_top) {
+                y = cb.y + d.margin.top + d.border.top + d.padding.top + inset.top;
+            } else if (bs.has_bottom) {
+                y = (cb.y + cb.height) - inset.bottom - d.margin.bottom - d.border.bottom -
+                    d.padding.bottom - d.content.height;
+            }
+            float x = cb.x + margin_left + d.border.left + d.padding.left;
             if (bs.has_left) x += inset.left;
-            else if (bs.has_right) x = (cb.x + cb.width) - inset.right - d.margin.right - d.border.right - d.padding.right - d.content.width;
-            if (bs.has_top) y += inset.top;
-            else if (bs.has_bottom) y = (cb.y + cb.height) - inset.bottom - d.margin.bottom - d.border.bottom - d.padding.bottom - d.content.height;
+            else if (bs.has_right) x = (cb.x + cb.width) - inset.right - margin_right -
+                                       d.border.right - d.padding.right - d.content.width;
             box->shift_position(x - box->dimensions.content.x, y - box->dimensions.content.y);
         }
 

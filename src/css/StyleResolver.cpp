@@ -6,6 +6,7 @@
 #include "litebird/dom/Selector.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
 #include "litebird/dom/FormState.hpp"
+#include "litebird/dom/Document.hpp"
 #include <sstream>
 #include <bit>
 #include <cctype>
@@ -460,6 +461,43 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         p {
             margin: 8px 0;
         }
+        /* HTML §Rendering 15.3.3, the dialog box. This is the standard's own
+           rule (the `dialog:not([open])` half of it is the hard-coded display
+           default above, which also has to answer for `open="false"`). The
+           `Canvas`/`CanvasText` system colours are written as the colours the
+           engine's canvas and text actually are, since it has no system-colour
+           keywords. `inset-inline-start/end` is spelled `left`/`right`: the
+           engine has no logical properties, and the page has no writing mode
+           but the horizontal one.
+
+           The width is `fit-content` because a dialog is as wide as it needs
+           to be, not as wide as the viewport -- that is the whole reason its
+           content is not one long line. */
+        dialog {
+            position: absolute;
+            left: 0;
+            right: 0;
+            width: fit-content;
+            height: fit-content;
+            margin: auto;
+            border: solid;
+            padding: 1em;
+            background-color: #ffffff;
+            color: #222222;
+        }
+        /* `showModal()` makes the dialog modal as well as open: fixed rather
+           than absolutely positioned, solved against the block insets too (so
+           `margin: auto` centres it on both axes), scrollable, and kept off the
+           edges of a small viewport. `:modal` is what tells the two states
+           apart; a dialog opened with `show()` keeps the rule above. */
+        dialog:modal {
+            position: fixed;
+            overflow: auto;
+            top: 0;
+            bottom: 0;
+            max-width: calc(100% - 6px - 2em);
+            max-height: calc(100% - 6px - 2em);
+        }
     )";
     return CssParser::parse(ua_css);
 }
@@ -788,6 +826,13 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
             } else if (name == "checked") {
                 // The control's state now, not its `checked` attribute.
                 if (!forms::matches_checked(*element)) return false;
+            } else if (name == "modal") {
+                // HTML: the element is the document's modal dialog. Every other
+                // dynamic state in this list answers from live document state,
+                // and so does this one; without the case the name fell through
+                // to "matches", which made `dialog:modal` true for every dialog.
+                auto document = element->owner_document();
+                if (!document || document->modal_dialog().get() != element.get()) return false;
             } else if (name == "not") {
                 if (!arg.empty()) {
                     if (pc.compiled_arg) {
@@ -1632,13 +1677,16 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
     };
 
     // One-to-four value box shorthands: top, right, bottom, left.
-    if (prop == "margin" || prop == "padding" || prop == "border-width" || prop == "border-color") {
+    if (prop == "margin" || prop == "padding" || prop == "border-width" || prop == "border-color" ||
+        prop == "inset") {
         auto tokens = split_tokens(trim(val));
         if (tokens.empty()) return true;
         std::string top, right, bottom, left;
         if (prop == "margin" || prop == "padding") {
             top = prop + "-top"; right = prop + "-right";
             bottom = prop + "-bottom"; left = prop + "-left";
+        } else if (prop == "inset") {
+            top = "top"; right = "right"; bottom = "bottom"; left = "left";
         } else if (prop == "border-width") {
             top = "border-top-width"; right = "border-right-width";
             bottom = "border-bottom-width"; left = "border-left-width";
@@ -1674,8 +1722,8 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
         return true;
     }
 
-    // inset / scroll-* have no renderer support yet.
-    if (prop == "inset" || prop == "scroll-margin" || prop == "scroll-padding") {
+    // scroll-margin / scroll-padding have no renderer support yet.
+    if (prop == "scroll-margin" || prop == "scroll-padding") {
         return true;
     }
 
@@ -1698,7 +1746,12 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
             if (lowered == "solid" || lowered == "dashed" || lowered == "dotted" ||
                 lowered == "double" || lowered == "groove" || lowered == "ridge" ||
                 lowered == "inset" || lowered == "outset") {
-                continue;  // border styles are not rendered yet
+                // A style with no width of its own is `medium` (CSS 2.1 8.5.1).
+                // It used to be dropped outright, which is why `border: solid`
+                // -- how the HTML rendering standard writes the dialog border
+                // -- computed to no border at all.
+                if (!saw_width) out.emplace_back(prop == "border" ? "border-width" : prop + "-width", "3px");
+                continue;
             }
             if (is_color_token(token)) {
                 out.emplace_back(prop == "border" ? "border-color" : prop + "-color", token);
@@ -2209,6 +2262,10 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             *pixels = length;
             *percent = -1.0f;
         }
+        // `width: fit-content` is a width the cascade cannot compute on its own;
+        // record the keyword (CSS Sizing 3 §5.1) and let layout measure it.
+        if (prop == "width" && val == "fit-content") style.width_fit_content = true;
+        if (prop == "height" && val == "fit-content") style.height_fit_content = true;
     } else if (prop == "box-sizing") {
         if (val == "border-box") style.box_sizing = BoxSizing::BorderBox;
         else if (val == "content-box") style.box_sizing = BoxSizing::ContentBox;
@@ -3525,6 +3582,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
     if (style.has_transform && !style.transform_str.empty()) {
         style.transform_matrix = parse_transform_matrix(style.transform_str);
     }
+
 
     return style;
 }

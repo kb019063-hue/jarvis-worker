@@ -9723,6 +9723,130 @@ TEST(computed_width_and_height_are_used_values) {
     })())JS").to_string() == "calc(100% - 20px)");
 }
 
+TEST(a_calc_percentage_is_of_the_declaration_not_the_viewport) {
+    using namespace litebird;
+    // A percentage inside a `calc()` is a share of what the property is
+    // measured against, and for two properties the cascade knows that:
+    // `font-size` percentages are of the *inherited* font size (CSS Fonts 4,
+    // §2.4) and `line-height` percentages of the element's *own* (CSS 2.1
+    // §10.8.1). The resolver made both a share of the viewport instead, so
+    // `font-size: calc(50% + 2px)` in a 20px paragraph computed to 402px —
+    // and laid out a 502px line box for one character while
+    // getComputedStyle reported 12px, because the script-side resolver
+    // evaluated the same declaration against the right basis.
+    //
+    // What can be asserted without trusting either resolver is the
+    // agreement: whatever getComputedStyle answers has to be the size of the
+    // box the layout built. Both halves are wrong in different ways on the
+    // engine before this, and on different declarations.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    js.eval(R"JS(
+        function sized(tag_and_style) {
+            var parts = tag_and_style.split('|');
+            var el = document.createElement(parts[0]);
+            el.setAttribute('style', parts[1]);
+            el.textContent = 'x';
+            document.body.appendChild(el);
+            return el;
+        }
+        function reported(el, prop) { return getComputedStyle(el)[prop]; }
+        var cases = {
+            halfPlus: sized('div|font-size:calc(50% + 2px)'),
+            percentOnly: sized('div|font-size:calc(50%)'),
+            emMixed: sized('div|font-size:calc(1em + 2px)'),
+            atRoot: sized('div|font-size:calc(10px)'),
+            maxPct: sized('div|font-size:max(50%, 30px)'),
+            minPct: sized('div|font-size:min(50%, 4px)'),
+            clampPct: sized('div|font-size:clamp(5px, 50%, 8px)'),
+            inherited: sized('span|font-size:calc(100% + 2px)'),
+            linePct: sized('div|line-height:calc(100% + 4px);font-size:10px'),
+            lineMax: sized('div|line-height:max(100%, 20px);font-size:10px'),
+            lineEm: sized('div|line-height:calc(1em + 2px);font-size:10px')
+        };
+        // The box a `font-size` of that many px makes: one line of one
+        // character at the default 1.25 line box.
+        function boxHeight(el) { return el.getBoundingClientRect().height; }
+        function fontSize(el) { return parseFloat(reported(el, 'fontSize')); }
+        function lineHeight(el) { return parseFloat(reported(el, 'lineHeight')); }
+    )JS");
+
+    // The parent is the body's 16px, so `50% + 2px` is 10px and `50%` is 8px.
+    // The line box is 1.25 of it, which is what the engine gives a
+    // `line-height: normal` box, so the two answers have to be the same one.
+    auto height = [&](const char* name) { return js.eval(std::string("boxHeight(cases.") + name + ")").to_number(); };
+    auto font = [&](const char* name) { return js.eval(std::string("fontSize(cases.") + name + ")").to_number(); };
+    assert(font("halfPlus") == 10 && std::abs(height("halfPlus") - 12.5) < 0.01);
+    assert(font("percentOnly") == 8 && std::abs(height("percentOnly") - 10.0) < 0.01);
+    // `1em` in a `font-size` is the inherited size, as anywhere else.
+    assert(font("emMixed") == 18 && std::abs(height("emMixed") - 22.5) < 0.01);
+    assert(font("atRoot") == 10 && std::abs(height("atRoot") - 12.5) < 0.01);
+    // The three comparisons need a basis before they can compare; the
+    // viewport is not it. At 16px: max(8,30)=30, min(8,4)=4, clamp(5,8,8)=8.
+    assert(font("maxPct") == 30 && std::abs(height("maxPct") - 37.5) < 0.01);
+    assert(font("minPct") == 4 && std::abs(height("minPct") - 5.0) < 0.01);
+    assert(font("clampPct") == 8 && std::abs(height("clampPct") - 10.0) < 0.01);
+    // An inline element's font size is inherited by its text, so its box is
+    // the line box the same size makes.
+    assert(font("inherited") == 18);
+
+    // A `line-height` percentage is of this element's own font size, and the
+    // reported length is the one the box was laid out with: 10px + 4px.
+    assert(js.eval("lineHeight(cases.linePct)").to_number() == 14 && std::abs(height("linePct") - 14) < 0.01);
+    assert(js.eval("lineHeight(cases.lineMax)").to_number() == 20 && std::abs(height("lineMax") - 20) < 0.01);
+    assert(js.eval("lineHeight(cases.lineEm)").to_number() == 12 && std::abs(height("lineEm") - 12) < 0.01);
+
+    // The invariant that ties the two resolvers together: no case reports a
+    // font size its own line box contradicts. On the engine before this, the
+    // first, second and third cases were out by a factor of the viewport.
+    assert(js.eval(R"JS((function () {
+        var bad = [];
+        for (var k in cases) {
+            var el = cases[k];
+            var size =/line/.test(k) ? null : fontSize(el);
+            var box = boxHeight(el);
+            var line = lineHeight(el);
+            if (size !== null && Math.abs(box - size * 1.25) > 0.01) bad.push(k);
+            if (line !== null && !isNaN(line) && Math.abs(box - line) > 0.01) bad.push(k + ':lh');
+        }
+        return bad.join(',');
+    })())JS").to_string() == "");
+
+    // The other properties a `calc()` percentage can appear in are still
+    // resolved against the viewport, which is the wrong basis and stays
+    // open (finding 199). The gap is pinned here so that a later fix is a
+    // change in this suite and not a surprise: a `calc(100% - 40px)` in a
+    // 600px block is the *viewport* less 40, not the block less 40.
+    assert(js.eval(R"JS((function () {
+        var wrap = document.createElement('div');
+        wrap.setAttribute('style', 'width:600px');
+        document.body.appendChild(wrap);
+        var d = document.createElement('div');
+        d.setAttribute('style', 'width:calc(100% - 40px);height:10px');
+        wrap.appendChild(d);
+        var answer = Math.round(d.getBoundingClientRect().width);
+        var viewport = Math.round(window.innerWidth);
+        wrap.remove();
+        // -1 means "the containing block, which is what it should be".
+        return answer === viewport - 40 ? -1 : answer;
+    })())JS").to_number() == -1);
+
+    // The same declaration against the basis layout can supply: a `calc()`
+    // of percentages and a plain percentage both resolve against the
+    // containing block, and the plain one is already right.
+    assert(js.eval(R"JS((function () {
+        var wrap = document.createElement('div');
+        wrap.setAttribute('style', 'width:600px');
+        document.body.appendChild(wrap);
+        var d = document.createElement('div');
+        d.setAttribute('style', 'width:50%;height:10px');
+        wrap.appendChild(d);
+        var answer = Math.round(d.getBoundingClientRect().width);
+        wrap.remove();
+        return answer;
+    })())JS").to_number() == 300);
+}
+
 TEST(computed_style_answers_for_every_property) {
     using namespace litebird;
     // getComputedStyle answered "" for a property nobody had declared and took
@@ -17769,9 +17893,9 @@ TEST(html5_date_time_inputs_validation_and_stepping) {
            "1969-12||2024-02-29|||2026-W53|2026-03-04T05:06|2026-03-06|true|12:30:00.5|2026-W01|TypeError,InvalidStateError,InvalidStateError,TypeError,InvalidStateError");
 }
 
-// =============================================================================
+// ======================================================================
 // Phase 36: Usable Real-World Browser & Security (Finding 44) Test Suites
-// =============================================================================
+// ======================================================================
 
 TEST(deflate_zlib_and_gzip_roundtrip_and_bomb_limits) {
     using namespace litebird;
@@ -20331,10 +20455,10 @@ static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
     assert(c_img && c_img->width == 40 && c_img->height == 40);
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 40: Worker MIME/event policy and lifecycle safety; Phase 66 extends
 // module execution and structured-clone delivery below.
-// ============================================================================
+// =====================================================================
 
 TEST(worker_mime_policy_enforces_javascript_content_types) {
     using namespace litebird;
@@ -21174,10 +21298,10 @@ TEST(js_strict_async_generator_identifier_context_and_line_terminators) {
     }
 }
 
-// =========================================================================
+// ==================================================================
 // Phase 42: Nested <iframe> Browsing Contexts, Origin/Sandbox Isolation,
 //           Cross-Realm DOM Wrappers, XHTML Execution, & Subdocument Layout
-// =========================================================================
+// ==================================================================
 
 TEST(iframe_browsing_context_hierarchy_and_navigation) {
     using namespace litebird;
@@ -22575,9 +22699,9 @@ TEST(js_a_page_with_compiled_custom_elements_is_collected) {
     }
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 50: CSS Color 4/5 color spaces, gamut mapping, color-mix(), relative colors
-// ============================================================================
+// =====================================================================
 
 static void test_css_color4_spaces_gamut_and_serialization() {
     using namespace litebird;
@@ -22794,9 +22918,9 @@ static void test_css_color45_style_resolver_dom_and_svg_integration() {
     assert(Color::from_argb(svg_img->get_pixel(15, 5)) == Color(255, 128, 128, 255));
 }
 
-// ============================================================================
+// =====================================================================
 // Warning 5: a DOMException is made in the Realm of the object it is about
-// ============================================================================
+// =====================================================================
 //
 // Web IDL creates an exception in the current realm of the function that
 // throws, and for a platform object that realm is the object's relevant realm.
@@ -22912,9 +23036,9 @@ TEST(dom_exceptions_belong_to_the_realm_of_the_object_they_are_about) {
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 47: WHATWG Encoding Standard, HTML <meta> prescan, XML EncName & CJK
-// ============================================================================
+// =====================================================================
 
 TEST(whatwg_text_encoding_labels_single_byte_and_multibyte_decoders) {
     using namespace litebird;
@@ -23423,9 +23547,9 @@ TEST(select_selectedcontent_cloning_and_edge_cases) {
     assert(deep_sc && deep_sc->text_content() == "DeepPick");
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 55: RegExp Unicode 17.0 properties, v/d flags, ES2025 modifiers & Symbol.*
-// ============================================================================
+// =====================================================================
 
 TEST(regexp_unicode17_tables_and_parse_time_validation) {
     using namespace litebird;
@@ -23588,9 +23712,9 @@ TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols) {
     assert(js.eval("phase55_ok").is_truthy());
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 60: Unicode 17.0 String normalize(), case mapping & CLDR 48 collation
-// ============================================================================
+// =====================================================================
 
 TEST(string_unicode17_normalization_tables_and_api) {
     using namespace litebird;
@@ -23767,9 +23891,9 @@ TEST(string_cldr48_uca_collation_and_ecma402_validation) {
     assert(js.eval("coll_ok && err_ok").is_truthy());
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 59: Temporal dead zone for derived constructor `this` and let/const/class
-// ============================================================================
+// =====================================================================
 
 TEST(js_derived_this_temporal_dead_zone) {
     using namespace litebird;
@@ -23958,9 +24082,9 @@ TEST(js_direct_eval_runs_in_the_callers_scope) {
            "0,1,2 c function 1 eval");
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 80: direct-eval syntax, variable environments and function-expression names
-// ============================================================================
+// =====================================================================
 
 TEST(js_direct_eval_follows_syntax_and_variable_environment_rules) {
     using namespace litebird;
@@ -34182,6 +34306,10 @@ int main() {
     // Phase 183: terminal clips, scrolling, shadows, text, borders and focus.
     RUN_TEST(terminal_outline_keeps_real_edges_and_clips);
     RUN_TEST(terminal_text_and_shadows_stay_inside_nested_clips);
+
+    // Phase 195: a `calc()` percentage is of the declaration (font size,
+    // line-height), not of the viewport.
+    RUN_TEST(a_calc_percentage_is_of_the_declaration_not_the_viewport);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

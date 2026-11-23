@@ -1295,8 +1295,43 @@ void install_array_builtins(JsIntrinsics& realm) {
         }
         return join.call_with_this(array, {});
     });
+    // §23.1.3.28: not a join. Every place is asked for the element first
+    // (Get(O, k)), and the element that is not `undefined` or `null` is asked
+    // for its own `toLocaleString` and that is called with the *boxed*
+    // element as `this`. A hole is never asked for, and nor is `undefined`:
+    // both are the empty string, and only the separators remain.
+    //
+    // Until this it was `join_array(receiver, ",")`, so
+    // `Number.prototype.toLocaleString = () => "X"` left `[1,2]` as "1,2"
+    // and `[1,,3]` as "1,,3" (finding 196).
     js_define_method(ap, "toLocaleString", 0, [](Args) {
-        return JsValue::make_string(join_array(receiver("toLocaleString"), ","));
+        JsValue array = receiver("toLocaleString");
+        const JsValue* primitive = js_wrapped_primitive(array);
+        const JsValue object = (primitive && (primitive->type == JsType::String ||
+                                              primitive->type == JsType::Number ||
+                                              primitive->type == JsType::Boolean))
+                                   ? *primitive
+                                   : array;
+        const size_t length = length_of(object);
+        std::string out;
+        for (size_t index = 0; index < length; ++index) {
+            if (index) out += ",";
+            // Get, not HasProperty: a place the prototype has is read, and a
+            // hole reads `undefined` without running anything.
+            const JsValue element = get_index(object, index);
+            if (element.is_nullish()) continue;
+            // Invoke(nextElement, "toLocaleString"): §23.1.3.28 step 7.c
+            // passes the element it read, primitive and all — there is no
+            // ToObject in the step. A strict method then sees the number it
+            // was given and a sloppy one the call boxes it into, which is what
+            // test262's `primitive_this_value` and `…_getter` ask for.
+            const JsValue method = element.get_property("toLocaleString");
+            if (!method.is_function()) {
+                js_throw_type_error("Array.prototype.toLocaleString: the element has no toLocaleString");
+            }
+            out += js_to_string(method.call_with_this(element, {}));
+        }
+        return JsValue::make_string(out);
     });
     js_define_method(ap, "reverse", 0, [](Args) {
         JsValue array = this_object("reverse");

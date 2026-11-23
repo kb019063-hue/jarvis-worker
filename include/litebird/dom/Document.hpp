@@ -202,6 +202,12 @@ public:
     }
     float viewport_width() const { return m_viewport_width; }
     float viewport_height() const { return m_viewport_height; }
+    void set_scroll_offset(float x, float y) {
+        m_scroll_x = x;
+        m_scroll_y = y;
+    }
+    float scroll_x() const { return m_scroll_x; }
+    float scroll_y() const { return m_scroll_y; }
 
     void set_layout_updater(LayoutUpdater updater) {
         m_layout_updater = std::move(updater);
@@ -252,6 +258,8 @@ private:
 
     float m_viewport_width{1024.0f};
     float m_viewport_height{768.0f};
+    float m_scroll_x{0.0f};
+    float m_scroll_y{0.0f};
     LayoutUpdater m_layout_updater;
     uint64_t m_layout_tree_version{0};
     bool m_in_layout_update{false};

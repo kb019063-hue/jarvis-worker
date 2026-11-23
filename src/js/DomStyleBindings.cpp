@@ -2200,7 +2200,7 @@ struct SheetRule;
 using SheetRulePtr = std::shared_ptr<SheetRule>;
 
 struct SheetRule {
-    enum class Kind { Style, Media, Keyframes, Keyframe };
+    enum class Kind { Style, Media, Keyframes, Keyframe, FontFace };
 
     Kind kind{Kind::Style};
     /// A style rule: what `selectorText` reads, and the rule the cascade
@@ -2226,6 +2226,7 @@ struct SheetRule {
     /// True when the rule came from the element's text. A rule a script
     /// inserted stays when that text changes; this one goes with it.
     bool from_text{false};
+    bool font_face_parsed{false};
 
     /// The answer `media_text` was last given, and the window it was given
     /// for: the cascade asks about every element, and the text is parsed once
@@ -2234,6 +2235,7 @@ struct SheetRule {
     mutable float cached_width{0.0f};
     mutable float cached_height{0.0f};
 
+    bool is_font_face() const { return kind == Kind::FontFace; }
     bool is_media() const { return kind == Kind::Media; }
     bool is_keyframes() const { return kind == Kind::Keyframes; }
     bool is_keyframe() const { return kind == Kind::Keyframe; }
@@ -2333,7 +2335,36 @@ void parse_rules(const std::string& css, std::size_t& at, std::vector<SheetRuleP
             const bool is_keyframes = lower.compare(0, 10, "@keyframes") == 0 ||
                                       lower.compare(0, 18, "@-webkit-keyframes") == 0;
             const bool applies = lower.compare(0, 9, "@supports") == 0 || lower.compare(0, 6, "@layer") == 0;
-            if (is_keyframes) {
+            if (lower == "@font-face") {
+                // A font-face is a declaration block, not a selector or a
+                // grouping rule. Quoted braces do not close its block.
+                std::string body;
+                int depth = 1;
+                char quote = 0;
+                while (at < css.size() && depth > 0) {
+                    char c = css[at++];
+                    if (quote) {
+                        body += c;
+                        if (c == '\\' && at < css.size()) body += css[at++];
+                        else if (c == quote) quote = 0;
+                    } else if (c == '/' && at < css.size() && css[at] == '*') {
+                        auto end = css.find("*/", at + 1);
+                        if (end == std::string::npos) { at = css.size(); break; }
+                        body += ' ';
+                        at = end + 2;
+                    } else if (c == '"' || c == '\'') {
+                        quote = c; body += c;
+                    } else if (c == '{') {
+                        ++depth; body += c;
+                    } else if (c == '}') {
+                        if (--depth) body += c;
+                    } else body += c;
+                }
+                auto rule = std::make_shared<SheetRule>();
+                rule->kind = SheetRule::Kind::FontFace;
+                rule->declarations = parse_declarations(body);
+                out.push_back(std::move(rule));
+            } else if (is_keyframes) {
                 // A `@keyframes` block is a rule of the sheet, as it is in the
                 // language: `cssRules` lists it, `rule.name` reads the name, and
                 // its frames are a `CSSRuleList` of their own. The cascade never
@@ -2508,7 +2539,7 @@ struct RuleObjectEntry {
 };
 
 struct RuleObjectsPart : RealmPart {
-    std::map<uint64_t, RuleObjectEntry> objects;
+    std::map<std::pair<const ParsedSheet*, const SheetRule*>, RuleObjectEntry> objects;
     std::map<const ParsedSheet*, RuleObjectEntry> sheets;
     void trace(Heap& heap) override {
         for (auto& entry : objects) heap.mark_value(entry.second.object);
@@ -4355,6 +4386,126 @@ std::string computed_value(Realm& realm, const Element& element, const Block& bl
 // The script object
 // ---------------------------------------------------------------------------
 
+// Font-face descriptors are a different grammar from element properties.
+// Keep them as individual entries, without expanding CSS shorthands.
+bool font_face_descriptor(const std::string& name) {
+    static const std::unordered_set<std::string> names = {
+        "font-family", "src", "font-style", "font-weight", "font-stretch",
+        "font-display", "unicode-range", "font-feature-settings", "font-variation-settings",
+        "font-named-instance", "ascent-override", "descent-override", "line-gap-override",
+        "size-adjust"};
+    return names.count(name) != 0;
+}
+
+std::string font_face_property(const std::string& property) {
+    std::string name;
+    for (char c : property) {
+        if (c >= 'A' && c <= 'Z') { name += '-'; name += static_cast<char>(c - 'A' + 'a'); }
+        else name += c;
+    }
+    return font_face_descriptor(name) ? name : std::string();
+}
+
+// Normalize the common descriptor forms. The CSSOM's font-face grammar is
+// independent of the renderer's font loader. Advanced CSS escapes and newer
+// descriptor forms are not yet fully parsed here.
+bool font_face_value(const std::string& name, const std::string& text, std::string& out) {
+    std::string value = trim(text);
+    if (value.empty()) return false;
+    std::string lower = ascii_lower(value);
+    if (name == "font-display") {
+        if (lower != "auto" && lower != "block" && lower != "swap" && lower != "fallback" && lower != "optional") return false;
+        out = lower; return true;
+    }
+    if (name == "font-family") {
+        if (value.find(',') != std::string::npos || lower == "inherit" || lower == "initial" || lower == "unset") return false;
+        if (value.size() >= 2 && (value.front() == '\'' || value.front() == '"') && value.back() == value.front()) {
+            std::string unquoted = value.substr(1, value.size() - 2);
+            // Identifiers made solely of simple words need no quotes.
+            if (!unquoted.empty() && unquoted.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_ ") == std::string::npos)
+                value = unquoted;
+        }
+        out = value; return true;
+    }
+    if (name == "src") {
+        // Serialize local(), url() and their format()/tech() hints without
+        // folding case inside their string arguments.
+        std::string result;
+        std::size_t i = 0;
+        bool need_source = true;
+        while (i < value.size()) {
+            while (i < value.size() && is_ascii_space(value[i])) ++i;
+            if (i == value.size()) break;
+            if (value[i] == ',') {
+                if (need_source) return false;
+                result += ", "; ++i; need_source = true; continue;
+            }
+            std::size_t start = i;
+            while (i < value.size() && ((value[i] >= 'a' && value[i] <= 'z') || (value[i] >= 'A' && value[i] <= 'Z') || value[i] == '-')) ++i;
+            std::string fn = ascii_lower(value.substr(start, i - start));
+            if (i == value.size() || value[i++] != '(') return false;
+            bool source = fn == "url" || fn == "local";
+            if ((need_source && !source) || (!need_source && fn != "format" && fn != "tech")) return false;
+            std::size_t arg_start = i;
+            char quote = 0;
+            while (i < value.size()) {
+                char c = value[i];
+                if (quote) {
+                    if (c == '\\' && i + 1 < value.size()) { i += 2; continue; }
+                    if (c == quote) quote = 0;
+                } else if (c == '\'' || c == '"') quote = c;
+                else if (c == ')') break;
+                ++i;
+            }
+            if (i == value.size() || quote) return false;
+            std::string arg = trim(value.substr(arg_start, i - arg_start)); ++i;
+            if (arg.empty()) return false;
+            if (!need_source && !result.empty()) result += ' ';
+            if (fn != "tech") {
+                if (arg.size() >= 2 && (arg.front() == '\'' || arg.front() == '"') && arg.back() == arg.front()) arg = arg.substr(1, arg.size() - 2);
+                std::string escaped;
+                for (char c : arg) { if (c == '"') escaped += '\\'; escaped += c; }
+                result += fn + "(\"" + escaped + "\")";
+            } else result += fn + "(" + arg + ")";
+            need_source = false;
+        }
+        if (need_source) return false;
+        out = result; return true;
+    }
+    if (name == "font-weight") {
+        if (lower == "normal" || lower == "bold") { out = lower; return true; }
+        auto parts = split_components(value);
+        if (parts.empty() || parts.size() > 2) return false;
+        double previous = 0;
+        for (const auto& part : parts) {
+            std::size_t at = 0; double number = 0;
+            if (!parse_css_number(part, at, number) || at != part.size() || number < 1 || number > 1000 || number < previous) return false;
+            previous = number;
+        }
+        out = value; return true;
+    }
+    if (name == "font-style") {
+        if (lower != "normal" && lower != "italic" && lower != "oblique" && lower.rfind("oblique ", 0) != 0) return false;
+        out = lower; return true;
+    }
+    if (is_global_keyword(lower) || lower.find("var(") != std::string::npos) return false;
+    out = value; return true;
+}
+
+std::string font_face_text(const Block& block) {
+    std::string out;
+    for (const Entry& entry : block.entries) {
+        if (!out.empty()) out += ' ';
+        out += entry.name + ": " + entry.value + (entry.important ? " !important;" : ";");
+    }
+    return out;
+}
+
+void font_face_put(Block& block, const std::string& name, const std::string& value, bool important) {
+    if (Entry* old = block.find(name)) { old->value = value; old->important = important; }
+    else block.entries.push_back({name, value, important, false});
+}
+
 struct StyleState : JsExotic {
     Realm* realm{nullptr};
     std::shared_ptr<Element> element;
@@ -4372,6 +4523,10 @@ struct StyleState : JsExotic {
     /// Computed: the style generation it was computed at.
     uint64_t style_version{0};
 
+    bool font_face() const { return rule && rule->rule && rule->rule->is_font_face(); }
+
+    std::string block_text() const { return font_face() ? font_face_text(block) : block.text(!computed); }
+
     void load() {
         if (rule) {
             std::vector<RawDeclaration>* declarations = rule_declarations(*rule);
@@ -4379,10 +4534,25 @@ struct StyleState : JsExotic {
             block.clear();
             if (!declarations) return;
             for (const auto& declaration : *declarations) {
-                if (!is_css_property(declaration.name)) continue;
-                block.set(declaration.name, declaration.value, declaration.important, true);
+                if (font_face()) {
+                    if (rule->rule->font_face_parsed) {
+                        font_face_put(block, declaration.name, declaration.value, declaration.important);
+                    } else {
+                        std::string value;
+                        if (declaration.important || !font_face_descriptor(declaration.name) ||
+                            !font_face_value(declaration.name, declaration.value, value)) continue;
+                        font_face_put(block, declaration.name, value, false);
+                    }
+                } else {
+                    if (!is_css_property(declaration.name)) continue;
+                    block.set(declaration.name, declaration.value, declaration.important, true);
+                }
             }
-            source = block.text(true);
+            source = block_text();
+            if (font_face() && !rule->rule->font_face_parsed) {
+                *declarations = parse_declarations(source);
+                rule->rule->font_face_parsed = true;
+            }
             has_source = true;
             version = sheet_generation(rule->sheet);
             return;
@@ -4418,13 +4588,14 @@ struct StyleState : JsExotic {
 
     void store() {
         if (rule) {
-            source = block.text(true);
+            source = block_text();
+            if (font_face()) rule->rule->font_face_parsed = true;
             has_source = true;
             std::vector<RawDeclaration>* declarations = rule_declarations(*rule);
             if (!declarations) return;
             declarations->clear();
             for (const auto& declaration : parse_declarations(source)) {
-                if (!is_css_property(declaration.name)) continue;
+                if (!font_face() && !is_css_property(declaration.name)) continue;
                 declarations->push_back(declaration);
             }
             touch_sheet(rule->sheet);
@@ -4445,6 +4616,7 @@ struct StyleState : JsExotic {
     std::string value_of(const std::string& name) {
         load();
         if (computed && realm->alive && !element->is_connected()) return std::string();
+        if (font_face()) { const Entry* entry = block.find(name); return entry ? entry->value : std::string(); }
         if (!computed || !realm->alive) return block.get(name, true);
         return computed_value(*realm, *element, block, name, 0);
     }
@@ -4452,6 +4624,21 @@ struct StyleState : JsExotic {
     void set_value(const std::string& name, const std::string& text, bool important) {
         refuse_write();
         load();
+        if (font_face()) {
+            std::string before = block_text();
+            if (trim(text).empty()) {
+                block.entries.erase(std::remove_if(block.entries.begin(), block.entries.end(),
+                    [&](const Entry& e) { return e.name == name; }), block.entries.end());
+            } else {
+                std::string value;
+                if (font_face_descriptor(name)) {
+                    if (!font_face_value(name, text, value)) return;
+                } else if (!is_css_property(name) || !normalize_value(name, text, value, true)) return;
+                font_face_put(block, name, value, important);
+            }
+            if (block_text() != before) store();
+            return;
+        }
         if (trim(text).empty()) {
             const std::string before = block.text(true);
             block.remove(name, true);
@@ -4472,7 +4659,8 @@ struct StyleState : JsExotic {
             out = str(entry->name);
             return true;
         }
-        const std::string property = css_name_for(name);
+        std::string property = css_name_for(name);
+        if (property.empty() && font_face()) property = font_face_property(name);
         if (property.empty()) return false;
         out = str(value_of(property));
         return true;
@@ -4483,12 +4671,13 @@ struct StyleState : JsExotic {
             load();
             return index < block.listed_count();
         }
-        return !css_name_for(name).empty();
+        return !css_name_for(name).empty() || (font_face() && !font_face_property(name).empty());
     }
     JsExotic::SetResult set(JsObject*, const std::string& name, const JsValue& value) override {
         std::size_t index = 0;
         if (parse_index(name, index)) return JsExotic::SetResult::Refused;
-        const std::string property = css_name_for(name);
+        std::string property = css_name_for(name);
+        if (property.empty() && font_face()) property = font_face_property(name);
         if (property.empty()) return JsExotic::SetResult::NotHandled;
         set_value(property, to_str_null_empty(value), false);
         return JsExotic::SetResult::Handled;
@@ -4515,13 +4704,20 @@ void setup_style_declaration(Iface& I) {
         [](Realm&) {
             StyleState& state = this_style();
             state.load();
-            return str(state.block.text(!state.computed));
+            return str(state.block_text());
         },
         [](Realm&, const JsValue& value) {
             StyleState& state = this_style();
             state.refuse_write();
             state.block.clear();
-            apply_declarations(state.block, to_str_null_empty(value), !state.computed);
+            if (state.font_face()) {
+                for (const auto& declaration : parse_declarations(to_str_null_empty(value))) {
+                    std::string normalized;
+                    if (!declaration.important && font_face_descriptor(declaration.name) &&
+                        font_face_value(declaration.name, declaration.value, normalized))
+                        font_face_put(state.block, declaration.name, normalized, false);
+                }
+            } else apply_declarations(state.block, to_str_null_empty(value), !state.computed);
             state.store();
         });
     I.getter("length", [](Realm&) {
@@ -4529,8 +4725,9 @@ void setup_style_declaration(Iface& I) {
         state.load();
         return num(static_cast<double>(state.block.listed_count()));
     });
-    I.getter("parentRule", [](Realm&) {
-        this_style();
+    I.getter("parentRule", [](Realm& realm) {
+        StyleState& state = this_style();
+        if (state.font_face()) return make_rule(realm, state.rule->sheet, state.rule->parent, state.rule->rule);
         return null();
     });
     I.method("item", 1, [](Realm&, Args args) {
@@ -4544,21 +4741,23 @@ void setup_style_declaration(Iface& I) {
         require_args(args, 1, "CSSStyleDeclaration.getPropertyValue");
         StyleState& state = this_style();
         const std::string name = property_argument(args[0]);
-        if (!is_css_property(name)) return str("");
+        if (!is_css_property(name) && !(state.font_face() && font_face_descriptor(name))) return str("");
         return str(state.value_of(name));
     });
     I.method("getPropertyPriority", 1, [](Realm&, Args args) {
         require_args(args, 1, "CSSStyleDeclaration.getPropertyPriority");
         StyleState& state = this_style();
         state.load();
-        return str(state.block.is_important(property_argument(args[0]), !state.computed) ? "important" : "");
+        const std::string name = property_argument(args[0]);
+        if (state.font_face()) { const Entry* e = state.block.find(name); return str(e && e->important ? "important" : ""); }
+        return str(state.block.is_important(name, !state.computed) ? "important" : "");
     });
     I.method("setProperty", 2, [](Realm&, Args args) {
         require_args(args, 2, "CSSStyleDeclaration.setProperty");
         StyleState& state = this_style();
         state.refuse_write();
         const std::string name = property_argument(args[0]);
-        if (!is_css_property(name)) return undefined();
+        if (!is_css_property(name) && !(state.font_face() && font_face_descriptor(name))) return undefined();
         const std::string priority = js_arg(args, 2).is_nullish() ? std::string() : ascii_lower(to_str(args[2]));
         if (!priority.empty() && priority != "important") return undefined();
         state.set_value(name, to_str_null_empty(args[1]), priority == "important");
@@ -4570,9 +4769,14 @@ void setup_style_declaration(Iface& I) {
         state.refuse_write();
         state.load();
         const std::string name = property_argument(args[0]);
-        const std::string before = state.block.text(!state.computed);
-        const std::string old = state.block.remove(name, !state.computed);
-        if (state.block.text(!state.computed) != before) state.store();
+        const std::string before = state.block_text();
+        std::string old;
+        if (state.font_face()) {
+            if (const Entry* entry = state.block.find(name)) old = entry->value;
+            state.block.entries.erase(std::remove_if(state.block.entries.begin(), state.block.entries.end(),
+                [&](const Entry& e) { return e.name == name; }), state.block.entries.end());
+        } else old = state.block.remove(name, !state.computed);
+        if (state.block_text() != before) state.store();
         return str(old);
     });
 }
@@ -4685,13 +4889,17 @@ std::string rule_block_text(Realm& realm, RuleState& state) {
         return declarations ? serialize_declarations(*declarations) : std::string();
     }
     style_state->load();
-    return style_state->block.text(true);
+    return style_state->block_text();
 }
 
 /// A rule as `cssText` writes it: a style rule with its block, and a `@media`
 /// rule with its query and the rules inside it.
 std::string rule_css_text(Realm& realm, RuleState& state) {
     if (!state.rule) return std::string();
+    if (state.rule->is_font_face()) {
+        const std::string block = rule_block_text(realm, state);
+        return block.empty() ? "@font-face { }" : "@font-face { " + block + " }";
+    }
     if (state.rule->is_keyframes()) {
         std::string inner;
         for (const auto& frame : state.rule->children) {
@@ -4750,7 +4958,8 @@ bool parse_inserted_rule(const std::string& text, SheetRulePtr& out) {
         const std::string lower = ascii_lower(trimmed);
         const bool keyframes = lower.compare(0, 10, "@keyframes") == 0 ||
                                lower.compare(0, 18, "@-webkit-keyframes") == 0;
-        if (!keyframes && lower.compare(0, 6, "@media") != 0) return false;
+        if (!keyframes && lower.compare(0, 6, "@media") != 0 &&
+            lower.compare(0, 10, "@font-face") != 0) return false;
     }
     // One block, and nothing after it: "a { b { c {} } }" is not a style rule.
     int depth = 0;
@@ -4785,7 +4994,7 @@ bool parse_inserted_rule(const std::string& text, SheetRulePtr& out) {
         if (rule->keyframes_name.empty()) return false;
     } else if (rule->is_media()) {
         if (rule->media_text.empty()) return false;
-    } else if (rule->selector.empty() || rule->selector_text.empty()) {
+    } else if (!rule->is_font_face() && (rule->selector.empty() || rule->selector_text.empty())) {
         return false;
     }
     out = std::move(rules.front());
@@ -4841,13 +5050,12 @@ JsValue make_rule(Realm& realm, std::shared_ptr<ParsedSheet> sheet, SheetRulePtr
     state.rule = rule;
     state.parent = std::move(parent);
     // One object per rule: `cssRules[0] === cssRules.item(0)`. The entry is
-    // keyed by the rule's id, and a `replaceSync` numbers the new rules from
-    // the same start, so the id alone does not say the object is this rule:
-    // it is only this rule's when the object it was made for still wraps the
-    // same rule. (A sheet's own object check has the same shape, and there the
-    // sheet cannot be replaced under it.)
+    // keyed by the sheet and rule object, not the sheet-local numeric id:
+    // different sheets (and replaceSync) can reuse an id while an old rule
+    // and its style remain reachable.
     auto& objects = realm.part<RuleObjectsPart>().objects;
-    auto found = objects.find(rule->id);
+    const auto key = std::make_pair(sheet.get(), rule.get());
+    auto found = objects.find(key);
     if (found != objects.end() && found->second.sheet.lock() == sheet) {
         const JsValue& cached = found->second.object;
         RuleState* cached_state = state_of<RuleState>(cached);
@@ -4857,9 +5065,10 @@ JsValue make_rule(Realm& realm, std::shared_ptr<ParsedSheet> sheet, SheetRulePtr
     const char* interface_name = rule->is_media()            ? "CSSMediaRule"
                                  : rule->is_keyframes()      ? "CSSKeyframesRule"
                                  : rule->is_keyframe()       ? "CSSKeyframeRule"
+                                 : rule->is_font_face()      ? "CSSFontFaceRule"
                                                              : "CSSStyleRule";
     JsValue object = realm.make(interface_name, shared_state);
-    objects[rule->id] = RuleObjectEntry{sheet, object};
+    objects[key] = RuleObjectEntry{sheet, object};
     return object;
 }
 
@@ -4994,6 +5203,19 @@ void setup_style_rule(Iface& I) {
         RuleState& state = this_state<RuleState>("CSSStyleRule");
         const std::string block = rule_block_text(realm, state);
         return str(rule_selector_text(state) + " { " + block + " }");
+    });
+}
+
+void setup_font_face_rule(Iface& I) {
+    I.getter("type", [](Realm&) {
+        this_state<RuleState>("CSSFontFaceRule");
+        return num(5);
+    });
+    I.getter("style", [](Realm& realm) {
+        RuleState& state = this_state<RuleState>("CSSFontFaceRule");
+        return cached(JsValue::current_this(), "fontFaceStyle", [&]() {
+            return make_rule_style(realm, std::make_shared<RuleState>(state));
+        });
     });
 }
 
@@ -5438,6 +5660,7 @@ void register_style_interfaces() {
     register_interface({"CSSStyleDeclaration", nullptr, setup_style_declaration, nullptr, 0, nullptr});
     register_interface({"CSSRule", nullptr, setup_rule, nullptr, 0, nullptr});
     register_interface({"CSSStyleRule", "CSSRule", setup_style_rule, nullptr, 0, nullptr});
+    register_interface({"CSSFontFaceRule", "CSSRule", setup_font_face_rule, nullptr, 0, nullptr});
     register_interface({"CSSMediaRule", "CSSRule", setup_media_rule, nullptr, 0, nullptr});
     register_interface({"CSSKeyframesRule", "CSSRule", setup_keyframes_rule, nullptr, 0, nullptr});
     register_interface({"CSSKeyframeRule", "CSSRule", setup_keyframe_rule, nullptr, 0, nullptr});

@@ -93,10 +93,85 @@ extern "C" void __sanitizer_purge_allocator(void) __attribute__((weak));
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define TEST(name) void test_##name()
+#include <cstdlib>  // std::_Exit, for EverySuiteRanOnce
+
+/// The suites, in the order they are defined. A suite puts itself here:
+/// `TEST(name)` declares the function, adds it to this list before `main()`
+/// begins, and then defines it.
+///
+/// Why there is a list. Until 23 November 2026 a suite was run because
+/// `main()` had a `RUN_TEST(name)` line for it, and nearly every pull request
+/// wrote its suite in front of `main()` and its line at the end of `main()`.
+/// Two pull requests that do that change the same two places, and only the
+/// first can be merged as it is. In the 90 pull requests before that day a
+/// branch merged `main` 285 times, and 44 of those merges were in conflict in
+/// this file, in 62 places: 22 at the end of `main()`, 22 just in front of it,
+/// and 18 further up, where two suites of one subject had gone to the same
+/// place. A suite that is a file of its own (tests/suites/, at the end of this
+/// file) has no line in common with any other pull request, and this list is
+/// how it is run without a `RUN_TEST` line.
+struct ListedSuite {
+    const char* name;
+    void (*run)();
+    bool own_file;  ///< in a file of tests/suites/: main() has no line for it
+    int runs;       ///< how often it was run; one, when main() has returned
+};
+static std::vector<ListedSuite>& suite_list() {
+    // Made at first use, which is before the first `TEST`, and never
+    // destroyed: `EverySuiteRanOnce` reads it after `main()` has returned.
+    static auto* list = new std::vector<ListedSuite>;
+    return *list;
+}
+/// True while the files of tests/suites/ are being read (the end of this file).
+static bool g_listing_own_files = false;
+static bool list_suite(const char* name, void (*run)()) {
+    suite_list().push_back({name, run, g_listing_own_files, 0});
+    return true;
+}
+static void note_suite_run(void (*run)()) {
+    for (auto& suite : suite_list())
+        if (suite.run == run) ++suite.runs;
+}
+#define TEST(name) \
+    void test_##name(); \
+    [[maybe_unused]] static const bool listed_##name = \
+        list_suite(#name, &test_##name); \
+    void test_##name()
 // Counted rather than hard-coded: the summary line used to drift behind the
 // real number of suites whenever a test was added.
 static int g_tests_run = 0;
+
+/// After `main()` has returned: every suite of the list was run, and once.
+///
+/// A suite that is defined and never run used to be nobody's failure: the run
+/// said "All N engine test suites passed" with an N one smaller than it should
+/// be, and nothing compared N with anything. That is the mistake a list kept
+/// in two places invites (a `TEST` in this file without its `RUN_TEST` line),
+/// and the one a list the suites keep themselves could hide (a file of
+/// tests/suites/ that was not read). Either now ends the run with status 1.
+/// It is looked at here, and not in `main()`, because the end of `main()` is
+/// the place every pull request used to write to.
+struct EverySuiteRanOnce {
+    ~EverySuiteRanOnce() {
+        if (g_tests_run == 0) return;  // main() did not get as far as a suite
+        int wrong = 0;
+        for (const auto& suite : suite_list()) {
+            if (suite.runs == 1) continue;
+            ++wrong;
+            std::cout << "\033[1;31mFAILED\033[0m: the suite " << suite.name
+                      << " was run " << suite.runs << " times, not once"
+                      << (suite.own_file
+                              ? " (a file of tests/suites/)\n"
+                              : " (a TEST of tests/test_suite.cpp: has it a "
+                                "RUN_TEST line in main()?)\n");
+        }
+        if (wrong != 0) {
+            std::cout << std::flush;
+            std::_Exit(1);
+        }
+    }
+};
+static EverySuiteRanOnce g_every_suite_ran_once;
 
 /// Called after every suite. In the sanitizer build it gives memory back;
 /// in the normal build it does nothing.
@@ -128,8 +203,29 @@ static void give_memory_back() {}
     std::cout << "Running test: " #name "... " << std::flush; \
     test_##name(); \
     give_memory_back(); \
+    note_suite_run(&test_##name); \
     std::cout << "\033[32mPASSED\033[0m\n"; \
 } while(0)
+
+/// Runs the suites that are files of their own (tests/suites/), in the order
+/// of their file names, and says of each what `RUN_TEST` says. `main()` calls
+/// this before its own list: the newest suites are the likeliest to fail, and
+/// a run that fails stops at the failure, so a mistake in a new suite is told
+/// in the first seconds and not behind every suite there ever was. A suite
+/// that leaves something behind for the suites after it is found the same
+/// way, in the pull request that wrote it.
+static void run_the_suites_in_files_of_their_own() {
+    for (std::size_t i = 0; i < suite_list().size(); ++i) {
+        if (!suite_list()[i].own_file) continue;
+        ++g_tests_run;
+        std::cout << "Running test: " << suite_list()[i].name << "... "
+                  << std::flush;
+        suite_list()[i].run();
+        give_memory_back();
+        ++suite_list()[i].runs;
+        std::cout << "\033[32mPASSED\033[0m\n";
+    }
+}
 
 /// A page and an interpreter over it, which is how nearly every suite that runs
 /// script begins.
@@ -35098,6 +35194,9 @@ TEST(svg_class_name_is_a_live_animated_string) {
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
+    // The suites of tests/suites/, which have no line here, and then the list.
+    run_the_suites_in_files_of_their_own();
+
     RUN_TEST(color_parsing);
     RUN_TEST(css_color_keywords_match_the_css_specification);
     RUN_TEST(html_parser);
@@ -35649,12 +35748,24 @@ int main() {
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";
-    // A new `RUN_TEST` line does not go at the end of the list above. Every
-    // pull request that puts one there changes the same place as every other
-    // that does, and only the first of them can be merged as it is
-    // (AGENTS.md, "Working together", point 2). Put it under the line of a
-    // related suite, further up. This comment stands below the summary so
-    // that it is not in that place itself.
+    // A new suite gets no line in the list above, and is not written into
+    // this file at all: it is a file of its own in tests/suites/ (AGENTS.md,
+    // "Working together", point 2; tests/suites/README.md). Every pull request
+    // that added a line here changed the same place as every other that did,
+    // and only the first of them could be merged as it was. This comment
+    // stands below the summary so that it is not in that place itself.
     return 0;
 }
+
+// The suites that are files of their own. `suite_files.inc` is written by the
+// Makefile from the names in tests/suites/ and is not kept in git: for each
+// file a namespace named after it, and inside that the file. So a suite sees
+// everything above this line, and two files may each have a helper of the
+// same name. They are read here, behind `main()`, because in front of it is
+// where pull requests used to put their suites.
+[[maybe_unused]] static const bool g_own_files_begin =
+    (g_listing_own_files = true);
+#include "suite_files.inc"
+[[maybe_unused]] static const bool g_own_files_end =
+    !(g_listing_own_files = false);
 

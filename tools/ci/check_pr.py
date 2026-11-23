@@ -988,8 +988,28 @@ def why_not_taken(pr: dict, comments: list[dict]) -> str:
 
 
 def board_number(prs: list[dict]) -> int | None:
+    """The board: the open pull request whose title begins with `BOARD:`.
+
+    `CHECK_PR_BOARD=N` in the environment names another pull request instead.
+    That is for trying these commands out without telling every agent that a
+    watch is on: the status comments are then read from #N and written there.
+    """
+    if os.environ.get("CHECK_PR_BOARD", "").isdigit():
+        return int(os.environ["CHECK_PR_BOARD"])
     return next((pr["number"] for pr in sorted(prs, key=lambda pr: pr["number"])
                  if NEVER_MERGED_RE.match(pr["title"])), None)
+
+
+def rewrites(last: Watch, until: datetime | None) -> bool:
+    """Whether a status is written over the last status comment, not under it.
+
+    A look of the same watch (the same end) rewrites its comment, and so does
+    the end of a watch; a new watch gets a comment of its own, at the foot of
+    the board where it is seen. `until` is None for the end of a watch.
+    """
+    if last.comment is None or last.state in ("off", "none"):
+        return False
+    return until is None or last.until == until
 
 
 def board_comments(number: int | None) -> list[dict] | None:
@@ -1048,7 +1068,7 @@ def show_watch() -> int:
     return 0 if watch.on else 1
 
 
-def write_status(first: str, rest: str, same_watch) -> int:
+def write_status(first: str, rest: str, until: datetime | None) -> int:
     """Write the status comment of the board: rewrite the one of this watch, or add one."""
     prs = gh_json("pr", "list", "--state", "open", "--limit", "100", "--json", "number,title")
     board = board_number(prs)
@@ -1057,7 +1077,7 @@ def write_status(first: str, rest: str, same_watch) -> int:
         sys.exit("the board could not be read (an open pull request whose title begins with BOARD:)")
     body = first + ("\n\n" + rest if rest else "")
     last = watch_state(comments, now_utc())
-    if last.comment is not None and same_watch(last):
+    if rewrites(last, until):
         ident = (last.comment.get("url") or "").rsplit("issuecomment-", 1)[-1]
         if not ident.isdigit():
             sys.exit(f"the status comment has no number in its address: {last.comment.get('url')}")
@@ -1075,14 +1095,13 @@ def beat(until: str, name: str) -> int:
     except ValueError:
         sys.exit(f"--beat takes the end of the watch as \"YYYY-MM-DD HH:MM\" (UTC), not {until!r}")
     first = f"{name}: WATCH ON until {end:{STAMP}} UTC. Last look {now_utc():{STAMP}} UTC."
-    return write_status(first, WATCH_ON_TEXT.format(quiet=QUIET_AFTER_MINUTES, name=name),
-                        lambda last: last.state != "off" and last.until == end)
+    return write_status(first, WATCH_ON_TEXT.format(quiet=QUIET_AFTER_MINUTES, name=name), end)
 
 
 def watch_off(text: str, name: str) -> int:
     """The landing session's: say that the watch has ended, and what it did."""
     first = f"{name}: WATCH OFF since {now_utc():{STAMP}} UTC. {text}".rstrip()
-    return write_status(first, "", lambda last: last.state != "off")
+    return write_status(first, "", None)
 
 
 def check_landed(number: int, wait: int) -> int:
@@ -1469,6 +1488,15 @@ def self_test() -> int:
                      at("2026-11-23 05:10")).state, "none"),
         ("the name in the status comment is the landing session's",
          watch_state([said("Osprey: WATCH OFF since 2026-11-23 06:01 UTC.")], at("2026-11-23 07:00")).name, "Osprey"),
+        ("a look of the same watch rewrites its status comment; so does its end",
+         [rewrites(watch_state(board, at("2026-11-23 05:10")), at("2026-11-23 12:00")),
+          rewrites(watch_state(board, at("2026-11-23 05:10")), None),
+          rewrites(watch_state(board, at("2026-11-23 13:00")), None)], [True, True, True]),
+        ("a new watch (another end, or after an OFF, or on an empty board) gets a comment of its own",
+         [rewrites(watch_state(board, at("2026-11-23 05:10")), at("2026-11-23 20:00")),
+          rewrites(watch_state(board + [off], at("2026-11-23 07:00")), at("2026-11-23 12:00")),
+          rewrites(watch_state([], at("2026-11-23 07:00")), at("2026-11-23 12:00")),
+          rewrites(watch_state(board + [off], at("2026-11-23 07:00")), None)], [False] * 4),
         ("sent back: at which head, and the whole of what was written",
          sent_back(board, 7), ("abc1234", "Lander: #7 is yours again (head abc1234): it conflicts with main in `src/a.cpp`")),
         ("sent back: not a pull request the board says nothing of", sent_back(board, 8), None),

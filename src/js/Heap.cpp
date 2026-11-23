@@ -306,6 +306,18 @@ void Heap::mark_value(const JsValue& val) {
     // A native function keeps its properties in a shared table until it is
     // given a cell.
     if (const PropertyMap* map = val.loose_properties()) mark_property_map(map);
+    // What the function's entry point captures is in the payload, not in the
+    // cell, and so is a bound function's target: `count_value` counts both, so
+    // the payload is owned from inside the heap and is no root, and the mark
+    // pass is the only thing that keeps what they refer to alive. Without the
+    // target here, an object that reaches a bound function only as its
+    // prototype lost the bound `this` after a collection: the target's payload
+    // was found owned and freed, while the live function went on reading it
+    // (finding 212, `prototypes.dat`, "reachable only as a prototype").
+    if (const std::vector<JsValue>* captured = val.payload_captured()) {
+        for (const auto& kept : *captured) mark_value(kept);
+    }
+    if (const JsValue* target = val.payload_bound_target()) mark_value(*target);
 }
 
 void Heap::mark_shared_value(const std::shared_ptr<JsValue>& value) {

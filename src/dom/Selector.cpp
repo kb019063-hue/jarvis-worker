@@ -340,7 +340,7 @@ struct SelectorParser {
             // States nothing is in here, and the old one-colon pseudo-elements.
             {"visited", Pseudo::Never}, {"indeterminate", Pseudo::Never}, {"default", Pseudo::Never},
             {"in-range", Pseudo::Never}, {"out-of-range", Pseudo::Never}, {"autofill", Pseudo::Never},
-            {"fullscreen", Pseudo::Never}, {"modal", Pseudo::Never}, {"popover-open", Pseudo::Never},
+            {"fullscreen", Pseudo::Never}, {"modal", Pseudo::Modal}, {"popover-open", Pseudo::Never},
             {"user-valid", Pseudo::Never}, {"user-invalid", Pseudo::Never}, {"target-within", Pseudo::Never},
             {"before", Pseudo::Never}, {"after", Pseudo::Never}, {"first-line", Pseudo::Never},
             {"first-letter", Pseudo::Never},
@@ -697,6 +697,13 @@ struct SelectorMatcher {
                 return id && *id == url.substr(hash + 1);
             }
             case Pseudo::Defined: return element.is_defined();
+            case Pseudo::Modal: {
+                // HTML: an element matches `:modal` while it is the document's
+                // top-layer modal dialog. `showModal()` records it; `close()`
+                // clears it, so nothing here caches the answer.
+                auto document = element.owner_document();
+                return document && document->modal_dialog().get() == &element;
+            }
             case Pseudo::Never: return false;
         }
         return false;

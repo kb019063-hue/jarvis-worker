@@ -176,17 +176,51 @@ if (s.outline_drawn && s.outline_width > 0.0f && !s.outline_color.is_transparent
 }
 }
 
+/// The one box that is not painted where the document walk reaches it: the
+/// modal dialog's, which `DisplayList::build` paints last, behind a backdrop.
+/// The walk leaves it out and fills in `box` when it passes it.
+struct TopLayer {
+    const Node* node{nullptr};
+    std::shared_ptr<LayoutBox> box;
+    /// True when `candidate` is the top-layer box, which is remembered here so
+    /// that `DisplayList::build` can paint it after everything else.
+    bool take(const std::shared_ptr<LayoutBox>& candidate) {
+        if (!node || candidate->node.get() != node) return false;
+        if (!box) box = candidate;
+        return true;
+    }
+};
+
+void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top);
+void paint_phases(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top);
+
 // ---------------------------------------------------------------------------
 // The box's own ink: its inline formatting context, or its text, or an image.
 // ---------------------------------------------------------------------------
-void emit_contents(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
+void emit_contents(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top) {
     const ComputedStyle& s = *box->style;
 
 // 3. Inline Formatting Context Lines (if this box established an IFC)
 if (!box->line_boxes.empty()) {
     for (const auto& line : box->line_boxes) {
         for (const auto& frag : line.fragments) {
-            if (frag.is_space) continue;
+            if (frag.is_space) {
+                // Transparent margin/padding spacers carry empty text and paint nothing.
+                // Real word-separating spaces inside a styled inline box paint its
+                // background so the inline background stays continuous across words.
+                if (!frag.text.empty() && !frag.style->background_color.is_transparent()) {
+                    DrawRectCommand bg_cmd;
+                    bg_cmd.rect = frag.rect;
+                    bg_cmd.color = frag.style->background_color;
+                    bg_cmd.border_radius = frag.style->border_radius;
+                    list.add(bg_cmd);
+                }
+                continue;
+            }
+            if (frag.box && frag.box->style->is_inline_block()) {
+                paint_atom(frag.box, list, top);
+                continue;
+            }
             const ComputedStyle& fs = *frag.style;
 
             // Fragment background (e.g. <span style="background-color: yellow;">)
@@ -291,24 +325,6 @@ if (box->image) {
 }
 }
 
-/// The one box that is not painted where the document walk reaches it: the
-/// modal dialog's, which `DisplayList::build` paints last, behind a backdrop.
-/// The walk leaves it out and fills in `box` when it passes it.
-struct TopLayer {
-    const Node* node{nullptr};
-    std::shared_ptr<LayoutBox> box;
-    /// True when `candidate` is the top-layer box, which is remembered here so
-    /// that `DisplayList::build` can paint it after everything else.
-    bool take(const std::shared_ptr<LayoutBox>& candidate) {
-        if (!node || candidate->node.get() != node) return false;
-        if (!box) box = candidate;
-        return true;
-    }
-};
-
-void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top);
-void paint_phases(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLayer& top);
-
 // Step 3: the backgrounds and borders of in-flow, non-positioned block-level
 // descendants, in document order. Floats and out-of-flow boxes are not here:
 // they belong to steps 5 and 8.
@@ -364,7 +380,7 @@ void paint_inline_contents(const std::shared_ptr<LayoutBox>& box, DisplayList& l
         if (top.take(child)) continue;   // the modal dialog: painted last
         switch (paint_role(*child)) {
             case PaintRole::Block:
-                emit_contents(child, list);
+                emit_contents(child, list, top);
                 paint_inline_contents(child, list, top);
                 break;
             case PaintRole::Inline:
@@ -447,7 +463,7 @@ void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLay
         clip.border_radius = s.border_radius;
         list.add(clip);
     }
-    emit_contents(box, list);
+    emit_contents(box, list, top);
     // A box that established an inline formatting context painted all of its
     // children into its lines; there is nothing left to walk.
     if (box->line_boxes.empty()) paint_phases(box, list, top);

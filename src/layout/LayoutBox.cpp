@@ -515,6 +515,12 @@ bool LayoutBox::establishes_ifc() const {
         // Out-of-flow children do not take part in inline flow, and floats are
         // handled by the formatting context itself.
         if (child->style->is_out_of_flow() || child->style->is_floated()) continue;
+        // display: inline-block participates as an atomic inline-level box in
+        // its parent's inline formatting context (CSS 2.1 §9.2.2.1).
+        if (child->style->is_inline_block()) {
+            has_inline_content = true;
+            continue;
+        }
         if (child->box_type == BoxType::BlockNode ||
             child->box_type == BoxType::FlexNode ||
             child->box_type == BoxType::GridNode ||
@@ -555,12 +561,15 @@ void LayoutBox::layout_block(float containing_width) {
         dimensions.content.width = std::max(0.0f, containing_width - total_horizontal_spacing);
     }
 
-    // `width: fit-content`: as wide as the content wants, and no wider than the
-    // space offered (CSS Sizing 3 §5.1). Measured before the children are
-    // placed, because it is the width they are placed in. Placed before the
-    // min/max clamps so that those still win, as they outrank the keyword.
-    if (s.width_fit_content) {
-        const float natural = std::max(0.0f, min_content_width(*this, 0.0f) - h_padding_border);
+    // `width: fit-content` (and shrink-to-fit for `inline-block` with `width: auto`,
+    // CSS 2.1 §10.3.9): as wide as the content wants, and no wider than the
+    // space offered. Measured before the children are placed, because it is the
+    // width they are placed in. Placed before the min/max clamps so that those
+    // still win, as they outrank the keyword.
+    if (s.width_fit_content || (s.is_inline_block() && s.width < 0.0f && !ignore_own_width)) {
+        const float natural = children.empty()
+            ? 0.0f
+            : std::max(0.0f, min_content_width(*this, 0.0f) - h_padding_border);
         const float available = std::max(0.0f, containing_width - total_horizontal_spacing);
         dimensions.content.width = std::min(natural, available);
     }
@@ -576,15 +585,17 @@ void LayoutBox::layout_block(float containing_width) {
         dimensions.content.width = std::min(dimensions.content.width, max_w);
     }
 
-    // Margin: auto centering
-    float remaining_h = std::max(0.0f, containing_width - (dimensions.content.width + h_padding_border));
-    if (s.margin_left_auto && s.margin_right_auto) {
-        dimensions.margin.left = remaining_h / 2.0f;
-        dimensions.margin.right = remaining_h / 2.0f;
-    } else if (s.margin_left_auto) {
-        dimensions.margin.left = remaining_h;
-    } else if (s.margin_right_auto) {
-        dimensions.margin.right = remaining_h;
+    // Margin: auto centering (block-level only; inline-block auto margins compute to 0 per CSS 2.1 §10.3.9)
+    if (!s.is_inline_block()) {
+        float remaining_h = std::max(0.0f, containing_width - (dimensions.content.width + h_padding_border));
+        if (s.margin_left_auto && s.margin_right_auto) {
+            dimensions.margin.left = remaining_h / 2.0f;
+            dimensions.margin.right = remaining_h / 2.0f;
+        } else if (s.margin_left_auto) {
+            dimensions.margin.left = remaining_h;
+        } else if (s.margin_right_auto) {
+            dimensions.margin.right = remaining_h;
+        }
     }
 
     // A definite height gives descendants a basis for percentage heights.
@@ -1640,6 +1651,7 @@ struct InlineItem {
     std::string text;
     float width{0.0f};
     float height{0.0f};
+    bool preserve_space{false};
     SharedComputedStyle style;
     std::shared_ptr<LayoutBox> source_box;
 };
@@ -1651,10 +1663,12 @@ using InlineOverrideCache = std::unordered_map<
 static void collect_items(
     const std::shared_ptr<LayoutBox>& box,
     std::vector<InlineItem>& items,
-    InlineOverrideCache& override_cache
+    InlineOverrideCache& override_cache,
+    float available_width
 ) {
     if (!box) return;
     if (stack_is_exhausted()) return;   // inline boxes nested too deeply to follow
+    if (box->style->is_out_of_flow() || box->style->is_floated()) return;
 
     if (box->box_type == BoxType::TextNode) {
         const SharedComputedStyle& effective_style = box->style;
@@ -1665,26 +1679,60 @@ static void collect_items(
                                                          es.font_family,
                                                          es.font_style != FontStyle::Normal,
                                                          kerning);
-        float line_h = es.effective_line_height();
+        const float line_h = es.effective_line_height();
+        const WhiteSpace ws = es.white_space;
+        const bool preserve_newlines = (ws == WhiteSpace::Pre || ws == WhiteSpace::PreWrap ||
+                                        ws == WhiteSpace::PreLine || ws == WhiteSpace::BreakSpaces);
+        const bool preserve_spaces = (ws == WhiteSpace::Pre || ws == WhiteSpace::PreWrap ||
+                                      ws == WhiteSpace::BreakSpaces);
 
         size_t i = 0;
         const std::string& str = box->text;
         while (i < str.length()) {
-            if (std::isspace(static_cast<unsigned char>(str[i]))) {
-                while (i < str.length() && std::isspace(static_cast<unsigned char>(str[i]))) {
-                    ++i;
+            if (preserve_newlines && (str[i] == '\n' || str[i] == '\r')) {
+                if (str[i] == '\r' && i + 1 < str.length() && str[i + 1] == '\n') i += 2;
+                else ++i;
+                InlineItem br;
+                br.type = InlineItem::Type::LineBreak;
+                br.height = line_h;
+                br.style = effective_style;
+                br.source_box = box;
+                items.push_back(std::move(br));
+            } else if (std::isspace(static_cast<unsigned char>(str[i]))) {
+                if (preserve_spaces) {
+                    size_t start = i;
+                    while (i < str.length() && std::isspace(static_cast<unsigned char>(str[i])) &&
+                           str[i] != '\n' && str[i] != '\r') {
+                        ++i;
+                    }
+                    std::string run = str.substr(start, i - start);
+                    InlineItem item;
+                    item.type = InlineItem::Type::Space;
+                    item.preserve_space = true;
+                    item.width = space_w * static_cast<float>(run.size());
+                    item.text = std::move(run);
+                    item.height = line_h;
+                    item.style = effective_style;
+                    item.source_box = box;
+                    items.push_back(std::move(item));
+                } else {
+                    while (i < str.length() && std::isspace(static_cast<unsigned char>(str[i])) &&
+                           (!preserve_newlines || (str[i] != '\n' && str[i] != '\r'))) {
+                        ++i;
+                    }
+                    if (!items.empty() && items.back().type == InlineItem::Type::Space &&
+                        !items.back().preserve_space) {
+                        continue;
+                    }
+                    InlineItem item;
+                    item.type = InlineItem::Type::Space;
+                    item.text = " ";
+                    item.width = space_w;
+                    item.height = line_h;
+                    item.style = effective_style;
+                    item.source_box = box;
+                    items.push_back(std::move(item));
                 }
-                if (!items.empty() && items.back().type == InlineItem::Type::Space) {
-                    continue;
-                }
-                InlineItem item;
-                item.type = InlineItem::Type::Space;
-                item.text = " ";
-                item.width = space_w;
-                item.height = line_h;
-                item.style = effective_style;
-                item.source_box = box;
-                items.push_back(std::move(item));
             } else {
                 size_t start = i;
                 while (i < str.length() && !std::isspace(static_cast<unsigned char>(str[i]))) {
@@ -1716,38 +1764,54 @@ static void collect_items(
             items.push_back(std::move(br));
             return;
         }
-        size_t initial_count = items.size();
+        const bool has_bg = !bs.background_color.is_transparent();
+        const bool has_rad = bs.border_radius > 0.0f;
+        const bool has_dec = bs.has_text_decoration();
+        const bool has_bdr = bs.border_width.left > 0.0f || bs.border_width.top > 0.0f ||
+                             bs.border_width.right > 0.0f || bs.border_width.bottom > 0.0f;
+
+        const float margin_left = bs.margin.left;
+        const float pad_bdr_left = bs.padding.left + bs.border_width.left;
+        const float pad_bdr_right = bs.padding.right + bs.border_width.right;
+        const float margin_right = bs.margin.right;
+
+        auto push_spacer = [&](float w, bool paint_box) {
+            if (w <= 0.0f) return;
+            InlineItem sp;
+            sp.type = paint_box ? InlineItem::Type::Text : InlineItem::Type::Space;
+            sp.preserve_space = true;
+            sp.width = w;
+            sp.height = paint_box ? bs.effective_line_height() : 0.0f;
+            sp.style = box->style;
+            sp.source_box = box;
+            items.push_back(std::move(sp));
+        };
+
+        const size_t before_left = items.size();
+        push_spacer(margin_left, false);
+        push_spacer(pad_bdr_left, has_bg || has_bdr);
+
+        const size_t initial_count = items.size();
         for (const auto& ch : box->children) {
-            collect_items(ch, items, override_cache);
+            collect_items(ch, items, override_cache, available_width);
         }
 
         if (items.size() > initial_count) {
-            float extra_left = bs.padding.left + bs.border_width.left;
-            float extra_right = bs.padding.right + bs.border_width.right;
-
-            if (extra_left > 0.0f) {
-                items[initial_count].width += extra_left;
-            }
-            if (extra_right > 0.0f) {
-                items.back().width += extra_right;
-            }
-
             // Chromium paints an inline body's background on its line
             // fragments as well as propagating it to the canvas. Block bodies
             // do not have this extra layer. Preserve a descendant's own
             // background: fragments carry just one color, so this still loses
             // the body layer under a translucent descendant (see the recorded
             // inline_body_under_a_translucent_inline_child reftest).
-            const bool has_bg = !bs.background_color.is_transparent();
-            const bool has_rad = bs.border_radius > 0.0f;
-            const bool has_dec = bs.has_text_decoration();
-            const bool has_bdr = bs.border_width.left > 0.0f || bs.border_width.top > 0.0f ||
-                                 bs.border_width.right > 0.0f || bs.border_width.bottom > 0.0f;
-
             if (has_bg || has_rad || has_dec || has_bdr) {
                 const ComputedStyle* inline_key = box->style.get();
                 auto& inner_cache = override_cache[inline_key];
                 for (size_t idx = initial_count; idx < items.size(); ++idx) {
+                    // Do not paint the outer inline span's background/border over
+                    // an atomic inline-block child (its own paint_atom handles it).
+                    if (items[idx].source_box && items[idx].source_box->style->is_inline_block()) {
+                        continue;
+                    }
                     const ComputedStyle* item_key = items[idx].style.get();
                     const ComputedStyle& cur = *item_key;
                     const bool apply_bg = has_bg &&
@@ -1778,6 +1842,14 @@ static void collect_items(
                     }
                 }
             }
+            push_spacer(pad_bdr_right, has_bg || has_bdr);
+            push_spacer(margin_right, false);
+        } else if (margin_left <= 0.0f && pad_bdr_left <= 0.0f &&
+                   pad_bdr_right <= 0.0f && margin_right <= 0.0f) {
+            items.resize(before_left);
+        } else {
+            push_spacer(pad_bdr_right, has_bg || has_bdr);
+            push_spacer(margin_right, false);
         }
     } else if (box->box_type == BoxType::ImageNode) {
         box->layout(0.0f);
@@ -1785,6 +1857,15 @@ static void collect_items(
         item.type = InlineItem::Type::Text;
         item.width = box->dimensions.content.width;
         item.height = box->dimensions.content.height;
+        item.style = box->style;
+        item.source_box = box;
+        items.push_back(std::move(item));
+    } else if (box->style->is_inline_block()) {
+        box->layout(available_width);
+        InlineItem item;
+        item.type = InlineItem::Type::Text;
+        item.width = box->dimensions.margin_box().width;
+        item.height = box->dimensions.margin_box().height;
         item.style = box->style;
         item.source_box = box;
         items.push_back(std::move(item));
@@ -1835,7 +1916,7 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
     std::vector<InlineItem> items;
     InlineOverrideCache override_cache;
     for (const auto& ch : children) {
-        collect_items(ch, items, override_cache);
+        collect_items(ch, items, override_cache, available_width);
     }
 
     if (items.empty()) {
@@ -1917,7 +1998,8 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
     const float estimated_line_height = s.effective_line_height();
 
     auto finish_line = [&](LineBox& line, float width) {
-        while (!line.fragments.empty() && line.fragments.back().is_space) {
+        while (!line.fragments.empty() && line.fragments.back().is_space &&
+               !line.fragments.back().preserve_space) {
             width -= line.fragments.back().rect.width;
             line.fragments.pop_back();
         }
@@ -1955,19 +2037,24 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
             continue;
         }
 
-        if (current_line.fragments.empty() && item.type == InlineItem::Type::Space) {
-            // Drop leading space at line start
+        if (current_line.fragments.empty() && item.type == InlineItem::Type::Space &&
+            !item.preserve_space) {
+            // Drop leading collapsible space at line start
             continue;
         }
 
-        if (!current_line.fragments.empty() && (current_x + item.width > line_capacity)) {
+        const WhiteSpace item_ws = item.style ? item.style->white_space : s.white_space;
+        const bool allow_wrap = (item_ws != WhiteSpace::Nowrap && item_ws != WhiteSpace::Pre);
+
+        if (allow_wrap && !current_line.fragments.empty() &&
+            (current_x + item.width > line_capacity)) {
             // Line break: the next line may have a different float shape.
             finish_line(current_line, current_x);
             current_x = 0.0f;
             line_top += estimated_line_height;
             line_capacity = measure_band(line_top, line_left, line_right);
 
-            if (item.type == InlineItem::Type::Space) {
+            if (item.type == InlineItem::Type::Space && !item.preserve_space) {
                 continue;
             }
         }
@@ -1982,6 +2069,7 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
         frag.box = std::move(item.source_box);
         frag.is_text = (item.type == InlineItem::Type::Text);
         frag.is_space = (item.type == InlineItem::Type::Space);
+        frag.preserve_space = item.preserve_space;
 
         current_line.fragments.push_back(std::move(frag));
         current_line.left_intrusion = line_left;
@@ -2038,12 +2126,44 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
         for (auto& frag : line.fragments) {
             frag.rect.x = dimensions.content.x + x_offset + frag.rect.x;
             frag.rect.y = dimensions.content.y + y_cursor;
-            // Vertically center inside line if smaller than line height
             if (frag.rect.height < line.rect.height) {
-                frag.rect.y += (line.rect.height - frag.rect.height) * 0.5f;
+                const VerticalAlign va = frag.style ? frag.style->vertical_align : VerticalAlign::Baseline;
+                switch (va) {
+                    case VerticalAlign::Top:
+                    case VerticalAlign::TextTop:
+                        // Top of fragment aligns with top of line box.
+                        break;
+                    case VerticalAlign::Bottom:
+                    case VerticalAlign::TextBottom:
+                        frag.rect.y += (line.rect.height - frag.rect.height);
+                        break;
+                    case VerticalAlign::Middle:
+                    case VerticalAlign::Baseline:
+                    case VerticalAlign::Sub:
+                    case VerticalAlign::Super:
+                    default:
+                        // Vertically center inside line if smaller than line height.
+                        frag.rect.y += (line.rect.height - frag.rect.height) * 0.5f;
+                        break;
+                }
             }
         }
         apply_bidi_to_line(line);
+
+        for (auto& frag : line.fragments) {
+            if (frag.box && frag.box->style->is_inline_block()) {
+                const float target_x = frag.rect.x +
+                    frag.box->dimensions.margin.left +
+                    frag.box->dimensions.border.left +
+                    frag.box->dimensions.padding.left;
+                const float target_y = frag.rect.y +
+                    frag.box->dimensions.margin.top +
+                    frag.box->dimensions.border.top +
+                    frag.box->dimensions.padding.top;
+                frag.box->shift_position(target_x - frag.box->dimensions.content.x,
+                                         target_y - frag.box->dimensions.content.y);
+            }
+        }
 
         y_cursor += line.rect.height;
     }

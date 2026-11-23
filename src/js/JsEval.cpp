@@ -3586,6 +3586,21 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
         case NodeKind::New:
             return eval_new(static_cast<const NewExpr*>(expr), env);
 
+        case NodeKind::ImportCall: {
+            // §13.3.12 step 6 runs ToString on the specifier first and throws
+            // its error at the call site; step 7 hands the result to the host,
+            // which answers a Promise. This engine has no module loader, so
+            // what the host answers is a rejection -- but the rejection still
+            // has to arrive as a promise, not as a throw, and the specifier is
+            // still coerced, which is the order a page can observe.
+            JsValue specifier = evaluate(static_cast<const ImportCallExpr*>(expr)->specifier.get(), env);
+            const std::string text = js_to_string(specifier);
+            JsValue error = js_make_error(JsErrorKind::TypeError,
+                                          "'import()' is not available: this engine does not load modules (asked for '" +
+                                              text + "')");
+            return Promise::make_rejected(error);
+        }
+
         case NodeKind::ObjectLiteral:
             return eval_object_literal(static_cast<const ObjectLiteralExpr*>(expr), env);
 

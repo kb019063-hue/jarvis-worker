@@ -4,6 +4,7 @@
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/js/JsInterpreter.hpp"
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
@@ -245,6 +246,34 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
     if (object.is_function() && object.function_data() && (key == "name" || key == "length")) {
         return data(object.get_property(key), false, false, true);
     }
+    // The global object owns the global declarations: §9.1.1.4 makes them
+    // non-configurable data properties of it. They live in the global
+    // environment rather than in the object's property table -- the object
+    // finds them through its `lookup_fallback` -- so the descriptor is
+    // derived from the binding, or `Object.getOwnPropertyDescriptor(this,
+    // "Object")` would answer `undefined` for a name that
+    // `hasOwnProperty(this, "Object")` reports as present. It is asked
+    // before the exotic below, which claims these names through
+    // `exotic->has` and then describes none of them, and would otherwise
+    // answer `undefined` on the way out.
+    //
+    // Only a *variable* declaration is one of these. What `let`, `const` and
+    // `class` declare is not a property of the global object at all, which is
+    // what `is_lexical` marks (`Object.getOwnPropertyDescriptor(this, "x")`
+    // is undefined after `let x`), and a non-writable global such as
+    // `undefined` is the one kind the standard does make non-configurable.
+    if (object.is_object_like() && object.object_val) {
+        dom::Realm& realm = dom::realm_of(JsIntrinsics::get());
+        if (object.object_val == realm.window.object_val) {
+            if (auto scope = realm.global_scope.lock()) {
+                const JsEnvironment::Binding* binding = scope->find_own(key);
+                if (binding && !binding->is_lexical) {
+                    return data(binding->value, !binding->is_readonly, false, !binding->is_readonly);
+                }
+            }
+        }
+    }
+
     // A property the object computes instead of storing: the indices and
     // names of a list, of a NamedNodeMap or of an HTMLCollection. The value
     // is what reading it gives, and it is configurable as every such
@@ -497,7 +526,6 @@ std::string object_tag(const JsValue& value) {
         }
         if (cell->is_array) return "Array";
     }
-    if (value.promise_value()) return "Promise";
     return "Object";
 }
 

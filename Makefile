@@ -173,6 +173,11 @@ DEEP_ASAN_DEPTH ?= 10000
 
 all: $(TARGET)
 
+## Check untrusted shell labels without writing attack bytes to a terminal.
+.PHONY: verify-terminal-shell-safety
+verify-terminal-shell-safety: $(TARGET)
+	@python3 tools/conformance/verify_terminal_shell_safety.py --binary $(TARGET)
+
 $(BUILD_DIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@
@@ -288,6 +293,16 @@ bench-styles: $(TARGET)
 
 run: $(TARGET)
 	@./$(TARGET) examples/hello.html
+
+## Compare full RGBA screenshots from two builds (strict equality by default).
+## Example: make diff-render BEFORE=/tmp/old/litebird AFTER=build/litebird
+## Pass DIFF_RENDER_ARGS="--suite tests/render/body-origin.json" for another corpus.
+.PHONY: diff-render diff-render-self-test
+diff-render:
+	@python3 tools/conformance/diff_render.py --before "$(BEFORE)" --after "$(AFTER)" $(DIFF_RENDER_ARGS)
+
+diff-render-self-test:
+	@python3 tools/conformance/test_diff_render.py
 
 ## Conformance scoreboard (html5lib / WPT tree-construction corpus).
 conformance: $(TARGET)

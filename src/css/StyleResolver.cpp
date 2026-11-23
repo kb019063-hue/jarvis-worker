@@ -146,6 +146,12 @@ std::size_t ComputedStyle::hash() const {
     hash_color(h, border_color);
     hash_combine(h, hash_float(border_radius));
     hash_combine(h, hash_float(border_radius_percent));
+    // The outline is part of the key: two boxes that differ only in it paint
+    // different ink, so they must not share a cached style.
+    hash_combine(h, hash_float(outline_width));
+    hash_combine(h, hash_float(outline_offset));
+    hash_combine(h, outline_drawn ? 1u : 0u);
+    hash_color(h, outline_color);
     if (box_shadow.has_shadow) {
         hash_combine(h, 1u);
         hash_combine(h, hash_float(box_shadow.x_offset));
@@ -853,6 +859,32 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
 
 bool StyleResolver::matches_selector(const std::shared_ptr<Element>& element, const Selector& selector) const {
     return match_selector_impl(element, selector, nullptr);
+}
+
+/// `matches_selector` for a selector that names a pseudo-element: the element
+/// it belongs to is matched by everything *except* that pseudo-element. Phase
+/// 215; `match_selector_impl` refuses every `::` selector, which is right for
+/// styling the element itself and wrong for asking whether the element owns a
+/// `::before` box.
+bool StyleResolver::matches_selector_for_pseudo(const std::shared_ptr<Element>& element,
+                                               const Selector& selector, int which) const {
+    if (selector.parts.empty() || !element) return false;
+    if (!selector.has_pseudo_element || selector.pseudo_element != which) return false;
+    Selector plain = selector;
+    plain.has_pseudo_element = false;
+    plain.pseudo_element = 0;
+    // The pseudo-element is also recorded as a pseudo-class of the last simple
+    // selector, and `matches_simple_selector` rejects `before`/`after` by name
+    // there. Remove exactly that entry -- and only from the last part, since a
+    // `::before` in a non-subject position is not a selector for this element.
+    if (!plain.parts.empty()) {
+        auto& pcs = plain.parts.back().pseudo_classes;
+        const char* name = which == 1 ? "before" : "after";
+        for (std::size_t i = pcs.size(); i > 0; --i) {
+            if (pcs[i - 1].name == name) { pcs.erase(pcs.begin() + static_cast<long>(i - 1)); break; }
+        }
+    }
+    return match_selector_impl(element, plain, nullptr);
 }
 
 bool StyleResolver::match_selector_impl(const std::shared_ptr<Element>& element, const Selector& selector, Specificity* out_spec) const {
@@ -1786,6 +1818,89 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
     return false;
 }
 
+
+/// CSS Syntax 3 §4.3.5: one quoted string, with the escapes the grammar
+/// allows. Answers false for anything that is not exactly one string, so
+/// `content: counter(x)` generates nothing rather than the literal text
+/// "counter(x)" (Phase 215).
+bool parse_content_string(const std::string& raw, std::string& out) {
+    std::size_t i = 0;
+    const std::size_t n = raw.size();
+    while (i < n && std::isspace(static_cast<unsigned char>(raw[i]))) ++i;
+    if (i >= n) return false;
+    const char quote = raw[i];
+    if (quote != '"' && quote != '\'') return false;
+    ++i;
+    std::string text;
+    while (i < n) {
+        const char c = raw[i];
+        if (c == quote) {
+            // Anything after the closing quote other than space means this was
+            // not a single string.
+            for (std::size_t j = i + 1; j < n; ++j) {
+                if (!std::isspace(static_cast<unsigned char>(raw[j]))) return false;
+            }
+            out = std::move(text);
+            return true;
+        }
+        if (c == '\\') {
+            ++i;
+            if (i >= n) return false;
+            const char e = raw[i];
+            if (e == '\n' || e == '\r' || e == '\f') {
+                // An escaped newline is removed, and moves nothing.
+                ++i;
+                if (e == '\r' && i < n && raw[i] == '\n') ++i;
+                continue;
+            }
+            switch (e) {
+            case '"': text.push_back('"'); ++i; break;
+            case '\'': text.push_back('\''); ++i; break;
+            case '\\': text.push_back('\\'); ++i; break;
+            default:
+                if (std::isxdigit(static_cast<unsigned char>(e))) {
+                    // Up to six hex digits, then one optional space.
+                    std::uint32_t cp = 0;
+                    int digits = 0;
+                    while (i < n && digits < 6 && std::isxdigit(static_cast<unsigned char>(raw[i]))) {
+                        const char h = raw[i];
+                        cp = cp * 16u + static_cast<std::uint32_t>(
+                             h >= '0' && h <= '9' ? h - '0'
+                             : h >= 'a' && h <= 'f' ? h - 'a' + 10 : h - 'A' + 10);
+                        ++i; ++digits;
+                    }
+                    if (i < n && (raw[i] == ' ' || raw[i] == '\t')) ++i;
+                    if (cp == 0 || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) cp = 0xFFFDu;
+                    // UTF-8, written here rather than reached for from the
+                    // text-decoding module: this is CSS syntax, not decoding.
+                    if (cp < 0x80u) {
+                        text.push_back(static_cast<char>(cp));
+                    } else if (cp < 0x800u) {
+                        text.push_back(static_cast<char>(0xC0u | (cp >> 6)));
+                        text.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+                    } else if (cp < 0x10000u) {
+                        text.push_back(static_cast<char>(0xE0u | (cp >> 12)));
+                        text.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+                        text.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+                    } else {
+                        text.push_back(static_cast<char>(0xF0u | (cp >> 18)));
+                        text.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu)));
+                        text.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu)));
+                        text.push_back(static_cast<char>(0x80u | (cp & 0x3Fu)));
+                    }
+                } else {
+                    text.push_back(e); ++i;
+                }
+                break;
+            }
+            continue;
+        }
+        text.push_back(c);
+        ++i;
+    }
+    return false;  // unterminated
+}
+
 void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& raw_val) const {
     if (prop.starts_with("--")) {
         style.custom_properties[prop] = raw_val;
@@ -1854,6 +1969,15 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else if (val_lower == "table-caption") style.display = Display::TableCaption;
         else if (val_lower == "contents") style.display = Display::Contents;
         else if (val_lower == "table-column" || val_lower == "table-column-group") style.display = Display::None;
+    } else if (prop == "content") {
+        // Phase 215. Only a string is represented: `content: "..."` with single
+        // or double quotes, and the CSS escapes inside it. `normal` and `none`
+        // leave `content` empty, which is what generates nothing; so does a
+        // value this parser does not represent (`counter()`, `attr()`,
+        // `url()`), rather than pretending to generate text it cannot mean.
+        std::string text;
+        if (parse_content_string(val, text)) style.content = text;
+        else style.content.clear();
     } else if (prop == "float") {
         if (val == "left") style.float_type = FloatType::Left;
         else if (val == "right") style.float_type = FloatType::Right;
@@ -2210,6 +2334,93 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             style.box_shadow.y_offset = lengths[1];
             style.box_shadow.blur = lengths.size() >= 3 ? lengths[2] : 0.0f;
             style.box_shadow.color = shadow_color;
+        }
+    } else if (prop == "outline" || prop == "outline-width" || prop == "outline-style" ||
+               prop == "outline-color" || prop == "outline-offset") {
+        // `outline: 2px solid red`, or any of its longhands. The four longhands
+        // are one ring around the border box: the style says whether there is
+        // one (`none` draws nothing whatever the width says), the width how
+        // thick, the colour which, and the offset how far outside the border
+        // box it sits. Before this the cascade stored none of it -- the CSSOM
+        // answered out of the declaration block and the painter had nothing to
+        // read -- so an outline was reported and never drawn.
+        auto says_drawn = [](const std::string& lower) {
+            return lower == "auto" || lower == "solid" || lower == "dashed" || lower == "dotted" ||
+                   lower == "double" || lower == "groove" || lower == "ridge" || lower == "inset" ||
+                   lower == "outset";
+        };
+        if (prop == "outline-offset") {
+            if (val_lower != "initial" && val_lower != "inherit" && val_lower != "unset") {
+                style.outline_offset = parse_length(val, 0.0f);
+            }
+        } else if (prop == "outline-style") {
+            if (val_lower == "initial" || val_lower == "unset") style.outline_drawn = false;
+            else if (val_lower != "inherit") style.outline_drawn = says_drawn(val_lower);
+        } else if (prop == "outline-width") {
+            if (val_lower == "initial" || val_lower == "unset") {
+                style.outline_width = 3.0f;    // `medium`
+            } else if (val_lower == "inherit") {
+                // inherited from the parent's ring, which the copy above did
+            } else if (val_lower == "thin") {
+                style.outline_width = 1.0f;
+            } else if (val_lower == "medium") {
+                style.outline_width = 3.0f;
+            } else if (val_lower == "thick") {
+                style.outline_width = 5.0f;
+            } else {
+                style.outline_width = std::max(0.0f, parse_length(val, 3.0f));
+            }
+        } else if (prop == "outline-color") {
+            if (val_lower == "initial" || val_lower == "unset" || val_lower == "currentcolor" ||
+                val_lower == "inherit") {
+                style.outline_color = style.color;
+            } else {
+                Color parsed;
+                if (Color::try_parse(val, parsed, style.color, style.dark_color_scheme)) {
+                    style.outline_color = parsed;
+                }
+            }
+        } else {
+            // The shorthand: the three parts in any order, each optional.
+            std::string cur;
+            int depth = 0;
+            auto process_part = [&](const std::string& part) {
+                if (part.empty()) return;
+                std::string low;
+                for (char c : part) low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                if (says_drawn(low)) {
+                    style.outline_drawn = true;
+                } else if (low == "none" || low == "hidden") {
+                    style.outline_drawn = false;
+                } else if (low == "thin") {
+                    style.outline_width = 1.0f;
+                } else if (low == "medium") {
+                    style.outline_width = 3.0f;
+                } else if (low == "thick") {
+                    style.outline_width = 5.0f;
+                } else if (low == "initial" || low == "unset" || low == "inherit") {
+                    // handled above, for the whole declaration
+                } else {
+                    Color parsed;
+                    if (Color::looks_like_color(part) &&
+                        Color::try_parse(part, parsed, style.color, style.dark_color_scheme)) {
+                        style.outline_color = parsed;
+                    } else if (std::isdigit(static_cast<unsigned char>(part[0])) || part[0] == '.') {
+                        style.outline_width = std::max(0.0f, parse_length(part, 3.0f));
+                    }
+                }
+            };
+            for (char c : val) {
+                if (c == '(') ++depth;
+                else if (c == ')' && depth > 0) --depth;
+                if (std::isspace(static_cast<unsigned char>(c)) && depth == 0) {
+                    process_part(cur);
+                    cur.clear();
+                } else {
+                    cur.push_back(c);
+                }
+            }
+            process_part(cur);
         }
     } else if (prop == "border") {
         // e.g. "1px solid black" or "2px solid oklch(0.6 0.2 30)"
@@ -2953,6 +3164,81 @@ std::string StyleResolver::resolve_calc_functions(const std::string& value, floa
         at = closed ? i : value.size();
     }
     return result;
+}
+
+ComputedStyle StyleResolver::resolve_pseudo_element(const std::shared_ptr<Element>& element, int which,
+                                                 const ComputedStyle& base) const {
+    ComputedStyle style = base;
+    // The generated box inherits everything from the element it belongs to and
+    // starts as an inline box with no content of its own. `content` is set only
+    // by the rules that name this pseudo-element.
+    style.display = Display::Inline;
+    style.content.clear();
+
+    struct Matched {
+        int tier;
+        int layer_key;
+        Specificity spec;
+        int order;
+        const Declaration* decl;
+    };
+    std::vector<Matched> matched;
+    int order = 0;
+    auto take = [&](const StyleSheet& sheet, int rank) {
+        (void)rank;
+        for (const auto& rule : sheet.rules) {
+            bool media_matches = true;
+            for (const auto& mq : rule.media_queries) {
+                if (!mq.matches(m_viewport_width, m_viewport_height)) { media_matches = false; break; }
+            }
+            if (!media_matches) continue;
+            for (const auto& sel : rule.selectors) {
+                // Only a selector that names this pseudo-element can style it,
+                // and only the last part's pseudo-element counts: `a::before b`
+                // is not a selector for `b`'s before box.
+                if (!matches_selector_for_pseudo(element, sel, which)) continue;
+                const int lrank = layer_rank(rule.layer_name);
+                for (const auto& decl : rule.declarations) {
+                    int tier = 2, lkey = 0;
+                    if (!decl.important) {
+                        tier = (lrank >= 0) ? 1 : 2;
+                        lkey = (lrank >= 0) ? lrank : 0;
+                    } else {
+                        tier = (lrank < 0) ? 4 : 5;
+                        lkey = (lrank < 0) ? 0 : -lrank;
+                    }
+                    matched.push_back({tier, lkey, sel.cached_specificity, order++, &decl});
+                }
+            }
+        }
+    };
+    ShadowRoot* shadow_scope = nullptr;
+    auto curr_p = element->parent();
+    while (curr_p) {
+        if (curr_p->is_document_fragment()) {
+            shadow_scope = dynamic_cast<ShadowRoot*>(curr_p.get());
+            if (shadow_scope) break;
+        }
+        curr_p = curr_p->parent();
+    }
+    if (shadow_scope) {
+        for (const auto& sheet : shadow_scope->parsed_stylesheets()) take(sheet, 0);
+    } else {
+        for (const auto& sheet : m_author_sheets) take(sheet, 0);
+    }
+
+    std::stable_sort(matched.begin(), matched.end(), [](const Matched& a, const Matched& b) {
+        if (a.tier != b.tier) return a.tier < b.tier;
+        if (a.layer_key != b.layer_key) return a.layer_key < b.layer_key;
+        if (a.spec.ids != b.spec.ids) return a.spec.ids < b.spec.ids;
+        if (a.spec.classes != b.spec.classes) return a.spec.classes < b.spec.classes;
+        if (a.spec.tags != b.spec.tags) return a.spec.tags < b.spec.tags;
+        return a.order < b.order;
+    });
+    for (const auto& m : matched) {
+        apply_declaration(style, m.decl->property, m.decl->value);
+    }
+    return style;
 }
 
 ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& element, const ComputedStyle* parent_style) const {

@@ -232,6 +232,11 @@ struct BoxShadow {
 
 struct ComputedStyle {
     Display display{Display::Inline};
+    /// CSS Generated Content 3 `content`. Only a string value is represented:
+    /// empty means `normal`/`none` (no box is generated), which is what the
+    /// property computes to when the page says nothing. Phase 215 makes
+    /// `::before`/`::after` with a non-empty string generate an inline run.
+    std::string content;
     Color color{Color::black()};
     Color background_color{Color::transparent()};
     bool dark_color_scheme{false};
@@ -254,6 +259,16 @@ struct ComputedStyle {
     EdgeSizes padding_percent{-1.0f};
     EdgeSizes border_width{0.0f};
     Color border_color{Color::black()};
+    /// `outline`, which a box draws around its border box without taking any
+    /// room (`outline-offset` moves it out; a negative one pulls it in). It is
+    /// not part of the box model, so it is not an `EdgeSizes`: it is one ring
+    /// of one width, and `outline_drawn` is the `outline-style` that decides
+    /// whether there is a ring at all (`none` draws nothing, whatever the
+    /// width says).
+    float outline_width{0.0f};
+    float outline_offset{0.0f};
+    bool outline_drawn{false};
+    Color outline_color{Color::black()};
     float border_radius{0.0f};
     float border_radius_percent{-1.0f};
     BoxShadow box_shadow;
@@ -517,6 +532,19 @@ public:
     float viewport_height() const { return m_viewport_height; }
 
     ComputedStyle resolve_style(const std::shared_ptr<Element>& element, const ComputedStyle* parent_style = nullptr) const;
+
+    /// The style of `element`'s `::before` (`which` 1) or `::after` (`which` 2)
+    /// box, computed against the element's own style: what the standard calls
+    /// the pseudo-element's computed values. Only selectors that name that
+    /// pseudo-element take part, which is why the ordinary matcher cannot be
+    /// used -- it rejects every `::` selector (Phase 215). `base` is the
+    /// element's style and everything generated inherits through it.
+    ComputedStyle resolve_pseudo_element(const std::shared_ptr<Element>& element, int which,
+                                         const ComputedStyle& base) const;
+    /// Whether `selector` -- which must name pseudo-element `which` -- applies
+    /// to `element`. The ordinary matcher refuses every `::` selector.
+    bool matches_selector_for_pseudo(const std::shared_ptr<Element>& element,
+                                     const Selector& selector, int which) const;
 
     const KeyframesRule* find_keyframes(const std::string& name) const;
     void apply_animation(ComputedStyle& style, float elapsed_seconds) const;

@@ -1,0 +1,12 @@
+stage: open
+Uncaught SyntaxError: 'with' statements are not supported (line 4)
+READ	0
+HIT	.new-todo @ 400,178.5 -> input#
+READ	true
+READ	Buy mangoes
+READ	1
+READ	Buy mangoes
+READ	
+HIT	.todo-list .toggle @ 145,248 -> label#
+BLOCKED	no clickable target: .todo-list .toggle
+END

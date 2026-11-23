@@ -786,6 +786,26 @@ void LayoutTree::build_boxes(
                 }
             }
         } else if (tag != "svg" && (element->is_foreign() || tag != "iframe")) {
+            // CSS Generated Content 3 `::before` and `::after` (Phase 215): an
+            // element with a string-valued `content` on one of them generates
+            // an inline run, in the DOM order the pseudo-elements take -- the
+            // before box first, then the children, then the after box.
+            //
+            // The run is laid out as a TextBox with no node of its own. Every
+            // object in it is made for this layout and dies with the tree, so
+            // nothing is inserted into the document: `textContent`, the
+            // children list and every live collection stay exactly as the page
+            // made them, which is what CSSOM says a pseudo-element is.
+            auto generated_run = [&](int which) -> std::shared_ptr<LayoutBox> {
+                const ComputedStyle pseudo =
+                    resolver.resolve_pseudo_element(element, which, *style);
+                if (pseudo.content.empty()) return nullptr;
+                if (pseudo.is_none() || pseudo.is_contents()) return nullptr;
+                SharedComputedStyle run_style = pool.intern(pseudo);
+                return LayoutBox::create_text(nullptr, collapse_whitespace(pseudo.content),
+                                              std::move(run_style));
+            };
+            if (auto before = generated_run(1)) box->append_child(std::move(before));
             const auto& children_to_process =
                 element->shadow_root() ? element->shadow_root()->children() : element->children();
             std::vector<std::shared_ptr<LayoutBox>> child_boxes;
@@ -822,6 +842,7 @@ void LayoutTree::build_boxes(
                     if (cb) box->append_child(cb);
                 }
             }
+            if (auto after = generated_run(2)) box->append_child(std::move(after));
         }
 
         normalize_table_children(box, pool);

@@ -70,7 +70,8 @@
 │   └── shell/             # BrowserShell (TUI keyboard navigation & DevTools)
 ├── src/                   # C++ implementation files matching include/
 ├── tests/
-│   └── test_suite.cpp     # Comprehensive monolithic unit & integration test runner
+│   ├── test_suite.cpp     # The test runner, and the suites written before 23 November 2026
+│   └── suites/            # A new suite is one file here (tests/suites/README.md)
 ├── examples/              # Visual showcase HTML pages
 ├── Makefile               # Build scripts for CLI (litebird) and test suite
 ├── README.md              # Public project documentation
@@ -289,7 +290,7 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
        });
    }
    ```
-4. Add unit test assertions in `tests/test_suite.cpp`.
+4. Add a suite for it: one file in `tests/suites/` ("Adding a Test Suite Entry", below).
 
 ### Adding a New CSS Property
 1. Add property enum value or data field to `ComputedStyle` in `include/litebird/css/StyleSheet.hpp`.
@@ -303,17 +304,16 @@ StyleResolver (Cascade + Viewport) ──► ComputedStyle per Element
 4. In `src/js/VM.cpp`, add the `case OpCode::OpMyOp:` dispatch branch inside `VM::run()`.
 
 ### Adding a Test Suite Entry
-1. Open `tests/test_suite.cpp`.
-2. Write a self-contained test function:
+1. Add one file to `tests/suites/`, named after the phase and what it is about: `218-text-decoration-lines.cpp`. `tests/suites/README.md` has the form and the reason.
+2. Write one self-contained suite in it, and nothing else in any other file (no `#include`, no line in `tests/test_suite.cpp`, no `RUN_TEST`):
    ```cpp
-   void test_my_feature() {
-       // Setup document or JS environment
+   TEST(my_feature_does_what_it_should) {
+       // Setup document or JS environment (TestPage)
        // Execute logic
        // assert(...)
    }
    ```
-3. Register the function inside `main()` with `RUN_TEST(test_my_feature);`.
-4. Run `make test` and ensure all suites pass.
+3. Run `make test` and ensure all suites pass. The suites of `tests/suites/` run first, so a new one fails in the first seconds if it fails.
 
 ---
 

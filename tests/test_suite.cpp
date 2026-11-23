@@ -93,10 +93,85 @@ extern "C" void __sanitizer_purge_allocator(void) __attribute__((weak));
 #include <sys/socket.h>
 #include <unistd.h>
 
-#define TEST(name) void test_##name()
+#include <cstdlib>  // std::_Exit, for EverySuiteRanOnce
+
+/// The suites, in the order they are defined. A suite puts itself here:
+/// `TEST(name)` declares the function, adds it to this list before `main()`
+/// begins, and then defines it.
+///
+/// Why there is a list. Until 23 November 2026 a suite was run because
+/// `main()` had a `RUN_TEST(name)` line for it, and nearly every pull request
+/// wrote its suite in front of `main()` and its line at the end of `main()`.
+/// Two pull requests that do that change the same two places, and only the
+/// first can be merged as it is. In the 90 pull requests before that day a
+/// branch merged `main` 285 times, and 44 of those merges were in conflict in
+/// this file, in 62 places: 22 at the end of `main()`, 22 just in front of it,
+/// and 18 further up, where two suites of one subject had gone to the same
+/// place. A suite that is a file of its own (tests/suites/, at the end of this
+/// file) has no line in common with any other pull request, and this list is
+/// how it is run without a `RUN_TEST` line.
+struct ListedSuite {
+    const char* name;
+    void (*run)();
+    bool own_file;  ///< in a file of tests/suites/: main() has no line for it
+    int runs;       ///< how often it was run; one, when main() has returned
+};
+static std::vector<ListedSuite>& suite_list() {
+    // Made at first use, which is before the first `TEST`, and never
+    // destroyed: `EverySuiteRanOnce` reads it after `main()` has returned.
+    static auto* list = new std::vector<ListedSuite>;
+    return *list;
+}
+/// True while the files of tests/suites/ are being read (the end of this file).
+static bool g_listing_own_files = false;
+static bool list_suite(const char* name, void (*run)()) {
+    suite_list().push_back({name, run, g_listing_own_files, 0});
+    return true;
+}
+static void note_suite_run(void (*run)()) {
+    for (auto& suite : suite_list())
+        if (suite.run == run) ++suite.runs;
+}
+#define TEST(name) \
+    void test_##name(); \
+    [[maybe_unused]] static const bool listed_##name = \
+        list_suite(#name, &test_##name); \
+    void test_##name()
 // Counted rather than hard-coded: the summary line used to drift behind the
 // real number of suites whenever a test was added.
 static int g_tests_run = 0;
+
+/// After `main()` has returned: every suite of the list was run, and once.
+///
+/// A suite that is defined and never run used to be nobody's failure: the run
+/// said "All N engine test suites passed" with an N one smaller than it should
+/// be, and nothing compared N with anything. That is the mistake a list kept
+/// in two places invites (a `TEST` in this file without its `RUN_TEST` line),
+/// and the one a list the suites keep themselves could hide (a file of
+/// tests/suites/ that was not read). Either now ends the run with status 1.
+/// It is looked at here, and not in `main()`, because the end of `main()` is
+/// the place every pull request used to write to.
+struct EverySuiteRanOnce {
+    ~EverySuiteRanOnce() {
+        if (g_tests_run == 0) return;  // main() did not get as far as a suite
+        int wrong = 0;
+        for (const auto& suite : suite_list()) {
+            if (suite.runs == 1) continue;
+            ++wrong;
+            std::cout << "\033[1;31mFAILED\033[0m: the suite " << suite.name
+                      << " was run " << suite.runs << " times, not once"
+                      << (suite.own_file
+                              ? " (a file of tests/suites/)\n"
+                              : " (a TEST of tests/test_suite.cpp: has it a "
+                                "RUN_TEST line in main()?)\n");
+        }
+        if (wrong != 0) {
+            std::cout << std::flush;
+            std::_Exit(1);
+        }
+    }
+};
+static EverySuiteRanOnce g_every_suite_ran_once;
 
 /// Called after every suite. In the sanitizer build it gives memory back;
 /// in the normal build it does nothing.
@@ -128,8 +203,29 @@ static void give_memory_back() {}
     std::cout << "Running test: " #name "... " << std::flush; \
     test_##name(); \
     give_memory_back(); \
+    note_suite_run(&test_##name); \
     std::cout << "\033[32mPASSED\033[0m\n"; \
 } while(0)
+
+/// Runs the suites that are files of their own (tests/suites/), in the order
+/// of their file names, and says of each what `RUN_TEST` says. `main()` calls
+/// this before its own list: the newest suites are the likeliest to fail, and
+/// a run that fails stops at the failure, so a mistake in a new suite is told
+/// in the first seconds and not behind every suite there ever was. A suite
+/// that leaves something behind for the suites after it is found the same
+/// way, in the pull request that wrote it.
+static void run_the_suites_in_files_of_their_own() {
+    for (std::size_t i = 0; i < suite_list().size(); ++i) {
+        if (!suite_list()[i].own_file) continue;
+        ++g_tests_run;
+        std::cout << "Running test: " << suite_list()[i].name << "... "
+                  << std::flush;
+        suite_list()[i].run();
+        give_memory_back();
+        ++suite_list()[i].runs;
+        std::cout << "\033[32mPASSED\033[0m\n";
+    }
+}
 
 /// A page and an interpreter over it, which is how nearly every suite that runs
 /// script begins.
@@ -5183,6 +5279,51 @@ TEST(collection_stress_asks_at_a_seeded_allocation_count) {
     assert(tight.take_gc_stress_request());
 }
 
+// A queued promise reaction is work outstanding, not garbage: the microtask
+// queue roots it, and the collector is right to leave it alone. The AGENTS.md
+// row for the GC audit read that queue depth as a leak, because it counted
+// `alive_cells` at the bottom of the loop where the reactions had not run yet.
+// This checks the two halves of that claim: mid-loop the cells are held, and
+// one turn later -- after the queue has drained -- they are gone.
+TEST(a_promise_reaction_is_a_queue_not_a_leak) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    js.eval(R"JS(
+        var base = 0, seenMid = 0, seenAfter = 0, drained = false;
+        var iterations = 500;
+        function start() {
+            for (var i = 0; i < iterations; i++) {
+                Promise.resolve(1).then(function f(v) { return v; });
+            }
+            gc();
+            seenMid = gc().alive_cells - base;
+            setTimeout(function () {
+                gc();
+                seenAfter = gc().alive_cells - base;
+                drained = true;
+            }, 0);
+        }
+        // Take the baseline after this script's own frame has been popped, so
+        // it does not count the interpreter's own working set.
+        setTimeout(function () { gc(); base = gc().alive_cells; start(); }, 0);
+    )JS");
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+
+    const auto& global = js.global_object();
+    const double mid = global.get_property("seenMid").to_number();
+    const double after = global.get_property("seenAfter").to_number();
+    assert(global.get_property("drained").is_truthy());
+
+    // The queued reactions are still on the heap mid-loop: the queue is visible
+    // in the count, which is exactly what the row mistook for a leak. Two cells
+    // (a promise and its reaction record) per queued reaction.
+    assert(mid >= 500.0);
+    // After the queue drains, all but a handful of cells come back. A real leak
+    // of two cells an iteration would leave a thousand.
+    assert(after <= 64.0);
+}
+
 TEST(dom_event_target_and_bubbling) {
     using namespace litebird;
 
@@ -6737,6 +6878,29 @@ TEST(subtle_crypto_digest_sha256) {
     // Unsupported algorithm rejects with NotSupportedError
     interp.eval("var rejAlg = null; crypto.subtle.digest({ name: 'MD5' }, new Uint8Array(0)).catch(function(e) { rejAlg = e.name; });");
     assert(interp.eval("rejAlg === 'NotSupportedError'").is_truthy());
+}
+
+TEST(subtle_crypto_digest_sha1_sha384_sha512) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var data = new TextEncoder().encode('abc');
+        var h1 = null, h384 = null, h512 = null;
+        crypto.subtle.digest('SHA-1', data).then(function(b) { h1 = toHex(b); });
+        crypto.subtle.digest('SHA-384', data).then(function(b) { h384 = toHex(b); });
+        crypto.subtle.digest('SHA-512', data).then(function(b) { h512 = toHex(b); });
+    )");
+    assert(interp.eval("h1 === 'a9993e364706816aba3e25717850c26c9cd0d89d'").is_truthy());
+    assert(interp.eval("h384 === 'cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7'").is_truthy());
+    assert(interp.eval("h512 === 'ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f'").is_truthy());
 }
 
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
@@ -32183,6 +32347,101 @@ TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
     assert(count == 2); // two cells of the four-by-three terminal
 }
 
+TEST(browser_shell_activates_a_checkbox_and_toggles_it_from_the_keyboard) {
+    using namespace litebird;
+    // A click on a checkbox is an *activation behavior*, and a listener reads
+    // the state the click caused - a todo list's handler asks `this.checked`.
+    // The mouse path already did this: `click_at` ends in `send_mouse`, and
+    // that ends in `Element::click()`, which is the door to the dispatch that
+    // runs `before_click`/`after_click` in DomFormBindings.cpp. The keyboard
+    // did not. `handle_key(" ")` on a focused checkbox fell through to
+    // `type_text`, which has nothing to type into, and answered true: it said
+    // "handled" and changed nothing. A control a keyboard user cannot work is
+    // not a control, and HTML's activation behavior is reached from Space and
+    // Enter as much as from a point.
+    //
+    // The first two cases below are therefore the mouse path held still: they
+    // pass before this phase and must keep passing after it, because the
+    // keyboard is only fixed once it goes through the same door.
+    //
+    // The page is loaded through the shell, because the shell makes its own
+    // document and that document is the one with the realm the events run in.
+    auto page = [](const char* body) {
+        return std::string("data:text/html,") + body;
+    };
+    const char* shell_page =
+        "<!DOCTYPE html><body style='margin:0'>"
+        "<input id='c' type='checkbox' style='display:block;width:20px;height:20px'>"
+        "<script>window.log = [];"
+        "c.addEventListener('click', function () { log.push('click:' + c.checked); });"
+        "c.addEventListener('change', function () { log.push('change:' + c.checked); });"
+        "</script></body>";
+
+    // ---- the mouse path, held still ---------------------------------------
+    {
+        BrowserShell shell(400.0f, 300.0f, 40, 12);
+        assert(shell.navigate_to(page(shell_page)));
+        JsInterpreter& js = *shell.js_engine();
+        auto text = [&](const char* s) { return js.eval(s).to_string(); };
+        assert(text("String(c.checked)") == "false");
+        assert(shell.click_at(10.0f, 10.0f));            // inside the checkbox
+        assert(text("String(c.checked)") == "true");
+        // The listener saw the state the click caused, not the one before it.
+        assert(text("log.join(',')") == "click:true,change:true");
+        assert(shell.click_at(10.0f, 10.0f));            // and it toggles back
+        assert(text("String(c.checked)") == "false");
+    }
+
+    // ---- a canceling listener takes the change back ------------------------
+    {
+        BrowserShell shell(400.0f, 300.0f, 40, 12);
+        assert(shell.navigate_to(page(shell_page)));
+        JsInterpreter& js = *shell.js_engine();
+        auto text = [&](const char* s) { return js.eval(s).to_string(); };
+        js.eval("c.onclick = function (e) { log.push('onclick:' + c.checked); e.preventDefault(); };");
+        shell.click_at(10.0f, 10.0f);
+        assert(text("log.join(',')") == "click:true,onclick:true");
+        assert(text("String(c.checked)") == "false");
+    }
+
+    // ---- the keyboard ------------------------------------------------------
+    {
+        BrowserShell shell(400.0f, 300.0f, 40, 12);
+        assert(shell.navigate_to(page(shell_page)));
+        JsInterpreter& js = *shell.js_engine();
+        auto text = [&](const char* s) { return js.eval(s).to_string(); };
+        js.eval("c.focus()");
+        assert(js.eval("document.activeElement === c").is_truthy());
+        assert(shell.handle_key(" "));
+        assert(text("String(c.checked)") == "true");
+        assert(text("log.join(',')") == "click:true,change:true");
+        assert(shell.handle_key(" "));
+        assert(text("String(c.checked)") == "false");
+    }
+
+    // ---- a radio is set, never toggled off, and its group is exclusive -----
+    {
+        BrowserShell shell(400.0f, 300.0f, 40, 12);
+        assert(shell.navigate_to(page(
+            "<!DOCTYPE html><body><script>window.log = [];"
+            "var r1 = document.createElement('input'); r1.type = 'radio'; r1.name = 'g';"
+            "var r2 = document.createElement('input'); r2.type = 'radio'; r2.name = 'g';"
+            "document.body.appendChild(r1); document.body.appendChild(r2);"
+            "r1.checked = true;"
+            "r2.addEventListener('change', function () { log.push('r2-change'); });"
+            "</script></body>")));
+        JsInterpreter& js = *shell.js_engine();
+        auto text = [&](const char* s) { return js.eval(s).to_string(); };
+        js.eval("r2.click()");
+        assert(text("String(r1.checked) + ',' + String(r2.checked)") == "false,true");
+        // Already checked: the activation sets it rather than toggling it, so
+        // nothing changed and no `change` is fired.
+        js.eval("log.length = 0; r2.click();");
+        assert(text("String(r2.checked)") == "true");
+        assert(text("log.join(',')") == "");
+    }
+}
+
 TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling) {
     using namespace litebird;
     BrowserShell shell(200, 150, 20, 10);
@@ -32228,6 +32487,64 @@ TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling) {
     auto resized = frame();
     assert(resized->width == 240 && resized->height == 180);
     assert(resized->get_pixel_color(239, 179) == Color(255, 127, 127));
+}
+
+TEST(browser_shell_geometry_is_viewport_relative) {
+    using namespace litebird;
+    // Phase 222, finding 226: getBoundingClientRect must return viewport
+    // coordinates (document rect minus scroll), and window.scrollX/Y must
+    // reflect the shell's scroll. A hidden element (display:none) has no box
+    // and must read 0,0,0,0.
+    BrowserShell shell(800, 600, 80, 24);
+    assert(shell.navigate_to("tests/render/canvas-scroll.html"));
+    // canvas-scroll.html has a tall canvas; its viewport starts at 0.
+    // Scroll and check that geometry follows the viewport.
+    auto rect_top = [&](const char* sel) -> double {
+        std::string js = std::string("document.querySelector('") + sel + "').getBoundingClientRect().top";
+        return shell.js_engine()->eval(js).to_number();
+    };
+    auto rect_left = [&](const char* sel) -> double {
+        std::string js = std::string("document.querySelector('") + sel + "').getBoundingClientRect().left";
+        return shell.js_engine()->eval(js).to_number();
+    };
+    // Initially the body is at its document position; window scroll is 0.
+    double body_top_0 = rect_top("body");
+    double body_left_0 = rect_left("body");
+    assert(shell.js_engine()->eval("window.scrollY").to_number() == 0.0);
+    assert(shell.js_engine()->eval("window.pageYOffset").to_number() == 0.0);
+
+    shell.scroll_to(15, 300);
+    assert(shell.scroll_x() == 15 && shell.scroll_y() == 300);
+    // Document and window must expose the same scroll.
+    assert(shell.document()->scroll_x() == 15 && shell.document()->scroll_y() == 300);
+    assert(shell.js_engine()->eval("window.scrollX").to_number() == 15.0);
+    assert(shell.js_engine()->eval("window.scrollY").to_number() == 300.0);
+    assert(shell.js_engine()->eval("window.pageXOffset").to_number() == 15.0);
+    assert(shell.js_engine()->eval("window.pageYOffset").to_number() == 300.0);
+
+    // Body's viewport position must be document position minus scroll.
+    double body_top_scrolled = rect_top("body");
+    assert(body_top_scrolled == body_top_0 - 300.0);
+    double body_left_scrolled = rect_left("body");
+    assert(body_left_scrolled == body_left_0 - 15.0);
+
+    // A canvas element inside the document should also be viewport-relative.
+    // canvas-scroll.html paints a canvas at document (0,0) with size 200x150 in the test above;
+    // its rect should also be -300 after scroll.
+    // For a hidden element, the rect must be 0,0,0,0 even when scrolled.
+    shell.js_engine()->eval("document.body.style.display = 'none'");
+    shell.relayout();
+    double hidden_top = rect_top("body");
+    assert(hidden_top == 0.0);
+    assert(shell.js_engine()->eval("document.querySelector('body').getBoundingClientRect().width").to_number() == 0.0);
+    double hidden_left = rect_left("body");
+    assert(hidden_left == 0.0);
+    // getClientRects on a hidden element must be empty.
+    assert(shell.js_engine()->eval("document.querySelector('body').getClientRects().length").to_number() == 0.0);
+    shell.js_engine()->eval("document.body.style.display = 'block'");
+    shell.relayout();
+    // After restoring, scroll is still 300, so viewport must be document minus scroll again.
+    assert(rect_top("body") == body_top_0 - 300.0);
 }
 
 TEST(a_built_in_method_is_not_a_constructor) {
@@ -35177,6 +35494,9 @@ TEST(svg_class_name_is_a_live_animated_string) {
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
+    // The suites of tests/suites/, which have no line here, and then the list.
+    run_the_suites_in_files_of_their_own();
+
     RUN_TEST(color_parsing);
     RUN_TEST(css_color_keywords_match_the_css_specification);
     RUN_TEST(html_parser);
@@ -35215,6 +35535,7 @@ int main() {
     RUN_TEST(the_font_shorthand_resets_font_kerning);
     RUN_TEST(the_painter_honours_font_kerning_none);
     RUN_TEST(garbage_collector_and_cycles);
+    RUN_TEST(a_promise_reaction_is_a_queue_not_a_leak);
     RUN_TEST(collection_stress_asks_at_a_seeded_allocation_count);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);
@@ -35240,6 +35561,7 @@ int main() {
     RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
     RUN_TEST(crypto_get_random_values_and_random_uuid);
     RUN_TEST(subtle_crypto_digest_sha256);
+    RUN_TEST(subtle_crypto_digest_sha1_sha384_sha512);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);
@@ -35665,6 +35987,10 @@ int main() {
     RUN_TEST(pseudo_elements_generate_a_box_that_can_be_hit);
     RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
     RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
+    RUN_TEST(browser_shell_geometry_is_viewport_relative);
+    // Phase 220: a click on a checkbox is an activation behavior, and Space
+    // on a focused one toggles it.
+    RUN_TEST(browser_shell_activates_a_checkbox_and_toggles_it_from_the_keyboard);
 
     // Phase 157: ArrayBuffer.prototype.transfer(), transferToFixedLength(), detached, and resize().
     RUN_TEST(arraybuffer_transfer_detach_and_resize);
@@ -35729,12 +36055,24 @@ int main() {
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";
-    // A new `RUN_TEST` line does not go at the end of the list above. Every
-    // pull request that puts one there changes the same place as every other
-    // that does, and only the first of them can be merged as it is
-    // (AGENTS.md, "Working together", point 2). Put it under the line of a
-    // related suite, further up. This comment stands below the summary so
-    // that it is not in that place itself.
+    // A new suite gets no line in the list above, and is not written into
+    // this file at all: it is a file of its own in tests/suites/ (AGENTS.md,
+    // "Working together", point 2; tests/suites/README.md). Every pull request
+    // that added a line here changed the same place as every other that did,
+    // and only the first of them could be merged as it was. This comment
+    // stands below the summary so that it is not in that place itself.
     return 0;
 }
+
+// The suites that are files of their own. `suite_files.inc` is written by the
+// Makefile from the names in tests/suites/ and is not kept in git: for each
+// file a namespace named after it, and inside that the file. So a suite sees
+// everything above this line, and two files may each have a helper of the
+// same name. They are read here, behind `main()`, because in front of it is
+// where pull requests used to put their suites.
+[[maybe_unused]] static const bool g_own_files_begin =
+    (g_listing_own_files = true);
+#include "suite_files.inc"
+[[maybe_unused]] static const bool g_own_files_end =
+    !(g_listing_own_files = false);
 

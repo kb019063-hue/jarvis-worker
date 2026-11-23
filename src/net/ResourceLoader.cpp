@@ -2432,7 +2432,18 @@ std::string ResourceLoader::address_of(const std::string& location) {
 }
 
 std::string ResourceLoader::resolve_url(std::string_view base_url, std::string_view relative_url) {
-    if (relative_url.empty()) return std::string(base_url);
+    // A reference with no path does not replace the base's last path segment.
+    // Let the URL parser handle absolute bases (including encoding and an
+    // authority with an empty path), as the browser's URL API does. Preserve
+    // support for the relative filesystem paths this legacy helper also takes.
+    if (relative_url.empty() || relative_url.front() == '?' || relative_url.front() == '#') {
+        Url base, resolved;
+        if (Url::parse(base_url, nullptr, base) && Url::parse(relative_url, &base, resolved))
+            return resolved.href();
+        const auto end = base_url.find_first_of(
+            !relative_url.empty() && relative_url.front() == '?' ? "?#" : "#");
+        return std::string(base_url.substr(0, end)) + std::string(relative_url);
+    }
 
     if (relative_url.rfind("http://", 0) == 0 ||
         relative_url.rfind("https://", 0) == 0 ||

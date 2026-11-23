@@ -4034,6 +4034,42 @@ std::pair<float, float> FontRenderer::em_ascent_descent(float font_size, int fon
     return {asc, desc};
 }
 
+std::pair<float, float> FontRenderer::decoration_lines(float font_size, int font_weight,
+                                                      std::string_view css_family, bool italic) {
+    const auto [ascent, descent] = em_ascent_descent(font_size, font_weight, css_family, italic);
+    // The bitmap the painter will use, so the ink measured here is the ink
+    // drawn: `draw_text` rounds to the same pixel size.
+    const int px_size = std::clamp(static_cast<int>(std::lround(font_size)), 6, 160);
+    const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);
+    const bool bold = font_weight >= 600;
+
+    // Top of the glyph's ink, as a height above the baseline. `bearing_y` is
+    // the offset from the baseline to the top of the bitmap and
+    // `coverage` rows run down from there; the first row with enough coverage
+    // is where the shape starts.
+    auto ink_top = [&](uint32_t codepoint, float fallback) -> float {
+        const GlyphBitmap& g = get_glyph(codepoint, px_size, font_weight, family_id, italic);
+        if (g.width <= 0 || g.height <= 0) return fallback;
+        for (int r = 0; r < g.height; ++r) {
+            for (int c = 0; c < g.width; ++c) {
+                if (g.coverage[static_cast<std::size_t>(r) * g.width + c] >= 48) {
+                    return static_cast<float>(g.bearing_y - r);
+                }
+            }
+        }
+        return fallback;
+    };
+    (void)bold;
+
+    float x_height = ink_top('x', ascent * 0.5f);
+    float cap_height = ink_top('H', ascent);
+    // A face with no lowercase (or no capitals) gets the other's shape rather
+    // than a line through the middle of the text.
+    if (!(x_height > 0.0f)) x_height = cap_height * 0.7f;
+    if (!(cap_height > 0.0f)) cap_height = ascent;
+    return {x_height, cap_height};
+}
+
 float FontRenderer::glyph_advance_px(uint32_t codepoint, float font_size, int font_weight,
                                      std::string_view css_family, bool italic) const {
     const int family_id = css_family.empty() ? kDefaultFamily : family_id_for(css_family);

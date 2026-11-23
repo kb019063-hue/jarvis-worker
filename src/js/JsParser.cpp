@@ -558,6 +558,12 @@ std::unique_ptr<Stmt> JsParser::parse_statement() {
             consume_semicolon();
             return std::make_unique<EmptyStmt>();
         case JsTokenType::Import:
+            // `import(...)` is an Import Call (§13.3.12) and is an expression,
+            // not a declaration: the check for an opening parenthesis is what
+            // the grammar looks for, and the parenthesis may come after a line
+            // break. `import.meta` and a module's `import x from` are not.
+            if (peek(1).type == JsTokenType::OpenParen) break;
+            fail("import and export are only valid in modules, which are not supported");
         case JsTokenType::Export:
             fail("import and export are only valid in modules, which are not supported");
         case JsTokenType::With:
@@ -1857,6 +1863,12 @@ std::unique_ptr<Expr> JsParser::parse_new() {
         return std::make_unique<NewTargetExpr>();
     }
     std::unique_ptr<Expr> callee = check(JsTokenType::New) ? parse_new() : parse_primary();
+    // `new import(x)` is a SyntaxError: §13.3 rules an Import Call out of
+    // `NewExpression`, and the restriction does not follow the parentheses --
+    // `new (import(x))` is a TypeError at run time, and that one parses.
+    if (callee && callee->kind == NodeKind::ImportCall && !callee->explicitly_grouped) {
+        fail("Cannot use new with import");
+    }
     // Member accesses bind tighter than the argument list: `new a.b.C(x)`.
     while (true) {
         if (match(JsTokenType::Dot)) {
@@ -2189,6 +2201,28 @@ std::unique_ptr<Expr> JsParser::parse_primary() {
                 if (auto* fn = nearest_non_arrow_function()) fn->uses_arguments = true;
             }
             result = std::make_unique<IdentifierExpr>(std::move(name));
+            break;
+        }
+        case JsTokenType::Import: {
+            // On the expression path only an Import Call can reach here -- the
+            // statement path refused everything else before it got this far.
+            // §13.3.12: `import` belongs to the call, so what follows it is an
+            // argument list and nothing else; `import.meta` falls in as an
+            // expected-')' error.
+            advance();
+            if (!check(JsTokenType::OpenParen)) fail_unexpected();
+            advance();
+            FlagScope scope(m_no_in, false);
+            auto specifier = parse_assignment();
+            if (match(JsTokenType::Comma)) {
+                // Node answers this as a SyntaxError at run time rather than a
+                // parse error; the language has no second argument, so the text
+                // is the useful part either way.
+                fail("import() takes one argument");
+            }
+            if (check(JsTokenType::Ellipsis)) fail("import() does not take a spread argument");
+            consume(JsTokenType::CloseParen, "Expected ')' after the import() specifier.");
+            result = std::make_unique<ImportCallExpr>(std::move(specifier));
             break;
         }
         case JsTokenType::Yield:

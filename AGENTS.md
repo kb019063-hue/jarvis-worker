@@ -106,21 +106,31 @@ within the hour, and the first lot was started again four times.
    count (#91, #150, #146, #170). Now `make check-numbers` notes a count that
    is behind and fails nothing, `make metrics` leaves the count as it is
    written, and the landing session refreshes it at the end of a watch. Add
-   your suite and its `RUN_TEST` line; do not touch the number. If your
-   branch already changed it and now conflicts there, take `main`'s lines.
+   your suite; do not touch the number. If your branch already changed it
+   and now conflicts there, take `main`'s lines.
 
-   **And put the `RUN_TEST` line under that of a related suite, not at the
-   end of `main()`.** Two pull requests that each add a line at the end
-   change the same place, and the second cannot be merged after the first.
-   On 23 November #244, #264, #267 and #273 had each put theirs there:
-   #264 landed, and within the hour the other three were in conflict with
-   it, one sent back out of a lot and two caught by `main`. The four that
-   had put theirs further up, by a suite of the same subject (#257, #263,
-   #268, #272), merged with everything. Where the line stands decides only
-   the order the suites run in. The suite itself goes behind a related one
-   as well, and not in front of `main()`, for the same reason. (Two pull
-   requests that rewrite neighbouring rows of "Open tasks" conflict too,
-   as #244 and #257 did, and nothing avoids that yet.)
+   **And write your suite as a file of its own:
+   `tests/suites/218-a-few-words.cpp`, the phase and what it is about, with
+   one `TEST(name) { … }` in it.** Nothing else: no line in
+   `tests/test_suite.cpp`, no `RUN_TEST`, no `#include`. The suite puts
+   itself into a list, and `make test` runs the files of that directory
+   first, then the old suites (`tests/suites/README.md` has the form and
+   what the file may use; `python3 tools/ci/check_suites.py` says when a
+   file is not in it). Until 23 November every suite was written into the
+   one file, in front of `main()`, with a `RUN_TEST` line at the end of
+   `main()`, and two pull requests that do that change the same two
+   places. In the 90 pull requests before that day their branches merged
+   `main` 285 times; 120 of those merges were in conflict, 44 of them in
+   that file, at the end of `main()` or in front of it or where two suites
+   of one subject had gone to the same place. That morning #244, #264,
+   #267 and #273 had each put a line at the end: #264 landed, and within
+   the hour the other three were in conflict with it, one sent back out of
+   a lot and two caught by `main`. A file that only your pull request has
+   is in conflict with nothing. The suites that are in
+   `tests/test_suite.cpp` stay there, each with its line, and an assertion
+   more for one of them is still written there. (Two pull requests that
+   rewrite neighbouring rows of "Open tasks" conflict too, as #244 and
+   #257 did, and nothing avoids that yet.)
 3. **When your pull request is finished, ask whether a watch is on.**
    Finished is: the checks of "What "done" means" pass, `WIP:` is off the
    title, and CI is green on the head commit (wait for it with
@@ -220,8 +230,9 @@ within the hour, and the first lot was started again four times.
    **Carried.** A finished pull request whose agent is gone, and whose
    conflict needs no judgement (the suite count of `README.md`; a row
    somebody else put where its row is; a `RUN_TEST` line at the end of
-   `main()`, where another's now is: #244's was moved under that of the
-   suite its own is defined after; a number that is on `main` already:
+   `main()`, where another's now is, in a pull request from before suites
+   were files of their own: #244's was moved under that of the suite its
+   own is defined after; a number that is on `main` already:
    #223 was opened as Phase 179 and landed as Phase 191), is resolved in
    the landing session's branch and said in #N. It lands when the watch's
    own pull request is merged, and not before: GitHub shows #N as merged
@@ -299,10 +310,11 @@ without one, and leaves the board and a watch out of the claims.
 
 ## The files every pull request changes
 
-`README.md`, `ARCHITECTURE.md`, `AUDIT.md`, `tests/test_suite.cpp` (one file,
-with the suites registered in a list at its end), `Makefile`,
+`README.md`, `ARCHITECTURE.md`, `AUDIT.md`, `Makefile`,
 `.github/workflows/ci.yml` and the table below. Two pull requests written at
-the same time will both have changed them. So:
+the same time will both have changed them. (`tests/test_suite.cpp` was the
+one they met in most often, until 23 November: a new suite is a file of its
+own now, "Working together", point 2.) So:
 
 1. Add a block of your own: a section, a group of tests. Do not re-wrap or
    reorder what is there.
@@ -326,7 +338,8 @@ Every live figure in `README.md` and `ROADMAP.md` carries an invisible marker
 naming it — `**1137 / 1156 (98.4%)**<!--metrics:js/frac_pct-->` — and `make
 metrics` rewrites the text in front of each marker from `docs/metrics.json` and
 from the tree. Counted things are derived where they are checked: the suite
-count is the `RUN_TEST` list of `tests/test_suite.cpp`, the corpus totals are
+count is the `RUN_TEST` list of `tests/test_suite.cpp` and the files of
+`tests/suites/`, the corpus totals are
 the cases on disk. Measured things are in `docs/metrics.json` with the command
 that produced them and the day it did, so a figure can be argued with instead
 of trusted. `make check-numbers` fails when any marked figure disagrees

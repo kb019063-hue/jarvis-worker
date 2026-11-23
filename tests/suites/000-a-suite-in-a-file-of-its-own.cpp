@@ -46,8 +46,4 @@ TEST(a_suite_in_a_file_of_its_own_is_run_without_a_line_in_main) {
     // No two suites of the list have the same name, wherever they are.
     std::set<std::string> names;
     for (const auto& suite : list) assert(names.insert(suite.name).second);
-
-    std::cout << "[" << list.size() << " suites list themselves; "
-              << (list.size() - in_the_big_file)
-              << " of them are files of their own] ";
 }

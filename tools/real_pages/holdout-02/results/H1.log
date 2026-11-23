@@ -1,0 +1,7 @@
+stage: open
+READ	false
+HIT	[popovertargetaction=show] @ 65.0195,18 -> button#
+READ	true
+HIT	[popovertargetaction=hide] @ 61.6719,38 -> button#
+READ	false
+END

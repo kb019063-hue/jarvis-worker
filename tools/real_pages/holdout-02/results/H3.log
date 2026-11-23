@@ -1,0 +1,7 @@
+stage: open
+READ	4
+HIT	section div @ 39,87 -> div#
+READ	true
+HIT	.after @ 52.4141,334 -> button#
+READ	5
+END

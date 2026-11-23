@@ -5481,6 +5481,56 @@ TEST(browser_shell_navigation_and_hit_testing) {
     assert(frame.find("Litebird DevTools") != std::string::npos);
 }
 
+TEST(shell_frame_labels_cannot_inject_terminal_controls) {
+    using namespace litebird;
+    // A real navigation keeps an attacker-controlled filename unchanged,
+    // while the terminal frame prints a safe representation of it.
+    const std::string path = "/tmp/litebird-shell-" + std::to_string(getpid()) + "-\033]0;bad\007.html";
+    { std::ofstream file(path); file << "<!doctype html><button>click</button>"; }
+    BrowserShell shell(200, 150, 20, 10);
+    assert(shell.navigate_to(path));
+    std::remove(path.c_str());
+    assert(shell.current_url() == path);
+    assert(shell.status_message() == "Loaded " + path);
+    std::string frame = shell.render_terminal_frame();
+    const std::string shown = "/tmp/litebird-shell-" + std::to_string(getpid()) + "-?]0;bad?.html";
+    assert(frame.find("URL: [\033[1m" + shown + "\033[22m]") != std::string::npos);
+    assert(frame.find("Loaded " + shown) != std::string::npos);
+
+    // Exercise every byte in both the focused ID and the status text. The
+    // original DOM and status are unchanged; controls, C1 and UTF-8 bytes
+    // are replaced only when emitted. Focus updates the cached text.
+    std::string bytes, safe;
+    for (int i = 0; i != 256; ++i) {
+        bytes.push_back(static_cast<char>(i));
+        safe.push_back(i >= 0x20 && i <= 0x7e ? static_cast<char>(i) : '?');
+    }
+    auto button = shell.focused_element();
+    assert(button);
+    button->set_attribute("id", bytes);
+    button->append_child(std::make_shared<Text>(bytes));
+    shell.relayout();
+    shell.focus_next();
+    assert(shell.focused_element()->id() == bytes);
+    assert(shell.status_message().find(bytes) != std::string::npos);
+    frame = shell.render_terminal_frame(true);
+    assert(frame.find("Focus: <button#" + safe + ">") != std::string::npos);
+    assert(frame.find("Focused: <button> \"click" + safe + "\"") != std::string::npos);
+    assert(frame.find("\033]0;bad\007") == std::string::npos);
+    std::ostringstream printed;
+    shell.print_terminal_frame(printed, false);
+    assert(printed.str() == shell.render_terminal_frame(false));
+
+    // A failed navigation also includes the untrusted URL in the status.
+    const std::string missing = "/tmp/litebird-no-such-" + std::to_string(getpid()) + "-\033[2J\r";
+    assert(!shell.navigate_to(missing));
+    assert(shell.status_message().find(missing) != std::string::npos);
+    frame = shell.render_terminal_frame();
+    assert(frame.find("Error loading /tmp/litebird-no-such-") != std::string::npos);
+    assert(frame.find("?[2J?") != std::string::npos);
+    assert(frame.find("\033[2J") == std::string::npos);
+}
+
 TEST(css_positioning_and_stacking_contexts) {
     using namespace litebird;
 
@@ -20899,6 +20949,157 @@ TEST(worker_options_module_policy_and_global_scope) {
     std::remove(secret_js.c_str());
 }
 
+/// A JS string literal holding `text`, escaping what a literal must escape.
+/// The worker sources below are handed to `new Worker('data:...')` through
+/// `encodeURIComponent`, so what they run must survive one more level of
+/// quoting than a pasted URL would.
+static std::string js_quote_for_suite(const std::string& text) {
+    std::string out = "\"";
+    for (char c : text) {
+        if (c == '\\' || c == '"') out += '\\';
+        out += c;
+    }
+    out += '"';
+    return out;
+}
+
+TEST(text_codecs_are_installed_in_a_worker_scope) {
+    using namespace litebird;
+
+    // Phase 206, finding 210. The row's last open item: `TextDecoder` and
+    // `TextEncoder` were installed on every global, a worker's included, and
+    // nothing said so. `install_text_codec_builtins` is called from
+    // `JsInterpreter`'s setup, which a worker runs for its own realm — but a
+    // later change could have moved it behind `if (m_document)` and every
+    // window suite would still pass.
+    //
+    // What is asserted here is the interface *through a worker's global*, in
+    // one script run inside the worker and answered by `postMessage`, and the
+    // answers are Node v22.22.3's (measured outside, in a worker there too).
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(4)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    // The same probes on the window's global first, so a failure says which
+    // scope is missing them rather than only that one is.
+    js.eval(R"JS(
+        var winProbe = [typeof TextDecoder, typeof TextEncoder].join(',');
+    )JS");
+    assert(js.eval("winProbe").to_string() == "function,function");
+
+    const std::string worker_source =
+        "var out = [];"
+        "function t(name, f) {"
+        "  var v; try { v = String(f()); } catch (e) { v = 'THREW ' + e.name; }"
+        "  out.push(name + ' => ' + v);"
+        "}"
+        "t('typeof', function () { return typeof TextDecoder + ',' + typeof TextEncoder; });"
+        "t('toStringTag', function () {"
+        "  return Object.prototype.toString.call(new TextDecoder()) + ' ' +"
+        "         Object.prototype.toString.call(new TextEncoder()); });"
+        "t('encoding', function () { return new TextDecoder().encoding + ' ' + new TextEncoder().encoding; });"
+        "t('latin1 label', function () { return new TextDecoder('latin1').encoding; });"
+        "t('options', function () {"
+        "  return new TextDecoder('utf-8', {fatal: true}).fatal + ' ' + new TextDecoder().ignoreBOM; });"
+        "t('constructor needs new', function () {"
+        "  try { TextDecoder(); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('unknown label', function () {"
+        "  try { new TextDecoder('utf-32'); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('replacement label', function () {"
+        "  try { new TextDecoder('replacement'); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('decode of a plain array', function () {"
+        "  try { new TextDecoder().decode([1, 2]); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('round trip', function () {"
+        "  return new TextDecoder().decode(new TextEncoder().encode('h\\u00e9llo \\u20ac')); });"
+        "t('encode answers a Uint8Array', function () {"
+        "  return Object.prototype.toString.call(new TextEncoder().encode('a')); });"
+        "t('encodeInto', function () {"
+        "  var buf = new Uint8Array(3); var r = new TextEncoder().encodeInto('ab', buf);"
+        "  return r.read + ',' + r.written + ',' + buf[0] + ',' + buf[1]; });"
+        "t('a lone surrogate is three bytes', function () {"
+        "  return new TextEncoder().encode('\\uD800').join(','); });"
+        "t('stream split inside a character', function () {"
+        "  var d = new TextDecoder();"
+        "  return d.decode(new Uint8Array([0xE2]), {stream: true}) + '|' +"
+        "         d.decode(new Uint8Array([0x82, 0xAC])) + '|' + d.decode(); });"
+        "t('fatal error resets the decoder', function () {"
+        "  var d = new TextDecoder('utf-8', {fatal: true});"
+        "  try { d.decode(new Uint8Array([0xFF]), {stream: true}); } catch (e) {}"
+        "  return d.decode(new Uint8Array([0x41])); });"
+        "t('BOM stripped', function () {"
+        "  return new TextDecoder().decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x41])); });"
+        "t('FE FF is data to UTF-16LE', function () {"
+        "  var v = new TextDecoder('utf-16le').decode(new Uint8Array([0xFE, 0xFF, 0x00, 0x41]));"
+        "  return v.length + ':' + v.charCodeAt(0).toString(16); });"
+        "t('ignoreBOM keeps it', function () {"
+        "  return new TextDecoder('utf-8', {ignoreBOM: true})"
+        "      .decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x41])).length; });"
+        "t('instanceof its own constructor', function () {"
+        "  return (new TextDecoder() instanceof TextDecoder) + ',' +"
+        "         (new TextEncoder() instanceof TextEncoder); });"
+        "postMessage(out);";
+
+    // The source goes through the interpreter as a JS string literal, so it is
+    // quoted here rather than pasted into a `data:` URL with its own escapes.
+    js.eval("var workerSrc = " + js_quote_for_suite(worker_source) + ";");
+    js.eval(
+        "var workerOut = null;"
+        "var workerErr = '';"
+        "var codecWorker = new Worker('data:text/javascript,' + encodeURIComponent(workerSrc));"
+        "codecWorker.onmessage = function (e) { workerOut = e.data; };"
+        "codecWorker.onerror = function (e) { workerErr = e.message; };");
+    const bool arrived = wait_for(js, "workerOut !== null");
+    if (!arrived) std::cerr << "worker said: " << js.eval("workerErr").to_string() << "\n";
+    assert(arrived);
+    js.eval("codecWorker.terminate();");
+
+    // The expected answers, each one Node v22.22.3's.
+    const char* const expected[] = {
+        "typeof => function,function",
+        "toStringTag => [object TextDecoder] [object TextEncoder]",
+        "encoding => utf-8 utf-8",
+        "latin1 label => windows-1252",
+        "options => true false",
+        "constructor needs new => TypeError",
+        "unknown label => RangeError",
+        "replacement label => RangeError",
+        "decode of a plain array => TypeError",
+        "round trip => h\u00e9llo \u20ac",
+        "encode answers a Uint8Array => [object Uint8Array]",
+        "encodeInto => 2,2,97,98",
+        "a lone surrogate is three bytes => 239,191,189",
+        "stream split inside a character => |\u20ac|",
+        "fatal error resets the decoder => A",
+        "BOM stripped => A",
+        "FE FF is data to UTF-16LE => 2:fffe",
+        "ignoreBOM keeps it => 2",
+        "instanceof its own constructor => true,true",
+    };
+    const std::size_t count = sizeof(expected) / sizeof(expected[0]);
+    assert(js.eval("workerOut.length").to_number() == static_cast<double>(count));
+    const std::string joined = js.eval("workerOut.join('\\n')").to_string();
+    std::string want;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i) want += "\n";
+        want += expected[i];
+    }
+    if (joined != want) std::cerr << "worker codecs:\n" << joined << "\n--- expected ---\n" << want << "\n";
+    assert(joined == want);
+}
+
 TEST(worker_event_target_error_and_message_dispatch) {
     using namespace litebird;
 
@@ -31066,6 +31267,62 @@ TEST(gc_reclaims_a_bound_functions_target) {
     heap.collect_garbage();
 }
 
+TEST(a_bound_function_as_a_prototype_keeps_its_target)
+{
+    using namespace litebird;
+
+    // The other side of `gc_reclaims_a_bound_functions_target`. That suite says
+    // a target nothing refers to is freed; this one says a target that only the
+    // *prototype* of a live object refers to is not. `count_value` counts a
+    // payload's captures and bound target, so a payload one handle holds is not
+    // a root, and the mark pass is the only thing that keeps those alive. It
+    // marked neither, so a bound function reached only as an object's prototype
+    // lost the bound `this` after a collection: its target's payload was found
+    // owned and freed while the live function went on reading it. `prototypes.dat`
+    // recorded the answer for a year ("collect: a function that is reachable only
+    // as a prototype stays alive, with what it closed over") and answered
+    // `undefined`; finding 212.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    auto text = [&](const std::string& source) { return js.eval(source).to_string(); };
+    js.eval(R"JS(
+        function churn() {
+            var junk = [];
+            for (var i = 0; i < 400; i++) junk.push({ i: i, s: 'x' + i });
+            return junk.length;
+        }
+        // Every escape of the target is the prototype link: `bound` is the only
+        // thing that refers to the function, and the function the only thing
+        // that refers to `this`'s object.
+        var bound = (function () {
+            var target = { v: 'kept' };
+            return Object.create(function () { return this.v; }.bind(target));
+        })();
+    )JS");
+    // A plain function as a prototype was already right: nothing but its own
+    // cell has to be kept alive.
+    js.eval(R"JS(
+        var plain = (function () {
+            var secret = 'S';
+            function Hidden() { return secret; }
+            return Object.create(Hidden);
+        })();
+    )JS");
+    assert(text("gc(); churn(); gc(); churn();"
+                "String(Object.getPrototypeOf(bound)())") == "kept");
+    assert(text("typeof Object.getPrototypeOf(plain) + ' ' + String(Object.getPrototypeOf(plain)())")
+           == "function S");
+    // The bound arguments and the entry point's other captures travel the same
+    // way: `instanceof` still asks the target, and `new` still constructs it.
+    assert(text("gc(); churn();"
+                "(function () { function T(x) { this.x = x; } return Object.create(T.bind(null, 7)); })()"
+                " && 'built'") == "built");
+    assert(text("gc(); churn();"
+                "(function () { var t = { v: 'again' };"
+                "  return String(Object.getPrototypeOf(Object.create(function () { return this.v; }"
+                "  .bind(t)))()); })()") == "again");
+}
+
 TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour) {
     using namespace litebird;
 
@@ -34423,6 +34680,132 @@ void test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties() 
     )") == "0,h,i,false,1,2,false,10,false,30,40,5,6,7,1");
 }
 
+void test_reduce_asks_for_each_place_as_it_reaches_it() {
+    auto eval = [](const char* src) -> std::string {
+        JsInterpreter js;
+        return js.eval(src).to_string();
+    };
+    // ECMA-262 §23.1.3.21 (reduce) and §23.1.3.22 (reduceRight) ask
+    // `HasProperty(O, Pk)` once per index, in the order the method walks, and
+    // the walk is bounded by the length read before the first callback. This
+    // engine listed the places that were there *before* the walk started and
+    // then only asked whether each of those had survived, so a place a
+    // callback created ahead of itself was never visited:
+    // `reduce/15.4.4.21-9-1.js` writes `arr[2]` from the callback while two is
+    // still a hole, and answered "75" where Node.js v22.22.3 answers "105".
+    //
+    // Every expectation below is what Node.js v22.22.3 prints for the same
+    // expression, and each names something the snapshot answers differently:
+    // a place created ahead of the walk, a place removed ahead of it, the
+    // length being fixed at the start, and reduceRight walking down.
+    //
+    // What the "before" column of finding 217 measured: of these twelve, the
+    // snapshot answers six wrongly (fill_hole_ahead, neg_result, add_ahead_once,
+    // rr_fill_below, plain_object, grow_mid).
+
+    // ---- a place the callback creates ahead of the walk is visited ---------
+    // The test262 case: a hole at 2 is filled by the callback at index 1, and
+    // the walk that reaches 2 afterwards sees it. A place created past the
+    // end is not visited, because the length was read first.
+    assert(eval(R"(
+        var arr = [1, 2, , 4, '5'];
+        arr.reduce(function (p, c) { arr[5] = 6; arr[2] = 3; return p + c; });
+    )") == "105");
+    // With an initial value the callback sees index 0 as well, so the place
+    // that appears at 2 is one the walk has not passed.
+    assert(eval(R"(
+        var seen = [];
+        [10, , 20, 30].reduce(function (p, c, i) { seen.push(i); return c - 1; }, 0);
+        seen.join(',');
+    )") == "0,2,3");
+
+    // ---- a place the callback removes ahead of the walk is not visited -----
+    assert(eval(R"(
+        var arr = [1, 2, 3, 4];
+        arr.reduce(function (p, c, i) { if (i === 0) delete arr[2]; return p + c; });
+    )") == "10");
+
+    // ---- the length is read once, before any callback ---------------------
+    // §23.1.3.21 step 3. A callback that lengthens the array cannot extend
+    // the walk; one that shortens it cannot end the walk early.
+    assert(eval(R"(
+        var arr = [1, 2, 3];
+        arr.reduce(function (p, c, i) { if (i === 0) arr.length = 1; return p + c; });
+    )") == "6");
+    assert(eval(R"(
+        var arr = [1, 2];
+        arr.reduce(function (p, c, i) { if (i === 0) arr.length = 99; return p + c; });
+    )") == "3");
+
+    // ---- a place the callback adds past the length is never visited --------
+    // The two places walked are handed to the callback and the three added at
+    // 3, 4 and 5 are not, so the callback runs twice and the array ends up
+    // six long.
+    assert(eval(R"(
+        var arr = [1, 2, 3];
+        var calls = 0;
+        arr.reduce(function (p, c, i) { calls++; arr[i + 3] = 9; return p; });
+        calls + ':' + arr.length;
+    )") == "2:6");
+
+    // ---- reduceRight walks from the top down ------------------------------
+    // The accumulator starts at the last place, so index 4 is not given to
+    // the callback; the hole at 3 is skipped and 2, 1 and 0 follow.
+    assert(eval(R"(
+        var seen = [];
+        var sum = [1, 2, 3, , 5].reduceRight(function (p, c, i) { seen.push(i); return p + c; });
+        seen.join(',') + '|' + sum;
+    )") == "2,1,0|11");
+    // A place the callback fills below itself is visited when the walk
+    // reaches it. This is the case that separates the standard's downward
+    // walk from listing the places upwards and reversing the list: with no
+    // initial value the callback never runs at index 2 here, so a version
+    // that fills the hole from index 2 looks right — the next case, where the
+    // callback does run at the top, answers 18 instead of 21.
+    assert(eval(R"(
+        var arr = [1, , 3];
+        arr.reduceRight(function (p, c, i) { if (i === 2) arr[1] = 2; return p + c; });
+    )") == "4");
+    assert(eval(R"(
+        var arr = [1, , 3];
+        arr.reduceRight(function (p, c, i) { if (i === 2) arr[1] = 2; return p + c; }, 0);
+    )") == "6");
+    assert(eval(R"(
+        var arr = [9, , , 9];
+        arr.reduceRight(function (p, c, i) { if (i === 3) { arr[1] = 1; arr[2] = 2; } return p + c; }, 0);
+    )") == "21");
+    // A place removed ahead of the walk — below it, for reduceRight — is
+    // skipped.
+    assert(eval(R"(
+        var arr = [1, 2, 3, 4];
+        arr.reduceRight(function (p, c, i) { if (i === 3) delete arr[1]; return p + c; });
+    )") == "10");
+
+    // ---- a receiver that is not an array ----------------------------------
+    // `HasProperty` is asked of the object as it is now, so a place a callback
+    // defines on a plain object's index is seen through the chain as any
+    // other would be.
+    assert(eval(R"(
+        var o = { length: 3, 0: 1 };
+        o.reduce = Array.prototype.reduce;
+        o.reduce(function (p, c, i) { if (i === 0) { o[1] = 2; o[2] = 3; } return p + c; });
+    )") == "1");
+    // Nothing to reduce and no initial value is a TypeError; a hole is not a
+    // place, so `[, ,]` is empty too; with an initial value nothing is asked.
+    assert(eval(R"(
+        function name(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }
+        name(function () { [].reduce(function () {}); }) + '|' +
+        name(function () { [, , ].reduce(function () {}); }) + '|' +
+        String([].reduce(function () {}, 7));
+    )") == "TypeError|TypeError|7");
+    assert(eval(R"(
+        var calls = 0;
+        [, , ].reduce(function () { calls++; }, 'start') + ':' + calls;
+    )") == "start:0");
+}
+
+
+
 TEST(svg_class_name_is_a_live_animated_string) {
     TestPage page;
     auto& js = page.js;
@@ -34690,6 +35073,9 @@ int main() {
     RUN_TEST(worker_event_target_error_and_message_dispatch);
     RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
 
+    // Phase 206: TextDecoder/TextEncoder on a worker's own global.
+    RUN_TEST(text_codecs_are_installed_in_a_worker_scope);
+
     // Phase 66: module-worker graph loading and structured-clone message packets.
     RUN_TEST(structured_clone_message_delivery_and_refusal);
     RUN_TEST(module_worker_static_graph_loading_and_refusal);
@@ -34938,6 +35324,7 @@ int main() {
 
     // Phase 168: what a native entry point captures is traced by the collector.
     RUN_TEST(gc_reclaims_a_bound_functions_target);
+    RUN_TEST(a_bound_function_as_a_prototype_keeps_its_target);
     RUN_TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour);
 
     // Phase 169: WebSocket permessage-deflate (RFC 7692) & stateful DEFLATE/INFLATE codec.
@@ -34964,6 +35351,9 @@ int main() {
     // Phase 203: page text is not a source of terminal controls.
     RUN_TEST(terminal_page_text_cannot_inject_controls);
 
+    // Phase 212: shell chrome emits labels as text, not terminal commands.
+    RUN_TEST(shell_frame_labels_cannot_inject_terminal_controls);
+
     // Phase 195: a `calc()` percentage is of the declaration (font size,
     // line-height), not of the viewport.
     RUN_TEST(a_calc_percentage_is_of_the_declaration_not_the_viewport);
@@ -34979,6 +35369,10 @@ int main() {
     // Phase 202: a box's outline is a ring outside the border box that takes
     // no room; it is stored by the cascade and painted.
     RUN_TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for);
+
+    // Phase 213: `reduce`/`reduceRight` ask `HasProperty` at each index as the
+    // walk reaches it, so a place a callback creates ahead of itself is seen.
+    RUN_TEST(reduce_asks_for_each_place_as_it_reaches_it);
 
     // Phase 214: SVG className is a live, retained SVGAnimatedString.
     RUN_TEST(svg_class_name_is_a_live_animated_string);

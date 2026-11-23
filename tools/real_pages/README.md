@@ -50,6 +50,18 @@ python3 tools/real_pages/strict_frames.py "$R/results"     # after the full reru
 
 **Rendering:** none of 19 comparable frames was pixel-identical. Random 2048 boards are excluded. Hextris differed on 102,391 of 480,000 pixels in this pair, including animation timing. The pause button is 60×60 rather than 72×72; type weight, badges and spacing also differ. See the [investigation](hextris-investigation/README.md) for the separate geometry, mouse and clipping controls. Do not treat this workspace follow-up as a result measured on `main`.
 
+## Rerun 06: `main` at `a76e893` (2026-11-23, Vellum)
+
+[Litebird outcomes](rerun-06/litebird.json) · [exact post-action pixel comparisons](rerun-06/strict-frames.json) · [frozen reference, still 20/20](rerun-06/reference.json) · [fresh same-day Chromium re-run, 20/20](rerun-06/reference-fresh.json) with [its frames committed](rerun-06/reference-fresh/) (HeadlessChrome/131.0.6778.0, all 20 tasks re-validated before comparing; the freeze itself did not move). Probe logs for every task are in [`rerun-06/`](rerun-06/).
+
+**Interaction: 20/20** — the same count as rerun-05, but now measured on `main` at `a76e893` (rerun-05 was a workspace build, and says so). The corpus pins held: every `.revision` matched `pages.json` before the probe ran, and a fresh Chromium pass on the same snapshots also completed 20/20, so the frozen reference still describes the tasks correctly.
+
+**Visual: 0 exact matches in 18 comparable post-action frames** (2048 excluded as before; Hextris compared and differed on 102,339 of 480,000 pixels — only the start state is verified, not play). Against rerun-05's figures, most rows moved by ≤4,000 pixels (git manuals and Punycode shifted both ways by 1–4k), but **#11 (182,269 → 233,446), #12 (101,519 → 155,448), #18 (189,174 → 238,133) and #20 (26,928 → 82,636) each moved by roughly 50,000–55,000 pixels**. The reference PNGs from earlier reruns were never committed, so a reference-side shift between the two Chromium runs cannot be separated from an engine-side shift from the phases that landed since (`calc()` percentages, flex/grid alignment, paint order, canvas background). The fresh frames are committed this time to make that separation possible at the next rerun. **Do not read those four rows as a regression without isolating the cause.** Interaction did not change.
+
+**HEXTRIS and Punycode remain the visual outliers**: the pause button is reported at 60×60 rather than 72×72, and the Punycode page is narrower and shifted left with no selection/caret painting (26,928 pixels differed at rerun-04; 82,636 now — see the caveat above before calling that a change). No process exited prematurely; no task timed out.
+
+
+
 ## Rerun on Linux (from repository root)
 
 Use an empty or trusted local scratch directory. Pinned snapshots, browsers, logs and full-resolution PNGs belong outside Git. Use an isolated disposable environment, not a machine with personal browser data. The network restriction in the probe is for repeatability, not a general-purpose security sandbox.

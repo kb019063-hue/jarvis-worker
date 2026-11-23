@@ -3316,10 +3316,36 @@ JsValue JsInterpreter::eval_tagged_template(const TaggedTemplateExpr* expr, cons
 }
 
 JsValue JsInterpreter::eval_update(const UpdateExpr* update, const EnvPtr& env) {
+    const double delta = update->op == JsTokenType::PlusPlus ? 1.0 : -1.0;
+    // `i++` is the counter of every loop ever written, and it is almost always
+    // a binding of the scope that is running. The general path resolves a
+    // `Reference` -- copying the name into a std::string and the value into a
+    // JsValue -- reads it, converts it to a number, and walks the scope chain
+    // again to write it. Here the walk happens once and the write lands on
+    // the binding the walk found. The refusals keep the words the general
+    // path's `assign_identifier` gives them.
+    if (update->target->kind == NodeKind::Identifier) {
+        const std::string& name = static_cast<const IdentifierExpr*>(update->target.get())->name;
+        if (JsEnvironment::Binding* binding = env->lookup(name)) {
+            if (!binding->is_initialized) throw_tdz_error(name);
+            if (binding->is_const) js_throw_type_error("Assignment to constant variable.");
+            if (binding->is_readonly) {
+                if (env->is_strict()) {
+                    js_throw_type_error("Cannot assign to read only property '" + name +
+                                        "' of object '#<Object>'");
+                }
+                return JsValue::make_number(js_to_number(binding->value));
+            }
+            const double before = js_to_number(binding->value);
+            const double after = before + delta;
+            binding->value = JsValue::make_number(after);
+            return JsValue::make_number(update->prefix ? after : before);
+        }
+    }
     // The target is resolved once, so `a[i++]++` evaluates `i++` once.
     Reference ref = resolve_reference(update->target.get(), env);
     double before = js_to_number(read_reference(ref, env));
-    double after = before + (update->op == JsTokenType::PlusPlus ? 1.0 : -1.0);
+    double after = before + delta;
     write_reference(ref, JsValue::make_number(after), env);
     return JsValue::make_number(update->prefix ? after : before);
 }

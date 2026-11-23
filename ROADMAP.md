@@ -71,8 +71,11 @@ with. This does. **Tier 1 is the difference between an engine and a browser.**
 
 Multicol and fragmentation (18); `overflow: auto` and `position: sticky` (19);
 Selectors L4 `:has()` and container queries (14, 15); `Proxy`, BigInt, `Intl`
-(9, 10); finish the bytecode VM — the tree-walker is **50–100× slower than
-V8** on loops and calls (7); `getComputedStyle`, `document.write`;
+(9, 10); finish the bytecode VM — the tree-walker is **3–9× slower than V8 on
+a loop, an array or a recursion and 18–27× on a property write or a call**,
+measured since Phase 204 (`make bench-js-core`, finding 208) rather than
+estimated; the call is the bytecode VM's row and the counter's was the
+tree-walker's (7); `getComputedStyle`, `document.write`;
 `TextDecoder`/`TextEncoder` (24); extend WPT to `html/`,
 `url/`, `fetch/` and the rest of `css-*` (37).
 

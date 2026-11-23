@@ -146,6 +146,12 @@ std::size_t ComputedStyle::hash() const {
     hash_color(h, border_color);
     hash_combine(h, hash_float(border_radius));
     hash_combine(h, hash_float(border_radius_percent));
+    // The outline is part of the key: two boxes that differ only in it paint
+    // different ink, so they must not share a cached style.
+    hash_combine(h, hash_float(outline_width));
+    hash_combine(h, hash_float(outline_offset));
+    hash_combine(h, outline_drawn ? 1u : 0u);
+    hash_color(h, outline_color);
     if (box_shadow.has_shadow) {
         hash_combine(h, 1u);
         hash_combine(h, hash_float(box_shadow.x_offset));
@@ -2210,6 +2216,93 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             style.box_shadow.y_offset = lengths[1];
             style.box_shadow.blur = lengths.size() >= 3 ? lengths[2] : 0.0f;
             style.box_shadow.color = shadow_color;
+        }
+    } else if (prop == "outline" || prop == "outline-width" || prop == "outline-style" ||
+               prop == "outline-color" || prop == "outline-offset") {
+        // `outline: 2px solid red`, or any of its longhands. The four longhands
+        // are one ring around the border box: the style says whether there is
+        // one (`none` draws nothing whatever the width says), the width how
+        // thick, the colour which, and the offset how far outside the border
+        // box it sits. Before this the cascade stored none of it -- the CSSOM
+        // answered out of the declaration block and the painter had nothing to
+        // read -- so an outline was reported and never drawn.
+        auto says_drawn = [](const std::string& lower) {
+            return lower == "auto" || lower == "solid" || lower == "dashed" || lower == "dotted" ||
+                   lower == "double" || lower == "groove" || lower == "ridge" || lower == "inset" ||
+                   lower == "outset";
+        };
+        if (prop == "outline-offset") {
+            if (val_lower != "initial" && val_lower != "inherit" && val_lower != "unset") {
+                style.outline_offset = parse_length(val, 0.0f);
+            }
+        } else if (prop == "outline-style") {
+            if (val_lower == "initial" || val_lower == "unset") style.outline_drawn = false;
+            else if (val_lower != "inherit") style.outline_drawn = says_drawn(val_lower);
+        } else if (prop == "outline-width") {
+            if (val_lower == "initial" || val_lower == "unset") {
+                style.outline_width = 3.0f;    // `medium`
+            } else if (val_lower == "inherit") {
+                // inherited from the parent's ring, which the copy above did
+            } else if (val_lower == "thin") {
+                style.outline_width = 1.0f;
+            } else if (val_lower == "medium") {
+                style.outline_width = 3.0f;
+            } else if (val_lower == "thick") {
+                style.outline_width = 5.0f;
+            } else {
+                style.outline_width = std::max(0.0f, parse_length(val, 3.0f));
+            }
+        } else if (prop == "outline-color") {
+            if (val_lower == "initial" || val_lower == "unset" || val_lower == "currentcolor" ||
+                val_lower == "inherit") {
+                style.outline_color = style.color;
+            } else {
+                Color parsed;
+                if (Color::try_parse(val, parsed, style.color, style.dark_color_scheme)) {
+                    style.outline_color = parsed;
+                }
+            }
+        } else {
+            // The shorthand: the three parts in any order, each optional.
+            std::string cur;
+            int depth = 0;
+            auto process_part = [&](const std::string& part) {
+                if (part.empty()) return;
+                std::string low;
+                for (char c : part) low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+                if (says_drawn(low)) {
+                    style.outline_drawn = true;
+                } else if (low == "none" || low == "hidden") {
+                    style.outline_drawn = false;
+                } else if (low == "thin") {
+                    style.outline_width = 1.0f;
+                } else if (low == "medium") {
+                    style.outline_width = 3.0f;
+                } else if (low == "thick") {
+                    style.outline_width = 5.0f;
+                } else if (low == "initial" || low == "unset" || low == "inherit") {
+                    // handled above, for the whole declaration
+                } else {
+                    Color parsed;
+                    if (Color::looks_like_color(part) &&
+                        Color::try_parse(part, parsed, style.color, style.dark_color_scheme)) {
+                        style.outline_color = parsed;
+                    } else if (std::isdigit(static_cast<unsigned char>(part[0])) || part[0] == '.') {
+                        style.outline_width = std::max(0.0f, parse_length(part, 3.0f));
+                    }
+                }
+            };
+            for (char c : val) {
+                if (c == '(') ++depth;
+                else if (c == ')' && depth > 0) --depth;
+                if (std::isspace(static_cast<unsigned char>(c)) && depth == 0) {
+                    process_part(cur);
+                    cur.clear();
+                } else {
+                    cur.push_back(c);
+                }
+            }
+            process_part(cur);
         }
     } else if (prop == "border") {
         // e.g. "1px solid black" or "2px solid oklch(0.6 0.2 30)"

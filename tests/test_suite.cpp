@@ -2706,6 +2706,98 @@ TEST(the_font_shorthand_resets_font_kerning) {
     std::fflush(stdout);
 }
 
+TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for) {
+    using namespace litebird;
+
+    // A box's outline is its own rectangle, drawn outside the border box and
+    // taking no room from anything (CSS 2.1 §16.3): `outline: 5px solid`
+    // paints a 5px ring around a box that is still 100 by 40 in the layout,
+    // where a `border` would have made it 110. The CSSOM has always answered
+    // `5px solid rgb(0, 255, 0)` for it, and the display list had nothing:
+    // `ComputedStyle` had no outline, so `emit_chrome` had nothing to draw.
+    // An outline the painter never receives is the same bug as a property the
+    // resolver never stored, and the difference only shows up in ink.
+    // Each box is indented far enough that its ring fits on the canvas: a
+    // ring at a zero offset starts at the border box and grows outward, and
+    // the painter clips anything at a negative coordinate.
+    auto doc = HtmlParser::parse(
+        "<body style=\"margin:0;padding:40px\">"
+        "<div id=a style=\"width:100px;height:40px;background:#ff0000;outline:5px solid #00ff00\"></div>"
+        "<div id=b style=\"width:100px;height:40px;background:#ff0000;outline:5px solid #00ff00;outline-offset:10px;margin-top:60px\"></div>"
+        "<div id=c style=\"width:100px;height:40px;background:#ff0000;outline:5px solid #00ff00;outline-style:none;margin-top:60px\"></div>"
+        "</body>");
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 400.0f);
+    assert(root);
+
+    // The ring takes no room: the box is the declaration's size, and the
+    // three boxes are 40 high one after another with nothing added.
+    auto el = doc->get_element_by_id("a");
+    assert(el && el->has_layout_box());
+    const Rect border_box = el->bounding_box();
+    assert(border_box.width == 100 && border_box.height == 40);
+
+    BitmapRenderer bmp(200, 400);
+    bmp.clear(Color::white());
+    bmp.render(DisplayList::build(root));
+
+    auto at = [&](float x, float y) { return bmp.get_pixel(static_cast<int>(x), static_cast<int>(y)); };
+    auto is_green = [](const Color& c) { return c.g > 200 && c.r < 60 && c.b < 60; };
+    auto is_red = [](const Color& c) { return c.r > 200 && c.g < 60 && c.b < 60; };
+    auto is_white = [](const Color& c) { return c.r > 240 && c.g > 240 && c.b > 240; };
+
+    // A zero offset leaves the ring flush against the border box and outside
+    // it: the fill is untouched, the 5px band beyond the edge is the
+    // outline's green, and nothing is painted past it.
+    assert(is_red(at(border_box.x + 20, border_box.y + 20)));
+    assert(is_green(at(border_box.x + border_box.width + 2, border_box.y + 20)));
+    assert(is_white(at(border_box.x + border_box.width + 12, border_box.y + 20)));
+    // ...and with `outline-offset: 10px` the ring is lifted clear: the fill is
+    // still red, nothing is drawn in the 10px gap, green 12px out, white past
+    // the ring's far edge.
+    auto b = doc->get_element_by_id("b");
+    assert(b && b->has_layout_box());
+    const Rect b_box = b->bounding_box();
+    assert(is_red(at(b_box.x + 2, b_box.y + 20)));
+    assert(is_white(at(b_box.x - 5, b_box.y + 20)));
+    assert(is_green(at(b_box.x - 12, b_box.y + 20)));
+    assert(is_white(at(b_box.x - 20, b_box.y + 20)));
+    // `outline-style: none` draws nothing, whatever the width says.
+    auto c = doc->get_element_by_id("c");
+    assert(c && c->has_layout_box());
+    const Rect c_box = c->bounding_box();
+    assert(is_white(at(c_box.x - 3, c_box.y + 20)));
+    assert(is_white(at(c_box.x - 1, c_box.y + 20)));
+
+    std::printf("      [outline] painted; no room taken; offset and none honoured\n");
+    std::fflush(stdout);
+
+    // The same value, read back through getComputedStyle, is the one that was
+    // painted: the two used to be different questions with only one answer.
+    auto page = std::make_unique<TestPage>();
+    JsInterpreter& js = page->js;
+    js.eval(R"JS(
+        function outlined(css) {
+            var d = document.createElement('div');
+            d.setAttribute('style', css);
+            document.body.appendChild(d);
+            return d;
+        }
+        var o1 = outlined('outline:5px solid #00ff00');
+        var o2 = outlined('outline:thin solid red');
+        var o3 = outlined('outline:5px solid #00ff00;outline-style:none');
+        var o4 = outlined('outline:5px solid #ff0000;outline-offset:-3px');
+    )JS");
+    auto cs = [&](const char* var, const char* prop) {
+        return js.eval(std::string("getComputedStyle(") + var + ")." + prop).to_string();
+    };
+    assert(cs("o1", "outlineWidth") == "5px" && cs("o1", "outlineStyle") == "solid" &&
+           cs("o1", "outlineColor") == "rgb(0, 255, 0)");
+    assert(cs("o2", "outlineWidth") == "1px" && cs("o2", "outlineColor") == "rgb(255, 0, 0)");
+    assert(cs("o3", "outlineStyle") == "none");
+    assert(cs("o4", "outlineOffset") == "-3px");
+}
+
 TEST(the_painter_honours_font_kerning_none) {
     using namespace litebird;
 
@@ -34554,6 +34646,10 @@ int main() {
     // Phase 192: `Array.prototype.toLocaleString` asks each element (§23.1.3.28),
     // and `Object.prototype.toLocaleString` is `Invoke(this, "toString")` (§20.1.3.5).
     RUN_TEST(an_array_to_locale_string_asks_every_element);
+
+    // Phase 202: a box's outline is a ring outside the border box that takes
+    // no room; it is stored by the cascade and painted.
+    RUN_TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

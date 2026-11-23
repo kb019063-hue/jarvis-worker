@@ -178,6 +178,11 @@ all: $(TARGET)
 verify-relative-navigation: $(BUILD_DIR)/relative_navigation_fixture
 	@python3 tools/conformance/verify_relative_navigation.py --binary $(BUILD_DIR)/relative_navigation_fixture
 
+## Compare path-bearing URL references against Node's URL implementation.
+.PHONY: verify-path-resolution
+verify-path-resolution: $(BUILD_DIR)/relative_navigation_fixture
+	@python3 tools/conformance/verify_path_resolution.py --binary $(BUILD_DIR)/relative_navigation_fixture
+
 $(BUILD_DIR)/relative_navigation_fixture: $(OBJS) tools/conformance/relative_navigation_fixture.cpp
 	$(CXX) $(CXXFLAGS) $(OBJS) tools/conformance/relative_navigation_fixture.cpp -o $@
 

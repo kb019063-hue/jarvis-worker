@@ -6534,6 +6534,33 @@ TEST(crypto_get_random_values_and_random_uuid) {
     // Non-TypedArray and >65536 bytes are validated in DomCryptoBindings.cpp.
 }
 
+TEST(subtle_crypto_digest_sha256) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    assert(interp.eval("typeof crypto.subtle === 'object' && typeof crypto.subtle.digest === 'function'").is_truthy());
+
+    // Known SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+    interp.eval(R"(
+        var hex = null;
+        var data = new TextEncoder().encode('abc');
+        crypto.subtle.digest('SHA-256', data).then(function(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) {
+                s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            }
+            hex = s;
+        });
+    )");
+    assert(interp.eval("hex === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'").is_truthy());
+
+    // Unsupported algorithm rejects with NotSupportedError
+    interp.eval("var rejAlg = null; crypto.subtle.digest({ name: 'MD5' }, new Uint8Array(0)).catch(function(e) { rejAlg = e.name; });");
+    assert(interp.eval("rejAlg === 'NotSupportedError'").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -34484,6 +34511,7 @@ int main() {
     RUN_TEST(html5_canvas_2d_context);
     RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
     RUN_TEST(crypto_get_random_values_and_random_uuid);
+    RUN_TEST(subtle_crypto_digest_sha256);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

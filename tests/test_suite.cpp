@@ -2802,6 +2802,7 @@ TEST(the_font_shorthand_resets_font_kerning) {
     std::fflush(stdout);
 }
 
+
 TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for) {
     using namespace litebird;
 
@@ -5277,6 +5278,51 @@ TEST(collection_stress_asks_at_a_seeded_allocation_count) {
     tight.set_gc_stress(1, 0);
     tight.allocate_object();
     assert(tight.take_gc_stress_request());
+}
+
+// A queued promise reaction is work outstanding, not garbage: the microtask
+// queue roots it, and the collector is right to leave it alone. The AGENTS.md
+// row for the GC audit read that queue depth as a leak, because it counted
+// `alive_cells` at the bottom of the loop where the reactions had not run yet.
+// This checks the two halves of that claim: mid-loop the cells are held, and
+// one turn later -- after the queue has drained -- they are gone.
+TEST(a_promise_reaction_is_a_queue_not_a_leak) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    js.eval(R"JS(
+        var base = 0, seenMid = 0, seenAfter = 0, drained = false;
+        var iterations = 500;
+        function start() {
+            for (var i = 0; i < iterations; i++) {
+                Promise.resolve(1).then(function f(v) { return v; });
+            }
+            gc();
+            seenMid = gc().alive_cells - base;
+            setTimeout(function () {
+                gc();
+                seenAfter = gc().alive_cells - base;
+                drained = true;
+            }, 0);
+        }
+        // Take the baseline after this script's own frame has been popped, so
+        // it does not count the interpreter's own working set.
+        setTimeout(function () { gc(); base = gc().alive_cells; start(); }, 0);
+    )JS");
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+
+    const auto& global = js.global_object();
+    const double mid = global.get_property("seenMid").to_number();
+    const double after = global.get_property("seenAfter").to_number();
+    assert(global.get_property("drained").is_truthy());
+
+    // The queued reactions are still on the heap mid-loop: the queue is visible
+    // in the count, which is exactly what the row mistook for a leak. Two cells
+    // (a promise and its reaction record) per queued reaction.
+    assert(mid >= 500.0);
+    // After the queue drains, all but a handful of cells come back. A real leak
+    // of two cells an iteration would leave a thousand.
+    assert(after <= 64.0);
 }
 
 TEST(dom_event_target_and_bubbling) {
@@ -21791,6 +21837,92 @@ TEST(module_worker_static_graph_loading_and_refusal) {
 // escaped keyword/contextual-keyword rules, and Unicode line terminators.
 // ---------------------------------------------------------------------------
 
+TEST(import_calls_parse_and_reject_without_a_loader) {
+    using namespace litebird;
+
+    // Phase 224, finding 228. `import('./x.mjs')` was a syntax error because
+    // the parser treats `import` as a module-only keyword everywhere: the
+    // statement path fails on it, and it is not a token `parse_primary` knew,
+    // so `await import('./specLinks.mjs')` in APG's `shared/js/app.js` threw
+    // before anything ran.
+    //
+    // ECMA-262 §13.3.12 (Import Calls) makes it an expression, and the checks
+    // below separate the three things that are easy to run together: what the
+    // grammar allows, what happens to the argument, and what the missing
+    // module loader answers. Every expected answer is Node v22.22.3's.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function report(what, got, want) {
+            var a = JSON.stringify(got), b = JSON.stringify(want);
+            if (a !== b) failures.push(what + ': got ' + a + ', expected ' + b);
+        }
+        function thrown(source) {
+            try { eval(source); return 'no throw'; } catch (e) { return e.name; }
+        }
+        // The evaluation of one call, with the rejection counted rather than
+        // left to print: an unhandled rejection is not a failure here.
+        function settled(value) {
+            var seen = '(pending)';
+            value.then(function () { seen = 'resolved'; }, function (e) { seen = 'rejected:' + e.name; });
+            return seen;
+        }
+
+        // ---- the grammar ------------------------------------------------
+        report('an import call is an expression', typeof import('./a.mjs'), 'object');
+        report('it is a promise', import('./a.mjs') instanceof Promise, true);
+        report('its tag is Promise', Object.prototype.toString.call(import('./a.mjs')), '[object Promise]');
+        report('the parenthesis may come after a line break', thrown('import\n("./b.mjs")'), 'no throw');
+        report('import.meta is still refused', thrown('import.meta'), 'SyntaxError');
+        report('a module import is still refused', thrown("import x from './a.js';"), 'SyntaxError');
+        report('a bare import is not a value', thrown('typeof import;'), 'SyntaxError');
+        report('no argument is a syntax error', thrown('import();'), 'SyntaxError');
+        report('a spread argument is a syntax error', thrown('import(...[]);'), 'SyntaxError');
+        // §13.3 keeps an Import Call out of NewExpression, and the rule does
+        // not follow the parentheses: `new (import(x))` parses and is a
+        // TypeError at run time, where `new import(x)` does not parse at all.
+        report('new import(x) does not parse', thrown("new import('./c.mjs');"), 'SyntaxError');
+        report('new (import(x)) is a run-time TypeError', thrown("new (import('./c.mjs'));"), 'TypeError');
+
+        // ---- the argument -----------------------------------------------
+        // §13.3.12 step 6 runs ToString at the call site, before the promise
+        // exists, so its error is thrown and not rejected.
+        var coerced = 0;
+        import({ toString: function () { coerced++; return './d.mjs'; } }).catch(function () {});
+        report('the specifier is coerced once', coerced, 1);
+        report('a symbol specifier throws at the call and does not reject',
+               thrown('import(Symbol("x")).catch(function () {});'), 'TypeError');
+        report('no argument is still a rejection, not a throw', typeof import(undefined), 'object');
+        report('null is a specifier too', typeof import(null), 'object');
+
+        // ---- the loader this engine does not have -------------------------
+        // The call answers a promise that is already rejected with a
+        // TypeError, and the message names what was asked for. The handler
+        // runs as a microtask, so what it sees is read in the second block
+        // below, after the queue has been drained.
+        var reason = null;
+        import('./e.mjs').catch(function (e) { reason = e; });
+        report('a call nobody handles starts as a pending promise',
+               settled(import('./f.mjs')), '(pending)');
+        failures;
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    js.eval(R"JS(
+        report('a rejection arrives as a TypeError', reason instanceof TypeError, true);
+        report('and names the specifier', reason !== null && reason.message.indexOf("'./e.mjs'") >= 0, true);
+        report('and says the engine loads no modules',
+               reason !== null && reason.message.indexOf('does not load modules') >= 0, true);
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
 TEST(js_unicode_identifier_tables_and_lexer_escapes) {
     using namespace litebird;
     // 1. Unicode 17.0 ID_Start / ID_Continue checks (ECMA-262 §12.7.1).
@@ -25697,6 +25829,85 @@ TEST(array_from_asks_the_source_for_its_iterator) {
         var made = Array.from([1, 2]);
         ok('an array', Array.isArray(made), 'true');
         ok('its length', made.length, '2');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
+TEST(array_from_reads_the_iterator_method_it_already_has)
+{
+    using namespace litebird;
+
+    // The other half of `array_from_asks_the_source_for_its_iterator`. That
+    // suite pins GetMethod running once, on the array-like path, where there
+    // is one read and nothing else. The iterable path had two: Array.from
+    // asked for `@@iterator` to decide which path it was on — the iterable one
+    // constructs with no argument, the array-like one with the length — and
+    // then handed the source to `js_iterate()`, which asks again. So a getter
+    // for `Symbol.iterator` ran twice for one iteration, where a spread and a
+    // `for…of` run it once and the standard has one Get per iteration.
+    // `iteration.dat` recorded the answer three years of phases ago
+    // ("a getter for the iterator on an array is read once for each
+    // iteration": `1,2 1 2 3 4`) and answered `1,2 1 2 4 5`; finding 229.
+    JsInterpreter js;
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+
+        // One read for each iteration, the same count for each of the four
+        // ways to iterate an array.
+        var a = [1, 2], reads = 0;
+        Object.defineProperty(a, Symbol.iterator, {
+            get: function () { reads++; return Array.prototype[Symbol.iterator]; }
+        });
+        var s = [...a]; var r1 = reads;
+        for (var x of a) {} var r2 = reads;
+        Array.from(a); var r3 = reads;
+        new Set(a); var r4 = reads;
+        ok('the spread', s.join(), '1,2');
+        ok('reads after each', [r1, r2, r3, r4].join(' '), '1 2 3 4');
+
+        // The value the getter hands out is iterated, not a second lookup of
+        // it: this getter returns a different iterator every time it is read.
+        var calls = 0;
+        var two = {};
+        Object.defineProperty(two, Symbol.iterator, {
+            get: function () { calls++; return function () { return [calls][Symbol.iterator](); }; }
+        });
+        ok('what the getter gave', Array.from(two).join(), '1');
+        ok('read once', calls, '1');
+
+        // An iterator is still followed for everything that is not the plain
+        // case, and `next` is read once: a protocol read is not a second
+        // method read.
+        var nextReads = 0;
+        var odd = {};
+        odd[Symbol.iterator] = function () {
+            var i = 0, it = {};
+            Object.defineProperty(it, 'next', {
+                get: function () { nextReads++; return function () { return i < 3 ? { value: i++, done: false } : { done: true }; }; }
+            });
+            return it;
+        };
+        ok('a hand-written iterator', Array.from(odd).join(), '0,1,2');
+        ok('next read once', nextReads, '1');
+
+        // The mapper still runs as each value arrives, and a throw still
+        // closes the iterator, now on the path that has the method in hand.
+        var log = [];
+        var endless = {};
+        endless[Symbol.iterator] = function () {
+            var i = 0;
+            return { next: function () { i++; return { value: i, done: false }; },
+                     return: function () { log.push('closed at ' + i); return { done: true }; } };
+        };
+        var thrown = 'none';
+        try { Array.from(endless, function (v) { if (v === 3) throw new RangeError('stop'); return v; }); }
+        catch (e) { thrown = e.name; }
+        ok('the mapper throws', thrown, 'RangeError');
+        ok('the iterator was closed', log.join(), 'closed at 3');
     )JS");
     assert(js.eval("failures.length").to_string() == "0");
     assert(js.eval("failures.join('; ')").to_string().empty());
@@ -35466,6 +35677,7 @@ int main() {
     RUN_TEST(the_font_shorthand_resets_font_kerning);
     RUN_TEST(the_painter_honours_font_kerning_none);
     RUN_TEST(garbage_collector_and_cycles);
+    RUN_TEST(a_promise_reaction_is_a_queue_not_a_leak);
     RUN_TEST(collection_stress_asks_at_a_seeded_allocation_count);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);
@@ -35679,6 +35891,8 @@ int main() {
     // Phase 66: module-worker graph loading and structured-clone message packets.
     RUN_TEST(structured_clone_message_delivery_and_refusal);
     RUN_TEST(module_worker_static_graph_loading_and_refusal);
+    // Phase 224: `import()` parses as an Import Call and rejects, since no modules load.
+    RUN_TEST(import_calls_parse_and_reject_without_a_loader);
 
     // Phase 42: Nested <iframe> browsing contexts, sandbox/origin isolation, and XHTML execution.
     RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);
@@ -35741,6 +35955,7 @@ int main() {
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
     RUN_TEST(array_from_asks_the_source_for_its_iterator);
+    RUN_TEST(array_from_reads_the_iterator_method_it_already_has);
     RUN_TEST(js_iteration_of_another_realms_array);
 
     // Phase 92: an iterator is a kind with a prototype a script can reach.

@@ -376,57 +376,6 @@ void normalize_table_children(const std::shared_ptr<LayoutBox>& box, ComputedSty
 
 // Origin-safe `<img src>` loader with per-document subresource caching.
 // Kept out of `build_boxes` so recursive stack frames stay tiny.
-std::shared_ptr<ImageData> load_image_for_element(const Element& element) {
-    const std::string src(trim_ascii_sv(element.get_attribute("src")));
-    if (src.empty()) return nullptr;
-
-    if (starts_with_data_scheme(src)) {
-        return ImageDecoder::decode_data_uri(src);
-    }
-
-    std::shared_ptr<Document> doc = element.owner_document();
-    ResourceRequestContext ctx;
-    if (doc) {
-        RequestMode mode = RequestMode::NoCors;
-        bool creds = false;
-        if (element.has_attribute("crossorigin")) {
-            mode = RequestMode::Cors;
-            std::string co(trim_ascii_sv(element.get_attribute("crossorigin")));
-            for (char& c : co) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
-            if (co == "use-credentials") creds = true;
-        }
-        ctx = DocumentStyles::request_context(*doc, mode, creds);
-    } else {
-        ctx.document_url = "about:blank";
-        ctx.base_url = "about:blank";
-        ctx.mode = RequestMode::NoCors;
-    }
-
-    const std::string resolved = ResourceLoader::resolve_url(ctx.base_url, src);
-    if (resolved.empty()) return nullptr;
-
-    if (doc) {
-        bool in_cache = false;
-        auto cached = doc->find_cached_image(resolved, in_cache);
-        if (in_cache) return cached;
-        if (!doc->allow_external_image_fetch()) return nullptr;
-    }
-
-    ResourceResponse resp = ResourceLoader::load_for_page(src, ctx);
-    std::shared_ptr<ImageData> decoded = nullptr;
-    if (resp.success && !resp.body.empty()) {
-        decoded = ImageDecoder::decode_bytes(
-            reinterpret_cast<const uint8_t*>(resp.body.data()),
-            resp.body.size(),
-            resp.content_type
-        );
-    }
-
-    if (doc) {
-        doc->store_cached_image(resolved, decoded);
-    }
-    return decoded;
-}
 
 void populate_special_element_box(
     const std::shared_ptr<Element>& element,
@@ -638,6 +587,64 @@ void split_inline_box_around_blocks(
 }
 
 } // namespace
+
+std::shared_ptr<ImageData> load_image_for_element(const Element& element) {
+    const std::string src(trim_ascii_sv(element.get_attribute("src")));
+    if (src.empty()) return nullptr;
+
+    if (starts_with_data_scheme(src)) {
+        return ImageDecoder::decode_data_uri(src);
+    }
+
+    std::shared_ptr<Document> doc = element.owner_document();
+    ResourceRequestContext ctx;
+    if (doc) {
+        RequestMode mode = RequestMode::NoCors;
+        bool creds = false;
+        if (element.has_attribute("crossorigin")) {
+            mode = RequestMode::Cors;
+            std::string co(trim_ascii_sv(element.get_attribute("crossorigin")));
+            for (char& c : co) if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+            if (co == "use-credentials") creds = true;
+        }
+        ctx = DocumentStyles::request_context(*doc, mode, creds);
+    } else {
+        ctx.document_url = "about:blank";
+        ctx.base_url = "about:blank";
+        ctx.mode = RequestMode::NoCors;
+    }
+
+    const std::string resolved = ResourceLoader::resolve_url(ctx.base_url, src);
+    if (resolved.empty()) return nullptr;
+
+    if (doc) {
+        bool in_cache = false;
+        auto cached = doc->find_cached_image(resolved, in_cache);
+        if (in_cache) return cached;
+        if (!doc->allow_external_image_fetch()) return nullptr;
+    }
+
+    ResourceResponse resp = ResourceLoader::load_for_page(src, ctx);
+    std::shared_ptr<ImageData> decoded = nullptr;
+    if (resp.success && !resp.body.empty()) {
+        decoded = ImageDecoder::decode_bytes(
+            reinterpret_cast<const uint8_t*>(resp.body.data()),
+            resp.body.size(),
+            resp.content_type
+        );
+        // Whether these pixels may be read back by a script is decided here,
+        // once, and carried on the element: a fetch that was not
+        // CORS-same-origin taints any canvas it is drawn on (§4.12.5.1), and
+        // `cross_origin` reports that the final hop, after any redirects, was
+        // not the document's own origin under a CORS request.
+        element.set_image_source_cross_origin(resp.cross_origin);
+    }
+
+    if (doc) {
+        doc->store_cached_image(resolved, decoded);
+    }
+    return decoded;
+}
 
 void LayoutTree::build_boxes(
     const std::shared_ptr<Node>& node,

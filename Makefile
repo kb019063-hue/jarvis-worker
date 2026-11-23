@@ -170,7 +170,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media verify-avif fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full gc-oracle deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics metrics-suites bench-css bench-attributes bench-tokenizer-attributes bench-surrogates verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket check-suites help
+.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media verify-avif fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full gc-oracle deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics metrics-suites bench-css bench-attributes bench-tokenizer-attributes bench-surrogates bench-js-core verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket check-suites help
 
 all: $(TARGET)
 
@@ -178,6 +178,11 @@ all: $(TARGET)
 .PHONY: verify-relative-navigation
 verify-relative-navigation: $(BUILD_DIR)/relative_navigation_fixture
 	@python3 tools/conformance/verify_relative_navigation.py --binary $(BUILD_DIR)/relative_navigation_fixture
+
+## Compare path-bearing URL references against Node's URL implementation.
+.PHONY: verify-path-resolution
+verify-path-resolution: $(BUILD_DIR)/relative_navigation_fixture
+	@python3 tools/conformance/verify_path_resolution.py --binary $(BUILD_DIR)/relative_navigation_fixture
 
 $(BUILD_DIR)/relative_navigation_fixture: $(OBJS) tools/conformance/relative_navigation_fixture.cpp
 	$(CXX) $(CXXFLAGS) $(OBJS) tools/conformance/relative_navigation_fixture.cpp -o $@
@@ -301,13 +306,23 @@ bench-floats: $(TARGET)
 bench-collections: $(TARGET)
 	@python3 tools/bench/bench_collection_iterators.py $(TARGET) --rounds 8192 --reps 3 --max-growth 2.25 --slack-ms 40
 
+## The tree-walker's own speed: six scripts (a loop, a property loop, a call, a
+## recursion, an array, a method) run inside a function, against Node.js on the
+## same box. Medians of interleaved runs, so a busy machine does not decide the
+## answer. `BENCH_JS_MAX_RATIO` turns it into a floor for CI; leave it empty to
+## only report. Row 7 of ROADMAP.md's Tier 2 is this number.
+BENCH_JS_MAX_RATIO ?=
+bench-js-core: $(TARGET)
+	@python3 tools/bench/bench_js_core.py $(TARGET) $(if $(BENCH_JS_MAX_RATIO),--max-ratio $(BENCH_JS_MAX_RATIO),) \
+		$(if $(BENCH_JS_BASELINE),--baseline $(BENCH_JS_BASELINE),)
+
 ## Explicit font required; install tools/shaping/requirements.txt in a venv.
 SHAPING_PYTHON ?= python3
 SHAPING_FONT ?=
 .PHONY: shaping-oracle shaping-oracle-self-test
-$(BUILD_DIR)/shaping-probe: tools/shaping/probe.cpp src/render/FontRenderer.cpp include/litebird/render/FontRenderer.hpp
+$(BUILD_DIR)/shaping-probe: tools/shaping/probe.cpp src/render/FontRenderer.cpp src/js/StringUnicodeTables.cpp include/litebird/render/FontRenderer.hpp include/litebird/js/StringUnicodeTables.hpp
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) tools/shaping/probe.cpp src/render/FontRenderer.cpp -o $@
+	$(CXX) $(CXXFLAGS) tools/shaping/probe.cpp src/render/FontRenderer.cpp src/js/StringUnicodeTables.cpp -o $@
 
 shaping-oracle: $(BUILD_DIR)/shaping-probe
 	$(SHAPING_PYTHON) tools/shaping/compare.py --probe $(BUILD_DIR)/shaping-probe --font "$(SHAPING_FONT)" --output $(BUILD_DIR)/shaping-report.json
@@ -722,5 +737,5 @@ clean:
 
 help:
 	@echo "Promise iterator check: make verify-promise-iterators (34 async cases, 3-second limit)"
-	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, verify-avif, fuzz-color, verify-color, verify-brotli, fuzz-brotli, verify-gc-stress (verify-gc-stress-full), gc-oracle, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, check-suites, clean"
+	@echo "Targets: all (default), test, run, bench-floats, bench-collections, bench-styles, conformance, js-conformance, test262, dom-conformance, url-conformance, xml-conformance, wpt, diff-strings, verify-regexp, diff-trees, diff-xml, fuzz, fuzz-media, verify-media, verify-avif, fuzz-color, verify-color, verify-brotli, fuzz-brotli, verify-gc-stress (verify-gc-stress-full), gc-oracle, deep, asan (asan-core, asan-deep), tsan, bench, bench-css, bench-attributes, bench-tokenizer-attributes, bench-surrogates, bench-js-core, verify-promise-iterators, verify-collection-iterators, security-fetch, security-https, security-worker, security-websocket, check-numbers, check-suites, clean"
 	@echo "Parts of asan-core, which CI runs as jobs side by side: asan-build, asan-unit, asan-verify, asan-js, asan-dom, asan-xml, asan-wpt, asan-xml-generated, asan-fuzz"

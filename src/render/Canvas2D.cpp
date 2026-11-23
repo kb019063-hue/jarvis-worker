@@ -346,6 +346,9 @@ CanvasRenderingContext2D::CanvasRenderingContext2D(int width, int height) {
 
 void CanvasRenderingContext2D::resize(int w, int h) {
     m_clip_mask.clear();
+    // Setting `width`/`height` gives the canvas a new bitmap, and a new bitmap
+    // is origin-clean whatever the old one held (HTML §4.12.5.1).
+    m_origin_clean = true;
     allocate(w, h);
 }
 

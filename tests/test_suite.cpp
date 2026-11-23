@@ -333,7 +333,6 @@ TEST(color_parsing) {
     assert(c4.r == 0 && c4.g == 0 && c4.b == 255);
 }
 
-
 TEST(css_color_keywords_match_the_css_specification) {
     using namespace litebird;
 
@@ -2619,7 +2618,6 @@ TEST(the_canvas_measures_the_ligature_it_paints) {
     assert(painted != separately);     // ...and not the two letters
 }
 
-
 TEST(font_kerning_none_reaches_the_box_and_the_painter) {
     using namespace litebird;
 
@@ -3468,10 +3466,12 @@ TEST(gpos_pair_and_single_positioning_without_kern_table) {
         if (mono.load_file(mono_path) && mono.has_gpos()) {
             assert(!mono.has_kerning());
             assert(mono.has_mark_positioning());
-            const auto mono_shaped = mono.shape_glyphs({'a', 0x0301, 'b'}, true);
+            // x/X + acute have no canonical composite: keep testing the mark
+            // path after font-aware composition makes a/A + acute one glyph.
+            const auto mono_shaped = mono.shape_glyphs({'x', 0x0301, 'b'}, true);
             assert(mono_shaped.size() == 3);
             assert(mono_shaped[1].x_advance == 0);
-            const auto mono_A = mono.shape_glyphs({'A', 0x0301}, true);
+            const auto mono_A = mono.shape_glyphs({'X', 0x0301}, true);
             assert(mono_A.size() == 2);
             assert(mono_A[1].y_offset > mono_shaped[1].y_offset);
         }
@@ -3605,14 +3605,14 @@ TEST(gpos_mark_to_base_and_mark_to_mark_anchoring) {
     assert(top_stacked < top_high - 15);
     fr.clear_webfonts();
 
-    // Check real host sans-serif (`DejaVuSans.ttf` if loaded) raises marks on 'A' and stacks 'circ' above 'acute'.
+    // Use uncomposable x/X so this host-font probe still exercises mark attachment.
     const std::string sans_path = fr.face_path("sans-serif");
     if (!sans_path.empty()) {
         TrueTypeFont sans;
         if (sans.load_file(sans_path) && sans.has_mark_positioning()) {
-            const auto a_mark = sans.shape_glyphs({'a', 0x0301}, true);
-            const auto A_mark = sans.shape_glyphs({'A', 0x0301}, true);
-            const auto a_stack = sans.shape_glyphs({'a', 0x0301, 0x0302}, true);
+            const auto a_mark = sans.shape_glyphs({'x', 0x0301}, true);
+            const auto A_mark = sans.shape_glyphs({'X', 0x0301}, true);
+            const auto a_stack = sans.shape_glyphs({'x', 0x0301, 0x0302}, true);
             assert(a_mark.size() == 2 && A_mark.size() == 2 && a_stack.size() == 3);
             assert(A_mark[1].y_offset > a_mark[1].y_offset);
             assert(a_stack[2].y_offset > a_stack[1].y_offset);
@@ -4191,7 +4191,8 @@ TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions) {
     const auto alt_a = f.shape_glyphs({'A'}, true);
     assert(alt_a.size() == 1 && alt_a[0].glyph == 11 && alt_a[0].x_advance == 750);
 
-    // 5. Optional host DejaVuSans.ttf real `ccmp` ChainContext: 'i' + acute converts to dotless i!
+    // 5. Optional host DejaVuSans.ttf real `ccmp`: i + vertical-line-above
+    // has no canonical composite and must still substitute dotless i.
     FontRenderer& fr = FontRenderer::instance();
     const std::string dejavu_path = fr.face_path("DejaVu Sans");
     if (!dejavu_path.empty()) {
@@ -4200,7 +4201,7 @@ TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions) {
             const uint16_t gid_i = dejavu.glyph_index('i');
             const uint16_t gid_dotless = dejavu.glyph_index(0x0131);
             if (gid_i != 0 && gid_dotless != 0) {
-                const auto d_ia = dejavu.shape_glyphs({'i', 0x0301}, true);
+                const auto d_ia = dejavu.shape_glyphs({'i', 0x030D}, true);
                 const auto d_ip = dejavu.shape_glyphs({'i', 'a'}, true);
                 assert(d_ia.size() == 2 && d_ip.size() == 2);
                 assert(d_ia[0].glyph == gid_dotless);
@@ -5098,7 +5099,6 @@ TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely) {
     std::printf("      [shaping] malformed/cyclic/recursive GSUB & GPOS rejected safely\n");
     std::fflush(stdout);
 }
-
 
 TEST(inline_formatting_context) {
     using namespace litebird;
@@ -13094,7 +13094,6 @@ TEST(table_completeness) {
     assert(saw_blue_rect);
 }
 
-
 TEST(float_shrinks_inline_line_boxes) {
     using namespace litebird;
 
@@ -17913,9 +17912,8 @@ TEST(destructuring_asks_the_value_for_its_iterator) {
         ok('and the length is not consulted', [p1, p2, p3].length, 3);
 
         // An object that only has `next` is not iterable in the language, and
-        // is not iterable here any more. Node.js refuses it as well; this
-        // engine's for...of takes it, which is an open row of AGENTS.md, so
-        // nothing is said about for...of here.
+        // engine refuses it too (every iteration path goes through
+        // js_iterate; see an_object_without_an_iterator_method_is_not_iterable).
         var bare = { i: 0, next: function () { return this.i < 2 ? { value: this.i++, done: false } : { done: true }; } };
         ok('an object with only next is a TypeError', t(function () { var [q] = bare; return q; }), 'TypeError');
 
@@ -17984,6 +17982,62 @@ TEST(destructuring_asks_the_value_for_its_iterator) {
         ok('a replaced prototype method is used', t(function () { var [q] = [1]; return q; }), 'substituted');
         Array.prototype[Symbol.iterator] = oa;
         ok('and the installed one is back', t(function () { var [q] = [1]; return q; }), '1');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
+TEST(an_object_without_an_iterator_method_is_not_iterable) {
+    using namespace litebird;
+    // Phase 210, finding 214, for the row "`for...of` takes an object that
+    // only has `next`", which this phase retired: the engine asks the value
+    // for its @@iterator for...of, spread, yield*, Set/Map/WeakSet/WeakMap,
+    // Object.fromEntries and destructuring all already made, and a bare
+    // { next } — not iterable in the language — was refused by every one of
+    // them here too. The row described a `method_is_installed()` fallback
+    // that is not in the tree at this commit; probe before believing a row
+    // (the precedent is Phase 201, finding 205). This suite pins the answers
+    // so the day a fallback comes back, these go red.
+    //
+    // Every assertion was run through Node.js v22.22.3 first; both engines
+    // print the same answers, including the one that is not a TypeError:
+    // Array.from with no @@iterator is the array-like path, a `length` of
+    // undefined is no length, and the answer is an empty array, not an error.
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
+    js.load_page("<!DOCTYPE html><html><body></body></html>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+        var bare = { i: 0, next: function () { return this.i < 2 ? { value: this.i++, done: false } : { done: true }; } };
+
+        ok('spread refuses a bare next', t(function () { return [...bare].join(); }), 'TypeError');
+        ok('for...of refuses it too', t(function () { var o = []; for (var x of bare) o.push(x); return o; }), 'TypeError');
+        ok('Set refuses it', t(function () { return new Set(bare).size; }), 'TypeError');
+        ok('Map refuses it', t(function () { return new Map(bare).size; }), 'TypeError');
+        ok('WeakSet refuses it', t(function () { return new WeakSet(bare); }), 'TypeError');
+        ok('yield* refuses it', t(function () { function* g() { yield* bare; } return [...g()].join(); }), 'TypeError');
+        ok('an array pattern refuses it', t(function () { var [q] = bare; return q; }), 'TypeError');
+        ok('an assignment pattern refuses it', t(function () { var q; [q] = bare; return q; }), 'TypeError');
+        ok('Object.fromEntries refuses it', t(function () { return Object.fromEntries(bare); }), 'TypeError');
+        ok('Array.from reads it as array-like with no length', Array.from(bare).length, 0);
+
+        var none = {};
+        ok('an object with no symbol key spreads to nothing', t(function () { return [...none].join(); }), 'TypeError');
+        ok('and a loop refuses it', t(function () { for (var x of none) {} return 'no error'; }), 'TypeError');
+        ok('and so does a Set', t(function () { return new Set(none).size; }), 'TypeError');
+
+        var with_null = { next: function () { return { done: true }; } };
+        with_null[Symbol.iterator] = null;
+        ok('a null @@iterator is a TypeError', t(function () { return [...with_null]; }), 'TypeError');
+        var with_five = { next: function () { return { done: true }; } };
+        with_five[Symbol.iterator] = 5;
+        ok('and so is a @@iterator that is not a function', t(function () { return [...with_five]; }), 'TypeError');
     )JS");
     assert(js.eval("failures.length").to_string() == "0");
     assert(js.eval("failures.join('; ')").to_string().empty());
@@ -35721,7 +35775,6 @@ void test_reduce_asks_for_each_place_as_it_reaches_it() {
 }
 
 
-
 TEST(svg_class_name_is_a_live_animated_string) {
     TestPage page;
     auto& js = page.js;
@@ -36094,6 +36147,8 @@ int main() {
     // Phase 102: a pattern asks the value for its iterator, as every other
     // loop does, instead of reading an array's elements by is_array().
     RUN_TEST(destructuring_asks_the_value_for_its_iterator);
+    // Phase 210: a bare { next } is not iterable anywhere — the loop included.
+    RUN_TEST(an_object_without_an_iterator_method_is_not_iterable);
     RUN_TEST(a_hole_is_a_place_the_prototype_can_fill);
     // Finding 138: the other thing an array keeps in `array_elements`, its
     // length, is inherited through the chain the same way its indices are.
@@ -36301,6 +36356,8 @@ int main() {
     // Phase 192: `Array.prototype.toLocaleString` asks each element (§23.1.3.28),
     // and `Object.prototype.toLocaleString` is `Invoke(this, "toString")` (§20.1.3.5).
     RUN_TEST(an_array_to_locale_string_asks_every_element);
+
+    // Phase 204: a counter is written where the walk found it.
 
     // Phase 202: a box's outline is a ring outside the border box that takes
     // no room; it is stored by the cascade and painted.

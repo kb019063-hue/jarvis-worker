@@ -8,6 +8,7 @@
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/render/Canvas2D.hpp"
 #include "litebird/render/ImageDecoder.hpp"
+#include "litebird/js/ImageBitmap.hpp"
 
 #include <cmath>
 #include <limits>
@@ -775,6 +776,149 @@ void install_image_data_methods(Realm& r, JsValue context_object,
     }));
 }
 
+// Defined below, beside toDataURL(): both need the same answer to "what
+// bitmap does this canvas have", including for a canvas that never had a
+// context.
+std::shared_ptr<ImageData> canvas_bitmap_for_serialization(Element& el);
+
+// --- CanvasRenderingContext2D.drawImage() ----------------------------------
+//
+// HTML §4.12.5.1 and the 2D context's drawing model: `drawImage(image, dx, dy)`
+// and its three- and five-argument forms, where the source is an
+// `HTMLCanvasElement`, an `ImageBitmap`, or an `HTMLImageElement` whose
+// bitmap the layout pass has already decoded.
+//
+// The origin-clean flag is what this method is *for*. Drawing a source that is
+// not known to be CORS-same-origin makes the destination canvas's bitmap
+// unclean, and `toDataURL()` then refuses it. The flag is only ever cleared
+// here, and only ever set by a resize, which replaces the bitmap.
+//
+// What this engine can read decides what it can be asked. A canvas and an
+// ImageBitmap have pixels it holds; an `<img>` has pixels only if the loader
+// decoded them, and the loader records whether the fetch was cross-origin
+// (ResourceResponse::cross_origin) — a cross-origin `<img>` without
+// `crossorigin` therefore taints. A source whose pixels are unreadable is
+// rejected rather than drawn as a blank box, because a blank draw would be a
+// silent wrong answer where the standard has a thrown one.
+
+namespace {
+
+/// The pixels a drawImage source holds, and whether they are known to be
+/// CORS-same-origin. False when the source is not something this engine can
+/// read at all.
+struct DrawSource {
+    std::shared_ptr<ImageData> pixels;
+    bool origin_clean{true};
+};
+
+bool draw_source_from(const JsValue& value, DrawSource& out) {
+    // A canvas: its bitmap is the context's, and a canvas that never had a
+    // context still has a blank bitmap of its size.
+    if (std::shared_ptr<Element> el = element_of(value); el && el->tag_name() == "canvas") {
+        if (auto ctx = el->canvas_context()) {
+            if (ctx->has_backing_store()) {
+                out.pixels = ctx->image_data();
+                out.origin_clean = ctx->origin_clean();
+                return out.pixels != nullptr;
+            }
+            return false;
+        }
+        out.pixels = canvas_bitmap_for_serialization(*el);
+        // A fresh blank bitmap of the element's size is clean: no pixel in it
+        // came from anywhere.
+        out.origin_clean = true;
+        return out.pixels != nullptr;
+    }
+    // An ImageBitmap: the pixels are the state's, and the state carries
+    // whether the bitmap was made from something origin-clean.
+    if (ImageBitmapState* bm = state_of<ImageBitmapState>(value)) {
+        if (bm->closed) return false;
+        auto image = std::make_shared<ImageData>();
+        image->width = bm->width;
+        image->height = bm->height;
+        image->pixels = bm->pixels;
+        out.pixels = std::move(image);
+        out.origin_clean = bm->origin_clean;
+        return out.pixels->is_valid();
+    }
+    // An <img>: whatever the layout pass decoded for it. `decoded_cross_origin`
+    // records a fetch that was not CORS-same-origin.
+    if (std::shared_ptr<Element> el = element_of(value); el && el->tag_name() == "img") {
+        std::shared_ptr<ImageData> decoded = load_image_for_element(*el);
+        if (!decoded || !decoded->is_valid()) return false;
+        out.pixels = std::move(decoded);
+        out.origin_clean = !el->image_source_cross_origin();
+        return true;
+    }
+    return false;
+}
+
+} // namespace
+
+void install_draw_image(Realm& r, JsValue context_object,
+                        const std::shared_ptr<CanvasRenderingContext2D>& context) {
+    auto get_ctx = [context]() -> CanvasRenderingContext2D* { return context.get(); };
+
+    context_object.set_property("drawImage", make_function(r, "drawImage", 3, [get_ctx](Realm& realm, Args args) {
+        require_args(args, 3, "CanvasRenderingContext2D.drawImage");
+        DrawSource source;
+        if (!draw_source_from(args[0], source)) {
+            js_throw_type_error(
+                "Failed to execute 'drawImage' on 'CanvasRenderingContext2D': the provided value is not "
+                "an image source this engine can read.");
+        }
+        // §4.12.5.1 step: a source that is not origin-clean clears the flag.
+        if (!source.origin_clean) get_ctx()->set_origin_clean(false);
+
+        // 3, 5 and 9 argument forms. The 9-argument form takes a source
+        // rectangle first; only the forms this engine draws are accepted.
+        double dx = 0, dy = 0, dw = 0, dh = 0;
+        const std::size_t n = args.size();
+        if (n == 3) {
+            dx = to_double(args[1]);
+            dy = to_double(args[2]);
+        } else if (n == 5) {
+            dx = to_double(args[1]);
+            dy = to_double(args[2]);
+            dw = to_double(args[3]);
+            dh = to_double(args[4]);
+        } else if (n == 9) {
+            // Source rectangle, cropped out of the pixels before drawing.
+            const double sx = to_double(args[1]);
+            const double sy = to_double(args[2]);
+            const double sw = to_double(args[3]);
+            const double sh = to_double(args[4]);
+            dx = to_double(args[5]);
+            dy = to_double(args[6]);
+            dw = to_double(args[7]);
+            dh = to_double(args[8]);
+            const int ix = static_cast<int>(std::lround(sx));
+            const int iy = static_cast<int>(std::lround(sy));
+            const int iw = static_cast<int>(std::lround(sw));
+            const int ih = static_cast<int>(std::lround(sh));
+            if (iw <= 0 || ih <= 0) return undefined();
+            auto cropped = std::make_shared<ImageData>();
+            cropped->width = iw;
+            cropped->height = ih;
+            cropped->pixels.assign(static_cast<std::size_t>(iw) * static_cast<std::size_t>(ih), 0);
+            for (int y = 0; y < ih; ++y) {
+                for (int x = 0; x < iw; ++x) {
+                    cropped->pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(iw) +
+                                    static_cast<std::size_t>(x)] = source.pixels->get_pixel(ix + x, iy + y);
+                }
+            }
+            source.pixels = std::move(cropped);
+        } else {
+            js_throw_type_error(
+                "Failed to execute 'drawImage' on 'CanvasRenderingContext2D': 3, 5 or 9 arguments required.");
+        }
+        get_ctx()->draw_image(source.pixels, static_cast<float>(dx), static_cast<float>(dy),
+                              static_cast<float>(dw), static_cast<float>(dh));
+        (void)realm;
+        return undefined();
+    }));
+}
+
 // --- HTMLCanvasElement.toDataURL() -----------------------------------------
 //
 // HTML §4.12.5.4, "serializing the bitmap": a type, the pixels encoded as that
@@ -869,6 +1013,17 @@ JsValue canvas_to_data_url(Element& el, Args args) {
     std::string type = "image/png";
     if (!args.empty() && !args[0].is_undefined()) type = to_str(args[0]);
 
+    // HTML §4.12.5.1 and §4.12.5.4: a bitmap that is not origin-clean must not
+    // be handed back, whatever type was asked for — the check comes before the
+    // type is looked at, because the pixels are what is protected, not the
+    // encoding. This is the whole point of the flag: it is the only thing
+    // standing between a page and a cross-origin image it drew.
+    if (auto context = el.canvas_context(); context && !context->origin_clean()) {
+        throw_dom(current_realm(), "SecurityError",
+                  "Failed to execute 'toDataURL' on 'HTMLCanvasElement': the canvas has been tainted by "
+                  "cross-origin data.");
+    }
+
     std::string canonical;
     if (!png_mime_type(type, canonical)) return str("data:,");
 
@@ -915,6 +1070,7 @@ void setup_canvas(Iface& I) {
             // ImageData needs a realm, so the three methods that speak it are
             // added here rather than in Canvas2D.cpp.
             install_image_data_methods(r, object, context);
+            install_draw_image(r, object, context);
             return object;
         });
     });
@@ -991,6 +1147,7 @@ void setup_offscreen_canvas(Iface& I) {
             st.context = std::make_shared<CtxPtr::element_type>(std::max(st.width, 1), std::max(st.height, 1));
             JsValue object = st.context->to_js_value(st.context);
             install_image_data_methods(r, object, st.context);
+            install_draw_image(r, object, st.context);
             st.context_obj = object;
         }
         return st.context_obj;

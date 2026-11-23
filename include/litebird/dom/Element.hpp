@@ -361,6 +361,12 @@ public:
     void set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> ctx) { m_canvas_context = std::move(ctx); }
     std::shared_ptr<CanvasRenderingContext2D> get_or_create_canvas_context_2d();
 
+    /// Whether the last successful fetch of this element's image was not
+    /// CORS-same-origin (HTML §4.12.5.1). Only meaningful for an `<img>` that
+    /// has decoded pixels; a source that never crossed an origin is false.
+    bool image_source_cross_origin() const { return m_image_source_cross_origin; }
+    void set_image_source_cross_origin(bool cross) const { m_image_source_cross_origin = cross; }
+
     /// Nested frame document hosted by an `<iframe>` / `<frame>`, if active.
     std::shared_ptr<Document> content_document() const {
         return m_rare ? m_rare->content_document.lock() : nullptr;
@@ -394,6 +400,10 @@ public:
     std::shared_ptr<Node> m_template_contents;
     AttributeList m_attributes;
     std::shared_ptr<CanvasRenderingContext2D> m_canvas_context;
+    /// Set when an `<img>`'s pixels came from a fetch that was not
+    /// CORS-same-origin; read by `drawImage` to decide whether drawing it
+    /// taints the destination canvas.
+    mutable bool m_image_source_cross_origin{false};
     std::shared_ptr<ShadowRoot> m_shadow_root;
     CustomElementState m_custom_state{CustomElementState::Uncustomized};
     /// What almost no element has, kept out of the element itself: a page of

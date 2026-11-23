@@ -26,8 +26,11 @@ its own kind of promise back from every method the standard makes one in.
   (`JsObject::internal` when `klass == ObjectClass::Promise`), because
   `super(...)` in a derived constructor hands the native parent the object
   `new` made, and a cell copied by `take_over` keeps what the cell holds and
-  not what the value held. `JsValue::promise_value()` reads the payload first
-  and the cell second; `JsValue::make_object(cell)` re-attaches the payload.
+  not what the value held. `Promise::state_of(value)` is the one reader: the
+  value's payload first, then the cell. It lives in `src/js/Promise.cpp` and
+  not in `JsValue` because `src/js/JsValue.cpp` sees `PromiseData`
+  forward-declared only, and because `#193` holds that file (AGENTS.md, "Look
+  again once the pull request is open" — the later pull request moves).
 - **`Symbol.species`** is on the constructor as a getter that answers `this`.
 
 ## The two bugs this uncovered

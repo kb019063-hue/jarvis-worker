@@ -94,13 +94,19 @@ cleared.
   the six new statics.
 - `src/js/Promise.cpp`: the capability pair, `PromiseResolve`, and every method
   that makes a promise going through them.
-- `include/litebird/js/JsValue.hpp`, `src/js/JsValue.cpp`: `promise_value()`
-  reads the payload first and the cell second; `make_object(cell)` attaches the
-  state of a `Promise`-klass cell; the collector's trace of a promise cell no
-  longer counts a handler's reactions as roots when more than three owners hold
-  the state (a value payload, the cell, and the one lambda that settles it is
-  the script-only count; a native owner — a resolver in a timer, a suspended
-  async function — adds one and the reactions stay roots).
+- `src/js/Promise.cpp`: `Promise::state_of(value)` reads the payload first and
+  the cell second, and every reader in the engine goes through it. (It cannot
+  live in `JsValue::promise_value()`: `src/js/JsValue.cpp` sees `PromiseData`
+  forward-declared only, so it cannot touch `cell->internal`; and `#193` holds
+  that file, so the later pull request moves — AGENTS.md.)
+  The collector's trace of a promise cell does not count a handler's reactions
+  as roots when more than three owners hold the state (a value payload, the
+  cell, and the one lambda that settles it is the script-only count; a native
+  owner — a resolver in a timer, a suspended async function — adds one and the
+  reactions stay roots).
+- `src/js/BuiltinsObject.cpp`: one line, because a promise named from its cell
+  was reaching a `promise_value()` check its own `ObjectClass::Promise` case had
+  already answered.
 
 ## What is still open
 

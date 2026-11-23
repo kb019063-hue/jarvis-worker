@@ -1043,7 +1043,8 @@ void install_object_builtins(JsIntrinsics& realm) {
                                     {"asyncIterator", kAsyncIteratorKey},
                                     {"hasInstance", "@@hasInstance"},
                                     {"toPrimitive", "@@toPrimitive"},
-                                    {"toStringTag", "@@toStringTag"}}) {
+                                    {"toStringTag", "@@toStringTag"},
+                                    {"unscopables", "@@unscopables"}}) {
         symbol_ctor.define_property(name, js_symbol_for_key(key, std::string("Symbol.") + name), 0);
     }
     js_define_method(symbol_ctor, "for", 1, [](Args args) {

@@ -86,7 +86,7 @@ that write anything on GitHub.
   - the checks that read documents fail on what would be merged (see below);
   - its phase or finding is on `main` already.
 It no longer fails when README.md states another number of unit suites than
-tests/test_suite.cpp registers: that count is the landing session's to
+tests/test_suite.cpp and tests/suites/ hold: that count is the landing session's to
 refresh (AGENTS.md, "Working together"; tools/ci/check_numbers.py says what
 it cost while every pull request edited it), and `merge N` only notes it.
 
@@ -244,6 +244,18 @@ def gh_json(*arguments: str):
 def file_at(path: str, ref: str) -> str:
     """A file of the repository as it is at a commit or on a branch."""
     return gh("api", f"{REPO}/contents/{path}?ref={ref}", "-H", "Accept: application/vnd.github.raw")
+
+
+def own_file_suites(ref: str) -> int:
+    """The suites that are files of their own at a commit or on a branch.
+
+    The `.cpp` files of tests/suites/, one suite each: tools/ci/check_suites.py
+    holds a file to that, so the names are enough and no file is read. A commit
+    from before 23 November 2026 has no such directory, and the answer is 0.
+    """
+    listed = gh("api", f"{REPO}/contents/tests/suites?ref={ref}", "--jq",
+                '[.[] | select(.type == "file" and (.name | endswith(".cpp")))] | length', check=False)
+    return int(listed) if listed.strip().isdigit() else 0
 
 
 def without_remarks(line: str) -> str:
@@ -1246,7 +1258,8 @@ def check_merge(number: int, landing: bool = False) -> int:
         if both:
             report.note(f"#{other['number']} is open and names or changes {', '.join(both)}: whichever merges second merges the other")
 
-    suites = len(re.findall(r"(?m)^    RUN_TEST\(", file_at("tests/test_suite.cpp", head)))
+    # The suites `main()` has a line for, and the files of tests/suites/.
+    suites = len(re.findall(r"(?m)^    RUN_TEST\(", file_at("tests/test_suite.cpp", head))) + own_file_suites(head)
     # The figures a document publishes may carry a `<!--metrics:key/shape-->`
     # marker (tools/ci/check_numbers.py): an HTML comment naming the claim, which
     # a reader does not see and which must not read as a word of prose.
@@ -1255,10 +1268,10 @@ def check_merge(number: int, landing: bool = False) -> int:
     stated |= {int(n) for n in re.findall(r"All (\d+) engine test suites passed", readme)}
     stated |= {int(n) for n in re.findall(r"# Run the (\d+) engine test suites", readme)}
     if stated == {suites}:
-        report.ok(f"README.md says {suites} unit suites, and tests/test_suite.cpp has {suites}")
+        report.ok(f"README.md says {suites} unit suites, and tests/ has {suites}")
     else:
         # Not a failure since 22 November: see the top of this file.
-        report.note(f"tests/test_suite.cpp has {suites} unit suites and README.md says {sorted(stated)}: "
+        report.note(f"tests/ has {suites} unit suites and README.md says {sorted(stated)}: "
                     "leave it, the landing session refreshes that count (AGENTS.md, \"Working together\")")
 
     if watch_on:

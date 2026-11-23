@@ -330,6 +330,14 @@ jobs:
         # `then` with no handler: each run through the engine and Node.js, and
         # the two outputs required to be equal, line for line (Phase 196).
         run: python3 tools/conformance/verify_promise_subclass.py
+      - name: Garbage-collector residue is flat across loop sizes
+        # 15 churn shapes -- promise reactions, chained reactions, bind, timers,
+        # intervals and listeners -- each run at 200 and at 2,000 iterations,
+        # requiring the residue after the queue drains to be the same at both
+        # sizes. A leak grows with the loop; a backlog does not. The row this
+        # replaces counted `alive_cells` mid-loop and read the queue's depth as
+        # garbage (Phase 227, finding 231).
+        run: python3 tools/conformance/verify_gc_residue.py
       - name: String results against Node.js
         # 36 subject strings through every string method and 51 regular
         # expressions: 50,580 results, each compared with what Node computes on

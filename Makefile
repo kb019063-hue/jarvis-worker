@@ -289,6 +289,16 @@ bench-styles: $(TARGET)
 run: $(TARGET)
 	@./$(TARGET) examples/hello.html
 
+## Compare full RGBA screenshots from two builds (strict equality by default).
+## Example: make diff-render BEFORE=/tmp/old/litebird AFTER=build/litebird
+## Pass DIFF_RENDER_ARGS="--suite tests/render/body-origin.json" for another corpus.
+.PHONY: diff-render diff-render-self-test
+diff-render:
+	@python3 tools/conformance/diff_render.py --before "$(BEFORE)" --after "$(AFTER)" $(DIFF_RENDER_ARGS)
+
+diff-render-self-test:
+	@python3 tools/conformance/test_diff_render.py
+
 ## Conformance scoreboard (html5lib / WPT tree-construction corpus).
 conformance: $(TARGET)
 	@$(CONFORMANCE)

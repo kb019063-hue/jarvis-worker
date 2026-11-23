@@ -32550,6 +32550,59 @@ TEST(textdecoder_reaches_script_in_pieces) {
         // x-user-defined carries every byte: nothing is ever held back.
         report('x-user-defined holds nothing', stream('x-user-defined', [[0x80], [0x81]]),
                '\uF780\uF781');
+
+        // ---- the byte order mark belongs to UTF-8 and UTF-16 --------------
+        // §7.1 skips the first scalar value of a decoder when it is U+FEFF,
+        // and that is the whole rule: which *bytes* are a byte order mark is
+        // the encoding's business, and the two UTF-16 ones disagree about the
+        // same two bytes. Everything below was taken from Node v22.22.3.
+        function cps(s) {
+            var out = [];
+            for (var ch of s) out.push(ch.codePointAt(0).toString(16));
+            return out.join(',');
+        }
+        report('UTF-16LE reads FE FF as U+FFFE, not as a BOM',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xFE, 0xFF, 0x00, 0x41]))), 'fffe,4100');
+        report('UTF-16BE reads FF FE as U+FFFE, not as a BOM',
+               cps(new TextDecoder('utf-16be').decode(bytes([0xFF, 0xFE, 0x41, 0x00]))), 'fffe,4100');
+        report('UTF-8 keeps FE FF as two replacements',
+               cps(new TextDecoder().decode(bytes([0xFF, 0xFE, 0x41, 0x00]))), 'fffd,fffd,41,0');
+        report('UTF-16LE does not read the UTF-8 BOM',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), 'bbef,41bf');
+        report('windows-1252 has no BOM at all',
+               cps(new TextDecoder('windows-1252').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), 'ef,bb,bf,41');
+        report('windows-1251 has no BOM at all either',
+               cps(new TextDecoder('windows-1251').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), '43f,bb,457,41');
+        report('a BOM on its own decodes to nothing',
+               new TextDecoder().decode(bytes([0xEF, 0xBB, 0xBF])), '');
+        report('a UTF-16 BOM on its own decodes to nothing',
+               new TextDecoder('utf-16le').decode(bytes([0xFF, 0xFE])), '');
+        report('only the first scalar value is asked',
+               cps(new TextDecoder().decode(bytes([0x41, 0xEF, 0xBB, 0xBF]))), '41,feff');
+        report('a second BOM in the same call is data',
+               cps(new TextDecoder().decode(bytes([0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF]))), 'feff');
+        report('a UTF-16 BOM is stripped after it is decoded',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xFF, 0xFE, 0xFF, 0xFE, 0x41, 0x00]))), 'feff,41');
+        // §7.2 step 1: a decode without {stream: true} is a new decoder, so
+        // the BOM is sniffed again; one *inside* a stream is data.
+        var bomTwice = new TextDecoder();
+        report('a new stream sniffs its own BOM',
+               bomTwice.decode(bytes([0xEF, 0xBB, 0xBF, 0x41])) + '|' +
+               bomTwice.decode(bytes([0xEF, 0xBB, 0xBF, 0x42])), 'A|B');
+        var bomMidStream = new TextDecoder();
+        report('a BOM after a stream chunk is data',
+               bomMidStream.decode(bytes([0x41]), {stream: true}) + '|' +
+               bomMidStream.decode(bytes([0xEF, 0xBB, 0xBF, 0x42])), 'A|\uFEFFB');
+        // Step 5 of §7.2: a fatal error resets the decoder, so the next call
+        // is a new one and does not continue the stream that failed.
+        var afterError = new TextDecoder('utf-8', {fatal: true});
+        try { afterError.decode(bytes([0xFF]), {stream: true}); } catch (e) {}
+        report('a fatal error resets the decoder', afterError.decode(bytes([0x41])), 'A');
+        // The ISO-2022-JP mode is decoder state too, and is reset with it.
+        var modeReset = new TextDecoder('iso-2022-jp');
+        modeReset.decode(bytes([0x1B, 0x24, 0x42, 0x21, 0x21]));
+        report('a one-shot call does not leave the escape mode behind',
+               modeReset.decode(bytes([0x41])), 'A');
         failures;
     )JS");
     const std::string failed = js.eval("failures.join('\\n')").to_string();

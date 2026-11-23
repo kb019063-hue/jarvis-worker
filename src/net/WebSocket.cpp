@@ -1,6 +1,7 @@
 #include "litebird/net/WebSocket.hpp"
 #include "litebird/dom/Document.hpp"
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/js/DomEventDispatch.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/JsOps.hpp"
@@ -1272,6 +1273,11 @@ void invoke_ws_handler(const JsValue& fn, const JsValue& target, const JsValue& 
     }
 }
 
+struct EndAtTargetEventDispatch {
+    const JsValue& event;
+    ~EndAtTargetEventDispatch() { dom::end_event_dispatch_at_target(event); }
+};
+
 } // namespace
 
 void WebSocketObject::dispatch_open_on_owner(const std::string& selected_protocol,
@@ -1341,20 +1347,19 @@ void WebSocketObject::dispatch_message_on_owner(const std::string& payload, bool
         }
 
         JsValue target = self->m_owner_js->inst;
-        JsValue ev = JsValue::make_object(Heap::default_heap().allocate_object());
-        ev.set_property("type", JsValue::make_string("message"));
-        ev.set_property("data", data_val);
-        ev.set_property("origin", JsValue::make_string(self->m_event_origin));
-        ev.set_property("lastEventId", JsValue::make_string(""));
-        ev.set_property("source", JsValue::make_null());
-        ev.set_property("target", target);
-        ev.set_property("currentTarget", target);
+        dom::Realm& event_realm = realm ? *realm : dom::current_realm();
+        JsValue ev = dom::make_event(event_realm, "MessageEvent", "message", false, false,
+                                     {{"data", data_val},
+                                      {"origin", JsValue::make_string(self->m_event_origin)}});
+        if (!dom::begin_event_dispatch_at_target(ev, target, /*trusted=*/true)) return;
+        EndAtTargetEventDispatch finish_dispatch{ev};
 
         JsValue onmsg = target.get_property("onmessage");
         if (onmsg.is_function()) invoke_ws_handler(onmsg, target, ev);
 
         auto list = self->m_owner_js->snapshot_and_consume_once("message");
         for (const auto& entry : list) {
+            if (dom::event_immediate_stopped(ev)) break;
             invoke_ws_handler(entry.callback, target, ev);
         }
     });
@@ -1367,6 +1372,20 @@ void WebSocketObject::dispatch_error_and_close_on_owner(const std::string& err_m
                                                         bool emit_error) {
     post_to_owner([self = shared_from_this(), err_msg, close_code, close_reason, was_clean, emit_error]() {
         self->m_js_ready_state.store(WebSocketReadyState::Closed, std::memory_order_release);
+        dom::Realm* realm = self->m_owner_js && self->m_owner_js->realm_id
+                                ? dom::find_realm(self->m_owner_js->realm_id)
+                                : nullptr;
+        JsIntrinsics* previous_intrinsics = &JsIntrinsics::get();
+        const bool switched_realm = realm && realm->intrinsics && realm->intrinsics != previous_intrinsics;
+        if (switched_realm) JsIntrinsics::set_current(realm->intrinsics);
+        struct RestoreIntrinsics {
+            JsIntrinsics* previous;
+            bool active;
+            ~RestoreIntrinsics() {
+                if (active) JsIntrinsics::set_current(previous);
+            }
+        } restore_guard{previous_intrinsics, switched_realm};
+
         const bool realm_alive = !self->m_event_sink || !self->m_event_sink->owner_alive ||
                                  self->m_event_sink->owner_alive->load(std::memory_order_acquire);
         if (realm_alive && self->m_owner_js && !self->m_owner_js->inst.is_undefined()) {
@@ -1388,20 +1407,22 @@ void WebSocketObject::dispatch_error_and_close_on_owner(const std::string& err_m
                 }
             }
 
-            JsValue close_ev = JsValue::make_object(Heap::default_heap().allocate_object());
-            close_ev.set_property("type", JsValue::make_string("close"));
-            close_ev.set_property("code", JsValue::make_number(close_code));
-            close_ev.set_property("reason", JsValue::make_string(close_reason));
-            close_ev.set_property("wasClean", JsValue::make_boolean(was_clean));
-            close_ev.set_property("target", target);
-            close_ev.set_property("currentTarget", target);
+            dom::Realm& event_realm = realm ? *realm : dom::current_realm();
+            JsValue close_ev = dom::make_event(event_realm, "CloseEvent", "close", false, false,
+                                               {{"wasClean", JsValue::make_boolean(was_clean)},
+                                                {"code", JsValue::make_number(close_code)},
+                                                {"reason", JsValue::make_string(close_reason)}});
+            if (dom::begin_event_dispatch_at_target(close_ev, target, /*trusted=*/true)) {
+                EndAtTargetEventDispatch finish_dispatch{close_ev};
 
-            JsValue onclose = target.get_property("onclose");
-            if (onclose.is_function()) invoke_ws_handler(onclose, target, close_ev);
+                JsValue onclose = target.get_property("onclose");
+                if (onclose.is_function()) invoke_ws_handler(onclose, target, close_ev);
 
-            auto close_list = self->m_owner_js->snapshot_and_consume_once("close");
-            for (const auto& entry : close_list) {
-                invoke_ws_handler(entry.callback, target, close_ev);
+                auto close_list = self->m_owner_js->snapshot_and_consume_once("close");
+                for (const auto& entry : close_list) {
+                    if (dom::event_immediate_stopped(close_ev)) break;
+                    invoke_ws_handler(entry.callback, target, close_ev);
+                }
             }
         }
         // Break inst <-> WebSocketObject reference cycle once close completes.

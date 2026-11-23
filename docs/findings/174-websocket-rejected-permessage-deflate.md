@@ -54,5 +54,7 @@ not negotiate or speak RFC 7692 `permessage-deflate`:
 
 ## 4. What is still open
 
-HTTP proxy tunneling (`CONNECT`) and standalone `CloseEvent`/`MessageEvent`
-constructors.
+HTTP proxy tunneling (`CONNECT`) and `WebSocket.prototype` completeness remain
+separate gaps. The event constructors already worked; Phase 187 typed WebSocket
+`message` and `close` delivery. Worker `message` and WebSocket `open`/`error`
+delivery were not changed by that phase.

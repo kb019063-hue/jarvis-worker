@@ -610,10 +610,12 @@ wsIp.onopen = function() {{
   wsIp.send('hi-ip');
 }};
 wsIp.onmessage = function(e) {{
+  log('ip_message_event', (e instanceof MessageEvent) + ':' + (e instanceof Event) + ':' + e.type + ':' + (e.ports ? e.ports.length : -1) + ':' + (e.target === wsIp) + ':' + (e.currentTarget === wsIp) + ':' + e.eventPhase + ':' + e.isTrusted + ':' + (typeof e.composedPath === 'function' ? e.composedPath().length : -1));
   log('ip_msg', e.data);
   wsIp.close(3000, 'clean-ip');
 }};
 wsIp.onclose = function(e) {{
+  log('ip_close_event', (e instanceof CloseEvent) + ':' + (e instanceof Event) + ':' + e.type + ':' + e.code + ':' + e.reason + ':' + e.wasClean + ':' + (e.target === wsIp) + ':' + (e.currentTarget === wsIp) + ':' + e.eventPhase + ':' + e.isTrusted + ':' + (typeof e.composedPath === 'function' ? e.composedPath().length : -1));
   log('ip_close', e.code + ':' + e.reason + ':' + e.wasClean + ':' + wsIp.readyState);
   pending--;
 }};
@@ -850,6 +852,12 @@ setTimeout(pump, 1);
             check("wss://127.0.0.1 IP SAN handshake, subprotocol, send & clean close",
                   r1.get("ip_proto") == "superchat" and r1.get("ip_msg") == "echo:hi-ip" and r1.get("ip_close") == "3000:clean-ip:true:3",
                   f"{r1.get('ip_proto')} / {r1.get('ip_msg')} / {r1.get('ip_close')}")
+            check("WebSocket delivers a trusted MessageEvent at the target",
+                  r1.get("ip_message_event") == "true:true:message:0:true:true:2:true:1",
+                  str(r1.get("ip_message_event")))
+            check("WebSocket delivers a trusted CloseEvent with close details",
+                  r1.get("ip_close_event") == "true:true:close:3000:clean-ip:true:true:true:2:true:1",
+                  str(r1.get("ip_close_event")))
             check("wss://localhost DNS SAN + SNI echo & clean close",
                   r1.get("dns_msg") == "echo:hi-dns" and r1.get("dns_close") == "1000:true" and "localhost" in wss_valid.sni_names,
                   f"{r1.get('dns_msg')} / {r1.get('dns_close')} / sni={wss_valid.sni_names}")

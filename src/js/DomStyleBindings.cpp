@@ -21,6 +21,7 @@
 #include "litebird/dom/Selector.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/common/Color.hpp"
+#include "litebird/css/DocumentStyles.hpp"
 #include "litebird/css/GridGrammar.hpp"
 #include "litebird/js/Promise.hpp"
 
@@ -2725,6 +2726,23 @@ bool sheet_is_applied(Element& element) {
 // while its text has not changed, and a new one when it has. A sheet a script
 // has written to is not thrown away with its text: an `insertRule` survives
 // the next `getComputedStyle`.
+/// The text of the sheet an element owns. A `<style>` owns its text; a
+/// `<link rel="stylesheet">` owns whatever its href points at, which is why a
+/// `<link>` used to contribute nothing here -- it has no text content, so the
+/// sheet a page actually links was empty and every rule in it was missing from
+/// what `getComputedStyle` reported, while the layout painted them. The load
+/// goes through DocumentStyles so that the two cascades cannot disagree.
+std::string sheet_text_of(Element& element) {
+    if (element.tag_name() != "link") return element.text_content();
+    std::shared_ptr<Document> doc = element.owner_document();
+    if (!doc) return std::string();
+    std::string css;
+    if (!DocumentStyles::load_linked_stylesheet(element, *doc, &doc->stylesheet_cache(), css)) {
+        return std::string();
+    }
+    return css;
+}
+
 std::shared_ptr<ParsedSheet> sheet_of(Realm& realm, Element& element) {
     StylePart& part = realm.part<StylePart>();
     SheetEntry& entry = part.sheet_objects[&element];
@@ -2732,17 +2750,18 @@ std::shared_ptr<ParsedSheet> sheet_of(Realm& realm, Element& element) {
         entry.sheet = std::make_shared<ParsedSheet>();
         entry.owner = shared(element);
         std::size_t at = 0;
-        parse_rules(element.text_content(), at, entry.sheet->rules, false);
+        parse_rules(sheet_text_of(element), at, entry.sheet->rules, false);
         entry.sheet->number_rules();
         entry.applied = sheet_is_applied(element);
         entry.version = Node::tree_version();
-        entry.source = element.text_content();
+        entry.source = sheet_text_of(element);
         return entry.sheet;
     }
     // The sheet is one object for as long as the element has one: its rules
-    // are the element's text, read again when the text changes, and an
-    // `insertRule` is a rule of the sheet like any other.
-    const std::string text = element.text_content();
+    // are the element's text (for a `<link>`, the text it points at), read
+    // again when that changes, and an `insertRule` is a rule of the sheet like
+    // any other.
+    const std::string text = sheet_text_of(element);
     if (text != entry.source) {
         std::vector<SheetRulePtr> parsed;
         std::size_t at = 0;
@@ -2796,6 +2815,16 @@ const std::vector<std::shared_ptr<Element>>& style_elements_of(Realm& realm, con
             auto& element = static_cast<Element&>(node);
             const std::string media = ascii_lower(element.get_attribute("media"));
             if (media.find("print") == std::string::npos) part.style_elements.push_back(shared(element));
+        } else if (is_html_element(node, "link")) {
+            // A linked stylesheet takes part in the cascade like an inline one.
+            // Leaving it out was the defect: a page whose only CSS is a
+            // `<link>` had a layout painted from rules that script was never
+            // told about, so `getComputedStyle` and the painted box disagreed.
+            auto& element = static_cast<Element&>(node);
+            if (DocumentStyles::is_stylesheet_rel(element.get_attribute("rel"))) {
+                const std::string media = ascii_lower(element.get_attribute("media"));
+                if (media.find("print") == std::string::npos) part.style_elements.push_back(shared(element));
+            }
         }
         return true;
     });

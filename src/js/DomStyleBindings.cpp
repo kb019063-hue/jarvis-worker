@@ -489,8 +489,8 @@ const std::unordered_map<std::string, PropertyRule>& property_rules() {
                                                        "start", "end", "baseline"}};
         rules["justify-items"] = {ValueKind::Keyword, {"normal", "stretch", "start", "end", "center", "left",
                                                        "right", "baseline", "self-start", "self-end"}};
-        rules["will-change"] = {ValueKind::Keyword, {"auto", "scroll-position", "contents", "transform", "opacity",
-                                                     "filter"}};
+        // `will-change` has no rule here: its grammar is a comma-separated
+        // list of custom idents (Phase 244), checked in normalize_value.
         rules["cursor"] = {ValueKind::Keyword, {"auto", "default", "none", "context-menu", "help", "pointer",
                                                 "progress", "wait", "cell", "crosshair", "text", "vertical-text",
                                                 "alias", "copy", "move", "no-drop", "not-allowed", "grab",
@@ -664,6 +664,446 @@ std::string canonicalize_css_value(const std::string& property, const std::strin
     return trim(out);
 }
 
+
+// Splits a value on the commas that are not inside parentheses or quotes.
+std::vector<std::string> split_top_level_commas(const std::string& value) {
+    std::vector<std::string> parts;
+    std::string current;
+    int depth = 0;
+    char quote = 0;
+    for (const char c : value) {
+        if (quote) {
+            current += c;
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            quote = c;
+            current += c;
+        } else if (c == '(') {
+            ++depth;
+            current += c;
+        } else if (c == ')') {
+            if (depth > 0) --depth;
+            current += c;
+        } else if (c == ',' && depth == 0) {
+            parts.push_back(trim(current));
+            current.clear();
+        } else {
+            current += c;
+        }
+    }
+    parts.push_back(trim(current));
+    return parts;
+}
+
+// Defined further down with the shorthand machinery it serves.
+std::vector<std::string> split_components(const std::string& value);
+
+// A number, or a percentage. A calc()/var() is taken on trust.
+bool is_number_or_percentage(const std::string& text) {
+    const std::string lower = ascii_lower(trim(text));
+    if (is_function_value(lower, "var") || is_function_value(lower, "calc") || is_function_value(lower, "min") ||
+        is_function_value(lower, "max") || is_function_value(lower, "clamp") || is_function_value(lower, "env")) {
+        return true;
+    }
+    std::size_t at = 0;
+    double number = 0;
+    if (!parse_css_number(lower, at, number)) return false;
+    const std::string unit = lower.substr(at);
+    return unit.empty() || unit == "%";
+}
+
+// An angle: a number with deg/rad/grad/turn, or a unitless zero. A
+// calc()/var() is taken on trust.
+bool is_angle_value(const std::string& text) {
+    const std::string lower = ascii_lower(trim(text));
+    if (is_function_value(lower, "var") || is_function_value(lower, "calc") || is_function_value(lower, "min") ||
+        is_function_value(lower, "max") || is_function_value(lower, "clamp") || is_function_value(lower, "env")) {
+        return true;
+    }
+    std::size_t at = 0;
+    double number = 0;
+    if (!parse_css_number(lower, at, number)) return false;
+    const std::string unit = lower.substr(at);
+    if (unit.empty()) return number == 0;
+    return unit == "deg" || unit == "rad" || unit == "grad" || unit == "turn";
+}
+
+// A length or a percentage (calc()/var() included via normalize_length).
+bool is_length_percentage(const std::string& text) {
+    std::string normalized;
+    return normalize_length(text, normalized);
+}
+
+// A length that is not a percentage.
+bool is_length_token(const std::string& text) {
+    std::string normalized;
+    if (!normalize_length(text, normalized)) return false;
+    return normalized.empty() || normalized.back() != '%';
+}
+
+bool balanced_parens(const std::string& text) {
+    int depth = 0;
+    char quote = 0;
+    for (const char c : text) {
+        if (quote) {
+            if (c == quote) quote = 0;
+            continue;
+        }
+        if (c == '"' || c == '\'') {
+            quote = c;
+        } else if (c == '(') {
+            ++depth;
+        } else if (c == ')') {
+            --depth;
+            if (depth < 0) return false;
+        }
+    }
+    return depth == 0 && !quote;
+}
+
+// A position token: a length-percentage, or one of the box keywords.
+bool is_position_token(const std::string& lower) {
+    return is_length_percentage(lower) || one_of(lower, {"left", "center", "right", "top", "bottom"});
+}
+
+// A shape radius: a length-percentage, or a closest/farthest keyword.
+bool is_shape_radius(const std::string& lower) {
+    return is_length_percentage(lower) || one_of(lower, {"closest-side", "farthest-side"});
+}
+
+// If `token` is a function call, gives its lowercase name and its raw
+// arguments; false when the token is not one.
+bool split_function_token(const std::string& raw_token, std::string& name, std::string& args) {
+    const std::string token = trim(raw_token);
+    if (token.size() < 4 || token.back() != ')') return false;
+    const std::size_t open = token.find('(');
+    if (open == std::string::npos || open == 0) return false;
+    if (!balanced_parens(token)) return false;
+    name = ascii_lower(trim(token.substr(0, open)));
+    args = token.substr(open + 1, token.size() - open - 2);
+    return !name.empty();
+}
+
+bool is_image_function(const std::string& name) {
+    return one_of(name, {"url", "linear-gradient", "radial-gradient", "conic-gradient",
+                         "repeating-linear-gradient", "repeating-radial-gradient", "repeating-conic-gradient",
+                         "image-set", "-webkit-image-set", "image"});
+}
+
+std::string join_strings(const std::vector<std::string>& parts, const char* separator) {
+    std::string out;
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        if (i) out += separator;
+        out += parts[i];
+    }
+    return out;
+}
+
+// --- contain -------------------------------------------------------------
+// contain: none | strict | content | [ size || inline-size || layout ||
+// style || paint ] — the standalone keywords may not be mixed, and none of
+// the list keywords may appear twice.
+bool normalize_contain(const std::string& value, std::string& out) {
+    const std::vector<std::string> parts = split_components(ascii_lower(trim(value)));
+    if (parts.empty()) return false;
+    if (parts.size() == 1 && one_of(parts[0], {"none", "strict", "content"})) {
+        out = parts[0];
+        return true;
+    }
+    std::unordered_set<std::string> seen;
+    for (const auto& part : parts) {
+        if (!one_of(part, {"size", "inline-size", "layout", "style", "paint"})) return false;
+        if (!seen.insert(part).second) return false;
+    }
+    out = join_strings(parts, " ");
+    return true;
+}
+
+// --- filter --------------------------------------------------------------
+// filter: none | <filter-function>+ — whitespace-separated, arguments per
+// function. A drop-shadow may carry one color token anywhere in it.
+bool normalize_drop_shadow(const std::string& args) {
+    const std::vector<std::string> parts = split_components(args);
+    if (parts.size() < 2 || parts.size() > 4) return false;
+    int lengths = 0, colors = 0;
+    for (const auto& token : parts) {
+        std::string normalized;
+        if (normalize_length(token, normalized)) {
+            ++lengths;
+            if (lengths > 3) return false;
+            if (lengths == 3 && (normalized.back() == '%' || is_negative_length(normalized))) return false;
+            continue;
+        }
+        std::string ignored;
+        if (normalize_color(token, ignored)) {
+            ++colors;
+            continue;
+        }
+        return false;
+    }
+    return lengths >= 2 && colors <= 1;
+}
+
+bool normalize_filter_function(const std::string& token) {
+    std::string name, args;
+    if (!split_function_token(token, name, args)) return false;
+    const std::vector<std::string> a = split_components(args);
+    if (name == "url") {
+        return is_function_value(ascii_lower(std::string("url(") + trim(args) + ")"), "url") && !trim(args).empty();
+    }
+    if (name == "blur") {
+        if (a.size() != 1 || !is_length_token(a[0])) return false;
+        std::string normalized;
+        return normalize_length(a[0], normalized) && !is_negative_length(normalized);
+    }
+    if (name == "hue-rotate") {
+        return a.size() == 1 && is_angle_value(a[0]);
+    }
+    if (one_of(name, {"brightness", "contrast", "grayscale", "invert", "opacity", "saturate", "sepia"})) {
+        return a.size() == 1 && is_number_or_percentage(a[0]);
+    }
+    if (name == "drop-shadow") {
+        return normalize_drop_shadow(args);
+    }
+    return false;
+}
+
+bool normalize_filter(const std::string& value, std::string& out) {
+    if (ascii_lower(trim(value)) == "none") {
+        out = "none";
+        return true;
+    }
+    const std::vector<std::string> tokens = split_components(value);
+    if (tokens.empty()) return false;
+    for (const auto& token : tokens) {
+        if (!normalize_filter_function(token)) return false;
+    }
+    out = canonicalize_css_value("filter", join_strings(tokens, " "));
+    return true;
+}
+
+// --- mask ----------------------------------------------------------------
+// mask: none | <mask-layer># — layers separated by top-level commas; each
+// layer carries a <mask-reference> (an image function, a url, or `none`)
+// and zero or more components (position/size lengths, repeat and mode
+// keywords, the `/` separator).
+bool normalize_mask_layer(const std::string& layer) {
+    const std::vector<std::string> tokens = split_components(layer);
+    if (tokens.empty()) return false;
+    bool saw_reference = false;
+    for (const auto& raw : tokens) {
+        const std::string token = ascii_lower(raw);
+        if (token == "/") continue;
+        std::string name, args;
+        if (split_function_token(raw, name, args)) {
+            if (!is_image_function(name)) return false;
+            if (trim(args).empty()) return false;
+            saw_reference = true;
+            continue;
+        }
+        if (one_of(token, {"none", "luminance", "alpha", "match-source", "add", "subtract", "intersect", "exclude",
+                           "repeat", "repeat-x", "repeat-y", "no-repeat", "space", "round", "scroll", "fixed",
+                           "local", "border-box", "padding-box", "content-box", "margin-box", "fill-box", "stroke-box",
+                           "view-box", "no-clip", "border-area", "text", "center", "left", "right", "top", "bottom",
+                           "x", "y", "auto", "cover", "contain"})) {
+            if (token == "none") saw_reference = true;
+            continue;
+        }
+        if (is_length_percentage(raw)) continue;
+        return false;
+    }
+    return saw_reference;
+}
+
+bool normalize_mask(const std::string& value, std::string& out) {
+    if (ascii_lower(trim(value)) == "none") {
+        out = "none";
+        return true;
+    }
+    const std::vector<std::string> layers = split_top_level_commas(value);
+    if (layers.empty()) return false;
+    for (const auto& layer : layers) {
+        if (!normalize_mask_layer(layer)) return false;
+    }
+    out = canonicalize_css_value("mask", join_strings(layers, ", "));
+    return true;
+}
+
+// --- clip-path -----------------------------------------------------------
+// clip-path: none | url(...) | [ <basic-shape> || <geometry-box> ] — at
+// most one url or shape, at most one geometry box.
+bool normalize_polygon(const std::string& args) {
+    std::vector<std::string> parts = split_top_level_commas(args);
+    if (parts.empty()) return false;
+    if (parts.size() > 1 && one_of(ascii_lower(parts[0]), {"nonzero", "evenodd"})) {
+        parts.erase(parts.begin());
+    }
+    if (parts.empty()) return false;
+    for (const auto& point : parts) {
+        const std::vector<std::string> pair = split_components(point);
+        if (pair.size() != 2) return false;
+        if (!is_length_percentage(pair[0]) || !is_length_percentage(pair[1])) return false;
+    }
+    return true;
+}
+
+// inset(10px 20px round 4px): 1-4 lengths/percentages, an optional `round`
+// followed by 1-4 shape radii. xywh(): exactly 4, then the same optional tail.
+bool normalize_inset_xywh(const std::string& args, bool exactly_four) {
+    const std::vector<std::string> tokens = split_components(args);
+    if (tokens.empty()) return false;
+    std::size_t i = 0;
+    int lengths = 0;
+    while (i < tokens.size() && tokens[i] != "round") {
+        const std::string t = ascii_lower(tokens[i]);
+        if (!is_length_percentage(t)) return false;
+        ++lengths;
+        ++i;
+    }
+    if (lengths == 0) return false;
+    if (!exactly_four && lengths > 4) return false;
+    if (exactly_four && lengths != 4) return false;
+    if (i == tokens.size()) return true;
+    ++i;  // past `round`
+    int radii = 0;
+    while (i < tokens.size()) {
+        const std::string t = ascii_lower(tokens[i]);
+        if (!is_shape_radius(t)) return false;
+        ++radii;
+        ++i;
+    }
+    return radii >= 1 && radii <= 4;
+}
+
+bool normalize_circle_ellipse(const std::string& args, bool two_radii) {
+    const std::vector<std::string> tokens = split_components(args);
+    if (tokens.empty()) return true;  // `circle()` defaults
+    std::size_t i = 0;
+    std::size_t radii = 0;
+    const std::size_t max_radii = two_radii ? 2 : 1;
+    while (i < tokens.size() && ascii_lower(tokens[i]) != "at" && radii < max_radii) {
+        const std::string t = ascii_lower(tokens[i]);
+        if (!is_shape_radius(t)) return false;
+        ++radii;
+        ++i;
+    }
+    if (two_radii && (radii == 1)) return false;  // ellipse takes both radii or none
+    if (i < tokens.size()) {
+        if (ascii_lower(tokens[i]) != "at") return false;
+        ++i;
+        // A position is one or two tokens: `at center`, `at left top`.
+        const std::size_t remaining = tokens.size() - i;
+        if (remaining < 1 || remaining > 2) return false;
+        for (; i < tokens.size(); ++i) {
+            if (!is_position_token(ascii_lower(tokens[i]))) return false;
+        }
+        return true;
+    }
+    return true;
+}
+
+bool normalize_shape_function(const std::string& name, const std::string& args) {
+    const std::string trimmed = trim(args);
+    if (name == "path") {
+        if (trimmed.size() < 2) return false;
+        const char q = trimmed.front();
+        return (q == '\'' || q == '"') && trimmed.back() == q;
+    }
+    if (name == "polygon") return normalize_polygon(trimmed);
+    if (name == "inset") return normalize_inset_xywh(trimmed, false);
+    if (name == "xywh") return normalize_inset_xywh(trimmed, true);
+    if (name == "circle") return normalize_circle_ellipse(trimmed, false);
+    if (name == "ellipse") return normalize_circle_ellipse(trimmed, true);
+    if (name == "shape") {
+        // The most expressive shape function (css-shapes-2). Checked for
+        // structure — balanced parentheses, a small safe charset — rather
+        // than modelled, so a valid `shape()` is never refused.
+        if (!balanced_parens(trimmed)) return false;
+        for (const char c : trimmed) {
+            const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+                            c == ' ' || c == '\t' || c == '-' || c == '+' || c == '.' || c == '%' || c == ',' ||
+                            c == '(' || c == ')' || c == '\'' || c == '"' || c == '/' || c == '_';
+            if (!ok) return false;
+        }
+        return true;
+    }
+    return false;
+}
+
+bool normalize_clip_path(const std::string& value, std::string& out) {
+    if (ascii_lower(trim(value)) == "none") {
+        out = "none";
+        return true;
+    }
+    const std::vector<std::string> tokens = split_components(value);
+    if (tokens.empty()) return false;
+    bool saw_url = false, saw_shape = false, saw_box = false;
+    for (const auto& raw : tokens) {
+        const std::string token = ascii_lower(trim(raw));
+        std::string name, args;
+        if (split_function_token(raw, name, args)) {
+            if (name == "url") {
+                if (tokens.size() != 1 || trim(args).empty()) return false;
+                saw_url = true;
+                continue;
+            }
+            if (saw_shape || !one_of(name, {"inset", "circle", "ellipse", "polygon", "path", "xywh", "shape"})) {
+                return false;
+            }
+            if (!normalize_shape_function(name, args)) return false;
+            saw_shape = true;
+            continue;
+        }
+        if (one_of(token, {"margin-box", "border-box", "padding-box", "content-box", "fill-box", "stroke-box",
+                           "view-box"})) {
+            if (saw_box) return false;
+            saw_box = true;
+            continue;
+        }
+        return false;
+    }
+    if (saw_url && (saw_shape || saw_box)) return false;
+    out = canonicalize_css_value("clip-path", join_strings(tokens, " "));
+    return true;
+}
+
+// --- will-change ---------------------------------------------------------
+// will-change: auto | <custom-ident># — any custom ident, or the two
+// non-property features. `auto` must stand alone; no ident may be a
+// CSS-wide keyword.
+bool is_custom_ident(const std::string& lower) {
+    if (lower.empty()) return false;
+    for (std::size_t i = 0; i < lower.size(); ++i) {
+        const char c = lower[i];
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_';
+        if (!ok) return false;
+        if (i == 0 && (c >= '0' && c <= '9')) return false;
+    }
+    if (lower[0] == '-' && lower.size() == 1) return false;
+    return true;
+}
+
+bool normalize_will_change(const std::string& value, std::string& out) {
+    if (ascii_lower(trim(value)) == "auto") {
+        out = "auto";
+        return true;
+    }
+    const std::vector<std::string> parts = split_top_level_commas(value);
+    if (parts.empty()) return false;
+    std::vector<std::string> idents;
+    for (const auto& raw : parts) {
+        const std::string token = ascii_lower(trim(raw));
+        if (token.empty() || token == "auto") return false;
+        if (is_global_keyword(token)) return false;
+        if (!is_custom_ident(token)) return false;
+        idents.push_back(token);
+    }
+    out = join_strings(idents, ", ");
+    return true;
+}
+
 // Checks `text` against what `property` accepts and gives it back the way
 // it is stored. False when the declaration must be dropped.
 bool normalize_value(const std::string& property, const std::string& text, std::string& out, bool inline_mode = false) {
@@ -685,6 +1125,19 @@ bool normalize_value(const std::string& property, const std::string& text, std::
         }
         return grid_property_canonical(property, value, out);
     }
+    if (is_global_keyword(lower)) {
+        out = lower;
+        return true;
+    }
+    if (is_function_value(lower, "var")) {
+        out = value;
+        return true;
+    }
+    if (property == "contain") return normalize_contain(value, out);
+    if (property == "filter") return normalize_filter(value, out);
+    if (property == "mask") return normalize_mask(value, out);
+    if (property == "clip-path") return normalize_clip_path(value, out);
+    if (property == "will-change") return normalize_will_change(value, out);
     auto found = property_rules().find(property);
     if (found == property_rules().end()) {
         if (!inline_mode || lower.find("var(") != std::string::npos) {

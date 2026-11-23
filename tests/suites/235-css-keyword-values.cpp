@@ -59,7 +59,7 @@ TEST(a_keyword_value_outside_the_grammar_is_not_a_declaration) {
         {"scroll-behavior", "smooth"},      {"image-rendering", "pixelated"},
         {"justify-content", "space-between"}, {"align-items", "center"},
         {"align-self", "stretch"},          {"align-content", "space-evenly"},
-        {"justify-items", "end"},           {"will-change", "transform"},
+        {"justify-items", "end"},
         {"cursor", "pointer"},
     };
     for (const auto& c : cases) {
@@ -74,12 +74,15 @@ TEST(a_keyword_value_outside_the_grammar_is_not_a_declaration) {
     assert(accepts("font-weight", "normal"));
     assert(accepts("writing-mode", "horizontal-tb"));
 
-    // The properties whose grammar is a function list, not a keyword set, are
-    // left as they were: this phase fixes what it can name the keywords of.
-    // (`contain`, `filter`, `mask` and `clip-path` take `url(...)`, `blur(...)`,
-    // `polygon(...)` and the like, so a keyword-only rule would refuse values
-    // a browser accepts — worse than not checking.)
+    // `will-change` left the keyword table in Phase 244: its grammar is a
+    // comma-separated list of custom idents (any property name, plus the
+    // `scroll-position` and `contents` features), not a keyword set, so a
+    // keyword-only rule refused `will-change: transform, opacity` — which a
+    // browser keeps. It is covered by Phase 244's suite instead. (`contain`,
+    // `filter`, `mask` and `clip-path` — function grammars — were fixed there
+    // too; the `<style>` sheet caveat is unchanged.)
+    assert(accepts("will-change", "transform"));
 
-    std::printf("      [css keywords] 35 properties check their grammar, valid numbers still pass\n");
+    std::printf("      [css keywords] 34 properties check their grammar, valid numbers still pass\n");
     std::fflush(stdout);
 }

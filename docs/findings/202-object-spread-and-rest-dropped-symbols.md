@@ -56,7 +56,7 @@ implementing ECMA-262 §7.3.24:
     failures in test262 all require the unimplemented `Proxy` constructor.
 - `tests/test_suite.cpp`:
   `test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties`
-  added; **345/345** unit suites pass.
+  added; **347/347** unit suites pass.
 - `make js-conformance`: **1146/1158**; `make dom-conformance`: **678/678**.
 
 ## What this does not cover

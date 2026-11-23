@@ -83,6 +83,6 @@ in `src/js/JsEval.cpp`, shared by both `eval_object_literal` (`Spread`) and
     left across every `spread`, `obj-rest`, and `object-rest` test in test262.
 - `tests/test_suite.cpp`: added
   `test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties` —
-  **345/345 engine test suites pass**.
+  **347/347 engine test suites pass**.
 - `make js-conformance`: **1146/1158** (90/90 everyday, 0 crashes).
 - `make dom-conformance`: **678/678** (68/68 everyday, 0 crashes).

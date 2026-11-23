@@ -1,6 +1,7 @@
 #include <cctype>
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/common/StackLimit.hpp"
+#include "litebird/render/FontRenderer.hpp"
 #include <algorithm>
 #include <functional>
 #include <utility>
@@ -57,6 +58,63 @@ PaintRole paint_role(const LayoutBox& box) {
 // ---------------------------------------------------------------------------
 // Step 1 of Appendix E for one box: its own shadow, background and borders.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Text decoration: the three lines `text-decoration` can ask for.
+//
+// `ComputedStyle` has carried all three bits since Phase 73 and the inline
+// fragment carries the style, but only the underline was ever drawn: a
+// `line-through` — the most-used decoration in the corpus after the link
+// underline — was parsed, reported correctly by `getComputedStyle`, and
+// painted as nothing at all. The information arrived at the painter and was
+// dropped at the last step.
+//
+// The y of each line is the face's, not a fraction of the line box. The
+// baseline inside a line box is `ascent + leading / 2` (the same expression
+// `FontRenderer::draw_text` uses to place the glyphs), so a line drawn from it
+// lands on the pixels the text occupies: `overline` at the ascent,
+// `line-through` through the middle of the x-height, and `underline` half a
+// descent below the baseline. The line is inset half a stroke from the
+// fragment's own left edge and stops half a stroke short of its right edge, so
+// the pieces of one word join up instead of leaving gaps.
+// ---------------------------------------------------------------------------
+void emit_text_decoration(const ComputedStyle& s, const Rect& rect, DisplayList& list) {
+    if (!s.has_text_decoration() || rect.width <= 0.0f) return;
+
+    const float font_size = s.font_size > 0.0f ? s.font_size : 16.0f;
+    FontRenderer& fonts = FontRenderer::instance();
+    const std::string family = s.font_family;
+    const int weight = s.font_weight;
+    const bool italic = s.font_style != FontStyle::Normal;
+    const auto [ascent, descent] =
+        fonts.em_ascent_descent(font_size, weight, family, italic);
+    const float leading = std::max(0.0f, font_size * 1.25f - (ascent + descent));
+    const float baseline = ascent + leading * 0.5f;
+
+    // The stroke thickness is the one the underline always had; the three
+    // lines are one shape of different y.
+    const float thickness = std::max(1.0f, font_size * 0.08f);
+    const float x = rect.x + thickness * 0.5f;
+    const float width = std::max(0.0f, rect.width - thickness);
+
+    auto line_at = [&](float y) {
+        DrawRectCommand cmd;
+        cmd.rect = Rect(x, rect.y + y, width, thickness);
+        cmd.color = s.color;
+        cmd.border_radius = 0.0f;
+        list.add(cmd);
+    };
+
+    // The two upper lines sit where the face's own ink says: `overline` at the
+    // capital height and `line-through` through the x-height, both measured
+    // from the glyphs this renderer draws. The underline is the usual half a
+    // descent below the baseline — every face's `post` table puts it there and
+    // `text-underline-position` is not implemented, so this is `auto`.
+    const auto [x_height, cap_height] = fonts.decoration_lines(font_size, weight, family, italic);
+    if (s.has_overline()) line_at(std::max(0.0f, baseline - cap_height));
+    if (s.has_line_through()) line_at(std::max(0.0f, baseline - x_height));
+    if (s.has_underline()) line_at(baseline + descent * 0.5f);
+}
+
 void emit_chrome(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
     const ComputedStyle& s = *box->style;
 
@@ -175,15 +233,9 @@ if (!box->line_boxes.empty()) {
                 list.add(img_cmd);
             }
 
-            // Text decoration (e.g. <a> link underline)
-            if (fs.has_underline()) {
-                DrawRectCommand u_cmd;
-                float u_height = std::max(1.0f, fs.font_size * 0.08f);
-                u_cmd.rect = Rect(frag.rect.x, frag.rect.y + frag.rect.height - u_height, frag.rect.width, u_height);
-                u_cmd.color = fs.color;
-                u_cmd.border_radius = 0.0f;
-                list.add(u_cmd);
-            }
+            // Text decoration (e.g. <a> link underline). The underline used to
+            // be the only one drawn, at `rect.height - 0.08em`.
+            emit_text_decoration(fs, frag.rect, list);
         }
     }
     return; // All inline children and text runs handled by IFC
@@ -194,8 +246,9 @@ if (box->box_type == BoxType::TextNode) {
     float line_h = s.font_size * 1.25f;
     if (!box->lines.empty()) {
         for (size_t i = 0; i < box->lines.size(); ++i) {
+            const float top = box->dimensions.content.y + static_cast<float>(i) * line_h;
             DrawTextCommand cmd;
-            cmd.position = Point(box->dimensions.content.x, box->dimensions.content.y + i * line_h);
+            cmd.position = Point(box->dimensions.content.x, top);
             cmd.text = box->lines[i];
             cmd.color = s.color;
             cmd.font_size = s.font_size;
@@ -204,6 +257,10 @@ if (box->box_type == BoxType::TextNode) {
             cmd.font_italic = s.font_style != FontStyle::Normal;
             cmd.font_kerning = s.kerning_enabled();
             list.add(cmd);
+            // A text node outside an inline formatting context used to get no
+            // decoration at all; it is one line, so the line is the node's.
+            emit_text_decoration(
+                s, Rect(box->dimensions.content.x, top, box->dimensions.content.width, line_h), list);
         }
     } else if (!box->text.empty()) {
         DrawTextCommand cmd;
@@ -216,6 +273,11 @@ if (box->box_type == BoxType::TextNode) {
         cmd.font_italic = s.font_style != FontStyle::Normal;
             cmd.font_kerning = s.kerning_enabled();
         list.add(cmd);
+        emit_text_decoration(
+            s,
+            Rect(box->dimensions.content.x, box->dimensions.content.y,
+                 box->dimensions.content.width, line_h),
+            list);
     }
 }
 

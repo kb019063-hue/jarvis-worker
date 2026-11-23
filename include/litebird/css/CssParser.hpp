@@ -26,6 +26,10 @@ private:
 
     Selector parse_selector();
     SimpleSelector parse_simple_selector(std::string& raw_out, bool& has_host, bool& has_pseudo_element);
+    /// Which pseudo-element the last `parse_simple_selector` call saw: 0 none,
+    /// 1 `::before`, 2 `::after`. A member rather than a fourth out-parameter so
+    /// the signature stays as the callers know it.
+    uint8_t last_pseudo_element{0};
     Declaration parse_declaration();
     Rule parse_rule();
     MediaQuery parse_media_query(std::string_view str);

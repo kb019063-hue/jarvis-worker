@@ -31708,6 +31708,115 @@ TEST(display_contents_generates_no_box_and_splices_its_children) {
     assert(bodyless_bitmap.get_pixel(199, 149) == Color::white());
 }
 
+// Phase 215 / finding 219. `::before` and `::after` parsed and matched
+// nothing, and there was no generated box anywhere in layout or paint, so an
+// icon-font-only control -- an anchor whose whole content is a class whose
+// `::before` supplies the glyph -- computed a zero box, painted nothing and
+// could not be hit-tested. The end-to-end oracle is holdout-01's Rust Book
+// "Next chapter" anchor, which the holdout recorded as 760x0 and 0x0.
+TEST(pseudo_elements_generate_a_box_that_can_be_hit) {
+    using namespace litebird;
+    const std::string html =
+        "<!doctype html><html><head><style>"
+        "body{margin:0;font-size:16px}"
+        ".nav{display:block;padding:8px 0}"
+        ".fa-angle-right:before{content:\"\\f105\"}"
+        "i.fa{font-style:normal}"
+        "#b::after{content:'YYY'}"
+        "</style></head><body>"
+        "<a class=\"nav\" href=\"#next\"><i class=\"fa fa-angle-right\"></i></a>"
+        "<div id=\"b\">mid</div>"
+        "</body></html>";
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 800.0f, 600.0f);
+    auto root = LayoutTree::build(doc, resolver, 800, 600);
+    assert(root);
+
+    auto find_texts = [](const LayoutBox* box, std::vector<const LayoutBox*>& out) {
+        std::vector<const LayoutBox*> stack{box};
+        while (!stack.empty()) {
+            const LayoutBox* b = stack.back();
+            stack.pop_back();
+            if (b->box_type == BoxType::TextNode) out.push_back(b);
+            for (const auto& c : b->children) stack.push_back(c.get());
+        }
+    };
+    // 1. The generated text is a real box in the tree -- a TextBox, not a new
+    //    kind of object -- holding the U+F105 the Font Awesome rule supplies,
+    //    and the `::after` string after the element's own children.
+    std::vector<const LayoutBox*> texts;
+    find_texts(root.get(), texts);
+    bool saw_glyph = false, saw_yyy = false;
+    for (const auto* t : texts) {
+        // U+F105 is EF 84 85 in UTF-8; EF BC 85 would be U+FF05, which is what
+        // this suite asserted the first time it was run.
+        if (t->text.size() == 3 && static_cast<unsigned char>(t->text[0]) == 0xEF &&
+            static_cast<unsigned char>(t->text[1]) == 0x84 && static_cast<unsigned char>(t->text[2]) == 0x85) {
+            saw_glyph = true;
+        }
+        if (t->text == "YYY") saw_yyy = true;
+    }
+    assert(saw_glyph);
+    assert(saw_yyy);
+
+    // 2. The icon-only anchor has a box with height where it had none.
+    std::vector<const LayoutBox*> stack{root.get()};
+    const LayoutBox* anchor = nullptr;
+    while (!stack.empty()) {
+        const LayoutBox* b = stack.back();
+        stack.pop_back();
+        if (b->node && b->node->is_element() && b->node->as_element()->tag_name() == "a") anchor = b;
+        for (const auto& c : b->children) stack.push_back(c.get());
+    }
+    assert(anchor);
+    assert(anchor->dimensions.content.height > 0.0f);
+
+    // 3. The DOM did not change. A pseudo-element is not a node the page can
+    //    see, which is what CSSOM says and what every script in the world
+    //    relies on when it reads `textContent`.
+    // Found by walking, not by `query_selector`, so the assertion is about the
+    // generated box and not about whether a class selector keys the index.
+    std::shared_ptr<Element> anchor_el;
+    { std::vector<std::shared_ptr<Node>> nodes; nodes.push_back(doc);
+      while (!nodes.empty()) { auto n = nodes.back(); nodes.pop_back();
+        if (n->is_element() && n->as_element()->tag_name() == "a") {
+            anchor_el = std::static_pointer_cast<Element>(n); break;
+        }
+        for (const auto& c : n->children()) nodes.push_back(c); } }
+    assert(anchor_el);
+    assert(anchor_el->text_content().empty());
+    const auto b_el = doc->get_element_by_id("b");
+    assert(b_el && b_el->text_content() == "mid");
+
+    // 4. The generated text belongs to the pseudo-element's style, not the
+    //    element's: `getComputedStyle(el).content` is still `normal`.
+    const ComputedStyle base = resolver.resolve_style(b_el, nullptr);
+    assert(base.content.empty());
+    assert(resolver.resolve_pseudo_element(b_el, 2, base).content == "YYY");
+    assert(resolver.resolve_pseudo_element(b_el, 1, base).content.empty());
+
+    // 5. A value this engine cannot mean generates nothing, rather than the
+    //    literal text of the declaration: `counter(x)` is not the string
+    //    "counter(x)", and `none` is not the string "none".
+    auto none_doc = HtmlParser::parse(
+        "<!doctype html><html><head><style>"
+        "p::before{content:counter(x)}"
+        "div::before{content:none}"
+        "span::before{content:attr(title)}"
+        "</style></head><body><p>a</p><div>b</div><span title=\"t\">c</span></body></html>");
+    StyleResolver none_resolver = DocumentStyles::build_resolver(*none_doc, nullptr, 800.0f, 600.0f);
+    auto none_root = LayoutTree::build(none_doc, none_resolver, 800, 600);
+    assert(none_root);
+    std::vector<const LayoutBox*> none_texts;
+    find_texts(none_root.get(), none_texts);
+    for (const auto* t : none_texts) {
+        assert(t->text != "counter(x)");
+        assert(t->text != "none");
+        assert(t->text != "attr(title)");
+        assert(t->text != "t");
+    }
+}
+
 TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
     using namespace litebird;
     BitmapRenderer child(40, 30);
@@ -35287,6 +35396,7 @@ int main() {
     // Phase 170: root/body canvas color, compositing, scoping and scrolling.
     RUN_TEST(document_canvas_background_is_scoped_and_keeps_computed_styles);
     RUN_TEST(display_contents_generates_no_box_and_splices_its_children);
+    RUN_TEST(pseudo_elements_generate_a_box_that_can_be_hit);
     RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
     RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
 

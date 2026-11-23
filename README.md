@@ -5,6 +5,14 @@
 
 ---
 
+## Shaping differential oracle
+
+`make shaping-oracle SHAPING_FONT=/path/to/font.ttf` compares the production
+shaper with HarfBuzz on identical font bytes and writes exact glyph/position
+differences. Setup and limits: [`tools/shaping/README.md`](tools/shaping/README.md).
+This is a diagnostic, not a passing conformance claim: raw glyph sequences
+can differ while painting equivalent pixels.
+
 ## 📊 Conformance scoreboard
 
 Phase 15 replaced the hand-rolled HTML parser with the WHATWG tree-construction

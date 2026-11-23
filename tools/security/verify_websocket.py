@@ -605,7 +605,14 @@ wsIp.url = 'https://hijack.example/';
 wsIp.binaryType = 'arraybuffer';
 wsIp.binaryType = 'bogus';
 log('ip_ro', wsIp.url + '|' + wsIp.binaryType);
-wsIp.onopen = function() {{
+var savedOpenEvent = null;
+var openCallbackOrder = [];
+wsIp.addEventListener('open', function(e) {{ openCallbackOrder.push('first'); e.stopImmediatePropagation(); }});
+wsIp.addEventListener('open', function(e) {{ openCallbackOrder.push('second'); }});
+wsIp.onopen = function(e) {{
+  openCallbackOrder.push('property');
+  savedOpenEvent = e;
+  log('ip_open_event', (e instanceof Event) + ':' + (e instanceof MessageEvent) + ':' + e.type + ':' + (e.target === wsIp) + ':' + (e.currentTarget === wsIp) + ':' + e.eventPhase + ':' + e.isTrusted + ':' + (typeof e.composedPath === 'function' ? e.composedPath().length : -1));
   log('ip_proto', wsIp.protocol);
   wsIp.send('hi-ip');
 }};
@@ -616,6 +623,8 @@ wsIp.onmessage = function(e) {{
 }};
 wsIp.onclose = function(e) {{
   log('ip_close_event', (e instanceof CloseEvent) + ':' + (e instanceof Event) + ':' + e.type + ':' + e.code + ':' + e.reason + ':' + e.wasClean + ':' + (e.target === wsIp) + ':' + (e.currentTarget === wsIp) + ':' + e.eventPhase + ':' + e.isTrusted + ':' + (typeof e.composedPath === 'function' ? e.composedPath().length : -1));
+  log('ip_open_after_dispatch', (savedOpenEvent.currentTarget === null) + ':' + savedOpenEvent.eventPhase + ':' + savedOpenEvent.composedPath().length + ':' + (savedOpenEvent.target === wsIp));
+  log('ip_open_callback_order', openCallbackOrder.join(','));
   log('ip_close', e.code + ':' + e.reason + ':' + e.wasClean + ':' + wsIp.readyState);
   pending--;
 }};
@@ -655,11 +664,26 @@ wsLoop.onclose = function(e) {{ log('loop_close', e.code + ':' + e.wasClean); pe
 function expectTlsFail(tag, url) {{
   pending++;
   var seq = [];
+  var errorCallbackOrder = [];
+  var savedErrorEvent = null;
   var s = new WebSocket(url);
-  s.onerror = function(e) {{ seq.push('err[' + (e && e.message ? e.message : 'no-msg') + ']'); }};
+  s.addEventListener('error', function(e) {{ errorCallbackOrder.push('first'); e.stopImmediatePropagation(); }});
+  s.addEventListener('error', function(e) {{ errorCallbackOrder.push('second'); }});
+  s.onerror = function(e) {{
+    errorCallbackOrder.push('property');
+    savedErrorEvent = e;
+    seq.push('err[' + (e && e.message ? e.message : 'no-msg') + ']');
+    if (tag === 'tls_untrusted') {{
+      log('tls_error_event', (e instanceof Event) + ':' + (e instanceof MessageEvent) + ':' + e.type + ':' + (e.target === s) + ':' + (e.currentTarget === s) + ':' + e.eventPhase + ':' + e.isTrusted + ':' + (typeof e.composedPath === 'function' ? e.composedPath().length : -1) + ':' + (typeof e.message === 'string' && e.message.length > 0));
+    }}
+  }};
   s.onclose = function(e) {{
     seq.push('close:' + e.code + ':' + e.wasClean);
     log(tag, seq.join(','));
+    if (tag === 'tls_untrusted') {{
+      log('tls_error_after_dispatch', (savedErrorEvent.currentTarget === null) + ':' + savedErrorEvent.eventPhase + ':' + savedErrorEvent.composedPath().length + ':' + (savedErrorEvent.target === s));
+      log('tls_error_callback_order', errorCallbackOrder.join(','));
+    }}
     pending--;
   }};
 }}
@@ -858,6 +882,13 @@ setTimeout(pump, 1);
             check("WebSocket delivers a trusted CloseEvent with close details",
                   r1.get("ip_close_event") == "true:true:close:3000:clean-ip:true:true:true:2:true:1",
                   str(r1.get("ip_close_event")))
+            check("WebSocket delivers a trusted Event for open at the target",
+                  r1.get("ip_open_event") == "true:false:open:true:true:2:true:1",
+                  str(r1.get("ip_open_event")))
+            check("WebSocket clears open dispatch state and honors stopImmediatePropagation",
+                  r1.get("ip_open_after_dispatch") == "true:0:0:true"
+                  and r1.get("ip_open_callback_order") == "property,first",
+                  f"after={r1.get('ip_open_after_dispatch')} callbacks={r1.get('ip_open_callback_order')}")
             check("wss://localhost DNS SAN + SNI echo & clean close",
                   r1.get("dns_msg") == "echo:hi-dns" and r1.get("dns_close") == "1000:true" and "localhost" in wss_valid.sni_names,
                   f"{r1.get('dns_msg')} / {r1.get('dns_close')} / sni={wss_valid.sni_names}")
@@ -871,6 +902,13 @@ setTimeout(pump, 1);
                   refused_before_close(r1.get("tls_untrusted")) and len(wss_untrusted.upgrades) == 0
                   and tls_refusal_code(r1.get("tls_untrusted")) == 18,
                   str(r1.get("tls_untrusted")))
+            check("WebSocket delivers a trusted Event for error at the target with its diagnostic",
+                  r1.get("tls_error_event") == "true:false:error:true:true:2:true:1:true",
+                  str(r1.get("tls_error_event")))
+            check("WebSocket clears error dispatch state and honors stopImmediatePropagation",
+                  r1.get("tls_error_after_dispatch") == "true:0:0:true"
+                  and r1.get("tls_error_callback_order") == "property,first",
+                  f"after={r1.get('tls_error_after_dispatch')} callbacks={r1.get('tls_error_callback_order')}")
             check("wss:// wrong SAN rejected fail-closed with 0 upgrades",
                   refused_before_close(r1.get("tls_wronghost")) and len(wss_wrong.upgrades) == 0
                   and tls_refusal_code(r1.get("tls_wronghost")) == 64,

@@ -6904,6 +6904,49 @@ TEST(subtle_crypto_digest_sha1_sha384_sha512) {
     assert(interp.eval("h512 === 'ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f'").is_truthy());
 }
 
+TEST(subtle_crypto_hmac_sign_and_verify) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // RFC 4231 Test Case 2: key = "Jefe", data = "what do ya want for nothing?"
+    // HMAC-SHA-256 = 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+    interp.eval(R"(
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var enc = new TextEncoder();
+        var key = null;
+        var sig = null;
+        var sigHex = null;
+        var okTrue = null;
+        var okFalse = null;
+        crypto.subtle.importKey('raw', enc.encode('Jefe'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
+            .then(function(k) {
+                key = k;
+                return crypto.subtle.sign('HMAC', k, enc.encode('what do ya want for nothing?'));
+            })
+            .then(function(s) {
+                sig = s;
+                sigHex = toHex(s);
+                return crypto.subtle.verify('HMAC', key, sig, enc.encode('what do ya want for nothing?'));
+            })
+            .then(function(v) {
+                okTrue = v;
+                return crypto.subtle.verify('HMAC', key, sig, enc.encode('tampered'));
+            })
+            .then(function(v) {
+                okFalse = v;
+            });
+    )");
+    assert(interp.eval("key instanceof CryptoKey && key.type === 'secret' && key.extractable === false").is_truthy());
+    assert(interp.eval("sigHex === '5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843'").is_truthy());
+    assert(interp.eval("okTrue === true && okFalse === false").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -35649,6 +35692,7 @@ int main() {
     RUN_TEST(crypto_get_random_values_and_random_uuid);
     RUN_TEST(subtle_crypto_digest_sha256);
     RUN_TEST(subtle_crypto_digest_sha1_sha384_sha512);
+    RUN_TEST(subtle_crypto_hmac_sign_and_verify);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

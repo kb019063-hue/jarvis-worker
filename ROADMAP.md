@@ -90,7 +90,11 @@ already existed: WPT, html5lib, the W3C XML suite, test262, the CSS Color
 rational oracle. That is the shape of problem the agents are fastest at.
 
 Count the oracles in Tier 1. Typed arrays has test262. Shaping has WPT
-`css-text`, partly. Automatic GC has two: Phase 103's `make verify-gc-stress`
+`css-text`, partly, and now a strict single-face HarfBuzz differential
+(`make shaping-oracle`; setup and limits in `tools/shaping/README.md`). It
+reports raw glyph/position disagreements, not necessarily visual defects;
+font coverage and equivalent output representations still need care.
+Automatic GC has two: Phase 103's `make verify-gc-stress`
 (finding 109) says a program must print what it prints however often the
 collector fires, and `make gc-oracle` with the `gc_oracle_*` suites says the
 collector's answer is right — unreachable cycles reclaimed, a retained

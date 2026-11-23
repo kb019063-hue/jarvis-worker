@@ -2478,6 +2478,37 @@
       ],
       "known_failure": "Inline box horizontal margin-left and padding-left do not offset a child replaced element: Litebird paints the 20px image starting at x=0 and widened to x=0..30 instead of x=20..40.",
       "note": "CSS 2.1 \u00a78.3, \u00a78.4, and \u00a79.4.2: horizontal margin and padding on an inline box advance the inline cursor before its child content."
+    },
+    {
+      "name": "a_data_uri_avif_image_scales_to_its_box",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}img{display:block;width:40px;height:40px}</style></head><body><img src=\"data:image/avif;base64,AAAAHGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZgAAAOptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAAAAAAAA5waXRtAAAAAAABAAAAImlsb2MAAAAAREAAAQABAAAAAAEOAAEAAAAAAAAAFAAAACNpaW5mAAAAAAABAAAAFWluZmUCAAAAAAEAAGF2MDEAAAAAamlwcnAAAABLaXBjbwAAABNjb2xybmNseAACAAIABoAAAAAMYXYxQ4EADAAAAAAUaXNwZQAAAAAAAAAEAAAABAAAABBwaXhpAAAAAAMICAgAAAAXaXBtYQAAAAAAAAABAAEEgYIDhAAAABxtZGF0EgAKBRgEfYEIMgkQAAAAB8gkxmI=\"></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 40,
+          "colour": "#000000",
+          "describe": "4x4 solid black AVIF (Y=0, Cb=128, Cr=128) scaled to 40x40 fills [0..40, 0..40] with #000000"
+        },
+        {
+          "kind": "pixel",
+          "x": 41,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "right of the 40px AVIF image remains white"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 41,
+          "colour": "#ffffff",
+          "describe": "below the 40px AVIF image remains white"
+        }
+      ],
+      "known_failure": "AVIF has no AV1 intra-frame picture decoder yet: AvifContainer parses the 4x4 container, but ImageDecoder::decode returns nullptr so <img src='data:image/avif;...'> paints no pixels (#ffffff instead of #000000).",
+      "note": "Uses the libheif-verified solid #000000 4x4 AVIF from tests/media/avif/corpus.json; Y=0, Cb=128, Cr=128 maps to exact (0,0,0) across every YCbCr-to-RGB matrix."
     }
   ]
 }

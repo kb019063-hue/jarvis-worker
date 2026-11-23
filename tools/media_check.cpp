@@ -2,6 +2,8 @@
 #include "litebird/render/GifDecoder.hpp"
 #include "litebird/render/WebPDecoder.hpp"
 #include "litebird/render/Vp8Decoder.hpp"
+#include "litebird/render/AvifContainer.hpp"
+#include "litebird/render/ImageDecoder.hpp"
 #include "litebird/render/SvgRenderer.hpp"
 #include "litebird/html/HtmlParser.hpp"
 
@@ -63,14 +65,14 @@ bool write_rgba(const std::string& path, const litebird::ImageData& img) {
 int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "Usage: media_check <--decode-jpeg|--decode-gif|--decode-webp|--decode-webp-anim|--decode-vp8|"
-                     "--render-svg|"
-                     "--fuzz-jpeg|--fuzz-gif|--fuzz-webp|--fuzz-vp8|--fuzz-svg> <in> [out]\n";
+                     "--probe-avif|--decode-avif|--render-svg|"
+                     "--fuzz-jpeg|--fuzz-gif|--fuzz-webp|--fuzz-vp8|--fuzz-avif|--fuzz-svg> <in> [out]\n";
         return 2;
     }
     const std::string mode = argv[1];
 
     if (mode == "--fuzz-batch") {
-        // Usage: media_check --fuzz-batch <jpeg|gif|webp|vp8|svg> <file1> [file2 ...]
+        // Usage: media_check --fuzz-batch <jpeg|gif|webp|vp8|avif|svg> <file1> [file2 ...]
         if (argc < 4) return 2;
         const std::string kind = argv[2];
         for (int i = 3; i < argc; ++i) {
@@ -91,6 +93,9 @@ int main(int argc, char** argv) {
                     std::vector<uint32_t> pixels;
                     litebird::Vp8Decoder::to_argb(frame, nullptr, 0, pixels);
                 }
+            } else if (kind == "avif") {
+                (void)litebird::AvifContainer::parse(b.data(), b.size());
+                (void)litebird::ImageDecoder::decode_bytes(b.data(), b.size(), "image/avif");
             } else if (kind == "svg") {
                 std::string markup(reinterpret_cast<const char*>(b.data()), b.size());
                 auto doc = litebird::HtmlParser::parse(markup);
@@ -247,6 +252,102 @@ int main(int argc, char** argv) {
     if (mode == "--fuzz-webp") {
         (void)litebird::WebPDecoder::decode_detailed(bytes.data(), bytes.size());
         (void)litebird::WebPDecoder::decode_frames(bytes.data(), bytes.size(), 16);
+        return 0;
+    }
+
+    if (mode == "--probe-avif") {
+        const bool is_avif = litebird::AvifContainer::is_avif(bytes.data(), bytes.size());
+        const auto file = litebird::AvifContainer::parse(bytes.data(), bytes.size());
+        const char* status_name = "Unknown";
+        switch (file.status) {
+            case litebird::AvifContainer::Status::Ok: status_name = "Ok"; break;
+            case litebird::AvifContainer::Status::NotAvif: status_name = "NotAvif"; break;
+            case litebird::AvifContainer::Status::Malformed: status_name = "Malformed"; break;
+            case litebird::AvifContainer::Status::Unsupported: status_name = "Unsupported"; break;
+        }
+        std::cout << "status=" << status_name << "\n";
+        std::cout << "is_avif=" << (is_avif ? 1 : 0) << "\n";
+        std::cout << "major_brand=" << file.major_brand << "\n";
+        std::cout << "primary_id=" << file.primary_id << "\n";
+        std::cout << "items=" << file.items.size() << "\n";
+        if (file.status == litebird::AvifContainer::Status::Ok) {
+            const auto& p = file.primary;
+            std::cout << "type=" << p.type << "\n";
+            std::cout << "ispe=" << (p.has_ispe ? 1 : 0) << " " << p.width << " " << p.height << "\n";
+            std::cout << "pixi=" << (p.has_pixi ? 1 : 0);
+            if (p.has_pixi) {
+                std::cout << " ";
+                for (size_t i = 0; i < p.bit_depth.size(); ++i) {
+                    if (i > 0) std::cout << ",";
+                    std::cout << static_cast<unsigned>(p.bit_depth[i]);
+                }
+            }
+            std::cout << "\n";
+            std::cout << "av1c=" << (p.has_av1c ? 1 : 0)
+                      << " profile=" << static_cast<unsigned>(p.av1c.seq_profile)
+                      << " level=" << static_cast<unsigned>(p.av1c.seq_level_idx_0)
+                      << " high_bd=" << (p.av1c.high_bitdepth ? 1 : 0)
+                      << " twelve_bit=" << (p.av1c.twelve_bit ? 1 : 0)
+                      << " mono=" << (p.av1c.monochrome ? 1 : 0)
+                      << " sub_x=" << (p.av1c.subsampling_x ? 1 : 0)
+                      << " sub_y=" << (p.av1c.subsampling_y ? 1 : 0)
+                      << " csp=" << static_cast<unsigned>(p.av1c.chroma_sample_position)
+                      << "\n";
+            std::cout << "colr=" << (p.colour.present ? 1 : 0)
+                      << " nclx=" << (p.colour.is_nclx ? 1 : 0)
+                      << " " << p.colour.primaries
+                      << " " << p.colour.transfer
+                      << " " << p.colour.matrix
+                      << " " << (p.colour.full_range ? 1 : 0) << "\n";
+            std::cout << "payload_bytes=" << p.payload.size() << "\n";
+            if (argc >= 4) {
+                std::ofstream ofs(argv[3], std::ios::binary);
+                if (!ofs) {
+                    std::cerr << "Failed to write AV1 payload\n";
+                    return 2;
+                }
+                if (!p.payload.empty()) {
+                    ofs.write(reinterpret_cast<const char*>(p.payload.data()),
+                              static_cast<std::streamsize>(p.payload.size()));
+                }
+                if (!ofs.good()) return 2;
+            }
+            return 0;
+        }
+        std::cout << "error=" << file.error << "\n";
+        return 1;
+    }
+
+    if (mode == "--decode-avif") {
+        if (argc < 4) return 2;
+        const auto file = litebird::AvifContainer::parse(bytes.data(), bytes.size());
+        if (file.status != litebird::AvifContainer::Status::Ok) {
+            std::cerr << "AVIF decode error (" << litebird::AvifContainer::status_string(file.status)
+                      << "): " << file.error << "\n";
+            return 1;
+        }
+        auto img = litebird::ImageDecoder::decode_bytes(bytes.data(), bytes.size(), "image/avif");
+        if (!img || !img->is_valid()) {
+            std::cerr << "AVIF decode error (no_av1_decoder): container Ok ("
+                      << file.primary.width << "x" << file.primary.height
+                      << ", " << file.primary.payload.size() << " AV1 bytes) but ImageDecoder returned null\n";
+            return 3;
+        }
+        if (!write_ppm(argv[3], *img)) {
+            std::cerr << "Failed to write PPM\n";
+            return 2;
+        }
+        if (argc >= 5 && !write_rgba(argv[4], *img)) {
+            std::cerr << "Failed to write RGBA\n";
+            return 2;
+        }
+        std::cout << img->width << " " << img->height << "\n";
+        return 0;
+    }
+
+    if (mode == "--fuzz-avif") {
+        (void)litebird::AvifContainer::parse(bytes.data(), bytes.size());
+        (void)litebird::ImageDecoder::decode_bytes(bytes.data(), bytes.size(), "image/avif");
         return 0;
     }
 

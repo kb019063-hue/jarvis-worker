@@ -1,0 +1,89 @@
+{
+  "_note": "Real AV1-coded AVIF fixtures generated with ImageMagick/libheif (1.15.1). Reference RGBA pixels are decoded by libheif; verify_avif.py also cross-checks them against live ImageMagick when available.",
+  "fixtures": [
+    {
+      "name": "solid_black_4x4",
+      "width": 4,
+      "height": 4,
+      "avif_base64": "AAAAHGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZgAAAOptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAAAAAAAA5waXRtAAAAAAABAAAAImlsb2MAAAAAREAAAQABAAAAAAEOAAEAAAAAAAAAFAAAACNpaW5mAAAAAAABAAAAFWluZmUCAAAAAAEAAGF2MDEAAAAAamlwcnAAAABLaXBjbwAAABNjb2xybmNseAACAAIABoAAAAAMYXYxQ4EADAAAAAAUaXNwZQAAAAAAAAAEAAAABAAAABBwaXhpAAAAAAMICAgAAAAXaXBtYQAAAAAAAAABAAEEgYIDhAAAABxtZGF0EgAKBRgEfYEIMgkQAAAAB8gkxmI=",
+      "reference_rgba_zlib_base64": "eNpjYGD4z0ABBgDuXw/x",
+      "picture_status": "unimplemented",
+      "known_failure": "No AV1 intra-frame decoder in Litebird yet; ImageDecoder::decode returns nullptr while AvifContainer parses all container metadata and extracts the AV1 OBU payload.",
+      "tolerance": {
+        "max_mae": 0.0,
+        "max_channel_diff": 0,
+        "min_psnr": 38.0
+      }
+    },
+    {
+      "name": "solid_red_1x1",
+      "width": 1,
+      "height": 1,
+      "avif_base64": "AAAAHGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZgAAAOptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAAAAAAAA5waXRtAAAAAAABAAAAImlsb2MAAAAAREAAAQABAAAAAAEOAAEAAAAAAAAAHAAAACNpaW5mAAAAAAABAAAAFWluZmUCAAAAAAEAAGF2MDEAAAAAamlwcnAAAABLaXBjbwAAABNjb2xybmNseAACAAIABoAAAAAMYXYxQ4EADAAAAAAUaXNwZQAAAAAAAAABAAAAAQAAABBwaXhpAAAAAAMICAgAAAAXaXBtYQAAAAAAAAABAAEEgYIDhAAAACRtZGF0EgAKBRgABgQgMhEQAAAAB8glQBfDN4v0SW34/A==",
+      "reference_rgba_zlib_base64": "eNr7x8DwHwAE+wH+",
+      "picture_status": "unimplemented",
+      "known_failure": "No AV1 intra-frame decoder in Litebird yet; ImageDecoder::decode returns nullptr while AvifContainer parses all container metadata and extracts the AV1 OBU payload.",
+      "tolerance": {
+        "max_mae": 2.0,
+        "max_channel_diff": 3,
+        "min_psnr": 38.0
+      }
+    },
+    {
+      "name": "quadrants_16x16_420",
+      "width": 16,
+      "height": 16,
+      "avif_base64": "AAAAHGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZgAAAOptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAAAAAAAA5waXRtAAAAAAABAAAAImlsb2MAAAAAREAAAQABAAAAAAEOAAEAAAAAAAAAJwAAACNpaW5mAAAAAAABAAAAFWluZmUCAAAAAAEAAGF2MDEAAAAAamlwcnAAAABLaXBjbwAAABNjb2xybmNseAACAAIABoAAAAAMYXYxQ4EADAAAAAAUaXNwZQAAAAAAAAAQAAAAEAAAABBwaXhpAAAAAAMICAgAAAAXaXBtYQAAAAAAAAABAAEEgYIDhAAAAC9tZGF0EgAKBhgM/9gQgDIbRDAAABSnwqeIgPryNJQP5ad7xN3BvBRQ3e6Q",
+      "reference_rgba_zlib_base64": "eNrty7ENAAAIw7DA/zcHPuiOxODRwhhgR/4//cFIK/p/+y/9OT1f",
+      "picture_status": "unimplemented",
+      "known_failure": "No AV1 intra-frame decoder in Litebird yet; ImageDecoder::decode returns nullptr while AvifContainer parses all container metadata and extracts the AV1 OBU payload.",
+      "tolerance": {
+        "max_mae": 2.0,
+        "max_channel_diff": 8,
+        "min_psnr": 38.0
+      }
+    },
+    {
+      "name": "odd_gradient_13x9",
+      "width": 13,
+      "height": 9,
+      "avif_base64": "AAAAHGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZgAAAOptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAAAAAAAA5waXRtAAAAAAABAAAAImlsb2MAAAAAREAAAQABAAAAAAEOAAEAAAAAAAAAXAAAACNpaW5mAAAAAAABAAAAFWluZmUCAAAAAAEAAGF2MDEAAAAAamlwcnAAAABLaXBjbwAAABNjb2xybmNseAACAAIABoAAAAAMYXYxQ4EADAAAAAAUaXNwZQAAAAAAAAANAAAACQAAABBwaXhpAAAAAAMICAgAAAAXaXBtYQAAAAAAAAABAAEEgYIDhAAAAGRtZGF0EgAKBhgM8hgQgDJQEUAAAEDD22dY8ApLddn7+Hi5vb7j/k6xYf6ejf/10XGeNI6c9TKDa2BzVmw5qkcuqzt70hQbQfxyFA/r37vsjJJjZ2nJlcOsw2PonnW3Boc=",
+      "reference_rgba_zlib_base64": "eNoN0M1OGlEYxnEhQdyCTQreQTVp7VqTUhrdNiVppR+ujYvqFZRzZmQOdtHCHMCZqb2AaprUbmujqcDWQDAiXoBu2OtC/Pdd/fKcZ/HkvLEJRTLhMRvTzCcNbyY0HyYNJbEs7kl/IPYlDxOGm7hmOuWTfRiwkPbJZ0PWJG9kQmppy454KLmVjbhK1xllIkhVieVcJpcqPMo5PFmu8Dqneb9s+CRuiT+eKX6JZ9IPl2QnLzuFBpmViIVCnefFiLWC5WMxpCo2xT+vfE7eyo70I+l5+YW40kx5hlmleGoMK1qxajyU1niS90ua316FM+VwKd46Lg98y0wQsuj7vAhD1q3PZhjgW0sg+W/N0goirm2DkcjXKvFjTbItdxPnO7Jz5LDarlA6dil3ttk7cjnofKYvDtvb3P7zmO7K3c4DFnuW/EB2unU2zyNqvQY7g28cdhu0Lr5z1WsyGuzCqSU+ViRwmbtzeEyZ4tjlnajFLTz2x2V+YrgYy3/k5f7e4T/4WCbW",
+      "picture_status": "unimplemented",
+      "known_failure": "No AV1 intra-frame decoder in Litebird yet; ImageDecoder::decode returns nullptr while AvifContainer parses all container metadata and extracts the AV1 OBU payload.",
+      "tolerance": {
+        "max_mae": 2.0,
+        "max_channel_diff": 8,
+        "min_psnr": 38.0
+      }
+    },
+    {
+      "name": "checker_24x16",
+      "width": 24,
+      "height": 16,
+      "avif_base64": "AAAAHGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZgAAAOptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAAAAAAAA5waXRtAAAAAAABAAAAImlsb2MAAAAAREAAAQABAAAAAAEOAAEAAAAAAAAAKAAAACNpaW5mAAAAAAABAAAAFWluZmUCAAAAAAEAAGF2MDEAAAAAamlwcnAAAABLaXBjbwAAABNjb2xybmNseAACAAIABoAAAAAMYXYxQ4EADAAAAAAUaXNwZQAAAAAAAAAYAAAAEAAAABBwaXhpAAAAAAMICAgAAAAXaXBtYQAAAAAAAAABAAEEgYIDhAAAADBtZGF0EgAKBhgQ7+wIQDIcRDAAABAaKRDZVnUex1UkRPagJY9KQeVxcM6Ijw==",
+      "reference_rgba_zlib_base64": "eNp7Kif3/ykSlrN+hoKfjsrTVH40PAZWfjQ8RtP/SJYHAGIsRq4=",
+      "picture_status": "unimplemented",
+      "known_failure": "No AV1 intra-frame decoder in Litebird yet; ImageDecoder::decode returns nullptr while AvifContainer parses all container metadata and extracts the AV1 OBU payload.",
+      "tolerance": {
+        "max_mae": 2.5,
+        "max_channel_diff": 10,
+        "min_psnr": 38.0
+      }
+    },
+    {
+      "name": "grayscale_16x16",
+      "width": 16,
+      "height": 16,
+      "avif_base64": "AAAAHGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZgAAAOptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAAAAAAAA5waXRtAAAAAAABAAAAImlsb2MAAAAAREAAAQABAAAAAAEOAAEAAAAAAAAAJAAAACNpaW5mAAAAAAABAAAAFWluZmUCAAAAAAEAAGF2MDEAAAAAamlwcnAAAABLaXBjbwAAABNjb2xybmNseAACAAIABoAAAAAMYXYxQ4EADAAAAAAUaXNwZQAAAAAAAAAQAAAAEAAAABBwaXhpAAAAAAMICAgAAAAXaXBtYQAAAAAAAAABAAEEgYIDhAAAACxtZGF0EgAKBhgM/9gQgDIYEMAAAEABH36GN5sH81lfi762Ou9/WSqg",
+      "reference_rgba_zlib_base64": "eNpjYGD4L8Av8F9BXuG/gb7Bfwd7h/8B/gH/E+Lj/xfk5/9vqK//P6G///+C+fP/b1i//v+B/fv/Xzh//v+D+/f/f3j//j/DqP5R/aP6h6x+AKxlZY8=",
+      "picture_status": "unimplemented",
+      "known_failure": "No AV1 intra-frame decoder in Litebird yet; ImageDecoder::decode returns nullptr while AvifContainer parses all container metadata and extracts the AV1 OBU payload.",
+      "tolerance": {
+        "max_mae": 2.0,
+        "max_channel_diff": 6,
+        "min_psnr": 38.0
+      }
+    }
+  ]
+}

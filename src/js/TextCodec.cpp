@@ -203,12 +203,18 @@ void setup_decoder(JsObject* proto, JsValue& constructor);
 /// does, and stops at the first character the chunk does not finish. Bytes
 /// already held back from an earlier chunk are always at the front, so the
 /// boundary is never in doubt.
-std::size_t pending_tail(EncodingId encoding, std::string_view bytes) {
+std::size_t pending_tail(EncodingId encoding, std::string_view bytes, int iso_mode_in = 0) {
     const std::size_t n = bytes.size();
     auto byte = [&](std::size_t i) { return static_cast<unsigned char>(bytes[i]); };
-    // ISO-2022-JP is the only one that carries a mode between characters; it
-    // is scanned in the same pass, so the mode is a local.
-    enum class IsoMode { Ascii, Double } iso_mode = IsoMode::Ascii;
+    // ISO-2022-JP is the only one that carries a mode between characters. The
+    // mode used to be a local starting at ASCII, which was wrong twice over:
+    // a chunk that continues a stream does not start in ASCII, and the held
+    // bytes this chunk is prefixed with are the *rest of a character* whose
+    // lead byte is in that mode. Both made the scan read a double-byte pair's
+    // trailing byte as a byte of its own, so the whole pair was passed to the
+    // decoder and decoded in the wrong mode (finding 213).
+    enum class IsoMode { Ascii, Double } iso_mode =
+        iso_mode_in == 3 ? IsoMode::Double : IsoMode::Ascii;
     std::size_t i = 0;
     while (i < n) {
         std::size_t need = 1;
@@ -401,7 +407,7 @@ void setup_decoder(JsObject* proto, JsValue& constructor) {
         // The part the encoding is not inside of, and what is left over.
         std::string head = bytes;
         if (stream) {
-            const std::size_t tail = pending_tail(state->encoding, bytes);
+            const std::size_t tail = pending_tail(state->encoding, bytes, state->iso_mode);
             head.assign(bytes, 0, bytes.size() - tail);
             state->stream_bytes.assign(bytes, bytes.size() - tail, tail);
         }

@@ -19,7 +19,9 @@ Verifies:
      reason, InvalidAccessError on invalid close code, InvalidStateError on
      send() while CONNECTING, readonly attributes, binaryType validation).
   5. Web Worker wss:// connection with inherited https:// Origin.
-  6. Concurrent wss:// startup + immediate exit stability (--stress-runs).
+  6. HTTP CONNECT through HTTPS_PROXY/https_proxy and ALL_PROXY/all_proxy,
+     uppercase/lowercase no_proxy host+port bypass, and fail-closed HTTP 407.
+  7. Concurrent wss:// startup + immediate exit stability (--stress-runs).
 """
 from __future__ import annotations
 
@@ -29,6 +31,7 @@ import hashlib
 import os
 import pathlib
 import re
+import select
 import socket
 import ssl
 import struct
@@ -445,6 +448,161 @@ class DualProtocolServer:
             self.upgrades.append(rec)
 
 
+class HttpConnectProxy:
+    """A loopback HTTP proxy that records CONNECT and relays opaque TLS bytes."""
+
+    def __init__(self, response_code: int = 200):
+        self.response_code = response_code
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(64)
+        self.sock.settimeout(0.25)
+        self.port = self.sock.getsockname()[1]
+        self.stop_event = threading.Event()
+        self.lock = threading.Lock()
+        self.requests: list[dict] = []
+        self.workers: list[threading.Thread] = []
+        self.thread = threading.Thread(target=self._accept_loop, daemon=True)
+        self.thread.start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.port}"
+
+    def stop(self) -> None:
+        self.stop_event.set()
+        try:
+            self.sock.close()
+        except OSError:
+            pass
+        self.thread.join(timeout=2.0)
+        with self.lock:
+            workers = list(self.workers)
+        deadline = time.monotonic() + 2.0
+        for worker in workers:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            worker.join(timeout=remaining)
+
+    def _accept_loop(self) -> None:
+        while not self.stop_event.is_set():
+            try:
+                conn, _ = self.sock.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            worker = threading.Thread(target=self._handle_conn, args=(conn,), daemon=True)
+            with self.lock:
+                self.workers.append(worker)
+            worker.start()
+
+    @staticmethod
+    def _split_authority(authority: str) -> tuple[str, int] | None:
+        if authority.startswith("["):
+            close = authority.find("]")
+            if close < 0 or authority[close + 1:close + 2] != ":":
+                return None
+            host, port_text = authority[1:close], authority[close + 2:]
+        else:
+            if ":" not in authority:
+                return None
+            host, port_text = authority.rsplit(":", 1)
+        try:
+            port = int(port_text)
+        except ValueError:
+            return None
+        if not host or not 0 < port <= 65535:
+            return None
+        return host, port
+
+    def _handle_conn(self, conn: socket.socket) -> None:
+        conn.settimeout(3.0)
+        upstream: socket.socket | None = None
+        try:
+            request = bytearray()
+            while len(request) < 65536 and b"\r\n\r\n" not in request:
+                byte = conn.recv(1)
+                if not byte:
+                    return
+                request.extend(byte)
+            end = request.find(b"\r\n\r\n")
+            if end < 0:
+                return
+            lines = request[:end].decode("latin-1").split("\r\n")
+            words = lines[0].split()
+            headers: dict[str, str] = {}
+            for line in lines[1:]:
+                if ":" in line:
+                    name, value = line.split(":", 1)
+                    headers[name.strip().lower()] = value.strip()
+            target = words[1] if len(words) >= 2 else ""
+            record = {
+                "request_line": lines[0],
+                "target": target,
+                "host": headers.get("host"),
+                "headers": headers,
+                "status": None,
+            }
+            with self.lock:
+                self.requests.append(record)
+
+            if self.response_code != 200:
+                record["status"] = self.response_code
+                if self.response_code == 407:
+                    response = (
+                        "HTTP/1.1 407 Proxy Authentication Required\r\n"
+                        "Proxy-Authenticate: Basic realm=\"test\"\r\n"
+                        "Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                else:
+                    response = (
+                        f"HTTP/1.1 {self.response_code} Test refusal\r\n"
+                        "Content-Length: 0\r\nConnection: close\r\n\r\n"
+                    )
+                conn.sendall(response.encode("ascii"))
+                return
+
+            destination = self._split_authority(target)
+            if (len(words) != 3 or words[0] != "CONNECT" or words[2] != "HTTP/1.1" or
+                    destination is None or headers.get("host") != target):
+                record["status"] = 400
+                conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+
+            try:
+                upstream = socket.create_connection(destination, timeout=3.0)
+            except OSError:
+                record["status"] = 502
+                conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                return
+            record["status"] = 200
+            conn.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+            while not self.stop_event.is_set():
+                readable, _, exceptional = select.select([conn, upstream], [], [conn, upstream], 0.25)
+                if exceptional:
+                    return
+                for source in readable:
+                    data = source.recv(65536)
+                    if not data:
+                        return
+                    (upstream if source is conn else conn).sendall(data)
+        except (OSError, ssl.SSLError, TimeoutError):
+            return
+        finally:
+            if upstream is not None:
+                try:
+                    upstream.close()
+                except OSError:
+                    pass
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+
 def make_server_ssl_ctx(cert: pathlib.Path, key: pathlib.Path) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(certfile=str(cert), keyfile=str(key))
@@ -528,6 +686,9 @@ def main() -> int:
         wss_wrong = DualProtocolServer(make_server_ssl_ctx(pki["wrong_pem"], pki["wrong_key"]), name="wss_wrong")
         wss_expired = DualProtocolServer(make_server_ssl_ctx(pki["expired_pem"], pki["expired_key"]), name="wss_expired")
         plain_srv = DualProtocolServer(None, name="plain")
+        connect_proxy = HttpConnectProxy()
+        lower_proxy: HttpConnectProxy | None = None
+        refusing_proxy: HttpConnectProxy | None = None
 
         try:
             https_srv.routes["/worker-ws.js"] = (
@@ -563,6 +724,16 @@ def main() -> int:
             )
 
             env_ca = {"LITEBIRD_SSL_CA_FILE": str(pki["ca"])}
+            no_proxy_for_wss_valid = f".localhost:{wss_valid.port}"
+            env_proxy = {
+                **env_ca,
+                "HTTPS_PROXY": connect_proxy.url,
+                "https_proxy": "",
+                "NO_PROXY": no_proxy_for_wss_valid,
+                "no_proxy": no_proxy_for_wss_valid,
+                "ALL_PROXY": "",
+                "all_proxy": "",
+            }
 
             # 1. HTTPS document verifying wss:// (IP SAN, DNS SAN + SNI, relative URL),
             #    loopback ws://, mixed-content blocking, TLS rejections, WebIDL API, and Worker wss://.
@@ -858,7 +1029,7 @@ setTimeout(pump, 1);
                 str(binary),
                 [str(https_page), f"--url={https_origin}/app/page.html", "--virtual-time-budget=2000"],
                 args.timeout,
-                env_extra=env_ca,
+                env_extra=env_proxy,
             )
             r1 = parse_checks(p1.stdout + "\n" + p1.stderr)
             check("HTTPS page exited cleanly", p1.returncode == 0 and r1.get("done") == "1", f"rc={p1.returncode}")
@@ -1007,6 +1178,78 @@ setTimeout(pump, 1);
                   and loop_up is not None and loop_up["origin"] == https_origin,
                   f"origins={[ip_up and ip_up['origin'], wk_up and wk_up['origin'], rel_up and rel_up['origin'], loop_up and loop_up['origin']]}")
 
+            with connect_proxy.lock:
+                p1_proxy_requests = list(connect_proxy.requests)
+            valid_ip_authority = f"127.0.0.1:{wss_valid.port}"
+            rel_authority = f"localhost:{https_srv.port}"
+            check("HTTPS_PROXY sends wss:// through a validated HTTP CONNECT tunnel",
+                  any(r["target"] == valid_ip_authority and r["status"] == 200
+                      for r in p1_proxy_requests)
+                  and any(r["target"] == rel_authority and r["status"] == 200
+                          for r in p1_proxy_requests)
+                  and all(r["request_line"] == f"CONNECT {r['target']} HTTP/1.1"
+                          and r["host"] == r["target"] and set(r["headers"]) == {"host"}
+                          and r["status"] == 200 for r in p1_proxy_requests),
+                  f"requests={len(p1_proxy_requests)} targets={[r['target'] for r in p1_proxy_requests[:8]]}")
+            check("NO_PROXY host-and-port suffix bypasses only its wss:// target",
+                  f"localhost:{wss_valid.port}" not in [r["target"] for r in p1_proxy_requests]
+                  and rel_authority in [r["target"] for r in p1_proxy_requests]
+                  and wss_cookie_up is not None and wss_cookie_up["host"] == f"localhost:{wss_valid.port}",
+                  f"targets={[r['target'] for r in p1_proxy_requests]}")
+            p1_proxy_count = len(p1_proxy_requests)
+
+            lower_proxy = HttpConnectProxy()
+            lower_html = f"""<!doctype html><meta charset="utf-8"><script>
+var pending = 2;
+function log(k, v) {{ console.log('WSCHECK:' + k + '=' + v); }}
+function pump() {{ if (pending <= 0) {{ log('done', '1'); return; }} fetch('/yield').then(pump, pump); }}
+var lower = new WebSocket('wss://127.0.0.1:{wss_valid.port}/lowercase-proxy');
+lower.onopen = function() {{ lower.send('lowercase-proxy'); }};
+lower.onmessage = function(e) {{ log('lower_proxy_msg', e.data); lower.close(1000); }};
+lower.onerror = function(e) {{ log('lower_proxy_err', e.message || 'error'); }};
+lower.onclose = function(e) {{ log('lower_proxy_close', e.code + ':' + e.wasClean); pending--; }};
+var bypass = new WebSocket('wss://localhost:{wss_valid.port}/lowercase-no-proxy');
+bypass.onopen = function() {{ bypass.send('lowercase-no-proxy'); }};
+bypass.onmessage = function(e) {{ log('lower_bypass_msg', e.data); bypass.close(1000); }};
+bypass.onerror = function(e) {{ log('lower_bypass_err', e.message || 'error'); }};
+bypass.onclose = function(e) {{ log('lower_bypass_close', e.code + ':' + e.wasClean); pending--; }};
+setTimeout(pump, 1);
+</script>"""
+            lower_page = root / "lower_proxy_page.html"
+            lower_page.write_text(lower_html, encoding="utf-8")
+            lower_env = {
+                **env_ca,
+                "HTTPS_PROXY": "",
+                "https_proxy": lower_proxy.url,
+                "NO_PROXY": "",
+                "no_proxy": f".localhost:{wss_valid.port}",
+                "ALL_PROXY": "",
+                "all_proxy": "",
+            }
+            lower_result = run_cli(
+                str(binary),
+                [str(lower_page), f"--url={https_origin}/lower-proxy-page", "--virtual-time-budget=2000"],
+                args.timeout,
+                env_extra=lower_env,
+            )
+            lower_checks = parse_checks(lower_result.stdout + "\n" + lower_result.stderr)
+            with lower_proxy.lock:
+                lower_requests = list(lower_proxy.requests)
+            check("lower-case https_proxy and no_proxy route through CONNECT or bypass by host and port",
+                  lower_result.returncode == 0 and lower_checks.get("done") == "1"
+                  and lower_checks.get("lower_proxy_msg") == "echo:lowercase-proxy"
+                  and lower_checks.get("lower_proxy_close") == "1000:true"
+                  and lower_checks.get("lower_bypass_msg") == "echo:lowercase-no-proxy"
+                  and lower_checks.get("lower_bypass_close") == "1000:true"
+                  and len(lower_requests) == 1
+                  and lower_requests[0]["target"] == valid_ip_authority
+                  and lower_requests[0]["status"] == 200
+                  and lower_requests[0]["host"] == valid_ip_authority
+                  and lower_requests[0]["headers"] == {"host": valid_ip_authority},
+                  f"checks={lower_checks} requests={lower_requests}")
+            lower_proxy.stop()
+            lower_proxy = None
+
             # 2. HTTP page Origin + relative ws:// + sandboxed iframes (srcdoc & data:) opaque Origin: null
             data_iframe_src = (
                 "data:text/html,<script>"
@@ -1063,6 +1306,7 @@ setTimeout(pump, 1);
                 str(binary),
                 [str(http_page), f"--url={http_origin}/dir/index.html", "--virtual-time-budget=2000"],
                 args.timeout,
+                env_extra=env_proxy,
             )
             r2 = parse_checks(p2.stdout + "\n" + p2.stderr)
             with plain_srv.lock:
@@ -1095,6 +1339,100 @@ setTimeout(pump, 1);
             check("Set-Cookie on the 101 reaches the page's document.cookie",
                   "harness_after=1" in r2.get("ws_cookie_page", ""),
                   f"ws_cookie_page={r2.get('ws_cookie_page')}")
+            with connect_proxy.lock:
+                p2_proxy_count = len(connect_proxy.requests)
+            check("HTTPS_PROXY is not applied to plain ws:// connections",
+                  p2.returncode == 0 and p2_proxy_count == p1_proxy_count,
+                  f"CONNECT requests before={p1_proxy_count} after={p2_proxy_count}")
+
+            all_proxy_html = f"""<!doctype html><meta charset="utf-8"><script>
+var pending = 1;
+function log(k, v) {{ console.log('WSCHECK:' + k + '=' + v); }}
+function pump() {{ if (pending <= 0) {{ log('done', '1'); return; }} fetch('/yield').then(pump, pump); }}
+var ws = new WebSocket('wss://127.0.0.1:{wss_valid.port}/all-proxy');
+ws.onopen = function() {{ ws.send('all-proxy'); }};
+ws.onmessage = function(e) {{ log('all_proxy_msg', e.data); ws.close(1000); }};
+ws.onerror = function(e) {{ log('all_proxy_err', e.message || 'error'); }};
+ws.onclose = function(e) {{ log('all_proxy_close', e.code + ':' + e.wasClean); pending--; }};
+setTimeout(pump, 1);
+</script>"""
+            all_proxy_page = root / "all_proxy_page.html"
+            all_proxy_page.write_text(all_proxy_html, encoding="utf-8")
+            all_proxy_env = {
+                **env_ca,
+                "HTTPS_PROXY": "",
+                "https_proxy": "",
+                "ALL_PROXY": "",
+                "all_proxy": connect_proxy.url,
+                "NO_PROXY": "",
+                "no_proxy": "",
+            }
+            with connect_proxy.lock:
+                all_proxy_before = len(connect_proxy.requests)
+            all_proxy_result = run_cli(
+                str(binary),
+                [str(all_proxy_page), f"--url={https_origin}/all-proxy-page", "--virtual-time-budget=2000"],
+                args.timeout,
+                env_extra=all_proxy_env,
+            )
+            all_proxy_checks = parse_checks(all_proxy_result.stdout + "\n" + all_proxy_result.stderr)
+            with connect_proxy.lock:
+                all_proxy_requests = list(connect_proxy.requests)
+            all_proxy_record = all_proxy_requests[all_proxy_before:] if len(all_proxy_requests) > all_proxy_before else []
+            with wss_valid.lock:
+                all_proxy_upgrade = next((u for u in wss_valid.upgrades if u["path"] == "/all-proxy"), None)
+            check("ALL_PROXY is the fallback for wss:// and completes the TLS WebSocket handshake",
+                  all_proxy_result.returncode == 0 and all_proxy_checks.get("done") == "1"
+                  and all_proxy_checks.get("all_proxy_msg") == "echo:all-proxy"
+                  and all_proxy_checks.get("all_proxy_close") == "1000:true"
+                  and len(all_proxy_record) == 1
+                  and all_proxy_record[0]["target"] == valid_ip_authority
+                  and all_proxy_record[0]["status"] == 200
+                  and all_proxy_upgrade is not None,
+                  f"checks={all_proxy_checks} records={all_proxy_record} upgrade={all_proxy_upgrade is not None}")
+
+            refusing_proxy = HttpConnectProxy(response_code=407)
+            refused_html = f"""<!doctype html><meta charset="utf-8"><script>
+var pending = 1, errorMessage = '';
+function log(k, v) {{ console.log('WSCHECK:' + k + '=' + v); }}
+function pump() {{ if (pending <= 0) {{ log('done', '1'); return; }} fetch('/yield').then(pump, pump); }}
+var ws = new WebSocket('wss://127.0.0.1:{wss_valid.port}/proxy-407');
+ws.onerror = function(e) {{ errorMessage = e.message || ''; }};
+ws.onclose = function(e) {{ log('proxy_407', errorMessage + '|' + e.code + ':' + e.wasClean); pending--; }};
+setTimeout(pump, 1);
+</script>"""
+            refused_page = root / "proxy_407_page.html"
+            refused_page.write_text(refused_html, encoding="utf-8")
+            refusing_env = {
+                **env_ca,
+                "HTTPS_PROXY": refusing_proxy.url,
+                "https_proxy": "",
+                "NO_PROXY": "",
+                "no_proxy": "",
+                "ALL_PROXY": "",
+                "all_proxy": "",
+            }
+            refused_result = run_cli(
+                str(binary),
+                [str(refused_page), f"--url={https_origin}/proxy-refused", "--virtual-time-budget=2000"],
+                args.timeout,
+                env_extra=refusing_env,
+            )
+            refused_checks = parse_checks(refused_result.stdout + "\n" + refused_result.stderr)
+            with refusing_proxy.lock:
+                refused_requests = list(refusing_proxy.requests)
+            with wss_valid.lock:
+                refused_upgrade = next((u for u in wss_valid.upgrades if u["path"] == "/proxy-407"), None)
+            check("HTTP proxy 407 fails closed before TLS/Upgrade and sends no Proxy-Authorization",
+                  refused_result.returncode == 0 and refused_checks.get("done") == "1"
+                  and refused_checks.get("proxy_407") == "WebSocket HTTP proxy CONNECT failed (407)|1006:false"
+                  and len(refused_requests) == 1 and refused_requests[0]["status"] == 407
+                  and refused_requests[0]["request_line"] == f"CONNECT {valid_ip_authority} HTTP/1.1"
+                  and "proxy-authorization" not in refused_requests[0]["headers"]
+                  and refused_upgrade is None,
+                  f"checks={refused_checks} requests={refused_requests} upgrade={refused_upgrade is not None}")
+            refusing_proxy.stop()
+            refusing_proxy = None
 
             # 3. file:// document sends Origin: null and rejects relative WebSocket URL
             file_html = f"""<!doctype html><meta charset="utf-8"><script>
@@ -1138,7 +1476,7 @@ setTimeout(pump, 1);
             )
             stress_failures = 0
             for _ in range(args.stress_runs):
-                sp = run_cli(str(binary), ["--run-js", js_stress], args.timeout, env_extra=env_ca)
+                sp = run_cli(str(binary), ["--run-js", js_stress], args.timeout, env_extra=env_proxy)
                 if sp.returncode != 0:
                     stress_failures += 1
                     print(f"  stress failure rc={sp.returncode}: {sp.stderr[:200]}")
@@ -1149,6 +1487,11 @@ setTimeout(pump, 1);
                 stress_failures == 0,
             )
         finally:
+            if refusing_proxy is not None:
+                refusing_proxy.stop()
+            if lower_proxy is not None:
+                lower_proxy.stop()
+            connect_proxy.stop()
             https_srv.stop()
             wss_valid.stop()
             wss_untrusted.stop()

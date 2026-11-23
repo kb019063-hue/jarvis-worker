@@ -5481,6 +5481,56 @@ TEST(browser_shell_navigation_and_hit_testing) {
     assert(frame.find("Litebird DevTools") != std::string::npos);
 }
 
+TEST(shell_frame_labels_cannot_inject_terminal_controls) {
+    using namespace litebird;
+    // A real navigation keeps an attacker-controlled filename unchanged,
+    // while the terminal frame prints a safe representation of it.
+    const std::string path = "/tmp/litebird-shell-" + std::to_string(getpid()) + "-\033]0;bad\007.html";
+    { std::ofstream file(path); file << "<!doctype html><button>click</button>"; }
+    BrowserShell shell(200, 150, 20, 10);
+    assert(shell.navigate_to(path));
+    std::remove(path.c_str());
+    assert(shell.current_url() == path);
+    assert(shell.status_message() == "Loaded " + path);
+    std::string frame = shell.render_terminal_frame();
+    const std::string shown = "/tmp/litebird-shell-" + std::to_string(getpid()) + "-?]0;bad?.html";
+    assert(frame.find("URL: [\033[1m" + shown + "\033[22m]") != std::string::npos);
+    assert(frame.find("Loaded " + shown) != std::string::npos);
+
+    // Exercise every byte in both the focused ID and the status text. The
+    // original DOM and status are unchanged; controls, C1 and UTF-8 bytes
+    // are replaced only when emitted. Focus updates the cached text.
+    std::string bytes, safe;
+    for (int i = 0; i != 256; ++i) {
+        bytes.push_back(static_cast<char>(i));
+        safe.push_back(i >= 0x20 && i <= 0x7e ? static_cast<char>(i) : '?');
+    }
+    auto button = shell.focused_element();
+    assert(button);
+    button->set_attribute("id", bytes);
+    button->append_child(std::make_shared<Text>(bytes));
+    shell.relayout();
+    shell.focus_next();
+    assert(shell.focused_element()->id() == bytes);
+    assert(shell.status_message().find(bytes) != std::string::npos);
+    frame = shell.render_terminal_frame(true);
+    assert(frame.find("Focus: <button#" + safe + ">") != std::string::npos);
+    assert(frame.find("Focused: <button> \"click" + safe + "\"") != std::string::npos);
+    assert(frame.find("\033]0;bad\007") == std::string::npos);
+    std::ostringstream printed;
+    shell.print_terminal_frame(printed, false);
+    assert(printed.str() == shell.render_terminal_frame(false));
+
+    // A failed navigation also includes the untrusted URL in the status.
+    const std::string missing = "/tmp/litebird-no-such-" + std::to_string(getpid()) + "-\033[2J\r";
+    assert(!shell.navigate_to(missing));
+    assert(shell.status_message().find(missing) != std::string::npos);
+    frame = shell.render_terminal_frame();
+    assert(frame.find("Error loading /tmp/litebird-no-such-") != std::string::npos);
+    assert(frame.find("?[2J?") != std::string::npos);
+    assert(frame.find("\033[2J") == std::string::npos);
+}
+
 TEST(css_positioning_and_stacking_contexts) {
     using namespace litebird;
 
@@ -5982,6 +6032,134 @@ TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion
     )JS");
     EventLoop::default_loop().run_microtasks();
     assert(js.eval("then_trace.join('|')").to_string() == "next|then|close|getter");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 196: a Promise subclass makes its own promises
+// ---------------------------------------------------------------------------
+TEST(promise_subclass_makes_its_own_promises_and_a_rejection_keeps_its_reject) {
+    using namespace litebird;
+    // The expectation for every question here was taken from Node.js: the
+    // engine is not asked to grade itself. `tools/conformance/verify_promise_
+    // subclass.py` runs the same questions through both, and this suite keeps
+    // the ones the engine has to answer without a second binary on the box.
+    TestPage page;
+    JsInterpreter& js = page.load("<!DOCTYPE html><body></body>");
+    auto text = [&js](const std::string& source) { return js.eval(source).to_string(); };
+
+    // 1. A subclass's instance is that subclass, and the native parent filled
+    //    in its state: `then` finds it through the cell `super(...)` was given.
+    assert(text(R"(
+        class P extends Promise { constructor(fn) { super(fn); } }
+        var p = new P(function (resolve) { resolve(1); });
+        [p instanceof P, p instanceof Promise,
+         Object.getPrototypeOf(p) === P.prototype].join()
+    )") == "true,true,true");
+
+    // 2. `then` asks SpeciesConstructor: what it makes is a P, and the chain
+    //    gives each step the value the step before it returned.
+    // Nothing has run yet when this returns: the reactions are queued.
+    text(R"(
+        var seen = [];
+        var q = p.then(function (v) { seen.push('one:' + v); return v * 2; })
+                 .then(function (v) { seen.push('two:' + v); return v + 5; })
+                 .then(function (v) { seen.push('three:' + v); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("seen.join()") == "one:1,two:2,three:7");
+    assert(text("q instanceof P") == "true");
+
+    // 3. A handler that answers a promise has it adopted, not used as a value.
+    text(R"(
+        var got = [];
+        Promise.resolve(1).then(function () { return Promise.resolve(7); })
+                          .then(function (v) { got.push(v); });
+        Promise.resolve(3).then(function (v) { return Promise.resolve(v * 2); })
+                          .then(function (v) { got.push(v); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("got.join()") == "7,6");
+
+    // 4. A rejection that passes through a `then` with no handler for it is
+    //    still a rejection: `catch` further down sees the same reason. This is
+    //    the half a capability's [[Reject]] is for, and settling it through
+    //    [[Resolve]] made it a value.
+    text(R"(
+        var trace = [];
+        Promise.reject(new Error("boom")).then(function () { trace.push('wrong'); })
+            .catch(function (e) { trace.push('caught:' + e.message); });
+        Promise.reject(2).then().then(function (v) { trace.push('no:' + v); },
+                                      function (e) { trace.push('second:' + e); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("trace.join()") == "caught:boom,second:2");
+
+    // 5. Every static that makes a promise makes the receiver's.
+    assert(text(R"(
+        [P.resolve(1) instanceof P, P.reject(1) instanceof P, P.all([1]) instanceof P,
+         P.allSettled([1]) instanceof P, P.any([1]) instanceof P, P.race([1]) instanceof P,
+         P.withResolvers().promise instanceof P].join()
+    )") == "true,true,true,true,true,true,true");
+
+    // 6. PromiseResolve returns a promise of the constructor unchanged, and
+    //    wraps one that is not. The combinators depend on the first half: a
+    //    wrapping hides a throwing `then` getter from js_iterate, which is what
+    //    closes the iterator.
+    // `p` is a P, so only P's own resolve answers it unchanged; %Promise%'s
+    // makes a plain promise around it.
+    assert(text("P.resolve(p) === p") == "true");
+    assert(text("Promise.resolve(p) === p") == "false");
+    assert(text("var plain = Promise.resolve(1); Promise.resolve(plain) === plain") == "true");
+    assert(text("Promise.resolve(1) === 1") == "false");
+
+    // 7. `new.target.prototype` is read once for a built-in that builds its own
+    //    object, and the executor is refused before it is read at all.
+    assert(text(R"(
+        var reads = 0;
+        function counting() {
+            var nt = function () {}.bind(null);
+            Object.defineProperty(nt, 'prototype', { get: function () { reads++; return { tag: 'G' }; } });
+            return nt;
+        }
+        var before = reads;
+        var made = Reflect.construct(Promise, [function () {}], counting());
+        [reads - before, made.tag, made instanceof Promise].join()
+    )") == "1,G,false");
+    assert(text(R"(
+        var before = reads;
+        try { Reflect.construct(Promise, [], counting()); 'no throw'; }
+        catch (e) { e.name + ',' + (reads - before); }
+    )") == "TypeError,0");
+
+    // 8. The resolving pair the constructor is handed: anonymous, `length` 1,
+    //    and no [[Construct]] (§27.2.1.3.2, §27.2.1.4.2).
+    assert(text(R"(
+        var resolveName;
+        new Promise(function (resolve) { resolveName = resolve; });
+        var ctor;
+        try { new resolveName(function () {}); ctor = 'constructed'; } catch (e) { ctor = e.name; }
+        [resolveName.name === '', resolveName.length, ctor].join()
+    )") == "true,1,TypeError");
+
+    // 9. Species is read, and a species that is not the constructor is honoured.
+    assert(text("P[Symbol.species] === P && Promise[Symbol.species] === Promise") == "true");
+    assert(text(R"(
+        class Odd extends Promise { static get [Symbol.species]() { return Promise; } }
+        var o = new Odd(function (r) { r(1); });
+        [o.then(function () {}) instanceof Odd, o.then(function () {}).constructor === Promise].join()
+    )") == "false,true");
+
+    // 10. `finally` goes through `then`, so a subclass's species is honoured
+    //     there too, and it keeps the value and the reason.
+    text(R"(
+        var f = [];
+        p.finally(function () { f.push('ran'); }).then(function (v) { f.push('value:' + v); });
+        Promise.reject(new Error('kept')).finally(function () { f.push('ran2'); })
+            .catch(function (e) { f.push('reason:' + e.message); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("f.join()") == "ran,ran2,value:1,reason:kept");
+    assert(text("p.finally(function () {}) instanceof P") == "true");
 }
 
 TEST(css_flex_wrapping_and_grid_layout) {
@@ -6532,6 +6710,33 @@ TEST(crypto_get_random_values_and_random_uuid) {
     )").is_truthy());
 
     // Non-TypedArray and >65536 bytes are validated in DomCryptoBindings.cpp.
+}
+
+TEST(subtle_crypto_digest_sha256) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    assert(interp.eval("typeof crypto.subtle === 'object' && typeof crypto.subtle.digest === 'function'").is_truthy());
+
+    // Known SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+    interp.eval(R"(
+        var hex = null;
+        var data = new TextEncoder().encode('abc');
+        crypto.subtle.digest('SHA-256', data).then(function(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) {
+                s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            }
+            hex = s;
+        });
+    )");
+    assert(interp.eval("hex === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'").is_truthy());
+
+    // Unsupported algorithm rejects with NotSupportedError
+    interp.eval("var rejAlg = null; crypto.subtle.digest({ name: 'MD5' }, new Uint8Array(0)).catch(function(e) { rejAlg = e.name; });");
+    assert(interp.eval("rejAlg === 'NotSupportedError'").is_truthy());
 }
 
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
@@ -17575,6 +17780,62 @@ TEST(destructuring_asks_the_value_for_its_iterator) {
     assert(js.eval("failures.join('; ')").to_string().empty());
 }
 
+TEST(an_object_without_an_iterator_method_is_not_iterable) {
+    using namespace litebird;
+    // Phase 210, finding 214, for the row "`for...of` takes an object that
+    // only has `next`", which this phase retired: the engine asks the value
+    // for its @@iterator for...of, spread, yield*, Set/Map/WeakSet/WeakMap,
+    // Object.fromEntries and destructuring all already made, and a bare
+    // { next } — not iterable in the language — was refused by every one of
+    // them here too. The row described a `method_is_installed()` fallback
+    // that is not in the tree at this commit; probe before believing a row
+    // (the precedent is Phase 201, finding 205). This suite pins the answers
+    // so the day a fallback comes back, these go red.
+    //
+    // Every assertion was run through Node.js v22.22.3 first; both engines
+    // print the same answers, including the one that is not a TypeError:
+    // Array.from with no @@iterator is the array-like path, a `length` of
+    // undefined is no length, and the answer is an empty array, not an error.
+    TestPage page(TestPage::WithUrl{});
+    JsInterpreter& js = page.js;
+    js.load_page("<!DOCTYPE html><html><body></body></html>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function ok(what, got, want) {
+            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
+        var bare = { i: 0, next: function () { return this.i < 2 ? { value: this.i++, done: false } : { done: true }; } };
+
+        ok('spread refuses a bare next', t(function () { return [...bare].join(); }), 'TypeError');
+        ok('for...of refuses it too', t(function () { var o = []; for (var x of bare) o.push(x); return o; }), 'TypeError');
+        ok('Set refuses it', t(function () { return new Set(bare).size; }), 'TypeError');
+        ok('Map refuses it', t(function () { return new Map(bare).size; }), 'TypeError');
+        ok('WeakSet refuses it', t(function () { return new WeakSet(bare); }), 'TypeError');
+        ok('yield* refuses it', t(function () { function* g() { yield* bare; } return [...g()].join(); }), 'TypeError');
+        ok('an array pattern refuses it', t(function () { var [q] = bare; return q; }), 'TypeError');
+        ok('an assignment pattern refuses it', t(function () { var q; [q] = bare; return q; }), 'TypeError');
+        ok('Object.fromEntries refuses it', t(function () { return Object.fromEntries(bare); }), 'TypeError');
+        ok('Array.from reads it as array-like with no length', Array.from(bare).length, 0);
+
+        var none = {};
+        ok('an object with no symbol key spreads to nothing', t(function () { return [...none].join(); }), 'TypeError');
+        ok('and a loop refuses it', t(function () { for (var x of none) {} return 'no error'; }), 'TypeError');
+        ok('and so does a Set', t(function () { return new Set(none).size; }), 'TypeError');
+
+        var with_null = { next: function () { return { done: true }; } };
+        with_null[Symbol.iterator] = null;
+        ok('a null @@iterator is a TypeError', t(function () { return [...with_null]; }), 'TypeError');
+        var with_five = { next: function () { return { done: true }; } };
+        with_five[Symbol.iterator] = 5;
+        ok('and so is a @@iterator that is not a function', t(function () { return [...with_five]; }), 'TypeError');
+    )JS");
+    assert(js.eval("failures.length").to_string() == "0");
+    assert(js.eval("failures.join('; ')").to_string().empty());
+}
+
 TEST(a_hole_is_a_place_the_prototype_can_fill) {
     using namespace litebird;
     // Phase 98, finding 104. Phase 81 made a hole a hole, and two things that
@@ -20896,6 +21157,157 @@ TEST(worker_options_module_policy_and_global_scope) {
 
     js.eval("wc.terminate(); wn.terminate(); wi.terminate();");
     std::remove(secret_js.c_str());
+}
+
+/// A JS string literal holding `text`, escaping what a literal must escape.
+/// The worker sources below are handed to `new Worker('data:...')` through
+/// `encodeURIComponent`, so what they run must survive one more level of
+/// quoting than a pasted URL would.
+static std::string js_quote_for_suite(const std::string& text) {
+    std::string out = "\"";
+    for (char c : text) {
+        if (c == '\\' || c == '"') out += '\\';
+        out += c;
+    }
+    out += '"';
+    return out;
+}
+
+TEST(text_codecs_are_installed_in_a_worker_scope) {
+    using namespace litebird;
+
+    // Phase 206, finding 210. The row's last open item: `TextDecoder` and
+    // `TextEncoder` were installed on every global, a worker's included, and
+    // nothing said so. `install_text_codec_builtins` is called from
+    // `JsInterpreter`'s setup, which a worker runs for its own realm — but a
+    // later change could have moved it behind `if (m_document)` and every
+    // window suite would still pass.
+    //
+    // What is asserted here is the interface *through a worker's global*, in
+    // one script run inside the worker and answered by `postMessage`, and the
+    // answers are Node v22.22.3's (measured outside, in a worker there too).
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(4)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    // The same probes on the window's global first, so a failure says which
+    // scope is missing them rather than only that one is.
+    js.eval(R"JS(
+        var winProbe = [typeof TextDecoder, typeof TextEncoder].join(',');
+    )JS");
+    assert(js.eval("winProbe").to_string() == "function,function");
+
+    const std::string worker_source =
+        "var out = [];"
+        "function t(name, f) {"
+        "  var v; try { v = String(f()); } catch (e) { v = 'THREW ' + e.name; }"
+        "  out.push(name + ' => ' + v);"
+        "}"
+        "t('typeof', function () { return typeof TextDecoder + ',' + typeof TextEncoder; });"
+        "t('toStringTag', function () {"
+        "  return Object.prototype.toString.call(new TextDecoder()) + ' ' +"
+        "         Object.prototype.toString.call(new TextEncoder()); });"
+        "t('encoding', function () { return new TextDecoder().encoding + ' ' + new TextEncoder().encoding; });"
+        "t('latin1 label', function () { return new TextDecoder('latin1').encoding; });"
+        "t('options', function () {"
+        "  return new TextDecoder('utf-8', {fatal: true}).fatal + ' ' + new TextDecoder().ignoreBOM; });"
+        "t('constructor needs new', function () {"
+        "  try { TextDecoder(); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('unknown label', function () {"
+        "  try { new TextDecoder('utf-32'); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('replacement label', function () {"
+        "  try { new TextDecoder('replacement'); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('decode of a plain array', function () {"
+        "  try { new TextDecoder().decode([1, 2]); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('round trip', function () {"
+        "  return new TextDecoder().decode(new TextEncoder().encode('h\\u00e9llo \\u20ac')); });"
+        "t('encode answers a Uint8Array', function () {"
+        "  return Object.prototype.toString.call(new TextEncoder().encode('a')); });"
+        "t('encodeInto', function () {"
+        "  var buf = new Uint8Array(3); var r = new TextEncoder().encodeInto('ab', buf);"
+        "  return r.read + ',' + r.written + ',' + buf[0] + ',' + buf[1]; });"
+        "t('a lone surrogate is three bytes', function () {"
+        "  return new TextEncoder().encode('\\uD800').join(','); });"
+        "t('stream split inside a character', function () {"
+        "  var d = new TextDecoder();"
+        "  return d.decode(new Uint8Array([0xE2]), {stream: true}) + '|' +"
+        "         d.decode(new Uint8Array([0x82, 0xAC])) + '|' + d.decode(); });"
+        "t('fatal error resets the decoder', function () {"
+        "  var d = new TextDecoder('utf-8', {fatal: true});"
+        "  try { d.decode(new Uint8Array([0xFF]), {stream: true}); } catch (e) {}"
+        "  return d.decode(new Uint8Array([0x41])); });"
+        "t('BOM stripped', function () {"
+        "  return new TextDecoder().decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x41])); });"
+        "t('FE FF is data to UTF-16LE', function () {"
+        "  var v = new TextDecoder('utf-16le').decode(new Uint8Array([0xFE, 0xFF, 0x00, 0x41]));"
+        "  return v.length + ':' + v.charCodeAt(0).toString(16); });"
+        "t('ignoreBOM keeps it', function () {"
+        "  return new TextDecoder('utf-8', {ignoreBOM: true})"
+        "      .decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x41])).length; });"
+        "t('instanceof its own constructor', function () {"
+        "  return (new TextDecoder() instanceof TextDecoder) + ',' +"
+        "         (new TextEncoder() instanceof TextEncoder); });"
+        "postMessage(out);";
+
+    // The source goes through the interpreter as a JS string literal, so it is
+    // quoted here rather than pasted into a `data:` URL with its own escapes.
+    js.eval("var workerSrc = " + js_quote_for_suite(worker_source) + ";");
+    js.eval(
+        "var workerOut = null;"
+        "var workerErr = '';"
+        "var codecWorker = new Worker('data:text/javascript,' + encodeURIComponent(workerSrc));"
+        "codecWorker.onmessage = function (e) { workerOut = e.data; };"
+        "codecWorker.onerror = function (e) { workerErr = e.message; };");
+    const bool arrived = wait_for(js, "workerOut !== null");
+    if (!arrived) std::cerr << "worker said: " << js.eval("workerErr").to_string() << "\n";
+    assert(arrived);
+    js.eval("codecWorker.terminate();");
+
+    // The expected answers, each one Node v22.22.3's.
+    const char* const expected[] = {
+        "typeof => function,function",
+        "toStringTag => [object TextDecoder] [object TextEncoder]",
+        "encoding => utf-8 utf-8",
+        "latin1 label => windows-1252",
+        "options => true false",
+        "constructor needs new => TypeError",
+        "unknown label => RangeError",
+        "replacement label => RangeError",
+        "decode of a plain array => TypeError",
+        "round trip => h\u00e9llo \u20ac",
+        "encode answers a Uint8Array => [object Uint8Array]",
+        "encodeInto => 2,2,97,98",
+        "a lone surrogate is three bytes => 239,191,189",
+        "stream split inside a character => |\u20ac|",
+        "fatal error resets the decoder => A",
+        "BOM stripped => A",
+        "FE FF is data to UTF-16LE => 2:fffe",
+        "ignoreBOM keeps it => 2",
+        "instanceof its own constructor => true,true",
+    };
+    const std::size_t count = sizeof(expected) / sizeof(expected[0]);
+    assert(js.eval("workerOut.length").to_number() == static_cast<double>(count));
+    const std::string joined = js.eval("workerOut.join('\\n')").to_string();
+    std::string want;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i) want += "\n";
+        want += expected[i];
+    }
+    if (joined != want) std::cerr << "worker codecs:\n" << joined << "\n--- expected ---\n" << want << "\n";
+    assert(joined == want);
 }
 
 TEST(worker_event_target_error_and_message_dispatch) {
@@ -31065,6 +31477,62 @@ TEST(gc_reclaims_a_bound_functions_target) {
     heap.collect_garbage();
 }
 
+TEST(a_bound_function_as_a_prototype_keeps_its_target)
+{
+    using namespace litebird;
+
+    // The other side of `gc_reclaims_a_bound_functions_target`. That suite says
+    // a target nothing refers to is freed; this one says a target that only the
+    // *prototype* of a live object refers to is not. `count_value` counts a
+    // payload's captures and bound target, so a payload one handle holds is not
+    // a root, and the mark pass is the only thing that keeps those alive. It
+    // marked neither, so a bound function reached only as an object's prototype
+    // lost the bound `this` after a collection: its target's payload was found
+    // owned and freed while the live function went on reading it. `prototypes.dat`
+    // recorded the answer for a year ("collect: a function that is reachable only
+    // as a prototype stays alive, with what it closed over") and answered
+    // `undefined`; finding 212.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    auto text = [&](const std::string& source) { return js.eval(source).to_string(); };
+    js.eval(R"JS(
+        function churn() {
+            var junk = [];
+            for (var i = 0; i < 400; i++) junk.push({ i: i, s: 'x' + i });
+            return junk.length;
+        }
+        // Every escape of the target is the prototype link: `bound` is the only
+        // thing that refers to the function, and the function the only thing
+        // that refers to `this`'s object.
+        var bound = (function () {
+            var target = { v: 'kept' };
+            return Object.create(function () { return this.v; }.bind(target));
+        })();
+    )JS");
+    // A plain function as a prototype was already right: nothing but its own
+    // cell has to be kept alive.
+    js.eval(R"JS(
+        var plain = (function () {
+            var secret = 'S';
+            function Hidden() { return secret; }
+            return Object.create(Hidden);
+        })();
+    )JS");
+    assert(text("gc(); churn(); gc(); churn();"
+                "String(Object.getPrototypeOf(bound)())") == "kept");
+    assert(text("typeof Object.getPrototypeOf(plain) + ' ' + String(Object.getPrototypeOf(plain)())")
+           == "function S");
+    // The bound arguments and the entry point's other captures travel the same
+    // way: `instanceof` still asks the target, and `new` still constructs it.
+    assert(text("gc(); churn();"
+                "(function () { function T(x) { this.x = x; } return Object.create(T.bind(null, 7)); })()"
+                " && 'built'") == "built");
+    assert(text("gc(); churn();"
+                "(function () { var t = { v: 'again' };"
+                "  return String(Object.getPrototypeOf(Object.create(function () { return this.v; }"
+                "  .bind(t)))()); })()") == "again");
+}
+
 TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour) {
     using namespace litebird;
 
@@ -31448,6 +31916,115 @@ TEST(display_contents_generates_no_box_and_splices_its_children) {
     bodyless_bitmap.render(DisplayList::build(bodyless_root));
     assert(bodyless_bitmap.get_pixel(0, 0) == Color::white());
     assert(bodyless_bitmap.get_pixel(199, 149) == Color::white());
+}
+
+// Phase 215 / finding 219. `::before` and `::after` parsed and matched
+// nothing, and there was no generated box anywhere in layout or paint, so an
+// icon-font-only control -- an anchor whose whole content is a class whose
+// `::before` supplies the glyph -- computed a zero box, painted nothing and
+// could not be hit-tested. The end-to-end oracle is holdout-01's Rust Book
+// "Next chapter" anchor, which the holdout recorded as 760x0 and 0x0.
+TEST(pseudo_elements_generate_a_box_that_can_be_hit) {
+    using namespace litebird;
+    const std::string html =
+        "<!doctype html><html><head><style>"
+        "body{margin:0;font-size:16px}"
+        ".nav{display:block;padding:8px 0}"
+        ".fa-angle-right:before{content:\"\\f105\"}"
+        "i.fa{font-style:normal}"
+        "#b::after{content:'YYY'}"
+        "</style></head><body>"
+        "<a class=\"nav\" href=\"#next\"><i class=\"fa fa-angle-right\"></i></a>"
+        "<div id=\"b\">mid</div>"
+        "</body></html>";
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 800.0f, 600.0f);
+    auto root = LayoutTree::build(doc, resolver, 800, 600);
+    assert(root);
+
+    auto find_texts = [](const LayoutBox* box, std::vector<const LayoutBox*>& out) {
+        std::vector<const LayoutBox*> stack{box};
+        while (!stack.empty()) {
+            const LayoutBox* b = stack.back();
+            stack.pop_back();
+            if (b->box_type == BoxType::TextNode) out.push_back(b);
+            for (const auto& c : b->children) stack.push_back(c.get());
+        }
+    };
+    // 1. The generated text is a real box in the tree -- a TextBox, not a new
+    //    kind of object -- holding the U+F105 the Font Awesome rule supplies,
+    //    and the `::after` string after the element's own children.
+    std::vector<const LayoutBox*> texts;
+    find_texts(root.get(), texts);
+    bool saw_glyph = false, saw_yyy = false;
+    for (const auto* t : texts) {
+        // U+F105 is EF 84 85 in UTF-8; EF BC 85 would be U+FF05, which is what
+        // this suite asserted the first time it was run.
+        if (t->text.size() == 3 && static_cast<unsigned char>(t->text[0]) == 0xEF &&
+            static_cast<unsigned char>(t->text[1]) == 0x84 && static_cast<unsigned char>(t->text[2]) == 0x85) {
+            saw_glyph = true;
+        }
+        if (t->text == "YYY") saw_yyy = true;
+    }
+    assert(saw_glyph);
+    assert(saw_yyy);
+
+    // 2. The icon-only anchor has a box with height where it had none.
+    std::vector<const LayoutBox*> stack{root.get()};
+    const LayoutBox* anchor = nullptr;
+    while (!stack.empty()) {
+        const LayoutBox* b = stack.back();
+        stack.pop_back();
+        if (b->node && b->node->is_element() && b->node->as_element()->tag_name() == "a") anchor = b;
+        for (const auto& c : b->children) stack.push_back(c.get());
+    }
+    assert(anchor);
+    assert(anchor->dimensions.content.height > 0.0f);
+
+    // 3. The DOM did not change. A pseudo-element is not a node the page can
+    //    see, which is what CSSOM says and what every script in the world
+    //    relies on when it reads `textContent`.
+    // Found by walking, not by `query_selector`, so the assertion is about the
+    // generated box and not about whether a class selector keys the index.
+    std::shared_ptr<Element> anchor_el;
+    { std::vector<std::shared_ptr<Node>> nodes; nodes.push_back(doc);
+      while (!nodes.empty()) { auto n = nodes.back(); nodes.pop_back();
+        if (n->is_element() && n->as_element()->tag_name() == "a") {
+            anchor_el = std::static_pointer_cast<Element>(n); break;
+        }
+        for (const auto& c : n->children()) nodes.push_back(c); } }
+    assert(anchor_el);
+    assert(anchor_el->text_content().empty());
+    const auto b_el = doc->get_element_by_id("b");
+    assert(b_el && b_el->text_content() == "mid");
+
+    // 4. The generated text belongs to the pseudo-element's style, not the
+    //    element's: `getComputedStyle(el).content` is still `normal`.
+    const ComputedStyle base = resolver.resolve_style(b_el, nullptr);
+    assert(base.content.empty());
+    assert(resolver.resolve_pseudo_element(b_el, 2, base).content == "YYY");
+    assert(resolver.resolve_pseudo_element(b_el, 1, base).content.empty());
+
+    // 5. A value this engine cannot mean generates nothing, rather than the
+    //    literal text of the declaration: `counter(x)` is not the string
+    //    "counter(x)", and `none` is not the string "none".
+    auto none_doc = HtmlParser::parse(
+        "<!doctype html><html><head><style>"
+        "p::before{content:counter(x)}"
+        "div::before{content:none}"
+        "span::before{content:attr(title)}"
+        "</style></head><body><p>a</p><div>b</div><span title=\"t\">c</span></body></html>");
+    StyleResolver none_resolver = DocumentStyles::build_resolver(*none_doc, nullptr, 800.0f, 600.0f);
+    auto none_root = LayoutTree::build(none_doc, none_resolver, 800, 600);
+    assert(none_root);
+    std::vector<const LayoutBox*> none_texts;
+    find_texts(none_root.get(), none_texts);
+    for (const auto* t : none_texts) {
+        assert(t->text != "counter(x)");
+        assert(t->text != "none");
+        assert(t->text != "attr(title)");
+        assert(t->text != "t");
+    }
 }
 
 TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
@@ -34422,61 +34999,155 @@ void test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties() 
     )") == "0,h,i,false,1,2,false,10,false,30,40,5,6,7,1");
 }
 
-
-TEST(an_object_without_an_iterator_method_is_not_iterable) {
-    using namespace litebird;
-    // Phase 210, finding 214, for the row "`for...of` takes an object that
-    // only has `next`", which this phase retired: the engine asks the value
-    // for its @@iterator for...of, spread, yield*, Set/Map/WeakSet/WeakMap,
-    // Object.fromEntries and destructuring all already made, and a bare
-    // { next } — not iterable in the language — was refused by every one of
-    // them here too. The row described a `method_is_installed()` fallback
-    // that is not in the tree at this commit; probe before believing a row
-    // (the precedent is Phase 201, finding 205). This suite pins the answers
-    // so the day a fallback comes back, these go red.
+void test_reduce_asks_for_each_place_as_it_reaches_it() {
+    auto eval = [](const char* src) -> std::string {
+        JsInterpreter js;
+        return js.eval(src).to_string();
+    };
+    // ECMA-262 §23.1.3.21 (reduce) and §23.1.3.22 (reduceRight) ask
+    // `HasProperty(O, Pk)` once per index, in the order the method walks, and
+    // the walk is bounded by the length read before the first callback. This
+    // engine listed the places that were there *before* the walk started and
+    // then only asked whether each of those had survived, so a place a
+    // callback created ahead of itself was never visited:
+    // `reduce/15.4.4.21-9-1.js` writes `arr[2]` from the callback while two is
+    // still a hole, and answered "75" where Node.js v22.22.3 answers "105".
     //
-    // Every assertion was run through Node.js v22.22.3 first; both engines
-    // print the same answers, including the one that is not a TypeError:
-    // Array.from with no @@iterator is the array-like path, a `length` of
-    // undefined is no length, and the answer is an empty array, not an error.
-    TestPage page(TestPage::WithUrl{});
-    JsInterpreter& js = page.js;
-    js.load_page("<!DOCTYPE html><html><body></body></html>");
-    js.notify_document_loaded();
+    // Every expectation below is what Node.js v22.22.3 prints for the same
+    // expression, and each names something the snapshot answers differently:
+    // a place created ahead of the walk, a place removed ahead of it, the
+    // length being fixed at the start, and reduceRight walking down.
+    //
+    // What the "before" column of finding 217 measured: of these twelve, the
+    // snapshot answers six wrongly (fill_hole_ahead, neg_result, add_ahead_once,
+    // rr_fill_below, plain_object, grow_mid).
 
-    js.eval(R"JS(
-        var failures = [];
-        function ok(what, got, want) {
-            if (String(got) !== String(want)) failures.push(what + ': got ' + got + ', expected ' + want);
-        }
-        function t(f) { try { return String(f()); } catch (e) { return e.constructor.name; } }
-        var bare = { i: 0, next: function () { return this.i < 2 ? { value: this.i++, done: false } : { done: true }; } };
+    // ---- a place the callback creates ahead of the walk is visited ---------
+    // The test262 case: a hole at 2 is filled by the callback at index 1, and
+    // the walk that reaches 2 afterwards sees it. A place created past the
+    // end is not visited, because the length was read first.
+    assert(eval(R"(
+        var arr = [1, 2, , 4, '5'];
+        arr.reduce(function (p, c) { arr[5] = 6; arr[2] = 3; return p + c; });
+    )") == "105");
+    // With an initial value the callback sees index 0 as well, so the place
+    // that appears at 2 is one the walk has not passed.
+    assert(eval(R"(
+        var seen = [];
+        [10, , 20, 30].reduce(function (p, c, i) { seen.push(i); return c - 1; }, 0);
+        seen.join(',');
+    )") == "0,2,3");
 
-        ok('spread refuses a bare next', t(function () { return [...bare].join(); }), 'TypeError');
-        ok('for...of refuses it too', t(function () { var o = []; for (var x of bare) o.push(x); return o; }), 'TypeError');
-        ok('Set refuses it', t(function () { return new Set(bare).size; }), 'TypeError');
-        ok('Map refuses it', t(function () { return new Map(bare).size; }), 'TypeError');
-        ok('WeakSet refuses it', t(function () { return new WeakSet(bare); }), 'TypeError');
-        ok('yield* refuses it', t(function () { function* g() { yield* bare; } return [...g()].join(); }), 'TypeError');
-        ok('an array pattern refuses it', t(function () { var [q] = bare; return q; }), 'TypeError');
-        ok('an assignment pattern refuses it', t(function () { var q; [q] = bare; return q; }), 'TypeError');
-        ok('Object.fromEntries refuses it', t(function () { return Object.fromEntries(bare); }), 'TypeError');
-        ok('Array.from reads it as array-like with no length', Array.from(bare).length, 0);
+    // ---- a place the callback removes ahead of the walk is not visited -----
+    assert(eval(R"(
+        var arr = [1, 2, 3, 4];
+        arr.reduce(function (p, c, i) { if (i === 0) delete arr[2]; return p + c; });
+    )") == "10");
 
-        var none = {};
-        ok('an object with no symbol key spreads to nothing', t(function () { return [...none].join(); }), 'TypeError');
-        ok('and a loop refuses it', t(function () { for (var x of none) {} return 'no error'; }), 'TypeError');
-        ok('and so does a Set', t(function () { return new Set(none).size; }), 'TypeError');
+    // ---- the length is read once, before any callback ---------------------
+    // §23.1.3.21 step 3. A callback that lengthens the array cannot extend
+    // the walk; one that shortens it cannot end the walk early.
+    assert(eval(R"(
+        var arr = [1, 2, 3];
+        arr.reduce(function (p, c, i) { if (i === 0) arr.length = 1; return p + c; });
+    )") == "6");
+    assert(eval(R"(
+        var arr = [1, 2];
+        arr.reduce(function (p, c, i) { if (i === 0) arr.length = 99; return p + c; });
+    )") == "3");
 
-        var with_null = { next: function () { return { done: true }; } };
-        with_null[Symbol.iterator] = null;
-        ok('a null @@iterator is a TypeError', t(function () { return [...with_null]; }), 'TypeError');
-        var with_five = { next: function () { return { done: true }; } };
-        with_five[Symbol.iterator] = 5;
-        ok('and so is a @@iterator that is not a function', t(function () { return [...with_five]; }), 'TypeError');
-    )JS");
-    assert(js.eval("failures.length").to_string() == "0");
-    assert(js.eval("failures.join('; ')").to_string().empty());
+    // ---- a place the callback adds past the length is never visited --------
+    // The two places walked are handed to the callback and the three added at
+    // 3, 4 and 5 are not, so the callback runs twice and the array ends up
+    // six long.
+    assert(eval(R"(
+        var arr = [1, 2, 3];
+        var calls = 0;
+        arr.reduce(function (p, c, i) { calls++; arr[i + 3] = 9; return p; });
+        calls + ':' + arr.length;
+    )") == "2:6");
+
+    // ---- reduceRight walks from the top down ------------------------------
+    // The accumulator starts at the last place, so index 4 is not given to
+    // the callback; the hole at 3 is skipped and 2, 1 and 0 follow.
+    assert(eval(R"(
+        var seen = [];
+        var sum = [1, 2, 3, , 5].reduceRight(function (p, c, i) { seen.push(i); return p + c; });
+        seen.join(',') + '|' + sum;
+    )") == "2,1,0|11");
+    // A place the callback fills below itself is visited when the walk
+    // reaches it. This is the case that separates the standard's downward
+    // walk from listing the places upwards and reversing the list: with no
+    // initial value the callback never runs at index 2 here, so a version
+    // that fills the hole from index 2 looks right — the next case, where the
+    // callback does run at the top, answers 18 instead of 21.
+    assert(eval(R"(
+        var arr = [1, , 3];
+        arr.reduceRight(function (p, c, i) { if (i === 2) arr[1] = 2; return p + c; });
+    )") == "4");
+    assert(eval(R"(
+        var arr = [1, , 3];
+        arr.reduceRight(function (p, c, i) { if (i === 2) arr[1] = 2; return p + c; }, 0);
+    )") == "6");
+    assert(eval(R"(
+        var arr = [9, , , 9];
+        arr.reduceRight(function (p, c, i) { if (i === 3) { arr[1] = 1; arr[2] = 2; } return p + c; }, 0);
+    )") == "21");
+    // A place removed ahead of the walk — below it, for reduceRight — is
+    // skipped.
+    assert(eval(R"(
+        var arr = [1, 2, 3, 4];
+        arr.reduceRight(function (p, c, i) { if (i === 3) delete arr[1]; return p + c; });
+    )") == "10");
+
+    // ---- a receiver that is not an array ----------------------------------
+    // `HasProperty` is asked of the object as it is now, so a place a callback
+    // defines on a plain object's index is seen through the chain as any
+    // other would be.
+    assert(eval(R"(
+        var o = { length: 3, 0: 1 };
+        o.reduce = Array.prototype.reduce;
+        o.reduce(function (p, c, i) { if (i === 0) { o[1] = 2; o[2] = 3; } return p + c; });
+    )") == "1");
+    // Nothing to reduce and no initial value is a TypeError; a hole is not a
+    // place, so `[, ,]` is empty too; with an initial value nothing is asked.
+    assert(eval(R"(
+        function name(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }
+        name(function () { [].reduce(function () {}); }) + '|' +
+        name(function () { [, , ].reduce(function () {}); }) + '|' +
+        String([].reduce(function () {}, 7));
+    )") == "TypeError|TypeError|7");
+    assert(eval(R"(
+        var calls = 0;
+        [, , ].reduce(function () { calls++; }, 'start') + ':' + calls;
+    )") == "start:0");
+}
+
+
+
+TEST(svg_class_name_is_a_live_animated_string) {
+    TestPage page;
+    auto& js = page.js;
+    auto S = [&](const char* code) { return js.eval(code).to_string(); };
+    assert(S("var s=document.createElementNS('http://www.w3.org/2000/svg','svg');"
+             "var e=document.createElementNS('http://www.w3.org/2000/svg','rect');"
+             "var a=e.className; [typeof a,a instanceof SVGAnimatedString,a===e.className,"
+             "a.baseVal,a.animVal,s.className.baseVal].join('|')") == "object|true|true|||");
+    assert(S("e.setAttribute('class','one'); [a.baseVal,a.animVal,e.classList.contains('one')].join('|')") == "one|one|true");
+    assert(S("a.baseVal='two three'; [e.getAttribute('class'),a.animVal,e.classList.contains('three')].join('|')") == "two three|two three|true");
+    assert(S("e.classList.add('four'); [a.baseVal,a.animVal].join('|')") == "two three four|two three four");
+    assert(S("e.removeAttribute('class'); [a.baseVal,a.animVal,e.hasAttribute('class')].join('|')") == "||false");
+    assert(S("a.baseVal=null; [a.baseVal,a.animVal,e.getAttribute('class')].join('|')") == "null|null|null");
+    assert(S("a.animVal='bad'; e.className='bad'; [e.className===a,a.baseVal,a.animVal].join('|')") == "true|null|null");
+    assert(S("var h=document.createElement('div'); h.className='ordinary'; [typeof h.className,h.className].join('|')") == "string|ordinary");
+    assert(S("try { Object.getOwnPropertyDescriptor(SVGAnimatedString.prototype,'baseVal').get.call({}); 'no'; } catch(e) { e.name; }") == "TypeError");
+    assert(S("try { new SVGAnimatedString(); 'no'; } catch(e) { e.name; }") == "TypeError");
+
+    // A view held on its own keeps its detached element, including its JS
+    // wrapper, alive through a collection and continues to reflect it.
+    assert(S("var v=(function(){var n=document.createElementNS('http://www.w3.org/2000/svg','g'); n.setAttribute('class','kept'); return n.className;})(); e=null; a=null; 'ok'") == "ok");
+    litebird::Heap::default_heap().collect_garbage();
+    assert(S("[v.baseVal,v.animVal,(v.baseVal='after'),v.animVal].join('|')") == "kept|kept|after|after");
 }
 
 int main() {
@@ -34532,6 +35203,10 @@ int main() {
     RUN_TEST(incremental_layout_and_invalidation);
     RUN_TEST(js_async_promises_and_json);
     RUN_TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion);
+    // Phase 196: a Promise subclass makes its own promises — NewPromiseCapability,
+    // SpeciesConstructor, the capability pair, and the promise state reachable
+    // from the object `super(...)` was handed.
+    RUN_TEST(promise_subclass_makes_its_own_promises_and_a_rejection_keeps_its_reject);
     RUN_TEST(css_flex_wrapping_and_grid_layout);
     RUN_TEST(dom_3phase_events_and_form_controls);
     RUN_TEST(image_decoding_and_rendering);
@@ -34540,6 +35215,7 @@ int main() {
     RUN_TEST(html5_canvas_2d_context);
     RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
     RUN_TEST(crypto_get_random_values_and_random_uuid);
+    RUN_TEST(subtle_crypto_digest_sha256);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);
@@ -34721,6 +35397,9 @@ int main() {
     RUN_TEST(worker_event_target_error_and_message_dispatch);
     RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
 
+    // Phase 206: TextDecoder/TextEncoder on a worker's own global.
+    RUN_TEST(text_codecs_are_installed_in_a_worker_scope);
+
     // Phase 66: module-worker graph loading and structured-clone message packets.
     RUN_TEST(structured_clone_message_delivery_and_refusal);
     RUN_TEST(module_worker_static_graph_loading_and_refusal);
@@ -34809,6 +35488,8 @@ int main() {
     // Phase 102: a pattern asks the value for its iterator, as every other
     // loop does, instead of reading an array's elements by is_array().
     RUN_TEST(destructuring_asks_the_value_for_its_iterator);
+    // Phase 210: a bare { next } is not iterable anywhere — the loop included.
+    RUN_TEST(an_object_without_an_iterator_method_is_not_iterable);
     RUN_TEST(a_hole_is_a_place_the_prototype_can_fill);
     // Finding 138: the other thing an array keeps in `array_elements`, its
     // length, is inherited through the chain the same way its indices are.
@@ -34958,6 +35639,7 @@ int main() {
     // Phase 170: root/body canvas color, compositing, scoping and scrolling.
     RUN_TEST(document_canvas_background_is_scoped_and_keeps_computed_styles);
     RUN_TEST(display_contents_generates_no_box_and_splices_its_children);
+    RUN_TEST(pseudo_elements_generate_a_box_that_can_be_hit);
     RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
     RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
 
@@ -34969,6 +35651,7 @@ int main() {
 
     // Phase 168: what a native entry point captures is traced by the collector.
     RUN_TEST(gc_reclaims_a_bound_functions_target);
+    RUN_TEST(a_bound_function_as_a_prototype_keeps_its_target);
     RUN_TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour);
 
     // Phase 169: WebSocket permessage-deflate (RFC 7692) & stateful DEFLATE/INFLATE codec.
@@ -34995,6 +35678,9 @@ int main() {
     // Phase 203: page text is not a source of terminal controls.
     RUN_TEST(terminal_page_text_cannot_inject_controls);
 
+    // Phase 212: shell chrome emits labels as text, not terminal commands.
+    RUN_TEST(shell_frame_labels_cannot_inject_terminal_controls);
+
     // Phase 195: a `calc()` percentage is of the declaration (font size,
     // line-height), not of the viewport.
     RUN_TEST(a_calc_percentage_is_of_the_declaration_not_the_viewport);
@@ -35011,11 +35697,21 @@ int main() {
     // no room; it is stored by the cascade and painted.
     RUN_TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for);
 
-    // Phase 210: a bare { next } is not iterable anywhere — the loop included.
-    RUN_TEST(an_object_without_an_iterator_method_is_not_iterable);
+    // Phase 213: `reduce`/`reduceRight` ask `HasProperty` at each index as the
+    // walk reaches it, so a place a callback creates ahead of itself is seen.
+    RUN_TEST(reduce_asks_for_each_place_as_it_reaches_it);
+
+    // Phase 214: SVG className is a live, retained SVGAnimatedString.
+    RUN_TEST(svg_class_name_is_a_live_animated_string);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";
+    // A new `RUN_TEST` line does not go at the end of the list above. Every
+    // pull request that puts one there changes the same place as every other
+    // that does, and only the first of them can be merged as it is
+    // (AGENTS.md, "Working together", point 2). Put it under the line of a
+    // related suite, further up. This comment stands below the summary so
+    // that it is not in that place itself.
     return 0;
 }
 

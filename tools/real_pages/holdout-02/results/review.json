@@ -1,0 +1,34 @@
+[
+ {
+  "id": "H1",
+  "reviewed_user_action": "not completed (popover unsupported)",
+  "raw_different_pre_pixels": 5895,
+  "raw_different_post_pixels": 6197,
+  "pixels": 480000,
+  "visual_verdict": "fail: popover renders as a plain visible div with the text always painted, and it never shows or hides — the after frame still shows \"Popover content\" under the buttons while Chromium's is hidden"
+ },
+ {
+  "id": "H2",
+  "reviewed_user_action": "not completed (Tab never moves focus; change never fires; worker posts nothing)",
+  "raw_different_pre_pixels": 51940,
+  "raw_different_post_pixels": 52796,
+  "pixels": 480000,
+  "visual_verdict": "fail: same family of visual drift as the before pair (page layout, typography and button chrome differ); functionally the interaction did not occur — value reads \"06\"/\"07\" after typing, activeElement stays the input after Tab"
+ },
+ {
+  "id": "H3",
+  "reviewed_user_action": "completed (gates pass)",
+  "raw_different_pre_pixels": 35170,
+  "raw_different_post_pixels": 42036,
+  "pixels": 480000,
+  "visual_verdict": "gate pass, visual fail: the inserted box is visible with the aqua selection border and the count reaches five in both engines (the inserted colour differs, as expected from randomColor) — but the divs paint as stacked blocks, not inline-block, and the button chrome differs"
+ },
+ {
+  "id": "H4",
+  "reviewed_user_action": "blocked by an engine defect (resolve_url drops the filename for query-only references)",
+  "raw_different_pre_pixels": 43361,
+  "raw_different_post_pixels": 480000,
+  "pixels": 480000,
+  "visual_verdict": "not comparable end states: the after frame is the full-screen 'Navigation Error — Mapped origin resource not found' page (the engine resolved ?firstName=Ayse&food=rice%20pudding against the base and produced /url-params/index.html -> /url-params/?firstName=..., dropping index.html)"
+ }
+]

@@ -771,6 +771,21 @@ public:
                                               std::string_view css_family = {},
                                               bool italic = false) const;
 
+    /// Where a face wants a `text-decoration` line drawn, as a signed offset
+    /// from the baseline in px at `font_size`: negative above it, positive
+    /// below. `'x'` is the x-height (the top of the lowercase glyphs, which is
+    /// where `line-through` runs) and `'H'` is the cap height (the top of a
+    /// capital, where `overline` runs). Both come from the *ink* of the glyphs
+    /// this renderer will actually draw, so the lines land on the pixels the
+    /// text occupies rather than on a fraction of the line box, and a face
+    /// with taller capitals gets its overline higher.
+    ///
+    /// Falls back to `0.5 * ascent` and `ascent` when there is no outline to
+    /// measure: the shapes CSS's own initial `underline-position` uses.
+    std::pair<float, float> decoration_lines(float font_size, int font_weight = 400,
+                                             std::string_view css_family = {},
+                                             bool italic = false);
+
     /// Horizontal advance of one codepoint at `font_size` px (exact size, not
     /// rounded to a whole pixel size). Sums to `measure_text` for a string of
     /// one codepoint; for longer ones `measure_text` adds the kerning between

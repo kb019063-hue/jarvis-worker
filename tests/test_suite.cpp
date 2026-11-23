@@ -2802,6 +2802,7 @@ TEST(the_font_shorthand_resets_font_kerning) {
     std::fflush(stdout);
 }
 
+
 TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for) {
     using namespace litebird;
 

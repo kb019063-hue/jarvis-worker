@@ -403,6 +403,8 @@ def main() -> int:
              '127.0.0.1', root_ca[0], 'IP address mismatch', None, None),
             ('DNS-only certificate on IP URL', identities['dns'][0], identities['dns'][1],
              '127.0.0.1', root_ca[0], 'IP address mismatch', None, None),
+            ('IP-only certificate on DNS URL', identities['ip'][0], identities['ip'][1],
+             'localhost', root_ca[0], 'hostname mismatch', None, None),
             ('untrusted DNS', identities['dns'][0], identities['dns'][1], 'localhost',
              identities['wrong'][0], 'unable to get local issuer certificate', None, None),
             ('untrusted IP', identities['ip'][0], identities['ip'][1], '127.0.0.1',

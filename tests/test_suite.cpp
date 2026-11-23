@@ -31066,6 +31066,62 @@ TEST(gc_reclaims_a_bound_functions_target) {
     heap.collect_garbage();
 }
 
+TEST(a_bound_function_as_a_prototype_keeps_its_target)
+{
+    using namespace litebird;
+
+    // The other side of `gc_reclaims_a_bound_functions_target`. That suite says
+    // a target nothing refers to is freed; this one says a target that only the
+    // *prototype* of a live object refers to is not. `count_value` counts a
+    // payload's captures and bound target, so a payload one handle holds is not
+    // a root, and the mark pass is the only thing that keeps those alive. It
+    // marked neither, so a bound function reached only as an object's prototype
+    // lost the bound `this` after a collection: its target's payload was found
+    // owned and freed while the live function went on reading it. `prototypes.dat`
+    // recorded the answer for a year ("collect: a function that is reachable only
+    // as a prototype stays alive, with what it closed over") and answered
+    // `undefined`; finding 212.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    auto text = [&](const std::string& source) { return js.eval(source).to_string(); };
+    js.eval(R"JS(
+        function churn() {
+            var junk = [];
+            for (var i = 0; i < 400; i++) junk.push({ i: i, s: 'x' + i });
+            return junk.length;
+        }
+        // Every escape of the target is the prototype link: `bound` is the only
+        // thing that refers to the function, and the function the only thing
+        // that refers to `this`'s object.
+        var bound = (function () {
+            var target = { v: 'kept' };
+            return Object.create(function () { return this.v; }.bind(target));
+        })();
+    )JS");
+    // A plain function as a prototype was already right: nothing but its own
+    // cell has to be kept alive.
+    js.eval(R"JS(
+        var plain = (function () {
+            var secret = 'S';
+            function Hidden() { return secret; }
+            return Object.create(Hidden);
+        })();
+    )JS");
+    assert(text("gc(); churn(); gc(); churn();"
+                "String(Object.getPrototypeOf(bound)())") == "kept");
+    assert(text("typeof Object.getPrototypeOf(plain) + ' ' + String(Object.getPrototypeOf(plain)())")
+           == "function S");
+    // The bound arguments and the entry point's other captures travel the same
+    // way: `instanceof` still asks the target, and `new` still constructs it.
+    assert(text("gc(); churn();"
+                "(function () { function T(x) { this.x = x; } return Object.create(T.bind(null, 7)); })()"
+                " && 'built'") == "built");
+    assert(text("gc(); churn();"
+                "(function () { var t = { v: 'again' };"
+                "  return String(Object.getPrototypeOf(Object.create(function () { return this.v; }"
+                "  .bind(t)))()); })()") == "again");
+}
+
 TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour) {
     using namespace litebird;
 
@@ -35023,6 +35079,7 @@ int main() {
 
     // Phase 168: what a native entry point captures is traced by the collector.
     RUN_TEST(gc_reclaims_a_bound_functions_target);
+    RUN_TEST(a_bound_function_as_a_prototype_keeps_its_target);
     RUN_TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour);
 
     // Phase 169: WebSocket permessage-deflate (RFC 7692) & stateful DEFLATE/INFLATE codec.

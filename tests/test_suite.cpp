@@ -17893,9 +17893,9 @@ TEST(html5_date_time_inputs_validation_and_stepping) {
            "1969-12||2024-02-29|||2026-W53|2026-03-04T05:06|2026-03-06|true|12:30:00.5|2026-W01|TypeError,InvalidStateError,InvalidStateError,TypeError,InvalidStateError");
 }
 
-// =============================================================================
+// ======================================================================
 // Phase 36: Usable Real-World Browser & Security (Finding 44) Test Suites
-// =============================================================================
+// ======================================================================
 
 TEST(deflate_zlib_and_gzip_roundtrip_and_bomb_limits) {
     using namespace litebird;
@@ -20455,10 +20455,10 @@ static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
     assert(c_img && c_img->width == 40 && c_img->height == 40);
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 40: Worker MIME/event policy and lifecycle safety; Phase 66 extends
 // module execution and structured-clone delivery below.
-// ============================================================================
+// =====================================================================
 
 TEST(worker_mime_policy_enforces_javascript_content_types) {
     using namespace litebird;
@@ -21298,10 +21298,10 @@ TEST(js_strict_async_generator_identifier_context_and_line_terminators) {
     }
 }
 
-// =========================================================================
+// ==================================================================
 // Phase 42: Nested <iframe> Browsing Contexts, Origin/Sandbox Isolation,
 //           Cross-Realm DOM Wrappers, XHTML Execution, & Subdocument Layout
-// =========================================================================
+// ==================================================================
 
 TEST(iframe_browsing_context_hierarchy_and_navigation) {
     using namespace litebird;
@@ -22699,9 +22699,9 @@ TEST(js_a_page_with_compiled_custom_elements_is_collected) {
     }
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 50: CSS Color 4/5 color spaces, gamut mapping, color-mix(), relative colors
-// ============================================================================
+// =====================================================================
 
 static void test_css_color4_spaces_gamut_and_serialization() {
     using namespace litebird;
@@ -22918,9 +22918,9 @@ static void test_css_color45_style_resolver_dom_and_svg_integration() {
     assert(Color::from_argb(svg_img->get_pixel(15, 5)) == Color(255, 128, 128, 255));
 }
 
-// ============================================================================
+// =====================================================================
 // Warning 5: a DOMException is made in the Realm of the object it is about
-// ============================================================================
+// =====================================================================
 //
 // Web IDL creates an exception in the current realm of the function that
 // throws, and for a platform object that realm is the object's relevant realm.
@@ -23036,9 +23036,9 @@ TEST(dom_exceptions_belong_to_the_realm_of_the_object_they_are_about) {
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 47: WHATWG Encoding Standard, HTML <meta> prescan, XML EncName & CJK
-// ============================================================================
+// =====================================================================
 
 TEST(whatwg_text_encoding_labels_single_byte_and_multibyte_decoders) {
     using namespace litebird;
@@ -23547,9 +23547,9 @@ TEST(select_selectedcontent_cloning_and_edge_cases) {
     assert(deep_sc && deep_sc->text_content() == "DeepPick");
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 55: RegExp Unicode 17.0 properties, v/d flags, ES2025 modifiers & Symbol.*
-// ============================================================================
+// =====================================================================
 
 TEST(regexp_unicode17_tables_and_parse_time_validation) {
     using namespace litebird;
@@ -23712,9 +23712,9 @@ TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols) {
     assert(js.eval("phase55_ok").is_truthy());
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 60: Unicode 17.0 String normalize(), case mapping & CLDR 48 collation
-// ============================================================================
+// =====================================================================
 
 TEST(string_unicode17_normalization_tables_and_api) {
     using namespace litebird;
@@ -23891,9 +23891,9 @@ TEST(string_cldr48_uca_collation_and_ecma402_validation) {
     assert(js.eval("coll_ok && err_ok").is_truthy());
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 59: Temporal dead zone for derived constructor `this` and let/const/class
-// ============================================================================
+// =====================================================================
 
 TEST(js_derived_this_temporal_dead_zone) {
     using namespace litebird;
@@ -24082,9 +24082,9 @@ TEST(js_direct_eval_runs_in_the_callers_scope) {
            "0,1,2 c function 1 eval");
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 80: direct-eval syntax, variable environments and function-expression names
-// ============================================================================
+// =====================================================================
 
 TEST(js_direct_eval_follows_syntax_and_variable_environment_rules) {
     using namespace litebird;
@@ -33198,6 +33198,130 @@ TEST(fetch_request_loopback_http_worker_and_abort) {
     assert(hit_count->load() == 3);
 }
 
+// Phase 183: read the public ANSI stream as cells, independently of the
+// renderer's internal grid. Each test below uses a fresh renderer.
+static std::string terminal_plain_text(const std::string& ansi) {
+    std::string result;
+    for (size_t i = 0; i < ansi.size();) {
+        if (ansi[i] == '\033') {
+            assert(i + 1 < ansi.size() && ansi[i + 1] == '[');
+            const size_t end = ansi.find('m', i + 2);
+            assert(end != std::string::npos);
+            i = end + 1;
+        } else {
+            result.push_back(ansi[i++]);
+        }
+    }
+    return result;
+}
+
+static size_t terminal_token_count(const std::string& ansi, const std::string& token) {
+    size_t count = 0;
+    for (size_t pos = 0; (pos = ansi.find(token, pos)) != std::string::npos; pos += token.size()) ++count;
+    return count;
+}
+
+TEST(terminal_outline_keeps_real_edges_and_clips) {
+    using namespace litebird;
+    auto border = [](Rect rect) {
+        DrawBorderCommand cmd;
+        cmd.rect = rect;
+        cmd.width = EdgeSizes(1);
+        cmd.edge_colors = EdgeColors(Color::red(), Color(0, 255, 0), Color::blue(), Color(255, 255, 0));
+        return cmd;
+    };
+    DisplayList partial;
+    partial.add(DrawCanvasCommand{Color::white()});
+    partial.add(border(Rect(-10, -20, 40, 60)));
+    TerminalRenderer renderer(5, 4, 10, 20);
+    const auto ansi = renderer.to_ansi_string(partial);
+    assert(terminal_plain_text(ansi) == "  |  \n--+  \n     \n     \n");
+    assert(terminal_token_count(ansi, "\033[38;2;0;255;0m") == 1);
+    assert(terminal_token_count(ansi, "\033[38;2;0;0;255m") == 3);
+
+    // A clip through the middle of a large border must not invent edges at
+    // the clip boundary, but visible portions of the real top/bottom remain.
+    DisplayList clipped;
+    clipped.add(DrawCanvasCommand{Color::white()});
+    clipped.add(PushClipCommand{Rect(10, 0, 20, 60)});
+    clipped.add(border(Rect(0, 0, 40, 60)));
+    clipped.add(PopClipCommand{});
+    TerminalRenderer clipped_renderer(5, 4, 10, 20);
+    assert(terminal_plain_text(clipped_renderer.to_ansi_string(clipped)) ==
+           " --  \n     \n --  \n     \n");
+
+    DisplayList offscreen;
+    offscreen.add(DrawCanvasCommand{Color::white()});
+    offscreen.add(border(Rect(0, 0, 50, 20)));
+    TerminalRenderer scrolled(5, 4, 10, 20);
+    scrolled.set_scroll(0, 80);
+    assert(terminal_plain_text(scrolled.to_ansi_string(offscreen)) ==
+           "     \n     \n     \n     \n");
+    TerminalRenderer focus(5, 4, 10, 20);
+    focus.draw_focus_ring(Rect(-10, -20, 40, 60));
+    DisplayList canvas;
+    canvas.add(DrawCanvasCommand{Color::white()});
+    assert(terminal_token_count(focus.to_ansi_string(canvas), "\033[38;2;245;158;11m") == 4);
+
+    // Empty viewports must not index the nonexistent first cell.
+    TerminalRenderer empty(0, 0, 10, 20);
+    empty.draw_focus_ring(Rect(0, 0, 20, 20));
+    assert(empty.to_ansi_string(offscreen) == "\033[0m");
+}
+
+TEST(terminal_text_and_shadows_stay_inside_nested_clips) {
+    using namespace litebird;
+    auto text = [](float x, float y, const std::string& value, Color color = Color::black()) {
+        DrawTextCommand cmd;
+        cmd.position = Point(x, y);
+        cmd.text = value;
+        cmd.color = color;
+        return cmd;
+    };
+    DisplayList commands;
+    commands.add(DrawCanvasCommand{Color::white()});
+    commands.add(PushClipCommand{Rect(0, 0, 40, 80)});
+    commands.add(PushClipCommand{Rect(20, 0, 20, 80)});
+    commands.add(text(0, 20, "ABCDE"));
+    commands.add(PopClipCommand{});
+    commands.add(text(0, 40, "12345"));
+    commands.add(PopClipCommand{});
+    commands.add(text(0, 0, "GHOST", Color::transparent()));
+    TerminalRenderer terminal(5, 4, 10, 20);
+    assert(terminal_plain_text(terminal.to_ansi_string(commands)) ==
+           "     \n  CD \n1234 \n     \n");
+
+    DisplayList partial_text;
+    partial_text.add(DrawCanvasCommand{Color::white()});
+    partial_text.add(text(0, 20, "ABCDE", Color(255, 0, 0, 128)));
+    TerminalRenderer scrolled(5, 4, 10, 20);
+    scrolled.set_scroll(15, 20);
+    const auto ansi = scrolled.to_ansi_string(partial_text);
+    assert(terminal_plain_text(ansi) == "CDE  \n     \n     \n     \n");
+    assert(terminal_token_count(ansi, "\033[38;2;255;127;127m") == 3);
+
+    DrawShadowCommand shadow;
+    shadow.rect = Rect(10, 20, 20, 20);
+    shadow.x_offset = 10;
+    shadow.color = Color(255, 0, 0, 128);
+    DisplayList shadows;
+    shadows.add(DrawCanvasCommand{Color::white()});
+    shadows.add(PushClipCommand{Rect(30, 20, 10, 20)});
+    shadows.add(shadow);
+    shadows.add(PopClipCommand{});
+    TerminalRenderer shadow_renderer(5, 4, 10, 20);
+    assert(terminal_token_count(shadow_renderer.to_ansi_string(shadows), "\033[48;2;255;179;179m") == 1);
+
+    // Exercise the actual HTML -> layout -> display-list path as well as the
+    // direct commands. Its 20px overflow clip permits only two terminal cells.
+    auto doc = HtmlParser::parse(R"html(<!doctype html><body style="margin:0"><div style="width:20px;height:20px;overflow:hidden"><div style="width:60px;height:20px">ABCDE</div></div></body>)html");
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 50, 80);
+    TerminalRenderer page(5, 4, 10, 20);
+    assert(terminal_plain_text(page.to_ansi_string(DisplayList::build(root))) ==
+           "AB   \n     \n     \n     \n");
+}
+
 TEST(direct_eval_inherits_context_and_checks_declarations_before_mutating) {
     TestPage page;
 
@@ -34231,6 +34355,10 @@ int main() {
     // Phase 180: CSS Box Alignment (`align-self`, `align-content`, `justify-items`/`self`,
     // `place-*`, and column flex `justify-content`).
     RUN_TEST(flex_and_grid_box_alignment_properties);
+
+    // Phase 183: terminal clips, scrolling, shadows, text, borders and focus.
+    RUN_TEST(terminal_outline_keeps_real_edges_and_clips);
+    RUN_TEST(terminal_text_and_shadows_stay_inside_nested_clips);
 
     // Phase 195: a `calc()` percentage is of the declaration (font size,
     // line-height), not of the viewport.

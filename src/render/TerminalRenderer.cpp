@@ -493,11 +493,6 @@ void TerminalRenderer::render(const DisplayList& display_list, std::ostream& os)
             os << "\033[38;2;" << (int)cell.fg.r << ";" << (int)cell.fg.g << ";" << (int)cell.fg.b << "m";
             os << "\033[48;2;" << (int)cell.bg.r << ";" << (int)cell.bg.g << ";" << (int)cell.bg.b << "m";
             if (cell.bold) os << "\033[1m";
-            // A wide character advances the terminal by two columns on its
-            // own, so the cell after it is not written: writing the space it
-            // holds would add a third column and push the rest of the row to
-            // the right. Its colour is the wide character's, which is why it
-            // is painted at all (Phase 241).
             os << (cell.cluster.empty() ? std::string(" ") : cell.cluster);
             if (cell.bold) os << "\033[22m";
         }
@@ -520,11 +515,6 @@ std::string TerminalRenderer::to_ansi_string(const DisplayList& display_list) {
             ss << "\033[38;2;" << (int)cell.fg.r << ";" << (int)cell.fg.g << ";" << (int)cell.fg.b << "m";
             ss << "\033[48;2;" << (int)cell.bg.r << ";" << (int)cell.bg.g << ";" << (int)cell.bg.b << "m";
             if (cell.bold) ss << "\033[1m";
-            // A wide character advances the terminal by two columns on its
-            // own, so the cell after it is not written: writing the space it
-            // holds would add a third column and push the rest of the row to
-            // the right. Its colour is the wide character's, which is why it
-            // is painted at all (Phase 241).
             ss << (cell.cluster.empty() ? std::string(" ") : cell.cluster);
             if (cell.bold) ss << "\033[22m";
         }

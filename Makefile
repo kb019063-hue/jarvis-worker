@@ -178,6 +178,11 @@ all: $(TARGET)
 verify-relative-navigation: $(BUILD_DIR)/relative_navigation_fixture
 	@python3 tools/conformance/verify_relative_navigation.py --binary $(BUILD_DIR)/relative_navigation_fixture
 
+## Compare path-bearing URL references against Node's URL implementation.
+.PHONY: verify-path-resolution
+verify-path-resolution: $(BUILD_DIR)/relative_navigation_fixture
+	@python3 tools/conformance/verify_path_resolution.py --binary $(BUILD_DIR)/relative_navigation_fixture
+
 $(BUILD_DIR)/relative_navigation_fixture: $(OBJS) tools/conformance/relative_navigation_fixture.cpp
 	$(CXX) $(CXXFLAGS) $(OBJS) tools/conformance/relative_navigation_fixture.cpp -o $@
 
@@ -304,9 +309,9 @@ bench-collections: $(TARGET)
 SHAPING_PYTHON ?= python3
 SHAPING_FONT ?=
 .PHONY: shaping-oracle shaping-oracle-self-test
-$(BUILD_DIR)/shaping-probe: tools/shaping/probe.cpp src/render/FontRenderer.cpp include/litebird/render/FontRenderer.hpp
+$(BUILD_DIR)/shaping-probe: tools/shaping/probe.cpp src/render/FontRenderer.cpp src/js/StringUnicodeTables.cpp include/litebird/render/FontRenderer.hpp include/litebird/js/StringUnicodeTables.hpp
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) tools/shaping/probe.cpp src/render/FontRenderer.cpp -o $@
+	$(CXX) $(CXXFLAGS) tools/shaping/probe.cpp src/render/FontRenderer.cpp src/js/StringUnicodeTables.cpp -o $@
 
 shaping-oracle: $(BUILD_DIR)/shaping-probe
 	$(SHAPING_PYTHON) tools/shaping/compare.py --probe $(BUILD_DIR)/shaping-probe --font "$(SHAPING_FONT)" --output $(BUILD_DIR)/shaping-report.json

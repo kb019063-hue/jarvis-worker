@@ -3,6 +3,9 @@
 // and the handful of interfaces that hang off the window and nothing else.
 
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/js/ImageBitmap.hpp"
+#include "litebird/render/Canvas2D.hpp"
+#include "litebird/render/ImageDecoder.hpp"
 #include "litebird/dom/Selector.hpp"
 #include "litebird/html/HtmlParser.hpp"
 #include "litebird/net/DataUrl.hpp"
@@ -1581,13 +1584,6 @@ void setup_request(Iface& I) {
 
 const char kBase64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
-struct ImageBitmapState : JsExotic {
-    int width = 0;
-    int height = 0;
-    std::vector<uint32_t> pixels;
-    bool closed = false;
-};
-
 void setup_window(Iface& I) {
     for (const char* name : {"window", "self", "frames", "globalThis"}) {
         I.getter(name, [](Realm& r) {
@@ -1887,6 +1883,7 @@ void setup_window(Iface& I) {
             state->width = bm->width;
             state->height = bm->height;
             state->pixels = bm->pixels;
+            state->origin_clean = bm->origin_clean;
         } else if (std::shared_ptr<Element> el = element_of(src); el && el->tag_name() == "canvas") {
             const std::string* w_attr = el->attribute("width");
             const std::string* h_attr = el->attribute("height");
@@ -1897,7 +1894,27 @@ void setup_window(Iface& I) {
             }
             state->width = w;
             state->height = h;
+            // The bitmap is a copy of the canvas' bitmap, not a blank one: a
+            // canvas has its bitmap from the moment it exists, and copying it
+            // is what the standard says this does.
             state->pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), 0);
+            if (auto ctx = el->canvas_context()) {
+                if (const std::shared_ptr<ImageData> image = ctx->image_data()) {
+                    if (image->is_valid()) {
+                        const int cw = std::min(w, image->width);
+                        const int ch = std::min(h, image->height);
+                        for (int y = 0; y < ch; ++y) {
+                            for (int x = 0; x < cw; ++x) {
+                                state->pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                                              static_cast<std::size_t>(x)] = image->get_pixel(x, y);
+                            }
+                        }
+                    }
+                }
+                // A bitmap of a tainted canvas is itself tainted; of a clean
+                // one, clean.
+                state->origin_clean = ctx->origin_clean();
+            }
         } else if (src.is_object_like() && src.get_property("width").type == JsType::Number &&
                    src.get_property("height").type == JsType::Number && src.get_property("data").is_object_like()) {
             int w = static_cast<int>(to_double(src.get_property("width")));

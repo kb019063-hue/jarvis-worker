@@ -65,4 +65,14 @@ public:
     static std::shared_ptr<ImageData> create_test_pattern(int w, int h, Color color);
 };
 
+class Element;
+
+/// The decoded pixels of an `<img>`, fetched under the document's own request
+/// context (CORS when the element has a `crossorigin` attribute) and cached
+/// per document. Null when the element has no source, the fetch is refused, or
+/// the bytes do not decode. Declared here because `drawImage` needs the same
+/// pixels the layout pass paints, and it must not decode them a second time
+/// under different rules.
+std::shared_ptr<ImageData> load_image_for_element(const Element& element);
+
 } // namespace litebird

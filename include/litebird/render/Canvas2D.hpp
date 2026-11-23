@@ -168,6 +168,16 @@ public:
     // Image Drawing
     void draw_image(const std::shared_ptr<ImageData>& img, float dx, float dy, float dw = 0.0f, float dh = 0.0f);
 
+    /// True while every pixel the bitmap holds came from a source that is not
+    /// known to be `CORS-same-origin` (HTML §4.12.5.1, "origin-clean flag").
+    /// A canvas starts origin-clean; `drawImage` of a source that is not
+    /// origin-clean sets it, and nothing clears it again except resizing the
+    /// canvas, which replaces the bitmap. `toDataURL()`/`toBlob()` must refuse
+    /// a bitmap that is not origin-clean, because what they hand back is the
+    /// pixels themselves.
+    bool origin_clean() const { return m_origin_clean; }
+    void set_origin_clean(bool clean) { m_origin_clean = clean; }
+
     // JS Bridge
     JsValue to_js_value(std::shared_ptr<CanvasRenderingContext2D> self = nullptr);
 
@@ -181,6 +191,11 @@ private:
     int m_nominal_width{300};
     int m_nominal_height{150};
     std::shared_ptr<ImageData> m_image;
+
+    /// HTML §4.12.5.1's origin-clean flag. Starts true; `drawImage` of a
+    /// source that is not known to be CORS-same-origin clears it. Resizing
+    /// the canvas replaces the bitmap, and a new bitmap is a clean one.
+    bool m_origin_clean{true};
 
     TransformMatrix2D m_ctm{TransformMatrix2D::identity()};
     std::vector<uint8_t> m_clip_mask; // Empty = unclipped; otherwise m_width * m_height coverage (0..255)

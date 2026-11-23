@@ -2485,6 +2485,19 @@ std::string ResourceLoader::resolve_url(std::string_view base_url, std::string_v
         }
     }
 
+    // For a hierarchical URL, resolve the reference as a URL rather than
+    // splitting the serialized base on slashes. A slash in its query is not
+    // a path separator, `//host` replaces the authority, and dot segments
+    // cannot walk above that authority. The parser also preserves empty path
+    // segments and trailing slashes. An invalid reference must not fall back
+    // to an apparently valid URL for a different host.
+    Url base, resolved;
+    if (Url::parse(base_url, nullptr, base) && !base.opaque_path) {
+        if (Url::parse(relative_url, &base, resolved)) return resolved.href();
+        return {};
+    }
+
+    // Legacy relative filesystem-style paths do not parse as absolute URLs.
     if (relative_url.front() == '/') {
         size_t scheme_len = 0;
         if (base_url.rfind("http://", 0) == 0) scheme_len = 7;

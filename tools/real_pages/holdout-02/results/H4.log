@@ -1,0 +1,5 @@
+stage: open
+READ	1
+HIT	a[href='?firstName=Ayse&food=rice%20pudding'] @ 200.574,166 -> code#
+BLOCKED	no clickable target: a[href='?firstName=Ayse&food=rice%20pudding']
+END

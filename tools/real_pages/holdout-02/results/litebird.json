@@ -1,0 +1,112 @@
+[
+  {
+    "id": "H1",
+    "pass": false,
+    "trace": [
+      {
+        "check": "initially hidden",
+        "want": "true",
+        "got": "false"
+      },
+      {
+        "hit": "[popovertargetaction=show] @ 65.0195,18 -> button#"
+      },
+      {
+        "check": "shown with text",
+        "want": "true",
+        "got": "true"
+      },
+      {
+        "hit": "[popovertargetaction=hide] @ 61.6719,38 -> button#"
+      },
+      {
+        "check": "hidden again",
+        "want": "true",
+        "got": "false"
+      }
+    ],
+    "exit": 0,
+    "seconds": 0.06,
+    "failures": [
+      "initially hidden: 'false', wanted 'true'",
+      "hidden again: 'false', wanted 'true'"
+    ]
+  },
+  {
+    "id": "H2",
+    "pass": false,
+    "trace": [
+      {
+        "check": "initial result",
+        "want": "Result: 0",
+        "got": "Result: 0"
+      },
+      {
+        "hit": "#number1 @ 196,275 -> input#number1"
+      },
+      {
+        "hit": "#number2 @ 196,301 -> input#number2"
+      },
+      {
+        "check": "result after change events",
+        "want": "Result: 42",
+        "got": "Result: 0"
+      }
+    ],
+    "exit": 0,
+    "seconds": 0.07,
+    "failures": [
+      "result after change events: 'Result: 0', wanted 'Result: 42'"
+    ]
+  },
+  {
+    "id": "H3",
+    "pass": true,
+    "trace": [
+      {
+        "check": "four boxes at load",
+        "want": "4",
+        "got": "4"
+      },
+      {
+        "hit": "section div @ 39,87 -> div#"
+      },
+      {
+        "check": "first box selected (aqua border)",
+        "want": "true",
+        "got": "true"
+      },
+      {
+        "hit": ".after @ 52.4141,334 -> button#"
+      },
+      {
+        "check": "five boxes after the insert",
+        "want": "5",
+        "got": "5"
+      }
+    ],
+    "exit": 0,
+    "seconds": 0.05,
+    "failures": []
+  },
+  {
+    "id": "H4",
+    "pass": false,
+    "trace": [
+      {
+        "check": "only the header row at load",
+        "want": "1",
+        "got": "1"
+      },
+      {
+        "hit": "a[href='?firstName=Ayse&food=rice%20pudding'] @ 200.574,166 -> code#"
+      }
+    ],
+    "exit": 0,
+    "seconds": 0.06,
+    "failures": [
+      "no clickable target: a[href='?firstName=Ayse&food=rice%20pudding']",
+      "incomplete trace"
+    ]
+  }
+]

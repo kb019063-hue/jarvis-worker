@@ -493,14 +493,20 @@ void setup_element(Iface& I) {
     };
     E.method("getBoundingClientRect", 0, [ensure_element_layout](Realm& r, Element& el, Args) {
         if (!ensure_element_layout(r, el)) return make_rect(r, 0, 0, 0, 0);
+        if (!el.has_layout_box()) return make_rect(r, 0, 0, 0, 0);
         const Rect box = el.bounding_box();
-        return make_rect(r, box.x, box.y, box.width, box.height);
+        float sx = 0.0f, sy = 0.0f;
+        if (auto doc = document_of(r, el)) { sx = doc->scroll_x(); sy = doc->scroll_y(); }
+        return make_rect(r, box.x - sx, box.y - sy, box.width, box.height);
     });
     E.method("getClientRects", 0, [ensure_element_layout](Realm& r, Element& el, Args) {
         if (!ensure_element_layout(r, el)) return JsValue::make_array();
+        if (!el.has_layout_box()) return JsValue::make_array();
         const Rect box = el.bounding_box();
+        float sx = 0.0f, sy = 0.0f;
+        if (auto doc = document_of(r, el)) { sx = doc->scroll_x(); sy = doc->scroll_y(); }
         std::vector<JsValue> rects;
-        if (box.width > 0 || box.height > 0) rects.push_back(make_rect(r, box.x, box.y, box.width, box.height));
+        if (box.width > 0 || box.height > 0) rects.push_back(make_rect(r, box.x - sx, box.y - sy, box.width, box.height));
         return JsValue::make_array(rects);
     });
     E.getter("clientWidth", [ensure_element_layout](Realm& r, Element& el) {

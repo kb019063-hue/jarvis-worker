@@ -73,7 +73,7 @@ new TextDecoder('windows-1251').decode([EF BB BF 41]) -> п»їA
 ```
 
 ```bash
-make test      # All 344 engine test suites passed successfully!
+make test      # All 346 engine test suites passed successfully!
 ```
 
 Sixteen assertions were added to `textdecoder_reaches_script_in_pieces`. With

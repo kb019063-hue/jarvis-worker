@@ -32,7 +32,7 @@ error clears them before it throws. The split-BOM special case is gone because
 
 ## 3. Evidence
 
-`make test` **344/344**. Sixteen assertions in
+`make test` **346/346**. Sixteen assertions in
 `textdecoder_reaches_script_in_pieces`, with the answers taken from Node
 v22.22.3: `FE FF` is U+FFFE under UTF-16LE and `FF FE` is U+FFFE under
 UTF-16BE, `FF FE 41 00` is two replacements and `A\0` under UTF-8, the

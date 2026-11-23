@@ -6904,6 +6904,49 @@ TEST(subtle_crypto_digest_sha1_sha384_sha512) {
     assert(interp.eval("h512 === 'ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f'").is_truthy());
 }
 
+TEST(subtle_crypto_hmac_sign_and_verify) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // RFC 4231 Test Case 2: key = "Jefe", data = "what do ya want for nothing?"
+    // HMAC-SHA-256 = 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843
+    interp.eval(R"(
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var enc = new TextEncoder();
+        var key = null;
+        var sig = null;
+        var sigHex = null;
+        var okTrue = null;
+        var okFalse = null;
+        crypto.subtle.importKey('raw', enc.encode('Jefe'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify'])
+            .then(function(k) {
+                key = k;
+                return crypto.subtle.sign('HMAC', k, enc.encode('what do ya want for nothing?'));
+            })
+            .then(function(s) {
+                sig = s;
+                sigHex = toHex(s);
+                return crypto.subtle.verify('HMAC', key, sig, enc.encode('what do ya want for nothing?'));
+            })
+            .then(function(v) {
+                okTrue = v;
+                return crypto.subtle.verify('HMAC', key, sig, enc.encode('tampered'));
+            })
+            .then(function(v) {
+                okFalse = v;
+            });
+    )");
+    assert(interp.eval("key instanceof CryptoKey && key.type === 'secret' && key.extractable === false").is_truthy());
+    assert(interp.eval("sigHex === '5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843'").is_truthy());
+    assert(interp.eval("okTrue === true && okFalse === false").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -32302,6 +32345,116 @@ TEST(pseudo_elements_generate_a_box_that_can_be_hit) {
     }
 }
 
+TEST(a_modal_dialog_gets_the_ua_box_and_centring_it_is_due) {
+    using namespace litebird;
+    // The oracle is holdout-01 H3's open frame: Chromium draws the open dialog
+    // as a 3px solid black border with 16px (1em) of padding, white inside, at
+    // x=253..546 y=245..355 of an 800x600 page, over a backdrop that takes the
+    // page's white to (229,229,229) -- black at 10%. Every number below is one
+    // of those, measured off tools/real_pages/holdout-01/results-rerun06/
+    // oracle-frames/H3-ref-open.png.
+    const std::string html =
+        "<!doctype html><html><head><style>body{margin:0;background:#fff}</style></head><body>"
+        "<dialog id='d'><p style='margin:0'>Favorite animal: </p></dialog>"
+        "<dialog id='shown'><p style='margin:0'>sh</p></dialog>"
+        "</body></html>";
+    auto doc = HtmlParser::parse(html);
+    auto dlg = doc->get_element_by_id("d");
+    assert(dlg);
+    auto shown = doc->get_element_by_id("shown");
+    assert(shown);
+
+    // 1. Closed: no box at all. This was already true and must stay true.
+    {
+        StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 800.0f, 600.0f);
+        auto root = LayoutTree::build(doc, resolver, 800, 600);
+        assert(root);
+        std::function<const LayoutBox*(const LayoutBox*, const Node*)> find =
+            [&](const LayoutBox* b, const Node* target) -> const LayoutBox* {
+            if (!b) return nullptr;
+            if (b->node.get() == target) return b;
+            for (const auto& c : b->children) {
+                if (auto hit = find(c.get(), target)) return hit;
+            }
+            return nullptr;
+        };
+        assert(find(root.get(), dlg.get()) == nullptr);
+    }
+
+    // 2. Open, not modal (`show()`): the UA box, still in the flow. The spec's
+    //    `position: absolute` puts it out of flow, so the button above it keeps
+    //    its place and the dialog is a box of its own.
+    {
+        dlg->set_attribute("open", "");
+        StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 800.0f, 600.0f);
+        auto root = LayoutTree::build(doc, resolver, 800, 600);
+        assert(root);
+        std::function<const LayoutBox*(const LayoutBox*, const Node*)> find =
+            [&](const LayoutBox* b, const Node* target) -> const LayoutBox* {
+            if (!b) return nullptr;
+            if (b->node.get() == target) return b;
+            for (const auto& c : b->children) {
+                if (auto hit = find(c.get(), target)) return hit;
+            }
+            return nullptr;
+        };
+        const LayoutBox* box = find(root.get(), dlg.get());
+        assert(box);
+        // border: solid, with no width stated, is `medium` = 3px (CSS 2.1
+        // 8.5.1). Before this phase the `solid` token was consumed and nothing
+        // was emitted, so the border computed to 0px.
+        assert(box->dimensions.border.left == 3.0f);
+        assert(box->dimensions.border.top == 3.0f);
+        // padding: 1em against a 16px inherited font.
+        assert(box->dimensions.padding.left == 16.0f);
+        assert(box->dimensions.padding.top == 16.0f);
+        // width: fit-content -- narrower than the 800px viewport, and not the
+        // 800 - 32 - 6 that an auto width would have taken.
+        assert(box->style->width_fit_content);
+        assert(box->dimensions.content.width < 800.0f - 32.0f - 6.0f);
+        // A background that makes it a surface rather than text on the page.
+        assert(box->style->background_color.r == 255);
+        assert(box->style->background_color.g == 255);
+        assert(box->style->background_color.b == 255);
+    }
+
+    // 3. Modal: `padding: 1em` and `border: solid` still apply, the dialog is
+    //    `position: fixed` and centred on both axes, and the top layer's
+    //    backdrop is what the painter draws behind it.
+    {
+        doc->set_modal_dialog(shown);
+        shown->set_attribute("open", "");
+        shown->set_modal_dialog(true);
+        StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 800.0f, 600.0f);
+        auto root = LayoutTree::build(doc, resolver, 800, 600);
+        assert(root);
+        std::function<const LayoutBox*(const LayoutBox*, const Node*)> find =
+            [&](const LayoutBox* b, const Node* target) -> const LayoutBox* {
+            if (!b) return nullptr;
+            if (b->node.get() == target) return b;
+            for (const auto& c : b->children) {
+                if (auto hit = find(c.get(), target)) return hit;
+            }
+            return nullptr;
+        };
+        const LayoutBox* box = find(root.get(), shown.get());
+        assert(box);
+        assert(box->style->position == Position::Fixed);
+        // `inset: 0`-equivalent vertical insets plus `margin: auto` centres it:
+        // the top gap equals the bottom gap, within a pixel.
+        const Rect border_box = box->dimensions.border_box();
+        const float top_gap = border_box.y;
+        const float bottom_gap = 600.0f - (border_box.y + border_box.height);
+        assert(top_gap > 0.0f);
+        assert(top_gap > 100.0f && top_gap < 500.0f);
+        assert(top_gap - bottom_gap < 1.5f && bottom_gap - top_gap < 1.5f);
+        // Horizontally centred too.
+        const float left_gap = border_box.x;
+        const float right_gap = 800.0f - (border_box.x + border_box.width);
+        assert(left_gap - right_gap < 1.5f && right_gap - left_gap < 1.5f);
+    }
+}
+
 TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
     using namespace litebird;
     BitmapRenderer child(40, 30);
@@ -35649,6 +35802,7 @@ int main() {
     RUN_TEST(crypto_get_random_values_and_random_uuid);
     RUN_TEST(subtle_crypto_digest_sha256);
     RUN_TEST(subtle_crypto_digest_sha1_sha384_sha512);
+    RUN_TEST(subtle_crypto_hmac_sign_and_verify);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);
@@ -36074,6 +36228,7 @@ int main() {
     RUN_TEST(document_canvas_background_is_scoped_and_keeps_computed_styles);
     RUN_TEST(display_contents_generates_no_box_and_splices_its_children);
     RUN_TEST(pseudo_elements_generate_a_box_that_can_be_hit);
+    RUN_TEST(a_modal_dialog_gets_the_ua_box_and_centring_it_is_due);
     RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
     RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
     RUN_TEST(browser_shell_geometry_is_viewport_relative);

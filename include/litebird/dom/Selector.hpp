@@ -53,6 +53,11 @@ enum class Pseudo {
     Not, Is, Has, Empty, Root, Scope,
     Checked, Disabled, Enabled, Required, Optional, ReadOnly, ReadWrite, PlaceholderShown,
     Valid, Invalid, Link, Hover, Active, Focus, FocusWithin, Target, Defined,
+    /// `:modal`: this element is the dialog the document has made modal
+    /// (`showModal()`), HTML's "blocked by a modal dialog". Not a static
+    /// property of the tree, so it is answered from the document at match time
+    /// the way `:target` and `:focus` are.
+    Modal,
     Never                       // a pseudo-element, or a state nothing here is ever in
 };
 

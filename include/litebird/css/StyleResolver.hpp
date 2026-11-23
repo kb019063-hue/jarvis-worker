@@ -242,6 +242,16 @@ struct ComputedStyle {
     bool dark_color_scheme{false};
     float width{-1.0f};  // -1 indicates auto
     float height{-1.0f}; // -1 indicates auto
+    /// `width: fit-content`. CSS Sizing 3 calls this the content-based size
+    /// clamped by the available space, which is a width the box cannot know
+    /// until its content is measured -- so `width` itself stays auto and the
+    /// two layout entry points shrink the box to `min_content_width`. Added for
+    /// the dialog UA rule (Phase 223), which is where the standard uses it.
+    bool width_fit_content{false};
+    /// `height: fit-content`: the box is as tall as its content, and does not
+    /// stretch between `top` and `bottom`. The two together are how the HTML
+    /// rendering standard centres a modal dialog.
+    bool height_fit_content{false};
     EdgeSizes margin{0.0f};
     EdgeSizes padding{0.0f};
 

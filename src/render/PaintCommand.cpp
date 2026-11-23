@@ -432,6 +432,14 @@ void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLay
     const bool has_t = box_has_transform(*box);
     if (has_t) list.add(PushTransformCommand{s.transform_matrix});
 
+    // The box's own border and background are not inside its overflow clip:
+    // CSS 2.1 11.1.1 clips a box's *contents*, not its chrome. This used to
+    // push the clip first and at `padding_box()`, which painted a box's border
+    // and background away entirely -- invisible while the only boxes that
+    // clipped were small, and fatal once the dialog UA rule gave the top-layer
+    // dialog `overflow: auto`. The clip now starts at the padding box edge (the
+    // inner edge of the border) and wraps everything after the chrome.
+    emit_chrome(box, list);
     const bool clips = box_clips(*box);
     if (clips) {
         PushClipCommand clip;
@@ -439,8 +447,6 @@ void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLay
         clip.border_radius = s.border_radius;
         list.add(clip);
     }
-
-    emit_chrome(box, list);
     emit_contents(box, list);
     // A box that established an inline formatting context painted all of its
     // children into its lines; there is nothing left to walk.

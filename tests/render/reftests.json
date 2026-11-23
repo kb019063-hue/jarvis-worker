@@ -2509,6 +2509,67 @@
       ],
       "known_failure": "AVIF has no AV1 intra-frame picture decoder yet: AvifContainer parses the 4x4 container, but ImageDecoder::decode returns nullptr so <img src='data:image/avif;...'> paints no pixels (#ffffff instead of #000000).",
       "note": "Uses the libheif-verified solid #000000 4x4 AVIF from tests/media/avif/corpus.json; Y=0, Cb=128, Cr=128 maps to exact (0,0,0) across every YCbCr-to-RGB matrix."
+    },
+    {
+      "name": "canvas_2d_script_paints_canvas_green",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}canvas{display:block}</style></head><body><canvas id=\"c\" width=\"40\" height=\"40\"></canvas><script>var ctx = document.getElementById('c').getContext('2d'); ctx.fillStyle = '#00ff00'; ctx.fillRect(0, 0, 40, 40);</script></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 40,
+          "colour": "#00ff00",
+          "describe": "2D canvas filled by inline script composites #00ff00 over [0..40, 0..40]"
+        },
+        {
+          "kind": "pixel",
+          "x": 41,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "right of the 40px canvas remains white"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 41,
+          "colour": "#ffffff",
+          "describe": "below the 40px canvas remains white"
+        }
+      ],
+      "note": "Paired positive control for webgl_clear_paints_canvas_green: proves inline <script> executes during --render-png and composites <canvas> pixels."
+    },
+    {
+      "name": "webgl_clear_paints_canvas_green",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}canvas{display:block}</style></head><body><canvas id=\"c\" width=\"40\" height=\"40\"></canvas><script>var gl = document.getElementById('c').getContext('webgl'); if (gl) { gl.clearColor(0, 1, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT); }</script></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 40,
+          "colour": "#00ff00",
+          "describe": "WebGL clearColor(0,1,0,1) + clear(COLOR_BUFFER_BIT) composites #00ff00 over [0..40, 0..40]"
+        },
+        {
+          "kind": "pixel",
+          "x": 41,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "right of the 40px canvas remains white"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 41,
+          "colour": "#ffffff",
+          "describe": "below the 40px canvas remains white"
+        }
+      ],
+      "known_failure": "HTMLCanvasElement.getContext('webgl') returns null (no WebGL implementation yet), so the 40x40 canvas remains #ffffff instead of #00ff00.",
+      "note": "Khronos WebGL 1.0 §§2.2, 5.14.3: paired with canvas_2d_script_paints_canvas_green so the only variable under test is WebGL context creation and compositing."
     }
   ]
 }

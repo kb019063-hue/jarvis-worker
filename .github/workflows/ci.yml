@@ -128,6 +128,11 @@ jobs:
           make verify-media
           make verify-avif
           make fuzz-media
+      - name: Audio/Video, WebCodecs, and WebGL spec conformance oracle
+        # Runs 25 spec-backed cases across HTMLMediaElement (<audio>/<video>),
+        # MediaSource/Web Audio, WebCodecs, and WebGL 1/2 with KNOWN/FIXED gating
+        # and 5 built-in negative controls.
+        run: make verify-media-webgl-codecs
       - name: CSS Color 4/5 rational oracle, WPT vectors, and fuzzing
         # Cross-checks all 15 color spaces against an independent exact-rational
         # Python W3C CSS Color 4 oracle, verifies §13.2 OKLCH gamut mapping,

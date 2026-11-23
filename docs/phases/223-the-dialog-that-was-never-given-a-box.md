@@ -87,10 +87,10 @@ this engine draws no scrollbars, so the clip buys nothing.
 | backdrop behind | `229,229,229` | `229,229,229` | `229,229,229` |
 | width | 784px | 114.4px | 265px |
 
-Suites on this tree: **363/363** engine suites (362 before, plus the new one),
-render reftests 35/41 with the same 6 recorded failures, DOM 678/678, JS
-1148/1158, tree construction 1973/1973, everyday probes 90/90 and 68/68,
-`make bench-floats` 0.134s for 10k rows.
+Suites on this tree (after merging a main that had moved to Phase 224):
+**373/373** engine suites, render reftests **55/64** and **35/41** with their
+recorded failures unchanged and no `FIXED`, DOM 678/678, JS 1149/1158, everyday
+probes 90/90 and 68/68, `make bench-floats` 0.134s for 10k rows.
 
 ## What this does not claim
 

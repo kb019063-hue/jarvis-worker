@@ -108,9 +108,9 @@ padding, fit-content narrower than an auto width, white background), and modal
 (fixed, both margins auto, top and bottom gaps equal to within 1.5px, left and
 right gaps likewise).
 
-Run on the tree this landed on: 363/363 engine suites, render reftests 35/41
-with the same 6 recorded failures, DOM 678/678, JS 1148/1158, tree construction
-1973/1973, everyday probes 90/90 and 68/68.
+Run on the tree this landed on: 373/373 engine suites, render reftests 55/64 and
+35/41 with their recorded failures unchanged (no `FIXED`), DOM 678/678, JS
+1149/1158, everyday probes 90/90 and 68/68.
 
 ## The general lesson
 

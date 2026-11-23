@@ -39,7 +39,7 @@ comparison over the helper itself.
 
 ```
 make test
-# 373 engine suites pass; cross-origin suite: 114 checks, 0 failures.
+# 375 engine suites pass; cross-origin suite: 114 checks, 0 failures.
 make verify-path-resolution
 # Path reference oracle: 132/132 agree with Node URL
 make verify-relative-navigation

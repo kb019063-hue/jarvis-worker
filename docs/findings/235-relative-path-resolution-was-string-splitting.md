@@ -20,7 +20,7 @@ legacy filesystem-style base handling remain unchanged.
 
 `make verify-path-resolution` matches Node's URL on 132/132 path-bearing
 cases, compared with 22/132 using the prior resolver; the earlier pathless
-matrix still matches 50/50. `make test` passes 373 engine suites, including
+matrix still matches 50/50. `make test` passes 375 engine suites, including
 two real shell clicks against separately mapped origins. See
 `docs/phases/231-path-references-use-the-url-parser.md` for reproducible
 commands and the cases covered.

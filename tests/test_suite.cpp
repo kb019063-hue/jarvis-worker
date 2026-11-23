@@ -32104,6 +32104,101 @@ TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
     assert(count == 2); // two cells of the four-by-three terminal
 }
 
+TEST(browser_shell_activates_a_checkbox_and_toggles_it_from_the_keyboard) {
+    using namespace litebird;
+    // A click on a checkbox is an *activation behavior*, and a listener reads
+    // the state the click caused - a todo list's handler asks `this.checked`.
+    // The mouse path already did this: `click_at` ends in `send_mouse`, and
+    // that ends in `Element::click()`, which is the door to the dispatch that
+    // runs `before_click`/`after_click` in DomFormBindings.cpp. The keyboard
+    // did not. `handle_key(" ")` on a focused checkbox fell through to
+    // `type_text`, which has nothing to type into, and answered true: it said
+    // "handled" and changed nothing. A control a keyboard user cannot work is
+    // not a control, and HTML's activation behavior is reached from Space and
+    // Enter as much as from a point.
+    //
+    // The first two cases below are therefore the mouse path held still: they
+    // pass before this phase and must keep passing after it, because the
+    // keyboard is only fixed once it goes through the same door.
+    //
+    // The page is loaded through the shell, because the shell makes its own
+    // document and that document is the one with the realm the events run in.
+    auto page = [](const char* body) {
+        return std::string("data:text/html,") + body;
+    };
+    const char* shell_page =
+        "<!DOCTYPE html><body style='margin:0'>"
+        "<input id='c' type='checkbox' style='display:block;width:20px;height:20px'>"
+        "<script>window.log = [];"
+        "c.addEventListener('click', function () { log.push('click:' + c.checked); });"
+        "c.addEventListener('change', function () { log.push('change:' + c.checked); });"
+        "</script></body>";
+
+    // ---- the mouse path, held still ---------------------------------------
+    {
+        BrowserShell shell(400.0f, 300.0f, 40, 12);
+        assert(shell.navigate_to(page(shell_page)));
+        JsInterpreter& js = *shell.js_engine();
+        auto text = [&](const char* s) { return js.eval(s).to_string(); };
+        assert(text("String(c.checked)") == "false");
+        assert(shell.click_at(10.0f, 10.0f));            // inside the checkbox
+        assert(text("String(c.checked)") == "true");
+        // The listener saw the state the click caused, not the one before it.
+        assert(text("log.join(',')") == "click:true,change:true");
+        assert(shell.click_at(10.0f, 10.0f));            // and it toggles back
+        assert(text("String(c.checked)") == "false");
+    }
+
+    // ---- a canceling listener takes the change back ------------------------
+    {
+        BrowserShell shell(400.0f, 300.0f, 40, 12);
+        assert(shell.navigate_to(page(shell_page)));
+        JsInterpreter& js = *shell.js_engine();
+        auto text = [&](const char* s) { return js.eval(s).to_string(); };
+        js.eval("c.onclick = function (e) { log.push('onclick:' + c.checked); e.preventDefault(); };");
+        shell.click_at(10.0f, 10.0f);
+        assert(text("log.join(',')") == "click:true,onclick:true");
+        assert(text("String(c.checked)") == "false");
+    }
+
+    // ---- the keyboard ------------------------------------------------------
+    {
+        BrowserShell shell(400.0f, 300.0f, 40, 12);
+        assert(shell.navigate_to(page(shell_page)));
+        JsInterpreter& js = *shell.js_engine();
+        auto text = [&](const char* s) { return js.eval(s).to_string(); };
+        js.eval("c.focus()");
+        assert(js.eval("document.activeElement === c").is_truthy());
+        assert(shell.handle_key(" "));
+        assert(text("String(c.checked)") == "true");
+        assert(text("log.join(',')") == "click:true,change:true");
+        assert(shell.handle_key(" "));
+        assert(text("String(c.checked)") == "false");
+    }
+
+    // ---- a radio is set, never toggled off, and its group is exclusive -----
+    {
+        BrowserShell shell(400.0f, 300.0f, 40, 12);
+        assert(shell.navigate_to(page(
+            "<!DOCTYPE html><body><script>window.log = [];"
+            "var r1 = document.createElement('input'); r1.type = 'radio'; r1.name = 'g';"
+            "var r2 = document.createElement('input'); r2.type = 'radio'; r2.name = 'g';"
+            "document.body.appendChild(r1); document.body.appendChild(r2);"
+            "r1.checked = true;"
+            "r2.addEventListener('change', function () { log.push('r2-change'); });"
+            "</script></body>")));
+        JsInterpreter& js = *shell.js_engine();
+        auto text = [&](const char* s) { return js.eval(s).to_string(); };
+        js.eval("r2.click()");
+        assert(text("String(r1.checked) + ',' + String(r2.checked)") == "false,true");
+        // Already checked: the activation sets it rather than toggling it, so
+        // nothing changed and no `change` is fired.
+        js.eval("log.length = 0; r2.click();");
+        assert(text("String(r2.checked)") == "true");
+        assert(text("log.join(',')") == "");
+    }
+}
+
 TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling) {
     using namespace litebird;
     BrowserShell shell(200, 150, 20, 10);
@@ -35585,6 +35680,9 @@ int main() {
     RUN_TEST(pseudo_elements_generate_a_box_that_can_be_hit);
     RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
     RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
+    // Phase 220: a click on a checkbox is an activation behavior, and Space
+    // on a focused one toggles it.
+    RUN_TEST(browser_shell_activates_a_checkbox_and_toggles_it_from_the_keyboard);
 
     // Phase 157: ArrayBuffer.prototype.transfer(), transferToFixedLength(), detached, and resize().
     RUN_TEST(arraybuffer_transfer_detach_and_resize);

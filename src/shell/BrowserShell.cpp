@@ -2,6 +2,7 @@
 #include "litebird/common/StackLimit.hpp"
 #include "litebird/css/CssParser.hpp"
 #include "litebird/css/DocumentStyles.hpp"
+#include "litebird/dom/FormState.hpp"
 #include "litebird/dom/Event.hpp"
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/html/HtmlParser.hpp"
@@ -480,6 +481,19 @@ std::shared_ptr<Element> BrowserShell::element_at(float x, float y) const {
     return hit_element;
 }
 
+/// A click on `target` through the DOM's own path, so the element's activation
+/// behavior runs. `Element::click()` is the door to the dispatch that runs it
+/// (`before_click`/`after_click` in DomFormBindings.cpp); dispatching an event
+/// here instead would skip it and a checkbox would never change state.
+bool BrowserShell::dispatch_click(const std::shared_ptr<Element>& target) {
+    if (!target) return false;
+    if (auto* realm = dom::realm_if_any(*target)) {
+        JsIntrinsics::set_current(realm->intrinsics);
+        JsScriptScope scope;
+    }
+    return target->click();
+}
+
 bool BrowserShell::click_at(float x, float y) {
     auto el = element_at(x, y);
     if (!el) return false;
@@ -668,6 +682,20 @@ bool BrowserShell::handle_key(const std::string& key) {
     auto target = m_document->focused_element();
     if (target) {
         const std::string tag = target->tag_name();
+        // A focused checkbox or radio toggles on Space and on Enter: HTML's
+        // activation behavior, reached from the keyboard instead of a point.
+        // Before this, `handle_key(" ")` on a focused checkbox answered `true`
+        // (it fell through to `type_text`, which has nothing to type into) and
+        // changed nothing at all.
+        if (tag == "input" &&
+            (forms::input_type(*target) == "checkbox" || forms::input_type(*target) == "radio") &&
+            (key == " " || key == "Enter" || key == "Spacebar")) {
+            dispatch_click(target);
+            EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(50));
+            rebuild_layout();
+            m_dirty = true;
+            return true;
+        }
         if (dom::plain_editable(*target)) {
             if (key == "SelectAll") return dom::select_edit_text(*target, true);
             if (key == "Backspace") {

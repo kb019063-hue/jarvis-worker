@@ -309,9 +309,9 @@ bench-collections: $(TARGET)
 SHAPING_PYTHON ?= python3
 SHAPING_FONT ?=
 .PHONY: shaping-oracle shaping-oracle-self-test
-$(BUILD_DIR)/shaping-probe: tools/shaping/probe.cpp src/render/FontRenderer.cpp include/litebird/render/FontRenderer.hpp
+$(BUILD_DIR)/shaping-probe: tools/shaping/probe.cpp src/render/FontRenderer.cpp src/js/StringUnicodeTables.cpp include/litebird/render/FontRenderer.hpp include/litebird/js/StringUnicodeTables.hpp
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) tools/shaping/probe.cpp src/render/FontRenderer.cpp -o $@
+	$(CXX) $(CXXFLAGS) tools/shaping/probe.cpp src/render/FontRenderer.cpp src/js/StringUnicodeTables.cpp -o $@
 
 shaping-oracle: $(BUILD_DIR)/shaping-probe
 	$(SHAPING_PYTHON) tools/shaping/compare.py --probe $(BUILD_DIR)/shaping-probe --font "$(SHAPING_FONT)" --output $(BUILD_DIR)/shaping-report.json

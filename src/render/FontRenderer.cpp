@@ -1,4 +1,5 @@
 #include "litebird/render/FontRenderer.hpp"
+#include "litebird/js/StringUnicodeTables.hpp"
 
 #include <algorithm>
 #include <map>
@@ -2764,10 +2765,34 @@ bool TrueTypeFont::apply_gpos_lookup_at(uint16_t lookup_index,
 }
 
 std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
-    const std::vector<uint32_t>& codepoints, bool kerning, bool visual_rtl) const {
+    const std::vector<uint32_t>& input, bool kerning, bool visual_rtl) const {
     std::vector<PositionedGlyph> result;
-    if (!m_loaded || codepoints.empty()) return result;
+    if (!m_loaded || input.empty()) return result;
 
+    // Font-aware adjacent canonical composition for Latin runs. This is not
+    // NFC: do not reorder marks, decompose input, cross script boundaries, or
+    // replace a supported base+mark with a composite missing from this face.
+    // Use the existing Unicode 17 canonical pairs (composition exclusions are
+    // already absent), not a font-specific correction or compatibility map.
+    const auto input_scripts = itemize_codepoint_scripts(input);
+    std::vector<uint32_t> codepoints;
+    codepoints.reserve(input.size());
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        bool composed = false;
+        if (i && input_scripts[i] == kTagLatn && input_scripts[i - 1] == kTagLatn &&
+            classify_codepoint_script(codepoints.back()) == kTagLatn) {
+            using namespace unicode::tables;
+            const uint64_t key = (uint64_t(codepoints.back()) << 21) | input[i];
+            const auto* pair = std::lower_bound(kComposePairs, kComposePairs + kComposePairsCount,
+                key, [](const ComposePair& p, uint64_t k) { return p.key < k; });
+            if (pair != kComposePairs + kComposePairsCount && pair->key == key &&
+                glyph_index(pair->composite) != 0) {
+                codepoints.back() = pair->composite;
+                composed = true;
+            }
+        }
+        if (!composed) codepoints.push_back(input[i]);
+    }
     const std::vector<uint32_t> scripts = itemize_codepoint_scripts(codepoints);
     uint16_t next_lig_id = 1;
 

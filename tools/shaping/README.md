@@ -255,3 +255,15 @@ verification of its outline parser, nor of Litebird's rasterizer. Arbitrary
 font/case resource usage is not benchmarked. General normalization and a
 font-independent engine repair remain separate work; no font-specific 10-unit
 adjustment belongs in the engine.
+
+### Phase 234: adjacent Latin composition repair
+
+The earlier Latin measurements remain the before state. The engine now consults
+Unicode's canonical composition pairs for adjacent Latin input and substitutes
+only a composite present in the current face. On the recorded DejaVu Sans hash,
+the five-case Latin reducer now gives **5/5 exact raw matches**, and all 15 ink
+case/size pairs match with zero changed pixels. The 14-case corpus gives 9 raw
+matches, 4 raw differences and 1 unsupported; all 13 supported cases match
+absolute placement. Full normalization is not claimed. Coverage guards,
+synthetic tests, reproducible commands and remaining limitations are in
+`docs/phases/234-latin-font-aware-composition.md`.

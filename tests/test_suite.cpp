@@ -3468,10 +3468,12 @@ TEST(gpos_pair_and_single_positioning_without_kern_table) {
         if (mono.load_file(mono_path) && mono.has_gpos()) {
             assert(!mono.has_kerning());
             assert(mono.has_mark_positioning());
-            const auto mono_shaped = mono.shape_glyphs({'a', 0x0301, 'b'}, true);
+            // x/X + acute have no canonical composite: keep testing the mark
+            // path after font-aware composition makes a/A + acute one glyph.
+            const auto mono_shaped = mono.shape_glyphs({'x', 0x0301, 'b'}, true);
             assert(mono_shaped.size() == 3);
             assert(mono_shaped[1].x_advance == 0);
-            const auto mono_A = mono.shape_glyphs({'A', 0x0301}, true);
+            const auto mono_A = mono.shape_glyphs({'X', 0x0301}, true);
             assert(mono_A.size() == 2);
             assert(mono_A[1].y_offset > mono_shaped[1].y_offset);
         }
@@ -3605,14 +3607,14 @@ TEST(gpos_mark_to_base_and_mark_to_mark_anchoring) {
     assert(top_stacked < top_high - 15);
     fr.clear_webfonts();
 
-    // Check real host sans-serif (`DejaVuSans.ttf` if loaded) raises marks on 'A' and stacks 'circ' above 'acute'.
+    // Use uncomposable x/X so this host-font probe still exercises mark attachment.
     const std::string sans_path = fr.face_path("sans-serif");
     if (!sans_path.empty()) {
         TrueTypeFont sans;
         if (sans.load_file(sans_path) && sans.has_mark_positioning()) {
-            const auto a_mark = sans.shape_glyphs({'a', 0x0301}, true);
-            const auto A_mark = sans.shape_glyphs({'A', 0x0301}, true);
-            const auto a_stack = sans.shape_glyphs({'a', 0x0301, 0x0302}, true);
+            const auto a_mark = sans.shape_glyphs({'x', 0x0301}, true);
+            const auto A_mark = sans.shape_glyphs({'X', 0x0301}, true);
+            const auto a_stack = sans.shape_glyphs({'x', 0x0301, 0x0302}, true);
             assert(a_mark.size() == 2 && A_mark.size() == 2 && a_stack.size() == 3);
             assert(A_mark[1].y_offset > a_mark[1].y_offset);
             assert(a_stack[2].y_offset > a_stack[1].y_offset);
@@ -4191,7 +4193,8 @@ TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions) {
     const auto alt_a = f.shape_glyphs({'A'}, true);
     assert(alt_a.size() == 1 && alt_a[0].glyph == 11 && alt_a[0].x_advance == 750);
 
-    // 5. Optional host DejaVuSans.ttf real `ccmp` ChainContext: 'i' + acute converts to dotless i!
+    // 5. Optional host DejaVuSans.ttf real `ccmp`: i + vertical-line-above
+    // has no canonical composite and must still substitute dotless i.
     FontRenderer& fr = FontRenderer::instance();
     const std::string dejavu_path = fr.face_path("DejaVu Sans");
     if (!dejavu_path.empty()) {
@@ -4200,7 +4203,7 @@ TEST(gsub_contextual_chaining_multiple_and_alternate_substitutions) {
             const uint16_t gid_i = dejavu.glyph_index('i');
             const uint16_t gid_dotless = dejavu.glyph_index(0x0131);
             if (gid_i != 0 && gid_dotless != 0) {
-                const auto d_ia = dejavu.shape_glyphs({'i', 0x0301}, true);
+                const auto d_ia = dejavu.shape_glyphs({'i', 0x030D}, true);
                 const auto d_ip = dejavu.shape_glyphs({'i', 'a'}, true);
                 assert(d_ia.size() == 2 && d_ip.size() == 2);
                 assert(d_ia[0].glyph == gid_dotless);

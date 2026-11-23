@@ -129,3 +129,13 @@ canonical combining class would fix it (the failing input is already in
 that order). A Hebrew-specific preprocessing/attachment investigation is
 needed before changing the engine. These five probes preserve the evidence
 for that separate fix; no engine behavior or expected answer was changed.
+
+### Phase 200 follow-up
+
+The fixed-position Hebrew ordering repair makes all five reduced cases agree
+in absolute placement (the earlier measurements above are the before state).
+Add `--permutations` to `hebrew_diagnostic.py` for the 12-case permutation
+corpus: qamats/shin-dot/dagesh in all orders after SHIN and BET. On the same
+font, placement improves from 4/12 to 12/12; raw sequence differences remain
+visible and may still make the command exit 1. Full details and remaining
+limits: `docs/phases/200-hebrew-mark-order.md`.

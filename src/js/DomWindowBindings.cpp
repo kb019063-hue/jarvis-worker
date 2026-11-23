@@ -2744,6 +2744,14 @@ void setup_image_bitmap(Iface& I) {
     });
 }
 
+JsValue make_image_bitmap(Realm& realm, int width, int height, std::vector<uint32_t> pixels) {
+    auto state = std::make_shared<ImageBitmapState>();
+    state->width = width;
+    state->height = height;
+    state->pixels = std::move(pixels);
+    return realm.make("ImageBitmap", state);
+}
+
 void register_window_interfaces() {
     register_interface({"Window", "EventTarget", setup_window, nullptr, 0, nullptr});
     register_interface({"ImageBitmap", nullptr, setup_image_bitmap, nullptr, 0, nullptr});

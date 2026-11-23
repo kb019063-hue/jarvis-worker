@@ -1,0 +1,5 @@
+stage: opening snapshot
+stage: painting initial frame
+stage: driving task
+BENCH-PAUSE 729 533 60 60
+BENCH pass: game state 0 -> 1; start hidden and pause hit-test required

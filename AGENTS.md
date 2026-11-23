@@ -212,7 +212,10 @@ within the hour, and the first lot was started again four times.
      23 November the first lot took a newcomer four times in 28 minutes
      (the runners were busy, and each run had finished two jobs of
      twelve when it was stopped), and #257, green since 05:20, landed at
-     06:16 for it, 48 minutes into the watch;
+     06:16 for it, 48 minutes into the watch. The last lot of a watch has
+     no next one, so it takes a newcomer while more than half of its run
+     is still to come: #267 joined one that was nine minutes old, and
+     landed nineteen minutes later;
    - nothing is pushed to anybody's branch, and no pull request is closed;
    - **the end** comes when nothing is finished and nothing is in test,
      not only at the hour the status comment names: a watch that goes on

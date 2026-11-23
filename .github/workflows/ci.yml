@@ -57,6 +57,8 @@ jobs:
         # `make test` checks the same in-process; this checks the path the
         # shell takes. Seconds.
         run: make gc-oracle
+      - name: Shaping comparator negative controls (not engine conformance)
+        run: make shaping-oracle-self-test
       - name: Bidi conformance (Unicode's own two suites)
         run: make bidi-conformance
       - name: Sized-float index keeps placements fast

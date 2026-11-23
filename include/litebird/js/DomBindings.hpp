@@ -877,6 +877,7 @@ std::shared_ptr<Element> make_option(Realm& realm, Args args);
 
 // --- DomWindowBindings.cpp --------------------------------------------------------
 void register_window_interfaces();
+JsValue make_image_bitmap(Realm& realm, int width, int height, std::vector<uint32_t> pixels);
 /// The address of the window's document.
 std::string document_url(Realm& realm);
 /// Follows a link or `location.href = ...` to `target`. Only a move within

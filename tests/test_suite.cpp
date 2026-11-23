@@ -21781,6 +21781,92 @@ TEST(module_worker_static_graph_loading_and_refusal) {
 // escaped keyword/contextual-keyword rules, and Unicode line terminators.
 // ---------------------------------------------------------------------------
 
+TEST(import_calls_parse_and_reject_without_a_loader) {
+    using namespace litebird;
+
+    // Phase 224, finding 228. `import('./x.mjs')` was a syntax error because
+    // the parser treats `import` as a module-only keyword everywhere: the
+    // statement path fails on it, and it is not a token `parse_primary` knew,
+    // so `await import('./specLinks.mjs')` in APG's `shared/js/app.js` threw
+    // before anything ran.
+    //
+    // ECMA-262 §13.3.12 (Import Calls) makes it an expression, and the checks
+    // below separate the three things that are easy to run together: what the
+    // grammar allows, what happens to the argument, and what the missing
+    // module loader answers. Every expected answer is Node v22.22.3's.
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    js.eval(R"JS(
+        var failures = [];
+        function report(what, got, want) {
+            var a = JSON.stringify(got), b = JSON.stringify(want);
+            if (a !== b) failures.push(what + ': got ' + a + ', expected ' + b);
+        }
+        function thrown(source) {
+            try { eval(source); return 'no throw'; } catch (e) { return e.name; }
+        }
+        // The evaluation of one call, with the rejection counted rather than
+        // left to print: an unhandled rejection is not a failure here.
+        function settled(value) {
+            var seen = '(pending)';
+            value.then(function () { seen = 'resolved'; }, function (e) { seen = 'rejected:' + e.name; });
+            return seen;
+        }
+
+        // ---- the grammar ------------------------------------------------
+        report('an import call is an expression', typeof import('./a.mjs'), 'object');
+        report('it is a promise', import('./a.mjs') instanceof Promise, true);
+        report('its tag is Promise', Object.prototype.toString.call(import('./a.mjs')), '[object Promise]');
+        report('the parenthesis may come after a line break', thrown('import\n("./b.mjs")'), 'no throw');
+        report('import.meta is still refused', thrown('import.meta'), 'SyntaxError');
+        report('a module import is still refused', thrown("import x from './a.js';"), 'SyntaxError');
+        report('a bare import is not a value', thrown('typeof import;'), 'SyntaxError');
+        report('no argument is a syntax error', thrown('import();'), 'SyntaxError');
+        report('a spread argument is a syntax error', thrown('import(...[]);'), 'SyntaxError');
+        // §13.3 keeps an Import Call out of NewExpression, and the rule does
+        // not follow the parentheses: `new (import(x))` parses and is a
+        // TypeError at run time, where `new import(x)` does not parse at all.
+        report('new import(x) does not parse', thrown("new import('./c.mjs');"), 'SyntaxError');
+        report('new (import(x)) is a run-time TypeError', thrown("new (import('./c.mjs'));"), 'TypeError');
+
+        // ---- the argument -----------------------------------------------
+        // §13.3.12 step 6 runs ToString at the call site, before the promise
+        // exists, so its error is thrown and not rejected.
+        var coerced = 0;
+        import({ toString: function () { coerced++; return './d.mjs'; } }).catch(function () {});
+        report('the specifier is coerced once', coerced, 1);
+        report('a symbol specifier throws at the call and does not reject',
+               thrown('import(Symbol("x")).catch(function () {});'), 'TypeError');
+        report('no argument is still a rejection, not a throw', typeof import(undefined), 'object');
+        report('null is a specifier too', typeof import(null), 'object');
+
+        // ---- the loader this engine does not have -------------------------
+        // The call answers a promise that is already rejected with a
+        // TypeError, and the message names what was asked for. The handler
+        // runs as a microtask, so what it sees is read in the second block
+        // below, after the queue has been drained.
+        var reason = null;
+        import('./e.mjs').catch(function (e) { reason = e; });
+        report('a call nobody handles starts as a pending promise',
+               settled(import('./f.mjs')), '(pending)');
+        failures;
+    )JS");
+    EventLoop::default_loop().run_microtasks();
+    js.eval(R"JS(
+        report('a rejection arrives as a TypeError', reason instanceof TypeError, true);
+        report('and names the specifier', reason !== null && reason.message.indexOf("'./e.mjs'") >= 0, true);
+        report('and says the engine loads no modules',
+               reason !== null && reason.message.indexOf('does not load modules') >= 0, true);
+        failures;
+    )JS");
+    const std::string failed = js.eval("failures.join('\\n')").to_string();
+    if (!failed.empty()) std::cerr << failed << "\n";
+    assert(failed.empty());
+}
 TEST(js_unicode_identifier_tables_and_lexer_escapes) {
     using namespace litebird;
     // 1. Unicode 17.0 ID_Start / ID_Continue checks (ECMA-262 §12.7.1).
@@ -35670,6 +35756,8 @@ int main() {
     // Phase 66: module-worker graph loading and structured-clone message packets.
     RUN_TEST(structured_clone_message_delivery_and_refusal);
     RUN_TEST(module_worker_static_graph_loading_and_refusal);
+    // Phase 224: `import()` parses as an Import Call and rejects, since no modules load.
+    RUN_TEST(import_calls_parse_and_reject_without_a_loader);
 
     // Phase 42: Nested <iframe> browsing contexts, sandbox/origin isolation, and XHTML execution.
     RUN_TEST(iframe_browsing_context_hierarchy_and_navigation);

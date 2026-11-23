@@ -31,7 +31,9 @@ denominators
     the total fails here.
 
 suite count
-    ``214 suites`` is ``grep -c '^    RUN_TEST(' tests/test_suite.cpp``, on
+    ``214 suites`` is ``grep -c '^    RUN_TEST(' tests/test_suite.cpp`` and,
+    since 23 November 2026, the suites that are files of their own with it:
+    ``grep -c '^TEST(' tests/suites/*.cpp`` (tests/suites/README.md). On
     the lines of `README.md` that speak in the present tense: its first 120
     lines, the table and the command list. The phase write-ups quote the count
     they had when they were written, and keep it.
@@ -51,8 +53,8 @@ The ledger and the markers
 --------------------------
 ``docs/metrics.json`` holds what had to be *measured* — a score from running a
 corpus — with the command that produced it and the day it did. What can be
-counted is derived here instead: the suite count from `tests/test_suite.cpp`,
-the corpus totals from the corpus on disk.
+counted is derived here instead: the suite count from `tests/test_suite.cpp`
+and `tests/suites/`, the corpus totals from the corpus on disk.
 
 A document that publishes one of those figures marks it, so that no reader has
 to guess which number is the live one and no agent has to find the eight places
@@ -104,6 +106,7 @@ from run_js_conformance import parse_dat  # noqa: E402
 README = ROOT / "README.md"
 ROADMAP = ROOT / "ROADMAP.md"
 SUITE_SOURCE = ROOT / "tests" / "test_suite.cpp"
+SUITE_DIR = ROOT / "tests" / "suites"
 LEDGER = ROOT / "docs" / "metrics.json"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 MAKEFILE = ROOT / "Makefile"
@@ -133,10 +136,29 @@ SUITE_CLAIM = re.compile(r"(\d[\d,]*)(?:\s*/\s*(\d[\d,]*))?\s+suites\b")
 # between the number and the noun.
 SUITE_CLAIM_ANYWHERE = re.compile(r"(\d[\d,]*)\s+engine(?:\s+test)?\s+suites\b")
 RUN_TEST = re.compile(r"^    RUN_TEST\(", re.MULTILINE)
+# A suite that is a file of its own: `TEST(name)` at the start of a line of a
+# file of tests/suites/. It has no `RUN_TEST` line; the list the suites keep
+# themselves runs it (tests/test_suite.cpp, `ListedSuite`).
+OWN_FILE_SUITE = re.compile(r"^TEST\(\w+\)", re.MULTILINE)
 
 
 def read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def suite_count(source: Path | None = None, directory: Path | None = None) -> int:
+    """The suites `make test` runs.
+
+    Those `main()` has a `RUN_TEST` line for, in tests/test_suite.cpp, and
+    those that are files of their own in tests/suites/. Neither is counted
+    twice: a suite of tests/suites/ cannot have a `RUN_TEST` line, because
+    `main()` is compiled before the file is read.
+    """
+    source = SUITE_SOURCE if source is None else source
+    directory = SUITE_DIR if directory is None else directory
+    listed = len(RUN_TEST.findall(read(source)))
+    own = sum(len(OWN_FILE_SUITE.findall(read(path))) for path in sorted(directory.glob("*.cpp")))
+    return listed + own
 
 
 def corpus_cases(directory: Path) -> int:
@@ -176,7 +198,7 @@ def figures() -> tuple[dict[str, int], set[str]]:
     out: dict[str, int] = {}
     measured: set[str] = set()
 
-    out["unit_suites"] = len(RUN_TEST.findall(read(SUITE_SOURCE)))
+    out["unit_suites"] = suite_count()
     out["js.total"] = corpus_cases(ROOT / "tests" / "js-conformance")
     out["js.pass"] = int(ledger["js_conformance"]["pass"])
     out["dom.total"] = corpus_cases(ROOT / "tests" / "dom-conformance")
@@ -543,7 +565,7 @@ def check_denominators(problems: list[str]) -> list[tuple[Path, int, int]]:
 
 
 def check_suite_count(problems: list[str]) -> int:
-    registered = len(RUN_TEST.findall(read(SUITE_SOURCE)))
+    registered = suite_count()
     lines = visible(read(README)).split("\n")
     reported: set[int] = set()
 
@@ -554,7 +576,7 @@ def check_suite_count(problems: list[str]) -> int:
         if int(digits.replace(",", "")) != registered:
             problems.append(
                 f"README.md:{number}: {text.strip()};"
-                f" tests/test_suite.cpp registers {registered}"
+                f" tests/test_suite.cpp and tests/suites/ hold {registered}"
             )
 
     for number, line in enumerate(lines[:PRESENT_TENSE], start=1):
@@ -652,6 +674,28 @@ def self_test_suite_count() -> int:
     return failures
 
 
+def self_test_own_files() -> int:
+    """A suite that is a file of its own is counted with the listed ones."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as scratch:
+        source = Path(scratch) / "test_suite.cpp"
+        directory = Path(scratch) / "suites"
+        directory.mkdir()
+        source.write_text(
+            "TEST(one) {\n}\nTEST(two) {\n}\nstatic void test_three() {}\n"
+            "int main() {\n    RUN_TEST(one);\n    RUN_TEST(two);\n    RUN_TEST(three);\n"
+            "    // RUN_TEST(not_this);\n}\n", encoding="utf-8")
+        (directory / "218-a.cpp").write_text("// words\nTEST(four) {\n    assert(TEST(1));\n}\n", encoding="utf-8")
+        (directory / "219-b.cpp").write_text("static int helper() { return 1; }\nTEST(five) { helper(); }\n",
+                                             encoding="utf-8")
+        (directory / "README.md").write_text("TEST(not_a_suite) {\n", encoding="utf-8")
+        counted = suite_count(source, directory)
+    if counted != 5:
+        print(f"  FAIL  three listed suites and two files of their own are {counted} suites, not 5")
+        return 1
+    return 0
+
+
 def self_test() -> int:
     failures = 0
     for name, shape, expected in SELF_TEST_CASES:
@@ -679,7 +723,8 @@ def self_test() -> int:
         print("  FAIL  first_number does not read a thousands separator")
         failures += 1
     failures += self_test_suite_count()
-    total = len(SELF_TEST_CASES) + 4 + 1 + 4
+    failures += self_test_own_files()
+    total = len(SELF_TEST_CASES) + 4 + 1 + 4 + 1
     if failures:
         print(f"\ncheck_numbers --self-test: {failures} failure(s)")
         return 1
@@ -739,15 +784,15 @@ def main(argv: list[str]) -> int:
                 f" README.md names {stated:,}"
             )
     if suites:
-        print(f"  FAIL  tests/test_suite.cpp registers {registered} suites")
+        print(f"  FAIL  tests/test_suite.cpp and tests/suites/ hold {registered} suites")
     elif behind:
         # No count of the places: the two checks above read the same lines, and
         # `len(behind)` said ten where README.md has six.
-        print(f"  note  tests/test_suite.cpp registers {registered} suites and README.md says another"
+        print(f"  note  tests/test_suite.cpp and tests/suites/ hold {registered} suites and README.md says another"
               f" number: leave it, the landing session refreshes that count"
               f" (AGENTS.md, \"Working together\")")
     else:
-        print(f"  ok    tests/test_suite.cpp registers {registered} suites, as README.md says")
+        print(f"  ok    tests/test_suite.cpp and tests/suites/ hold {registered} suites, as README.md says")
 
     if marked:
         print(f"  FAIL  {len(marked)} marked claim(s) disagree with the tree or the ledger")

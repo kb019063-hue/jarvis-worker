@@ -106,21 +106,31 @@ within the hour, and the first lot was started again four times.
    count (#91, #150, #146, #170). Now `make check-numbers` notes a count that
    is behind and fails nothing, `make metrics` leaves the count as it is
    written, and the landing session refreshes it at the end of a watch. Add
-   your suite and its `RUN_TEST` line; do not touch the number. If your
-   branch already changed it and now conflicts there, take `main`'s lines.
+   your suite; do not touch the number. If your branch already changed it
+   and now conflicts there, take `main`'s lines.
 
-   **And put the `RUN_TEST` line under that of a related suite, not at the
-   end of `main()`.** Two pull requests that each add a line at the end
-   change the same place, and the second cannot be merged after the first.
-   On 23 November #244, #264, #267 and #273 had each put theirs there:
-   #264 landed, and within the hour the other three were in conflict with
-   it, one sent back out of a lot and two caught by `main`. The four that
-   had put theirs further up, by a suite of the same subject (#257, #263,
-   #268, #272), merged with everything. Where the line stands decides only
-   the order the suites run in. The suite itself goes behind a related one
-   as well, and not in front of `main()`, for the same reason. (Two pull
-   requests that rewrite neighbouring rows of "Open tasks" conflict too,
-   as #244 and #257 did, and nothing avoids that yet.)
+   **And write your suite as a file of its own:
+   `tests/suites/218-a-few-words.cpp`, the phase and what it is about, with
+   one `TEST(name) { … }` in it.** Nothing else: no line in
+   `tests/test_suite.cpp`, no `RUN_TEST`, no `#include`. The suite puts
+   itself into a list, and `make test` runs the files of that directory
+   first, then the old suites (`tests/suites/README.md` has the form and
+   what the file may use; `python3 tools/ci/check_suites.py` says when a
+   file is not in it). Until 23 November every suite was written into the
+   one file, in front of `main()`, with a `RUN_TEST` line at the end of
+   `main()`, and two pull requests that do that change the same two
+   places. In the 90 pull requests before that day their branches merged
+   `main` 285 times; 120 of those merges were in conflict, 44 of them in
+   that file, at the end of `main()` or in front of it or where two suites
+   of one subject had gone to the same place. That morning #244, #264,
+   #267 and #273 had each put a line at the end: #264 landed, and within
+   the hour the other three were in conflict with it, one sent back out of
+   a lot and two caught by `main`. A file that only your pull request has
+   is in conflict with nothing. The suites that are in
+   `tests/test_suite.cpp` stay there, each with its line, and an assertion
+   more for one of them is still written there. (Two pull requests that
+   rewrite neighbouring rows of "Open tasks" conflict too, as #244 and
+   #257 did, and nothing avoids that yet.)
 3. **When your pull request is finished, ask whether a watch is on.**
    Finished is: the checks of "What "done" means" pass, `WIP:` is off the
    title, and CI is green on the head commit (wait for it with
@@ -202,7 +212,10 @@ within the hour, and the first lot was started again four times.
      23 November the first lot took a newcomer four times in 28 minutes
      (the runners were busy, and each run had finished two jobs of
      twelve when it was stopped), and #257, green since 05:20, landed at
-     06:16 for it, 48 minutes into the watch;
+     06:16 for it, 48 minutes into the watch. The last lot of a watch has
+     no next one, so it takes a newcomer while more than half of its run
+     is still to come: #267 joined one that was nine minutes old, and
+     landed nineteen minutes later;
    - nothing is pushed to anybody's branch, and no pull request is closed;
    - **the end** comes when nothing is finished and nothing is in test,
      not only at the hour the status comment names: a watch that goes on
@@ -220,8 +233,9 @@ within the hour, and the first lot was started again four times.
    **Carried.** A finished pull request whose agent is gone, and whose
    conflict needs no judgement (the suite count of `README.md`; a row
    somebody else put where its row is; a `RUN_TEST` line at the end of
-   `main()`, where another's now is: #244's was moved under that of the
-   suite its own is defined after; a number that is on `main` already:
+   `main()`, where another's now is, in a pull request from before suites
+   were files of their own: #244's was moved under that of the suite its
+   own is defined after; a number that is on `main` already:
    #223 was opened as Phase 179 and landed as Phase 191), is resolved in
    the landing session's branch and said in #N. It lands when the watch's
    own pull request is merged, and not before: GitHub shows #N as merged
@@ -299,10 +313,11 @@ without one, and leaves the board and a watch out of the claims.
 
 ## The files every pull request changes
 
-`README.md`, `ARCHITECTURE.md`, `AUDIT.md`, `tests/test_suite.cpp` (one file,
-with the suites registered in a list at its end), `Makefile`,
+`README.md`, `ARCHITECTURE.md`, `AUDIT.md`, `Makefile`,
 `.github/workflows/ci.yml` and the table below. Two pull requests written at
-the same time will both have changed them. So:
+the same time will both have changed them. (`tests/test_suite.cpp` was the
+one they met in most often, until 23 November: a new suite is a file of its
+own now, "Working together", point 2.) So:
 
 1. Add a block of your own: a section, a group of tests. Do not re-wrap or
    reorder what is there.
@@ -326,7 +341,8 @@ Every live figure in `README.md` and `ROADMAP.md` carries an invisible marker
 naming it — `**1137 / 1156 (98.4%)**<!--metrics:js/frac_pct-->` — and `make
 metrics` rewrites the text in front of each marker from `docs/metrics.json` and
 from the tree. Counted things are derived where they are checked: the suite
-count is the `RUN_TEST` list of `tests/test_suite.cpp`, the corpus totals are
+count is the `RUN_TEST` list of `tests/test_suite.cpp` and the files of
+`tests/suites/`, the corpus totals are
 the cases on disk. Measured things are in `docs/metrics.json` with the command
 that produced them and the day it did, so a figure can be argued with instead
 of trusted. `make check-numbers` fails when any marked figure disagrees
@@ -918,7 +934,7 @@ Rows that share files should not be in work at the same time.
 | ~~**`Array.prototype.toLocaleString` never asks the element either.**~~ **Done in Phase 192 (`docs/phases/192-an-array-to-locale-string-asks-the-element.md`, finding 196):** `Array.prototype.toLocaleString` was `join_array(receiver, ",")`; it is now §23.1.3.28 — `Get` each place, skip `undefined`/`null`, and `Invoke(element, "toLocaleString")` with the element unwrapped (test262's `primitive_this_value` needs the strict `this` to stay a primitive). Both of those cases also needed `Object.prototype.toLocaleString`, which was `js_to_string(self())` and asked nothing: §20.1.3.5 is `Invoke(this, "toString")`, so `src/js/BuiltinsObject.cpp` is in the phase as well. Re-measured over `built-ins/Array` + `built-ins/TypedArray`: **3,375 → 3,380 / 4,536 (+5 / -0)** (the row said +3 for a narrower sweep), `built-ins/Array/prototype/toLocaleString` **9/12** with the three left gated on `BigInt`, `make test` **348 / 348**, js-conformance 1,146/1,158 and dom-conformance 678/678 unchanged. **Still open:** no `toLocaleString` in the engine takes `locales`/`options` or passes them on (`[1].toLocaleString("de")` is not a browser's answer), the typed array keeps its own walker, and the three `BigInt` cases need `BigInt` | `src/js/BuiltinsArray.cpp`, `src/js/BuiltinsObject.cpp` | Phase 177 / finding 182, Phase 192 / finding 196 | Closed by #238 |
 | **`%Function.prototype%` does not carry the `caller`/`arguments` poison pill.** Phase 146 (`docs/phases/146-a-functions-name-and-length-are-its-own.md`) made `name` and `length` own properties and gave a sloppy ordinary function its `null` `arguments`/`caller` and its eager `prototype`. The standard's own arrangement is different: the pill is a pair of throwing accessors on `%Function.prototype%`, which is why `'caller' in f` is true for an arrow while `f.caller` throws. This engine answers the `HasProperty` question in `has_property` and the throw in `throw_if_forbidden_property`, so both answers are right without the object existing. Also open in that area: `%AsyncFunction.prototype%` and `%GeneratorFunction.prototype%` are not separate objects (`Object.getPrototypeOf(async function () {})` is `Function.prototype`, and `Object.prototype.toString` says `[object Function]` for both — `prototypes.dat`), and a *native* function lists `name,length` where the standard's order is `length,name` because `js_make_native` defines `name` first | `src/js/JsValue.cpp` (`has_property`, `throw_if_forbidden_property`), `src/js/JsOps.cpp` (`js_make_native`) | Phase 146 / finding 151; `prototypes.dat`'s async/generator case; 4 test262 `forbidden-ext` cases lost and regained in that phase | Build the pill as a real accessor pair on `%Function.prototype%` and delete both fictions. Order matters: `forbidden-ext` asserts `hasOwnProperty("caller") === false` on a strict function, so the pill must be inherited and never installed as an own property |
 | **Hebrew fixed-position points are ordered before shaping (Phase 200, finding 204).** The #166 SHIN/QAMATS/SHIN DOT discrepancy is repaired: five reduced probes and twelve mark-order permutations agree with HarfBuzz in absolute placement. **Still open:** general normalization, ordering across cantillation/non-Hebrew combining marks, presentation-form fallback and special meteg sequences. | `src/render/FontRenderer.cpp`, `tools/shaping/` | `docs/phases/200-hebrew-mark-order.md`, `docs/findings/204-hebrew-mark-order.md` | Stable ordering of contiguous Hebrew fixed-position points only; raw glyph differences and pixel equivalence remain separate measurements. |
-| **A click on a `<label>` activates its labeled control.** At the completion toggle's centre (145,248) TodoMVC's hit-test lands on the `<label>` next to the checkbox and nothing routes the activation to it, so the toggle is unusable without script (holdout-01 H4's gate-fatal step). The HTML standard gives the label an activation behavior: a click on it fires a click at the labeled control (`for`→id association, else the first labelable descendant), unless the click landed on interactive content inside the label, or the labeled control is disabled. The association walk already exists (`label_control` and `is_labelable` in `src/dom/FormState.cpp:680` and `src/dom/FormState.cpp:764`); the missing piece is dispatching it from the shell's click path (`BrowserShell.cpp`, `click_at`). Oracle: TodoMVC's toggle on the frozen holdout-01 page plus a unit suite asserting label→checkbox activation, `for`-association and the interactive-descendant exception | `src/shell/BrowserShell.cpp`, `src/dom/FormState.cpp`, `include/litebird/dom/FormState.hpp` | holdout-01 re-run 2026-11-23 (`tools/real_pages/holdout-01/README.md`); HTML Standard, labels' activation behavior | Small and well-oracled. Not a driver workaround — the engine is what must forward the activation, or every labelled control on the web needs a script |
+| **A click on a `<label>` activates its labeled control.** ~~At the completion toggle's centre (145,248) nothing routes the activation.~~ **Half of this is not true at the head Phase 220 began on, and the other half is a different bug, fixed in Phase 220** ([`docs/phases/220-space-on-a-checkbox-is-a-toggle.md`](docs/phases/220-space-on-a-checkbox-is-a-toggle.md), [finding 224](docs/findings/224-space-on-a-checkbox-was-never-a-toggle.md)): a click on a `label[for]`, and on a label containing its control, already reaches the control and runs its activation — `click_at` → `send_mouse` → `Element::click()` → `before_click`/`after_click`. What was wrong is the keyboard: `handle_key(" ")` on a focused checkbox fell through to `type_text`, accepted the space as a printable character, returned `true` and toggled nothing. A focused checkbox or radio now activates on Space or Enter through the same `Element::click()` door the mouse uses. **Still open:** a `<label>` with no control does not forward its click to the element under the pointer At the completion toggle's centre (145,248) TodoMVC's hit-test lands on the `<label>` next to the checkbox and nothing routes the activation to it, so the toggle is unusable without script (holdout-01 H4's gate-fatal step). The HTML standard gives the label an activation behavior: a click on it fires a click at the labeled control (`for`→id association, else the first labelable descendant), unless the click landed on interactive content inside the label, or the labeled control is disabled. The association walk already exists (`label_control` and `is_labelable` in `src/dom/FormState.cpp:680` and `src/dom/FormState.cpp:764`); the missing piece is dispatching it from the shell's click path (`BrowserShell.cpp`, `click_at`). Oracle: TodoMVC's toggle on the frozen holdout-01 page plus a unit suite asserting label→checkbox activation, `for`-association and the interactive-descendant exception | `src/shell/BrowserShell.cpp`, `src/dom/FormState.cpp`, `include/litebird/dom/FormState.hpp` | holdout-01 re-run 2026-11-23 (`tools/real_pages/holdout-01/README.md`); HTML Standard, labels' activation behavior | Small and well-oracled. Not a driver workaround — the engine is what must forward the activation, or every labelled control on the web needs a script |
 | **`::before` and `::after` generate since Phase 215** (`docs/phases/215-the-icon-that-had-no-box.md`, finding 219): a string-valued `content` makes an inline run — an ordinary `TextBox` with no node, so `textContent` is untouched — appended before the children (`::before`) or after them (`::after`). Measured on the row's own oracle: the Rust Book's icon-only anchor was `800x0` with an empty inline box and is now `800x20` with a line and a text box, and `#a::before{content:"XXX"}` grows the line 30.2 → 63.1. **Still open:** only a string is represented, so `counter()`, `attr()`, `url()` and the content list generate nothing; `::first-line`, `::first-letter`, `::marker`, `::placeholder` and `::selection` match no box; and the glyph itself is not drawn when the fallback font has no such codepoint (U+F105 measures the 9.6px the font can draw), which is why the box existing is the claim and not the picture | `src/css/CssParser.cpp`, `src/css/StyleResolver.cpp`, plus layout and paint for the generated box (`src/layout/`, `src/render/`) | holdout-01 re-run 2026-11-23 (`tools/real_pages/holdout-01/README.md`) | The row that un-blocks icon-font-only controls — a large fraction of real-world buttons, links and menu items. Glyph-level correctness (the actual glyph) matters less than the box existing and being hit-testable |
 | ~~**The geometry a script reads disagrees with the painted layout.**~~ **Done in Phase 222 (`docs/phases/222-geometry-agrees-with-paint.md`, finding 226):** `getBoundingClientRect`/`getClientRects` returned document coordinates, not viewport coordinates — after the driver scrolled the tablist into view the biography's document `y` was 931.8 (2061.4 on the frozen re-run's taller content) while its viewport `y` was 456, so `visible()` was false. `window.scrollY` was hard-coded to `0`. The fix stores `m_scroll_x/y` on `Document` (propagated from `BrowserShell::scroll_to`), makes `window.scrollX/Y` read from it, and makes the two DOMRect methods return `box − scroll` (with `0` for `display: none`). No layout change; the stored `bounding_box` stays absolute. | `include/litebird/dom/Document.hpp`, `src/shell/BrowserShell.cpp`, `src/js/DomElementBindings.cpp`, `src/js/DomWindowBindings.cpp` | `docs/phases/222-geometry-agrees-with-paint.md`, `docs/findings/226-geometry-was-not-the-painted-one.md` | Closed; `visible('#tabpanel-2 p')` now true and the DOMRect agrees with the painted after-frame within padding |
 | **`import(...)` does not parse.** `await import('./specLinks.mjs')` in APG `shared/js/app.js` (line 52) throws `SyntaxError: Unexpected token 'import'` (the token is reached in expression position and `fail_unexpected` throws at `JsParser.cpp`), so the spec-link enhancement in app.js dies; the tabs widget survives (`tabs-automatic.js` is a classic script). Dynamic `import()` is the parse half of the ES-modules row — full modules are out of scope of this row. Oracle: test262 `language/expressions/dynamic-import`, plus the APG page no longer logging the error | `src/js/JsParser.cpp` (expression grammar and `fail_unexpected`), `src/js/JsEval.cpp` | ROADMAP tier 2 row on ES-module semantics; holdout-01 re-run 2026-11-23 (`tools/real_pages/holdout-01/README.md`) | A parse acceptance with no dynamic-import *evaluation* is not this row; whichever half is claimed must say which behavior it lands. Strictly additive over the classic-script path |

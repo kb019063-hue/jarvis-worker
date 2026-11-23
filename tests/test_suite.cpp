@@ -6739,6 +6739,29 @@ TEST(subtle_crypto_digest_sha256) {
     assert(interp.eval("rejAlg === 'NotSupportedError'").is_truthy());
 }
 
+TEST(subtle_crypto_digest_sha1_sha384_sha512) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var data = new TextEncoder().encode('abc');
+        var h1 = null, h384 = null, h512 = null;
+        crypto.subtle.digest('SHA-1', data).then(function(b) { h1 = toHex(b); });
+        crypto.subtle.digest('SHA-384', data).then(function(b) { h384 = toHex(b); });
+        crypto.subtle.digest('SHA-512', data).then(function(b) { h512 = toHex(b); });
+    )");
+    assert(interp.eval("h1 === 'a9993e364706816aba3e25717850c26c9cd0d89d'").is_truthy());
+    assert(interp.eval("h384 === 'cb00753f45a35e8bb5a03d699ac65007272c32ab0eded1631a8b605a43ff5bed8086072ba1e7cc2358baeca134c825a7'").is_truthy());
+    assert(interp.eval("h512 === 'ddaf35a193617abacc417349ae20413112e6fa4e89a97ea20a9eeee64b55d39a2192992a274fc1a836ba3c23a3feebbd454d4423643ce80e2a9ac94fa54ca49f'").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -35161,6 +35184,7 @@ int main() {
     RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
     RUN_TEST(crypto_get_random_values_and_random_uuid);
     RUN_TEST(subtle_crypto_digest_sha256);
+    RUN_TEST(subtle_crypto_digest_sha1_sha384_sha512);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

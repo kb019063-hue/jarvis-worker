@@ -254,6 +254,16 @@ struct ComputedStyle {
     EdgeSizes padding_percent{-1.0f};
     EdgeSizes border_width{0.0f};
     Color border_color{Color::black()};
+    /// `outline`, which a box draws around its border box without taking any
+    /// room (`outline-offset` moves it out; a negative one pulls it in). It is
+    /// not part of the box model, so it is not an `EdgeSizes`: it is one ring
+    /// of one width, and `outline_drawn` is the `outline-style` that decides
+    /// whether there is a ring at all (`none` draws nothing, whatever the
+    /// width says).
+    float outline_width{0.0f};
+    float outline_offset{0.0f};
+    bool outline_drawn{false};
+    Color outline_color{Color::black()};
     float border_radius{0.0f};
     float border_radius_percent{-1.0f};
     BoxShadow box_shadow;

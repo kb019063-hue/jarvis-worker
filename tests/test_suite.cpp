@@ -32891,6 +32891,52 @@ TEST(textdecoder_reaches_script_in_pieces) {
         var afterError = new TextDecoder('utf-8', {fatal: true});
         try { afterError.decode(bytes([0xFF]), {stream: true}); } catch (e) {}
         report('a fatal error resets the decoder', afterError.decode(bytes([0x41])), 'A');
+        // Phase 209, finding 213. The single cuts above miss a defect that
+        // needs *two*: cutting one chunk in the middle of a double-byte pair
+        // is only wrong when the decoder has already been left in the
+        // double-byte mode by an earlier chunk, because the count of bytes to
+        // hold back was scanned from a mode that started at ASCII every time.
+        // So here is the row's own oracle in full -- every partition of every
+        // byte string, not one cut of it -- over the encodings whose decoders
+        // carry a mode or a pending character.
+        var partitions = [
+            ['iso-2022-jp', [0x1B, 0x24, 0x42, 0x24, 0x22, 0x24, 0x24, 0x1B, 0x28, 0x42, 0x41]],
+            ['iso-2022-jp', [0x1B, 0x28, 0x4A, 0x5C, 0x7E, 0x41]],
+            ['iso-2022-jp', [0x1B, 0x28, 0x49, 0x21, 0x22, 0x1B, 0x28, 0x42]],
+            ['iso-2022-jp', [0x1B, 0x24, 0x40, 0x24, 0x22]],
+            ['iso-2022-jp', [0x41, 0x1B, 0x24, 0x42, 0x24, 0x22, 0x42]],
+            ['iso-2022-jp', [0x1B, 0x24, 0x42, 0x24]],
+            ['iso-2022-jp', [0x1B, 0x24]],
+            ['iso-2022-jp', [0x1B, 0x28, 0x42, 0x41]],
+            ['utf-8', [0xEF, 0xBB, 0xBF, 0x41, 0xC3, 0xA9, 0xF0, 0x9F, 0x98, 0x80, 0x42]],
+            ['utf-8', [0xF0, 0x9F, 0x98]],
+            ['utf-16le', [0xFF, 0xFE, 0x41, 0x00, 0x42, 0x00]],
+            ['shift_jis', [0x82, 0xA0, 0x82, 0xA2, 0x41]],
+            ['euc-kr', [0xB0, 0xA1, 0xB0, 0xA2, 0x41]],
+            ['big5', [0xA4, 0x40, 0xA4, 0x41, 0x41]],
+            ['gb18030', [0x81, 0x30, 0x81, 0x30, 0x41]],
+            ['windows-1252', [0x80, 0x81, 0x41]]
+        ];
+        var pChecks = 0, pDiffer = 0, firstDiffer = '';
+        for (var pc = 0; pc < partitions.length; pc++) {
+            var pEnc = partitions[pc][0], pData = partitions[pc][1];
+            var pWhole = new TextDecoder(pEnc).decode(bytes(pData));
+            for (var pm = 0; pm < (1 << (pData.length - 1)); pm++) {
+                var parts = [], from = 0;
+                for (var bit = 0; bit < pData.length - 1; bit++) {
+                    if (pm & (1 << bit)) { parts.push(pData.slice(from, bit + 1)); from = bit + 1; }
+                }
+                parts.push(pData.slice(from));
+                pChecks++;
+                if (stream(pEnc, parts) !== pWhole) {
+                    pDiffer++;
+                    if (!firstDiffer) firstDiffer = pEnc + ' partition ' + pm;
+                }
+            }
+        }
+        report('every partition of a byte string answers what one call answers (' +
+               pChecks + ' partitions)', pDiffer, 0);
+        if (firstDiffer) failures.push('first partition that differed: ' + firstDiffer);
         // The ISO-2022-JP mode is decoder state too, and is reset with it.
         var modeReset = new TextDecoder('iso-2022-jp');
         modeReset.decode(bytes([0x1B, 0x24, 0x42, 0x21, 0x21]));

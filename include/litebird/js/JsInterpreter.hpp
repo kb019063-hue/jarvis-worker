@@ -86,6 +86,7 @@ public:
 
     /// Drops every binding. Used by the collector on scopes nothing can reach.
     void clear_bindings() {
+        if (m_bindings.empty()) return;
         std::vector<Binding> dropped = std::move(m_bindings);
         m_bindings.clear();
         m_index.clear();
@@ -319,6 +320,7 @@ private:
             m_index[name] = static_cast<uint32_t>(m_bindings.size() - 1);
         }
     }
+
 
     // All live scopes, as an intrusive list. Scopes are created and destroyed
     // on every call, so the lock is a spin lock: it is held for a few

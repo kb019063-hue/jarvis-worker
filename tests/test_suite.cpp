@@ -333,7 +333,6 @@ TEST(color_parsing) {
     assert(c4.r == 0 && c4.g == 0 && c4.b == 255);
 }
 
-
 TEST(css_color_keywords_match_the_css_specification) {
     using namespace litebird;
 
@@ -2618,7 +2617,6 @@ TEST(the_canvas_measures_the_ligature_it_paints) {
     assert(painted == as_codepoint);   // the ligature glyph, drawn by the canvas
     assert(painted != separately);     // ...and not the two letters
 }
-
 
 TEST(font_kerning_none_reaches_the_box_and_the_painter) {
     using namespace litebird;
@@ -5101,7 +5099,6 @@ TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely) {
     std::printf("      [shaping] malformed/cyclic/recursive GSUB & GPOS rejected safely\n");
     std::fflush(stdout);
 }
-
 
 TEST(inline_formatting_context) {
     using namespace litebird;
@@ -13096,7 +13093,6 @@ TEST(table_completeness) {
     assert(saw_green_rect);
     assert(saw_blue_rect);
 }
-
 
 TEST(float_shrinks_inline_line_boxes) {
     using namespace litebird;
@@ -35763,7 +35759,6 @@ void test_reduce_asks_for_each_place_as_it_reaches_it() {
 }
 
 
-
 TEST(svg_class_name_is_a_live_animated_string) {
     TestPage page;
     auto& js = page.js;
@@ -36345,6 +36340,8 @@ int main() {
     // Phase 192: `Array.prototype.toLocaleString` asks each element (§23.1.3.28),
     // and `Object.prototype.toLocaleString` is `Invoke(this, "toString")` (§20.1.3.5).
     RUN_TEST(an_array_to_locale_string_asks_every_element);
+
+    // Phase 204: a counter is written where the walk found it.
 
     // Phase 202: a box's outline is a ring outside the border box that takes
     // no room; it is stored by the cascade and painted.

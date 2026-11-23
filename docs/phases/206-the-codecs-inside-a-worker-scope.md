@@ -63,6 +63,25 @@ toStringTag => THREW ReferenceError      (expected [object TextDecoder] [object 
 Nineteen lines differ, and the run stops at its assertion. Restoring the call
 makes it pass again.
 
+Nothing else moved:
+
+| Check | Result |
+| :--- | :--- |
+| `make js-conformance` | 1146/1158 (99.0%), 0 crashes |
+| `make conformance` / `make dom-conformance` | 1973/1973 · 678/678 |
+| `make wpt` | 9567/9824, the same 257 listed |
+| `make url-conformance` / `make xml-conformance` | 1188/1188 · 1718/1718 |
+| `make diff-trees` / `make diff-xml` | 1500/1500 trees equal, no crash |
+| `make deep` | 1332 runs, 0 failed |
+| `make security-fetch` / `-worker` / `-https` | 3/3 · 17/17 · 20/20 |
+| `build-asan/litebird` | builds; a worker in it decodes `héllo €`, splits `€` across chunks and reports `typeof TextDecoder === "function"` with no ASan or UBSan report |
+
+`make deep` first came back with four 60-second timeouts; it had been run side
+by side with the ASan build on this two-core sandbox, and on its own it answers
+1332 runs, 0 failed. The sanitizer *unit* step is killed for memory here
+(3.9 GB) and runs on CI's runners, so the local sanitizer evidence is the
+built binary and the probe above rather than the whole suite.
+
 ## 4. What is still open
 
 - **`TextDecoderStream` and `TextEncoderStream`** do not exist in either

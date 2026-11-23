@@ -75,7 +75,11 @@ without being asked, tests those that are waiting together in one run, and
 merges each as it is. No test is given up for that: a pull request still
 passes its own CI run before it is taken, and `main` still only ever gets a
 tree that a whole run passed on, file for file. What is given up is the
-runs that tested a tree nobody was going to merge.
+runs that tested a tree nobody was going to merge. (Each piece of it was
+tried before it was written down: the status comment and the two commands
+of point 3 on a pull request of the landing session's own, on 23
+November. No whole watch has run under this rule yet; what the first one
+shows will be written here.)
 
 1. **Take a name.** One made-up word, yours for as long as your chat lasts.
    A branch is new after every Continue and a pull request's number says

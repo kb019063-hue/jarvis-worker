@@ -47,17 +47,35 @@ document cannot prevent. So:
 A change like this one — documents, tooling, CI, nothing that moves a
 scoreboard — is not a phase and takes no phase or finding number.
 
-## Working together: a name, the hand-over, the landing session (2026-11-22)
+## Working together: a name, the watch, the landing session (2026-11-23)
 
 Until 22 November every agent landed its own pull request, however often
-`main` moved under it. Of 42 pull requests merged on 20 and 21 November,
+`main` moved under it. A CI run takes about nineteen minutes and tests a
+pull request merged with `main` as it is at that moment; every merge makes
+every other finished pull request's green run a run on another tree, and
+sends it round again. Of 42 pull requests merged on 20 and 21 November,
 half had merged `main` three times or more (#173 sixteen times), and half
-waited 80 minutes or more between their first green run and their merge:
-each merge sent every other finished pull request round again. The person we
-work for planned what follows with one of the sessions, and each piece of it
-was tried first ("The turn, and what a merge does to it", below, says what
-the platform turned out to do). The first watch, on 22 November, was the
-trial of the whole: point 4 ends with what it showed.
+waited 80 minutes or more between their first green run and their merge.
+
+On 22 November one session began to land the others' pull requests for
+them (a *watch*), at first only those that `main` had beaten twice. That
+night showed what the half measure costs. In 3 hours 48 minutes ten pull
+requests landed, on 34 CI runs; `main` moved ten times, seven of them by an
+agent merging its own. #241 went from its first green run to its merge in
+64 minutes and three runs, #238 in 98 minutes and four. Three pull requests
+that were finished and green stood unmerged at the end of it, one for an
+hour and three quarters: nobody was to take them before their agents had
+tried twice and then asked. And the landing session needed six runs for the
+three pull requests it landed: three times an agent's own merge moved
+`main` under what it was testing.
+
+So since 23 November, **while a watch is on, one session merges and nobody
+else does**. It takes every pull request that is finished and green,
+without being asked, tests those that are waiting together in one run, and
+merges each as it is. No test is given up for that: a pull request still
+passes its own CI run before it is taken, and `main` still only ever gets a
+tree that a whole run passed on, file for file. What is given up is the
+runs that tested a tree nobody was going to merge.
 
 1. **Take a name.** One made-up word, yours for as long as your chat lasts.
    A branch is new after every Continue and a pull request's number says
@@ -78,66 +96,118 @@ trial of the whole: point 4 ends with what it showed.
    written, and the landing session refreshes it at the end of a watch. Add
    your suite and its `RUN_TEST` line; do not touch the number. If your
    branch already changed it and now conflicts there, take `main`'s lines.
-3. **Beaten twice, hand over.** When the work is finished (the checks pass,
-   CI is green on the head, `WIP:` is off), merge as "What "done" means"
-   says. When `python3 tools/ci/check_pr.py merge N` says "not ready"
-   because `main` has moved, merge `main`, push, and wait for CI: twice at
-   the most. The third time:
-   - see that GitHub can still merge it
-     (`gh pr view N --json mergeable`: a pull request that conflicts with
-     `main` in its code cannot be landed by anybody but you);
-   - write one line on the board, #219:
-     `Heron: #N finished, beaten twice, please land`;
-   - push nothing more to #N. If you must, say so on the board first
-     (`Heron: #N taken back`);
-   - end the turn. Tell the person your name, that #N is handed over, and
-     that your next task begins with their Continue once #N shows as merged.
-4. **The landing session lands it.** One session does this, for a *watch* of
-   up to seven and a half hours that the person starts (a session's login to
-   GitHub ends after eight). About every ten minutes it reads the board. It
-   merges `main` and the heads of the handed-over pull requests into its own
-   branch, whose pull request is titled `WATCH:` and is not merged while the
-   watch lasts, and lets CI run once on all of them together. When that run
-   passes and `main` has not moved, it merges each of them as it is
-   (`gh pr merge N --merge`), so that `main` has, file for file, the tree
-   that run passed on. Nothing is pushed to your branch and your pull request
-   is not closed. If yours conflicts, or the run fails because of it, the
-   landing session says why on the board and in #N, and #N is yours again:
-   the person hears of it and continues your chat. Its last act of a watch
-   is to merge its own pull request, which by then holds what no other one
-   does: the suite count (`make metrics-suites`).
+3. **When your pull request is finished, ask whether a watch is on.**
+   Finished is: the checks of "What "done" means" pass, `WIP:` is off the
+   title, and CI is green on the head commit (wait for it with
+   `gh pr checks N`, once a minute; not with `gh run watch`). Then run
+   `python3 tools/ci/check_pr.py merge N` and do what its last lines say.
+   - **`do not merge: a watch is on …`** The landing session takes #N as it
+     is. Push nothing more to it and do not merge `main` into it, however
+     far `main` has moved: either would start a run of your own and move
+     the head under the one that is testing it. Wait with
+     `python3 tools/ci/check_pr.py landed N`, which looks for up to four
+     minutes and says one of four things:
+     - it has landed: tell the person, and end the turn. Your next task
+       begins with their Continue;
+     - it is yours again, and what the landing session wrote about it: it
+       conflicts, or the run on the lot failed because of it. Do what that
+       says and push. When CI is green on the new head it is taken again;
+     - no watch is on any more: go on as in the next point;
+     - nothing yet: run it again. After an hour of that, end the turn and
+       tell the person that #N is finished and with the landing session.
+   - **`ready: gh pr merge N --merge`** No watch is on. Merge it yourself.
+   - **`not ready`**, because `main` has moved (it says so only when no
+     watch is on): merge `main`, push, and wait for CI, twice at the most.
+     The third time leave #N as it is, finished and green, end the turn and
+     tell the person: the next watch takes it.
 
-   What the first watch showed (22 November, #237; five finished pull
-   requests had been waiting, three were landed and two went back):
-   - **A conflict that needs no judgement is resolved by the landing
-     session, and the pull request is carried.** The suite count of
-     `README.md`; a row somebody else put where yours is; a number that is
-     on `main` already (#223 was opened as Phase 179 and landed as Phase
-     191). It is done in the landing session's branch and said in #N. A
-     carried pull request lands when the watch's own pull request is merged,
-     and not before: GitHub shows #N as merged because its head commit is in
-     what was merged. That merge ends the watch, so a watch that carries
-     anything ends as soon as its lot is green and the board is empty, and
-     the person starts the next one.
-   - **A conflict in code is yours.** #226 and #211 had changed the same
-     four files of the JS engine, and which of the two stays is not for a
-     landing session to say.
-   - **Two pull requests that each pass can fail together**, which is what
-     the one run on the lot is for. #176 fills the answer of `map` with a
-     `Set`; #193 makes a `Set` on a hole ask the prototype; with both,
-     `[7].map(f)` called a setter on `Array.prototype`, and a suite of
-     Phase 98 failed. The later of the two went back to its agent, with
-     what was found.
-   - **A head is taken out of the lot with a forced push** of the landing
-     session's own branch, never with a revert: a revert leaves the head
-     commit in the history, and GitHub would show #N as merged with nothing
-     of it on `main`.
-5. **The board is #219**, a pull request that is never merged (an agent's
-   token can comment on a pull request, and can open an issue but not
-   comment on it). One line a message, your name first. The landing session
-   writes there when a watch begins and ends, what it landed, and what it
-   could not land and why. Between watches nothing is landed, and what is
-   handed over waits for the next one.
+   A title without `WIP:` on a green pull request says "land this", to
+   whoever is landing. Keep `WIP:` on until the work is finished, and put
+   it back if you have to go on: a pull request with `WIP:` is left alone.
+4. **The landing session lands it.** One session does this, for a watch
+   that the person starts with a word. It promises no length: the login to
+   GitHub can end under it at any moment ("The turn, and what a merge does
+   to it", below). At every look, five minutes apart or less:
+   - `python3 tools/ci/check_pr.py watch --beat "YYYY-MM-DD HH:MM"` writes
+     the time of the look into the status comment of the board;
+   - `python3 tools/ci/check_pr.py watch` lists what is finished, green and
+     mergeable, and for the rest why not;
+   - **a pull request with `main` in its head is merged at once**, as it
+     is: its own run was a run on what the merge puts on `main`
+     (`python3 tools/ci/check_pr.py merge N --landing` says "ready", then
+     `gh pr merge N --merge`). Not while a lot is being tested: the merge
+     would move `main` under the lot;
+   - **the others are a lot.** The landing session's branch, whose pull
+     request is titled `WATCH:`, is made `main` with their heads merged
+     in, in the order of their numbers, and nothing else: `git merge-tree`
+     of `main` and the heads, one after the other, gives the same tree.
+     One push, one CI run. `make -j2 all && make -j2 test` in the sandbox
+     says in about six minutes what the run will say in twenty about the
+     unit suites;
+   - **the run passes and `main` has not moved:** each of them is merged as
+     it is, in that order (`gh pr merge N --merge`), and `main` has, file
+     for file, the tree the run passed on. If `main` has moved all the
+     same (an agent that did not know of the watch), `main` is merged into
+     the lot and the run starts again;
+   - **the run fails:** the landing session finds the pull request (the
+     job that failed, the sandbox, or half the lot at a time), builds its
+     branch again from `main` without that head, and tests the rest. A
+     head leaves the lot by a forced push of the landing session's own
+     branch, never by a revert: a revert leaves the head commit in the
+     history, and GitHub would show #N as merged with nothing of it on
+     `main`;
+   - **what it cannot land goes back**, with one line on the board and the
+     same in #N: `Lander: #N is yours again (head abc1234): why`. That is
+     a conflict with `main` or with a pull request before it in the lot,
+     or a lot that fails with it. #N is then left alone until its head is
+     another commit. Its agent is waiting (point 3) and reads the line
+     within a minute;
+   - a pull request that becomes finished while a run is going waits for
+     the next lot, unless the run is less than five minutes old: then it
+     joins, and the run starts again;
+   - nothing is pushed to anybody's branch, and no pull request is closed;
+   - **the end:** `python3 tools/ci/check_pr.py watch --off "…"` says what
+     landed and what went back, and then the landing session merges its
+     own pull request, which holds what no other one does: the suite count
+     (`make metrics-suites`) and whatever it carried or wrote. That merge
+     ends its access within minutes. Until then, what it writes itself is
+     kept out of the lot's tree: committed in a second worktree, merged
+     into the branch with `git merge -s ours` so that it is pushed, and
+     brought into the tree at the end with `git cherry-pick`.
+
+   **Carried.** A finished pull request whose agent is gone, and whose
+   conflict needs no judgement (the suite count of `README.md`; a row
+   somebody else put where its row is; a number that is on `main` already:
+   #223 was opened as Phase 179 and landed as Phase 191), is resolved in
+   the landing session's branch and said in #N. It lands when the watch's
+   own pull request is merged, and not before: GitHub shows #N as merged
+   because its head commit is in what was merged. A conflict in code is
+   never the landing session's: #226 and #211 had changed the same four
+   files of the JS engine, and which of the two stays was not for it to
+   say.
+
+   **Two pull requests that each pass can fail together**, which is what
+   the run on the lot is for. On 22 November #176 filled the answer of
+   `map` with a `Set` and #193 made a `Set` on a hole ask the prototype;
+   with both, `[7].map(f)` called a setter on `Array.prototype`, and a
+   suite of Phase 98 failed. The later of the two went back, with what was
+   found.
+5. **The board is #219**, a pull request that is never merged (an agent
+   can comment on a pull request, and can open an issue but not comment on
+   it). It holds:
+   - the status comment, which the landing session rewrites at every look:
+     `Lander: WATCH ON until 2026-11-23 12:00 UTC. Last look 2026-11-23
+     05:00 UTC.`, and at the end `Lander: WATCH OFF since …`. A watch is on
+     when the last such comment says ON, its end has not come, and its last
+     look is at most 30 minutes old. A landing session that has died stops
+     looking, and half an hour later every agent is told that no watch is
+     on, without anybody having had to say so. (On 23 November the login
+     ended in the middle of a watch, and the board went on saying "until
+     06:30" for an hour.) Nobody reads that comment by eye:
+     `python3 tools/ci/check_pr.py watch` does;
+   - the lines that send a pull request back;
+   - whatever else one agent has to tell another: one line, your name
+     first.
 
 `python3 tools/ci/check_pr.py` shows each claim's name, notes a pull request
 without one, and leaves the board and a watch out of the claims.
@@ -272,17 +342,20 @@ asan`.
   (`docs/README.md` says where a write-up goes now, and what one says.)
 - The pull request takes its row out of the table below, or rewrites the row
   to what is left.
-- The `WIP:` comes off the title. Merged into `main` with a merge commit
-  (`gh pr merge N --merge`) once CI is green, and the merge comes last:
-  minutes after it GitHub is out of reach until the person presses
-  Continue, so CI on `main` is looked at when the next turn begins, by
-  whoever has one ("The turn, and what a merge does to it", below).
-- `python3 tools/ci/check_pr.py merge N` says "ready" right before the merge.
-  It asks what is easy to believe and was wrong more than once: that `main`
-  is in the head commit, that CI passed on that commit, that the numbers are
-  still free. When it has said "not ready" twice because `main` had moved,
-  the pull request is handed over ("Working together", above), not merged
-  into a third time.
+- The `WIP:` comes off the title, and CI is green on the head commit. Then
+  `python3 tools/ci/check_pr.py merge N` says who merges ("Working
+  together", point 3, above): the landing session while a watch is on, you
+  when none is. When it is you: with a merge commit
+  (`gh pr merge N --merge`), and the merge comes last: minutes after it
+  GitHub is out of reach until the person presses Continue, so CI on `main`
+  is looked at when the next turn begins, by whoever has one ("The turn,
+  and what a merge does to it", below).
+- `python3 tools/ci/check_pr.py merge N` says "ready" right before a merge
+  of your own. It asks what is easy to believe and was wrong more than
+  once: that `main` is in the head commit, that CI passed on that commit,
+  that the numbers are still free. When it has said "not ready" twice
+  because `main` had moved, the pull request is left as it is, finished
+  and green, for the next watch, not merged into a third time.
 - **When `main` has moved, ask it before you merge `main` again.** A new CI
   run is needed only when both sides changed something other than documents
   and the checks that read them. When `main` moved by a line of README.md,
@@ -625,21 +698,28 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   another agent's pull request to have it tested. Two more limits of that
   way: a head commit with the skip marker gets no run when it is reopened
   either, and a pull request that conflicts with `main` gets none at all.
-- **A session's login to GitHub ends after eight hours.** A turn can last
-  longer: one waited, in calls of ten minutes, for 8 hours 14 minutes on
-  21 November and ended itself. But its last write that worked was 7 hours
-  59 minutes in; ten minutes later, and from then on, every write and every
-  push was refused ("Requires authentication"), while reading went on
-  working, and the next day's turn had a login again. A watch is seven and
-  a half hours for that reason. (The record is a comment on #179.) A single
-  call that waits more than five minutes is sometimes cut short without the
-  turn ending: twice in some fifty.
+- **The login to GitHub is the person's, one for all sessions, and it
+  ends without warning.** A turn can last longer than it: one waited, in
+  calls of ten minutes, for 8 hours 14 minutes on 21 November and ended
+  itself; its last write that worked was 7 hours 59 minutes in, and ten
+  minutes later every write and every push was refused ("Requires
+  authentication"). That looked like eight hours from the start of a turn.
+  It is not: on 23 November at 02:46:40 every command of every session
+  failed at once (`Bad credentials`, HTTP 401, from `gh`, reading included;
+  `could not read Username` from `git`), 3 hours 48 minutes into the
+  landing session's turn. No session wrote anything for 22 minutes (the
+  repository's events), until the person had logged in to GitHub again. No
+  session can see how long the login still has. When it ends: stop, tell
+  the person that the connection to GitHub has to be made again, and say
+  what is left undone; what was pushed is safe. (The record of 21 November
+  is a comment on #179.) A single call that waits more than five minutes
+  is sometimes cut short without the turn ending: twice in some fifty.
 - **An agent can open an issue and can neither comment on it nor edit
   it** (#196: the session that opened it could not correct it). It can
   comment on a pull request and rewrite its own comment
   (`gh api -X PATCH repos/OWNER/REPO/issues/comments/ID -F body=@FILE`),
   so what agents have to tell each other is said on one: the board.
-- **Every session uses the same GitHub token, and its REST limit is 5,000
+- **All sessions are one GitHub user, and that user's REST limit is 5,000
   requests an hour for all of them together.** On 23 November at 02:30,
   with nine agents' pull requests open and most of them waiting for CI, it
   was used up (`gh api rate_limit`: `core`, 5000 of 5000). For the sixteen

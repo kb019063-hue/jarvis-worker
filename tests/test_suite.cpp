@@ -2706,6 +2706,98 @@ TEST(the_font_shorthand_resets_font_kerning) {
     std::fflush(stdout);
 }
 
+TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for) {
+    using namespace litebird;
+
+    // A box's outline is its own rectangle, drawn outside the border box and
+    // taking no room from anything (CSS 2.1 §16.3): `outline: 5px solid`
+    // paints a 5px ring around a box that is still 100 by 40 in the layout,
+    // where a `border` would have made it 110. The CSSOM has always answered
+    // `5px solid rgb(0, 255, 0)` for it, and the display list had nothing:
+    // `ComputedStyle` had no outline, so `emit_chrome` had nothing to draw.
+    // An outline the painter never receives is the same bug as a property the
+    // resolver never stored, and the difference only shows up in ink.
+    // Each box is indented far enough that its ring fits on the canvas: a
+    // ring at a zero offset starts at the border box and grows outward, and
+    // the painter clips anything at a negative coordinate.
+    auto doc = HtmlParser::parse(
+        "<body style=\"margin:0;padding:40px\">"
+        "<div id=a style=\"width:100px;height:40px;background:#ff0000;outline:5px solid #00ff00\"></div>"
+        "<div id=b style=\"width:100px;height:40px;background:#ff0000;outline:5px solid #00ff00;outline-offset:10px;margin-top:60px\"></div>"
+        "<div id=c style=\"width:100px;height:40px;background:#ff0000;outline:5px solid #00ff00;outline-style:none;margin-top:60px\"></div>"
+        "</body>");
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 400.0f);
+    assert(root);
+
+    // The ring takes no room: the box is the declaration's size, and the
+    // three boxes are 40 high one after another with nothing added.
+    auto el = doc->get_element_by_id("a");
+    assert(el && el->has_layout_box());
+    const Rect border_box = el->bounding_box();
+    assert(border_box.width == 100 && border_box.height == 40);
+
+    BitmapRenderer bmp(200, 400);
+    bmp.clear(Color::white());
+    bmp.render(DisplayList::build(root));
+
+    auto at = [&](float x, float y) { return bmp.get_pixel(static_cast<int>(x), static_cast<int>(y)); };
+    auto is_green = [](const Color& c) { return c.g > 200 && c.r < 60 && c.b < 60; };
+    auto is_red = [](const Color& c) { return c.r > 200 && c.g < 60 && c.b < 60; };
+    auto is_white = [](const Color& c) { return c.r > 240 && c.g > 240 && c.b > 240; };
+
+    // A zero offset leaves the ring flush against the border box and outside
+    // it: the fill is untouched, the 5px band beyond the edge is the
+    // outline's green, and nothing is painted past it.
+    assert(is_red(at(border_box.x + 20, border_box.y + 20)));
+    assert(is_green(at(border_box.x + border_box.width + 2, border_box.y + 20)));
+    assert(is_white(at(border_box.x + border_box.width + 12, border_box.y + 20)));
+    // ...and with `outline-offset: 10px` the ring is lifted clear: the fill is
+    // still red, nothing is drawn in the 10px gap, green 12px out, white past
+    // the ring's far edge.
+    auto b = doc->get_element_by_id("b");
+    assert(b && b->has_layout_box());
+    const Rect b_box = b->bounding_box();
+    assert(is_red(at(b_box.x + 2, b_box.y + 20)));
+    assert(is_white(at(b_box.x - 5, b_box.y + 20)));
+    assert(is_green(at(b_box.x - 12, b_box.y + 20)));
+    assert(is_white(at(b_box.x - 20, b_box.y + 20)));
+    // `outline-style: none` draws nothing, whatever the width says.
+    auto c = doc->get_element_by_id("c");
+    assert(c && c->has_layout_box());
+    const Rect c_box = c->bounding_box();
+    assert(is_white(at(c_box.x - 3, c_box.y + 20)));
+    assert(is_white(at(c_box.x - 1, c_box.y + 20)));
+
+    std::printf("      [outline] painted; no room taken; offset and none honoured\n");
+    std::fflush(stdout);
+
+    // The same value, read back through getComputedStyle, is the one that was
+    // painted: the two used to be different questions with only one answer.
+    auto page = std::make_unique<TestPage>();
+    JsInterpreter& js = page->js;
+    js.eval(R"JS(
+        function outlined(css) {
+            var d = document.createElement('div');
+            d.setAttribute('style', css);
+            document.body.appendChild(d);
+            return d;
+        }
+        var o1 = outlined('outline:5px solid #00ff00');
+        var o2 = outlined('outline:thin solid red');
+        var o3 = outlined('outline:5px solid #00ff00;outline-style:none');
+        var o4 = outlined('outline:5px solid #ff0000;outline-offset:-3px');
+    )JS");
+    auto cs = [&](const char* var, const char* prop) {
+        return js.eval(std::string("getComputedStyle(") + var + ")." + prop).to_string();
+    };
+    assert(cs("o1", "outlineWidth") == "5px" && cs("o1", "outlineStyle") == "solid" &&
+           cs("o1", "outlineColor") == "rgb(0, 255, 0)");
+    assert(cs("o2", "outlineWidth") == "1px" && cs("o2", "outlineColor") == "rgb(255, 0, 0)");
+    assert(cs("o3", "outlineStyle") == "none");
+    assert(cs("o4", "outlineOffset") == "-3px");
+}
+
 TEST(the_painter_honours_font_kerning_none) {
     using namespace litebird;
 
@@ -6518,6 +6610,22 @@ TEST(image_bitmap_and_create_image_bitmap) {
     // Unsupported source rejects
     interp.eval("var rejBad = null; createImageBitmap(123).catch(function(e) { rejBad = e.name; });");
     assert(interp.eval("rejBad === 'TypeError'").is_truthy());
+}
+
+TEST(offscreen_canvas_transfer_to_image_bitmap) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var oc = new OffscreenCanvas(4, 3);
+        var ctx = oc.getContext('2d');
+        ctx.fillStyle = '#00ff00';
+        ctx.fillRect(0, 0, 4, 3);
+        var bm = oc.transferToImageBitmap();
+    )");
+    assert(interp.eval("bm instanceof ImageBitmap").is_truthy());
+    assert(interp.eval("bm.width === 4 && bm.height === 3").is_truthy());
 }
 
 void test_css_media_queries() {
@@ -24196,6 +24304,95 @@ TEST(js_direct_eval_follows_syntax_and_variable_environment_rules) {
            "undefined SyntaxError:0 9 2 2 3 4 function function TypeError TypeError");
 }
 
+TEST(js_direct_eval_inherits_the_callers_grammar) {
+    // Written for #226, which was closed on 22 November 2026: #211 (Phase 171)
+    // had landed the same behaviour by another route, and with no suite of its
+    // own for it. These are the behaviours #226 pinned, as its agent wrote
+    // them; `main` and Node.js v22.22.3 give the line below.
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"js(
+        var out = [];
+
+        // Strictness is inherited, not re-derived from the eval's own text.
+        // Strict code makes `var static` a syntax error; sloppy code does not.
+        function strictInherits() {
+            'use strict';
+            try { eval('var static;'); return 'no error'; }
+            catch (e) { return e.name; }
+        }
+        function sloppyDoesNot() {
+            try { eval('var static;'); return 'declared'; }
+            catch (e) { return e.name; }
+        }
+        out.push(strictInherits(), sloppyDoesNot());
+
+        // A class field initialiser and a static block ban `arguments`, and a
+        // direct eval written there is handed that ban. The text must be
+        // rejected before any of it runs.
+        var effects = 0;
+        class Banned {
+            field = eval('effects = 1; arguments;');
+            static { try { eval('arguments'); } catch (e) { Banned.block = e.name; } }
+        }
+        try { new Banned(); out.push('no error'); } catch (e) { out.push(e.name + ':' + effects); }
+        out.push(Banned.block);
+
+        // The ban follows arrows into their bodies, because an arrow declares
+        // no `arguments` of its own, but an ordinary function does declare
+        // one -- and a `function` declaration's parameters are ordinary code.
+        class Arrows {
+            field = eval('() => arguments');
+        }
+        try { new Arrows().field(); out.push('no error'); } catch (e) { out.push(e.name); }
+        class Functions {
+            field = eval('function g({ p = arguments } = {}) { return arguments.length; } g(7, 8)');
+        }
+        out.push(new Functions().field);
+
+        // §19.2.1.3 EvalDeclarationInstantiation: a sloppy eval's `var` cannot
+        // collide with a lexical binding the caller's scope chain declares.
+        function blockLet() { { let x; try { eval('var x;'); return 'no error'; } catch (e) { return e.name; } } }
+        function bodyLet() { let x; try { eval('var x;'); return 'no error'; } catch (e) { return e.name; } }
+        function bodyVar() { var x; try { eval('var x;'); return 'no collision'; } catch (e) { return e.name; } }
+        function paramVar() { return (function (x) { try { eval('var x;'); return 'no collision'; } catch (e) { return e.name; } })(1); }
+        function siblingLet() { { let x; } try { eval('var x;'); return 'no collision'; } catch (e) { return e.name; } }
+        out.push(blockLet(), bodyLet(), bodyVar(), paramVar(), siblingLet());
+        // Strict eval text puts its `var`s in an environment of its own, so the
+        // same text that collides above merely shadows there.
+        function strictTextShadows() {
+            let x = 'caller';
+            eval('"use strict"; var x = "eval";');
+            return x;
+        }
+        out.push(strictTextShadows());
+
+        // `break`, `continue` and `return` are judged against the eval's own
+        // text: the caller's loop does not enclose it, and neither does the
+        // caller's function.
+        function breakOutside() { for (;;) { try { eval('break;'); return 'no error'; } catch (e) { return e.name; } } }
+        function continueOutside() { try { eval('continue;'); return 'no error'; } catch (e) { return e.name; } }
+        function returnOutside() { try { eval('return 1;'); return 'no error'; } catch (e) { return e.name; } }
+        function insideOwnLoop() { return eval('for (var i = 0; i < 3; i++) { continue; } i'); }
+        function insideOwnSwitch() { return eval('switch (1) { case 1: break; } "done"'); }
+        out.push(breakOutside(), continueOutside(), returnOutside(), insideOwnLoop(), insideOwnSwitch());
+
+        // Indirect eval is global code: it inherits neither the caller's
+        // strictness nor the ban on `arguments`.
+        function indirectIsGlobal() {
+            'use strict';
+            try { return (0, eval)('var static; typeof static'); } catch (e) { return e.name; }
+        }
+        out.push(indirectIsGlobal());
+
+        var summary = out.join(' ');
+    )js");
+    assert(!js.last_eval_failed());
+    assert(js.global_env()->get("summary").to_string() ==
+           "SyntaxError declared SyntaxError:0 SyntaxError SyntaxError 2 SyntaxError SyntaxError "
+           "no collision no collision no collision caller SyntaxError SyntaxError SyntaxError 3 done undefined");
+}
+
 TEST(js_lexical_temporal_dead_zone_blocks_and_classes) {
     using namespace litebird;
     JsInterpreter js;
@@ -32693,6 +32890,52 @@ TEST(textdecoder_reaches_script_in_pieces) {
         var afterError = new TextDecoder('utf-8', {fatal: true});
         try { afterError.decode(bytes([0xFF]), {stream: true}); } catch (e) {}
         report('a fatal error resets the decoder', afterError.decode(bytes([0x41])), 'A');
+        // Phase 209, finding 213. The single cuts above miss a defect that
+        // needs *two*: cutting one chunk in the middle of a double-byte pair
+        // is only wrong when the decoder has already been left in the
+        // double-byte mode by an earlier chunk, because the count of bytes to
+        // hold back was scanned from a mode that started at ASCII every time.
+        // So here is the row's own oracle in full -- every partition of every
+        // byte string, not one cut of it -- over the encodings whose decoders
+        // carry a mode or a pending character.
+        var partitions = [
+            ['iso-2022-jp', [0x1B, 0x24, 0x42, 0x24, 0x22, 0x24, 0x24, 0x1B, 0x28, 0x42, 0x41]],
+            ['iso-2022-jp', [0x1B, 0x28, 0x4A, 0x5C, 0x7E, 0x41]],
+            ['iso-2022-jp', [0x1B, 0x28, 0x49, 0x21, 0x22, 0x1B, 0x28, 0x42]],
+            ['iso-2022-jp', [0x1B, 0x24, 0x40, 0x24, 0x22]],
+            ['iso-2022-jp', [0x41, 0x1B, 0x24, 0x42, 0x24, 0x22, 0x42]],
+            ['iso-2022-jp', [0x1B, 0x24, 0x42, 0x24]],
+            ['iso-2022-jp', [0x1B, 0x24]],
+            ['iso-2022-jp', [0x1B, 0x28, 0x42, 0x41]],
+            ['utf-8', [0xEF, 0xBB, 0xBF, 0x41, 0xC3, 0xA9, 0xF0, 0x9F, 0x98, 0x80, 0x42]],
+            ['utf-8', [0xF0, 0x9F, 0x98]],
+            ['utf-16le', [0xFF, 0xFE, 0x41, 0x00, 0x42, 0x00]],
+            ['shift_jis', [0x82, 0xA0, 0x82, 0xA2, 0x41]],
+            ['euc-kr', [0xB0, 0xA1, 0xB0, 0xA2, 0x41]],
+            ['big5', [0xA4, 0x40, 0xA4, 0x41, 0x41]],
+            ['gb18030', [0x81, 0x30, 0x81, 0x30, 0x41]],
+            ['windows-1252', [0x80, 0x81, 0x41]]
+        ];
+        var pChecks = 0, pDiffer = 0, firstDiffer = '';
+        for (var pc = 0; pc < partitions.length; pc++) {
+            var pEnc = partitions[pc][0], pData = partitions[pc][1];
+            var pWhole = new TextDecoder(pEnc).decode(bytes(pData));
+            for (var pm = 0; pm < (1 << (pData.length - 1)); pm++) {
+                var parts = [], from = 0;
+                for (var bit = 0; bit < pData.length - 1; bit++) {
+                    if (pm & (1 << bit)) { parts.push(pData.slice(from, bit + 1)); from = bit + 1; }
+                }
+                parts.push(pData.slice(from));
+                pChecks++;
+                if (stream(pEnc, parts) !== pWhole) {
+                    pDiffer++;
+                    if (!firstDiffer) firstDiffer = pEnc + ' partition ' + pm;
+                }
+            }
+        }
+        report('every partition of a byte string answers what one call answers (' +
+               pChecks + ' partitions)', pDiffer, 0);
+        if (firstDiffer) failures.push('first partition that differed: ' + firstDiffer);
         // The ISO-2022-JP mode is decoder state too, and is reset with it.
         var modeReset = new TextDecoder('iso-2022-jp');
         modeReset.decode(bytes([0x1B, 0x24, 0x42, 0x21, 0x21]));
@@ -33719,6 +33962,87 @@ TEST(parameter_scopes_loop_completions_class_fields_and_early_syntax_errors) {
     assert(failed.empty());
 }
 
+TEST(global_declarations_have_descriptors) {
+    using namespace litebird;
+    // Phase 197, finding 201. The global declarations live in the global
+    // environment, and the global object reaches them through its
+    // `lookup_fallback`, so `hasOwnProperty` saw them and
+    // `Object.getOwnPropertyDescriptor` did not. Every expected value below
+    // was printed by Node.js v22.22.3 before being asserted here.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function shape(o, k) {
+            var d = Object.getOwnPropertyDescriptor(o, k);
+            return d === undefined ? null : [d.value === undefined ? 'u' : typeof d.value,
+                                             d.writable, d.enumerable, d.configurable];
+        }
+
+        // A constructor the global object owns: writable, non-enumerable,
+        // configurable, and the value is what reading the name gives.
+        check('Object', function () { return shape(this, 'Object'); }, '["function",true,false,true]');
+        check('Error', function () { return shape(this, 'Error'); }, '["function",true,false,true]');
+        check('TypeError', function () { return shape(this, 'TypeError'); }, '["function",true,false,true]');
+        check('Math', function () { return shape(this, 'Math'); }, '["object",true,false,true]');
+        check('JSON', function () { return shape(this, 'JSON'); }, '["object",true,false,true]');
+        check('eval', function () { return shape(this, 'eval'); }, '["function",true,false,true]');
+        check('parseInt', function () { return shape(this, 'parseInt'); }, '["function",true,false,true]');
+        check('globalThis is its own property', function () {
+            return Object.getOwnPropertyDescriptor(this, 'globalThis').value === this;
+        }, 'true');
+
+        // The one kind the standard makes non-configurable as well.
+        check('undefined', function () { return shape(this, 'undefined'); }, '["u",false,false,false]');
+        check('NaN', function () { return shape(this, 'NaN'); }, '["number",false,false,false]');
+        check('Infinity', function () { return shape(this, 'Infinity'); }, '["number",false,false,false]');
+
+        // `hasOwnProperty` and the descriptor must agree for every global
+        // name, which is the contract propertyHelper.js relies on.
+        check('the two answers agree', function () {
+            var names = 'Object Function Array String Number Boolean Symbol Error EvalError RangeError ' +
+                        'ReferenceError SyntaxError TypeError URIError parseInt parseFloat isNaN ' +
+                        'isFinite eval JSON Math Reflect Promise Map Set WeakMap WeakSet ArrayBuffer ' +
+                        'DataView Date RegExp Int8Array Uint8Array globalThis undefined NaN Infinity ' +
+                        'decodeURI encodeURI';
+            var list = names.split(' '), bad = [];
+            for (var i = 0; i < list.length; i++) {
+                var has = Object.prototype.hasOwnProperty.call(this, list[i]);
+                if (has !== (Object.getOwnPropertyDescriptor(this, list[i]) !== undefined)) bad.push(list[i]);
+            }
+            return bad.length;
+        }, '0');
+
+        // A `var` and a function declaration are properties of the global
+        // object: writable, enumerable, non-configurable. A `let` is not a
+        // property of it at all, which is what keeps them apart.
+        var declaredVar = 1;
+        function declaredFunction() {}
+        let declaredLet = 2;
+        check('a var', function () {
+            return [shape(this, 'declaredVar'), Object.keys(this).indexOf('declaredVar') >= 0];
+        }.bind(this), '[["number",true,true,false],true]');
+        check('a function declaration', function () { return shape(this, 'declaredFunction'); },
+              '["function",true,true,false]');
+        check('a let is not a property', function () { return shape(this, 'declaredLet'); }, 'null');
+        check('a let is not in Object.keys', function () {
+            return Object.keys(this).indexOf('declaredLet');
+        }, '-1');
+
+        // Reflect gives the same answer as Object for these.
+        check('Reflect agrees', function () { return shape(Reflect, 'apply'); }, '["function",true,false,true]');
+
+        var summary = failures.length === 0 ? 'ok' : failures.join(' | ');
+    )JS");
+    assert(!js.last_eval_failed());
+    assert(js.global_env()->get("summary").to_string() == "ok");
+}
+
 TEST(flex_and_grid_box_alignment_properties) {
     using namespace litebird;
     // Phase 180, finding 184: CSS Box Alignment Level 3 in flex and grid —
@@ -33944,6 +34268,39 @@ TEST(flex_and_grid_box_alignment_properties) {
         assert(approx(g->children[1]->dimensions.content.y - gy, 60.0f));
         assert(approx(g->children[1]->dimensions.content.height, 40.0f));
     }
+}
+
+TEST(terminal_page_text_cannot_inject_controls) {
+    using namespace litebird;
+    std::string bytes;
+    std::string expected;
+    for (int i = 0; i < 256; ++i) {
+        bytes.push_back(static_cast<char>(i));
+        expected.push_back(i >= 0x20 && i <= 0x7e ? static_cast<char>(i) : '?');
+    }
+    expected += '\n';
+    DrawTextCommand text;
+    text.position = Point(0, 0);
+    text.text = bytes;
+    text.color = Color::black();
+    DisplayList list;
+    list.add(text);
+    TerminalRenderer string_renderer(256, 1);
+    const std::string output = string_renderer.to_ansi_string(list);
+    assert(terminal_plain_text(output) == expected);
+    TerminalRenderer stream_renderer(256, 1);
+    std::ostringstream stream;
+    stream_renderer.render(list, stream);
+    assert(stream.str() == output);
+
+    // Numeric character references survive the HTML parser as text. Their
+    // ESC, BEL and DEL must not become terminal instructions.
+    auto doc = HtmlParser::parse(R"html(<!doctype html><body style="margin:0"><div>Hi&#27;[2J&#7;X&#127;</div></body>)html");
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 200, 40);
+    TerminalRenderer page(20, 2);
+    const auto plain = terminal_plain_text(page.to_ansi_string(DisplayList::build(root)));
+    assert(plain.substr(0, 10) == "Hi?[2J?X? ");
 }
 
 void test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties() {
@@ -34185,6 +34542,7 @@ int main() {
     RUN_TEST(crypto_get_random_values_and_random_uuid);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
+    RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
     RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);
@@ -34423,6 +34781,7 @@ int main() {
 
     // Phase 80: direct-eval syntax and variable-environment follow-ups.
     RUN_TEST(js_direct_eval_follows_syntax_and_variable_environment_rules);
+    RUN_TEST(js_direct_eval_inherits_the_callers_grammar);
 
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
@@ -34626,11 +34985,15 @@ int main() {
 
     // Phase 180: CSS Box Alignment (`align-self`, `align-content`, `justify-items`/`self`,
     // `place-*`, and column flex `justify-content`).
+    RUN_TEST(global_declarations_have_descriptors);
     RUN_TEST(flex_and_grid_box_alignment_properties);
 
     // Phase 183: terminal clips, scrolling, shadows, text, borders and focus.
     RUN_TEST(terminal_outline_keeps_real_edges_and_clips);
     RUN_TEST(terminal_text_and_shadows_stay_inside_nested_clips);
+
+    // Phase 203: page text is not a source of terminal controls.
+    RUN_TEST(terminal_page_text_cannot_inject_controls);
 
     // Phase 195: a `calc()` percentage is of the declaration (font size,
     // line-height), not of the viewport.
@@ -34643,6 +35006,10 @@ int main() {
     // Phase 192: `Array.prototype.toLocaleString` asks each element (§23.1.3.28),
     // and `Object.prototype.toLocaleString` is `Invoke(this, "toString")` (§20.1.3.5).
     RUN_TEST(an_array_to_locale_string_asks_every_element);
+
+    // Phase 202: a box's outline is a ring outside the border box that takes
+    // no room; it is stored by the cascade and painted.
+    RUN_TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for);
 
     // Phase 210: a bare { next } is not iterable anywhere — the loop included.
     RUN_TEST(an_object_without_an_iterator_method_is_not_iterable);

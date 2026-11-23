@@ -56,6 +56,7 @@ struct PendingRegistry {
                 for (auto& handler : data->handlers) {
                     roots.push_back(&handler.on_fulfilled);
                     roots.push_back(&handler.on_rejected);
+                    roots.push_back(&handler.resolve);
                     if (handler.keep_alive) {
                         for (auto& value : *handler.keep_alive) roots.push_back(&value);
                     }
@@ -91,6 +92,30 @@ PendingRegistry& pending_registry() {
 
 void settle(const std::shared_ptr<PromiseData>& data, PromiseState state, JsValue value);
 
+/// Settles the promise a reaction produced. When the reaction was made by a
+/// constructor that is not %Promise% (`capability` holds that constructor's
+/// own resolve/reject), the engine calls those, as PromiseReactionJob does;
+/// the promise state is the engine's own only when the constructor is.
+void settle_through(const PromiseHandler& handler, bool rejected, const JsValue& value) {
+    // PromiseReactionJob steps 8-9: the reaction settles the capability with
+    // the function that matches the outcome -- [[Reject]] for a rejection and
+    // [[Resolve]] for a value. Calling the resolve for both fulfilled and
+    // rejected, as this did, turned every rejection that passed through a
+    // `then` with no handler for it into a value: a chain's `catch` was never
+    // reached and the reason arrived at the next `then` as an answer.
+    const JsValue& settle_fn = rejected ? handler.reject : handler.resolve;
+    if (settle_fn.is_function()) {
+        // What that call throws does not reach the caller of `then`: the job
+        // is not the script's, and the answer is a new rejected promise.
+        JsValue thrown;
+        if (!js_capture_throw([&] { settle_fn.call({value}); }, thrown)) {
+            js_report_unhandled_rejection(thrown);
+        }
+        return;
+    }
+    settle(handler.next_promise, rejected ? PromiseState::Rejected : PromiseState::Fulfilled, value);
+}
+
 void run_reaction(const PromiseHandler& handler, bool rejected, const JsValue& value) {
     if (handler.native) {
         handler.native(rejected, value);
@@ -98,24 +123,27 @@ void run_reaction(const PromiseHandler& handler, bool rejected, const JsValue& v
     }
     const JsValue& callback = rejected ? handler.on_rejected : handler.on_fulfilled;
     if (!callback.is_function()) {
-        // No callback for this outcome: it passes through to the derived promise.
-        if (handler.next_promise) settle(handler.next_promise, rejected ? PromiseState::Rejected : PromiseState::Fulfilled, value);
+        // No callback for this outcome: it passes through to the derived
+        // promise, through the capability the constructor gave (if any).
+        settle_through(handler, rejected, value);
         return;
     }
     JsValue result;
     JsValue thrown;
     if (js_capture_throw([&] { result = callback.call({value}); }, thrown)) {
-        Promise::resolve(handler.next_promise, result);
+        // The reaction's own resolve, exactly, not PromiseResolve: a subclass's
+        // resolve was handed to the constructor and is what the job calls.
+        settle_through(handler, false, result);
     } else {
         // What the callback threw becomes the rejection reason, as a value:
         // `catch (e)` further down the chain sees the same object.
-        Promise::reject(handler.next_promise, thrown);
+        settle_through(handler, true, thrown);
     }
 }
 
 void queue_reaction(PromiseHandler handler, bool rejected, const JsValue& value) {
     std::vector<JsRootSet> roots;
-    roots.push_back(js_roots({handler.on_fulfilled, handler.on_rejected, value}));
+    roots.push_back(js_roots({handler.on_fulfilled, handler.on_rejected, handler.resolve, handler.reject, value}));
     if (handler.keep_alive) roots.push_back(handler.keep_alive);
     EventLoop::default_loop().post_microtask(
         [handler = std::move(handler), rejected, value]() { run_reaction(handler, rejected, value); },
@@ -161,7 +189,7 @@ JsValue arg_or_undefined(Args args, size_t index) {
 
 std::shared_ptr<PromiseData> this_promise(const char* method) {
     JsValue me = JsValue::current_this();
-    auto data = me.promise_value();
+    auto data = Promise::state_of(me);
     if (!data) {
         js_throw_type_error(std::string("Method Promise.prototype.") + method +
                             " called on incompatible receiver " + js_describe_thrown(me));
@@ -173,33 +201,150 @@ std::shared_ptr<PromiseData> this_promise(const char* method) {
 /// call to either has any effect.
 std::pair<JsValue, JsValue> make_resolving_functions(const std::shared_ptr<PromiseData>& data) {
     auto called = std::make_shared<bool>(false);
-    JsValue resolve_fn = js_make_native("resolve", 1, [data, called](Args args) {
+    // §27.2.1.3.2 steps 3-4 and §27.2.1.4.2: the pair is made by
+    // CreateBuiltinFunction with the empty string for a name, `length` 1 and no
+    // `[[Construct]]` -- they are not `new resolve()`. Node prints ` 1` for
+    // `resolve.name + ' ' + resolve.length` for exactly this reason, and a
+    // script can tell: `new resolve(function () {})` was accepted here.
+    JsValue resolve_fn = js_make_native("", 1, [data, called](Args args) {
         if (*called) return JsValue::make_undefined();
         *called = true;
         data->locked = false;
         Promise::resolve(data, arg_or_undefined(args, 0));
         return JsValue::make_undefined();
     });
-    JsValue reject_fn = js_make_native("reject", 1, [data, called](Args args) {
+    JsValue reject_fn = js_make_native("", 1, [data, called](Args args) {
         if (*called) return JsValue::make_undefined();
         *called = true;
         data->locked = false;
         settle(data, PromiseState::Rejected, arg_or_undefined(args, 0));
         return JsValue::make_undefined();
     });
+    resolve_fn.function_cell()->not_constructor = true;
+    reject_fn.function_cell()->not_constructor = true;
     return {resolve_fn, reject_fn};
 }
 
-// GetPromiseResolve happens before GetIterator, but the returned method is
-// called once *per value*, while the iterator is still open. The constructor
-// fallback keeps the long-standing native `Promise.all` call-without-this API.
-std::pair<JsValue, JsValue> combinator_resolve(const JsValue& default_constructor) {
-    JsValue constructor = JsValue::current_this();
-    if (!constructor.is_object_like()) constructor = default_constructor;
-    JsValue resolve = constructor.get_property("resolve");
-    if (!resolve.is_function()) js_throw_type_error("Promise resolve is not a function");
-    return {constructor, resolve};
+// NewPromiseCapability (§27.2.1.5) and the two halves it needs.
+//
+// A capability's resolve and reject are the constructor's own two functions,
+// captured by the GetCapabilitiesExecutor the constructor is handed. Where the
+// constructor is %Promise% itself the engine knows the pair it is about to
+// make, and makes it directly: the promise it settles is then the engine's own
+// state, which is the case every script's `new Promise` takes.
+
+JsValue make_capability_executor(JsValue* resolve, JsValue* reject) {
+    // §27.2.1.5.1: the executor notes the first pair of functions it is given
+    // and throws on a second, and it is anonymous (no name), length 2, and has
+    // no [[Construct]].
+    JsValue executor = js_make_native("", 2, [resolve, reject](Args args) {
+        if (resolve->is_undefined() && reject->is_undefined()) {
+            *resolve = arg_or_undefined(args, 0);
+            *reject = arg_or_undefined(args, 1);
+            return JsValue::make_undefined();
+        }
+        js_throw_type_error("Promise executor has already been invoked with non-undefined arguments");
+    });
+    executor.function_cell()->not_constructor = true;
+    return executor;
 }
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+std::shared_ptr<PromiseData> Promise::state_of(const JsValue& value) {
+    if (auto payload = value.promise_value()) return payload;
+    // The cell, when the value did not keep the payload: see the declaration.
+    JsObject* cell = value.object_val.get();
+    if (cell && cell->klass == ObjectClass::Promise && cell->internal) {
+        return std::static_pointer_cast<PromiseData>(cell->internal);
+    }
+    return nullptr;
+}
+
+bool Promise::is_promise(const JsValue& value) {
+    return static_cast<bool>(state_of(value));
+}
+
+PromiseCapability Promise::capability_for(const JsValue& promise) {
+    // A capability over a promise that already exists: the object is the one
+    // the constructor answered, and the engine settles it where it can.
+    PromiseCapability capability;
+    capability.promise = promise;
+    std::shared_ptr<PromiseData> data = Promise::state_of(promise);
+    if (!data) return capability;
+    auto [resolve_fn, reject_fn] = make_resolving_functions(data);
+    capability.resolve = resolve_fn;
+    capability.reject = reject_fn;
+    return capability;
+}
+
+PromiseCapability Promise::new_capability(const JsValue& constructor) {
+    if (!constructor.is_function() || !js_is_constructor(constructor)) {
+        js_throw_type_error(js_describe_thrown(constructor) + " is not a constructor");
+    }
+    // %Promise%: the pair the engine makes is the pair the constructor would
+    // have been handed, so it is made here and the constructor is not called.
+    // A subclass overriding the constructor is not %Promise%, and goes below.
+    const JsValue* builtin = JsIntrinsics::get().find_global("Promise");
+    if (builtin && strict_equals(constructor, *builtin)) {
+        auto data = std::make_shared<PromiseData>();
+        PromiseCapability capability;
+        capability.promise = Promise::create_promise_instance(data);
+        auto [resolve_fn, reject_fn] = make_resolving_functions(data);
+        capability.resolve = resolve_fn;
+        capability.reject = reject_fn;
+        return capability;
+    }
+    PromiseCapability capability;
+    JsValue executor = make_capability_executor(&capability.resolve, &capability.reject);
+    JsValue made = js_construct(constructor, {executor});
+    if (!made.is_object_like()) {
+        js_throw_type_error("Promise constructor returned a non-object");
+    }
+    if (!capability.resolve.is_function() || !capability.reject.is_function()) {
+        if (capability.resolve.is_undefined() && capability.reject.is_undefined()) {
+            js_throw_type_error("Promise constructor did not call the executor");
+        }
+        js_throw_type_error("Promise resolve or reject function is not callable");
+    }
+    capability.promise = made;
+    return capability;
+}
+
+JsValue Promise::resolve_from(const JsValue& constructor, const JsValue& value) {
+    const JsValue* builtin = JsIntrinsics::get().find_global("Promise");
+    // §27.2.4.7.1, steps 2-3: a value that is already a promise of this very
+    // constructor is the answer itself, not a new promise around it. The
+    // combinators depend on it: `Promise.all` asks `this.resolve` for each
+    // item, and `then` on the answer is what the iteration is watching. Wrapping
+    // a promise here hid a `then` getter that throws -- the failure surfaced a
+    // step later, outside `js_iterate`, so the iterator was never closed.
+    if (Promise::state_of(value)) {
+        JsValue value_constructor;
+        JsValue thrown;
+        if (!js_capture_throw([&] { value_constructor = value.get_property("constructor"); }, thrown)) {
+            js_throw(thrown);
+        }
+        // A plain promise whose `constructor` was deleted, or set to something
+        // that is not a function, is still a promise of %Promise%: its own
+        // prototype is what says so (`not-a-constructor.js`).
+        if (builtin && strict_equals(constructor, *builtin) && !value_constructor.is_function() &&
+            !value_constructor.is_object_like()) {
+            return value;
+        }
+        if (strict_equals(value_constructor, constructor)) return value;
+    }
+    if (builtin && strict_equals(constructor, *builtin)) return Promise::make_resolved(value);
+    PromiseCapability capability = Promise::new_capability(constructor);
+    capability.resolve.call({value});
+    return capability.promise;
+}
+
+namespace {
 
 // Invoke(nextPromise, "then", ...), not PromiseResolve(nextPromise). A custom
 // resolve can return an object whose `then` getter/call throws; that abrupt
@@ -213,7 +358,7 @@ void subscribe_combinator_item(const JsValue& next_promise,
     JsValue then_fn = next_promise.get_property("then");
     if (!then_fn.is_function()) js_throw_type_error("Promise result has no callable then");
     const JsValue builtin_then = js_object_value(JsIntrinsics::get().promise_proto).get_property("then");
-    if (auto data = next_promise.promise_value(); data && strict_equals(then_fn, builtin_then)) {
+    if (auto data = Promise::state_of(next_promise); data && strict_equals(then_fn, builtin_then)) {
         Promise::subscribe(data, std::move(reaction), std::move(keep_alive));
         return;
     }
@@ -250,7 +395,29 @@ void subscribe_combinator_item(const JsValue& next_promise,
 /// each element as it is yielded, and settles `result` through `on_item`.
 template <typename OnItem, typename OnEmpty>
 JsValue combine(Args args, const JsValue& default_constructor, OnItem on_item, OnEmpty on_done) {
-    auto result = std::make_shared<PromiseData>();
+    // §27.2.4.1: C is the receiver (the constructor the method was called on),
+    // and the answer is a promise of C's, settled through C's own functions.
+    JsValue constructor = JsValue::current_this();
+    if (!constructor.is_object_like()) constructor = default_constructor;
+    PromiseCapability capability = Promise::new_capability(constructor);
+    // The engine's state behind the answer when it can see it; a subclass's
+    // promise is settled through its capability, and the state is a stand-in.
+    auto result = Promise::state_of(capability.promise);
+    if (!result) result = std::make_shared<PromiseData>();
+    JsValue answer = capability.promise;
+    // The engine settles `result` and then the answer through the capability's
+    // own resolve: for %Promise% they are the same promise.
+    const bool through_capability = Promise::state_of(answer) != result;
+    auto settle_answer = [capability, result, through_capability](bool rejected, const JsValue& value) {
+        if (through_capability) {
+            (rejected ? capability.reject : capability.resolve).call({value});
+        } else if (rejected) {
+            settle(result, PromiseState::Rejected, value);
+        } else {
+            Promise::resolve(result, value);
+        }
+    };
+
     auto values = std::make_shared<std::vector<JsValue>>();
     // Starts at 1 so a synchronous custom then() cannot finish the combinator
     // before the iterator has reported its end.
@@ -258,7 +425,8 @@ JsValue combine(Args args, const JsValue& default_constructor, OnItem on_item, O
 
     JsValue thrown;
     const bool ok = js_capture_throw([&] {
-        auto [constructor, resolve] = combinator_resolve(default_constructor);
+        JsValue resolve = constructor.get_property("resolve");
+        if (!resolve.is_function()) js_throw_type_error("Promise resolve is not a function");
         size_t index = 0;
         js_iterate(js_arg(args, 0), [&](const JsValue& item) {
             const size_t i = index++;
@@ -267,33 +435,34 @@ JsValue combine(Args args, const JsValue& default_constructor, OnItem on_item, O
             values->push_back(JsValue::make_undefined());
             ++*remaining;
             subscribe_combinator_item(next_promise,
-                [result, values, remaining, i, on_item, on_done](bool rejected, const JsValue& value) {
+                [result, values, remaining, i, on_item, on_done, settle_answer](bool rejected, const JsValue& value) {
                     if (result->state != PromiseState::Pending) return;
-                    if (!on_item(result, *values, i, rejected, value)) return;
+                    if (!on_item(result, *values, i, rejected, value)) {
+                        // The combinator is decided: the answer takes it.
+                        if (rejected) settle_answer(true, value);
+                        else settle_answer(false, value);
+                        return;
+                    }
                     if (--*remaining == 0) on_done(result, *values);
                 }, result, values);
             return true;
         });
     }, thrown);
     if (!ok) {
-        settle(result, PromiseState::Rejected, thrown);
+        settle_answer(true, thrown);
     } else if (--*remaining == 0) {
         on_done(result, *values);
     }
-    return Promise::create_promise_instance(result);
+    return answer;
 }
 
 } // namespace
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 void Promise::resolve(const std::shared_ptr<PromiseData>& data, JsValue val) {
     if (!data || data->state != PromiseState::Pending || data->locked) return;
 
     if (val.is_object_like()) {
-        if (val.promise_value() == data) {
+        if (Promise::state_of(val) == data) {
             settle(data, PromiseState::Rejected,
                    js_make_error(JsErrorKind::TypeError, "Chaining cycle detected for promise"));
             return;
@@ -329,7 +498,7 @@ void Promise::reject(const std::shared_ptr<PromiseData>& data, JsValue reason) {
 }
 
 std::shared_ptr<PromiseData> Promise::to_promise(const JsValue& value) {
-    if (auto data = value.promise_value()) return data;
+    if (auto data = Promise::state_of(value)) return data;
     auto data = std::make_shared<PromiseData>();
     resolve(data, value);
     return data;
@@ -346,6 +515,56 @@ std::shared_ptr<PromiseData> Promise::then(const std::shared_ptr<PromiseData>& d
     return next;
 }
 
+PromiseCapability Promise::capability_for(const std::shared_ptr<PromiseData>& data,
+                                          const JsValue& constructor) {
+    const JsValue* builtin = JsIntrinsics::get().find_global("Promise");
+    if (builtin && strict_equals(constructor, *builtin)) {
+        // %Promise%: the engine's own state, settled directly. It has to be a
+        // state of its own -- the promise `then` answers is a different
+        // promise from the receiver, and giving the two one state made every
+        // settlement of the new one settle the source as well: `p.then(g)`
+        // handed g what f had already received.
+        (void)data;
+        PromiseCapability capability;
+        auto next = std::make_shared<PromiseData>();
+        capability.promise = Promise::create_promise_instance(next);
+        // Bind the pair to the new state: the reaction settles the promise
+        // through these, and Promise::resolve is what adopts a thenable a
+        // handler answered with (`then(function (r) { return r.json(); })`).
+        // Settling the state directly would fulfil with the promise itself.
+        auto [resolve_fn, reject_fn] = make_resolving_functions(next);
+        capability.resolve = resolve_fn;
+        capability.reject = reject_fn;
+        return capability;
+    }
+    // The constructor's promise is made, and settled through its own
+    // functions; the engine's state carries the reactions either way.
+    return Promise::new_capability(constructor);
+}
+
+JsValue Promise::then_into(const JsValue& promise, const std::shared_ptr<PromiseData>& data,
+                           JsValue on_fulfilled, JsValue on_rejected, PromiseCapability capability) {
+    // NewPromiseCapability has already run: a constructor that throws, refuses
+    // the executor or answers a non-object has thrown in `then` itself, before
+    // anything is registered.
+    // What the reaction settles is the promise NewPromiseCapability made. For
+    // %Promise% that promise is the engine's own, carrying the state it was
+    // made with; a fresh one here would be settled while the promise handed
+    // back stayed pending, and a chain would give every step the first value
+    // (`p.then(f).then(g)` -- g saw what f was given, not what it returned).
+    auto next = Promise::state_of(capability.promise);
+    if (!next) next = std::make_shared<PromiseData>();
+    PromiseHandler handler;
+    handler.on_fulfilled = std::move(on_fulfilled);
+    handler.on_rejected = std::move(on_rejected);
+    handler.next_promise = next;
+    handler.resolve = capability.resolve;       // undefined for %Promise%
+    handler.reject = capability.reject;
+    add_reaction(data, std::move(handler));
+    (void)promise;
+    return capability.promise;
+}
+
 void Promise::subscribe(const std::shared_ptr<PromiseData>& data,
                         std::function<void(bool rejected, const JsValue& value)> reaction,
                         JsRootSet keep_alive) {
@@ -359,20 +578,31 @@ JsValue Promise::create_promise_instance(std::shared_ptr<PromiseData> data) {
     JsObject* cell = Heap::default_heap().allocate_object();
     cell->prototype = JsIntrinsics::get().promise_proto;
     cell->klass = ObjectClass::Promise;
+    // The state is reachable from the cell as well as from the value: a class
+    // that extends Promise takes its parent's object over into the one `new`
+    // made (JsInterpreter::eval_super_call, take_over), and what travels
+    // between two cells is what a cell holds. The value's payload is what the
+    // engine copies around; `internal` is what survives a cell being copied.
+    cell->internal = data;
     // The promise's state lives outside the cell; whoever can reach the
     // promise can reach its result and its reactions.
-    cell->trace_extra = [data](Heap& heap) {
-        // This capture and the promise value's payload are the two owners a
+    cell->trace_extra = [cell](Heap& heap) {
+        const auto state = std::static_pointer_cast<PromiseData>(cell->internal);
+        const PromiseData& data = *state;
+        const long holders = state.use_count();
+        // The value's payload and this cell's own handle are the two owners a
         // promise has when only script refers to it. Any more and native code
         // (a resolver handed to a timer, a suspended async function) can settle
         // it after the object is gone, so its reactions must not be counted as
         // belonging to this cell: they stay roots.
-        if (heap.counting() && data.use_count() > 2) return;
-        if (!heap.first_visit(data.get())) return;
-        heap.mark_value(data->result);
-        for (const auto& handler : data->handlers) {
+        if (heap.counting() && holders > 3) return;
+        if (!heap.first_visit(state.get())) return;
+        heap.mark_value(data.result);
+        for (const auto& handler : data.handlers) {
             heap.mark_value(handler.on_fulfilled);
             heap.mark_value(handler.on_rejected);
+            heap.mark_value(handler.resolve);
+            heap.mark_value(handler.reject);
             if (handler.keep_alive) {
                 for (const auto& kept : *handler.keep_alive) heap.mark_value(kept);
             }
@@ -411,12 +641,38 @@ void install_promise_builtins(JsIntrinsics& realm) {
         if (!JsValue::current_is_construct()) {
             js_throw_type_error("Promise constructor cannot be invoked without 'new'");
         }
+        // §27.2.3.1: the object is OrdinaryCreateFromConstructor(new.target,
+        // "%Promise.prototype%", « [[PromiseState]] ... »). The executor is
+        // checked afterwards -- `Reflect.construct(Promise, [], NewTarget)`
+        // complains about the executor before NewTarget.prototype is read --
+        // and a new.target whose prototype is not an object leaves the
+        // promise with %Promise.prototype% (`get-prototype-abrupt.js`).
         const JsValue executor = js_arg(args, 0);
+        // The executor is asked about first, before new.target's prototype is
+        // read, and nothing of the promise exists until it has been accepted:
+        // §27.2.3.1 steps 3-7 read `NewTarget.prototype` only after step 3 has
+        // refused a non-callable executor. (`Reflect.construct(Promise, [],
+        // NewTarget)` with a counting prototype getter reads it zero times.)
         if (!executor.is_function()) {
             js_throw_type_error("Promise resolver " + js_describe_thrown(executor) + " is not a function");
         }
         auto data = std::make_shared<PromiseData>();
         JsValue promise = Promise::create_promise_instance(data);
+        // OrdinaryCreateFromConstructor(new.target, "%Promise.prototype%"): the
+        // object gets new.target's `prototype` when that is an object, and
+        // %Promise.prototype% otherwise. current_derived_this() is the engine's
+        // one place for that question: it reads the property once per call and
+        // remembers the answer in the call's slot, which js_construct then
+        // uses instead of reading the property a second time (`Reflect
+        // .construct(Promise, [fn], NewTarget)` with a counting getter: one
+        // read). Null there means it was read and was not an object; no
+        // answer at all means this is an ordinary call and there is nothing to
+        // do.
+        if (const JsValue* chosen = JsValue::current_derived_this()) {
+            if (chosen->is_object_like()) {
+                if (JsObject* target = chosen->as_prototype()) promise.object_val->prototype = target;
+            }
+        }
         auto [resolve_fn, reject_fn] = make_resolving_functions(data);
         JsValue thrown;
         // The executor runs synchronously; if it throws, the promise rejects.
@@ -441,55 +697,96 @@ void install_promise_builtins(JsIntrinsics& realm) {
     }
 
     // ---- Promise.prototype ------------------------------------------------
+    // §27.2.5.4: the receiver, then SpeciesConstructor(promise, %Promise%),
+    // then NewPromiseCapability(C). The promise the reaction fills is the
+    // species constructor's, so `class P extends Promise {}` gets a P back.
     js_define_method(pp, "then", 2, [](Args args) {
-        auto data = this_promise("then");
-        return Promise::create_promise_instance(Promise::then(data, js_arg(args, 0), js_arg(args, 1)));
-    });
-    js_define_method(pp, "catch", 1, [](Args args) {
-        auto data = this_promise("catch");
-        return Promise::create_promise_instance(Promise::then(data, JsValue::make_undefined(), js_arg(args, 0)));
-    });
-    js_define_method(pp, "finally", 1, [](Args args) {
-        auto data = this_promise("finally");
-        const JsValue callback = js_arg(args, 0);
-        if (!callback.is_function()) {
-            return Promise::create_promise_instance(Promise::then(data, callback, callback));
+        JsValue me = JsValue::current_this();
+        if (!Promise::is_promise(me)) {
+            js_throw_type_error("Method Promise.prototype.then called on incompatible receiver " +
+                                js_describe_thrown(me));
         }
-        // The callback's return value is ignored (unless it is a rejected
-        // promise or it throws); the original outcome passes through.
-        auto next = std::make_shared<PromiseData>();
-        Promise::subscribe(data, [next, callback](bool rejected, const JsValue& value) {
-            JsValue returned;
-            JsValue thrown;
-            if (!js_capture_throw([&] { returned = callback.call({}); }, thrown)) {
-                Promise::reject(next, thrown);
-                return;
-            }
-            Promise::subscribe(Promise::to_promise(returned), [next, rejected, value](bool inner_rejected, const JsValue& inner) {
-                if (inner_rejected) Promise::reject(next, inner);
-                else if (rejected) Promise::reject(next, value);
-                else Promise::resolve(next, value);
-            }, js_roots({value}));
-        }, js_roots({callback}));
-        return Promise::create_promise_instance(next);
+        auto data = Promise::state_of(me);
+        JsValue constructor = species_constructor(me, Promise::create_constructor());
+        PromiseCapability capability = Promise::capability_for(data, constructor);
+        return Promise::then_into(me, data, js_arg(args, 0), js_arg(args, 1), capability);
+    });
+    // §27.2.5.1: a call to `then`, whatever the receiver it was found on --
+    // so a receiver that only has `then` is enough, and its own `then` is what
+    // runs (`SpeciesConstructor` is asked by `then`, not here).
+    js_define_method(pp, "catch", 1, [](Args args) {
+        JsValue me = JsValue::current_this();
+        JsValue then = me.get_property("then");
+        if (!then.is_function()) js_throw_type_error("Promise.prototype.catch: then is not a function");
+        return then.call_with_this(me, {JsValue::make_undefined(), js_arg(args, 0)});
+    });
+    // §27.2.5.3: `then` twice with the wrappers the standard names
+    // (ThenFinally and CatchFinally). Both wrappers return `valueThunk`'s or
+    // `thenFinally`'s answer, and a non-callable argument makes them the
+    // identity: the original outcome then passes through untouched, and it is
+    // `then` that makes the promise, so a subclass's species is honoured.
+    js_define_method(pp, "finally", 1, [](Args args) {
+        JsValue me = JsValue::current_this();
+        if (!me.is_object_like()) {
+            js_throw_type_error("Method Promise.prototype.finally called on incompatible receiver " +
+                                js_describe_thrown(me));
+        }
+        const JsValue on_finally = js_arg(args, 0);
+        // PromiseResolve(%Promise%, value) for `then`'s first call, which the
+        // standard spells as `then` on the result of ThenFinally.
+        auto make_wrapper = [on_finally](bool fulfilled) {
+            return js_make_native("", 1, [on_finally, fulfilled](Args inner) {
+                const JsValue& value = arg_or_undefined(inner, 0);
+                if (!on_finally.is_function()) return value;
+                JsValue result;
+                JsValue thrown;
+                if (!js_capture_throw([&] { result = on_finally.call({}); }, thrown)) js_throw(thrown);
+                JsValue value_thunk = js_make_native("", 0, [value](Args) { return value; });
+                value_thunk.function_cell()->not_constructor = true;
+                JsValue from_finally = Promise::resolve_from(Promise::create_constructor(), result);
+                if (fulfilled) return from_finally.get_property("then").call_with_this(from_finally, {value_thunk});
+                JsValue thrower = js_make_native("", 0, [value](Args) -> JsValue {
+                    js_throw(value);
+                    return JsValue::make_undefined();
+                });
+                thrower.function_cell()->not_constructor = true;
+                return from_finally.get_property("then").call_with_this(from_finally, {thrower});
+            });
+        };
+        // `onFinally` is read once, as the wrapper closes over it.
+        JsValue then_fn = me.get_property("then");
+        if (!then_fn.is_function()) js_throw_type_error("Promise.prototype.finally: then is not a function");
+        return then_fn.call_with_this(me, {make_wrapper(true), make_wrapper(false)});
     });
 
     // ---- Static methods ---------------------------------------------------
+    // All four of these are generic in their receiver (§27.2.4): `this` is a
+    // constructor, and what it makes is the promise the answer is. `resolve`
+    // and `reject` are on %Promise% itself too, where the receiver is the
+    // constructor and the engine makes the promise and its state together.
     js_define_method(ctor, "resolve", 1, [](Args args) {
-        const JsValue& value = js_arg(args, 0);
-        if (value.promise_value()) return value;        // already a promise: returned as is
-        return Promise::make_resolved(value);
+        // A copy: current_this() is a reference into the call context, and the
+        // constructor below starts a call that overwrites it. Held by reference
+        // the receiver became that call's `this` -- an object -- and the
+        // constructor it stood for was lost (Phase 196).
+        const JsValue constructor = JsValue::current_this();
+        return Promise::resolve_from(constructor, js_arg(args, 0));
     });
     js_define_method(ctor, "reject", 1, [](Args args) {
-        return Promise::make_rejected(js_arg(args, 0));
+        const JsValue constructor = JsValue::current_this();   // a copy; see `resolve`
+        PromiseCapability capability = Promise::new_capability(constructor);
+        capability.reject.call({js_arg(args, 0)});
+        return capability.promise;
     });
     js_define_method(ctor, "withResolvers", 0, [](Args) {
-        auto data = std::make_shared<PromiseData>();
-        auto [resolve_fn, reject_fn] = make_resolving_functions(data);
+        // §27.2.4.8: the object has `promise`, then `resolve`, then `reject`,
+        // in that order, and they are the capability's own functions.
+        const JsValue constructor = JsValue::current_this();   // a copy; see `resolve`
+        PromiseCapability capability = Promise::new_capability(constructor);
         JsValue result = JsValue::make_object();
-        result.set_property("promise", Promise::create_promise_instance(data));
-        result.set_property("resolve", resolve_fn);
-        result.set_property("reject", reject_fn);
+        result.set_property("promise", capability.promise);
+        result.set_property("resolve", capability.resolve);
+        result.set_property("reject", capability.reject);
         return result;
     });
 
@@ -544,21 +841,34 @@ void install_promise_builtins(JsIntrinsics& realm) {
     });
 
     js_define_method(ctor, "race", 1, [](Args args) {
-        auto result = std::make_shared<PromiseData>();
+        // §27.2.4.5: the first element to settle decides the answer, through
+        // the capability's own functions.
+        JsValue constructor = JsValue::current_this();
+        if (!constructor.is_object_like()) constructor = Promise::create_constructor();
+        PromiseCapability capability = Promise::new_capability(constructor);
+        auto result = Promise::state_of(capability.promise);
+        const bool through_capability = !result;
+        if (through_capability) result = std::make_shared<PromiseData>();
+        auto settle_answer = [capability, result, through_capability](bool rejected, const JsValue& value) {
+            if (through_capability) (rejected ? capability.reject : capability.resolve).call({value});
+            else if (rejected) Promise::reject(result, value);
+            else Promise::resolve(result, value);
+        };
         JsValue thrown;
         const bool ok = js_capture_throw([&] {
-            auto [constructor, resolve] = combinator_resolve(Promise::create_constructor());
+            JsValue resolve = constructor.get_property("resolve");
+            if (!resolve.is_function()) js_throw_type_error("Promise resolve is not a function");
             js_iterate(js_arg(args, 0), [&](const JsValue& item) {
                 JsValue next_promise = resolve.call_with_this(constructor, {item});
-                subscribe_combinator_item(next_promise, [result](bool rejected, const JsValue& value) {
-                    if (rejected) Promise::reject(result, value);
-                    else Promise::resolve(result, value);
+                subscribe_combinator_item(next_promise, [result, settle_answer](bool rejected, const JsValue& value) {
+                    if (result->state != PromiseState::Pending) return;
+                    settle_answer(rejected, value);
                 }, result);
                 return true;
             });
         }, thrown);
-        if (!ok) Promise::reject(result, thrown);
-        return Promise::create_promise_instance(result);
+        if (!ok) settle_answer(true, thrown);
+        return capability.promise;
     });
 
     realm.add_global("Promise", ctor);

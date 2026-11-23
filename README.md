@@ -151,7 +151,7 @@ Read the number for what it is:
   its `built-ins`, `language` and `annexB` directories that are not modules,
   31,220<!--metrics:t262.full.pass/num--> pass (65.1%<!--metrics:t262.full/pct-->; 29,450 / 61.4% last recorded before Phase 88, 27,872 /
   58.1% before Phase 55, 26,012 / 54.2% before Phase 44); of the 15,686
-  on functions, classes and objects, 14,980<!--metrics:t262.default.now/num--> pass (95.5%<!--metrics:t262.default/pct-->; 14,969<!--metrics:t262.default.before/num--> / 95.4%<!--metrics:t262.default.before_pct/pct-->
+  on functions, classes and objects, 14,993<!--metrics:t262.default.now/num--> pass (95.6%<!--metrics:t262.default/pct-->; 14,982<!--metrics:t262.default.before/num--> / 95.5%<!--metrics:t262.default.before_pct/pct-->
   before Phase 88, 12,359 / 78.8% before Phase 59, 10,835 / 69.1% before
   Phase 44). `make test262` runs the
   latter. It is used for what a change moved between two builds, not as a

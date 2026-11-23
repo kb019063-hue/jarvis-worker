@@ -43,14 +43,14 @@
       "date": "2026-11-20"
     },
     "test262_default_directories": {
-      "before_pass": 14969,
+      "before_pass": 14982,
       "before_of": 15686,
-      "now_pass": 14980,
+      "now_pass": 14993,
       "now_of": 15686,
       "fixed": 11,
       "command": "python3 tools/conformance/run_test262.py --binary before=<branch point> --binary now=build/litebird",
       "date": "2026-11-23",
-      "note": "the 21 default directories; 'before' is the commit the phase started from. Phase 199 fixed 11 with 0 lost (39 global names had hasOwnProperty true and no descriptor)"
+      "note": "the 21 default directories; 'before' is the commit the phase started from. Phase 199 fixed 11 with 0 lost (39 global names had hasOwnProperty true and no descriptor); both figures are of the tree it landed on, without and with that change (its author had 14969 and 14980 on c295b1c)"
     },
     "test262_class_directories": {
       "before_pass": 6832,

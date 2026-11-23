@@ -5,7 +5,11 @@
 > claimed that file first. When #238 was on `main`, on 23 November, the
 > landing session put the change back as it was written and landed the whole
 > with #240. Everything below was measured by its author on a build that
-> carried it: +11 test262, +1 js-conformance, 0 lost.
+> carried it: +11 test262, +1 js-conformance, 0 lost. Measured again on
+> the tree it landed on (`main` `51fb965` and what #240 carries), without
+> the change and with it: test262, the 21 default directories, 14,982 and
+> 14,993 of 15,686 (11 gained, none lost); `make js-conformance` 1,146 of
+> 1,158 both times.
 
 *Finding 203.* The global object and the global environment are two things
 that have to answer as one. §9.1.1.4 makes the global declarations — `Object`,

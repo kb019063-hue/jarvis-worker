@@ -1785,7 +1785,6 @@
           "describe": "nowrap does not create a second line"
         }
       ],
-      "known_failure": "white-space:nowrap does not prevent wrapping inline replaced elements: the third 20px image appears on the second line instead of overflowing the 45px container.",
       "note": "The span inherits nowrap to the images; the viewport is wide enough for the overflow."
     },
     {
@@ -1886,7 +1885,6 @@
           "describe": "second row opaque cell paints above tbody and table"
         }
       ],
-      "known_failure": "tbody (display:table-row-group) backgrounds are not painted: the transparent cell at (0, 40) exposes the red table background instead of the green tbody background (while tr over table and td over tr do paint).",
       "note": "CSS 2.1 \u00a717.5.1 six-layer table background stack: cell > row > row-group (tbody) > column > column-group > table."
     },
     {
@@ -2024,7 +2022,6 @@
           "describe": "below the 60px row remains white"
         }
       ],
-      "known_failure": "A table cell with shorter content does not stretch its painted background to the row height of a taller sibling: cell 0 stops painting red at y=20, leaving [0..50, 20..60] white.",
       "note": "CSS 2.1 \u00a717.5.3: every cell in a row takes the full height of the row."
     },
     {
@@ -2344,7 +2341,6 @@
           "describe": "rest of line 2 is blank"
         }
       ],
-      "known_failure": "display:inline-block elements do not participate in horizontal inline flow: Litebird stacks all three boxes vertically at x=0 (y=0..20, 20..40, 40..60) like block boxes.",
       "note": "CSS 2.1 \u00a79.2.4 and \u00a79.4.2: inline-block generates an inline-level block container that flows horizontally on lines and wraps at the container width."
     },
     {
@@ -2397,7 +2393,6 @@
           "describe": "vertical-align:bottom places the 10px image at y=30..40"
         }
       ],
-      "known_failure": "vertical-align:top and vertical-align:bottom are not applied to inline replaced elements: Litebird vertically centers both 10px images at y=15..25 inside the 40px line box.",
       "note": "CSS 2.1 \u00a710.8.1: vertical-align:top and vertical-align:bottom align boxes to the line box edges independently of font metrics."
     },
     {
@@ -2476,7 +2471,6 @@
           "describe": "right of the image stays background"
         }
       ],
-      "known_failure": "Inline box horizontal margin-left and padding-left do not offset a child replaced element: Litebird paints the 20px image starting at x=0 and widened to x=0..30 instead of x=20..40.",
       "note": "CSS 2.1 \u00a78.3, \u00a78.4, and \u00a79.4.2: horizontal margin and padding on an inline box advance the inline cursor before its child content."
     },
     {
@@ -2569,7 +2563,7 @@
         }
       ],
       "known_failure": "HTMLCanvasElement.getContext('webgl') returns null (no WebGL implementation yet), so the 40x40 canvas remains #ffffff instead of #00ff00.",
-      "note": "Khronos WebGL 1.0 §§2.2, 5.14.3: paired with canvas_2d_script_paints_canvas_green so the only variable under test is WebGL context creation and compositing."
+      "note": "Khronos WebGL 1.0 \u00a7\u00a72.2, 5.14.3: paired with canvas_2d_script_paints_canvas_green so the only variable under test is WebGL context creation and compositing."
     }
   ]
 }

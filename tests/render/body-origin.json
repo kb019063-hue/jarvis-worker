@@ -998,7 +998,6 @@
     {
       "name": "inline_body_honors_its_default_horizontal_margin",
       "html": "<!doctype html><body style=\"display:inline;background:rgba(255,0,0,.5);color:transparent\">hello world</body>",
-      "known_failure": "The document-body placement path only handles a block-level body. Chromium starts the inline body at x=8; the anonymous layout wrapper currently starts its fragments at x=0.",
       "assert": [
         {
           "kind": "pixel",

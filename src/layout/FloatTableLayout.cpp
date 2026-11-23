@@ -297,8 +297,14 @@ void LayoutBox::layout_table(float containing_width) {
 
     // 1. Gather the row grid, flattening row groups and synthesising rows for
     //    cells that are direct children of the table.
+    struct RowGroupSpan {
+        std::shared_ptr<LayoutBox> box;
+        std::size_t first_row{0};
+        std::size_t last_row{0}; // exclusive
+    };
     std::vector<std::vector<std::shared_ptr<LayoutBox>>> grid;
     std::vector<std::shared_ptr<LayoutBox>> row_boxes;
+    std::vector<RowGroupSpan> row_groups;
 
     for (const auto& child : children) {
         if (child->style->is_table_caption()) continue;
@@ -310,6 +316,7 @@ void LayoutBox::layout_table(float containing_width) {
             grid.push_back(std::move(cells));
             row_boxes.push_back(child);
         } else if (child->style->is_table_row_group()) {
+            const std::size_t group_first = grid.size();
             for (const auto& row : child->children) {
                 std::vector<std::shared_ptr<LayoutBox>> cells;
                 if (row->box_type == BoxType::TableRowNode) {
@@ -323,6 +330,7 @@ void LayoutBox::layout_table(float containing_width) {
                     row_boxes.push_back(nullptr);
                 }
             }
+            row_groups.push_back(RowGroupSpan{child, group_first, grid.size()});
         } else if (child->box_type == BoxType::TableCellNode) {
             // Consecutive cells directly in the table form one anonymous row.
             if (grid.empty() || (!row_boxes.empty() && row_boxes.back() == nullptr)) {
@@ -628,7 +636,8 @@ void LayoutBox::layout_table(float containing_width) {
         y_cursor += row_heights[r] + spacing_y;
     }
 
-    // 7. Position the cells. A cell that spans rows fills the box it covers.
+    // 7. Position the cells. Every cell stretches to cover the full height of
+    //    the row (or spanned rows) it occupies (CSS 2.1 §17.5.3).
     for (auto& entry : placed) {
         const auto& cell = entry.box;
         const float new_x = dimensions.content.x + column_left(entry.col) +
@@ -639,14 +648,12 @@ void LayoutBox::layout_table(float containing_width) {
                             cell->dimensions.padding.top;
         cell->shift_position(new_x - cell->dimensions.content.x, new_y - cell->dimensions.content.y);
 
-        if (entry.rowspan > 1) {
-            float spanned = spacing_y * static_cast<float>(entry.rowspan - 1);
-            for (std::size_t r = entry.row; r < entry.row + entry.rowspan && r < row_count; ++r) {
-                spanned += row_heights[r];
-            }
-            const float current = cell->dimensions.margin_box().height;
-            if (spanned > current) cell->dimensions.content.height += spanned - current;
+        float spanned = spacing_y * static_cast<float>(entry.rowspan - 1);
+        for (std::size_t r = entry.row; r < entry.row + entry.rowspan && r < row_count; ++r) {
+            spanned += row_heights[r];
         }
+        const float current = cell->dimensions.margin_box().height;
+        if (spanned > current) cell->dimensions.content.height += spanned - current;
     }
 
     for (std::size_t r = 0; r < row_count; ++r) {
@@ -659,6 +666,24 @@ void LayoutBox::layout_table(float containing_width) {
         row->dimensions.margin = row->style->margin;
         row->dimensions.padding = row->style->padding;
         row->dimensions.border = row->style->border_width;
+    }
+
+    for (const auto& group : row_groups) {
+        auto& gb = group.box;
+        gb->dimensions.margin = gb->style->margin;
+        gb->dimensions.padding = gb->style->padding;
+        gb->dimensions.border = gb->style->border_width;
+        gb->dimensions.content.x = dimensions.content.x;
+        gb->dimensions.content.width = total;
+        if (group.last_row > group.first_row) {
+            const float top = row_top[group.first_row];
+            const float bottom = row_top[group.last_row - 1] + row_heights[group.last_row - 1];
+            gb->dimensions.content.y = dimensions.content.y + top;
+            gb->dimensions.content.height = std::max(0.0f, bottom - top);
+        } else {
+            gb->dimensions.content.y = dimensions.content.y;
+            gb->dimensions.content.height = 0.0f;
+        }
     }
 
     // 8. Height: explicit, or the grid's own height, plus the bottom

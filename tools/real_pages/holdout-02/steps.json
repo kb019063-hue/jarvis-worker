@@ -1,6 +1,138 @@
 {
- "H1":[["read","initially hidden","!visible('#mypopover')","true"],["click","[popovertargetaction=show]"],["read","shown with text","visible('#mypopover') && text('#mypopover')==='Popover content'","true"],["click","[popovertargetaction=hide]"],["read","hidden again","!visible('#mypopover')","true"]],
- "H2":[["read","initial result","text('.result')","Result: 0"],["click","#number1"],["type","6"],["key","Tab"],["click","#number2"],["type","7"],["key","Tab"],["read","result after change events","text('.result')","Result: 42"]],
- "H3":[["read","four boxes at load","String(document.querySelectorAll('section div').length)","4"],["click","section div"],["read","first box selected (aqua border)","attr('section div','style').includes('aqua')","true"],["click",".after"],["read","five boxes after the insert","String(document.querySelectorAll('section div').length)","5"]],
- "H4":[["read","only the header row at load","String(document.querySelectorAll('.param-table tr').length)","1"],["click","a[href='?firstName=Ayse&food=rice%20pudding']"],["read","two body rows after navigation","String(document.querySelectorAll('.param-table tr').length)","3"],["read","keys sorted: food first","document.querySelectorAll('.param-table tr')[1].cells[0].innerText","food"],["read","percent-decoding: rice pudding","document.querySelectorAll('.param-table tr')[1].cells[1].innerText","rice pudding"],["read","second body row: firstName","document.querySelectorAll('.param-table tr')[2].cells[0].innerText","firstName"],["read","output line present","text('#url-output').includes('Current URL:')","true"]]
+ "H1": [
+  [
+   "read",
+   "initially hidden",
+   "!visible('#mypopover')",
+   "true"
+  ],
+  [
+   "click",
+   "[popovertargetaction=show]"
+  ],
+  [
+   "read",
+   "shown with text",
+   "visible('#mypopover') && text('#mypopover')==='Popover content'",
+   "true"
+  ],
+  [
+   "click",
+   "[popovertargetaction=hide]"
+  ],
+  [
+   "read",
+   "hidden again",
+   "!visible('#mypopover')",
+   "true"
+  ]
+ ],
+ "H2": [
+  [
+   "read",
+   "initial result",
+   "text('.result')",
+   "Result: 0"
+  ],
+  [
+   "click",
+   "#number1"
+  ],
+  [
+   "type",
+   "6"
+  ],
+  [
+   "key",
+   "Tab"
+  ],
+  [
+   "click",
+   "#number2"
+  ],
+  [
+   "type",
+   "7"
+  ],
+  [
+   "key",
+   "Tab"
+  ],
+  [
+   "read",
+   "result after change events",
+   "text('.result')",
+   "Result: 42"
+  ]
+ ],
+ "H3": [
+  [
+   "read",
+   "four boxes at load",
+   "String(document.querySelectorAll('section div').length)",
+   "4"
+  ],
+  [
+   "click",
+   "section div"
+  ],
+  [
+   "read",
+   "first box selected (aqua border)",
+   "attr('section div','style').includes('aqua')",
+   "true"
+  ],
+  [
+   "click",
+   ".after"
+  ],
+  [
+   "read",
+   "five boxes after the insert",
+   "String(document.querySelectorAll('section div').length)",
+   "5"
+  ]
+ ],
+ "H4": [
+  [
+   "read",
+   "only the header row at load",
+   "String(document.querySelectorAll('.param-table tr').length)",
+   "1"
+  ],
+  [
+   "click",
+   "a[href='?firstName=Ayse&food=rice%20pudding']"
+  ],
+  [
+   "read",
+   "two body rows after navigation",
+   "String(document.querySelectorAll('.param-table tr').length)",
+   "3"
+  ],
+  [
+   "read",
+   "keys sorted: firstName first",
+   "document.querySelectorAll('.param-table tr')[1].cells[0].innerText",
+   "firstName"
+  ],
+  [
+   "read",
+   "percent-decoding: rice pudding",
+   "document.querySelectorAll('.param-table tr')[2].cells[1].innerText",
+   "rice pudding"
+  ],
+  [
+   "read",
+   "sorted second row: food",
+   "document.querySelectorAll('.param-table tr')[2].cells[0].innerText",
+   "food"
+  ],
+  [
+   "read",
+   "output line present",
+   "text('#url-output').includes('Current URL:')",
+   "true"
+  ]
+ ]
 }

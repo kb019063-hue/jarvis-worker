@@ -15,7 +15,7 @@ enum class NodeKind : uint8_t {
     Literal, Identifier, TemplateLiteral, TaggedTemplate, ArrayLiteral, ObjectLiteral,
     Function, Class, Regex, Unary, Update, Binary, Assign, Conditional, Call, New,
     Member, Index, Sequence, Spread, Yield, Await, SuperCall, SuperMember,
-    OptionalChain, NewTarget, PrivateIn,
+    OptionalChain, NewTarget, PrivateIn, ImportCall,
     // Statements
     ExprStmt, VarDecl, Block, If, While, DoWhile, For, ForEach, Return, Break,
     Continue, Throw, Try, Switch, FunctionDecl, ClassDecl, Labeled, Empty,
@@ -421,6 +421,18 @@ public:
     std::unique_ptr<Expr> expression;
     explicit AwaitExpr(std::unique_ptr<Expr> expr)
         : Expr(NodeKind::Await), expression(std::move(expr)) {}
+};
+
+/// `import(specifier)` -- ECMA-262 §13.3.12 (Import Calls). This engine loads
+/// no modules, so evaluating it rejects; what the node is for is the part a
+/// parser owes the language before any of that: `import` is a keyword only
+/// where a call parenthesis follows it, so the expression parses and its
+/// argument is evaluated. `import.meta` is not this node and is still refused.
+class ImportCallExpr : public Expr {
+public:
+    std::unique_ptr<Expr> specifier;
+    explicit ImportCallExpr(std::unique_ptr<Expr> spec)
+        : Expr(NodeKind::ImportCall), specifier(std::move(spec)) {}
 };
 
 /// `super(args)` inside a derived class constructor.

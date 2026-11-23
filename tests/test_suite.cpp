@@ -32174,6 +32174,64 @@ TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling) {
     assert(resized->get_pixel_color(239, 179) == Color(255, 127, 127));
 }
 
+TEST(browser_shell_geometry_is_viewport_relative) {
+    using namespace litebird;
+    // Phase 222, finding 226: getBoundingClientRect must return viewport
+    // coordinates (document rect minus scroll), and window.scrollX/Y must
+    // reflect the shell's scroll. A hidden element (display:none) has no box
+    // and must read 0,0,0,0.
+    BrowserShell shell(800, 600, 80, 24);
+    assert(shell.navigate_to("tests/render/canvas-scroll.html"));
+    // canvas-scroll.html has a tall canvas; its viewport starts at 0.
+    // Scroll and check that geometry follows the viewport.
+    auto rect_top = [&](const char* sel) -> double {
+        std::string js = std::string("document.querySelector('") + sel + "').getBoundingClientRect().top";
+        return shell.js_engine()->eval(js).to_number();
+    };
+    auto rect_left = [&](const char* sel) -> double {
+        std::string js = std::string("document.querySelector('") + sel + "').getBoundingClientRect().left";
+        return shell.js_engine()->eval(js).to_number();
+    };
+    // Initially the body is at its document position; window scroll is 0.
+    double body_top_0 = rect_top("body");
+    double body_left_0 = rect_left("body");
+    assert(shell.js_engine()->eval("window.scrollY").to_number() == 0.0);
+    assert(shell.js_engine()->eval("window.pageYOffset").to_number() == 0.0);
+
+    shell.scroll_to(15, 300);
+    assert(shell.scroll_x() == 15 && shell.scroll_y() == 300);
+    // Document and window must expose the same scroll.
+    assert(shell.document()->scroll_x() == 15 && shell.document()->scroll_y() == 300);
+    assert(shell.js_engine()->eval("window.scrollX").to_number() == 15.0);
+    assert(shell.js_engine()->eval("window.scrollY").to_number() == 300.0);
+    assert(shell.js_engine()->eval("window.pageXOffset").to_number() == 15.0);
+    assert(shell.js_engine()->eval("window.pageYOffset").to_number() == 300.0);
+
+    // Body's viewport position must be document position minus scroll.
+    double body_top_scrolled = rect_top("body");
+    assert(body_top_scrolled == body_top_0 - 300.0);
+    double body_left_scrolled = rect_left("body");
+    assert(body_left_scrolled == body_left_0 - 15.0);
+
+    // A canvas element inside the document should also be viewport-relative.
+    // canvas-scroll.html paints a canvas at document (0,0) with size 200x150 in the test above;
+    // its rect should also be -300 after scroll.
+    // For a hidden element, the rect must be 0,0,0,0 even when scrolled.
+    shell.js_engine()->eval("document.body.style.display = 'none'");
+    shell.relayout();
+    double hidden_top = rect_top("body");
+    assert(hidden_top == 0.0);
+    assert(shell.js_engine()->eval("document.querySelector('body').getBoundingClientRect().width").to_number() == 0.0);
+    double hidden_left = rect_left("body");
+    assert(hidden_left == 0.0);
+    // getClientRects on a hidden element must be empty.
+    assert(shell.js_engine()->eval("document.querySelector('body').getClientRects().length").to_number() == 0.0);
+    shell.js_engine()->eval("document.body.style.display = 'block'");
+    shell.relayout();
+    // After restoring, scroll is still 300, so viewport must be document minus scroll again.
+    assert(rect_top("body") == body_top_0 - 300.0);
+}
+
 TEST(a_built_in_method_is_not_a_constructor) {
     using namespace litebird;
 
@@ -35609,6 +35667,7 @@ int main() {
     RUN_TEST(pseudo_elements_generate_a_box_that_can_be_hit);
     RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
     RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
+    RUN_TEST(browser_shell_geometry_is_viewport_relative);
 
     // Phase 157: ArrayBuffer.prototype.transfer(), transferToFixedLength(), detached, and resize().
     RUN_TEST(arraybuffer_transfer_detach_and_resize);

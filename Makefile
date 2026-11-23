@@ -173,6 +173,18 @@ DEEP_ASAN_DEPTH ?= 10000
 
 all: $(TARGET)
 
+## Compare query/fragment-only resolution with Node's URL implementation.
+.PHONY: verify-relative-navigation
+verify-relative-navigation: $(BUILD_DIR)/relative_navigation_fixture
+	@python3 tools/conformance/verify_relative_navigation.py --binary $(BUILD_DIR)/relative_navigation_fixture
+
+$(BUILD_DIR)/relative_navigation_fixture: $(OBJS) tools/conformance/relative_navigation_fixture.cpp
+	$(CXX) $(CXXFLAGS) $(OBJS) tools/conformance/relative_navigation_fixture.cpp -o $@
+
+## The original offline driver, for rechecking exposed holdout-02 tasks.
+$(BUILD_DIR)/holdout_02_driver: $(OBJS) tools/real_pages/holdout-02/drive.cpp
+	$(CXX) $(CXXFLAGS) $(OBJS) tools/real_pages/holdout-02/drive.cpp -o $@
+
 ## Check untrusted shell labels without writing attack bytes to a terminal.
 .PHONY: verify-terminal-shell-safety
 verify-terminal-shell-safety: $(TARGET)

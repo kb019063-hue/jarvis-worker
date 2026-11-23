@@ -53,6 +53,8 @@ jobs:
         run: make test
       - name: Shell labels cannot inject terminal controls
         run: make verify-terminal-shell-safety
+      - name: Pathless URL references agree with Node
+        run: make verify-relative-navigation
       - name: GC invariants hold through the shell
         # Unreachable cycles and closure captures must be reclaimed, churn
         # must not grow the live set, what a global names must stay intact.

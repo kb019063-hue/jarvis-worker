@@ -2095,6 +2095,28 @@ void install_array_builtins(JsIntrinsics& realm) {
     js_define_hidden(ap, kIteratorKey, values_iterator);
     js_define_hidden(ap, "Symbol.iterator", values_iterator);
 
+    // Array.prototype[@@unscopables] (§23.1.3.34): the names a `with (array)`
+    // block must not resolve to the array, so a page written before these
+    // methods existed keeps seeing its own `values`, `keys` or `find` in the
+    // block. A null-prototype object, `true` under each name, and — unlike the
+    // methods it hides — neither writable nor enumerable on the prototype, but
+    // configurable. The list is the standard's, in its order: the twelve the
+    // 2015 edition named plus `findLast`, `findLastIndex` (2022) and
+    // `toReversed`, `toSorted`, `toSpliced` (2023).
+    {
+        JsValue unscopables = JsValue::make_object();
+        unscopables.object_val->prototype = nullptr;
+        for (const char* name : {"at", "copyWithin", "entries", "fill", "find", "findIndex",
+                                 "findLast", "findLastIndex", "flat", "flatMap", "includes",
+                                 "keys", "toReversed", "toSorted", "toSpliced", "values"}) {
+            unscopables.define_property(name, JsValue::make_boolean(true),
+                                       PropertyMap::Enumerable | PropertyMap::Writable |
+                                           PropertyMap::Configurable);
+        }
+        js_object_value(ap).define_property("@@unscopables", unscopables,
+                                           static_cast<uint8_t>(PropertyMap::Configurable));
+    }
+
     // Every method here is a built-in function, and a built-in function has no
     // [[Construct]]: `new Array.prototype.reverse()` is a TypeError, which
     // test262's not-a-constructor.js in each method's directory asks for. The

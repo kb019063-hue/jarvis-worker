@@ -666,6 +666,7 @@ Selector CssParser::parse_selector() {
         size_t cursor_before = m_cursor;
         std::string simple_raw;
         auto simple = parse_simple_selector(simple_raw, sel.has_host, sel.has_pseudo_element);
+        if (last_pseudo_element) sel.pseudo_element = last_pseudo_element;
         if (m_cursor == cursor_before) {
             // Unexpected character that simple selector cannot consume
             advance();
@@ -683,6 +684,7 @@ Selector CssParser::parse_selector() {
 }
 
 SimpleSelector CssParser::parse_simple_selector(std::string& raw_out, bool& has_host, bool& has_pseudo_element) {
+    last_pseudo_element = 0;
     SimpleSelector s;
     auto is_ident_char = [](char c) {
         return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_' ||
@@ -855,6 +857,11 @@ SimpleSelector CssParser::parse_simple_selector(std::string& raw_out, bool& has_
             if (double_colon || pseudo_name == "before" || pseudo_name == "after" ||
                 pseudo_name == "first-line" || pseudo_name == "first-letter") {
                 has_pseudo_element = true;
+                // Phase 215: `::before` and `::after` generate; the rest only
+                // make the selector match nothing. Recorded here so the
+                // resolver can ask for one without re-reading the raw text.
+                if (pseudo_name == "before") last_pseudo_element = 1;
+                else if (pseudo_name == "after") last_pseudo_element = 2;
             }
             if (pseudo_name == "host" || pseudo_name == "host-context") {
                 has_host = true;

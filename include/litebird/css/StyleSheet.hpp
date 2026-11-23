@@ -90,6 +90,11 @@ struct Selector {
     std::shared_ptr<SelectorList> compiled;
     bool has_host{false};
     bool has_pseudo_element{false};
+    /// Which pseudo-element, when `has_pseudo_element`: 0 none, 1 `::before`,
+    /// 2 `::after`. The other pseudo-elements (`::first-line`, `::first-letter`)
+    /// set the flag and leave this 0 -- they still make a selector that matches
+    /// no element, but no generated box is made for them yet.
+    uint8_t pseudo_element{0};
     bool metadata_computed{false};
     bool any_dynamic_specificity{false};
     CombinatorKind combinator_kind{CombinatorKind::Single};

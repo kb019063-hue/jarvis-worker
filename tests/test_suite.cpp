@@ -34680,6 +34680,131 @@ void test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties() 
     )") == "0,h,i,false,1,2,false,10,false,30,40,5,6,7,1");
 }
 
+void test_reduce_asks_for_each_place_as_it_reaches_it() {
+    auto eval = [](const char* src) -> std::string {
+        JsInterpreter js;
+        return js.eval(src).to_string();
+    };
+    // ECMA-262 §23.1.3.21 (reduce) and §23.1.3.22 (reduceRight) ask
+    // `HasProperty(O, Pk)` once per index, in the order the method walks, and
+    // the walk is bounded by the length read before the first callback. This
+    // engine listed the places that were there *before* the walk started and
+    // then only asked whether each of those had survived, so a place a
+    // callback created ahead of itself was never visited:
+    // `reduce/15.4.4.21-9-1.js` writes `arr[2]` from the callback while two is
+    // still a hole, and answered "75" where Node.js v22.22.3 answers "105".
+    //
+    // Every expectation below is what Node.js v22.22.3 prints for the same
+    // expression, and each names something the snapshot answers differently:
+    // a place created ahead of the walk, a place removed ahead of it, the
+    // length being fixed at the start, and reduceRight walking down.
+    //
+    // What the "before" column of finding 217 measured: of these twelve, the
+    // snapshot answers six wrongly (fill_hole_ahead, neg_result, add_ahead_once,
+    // rr_fill_below, plain_object, grow_mid).
+
+    // ---- a place the callback creates ahead of the walk is visited ---------
+    // The test262 case: a hole at 2 is filled by the callback at index 1, and
+    // the walk that reaches 2 afterwards sees it. A place created past the
+    // end is not visited, because the length was read first.
+    assert(eval(R"(
+        var arr = [1, 2, , 4, '5'];
+        arr.reduce(function (p, c) { arr[5] = 6; arr[2] = 3; return p + c; });
+    )") == "105");
+    // With an initial value the callback sees index 0 as well, so the place
+    // that appears at 2 is one the walk has not passed.
+    assert(eval(R"(
+        var seen = [];
+        [10, , 20, 30].reduce(function (p, c, i) { seen.push(i); return c - 1; }, 0);
+        seen.join(',');
+    )") == "0,2,3");
+
+    // ---- a place the callback removes ahead of the walk is not visited -----
+    assert(eval(R"(
+        var arr = [1, 2, 3, 4];
+        arr.reduce(function (p, c, i) { if (i === 0) delete arr[2]; return p + c; });
+    )") == "10");
+
+    // ---- the length is read once, before any callback ---------------------
+    // §23.1.3.21 step 3. A callback that lengthens the array cannot extend
+    // the walk; one that shortens it cannot end the walk early.
+    assert(eval(R"(
+        var arr = [1, 2, 3];
+        arr.reduce(function (p, c, i) { if (i === 0) arr.length = 1; return p + c; });
+    )") == "6");
+    assert(eval(R"(
+        var arr = [1, 2];
+        arr.reduce(function (p, c, i) { if (i === 0) arr.length = 99; return p + c; });
+    )") == "3");
+
+    // ---- a place the callback adds past the length is never visited --------
+    // The two places walked are handed to the callback and the three added at
+    // 3, 4 and 5 are not, so the callback runs twice and the array ends up
+    // six long.
+    assert(eval(R"(
+        var arr = [1, 2, 3];
+        var calls = 0;
+        arr.reduce(function (p, c, i) { calls++; arr[i + 3] = 9; return p; });
+        calls + ':' + arr.length;
+    )") == "2:6");
+
+    // ---- reduceRight walks from the top down ------------------------------
+    // The accumulator starts at the last place, so index 4 is not given to
+    // the callback; the hole at 3 is skipped and 2, 1 and 0 follow.
+    assert(eval(R"(
+        var seen = [];
+        var sum = [1, 2, 3, , 5].reduceRight(function (p, c, i) { seen.push(i); return p + c; });
+        seen.join(',') + '|' + sum;
+    )") == "2,1,0|11");
+    // A place the callback fills below itself is visited when the walk
+    // reaches it. This is the case that separates the standard's downward
+    // walk from listing the places upwards and reversing the list: with no
+    // initial value the callback never runs at index 2 here, so a version
+    // that fills the hole from index 2 looks right — the next case, where the
+    // callback does run at the top, answers 18 instead of 21.
+    assert(eval(R"(
+        var arr = [1, , 3];
+        arr.reduceRight(function (p, c, i) { if (i === 2) arr[1] = 2; return p + c; });
+    )") == "4");
+    assert(eval(R"(
+        var arr = [1, , 3];
+        arr.reduceRight(function (p, c, i) { if (i === 2) arr[1] = 2; return p + c; }, 0);
+    )") == "6");
+    assert(eval(R"(
+        var arr = [9, , , 9];
+        arr.reduceRight(function (p, c, i) { if (i === 3) { arr[1] = 1; arr[2] = 2; } return p + c; }, 0);
+    )") == "21");
+    // A place removed ahead of the walk — below it, for reduceRight — is
+    // skipped.
+    assert(eval(R"(
+        var arr = [1, 2, 3, 4];
+        arr.reduceRight(function (p, c, i) { if (i === 3) delete arr[1]; return p + c; });
+    )") == "10");
+
+    // ---- a receiver that is not an array ----------------------------------
+    // `HasProperty` is asked of the object as it is now, so a place a callback
+    // defines on a plain object's index is seen through the chain as any
+    // other would be.
+    assert(eval(R"(
+        var o = { length: 3, 0: 1 };
+        o.reduce = Array.prototype.reduce;
+        o.reduce(function (p, c, i) { if (i === 0) { o[1] = 2; o[2] = 3; } return p + c; });
+    )") == "1");
+    // Nothing to reduce and no initial value is a TypeError; a hole is not a
+    // place, so `[, ,]` is empty too; with an initial value nothing is asked.
+    assert(eval(R"(
+        function name(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }
+        name(function () { [].reduce(function () {}); }) + '|' +
+        name(function () { [, , ].reduce(function () {}); }) + '|' +
+        String([].reduce(function () {}, 7));
+    )") == "TypeError|TypeError|7");
+    assert(eval(R"(
+        var calls = 0;
+        [, , ].reduce(function () { calls++; }, 'start') + ':' + calls;
+    )") == "start:0");
+}
+
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -35218,6 +35343,10 @@ int main() {
     // Phase 202: a box's outline is a ring outside the border box that takes
     // no room; it is stored by the cascade and painted.
     RUN_TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for);
+
+    // Phase 213: `reduce`/`reduceRight` ask `HasProperty` at each index as the
+    // walk reaches it, so a place a callback creates ahead of itself is seen.
+    RUN_TEST(reduce_asks_for_each_place_as_it_reaches_it);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

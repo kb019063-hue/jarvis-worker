@@ -3,6 +3,7 @@
 // nothing caught.
 
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/js/DomEventDispatch.hpp"
 #include "litebird/js/EventLoop.hpp"
 
 #include <chrono>
@@ -934,6 +935,34 @@ JsValue make_event(Realm& realm, const char* iface, const std::string& type, boo
     state.composed = composed;
     for (auto& field : fields) state.set_field(field.name, std::move(field.value));
     return event;
+}
+
+bool begin_event_dispatch_at_target(const JsValue& event, const JsValue& target, bool trusted) {
+    EventState* state = state_of<EventState>(event);
+    if (!state || !target.is_object() || state->dispatching || !state->initialized) return false;
+    state->trusted = trusted;
+    state->dispatching = true;
+    state->target = target;
+    state->current_target = target;
+    state->phase = 2; // AT_TARGET
+    state->path = {target};
+    return true;
+}
+
+void end_event_dispatch_at_target(const JsValue& event) {
+    EventState* state = state_of<EventState>(event);
+    if (!state) return;
+    state->phase = 0;
+    state->current_target = undefined();
+    state->dispatching = false;
+    state->stop_propagation = false;
+    state->stop_immediate = false;
+    state->path.clear();
+}
+
+bool event_immediate_stopped(const JsValue& event) {
+    const EventState* state = state_of<EventState>(event);
+    return state && state->stop_immediate;
 }
 
 JsValue create_legacy_event(Realm& realm, const std::string& name) {

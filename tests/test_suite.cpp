@@ -4799,6 +4799,38 @@ TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs) {
     std::fflush(stdout);
 }
 
+TEST(hebrew_fixed_points_are_ordered_before_shaping) {
+    using namespace litebird;
+    const std::vector<TestGlyphSpec> glyphs = {
+        {0, 500, false, 0, 0, 0, 0},
+        {0x05E9, 600, true, 40, 0, 560, 500},
+        {0x05B8, 0, true, 10, 0, 20, 10},
+        {0x05C1, 0, true, 10, 0, 20, 10},
+        {0x05BC, 0, true, 10, 0, 20, 10},
+        {0x05C7, 0, true, 10, 0, 20, 10},
+        {' ', 200, false, 0, 0, 0, 0},
+        {0x0301, 0, true, 10, 0, 20, 10},
+    };
+    TrueTypeFont f;
+    assert(f.load_memory(build_synthetic_sfnt(1000, 800, -200, glyphs, {})));
+    auto ids = [&](const std::vector<uint32_t>& cps) {
+        std::vector<uint16_t> out;
+        for (const auto& g : f.shape_glyphs(cps, true, false)) out.push_back(g.glyph);
+        return out;
+    };
+    // No host font and no GDEF needed: preprocessing is a codepoint rule.
+    assert((ids({0x05E9, 0x05B8, 0x05C1}) == std::vector<uint16_t>{1, 3, 2}));
+    assert(ids({0x05E9, 0x05B8, 0x05C1}) == ids({0x05E9, 0x05C1, 0x05B8}));
+    assert((ids({0x05E9, 0x05B8, 0x05BC, 0x05C1}) == std::vector<uint16_t>{1, 3, 4, 2}));
+    // Equal-ranked qamats/qamats-qatan stay stable, including repeated marks.
+    assert((ids({0x05E9, 0x05C7, 0x05B8, 0x05B8}) == std::vector<uint16_t>{1, 5, 2, 2}));
+    // Neither a base, space, nor an unhandled combining mark is crossed.
+    assert((ids({0x05E9, 0x05B8, 0x05E9, 0x05C1}) == std::vector<uint16_t>{1, 2, 1, 3}));
+    assert((ids({0x05E9, 0x05B8, ' ', 0x05C1}) == std::vector<uint16_t>{1, 2, 6, 3}));
+    assert((ids({0x05E9, 0x05B8, 0x0301, 0x05C1}) == std::vector<uint16_t>{1, 2, 7, 3}));
+    assert(ids({}).empty());
+}
+
 TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely) {
     using namespace litebird;
 
@@ -9849,6 +9881,130 @@ TEST(computed_width_and_height_are_used_values) {
         var d = styleOf('width:calc(100% - 20px);height:10px');
         return getComputedStyle(d).width;
     })())JS").to_string() == "calc(100% - 20px)");
+}
+
+TEST(a_calc_percentage_is_of_the_declaration_not_the_viewport) {
+    using namespace litebird;
+    // A percentage inside a `calc()` is a share of what the property is
+    // measured against, and for two properties the cascade knows that:
+    // `font-size` percentages are of the *inherited* font size (CSS Fonts 4,
+    // §2.4) and `line-height` percentages of the element's *own* (CSS 2.1
+    // §10.8.1). The resolver made both a share of the viewport instead, so
+    // `font-size: calc(50% + 2px)` in a 20px paragraph computed to 402px —
+    // and laid out a 502px line box for one character while
+    // getComputedStyle reported 12px, because the script-side resolver
+    // evaluated the same declaration against the right basis.
+    //
+    // What can be asserted without trusting either resolver is the
+    // agreement: whatever getComputedStyle answers has to be the size of the
+    // box the layout built. Both halves are wrong in different ways on the
+    // engine before this, and on different declarations.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    js.eval(R"JS(
+        function sized(tag_and_style) {
+            var parts = tag_and_style.split('|');
+            var el = document.createElement(parts[0]);
+            el.setAttribute('style', parts[1]);
+            el.textContent = 'x';
+            document.body.appendChild(el);
+            return el;
+        }
+        function reported(el, prop) { return getComputedStyle(el)[prop]; }
+        var cases = {
+            halfPlus: sized('div|font-size:calc(50% + 2px)'),
+            percentOnly: sized('div|font-size:calc(50%)'),
+            emMixed: sized('div|font-size:calc(1em + 2px)'),
+            atRoot: sized('div|font-size:calc(10px)'),
+            maxPct: sized('div|font-size:max(50%, 30px)'),
+            minPct: sized('div|font-size:min(50%, 4px)'),
+            clampPct: sized('div|font-size:clamp(5px, 50%, 8px)'),
+            inherited: sized('span|font-size:calc(100% + 2px)'),
+            linePct: sized('div|line-height:calc(100% + 4px);font-size:10px'),
+            lineMax: sized('div|line-height:max(100%, 20px);font-size:10px'),
+            lineEm: sized('div|line-height:calc(1em + 2px);font-size:10px')
+        };
+        // The box a `font-size` of that many px makes: one line of one
+        // character at the default 1.25 line box.
+        function boxHeight(el) { return el.getBoundingClientRect().height; }
+        function fontSize(el) { return parseFloat(reported(el, 'fontSize')); }
+        function lineHeight(el) { return parseFloat(reported(el, 'lineHeight')); }
+    )JS");
+
+    // The parent is the body's 16px, so `50% + 2px` is 10px and `50%` is 8px.
+    // The line box is 1.25 of it, which is what the engine gives a
+    // `line-height: normal` box, so the two answers have to be the same one.
+    auto height = [&](const char* name) { return js.eval(std::string("boxHeight(cases.") + name + ")").to_number(); };
+    auto font = [&](const char* name) { return js.eval(std::string("fontSize(cases.") + name + ")").to_number(); };
+    assert(font("halfPlus") == 10 && std::abs(height("halfPlus") - 12.5) < 0.01);
+    assert(font("percentOnly") == 8 && std::abs(height("percentOnly") - 10.0) < 0.01);
+    // `1em` in a `font-size` is the inherited size, as anywhere else.
+    assert(font("emMixed") == 18 && std::abs(height("emMixed") - 22.5) < 0.01);
+    assert(font("atRoot") == 10 && std::abs(height("atRoot") - 12.5) < 0.01);
+    // The three comparisons need a basis before they can compare; the
+    // viewport is not it. At 16px: max(8,30)=30, min(8,4)=4, clamp(5,8,8)=8.
+    assert(font("maxPct") == 30 && std::abs(height("maxPct") - 37.5) < 0.01);
+    assert(font("minPct") == 4 && std::abs(height("minPct") - 5.0) < 0.01);
+    assert(font("clampPct") == 8 && std::abs(height("clampPct") - 10.0) < 0.01);
+    // An inline element's font size is inherited by its text, so its box is
+    // the line box the same size makes.
+    assert(font("inherited") == 18);
+
+    // A `line-height` percentage is of this element's own font size, and the
+    // reported length is the one the box was laid out with: 10px + 4px.
+    assert(js.eval("lineHeight(cases.linePct)").to_number() == 14 && std::abs(height("linePct") - 14) < 0.01);
+    assert(js.eval("lineHeight(cases.lineMax)").to_number() == 20 && std::abs(height("lineMax") - 20) < 0.01);
+    assert(js.eval("lineHeight(cases.lineEm)").to_number() == 12 && std::abs(height("lineEm") - 12) < 0.01);
+
+    // The invariant that ties the two resolvers together: no case reports a
+    // font size its own line box contradicts. On the engine before this, the
+    // first, second and third cases were out by a factor of the viewport.
+    assert(js.eval(R"JS((function () {
+        var bad = [];
+        for (var k in cases) {
+            var el = cases[k];
+            var size =/line/.test(k) ? null : fontSize(el);
+            var box = boxHeight(el);
+            var line = lineHeight(el);
+            if (size !== null && Math.abs(box - size * 1.25) > 0.01) bad.push(k);
+            if (line !== null && !isNaN(line) && Math.abs(box - line) > 0.01) bad.push(k + ':lh');
+        }
+        return bad.join(',');
+    })())JS").to_string() == "");
+
+    // The other properties a `calc()` percentage can appear in are still
+    // resolved against the viewport, which is the wrong basis and stays
+    // open (finding 199). The gap is pinned here so that a later fix is a
+    // change in this suite and not a surprise: a `calc(100% - 40px)` in a
+    // 600px block is the *viewport* less 40, not the block less 40.
+    assert(js.eval(R"JS((function () {
+        var wrap = document.createElement('div');
+        wrap.setAttribute('style', 'width:600px');
+        document.body.appendChild(wrap);
+        var d = document.createElement('div');
+        d.setAttribute('style', 'width:calc(100% - 40px);height:10px');
+        wrap.appendChild(d);
+        var answer = Math.round(d.getBoundingClientRect().width);
+        var viewport = Math.round(window.innerWidth);
+        wrap.remove();
+        // -1 means "the containing block, which is what it should be".
+        return answer === viewport - 40 ? -1 : answer;
+    })())JS").to_number() == -1);
+
+    // The same declaration against the basis layout can supply: a `calc()`
+    // of percentages and a plain percentage both resolve against the
+    // containing block, and the plain one is already right.
+    assert(js.eval(R"JS((function () {
+        var wrap = document.createElement('div');
+        wrap.setAttribute('style', 'width:600px');
+        document.body.appendChild(wrap);
+        var d = document.createElement('div');
+        d.setAttribute('style', 'width:50%;height:10px');
+        wrap.appendChild(d);
+        var answer = Math.round(d.getBoundingClientRect().width);
+        wrap.remove();
+        return answer;
+    })())JS").to_number() == 300);
 }
 
 TEST(computed_style_answers_for_every_property) {
@@ -17897,9 +18053,9 @@ TEST(html5_date_time_inputs_validation_and_stepping) {
            "1969-12||2024-02-29|||2026-W53|2026-03-04T05:06|2026-03-06|true|12:30:00.5|2026-W01|TypeError,InvalidStateError,InvalidStateError,TypeError,InvalidStateError");
 }
 
-// =============================================================================
+// ======================================================================
 // Phase 36: Usable Real-World Browser & Security (Finding 44) Test Suites
-// =============================================================================
+// ======================================================================
 
 TEST(deflate_zlib_and_gzip_roundtrip_and_bomb_limits) {
     using namespace litebird;
@@ -20459,10 +20615,10 @@ static void test_svg_real_world_paths_arcs_gradients_use_clip_and_guards() {
     assert(c_img && c_img->width == 40 && c_img->height == 40);
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 40: Worker MIME/event policy and lifecycle safety; Phase 66 extends
 // module execution and structured-clone delivery below.
-// ============================================================================
+// =====================================================================
 
 TEST(worker_mime_policy_enforces_javascript_content_types) {
     using namespace litebird;
@@ -21302,10 +21458,10 @@ TEST(js_strict_async_generator_identifier_context_and_line_terminators) {
     }
 }
 
-// =========================================================================
+// ==================================================================
 // Phase 42: Nested <iframe> Browsing Contexts, Origin/Sandbox Isolation,
 //           Cross-Realm DOM Wrappers, XHTML Execution, & Subdocument Layout
-// =========================================================================
+// ==================================================================
 
 TEST(iframe_browsing_context_hierarchy_and_navigation) {
     using namespace litebird;
@@ -22703,9 +22859,9 @@ TEST(js_a_page_with_compiled_custom_elements_is_collected) {
     }
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 50: CSS Color 4/5 color spaces, gamut mapping, color-mix(), relative colors
-// ============================================================================
+// =====================================================================
 
 static void test_css_color4_spaces_gamut_and_serialization() {
     using namespace litebird;
@@ -22922,9 +23078,9 @@ static void test_css_color45_style_resolver_dom_and_svg_integration() {
     assert(Color::from_argb(svg_img->get_pixel(15, 5)) == Color(255, 128, 128, 255));
 }
 
-// ============================================================================
+// =====================================================================
 // Warning 5: a DOMException is made in the Realm of the object it is about
-// ============================================================================
+// =====================================================================
 //
 // Web IDL creates an exception in the current realm of the function that
 // throws, and for a platform object that realm is the object's relevant realm.
@@ -23040,9 +23196,9 @@ TEST(dom_exceptions_belong_to_the_realm_of_the_object_they_are_about) {
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 47: WHATWG Encoding Standard, HTML <meta> prescan, XML EncName & CJK
-// ============================================================================
+// =====================================================================
 
 TEST(whatwg_text_encoding_labels_single_byte_and_multibyte_decoders) {
     using namespace litebird;
@@ -23551,9 +23707,9 @@ TEST(select_selectedcontent_cloning_and_edge_cases) {
     assert(deep_sc && deep_sc->text_content() == "DeepPick");
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 55: RegExp Unicode 17.0 properties, v/d flags, ES2025 modifiers & Symbol.*
-// ============================================================================
+// =====================================================================
 
 TEST(regexp_unicode17_tables_and_parse_time_validation) {
     using namespace litebird;
@@ -23716,9 +23872,9 @@ TEST(regexp_es2025_modifiers_duplicate_named_groups_escape_and_symbols) {
     assert(js.eval("phase55_ok").is_truthy());
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 60: Unicode 17.0 String normalize(), case mapping & CLDR 48 collation
-// ============================================================================
+// =====================================================================
 
 TEST(string_unicode17_normalization_tables_and_api) {
     using namespace litebird;
@@ -23895,9 +24051,9 @@ TEST(string_cldr48_uca_collation_and_ecma402_validation) {
     assert(js.eval("coll_ok && err_ok").is_truthy());
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 59: Temporal dead zone for derived constructor `this` and let/const/class
-// ============================================================================
+// =====================================================================
 
 TEST(js_derived_this_temporal_dead_zone) {
     using namespace litebird;
@@ -24086,9 +24242,9 @@ TEST(js_direct_eval_runs_in_the_callers_scope) {
            "0,1,2 c function 1 eval");
 }
 
-// ============================================================================
+// =====================================================================
 // Phase 80: direct-eval syntax, variable environments and function-expression names
-// ============================================================================
+// =====================================================================
 
 TEST(js_direct_eval_follows_syntax_and_variable_environment_rules) {
     using namespace litebird;
@@ -28752,6 +28908,70 @@ TEST(dataview_and_the_iterating_typed_array_methods) {
     assert(text("class L extends Int16Array {}; var l = new L([3, 1]); l.toSorted() instanceof L") == "true");
 }
 
+TEST(an_array_to_locale_string_asks_every_element)
+{
+    TestPage page;
+    JsInterpreter& js = page.js;
+    auto text = [&](const std::string& source) { return js.eval(source).to_string(); };
+    // §23.1.3.28 is not `join`. `Array.prototype.toLocaleString` was
+    // `join_array(receiver, ",")`, which read every place as `join` does and
+    // formatted the numbers itself, so a patched `Number.prototype.
+    // toLocaleString` was never asked (finding 196). §20.1.3.5 was
+    // `js_to_string(self())` — "[object Object]", asking nothing — where the
+    // standard is `Invoke(this, "toString")`.
+    js.eval("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- the element is asked, so a patched method shows ------------------
+    assert(text("Number.prototype.toLocaleString = function () { return 'X'; }; [1,2].toLocaleString()")
+           == "X,X");
+    // A hole and `undefined` are the empty string, with nothing asked: two
+    // separators and no 'undefined' text.
+    assert(text("[1,,3].toLocaleString()") == "X,,X");
+    assert(text("String([null,2].toLocaleString())") == ",X");
+    assert(text("[].toLocaleString()") == "");
+    // §23.1.3.28 step 7.c has no ToObject: a strict method sees the number it
+    // was given, and a sloppy one is boxed by the call.
+    assert(text("Number.prototype.toLocaleString = function () { 'use strict'; return typeof this; };"
+                "[7].toLocaleString()") == "number");
+    assert(text("Number.prototype.toLocaleString = function () { return typeof this; };"
+                "[7].toLocaleString()") == "object");
+
+    // ---- the place is read as `[k]` is, and a prototype's index counts ----
+    assert(text("delete Number.prototype.toLocaleString; Array.prototype[1] = 'P';"
+                "Array.prototype.toLocaleString.call([0,,2])") == "0,P,2");
+    assert(text("delete Array.prototype[1]; [0,,2].toLocaleString()") == "0,,2");
+    // A getter on a place runs once, as one read of it.
+    assert(text("var asked = 0; var g = [1,,3];"
+                "Object.defineProperty(g, '0', { get: function () { asked++; return 5; } });"
+                "g.toLocaleString() + ' ' + asked") == "5,,3 1");
+
+    // ---- the element's own method, wherever it is found -------------------
+    assert(text("[{toLocaleString: function () { return 'own'; }}].toLocaleString()") == "own");
+    assert(text("[Object.create({toLocaleString: function () { return 'I'; }})].toLocaleString()") == "I");
+    assert(text("errName(function () { [{toLocaleString: 1}].toLocaleString(); })") == "TypeError");
+    // ToObject is the method's own business: a primitive receiver and a
+    // string's places are both accepted.
+    assert(text("Array.prototype.toLocaleString.call(42)") == "");
+    assert(text("Array.prototype.toLocaleString.call('abc')") == "a,b,c");
+    assert(text("errName(function () { Array.prototype.toLocaleString.call(null); })") == "TypeError");
+
+    // ---- §20.1.3.5: Object.prototype.toLocaleString calls this.toString ---
+    // test262's `primitive_this_value` reaches an element's inherited
+    // `toLocaleString` and needs the patched `toString` to be the one called.
+    assert(text("({toLocaleString: Object.prototype.toLocaleString,"
+                "toString: function () { return 'mine'; }}).toLocaleString()") == "mine");
+    // `"use strict"` in the override is what makes `typeof this` the primitive:
+    // a sloppy function's `this` is boxed by §10.2.1.2, which is why test262
+    // runs its file `onlyStrict`.
+    assert(text("Boolean.prototype.toString = function () { 'use strict'; return typeof this; };"
+                "[true,false].toLocaleString()") == "boolean,boolean");
+    assert(text("Boolean.prototype.toString = function () { return typeof this; };"
+                "[true,false].toLocaleString()") == "object,object");
+    assert(text("String(({toLocaleString: Object.prototype.toLocaleString}).toLocaleString())")
+           == "[object Object]");
+    assert(text("errName(function () { Object.prototype.toLocaleString.call(null); })") == "TypeError");
+}
+
 TEST(a_typed_array_to_locale_string_asks_every_element)
 {
     using namespace litebird;
@@ -32554,6 +32774,59 @@ TEST(textdecoder_reaches_script_in_pieces) {
         // x-user-defined carries every byte: nothing is ever held back.
         report('x-user-defined holds nothing', stream('x-user-defined', [[0x80], [0x81]]),
                '\uF780\uF781');
+
+        // ---- the byte order mark belongs to UTF-8 and UTF-16 --------------
+        // §7.1 skips the first scalar value of a decoder when it is U+FEFF,
+        // and that is the whole rule: which *bytes* are a byte order mark is
+        // the encoding's business, and the two UTF-16 ones disagree about the
+        // same two bytes. Everything below was taken from Node v22.22.3.
+        function cps(s) {
+            var out = [];
+            for (var ch of s) out.push(ch.codePointAt(0).toString(16));
+            return out.join(',');
+        }
+        report('UTF-16LE reads FE FF as U+FFFE, not as a BOM',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xFE, 0xFF, 0x00, 0x41]))), 'fffe,4100');
+        report('UTF-16BE reads FF FE as U+FFFE, not as a BOM',
+               cps(new TextDecoder('utf-16be').decode(bytes([0xFF, 0xFE, 0x41, 0x00]))), 'fffe,4100');
+        report('UTF-8 keeps FE FF as two replacements',
+               cps(new TextDecoder().decode(bytes([0xFF, 0xFE, 0x41, 0x00]))), 'fffd,fffd,41,0');
+        report('UTF-16LE does not read the UTF-8 BOM',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), 'bbef,41bf');
+        report('windows-1252 has no BOM at all',
+               cps(new TextDecoder('windows-1252').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), 'ef,bb,bf,41');
+        report('windows-1251 has no BOM at all either',
+               cps(new TextDecoder('windows-1251').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), '43f,bb,457,41');
+        report('a BOM on its own decodes to nothing',
+               new TextDecoder().decode(bytes([0xEF, 0xBB, 0xBF])), '');
+        report('a UTF-16 BOM on its own decodes to nothing',
+               new TextDecoder('utf-16le').decode(bytes([0xFF, 0xFE])), '');
+        report('only the first scalar value is asked',
+               cps(new TextDecoder().decode(bytes([0x41, 0xEF, 0xBB, 0xBF]))), '41,feff');
+        report('a second BOM in the same call is data',
+               cps(new TextDecoder().decode(bytes([0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF]))), 'feff');
+        report('a UTF-16 BOM is stripped after it is decoded',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xFF, 0xFE, 0xFF, 0xFE, 0x41, 0x00]))), 'feff,41');
+        // §7.2 step 1: a decode without {stream: true} is a new decoder, so
+        // the BOM is sniffed again; one *inside* a stream is data.
+        var bomTwice = new TextDecoder();
+        report('a new stream sniffs its own BOM',
+               bomTwice.decode(bytes([0xEF, 0xBB, 0xBF, 0x41])) + '|' +
+               bomTwice.decode(bytes([0xEF, 0xBB, 0xBF, 0x42])), 'A|B');
+        var bomMidStream = new TextDecoder();
+        report('a BOM after a stream chunk is data',
+               bomMidStream.decode(bytes([0x41]), {stream: true}) + '|' +
+               bomMidStream.decode(bytes([0xEF, 0xBB, 0xBF, 0x42])), 'A|\uFEFFB');
+        // Step 5 of §7.2: a fatal error resets the decoder, so the next call
+        // is a new one and does not continue the stream that failed.
+        var afterError = new TextDecoder('utf-8', {fatal: true});
+        try { afterError.decode(bytes([0xFF]), {stream: true}); } catch (e) {}
+        report('a fatal error resets the decoder', afterError.decode(bytes([0x41])), 'A');
+        // The ISO-2022-JP mode is decoder state too, and is reset with it.
+        var modeReset = new TextDecoder('iso-2022-jp');
+        modeReset.decode(bytes([0x1B, 0x24, 0x42, 0x21, 0x21]));
+        report('a one-shot call does not leave the escape mode behind',
+               modeReset.decode(bytes([0x41])), 'A');
         failures;
     )JS");
     const std::string failed = js.eval("failures.join('\\n')").to_string();
@@ -33149,6 +33422,130 @@ TEST(fetch_request_loopback_http_worker_and_abort) {
     assert(hit_count->load() == 3);
 }
 
+// Phase 183: read the public ANSI stream as cells, independently of the
+// renderer's internal grid. Each test below uses a fresh renderer.
+static std::string terminal_plain_text(const std::string& ansi) {
+    std::string result;
+    for (size_t i = 0; i < ansi.size();) {
+        if (ansi[i] == '\033') {
+            assert(i + 1 < ansi.size() && ansi[i + 1] == '[');
+            const size_t end = ansi.find('m', i + 2);
+            assert(end != std::string::npos);
+            i = end + 1;
+        } else {
+            result.push_back(ansi[i++]);
+        }
+    }
+    return result;
+}
+
+static size_t terminal_token_count(const std::string& ansi, const std::string& token) {
+    size_t count = 0;
+    for (size_t pos = 0; (pos = ansi.find(token, pos)) != std::string::npos; pos += token.size()) ++count;
+    return count;
+}
+
+TEST(terminal_outline_keeps_real_edges_and_clips) {
+    using namespace litebird;
+    auto border = [](Rect rect) {
+        DrawBorderCommand cmd;
+        cmd.rect = rect;
+        cmd.width = EdgeSizes(1);
+        cmd.edge_colors = EdgeColors(Color::red(), Color(0, 255, 0), Color::blue(), Color(255, 255, 0));
+        return cmd;
+    };
+    DisplayList partial;
+    partial.add(DrawCanvasCommand{Color::white()});
+    partial.add(border(Rect(-10, -20, 40, 60)));
+    TerminalRenderer renderer(5, 4, 10, 20);
+    const auto ansi = renderer.to_ansi_string(partial);
+    assert(terminal_plain_text(ansi) == "  |  \n--+  \n     \n     \n");
+    assert(terminal_token_count(ansi, "\033[38;2;0;255;0m") == 1);
+    assert(terminal_token_count(ansi, "\033[38;2;0;0;255m") == 3);
+
+    // A clip through the middle of a large border must not invent edges at
+    // the clip boundary, but visible portions of the real top/bottom remain.
+    DisplayList clipped;
+    clipped.add(DrawCanvasCommand{Color::white()});
+    clipped.add(PushClipCommand{Rect(10, 0, 20, 60)});
+    clipped.add(border(Rect(0, 0, 40, 60)));
+    clipped.add(PopClipCommand{});
+    TerminalRenderer clipped_renderer(5, 4, 10, 20);
+    assert(terminal_plain_text(clipped_renderer.to_ansi_string(clipped)) ==
+           " --  \n     \n --  \n     \n");
+
+    DisplayList offscreen;
+    offscreen.add(DrawCanvasCommand{Color::white()});
+    offscreen.add(border(Rect(0, 0, 50, 20)));
+    TerminalRenderer scrolled(5, 4, 10, 20);
+    scrolled.set_scroll(0, 80);
+    assert(terminal_plain_text(scrolled.to_ansi_string(offscreen)) ==
+           "     \n     \n     \n     \n");
+    TerminalRenderer focus(5, 4, 10, 20);
+    focus.draw_focus_ring(Rect(-10, -20, 40, 60));
+    DisplayList canvas;
+    canvas.add(DrawCanvasCommand{Color::white()});
+    assert(terminal_token_count(focus.to_ansi_string(canvas), "\033[38;2;245;158;11m") == 4);
+
+    // Empty viewports must not index the nonexistent first cell.
+    TerminalRenderer empty(0, 0, 10, 20);
+    empty.draw_focus_ring(Rect(0, 0, 20, 20));
+    assert(empty.to_ansi_string(offscreen) == "\033[0m");
+}
+
+TEST(terminal_text_and_shadows_stay_inside_nested_clips) {
+    using namespace litebird;
+    auto text = [](float x, float y, const std::string& value, Color color = Color::black()) {
+        DrawTextCommand cmd;
+        cmd.position = Point(x, y);
+        cmd.text = value;
+        cmd.color = color;
+        return cmd;
+    };
+    DisplayList commands;
+    commands.add(DrawCanvasCommand{Color::white()});
+    commands.add(PushClipCommand{Rect(0, 0, 40, 80)});
+    commands.add(PushClipCommand{Rect(20, 0, 20, 80)});
+    commands.add(text(0, 20, "ABCDE"));
+    commands.add(PopClipCommand{});
+    commands.add(text(0, 40, "12345"));
+    commands.add(PopClipCommand{});
+    commands.add(text(0, 0, "GHOST", Color::transparent()));
+    TerminalRenderer terminal(5, 4, 10, 20);
+    assert(terminal_plain_text(terminal.to_ansi_string(commands)) ==
+           "     \n  CD \n1234 \n     \n");
+
+    DisplayList partial_text;
+    partial_text.add(DrawCanvasCommand{Color::white()});
+    partial_text.add(text(0, 20, "ABCDE", Color(255, 0, 0, 128)));
+    TerminalRenderer scrolled(5, 4, 10, 20);
+    scrolled.set_scroll(15, 20);
+    const auto ansi = scrolled.to_ansi_string(partial_text);
+    assert(terminal_plain_text(ansi) == "CDE  \n     \n     \n     \n");
+    assert(terminal_token_count(ansi, "\033[38;2;255;127;127m") == 3);
+
+    DrawShadowCommand shadow;
+    shadow.rect = Rect(10, 20, 20, 20);
+    shadow.x_offset = 10;
+    shadow.color = Color(255, 0, 0, 128);
+    DisplayList shadows;
+    shadows.add(DrawCanvasCommand{Color::white()});
+    shadows.add(PushClipCommand{Rect(30, 20, 10, 20)});
+    shadows.add(shadow);
+    shadows.add(PopClipCommand{});
+    TerminalRenderer shadow_renderer(5, 4, 10, 20);
+    assert(terminal_token_count(shadow_renderer.to_ansi_string(shadows), "\033[48;2;255;179;179m") == 1);
+
+    // Exercise the actual HTML -> layout -> display-list path as well as the
+    // direct commands. Its 20px overflow clip permits only two terminal cells.
+    auto doc = HtmlParser::parse(R"html(<!doctype html><body style="margin:0"><div style="width:20px;height:20px;overflow:hidden"><div style="width:60px;height:20px">ABCDE</div></div></body>)html");
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 50, 80);
+    TerminalRenderer page(5, 4, 10, 20);
+    assert(terminal_plain_text(page.to_ansi_string(DisplayList::build(root))) ==
+           "AB   \n     \n     \n     \n");
+}
+
 TEST(direct_eval_inherits_context_and_checks_declarations_before_mutating) {
     TestPage page;
 
@@ -33678,6 +34075,125 @@ TEST(flex_and_grid_box_alignment_properties) {
     }
 }
 
+void test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties() {
+    auto eval = [](const char* src) -> std::string {
+        JsInterpreter js;
+        return js.eval(src).to_string();
+    };
+
+    // 1. Object spread copies own enumerable symbol keys alongside string keys
+    //    and skips non-enumerable symbols and strings.
+    assert(eval(R"(
+        const s1 = Symbol('a'), s2 = Symbol('b'), sHidden = Symbol('h');
+        const src = { x: 1, [s1]: 2, [s2]: 3 };
+        Object.defineProperty(src, 'ne', { value: 4, enumerable: false });
+        Object.defineProperty(src, sHidden, { value: 5, enumerable: false });
+        const copy = { ...src };
+        [copy.x, copy[s1], copy[s2], 'ne' in copy, sHidden in copy,
+         Object.getOwnPropertySymbols(copy).length, Reflect.ownKeys(copy).length].join(',');
+    )") == "1,2,3,false,false,2,3");
+
+    // 2. Object spread preserves [[OwnPropertyKeys]] order (indices, strings, symbols)
+    //    and keeps same-description symbols distinct.
+    assert(eval(R"(
+        const a = Symbol('same'), b = Symbol('same');
+        const log = [];
+        const src = {};
+        Object.defineProperty(src, a, { enumerable: true, get() { log.push('a'); return 'A'; } });
+        Object.defineProperty(src, 'z', { enumerable: true, get() { log.push('z'); return 'Z'; } });
+        Object.defineProperty(src, '2', { enumerable: true, get() { log.push('2'); return 'two'; } });
+        Object.defineProperty(src, b, { enumerable: true, get() { log.push('b'); return 'B'; } });
+        Object.defineProperty(src, '0', { enumerable: true, get() { log.push('0'); return 'zero'; } });
+        const copy = { ...src };
+        log.join(':') + '|' + [copy[0], copy[2], copy.z, copy[a], copy[b]].join(',');
+    )") == "0:2:z:a:b|zero,two,Z,A,B");
+
+    // 3. Object spread uses CreateDataProperty rather than [[Set]]: earlier own
+    //    setters and prototype setters are not invoked.
+    assert(eval(R"(
+        const s = Symbol('setter');
+        let calls = 0;
+        const proto = {};
+        Object.defineProperty(proto, 'p', { set() { calls++; } });
+        Object.defineProperty(proto, s, { set() { calls++; } });
+        const target = {
+            __proto__: proto,
+            set own(v) { calls++; },
+            set [s](v) { calls++; },
+            ...{ own: 10, p: 20, [s]: 30 }
+        };
+        const dOwn = Object.getOwnPropertyDescriptor(target, 'own');
+        const dSym = Object.getOwnPropertyDescriptor(target, s);
+        [calls, target.own, target.p, target[s], dOwn.value, dOwn.writable, dSym.value, dSym.writable].join(',');
+    )") == "0,10,20,30,10,true,30,true");
+
+    // 4. Object rest destructuring (declaration, assignment, parameter) copies own
+    //    enumerable symbols, excludes destructured computed symbol keys, and skips
+    //    non-enumerable symbols.
+    assert(eval(R"(
+        const sDrop = Symbol('drop'), sKeep = Symbol('keep'), sHidden = Symbol('h');
+        const src = { a: 1, b: 2, [sDrop]: 10, [sKeep]: 20 };
+        Object.defineProperty(src, sHidden, { value: 30, enumerable: false });
+        const { a, [sDrop]: picked, ...rest } = src;
+        let p2, assignRest;
+        ({ [sDrop]: p2, ...assignRest } = src);
+        const paramRest = (({ a: _, ...r }) => r)(src);
+        [a, picked, rest.b, sDrop in rest, rest[sKeep], sHidden in rest,
+         Object.getOwnPropertySymbols(rest).length,
+         p2, sDrop in assignRest, assignRest[sKeep],
+         paramRest[sDrop], paramRest[sKeep]].join(',');
+    )") == "1,10,2,false,20,false,1,10,false,20,10,20");
+
+    // 5. CopyDataProperties checks live own-enumerability per snapshotted key
+    //    (ECMA-262 7.3.24 step 6.c).
+    assert(eval(R"(
+        const sHide = Symbol('hide'), sReveal = Symbol('reveal'), sNew = Symbol('new');
+        const src = {};
+        Object.defineProperty(src, 'trigger', {
+            enumerable: true,
+            get() {
+                delete this.removed;
+                Object.defineProperty(this, sHide, { enumerable: false });
+                Object.defineProperty(this, sReveal, { enumerable: true });
+                this[sNew] = 99;
+                return 1;
+            }
+        });
+        src.removed = 2;
+        src[sHide] = 3;
+        Object.defineProperty(src, sReveal, { value: 4, enumerable: false, configurable: true });
+        const out = { ...src };
+        [out.trigger, 'removed' in out, sHide in out, out[sReveal], sNew in out].join(',');
+    )") == "1,false,false,4,false");
+
+    // 6. Spread and rest across strings, sparse arrays, TypedArrays, functions, nullish,
+    //    and without invoking Object.prototype setters.
+    assert(eval(R"(
+        const s = Symbol('extra');
+        function fn() {}
+        fn.x = 1; fn[s] = 2;
+        const arr = [10, , 30]; arr[s] = 40;
+        const ta = new Uint8Array([5, 6]); ta[s] = 7;
+        let protoCalls = 0;
+        Object.defineProperty(Object.prototype, s, { configurable: true, set() { protoCalls++; } });
+        let out = '';
+        try {
+            const { 0: first, ...strRest } = 'hi';
+            const { ...fnRest } = fn;
+            const arrCopy = { ...arr };
+            const taCopy = { ...ta };
+            const nullCopy = { ...null, ...undefined, ok: 1 };
+            out = [protoCalls, first, strRest[1], 'length' in strRest,
+                   fnRest.x, fnRest[s], 'name' in fnRest,
+                   arrCopy[0], '1' in arrCopy, arrCopy[2], arrCopy[s],
+                   taCopy[0], taCopy[1], taCopy[s], nullCopy.ok].join(',');
+        } finally {
+            delete Object.prototype[s];
+        }
+        out;
+    )") == "0,h,i,false,1,2,false,10,false,30,40,5,6,7,1");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -34132,6 +34648,7 @@ int main() {
     RUN_TEST(gpos_cursive_attachment_ltr_rtl_and_contextual_pos);
     RUN_TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs);
     RUN_TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs);
+    RUN_TEST(hebrew_fixed_points_are_ordered_before_shaping);
     RUN_TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely);
 
     // Phase 127: TextDecoder and TextEncoder reachable from script.
@@ -34182,6 +34699,22 @@ int main() {
     // Phase 180: CSS Box Alignment (`align-self`, `align-content`, `justify-items`/`self`,
     // `place-*`, and column flex `justify-content`).
     RUN_TEST(flex_and_grid_box_alignment_properties);
+
+    // Phase 183: terminal clips, scrolling, shadows, text, borders and focus.
+    RUN_TEST(terminal_outline_keeps_real_edges_and_clips);
+    RUN_TEST(terminal_text_and_shadows_stay_inside_nested_clips);
+
+    // Phase 195: a `calc()` percentage is of the declaration (font size,
+    // line-height), not of the viewport.
+    RUN_TEST(a_calc_percentage_is_of_the_declaration_not_the_viewport);
+
+    // Phase 198: object spread and rest destructuring copy own enumerable
+    // symbols and follow ECMA-262 §7.3.24 CopyDataProperties.
+    RUN_TEST(object_spread_and_rest_copy_symbols_and_follow_copy_data_properties);
+
+    // Phase 192: `Array.prototype.toLocaleString` asks each element (§23.1.3.28),
+    // and `Object.prototype.toLocaleString` is `Invoke(this, "toString")` (§20.1.3.5).
+    RUN_TEST(an_array_to_locale_string_asks_every_element);
 
     // Phase 196: a Promise subclass makes its own promises — NewPromiseCapability,
     // SpeciesConstructor, the capability pair, and the promise state reachable

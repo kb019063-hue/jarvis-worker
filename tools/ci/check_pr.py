@@ -52,8 +52,8 @@ alone until its head is another commit.
 
 `watch --beat "YYYY-MM-DD HH:MM"` and `watch --off "what it did"` are the
 landing session's: they write the status comment (`--name NAME` when the
-landing session is not called Lander). They and `gh pr comment` are the only
-things here that write.
+landing session is not called Lander). They are the only two commands here
+that write anything on GitHub.
 
 `claim N` fails (exit 1) when
   - #N does not begin with the `Task:`, `Files:` and `Phase P, finding F`

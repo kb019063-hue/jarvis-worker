@@ -189,7 +189,7 @@ JsValue arg_or_undefined(Args args, size_t index) {
 
 std::shared_ptr<PromiseData> this_promise(const char* method) {
     JsValue me = JsValue::current_this();
-    auto data = me.promise_value();
+    auto data = Promise::state_of(me);
     if (!data) {
         js_throw_type_error(std::string("Method Promise.prototype.") + method +
                             " called on incompatible receiver " + js_describe_thrown(me));
@@ -255,8 +255,18 @@ JsValue make_capability_executor(JsValue* resolve, JsValue* reject) {
 // Public API
 // ---------------------------------------------------------------------------
 
+std::shared_ptr<PromiseData> Promise::state_of(const JsValue& value) {
+    if (auto payload = value.promise_value()) return payload;
+    // The cell, when the value did not keep the payload: see the declaration.
+    JsObject* cell = value.object_val.get();
+    if (cell && cell->klass == ObjectClass::Promise && cell->internal) {
+        return std::static_pointer_cast<PromiseData>(cell->internal);
+    }
+    return nullptr;
+}
+
 bool Promise::is_promise(const JsValue& value) {
-    return static_cast<bool>(value.promise_value());
+    return static_cast<bool>(state_of(value));
 }
 
 PromiseCapability Promise::capability_for(const JsValue& promise) {
@@ -264,7 +274,7 @@ PromiseCapability Promise::capability_for(const JsValue& promise) {
     // the constructor answered, and the engine settles it where it can.
     PromiseCapability capability;
     capability.promise = promise;
-    std::shared_ptr<PromiseData> data = promise.promise_value();
+    std::shared_ptr<PromiseData> data = Promise::state_of(promise);
     if (!data) return capability;
     auto [resolve_fn, reject_fn] = make_resolving_functions(data);
     capability.resolve = resolve_fn;
@@ -313,7 +323,7 @@ JsValue Promise::resolve_from(const JsValue& constructor, const JsValue& value) 
     // item, and `then` on the answer is what the iteration is watching. Wrapping
     // a promise here hid a `then` getter that throws -- the failure surfaced a
     // step later, outside `js_iterate`, so the iterator was never closed.
-    if (value.promise_value()) {
+    if (Promise::state_of(value)) {
         JsValue value_constructor;
         JsValue thrown;
         if (!js_capture_throw([&] { value_constructor = value.get_property("constructor"); }, thrown)) {
@@ -348,7 +358,7 @@ void subscribe_combinator_item(const JsValue& next_promise,
     JsValue then_fn = next_promise.get_property("then");
     if (!then_fn.is_function()) js_throw_type_error("Promise result has no callable then");
     const JsValue builtin_then = js_object_value(JsIntrinsics::get().promise_proto).get_property("then");
-    if (auto data = next_promise.promise_value(); data && strict_equals(then_fn, builtin_then)) {
+    if (auto data = Promise::state_of(next_promise); data && strict_equals(then_fn, builtin_then)) {
         Promise::subscribe(data, std::move(reaction), std::move(keep_alive));
         return;
     }
@@ -392,12 +402,12 @@ JsValue combine(Args args, const JsValue& default_constructor, OnItem on_item, O
     PromiseCapability capability = Promise::new_capability(constructor);
     // The engine's state behind the answer when it can see it; a subclass's
     // promise is settled through its capability, and the state is a stand-in.
-    auto result = capability.promise.promise_value();
+    auto result = Promise::state_of(capability.promise);
     if (!result) result = std::make_shared<PromiseData>();
     JsValue answer = capability.promise;
     // The engine settles `result` and then the answer through the capability's
     // own resolve: for %Promise% they are the same promise.
-    const bool through_capability = answer.promise_value() != result;
+    const bool through_capability = Promise::state_of(answer) != result;
     auto settle_answer = [capability, result, through_capability](bool rejected, const JsValue& value) {
         if (through_capability) {
             (rejected ? capability.reject : capability.resolve).call({value});
@@ -452,7 +462,7 @@ void Promise::resolve(const std::shared_ptr<PromiseData>& data, JsValue val) {
     if (!data || data->state != PromiseState::Pending || data->locked) return;
 
     if (val.is_object_like()) {
-        if (val.promise_value() == data) {
+        if (Promise::state_of(val) == data) {
             settle(data, PromiseState::Rejected,
                    js_make_error(JsErrorKind::TypeError, "Chaining cycle detected for promise"));
             return;
@@ -488,7 +498,7 @@ void Promise::reject(const std::shared_ptr<PromiseData>& data, JsValue reason) {
 }
 
 std::shared_ptr<PromiseData> Promise::to_promise(const JsValue& value) {
-    if (auto data = value.promise_value()) return data;
+    if (auto data = Promise::state_of(value)) return data;
     auto data = std::make_shared<PromiseData>();
     resolve(data, value);
     return data;
@@ -542,7 +552,7 @@ JsValue Promise::then_into(const JsValue& promise, const std::shared_ptr<Promise
     // made with; a fresh one here would be settled while the promise handed
     // back stayed pending, and a chain would give every step the first value
     // (`p.then(f).then(g)` -- g saw what f was given, not what it returned).
-    auto next = capability.promise.promise_value();
+    auto next = Promise::state_of(capability.promise);
     if (!next) next = std::make_shared<PromiseData>();
     PromiseHandler handler;
     handler.on_fulfilled = std::move(on_fulfilled);
@@ -696,7 +706,7 @@ void install_promise_builtins(JsIntrinsics& realm) {
             js_throw_type_error("Method Promise.prototype.then called on incompatible receiver " +
                                 js_describe_thrown(me));
         }
-        auto data = me.promise_value();
+        auto data = Promise::state_of(me);
         JsValue constructor = species_constructor(me, Promise::create_constructor());
         PromiseCapability capability = Promise::capability_for(data, constructor);
         return Promise::then_into(me, data, js_arg(args, 0), js_arg(args, 1), capability);
@@ -836,7 +846,7 @@ void install_promise_builtins(JsIntrinsics& realm) {
         JsValue constructor = JsValue::current_this();
         if (!constructor.is_object_like()) constructor = Promise::create_constructor();
         PromiseCapability capability = Promise::new_capability(constructor);
-        auto result = capability.promise.promise_value();
+        auto result = Promise::state_of(capability.promise);
         const bool through_capability = !result;
         if (through_capability) result = std::make_shared<PromiseData>();
         auto settle_answer = [capability, result, through_capability](bool rejected, const JsValue& value) {

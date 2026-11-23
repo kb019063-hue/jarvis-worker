@@ -497,7 +497,6 @@ std::string object_tag(const JsValue& value) {
         }
         if (cell->is_array) return "Array";
     }
-    if (value.promise_value()) return "Promise";
     return "Object";
 }
 

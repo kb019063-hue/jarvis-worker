@@ -124,19 +124,10 @@ const std::shared_ptr<CanvasGradient>& JsValue::canvas_gradient_value() const {
     if (extra()) if (auto v = std::get_if<std::shared_ptr<CanvasGradient>>(&extra()->payload)) return *v;
     return empty;
 }
-std::shared_ptr<PromiseData> JsValue::promise_value() const {
-    if (extra()) {
-        if (auto v = std::get_if<std::shared_ptr<PromiseData>>(&extra()->payload)) return *v;
-    }
-    // A promise's cell holds the state too, and a value made from that cell
-    // need not have been given the payload: `super(...)` in `class P extends
-    // Promise {}` hands the native parent the object `new` made, and the
-    // parent fills that object in (Promise::create_promise_instance).
-    JsObject* cell = object_val.get();
-    if (cell && cell->klass == ObjectClass::Promise && cell->internal) {
-        return std::static_pointer_cast<PromiseData>(cell->internal);
-    }
-    return nullptr;
+const std::shared_ptr<PromiseData>& JsValue::promise_value() const {
+    static const std::shared_ptr<PromiseData> empty;
+    if (extra()) if (auto v = std::get_if<std::shared_ptr<PromiseData>>(&extra()->payload)) return *v;
+    return empty;
 }
 const std::shared_ptr<GeneratorData>& JsValue::generator_value() const {
     static const std::shared_ptr<GeneratorData> empty;
@@ -683,15 +674,6 @@ JsValue JsValue::make_object(JsObject* obj) {
     if (obj) {
         // A function's cell, reached through a prototype link: the function.
         if (const JsValue* function = obj->function_value()) return *function;
-        // A promise's state is kept in its cell as well as in the value (see
-        // Promise::create_promise_instance), so that a cell copied with
-        // take_over keeps it. A value made from such a cell is given the state
-        // here, which is what everything that reads a promise asks for. The
-        // payload comes first: setting it copies the value, and an `object_val`
-        // set before the copy would not come through it.
-        if (obj->klass == ObjectClass::Promise && obj->internal) {
-            v.set_promise_value(std::static_pointer_cast<PromiseData>(obj->internal));
-        }
         v.object_val = obj;
     } else {
         v.object_val = Heap::default_heap().allocate_object();

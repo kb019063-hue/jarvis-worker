@@ -77,6 +77,22 @@ public:
     /// IsPromise(value) (§27.2.1.6): an object with the promise state.
     static bool is_promise(const JsValue& value);
 
+    /// The promise state of `value`, or null when it is not a promise.
+    ///
+    /// The state lives in the value's payload, and -- since Phase 196 -- in the
+    /// cell of an `ObjectClass::Promise` object as well. The second place is
+    /// what makes `super(...)` work in a subclass: it hands the native parent
+    /// the object `new` made, and `take_over` copies what a *cell* holds, not
+    /// what a value held. So a value made from such a cell (`make_object`, a
+    /// property read, a prototype link) need not carry the payload and is
+    /// still a promise.
+    ///
+    /// This is here rather than in `JsValue::promise_value()` because the
+    /// state is a promise's own business and `JsValue` may not name
+    /// `PromiseData`'s members (`src/js/JsValue.cpp` sees it forward-declared
+    /// only). Every reader in the engine goes through this.
+    static std::shared_ptr<PromiseData> state_of(const JsValue& value);
+
     /// NewPromiseCapability(C) (§27.2.1.5). `C` must be a constructor; the
     /// capability's `resolve` and `reject` are its own if it did not call the
     /// executor, and the object it answered is its `[[Promise]]`.

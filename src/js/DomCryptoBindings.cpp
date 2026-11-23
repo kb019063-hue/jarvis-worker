@@ -449,6 +449,68 @@ void setup_subtle_crypto(Iface& I) {
         if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {boolean(ok)});
         return undefined();
     });
+
+    I.method("exportKey", 2, [](Realm& r, Args args) {
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const std::string& name, const std::string& msg) {
+            JsValue err = make_dom_exception(r, name, msg);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        if (args.size() < 2) return reject_with("TypeError", "SubtleCrypto.exportKey: 2 arguments required.");
+        if (to_str(args[0]) != "raw") {
+            return reject_with("NotSupportedError", "SubtleCrypto.exportKey: only 'raw' format is supported.");
+        }
+        CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
+        if (!key) return reject_with("TypeError", "SubtleCrypto.exportKey: key must be a CryptoKey.");
+        if (!key->extractable) {
+            return reject_with("InvalidAccessError", "SubtleCrypto.exportKey: key is not extractable.");
+        }
+        JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
+        JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
+        JsValue out_ab = js_construct(ab_ctor, {num(static_cast<double>(key->key_bytes.size()))});
+        JsValue out_u8 = js_construct(u8_ctor, {out_ab});
+        for (std::size_t i = 0; i < key->key_bytes.size(); ++i) {
+            out_u8.set_property(std::to_string(i), num(static_cast<double>(key->key_bytes[i])));
+        }
+        if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {out_ab});
+        return undefined();
+    });
+
+    I.method("generateKey", 3, [](Realm& r, Args args) {
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const std::string& name, const std::string& msg) {
+            JsValue err = make_dom_exception(r, name, msg);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        if (args.size() < 3) return reject_with("TypeError", "SubtleCrypto.generateKey: 3 arguments required.");
+        const JsValue& alg_val = args[0];
+        std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
+                                                        : ascii_lower_str(to_str(alg_val));
+        if (alg_name != "hmac" || !alg_val.is_object_like()) {
+            return reject_with("NotSupportedError", "SubtleCrypto.generateKey: only HMAC is supported.");
+        }
+        JsValue hash_val = alg_val.get_property("hash");
+        std::string hash_alg = hash_val.is_object_like() ? ascii_lower_str(to_str(hash_val.get_property("name")))
+                                                         : ascii_lower_str(to_str(hash_val));
+        if (hash_alg != "sha-1" && hash_alg != "sha-256" && hash_alg != "sha-384" && hash_alg != "sha-512") {
+            return reject_with("NotSupportedError", "SubtleCrypto.generateKey: unsupported HMAC hash '" + hash_alg + "'.");
+        }
+        std::size_t key_bytes_len = (hash_alg == "sha-384" || hash_alg == "sha-512") ? 128u : 64u;
+        JsValue len_val = alg_val.get_property("length");
+        if (len_val.type == JsType::Number && to_double(len_val) > 0) {
+            key_bytes_len = static_cast<std::size_t>((static_cast<int>(to_double(len_val)) + 7) / 8);
+        }
+        auto state = std::make_shared<CryptoKeyState>();
+        state->extractable = args[1].is_truthy();
+        state->hash_alg = hash_alg;
+        state->key_bytes.resize(key_bytes_len);
+        fill_random_bytes(state->key_bytes.data(), state->key_bytes.size());
+        JsValue key = r.make("CryptoKey", state);
+        if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
+        return undefined();
+    });
 }
 
 void setup_crypto(Iface& I) {

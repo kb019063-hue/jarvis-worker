@@ -6947,6 +6947,43 @@ TEST(subtle_crypto_hmac_sign_and_verify) {
     assert(interp.eval("okTrue === true && okFalse === false").is_truthy());
 }
 
+TEST(subtle_crypto_export_and_generate_key) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var genKey = null;
+        var rawBuf = null;
+        var verified = null;
+        var rejNonExt = null;
+        var enc = new TextEncoder();
+        crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, true, ['sign', 'verify'])
+            .then(function(k) {
+                genKey = k;
+                return crypto.subtle.exportKey('raw', k);
+            })
+            .then(function(buf) {
+                rawBuf = buf;
+                return crypto.subtle.sign('HMAC', genKey, enc.encode('hello'));
+            })
+            .then(function(sig) {
+                return crypto.subtle.verify('HMAC', genKey, sig, enc.encode('hello'));
+            })
+            .then(function(v) {
+                verified = v;
+            });
+
+        crypto.subtle.importKey('raw', enc.encode('secret'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+            .then(function(k) { return crypto.subtle.exportKey('raw', k); })
+            .catch(function(e) { rejNonExt = e.name; });
+    )");
+    assert(interp.eval("genKey instanceof CryptoKey && genKey.extractable === true").is_truthy());
+    assert(interp.eval("rawBuf instanceof ArrayBuffer && rawBuf.byteLength === 64").is_truthy());
+    assert(interp.eval("verified === true").is_truthy());
+    assert(interp.eval("rejNonExt === 'InvalidAccessError'").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -35856,6 +35893,7 @@ int main() {
     RUN_TEST(subtle_crypto_digest_sha256);
     RUN_TEST(subtle_crypto_digest_sha1_sha384_sha512);
     RUN_TEST(subtle_crypto_hmac_sign_and_verify);
+    RUN_TEST(subtle_crypto_export_and_generate_key);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

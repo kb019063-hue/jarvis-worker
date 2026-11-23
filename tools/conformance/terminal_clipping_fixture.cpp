@@ -160,6 +160,45 @@ int main(int argc, char** argv) {
         commands.add(text(0, 0, "NO")); // the invalid clip stays empty after pop
         commands.add(PopClipCommand{});
         terminal.draw_focus_ring(Rect(0, 0, 0, 20));
+    } else if (test == "unicode_latin") {
+        // "café résumé": every é is one character in one cell, not two bytes
+        // in two cells.
+        DisplayList commands;
+        commands.add(text(0, 0, "caf\xC3\xA9 r\xC3\xA9sum\xC3\xA9"));
+        TerminalRenderer terminal(11, 4);
+        std::cout << terminal.to_ansi_string(commands);
+        return 0;
+    } else if (test == "unicode_wide") {
+        // 日本語 is three characters taking two columns each, so only two of
+        // them fit in a five-column viewport and both take two cells.
+        DisplayList commands;
+        commands.add(text(0, 0, "\xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E"));
+        TerminalRenderer terminal(5, 4);
+        std::cout << terminal.to_ansi_string(commands);
+        return 0;
+    } else if (test == "unicode_combining") {
+        // "e" + U+0301 is one grapheme cluster and one cell (UAX #29).
+        DisplayList commands;
+        commands.add(text(0, 0, "e\xCC\x81" "X"));  // two literals: \x81X would be one escape
+        TerminalRenderer terminal(5, 4);
+        std::cout << terminal.to_ansi_string(commands);
+        return 0;
+    } else if (test == "unicode_control") {
+        // ESC, DEL and the C1 CSI become U+FFFD: they are never written to the
+        // stream, but a cell still appears where the page asked for one.
+        DisplayList commands;
+        commands.add(text(0, 0, "A\x1b" "B\x7f" "C\xC2\x9b" "D"));
+        TerminalRenderer terminal(5, 4);
+        std::cout << terminal.to_ansi_string(commands);
+        return 0;
+    } else if (test == "unicode_malformed") {
+        // A stray continuation byte and a truncated sequence are each one
+        // replacement character, and the walk does not run past either.
+        DisplayList commands;
+        commands.add(text(0, 0, "A\x80" "B\xE6\x97"));  // the last two bytes are truncated
+        TerminalRenderer terminal(5, 4);
+        std::cout << terminal.to_ansi_string(commands);
+        return 0;
     } else {
         std::cerr << "unknown case: " << test << '\n';
         return 2;

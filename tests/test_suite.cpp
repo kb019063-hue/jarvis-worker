@@ -20899,6 +20899,157 @@ TEST(worker_options_module_policy_and_global_scope) {
     std::remove(secret_js.c_str());
 }
 
+/// A JS string literal holding `text`, escaping what a literal must escape.
+/// The worker sources below are handed to `new Worker('data:...')` through
+/// `encodeURIComponent`, so what they run must survive one more level of
+/// quoting than a pasted URL would.
+static std::string js_quote_for_suite(const std::string& text) {
+    std::string out = "\"";
+    for (char c : text) {
+        if (c == '\\' || c == '"') out += '\\';
+        out += c;
+    }
+    out += '"';
+    return out;
+}
+
+TEST(text_codecs_are_installed_in_a_worker_scope) {
+    using namespace litebird;
+
+    // Phase 206, finding 210. The row's last open item: `TextDecoder` and
+    // `TextEncoder` were installed on every global, a worker's included, and
+    // nothing said so. `install_text_codec_builtins` is called from
+    // `JsInterpreter`'s setup, which a worker runs for its own realm — but a
+    // later change could have moved it behind `if (m_document)` and every
+    // window suite would still pass.
+    //
+    // What is asserted here is the interface *through a worker's global*, in
+    // one script run inside the worker and answered by `postMessage`, and the
+    // answers are Node v22.22.3's (measured outside, in a worker there too).
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(4)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    // The same probes on the window's global first, so a failure says which
+    // scope is missing them rather than only that one is.
+    js.eval(R"JS(
+        var winProbe = [typeof TextDecoder, typeof TextEncoder].join(',');
+    )JS");
+    assert(js.eval("winProbe").to_string() == "function,function");
+
+    const std::string worker_source =
+        "var out = [];"
+        "function t(name, f) {"
+        "  var v; try { v = String(f()); } catch (e) { v = 'THREW ' + e.name; }"
+        "  out.push(name + ' => ' + v);"
+        "}"
+        "t('typeof', function () { return typeof TextDecoder + ',' + typeof TextEncoder; });"
+        "t('toStringTag', function () {"
+        "  return Object.prototype.toString.call(new TextDecoder()) + ' ' +"
+        "         Object.prototype.toString.call(new TextEncoder()); });"
+        "t('encoding', function () { return new TextDecoder().encoding + ' ' + new TextEncoder().encoding; });"
+        "t('latin1 label', function () { return new TextDecoder('latin1').encoding; });"
+        "t('options', function () {"
+        "  return new TextDecoder('utf-8', {fatal: true}).fatal + ' ' + new TextDecoder().ignoreBOM; });"
+        "t('constructor needs new', function () {"
+        "  try { TextDecoder(); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('unknown label', function () {"
+        "  try { new TextDecoder('utf-32'); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('replacement label', function () {"
+        "  try { new TextDecoder('replacement'); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('decode of a plain array', function () {"
+        "  try { new TextDecoder().decode([1, 2]); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('round trip', function () {"
+        "  return new TextDecoder().decode(new TextEncoder().encode('h\\u00e9llo \\u20ac')); });"
+        "t('encode answers a Uint8Array', function () {"
+        "  return Object.prototype.toString.call(new TextEncoder().encode('a')); });"
+        "t('encodeInto', function () {"
+        "  var buf = new Uint8Array(3); var r = new TextEncoder().encodeInto('ab', buf);"
+        "  return r.read + ',' + r.written + ',' + buf[0] + ',' + buf[1]; });"
+        "t('a lone surrogate is three bytes', function () {"
+        "  return new TextEncoder().encode('\\uD800').join(','); });"
+        "t('stream split inside a character', function () {"
+        "  var d = new TextDecoder();"
+        "  return d.decode(new Uint8Array([0xE2]), {stream: true}) + '|' +"
+        "         d.decode(new Uint8Array([0x82, 0xAC])) + '|' + d.decode(); });"
+        "t('fatal error resets the decoder', function () {"
+        "  var d = new TextDecoder('utf-8', {fatal: true});"
+        "  try { d.decode(new Uint8Array([0xFF]), {stream: true}); } catch (e) {}"
+        "  return d.decode(new Uint8Array([0x41])); });"
+        "t('BOM stripped', function () {"
+        "  return new TextDecoder().decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x41])); });"
+        "t('FE FF is data to UTF-16LE', function () {"
+        "  var v = new TextDecoder('utf-16le').decode(new Uint8Array([0xFE, 0xFF, 0x00, 0x41]));"
+        "  return v.length + ':' + v.charCodeAt(0).toString(16); });"
+        "t('ignoreBOM keeps it', function () {"
+        "  return new TextDecoder('utf-8', {ignoreBOM: true})"
+        "      .decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x41])).length; });"
+        "t('instanceof its own constructor', function () {"
+        "  return (new TextDecoder() instanceof TextDecoder) + ',' +"
+        "         (new TextEncoder() instanceof TextEncoder); });"
+        "postMessage(out);";
+
+    // The source goes through the interpreter as a JS string literal, so it is
+    // quoted here rather than pasted into a `data:` URL with its own escapes.
+    js.eval("var workerSrc = " + js_quote_for_suite(worker_source) + ";");
+    js.eval(
+        "var workerOut = null;"
+        "var workerErr = '';"
+        "var codecWorker = new Worker('data:text/javascript,' + encodeURIComponent(workerSrc));"
+        "codecWorker.onmessage = function (e) { workerOut = e.data; };"
+        "codecWorker.onerror = function (e) { workerErr = e.message; };");
+    const bool arrived = wait_for(js, "workerOut !== null");
+    if (!arrived) std::cerr << "worker said: " << js.eval("workerErr").to_string() << "\n";
+    assert(arrived);
+    js.eval("codecWorker.terminate();");
+
+    // The expected answers, each one Node v22.22.3's.
+    const char* const expected[] = {
+        "typeof => function,function",
+        "toStringTag => [object TextDecoder] [object TextEncoder]",
+        "encoding => utf-8 utf-8",
+        "latin1 label => windows-1252",
+        "options => true false",
+        "constructor needs new => TypeError",
+        "unknown label => RangeError",
+        "replacement label => RangeError",
+        "decode of a plain array => TypeError",
+        "round trip => h\u00e9llo \u20ac",
+        "encode answers a Uint8Array => [object Uint8Array]",
+        "encodeInto => 2,2,97,98",
+        "a lone surrogate is three bytes => 239,191,189",
+        "stream split inside a character => |\u20ac|",
+        "fatal error resets the decoder => A",
+        "BOM stripped => A",
+        "FE FF is data to UTF-16LE => 2:fffe",
+        "ignoreBOM keeps it => 2",
+        "instanceof its own constructor => true,true",
+    };
+    const std::size_t count = sizeof(expected) / sizeof(expected[0]);
+    assert(js.eval("workerOut.length").to_number() == static_cast<double>(count));
+    const std::string joined = js.eval("workerOut.join('\\n')").to_string();
+    std::string want;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i) want += "\n";
+        want += expected[i];
+    }
+    if (joined != want) std::cerr << "worker codecs:\n" << joined << "\n--- expected ---\n" << want << "\n";
+    assert(joined == want);
+}
+
 TEST(worker_event_target_error_and_message_dispatch) {
     using namespace litebird;
 
@@ -34720,6 +34871,9 @@ int main() {
     RUN_TEST(worker_options_module_policy_and_global_scope);
     RUN_TEST(worker_event_target_error_and_message_dispatch);
     RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
+
+    // Phase 206: TextDecoder/TextEncoder on a worker's own global.
+    RUN_TEST(text_codecs_are_installed_in_a_worker_scope);
 
     // Phase 66: module-worker graph loading and structured-clone message packets.
     RUN_TEST(structured_clone_message_delivery_and_refusal);

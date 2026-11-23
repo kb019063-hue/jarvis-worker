@@ -6034,6 +6034,134 @@ TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion
     assert(js.eval("then_trace.join('|')").to_string() == "next|then|close|getter");
 }
 
+// ---------------------------------------------------------------------------
+// Phase 196: a Promise subclass makes its own promises
+// ---------------------------------------------------------------------------
+TEST(promise_subclass_makes_its_own_promises_and_a_rejection_keeps_its_reject) {
+    using namespace litebird;
+    // The expectation for every question here was taken from Node.js: the
+    // engine is not asked to grade itself. `tools/conformance/verify_promise_
+    // subclass.py` runs the same questions through both, and this suite keeps
+    // the ones the engine has to answer without a second binary on the box.
+    TestPage page;
+    JsInterpreter& js = page.load("<!DOCTYPE html><body></body>");
+    auto text = [&js](const std::string& source) { return js.eval(source).to_string(); };
+
+    // 1. A subclass's instance is that subclass, and the native parent filled
+    //    in its state: `then` finds it through the cell `super(...)` was given.
+    assert(text(R"(
+        class P extends Promise { constructor(fn) { super(fn); } }
+        var p = new P(function (resolve) { resolve(1); });
+        [p instanceof P, p instanceof Promise,
+         Object.getPrototypeOf(p) === P.prototype].join()
+    )") == "true,true,true");
+
+    // 2. `then` asks SpeciesConstructor: what it makes is a P, and the chain
+    //    gives each step the value the step before it returned.
+    // Nothing has run yet when this returns: the reactions are queued.
+    text(R"(
+        var seen = [];
+        var q = p.then(function (v) { seen.push('one:' + v); return v * 2; })
+                 .then(function (v) { seen.push('two:' + v); return v + 5; })
+                 .then(function (v) { seen.push('three:' + v); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("seen.join()") == "one:1,two:2,three:7");
+    assert(text("q instanceof P") == "true");
+
+    // 3. A handler that answers a promise has it adopted, not used as a value.
+    text(R"(
+        var got = [];
+        Promise.resolve(1).then(function () { return Promise.resolve(7); })
+                          .then(function (v) { got.push(v); });
+        Promise.resolve(3).then(function (v) { return Promise.resolve(v * 2); })
+                          .then(function (v) { got.push(v); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("got.join()") == "7,6");
+
+    // 4. A rejection that passes through a `then` with no handler for it is
+    //    still a rejection: `catch` further down sees the same reason. This is
+    //    the half a capability's [[Reject]] is for, and settling it through
+    //    [[Resolve]] made it a value.
+    text(R"(
+        var trace = [];
+        Promise.reject(new Error("boom")).then(function () { trace.push('wrong'); })
+            .catch(function (e) { trace.push('caught:' + e.message); });
+        Promise.reject(2).then().then(function (v) { trace.push('no:' + v); },
+                                      function (e) { trace.push('second:' + e); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("trace.join()") == "caught:boom,second:2");
+
+    // 5. Every static that makes a promise makes the receiver's.
+    assert(text(R"(
+        [P.resolve(1) instanceof P, P.reject(1) instanceof P, P.all([1]) instanceof P,
+         P.allSettled([1]) instanceof P, P.any([1]) instanceof P, P.race([1]) instanceof P,
+         P.withResolvers().promise instanceof P].join()
+    )") == "true,true,true,true,true,true,true");
+
+    // 6. PromiseResolve returns a promise of the constructor unchanged, and
+    //    wraps one that is not. The combinators depend on the first half: a
+    //    wrapping hides a throwing `then` getter from js_iterate, which is what
+    //    closes the iterator.
+    // `p` is a P, so only P's own resolve answers it unchanged; %Promise%'s
+    // makes a plain promise around it.
+    assert(text("P.resolve(p) === p") == "true");
+    assert(text("Promise.resolve(p) === p") == "false");
+    assert(text("var plain = Promise.resolve(1); Promise.resolve(plain) === plain") == "true");
+    assert(text("Promise.resolve(1) === 1") == "false");
+
+    // 7. `new.target.prototype` is read once for a built-in that builds its own
+    //    object, and the executor is refused before it is read at all.
+    assert(text(R"(
+        var reads = 0;
+        function counting() {
+            var nt = function () {}.bind(null);
+            Object.defineProperty(nt, 'prototype', { get: function () { reads++; return { tag: 'G' }; } });
+            return nt;
+        }
+        var before = reads;
+        var made = Reflect.construct(Promise, [function () {}], counting());
+        [reads - before, made.tag, made instanceof Promise].join()
+    )") == "1,G,false");
+    assert(text(R"(
+        var before = reads;
+        try { Reflect.construct(Promise, [], counting()); 'no throw'; }
+        catch (e) { e.name + ',' + (reads - before); }
+    )") == "TypeError,0");
+
+    // 8. The resolving pair the constructor is handed: anonymous, `length` 1,
+    //    and no [[Construct]] (§27.2.1.3.2, §27.2.1.4.2).
+    assert(text(R"(
+        var resolveName;
+        new Promise(function (resolve) { resolveName = resolve; });
+        var ctor;
+        try { new resolveName(function () {}); ctor = 'constructed'; } catch (e) { ctor = e.name; }
+        [resolveName.name === '', resolveName.length, ctor].join()
+    )") == "true,1,TypeError");
+
+    // 9. Species is read, and a species that is not the constructor is honoured.
+    assert(text("P[Symbol.species] === P && Promise[Symbol.species] === Promise") == "true");
+    assert(text(R"(
+        class Odd extends Promise { static get [Symbol.species]() { return Promise; } }
+        var o = new Odd(function (r) { r(1); });
+        [o.then(function () {}) instanceof Odd, o.then(function () {}).constructor === Promise].join()
+    )") == "false,true");
+
+    // 10. `finally` goes through `then`, so a subclass's species is honoured
+    //     there too, and it keeps the value and the reason.
+    text(R"(
+        var f = [];
+        p.finally(function () { f.push('ran'); }).then(function (v) { f.push('value:' + v); });
+        Promise.reject(new Error('kept')).finally(function () { f.push('ran2'); })
+            .catch(function (e) { f.push('reason:' + e.message); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("f.join()") == "ran,ran2,value:1,reason:kept");
+    assert(text("p.finally(function () {}) instanceof P") == "true");
+}
+
 TEST(css_flex_wrapping_and_grid_layout) {
     using namespace litebird;
 
@@ -34994,6 +35122,10 @@ int main() {
     RUN_TEST(incremental_layout_and_invalidation);
     RUN_TEST(js_async_promises_and_json);
     RUN_TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion);
+    // Phase 196: a Promise subclass makes its own promises — NewPromiseCapability,
+    // SpeciesConstructor, the capability pair, and the promise state reachable
+    // from the object `super(...)` was handed.
+    RUN_TEST(promise_subclass_makes_its_own_promises_and_a_rejection_keeps_its_reject);
     RUN_TEST(css_flex_wrapping_and_grid_layout);
     RUN_TEST(dom_3phase_events_and_form_controls);
     RUN_TEST(image_decoding_and_rendering);

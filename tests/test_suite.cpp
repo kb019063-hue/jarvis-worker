@@ -33798,6 +33798,39 @@ TEST(flex_and_grid_box_alignment_properties) {
     }
 }
 
+TEST(terminal_page_text_cannot_inject_controls) {
+    using namespace litebird;
+    std::string bytes;
+    std::string expected;
+    for (int i = 0; i < 256; ++i) {
+        bytes.push_back(static_cast<char>(i));
+        expected.push_back(i >= 0x20 && i <= 0x7e ? static_cast<char>(i) : '?');
+    }
+    expected += '\n';
+    DrawTextCommand text;
+    text.position = Point(0, 0);
+    text.text = bytes;
+    text.color = Color::black();
+    DisplayList list;
+    list.add(text);
+    TerminalRenderer string_renderer(256, 1);
+    const std::string output = string_renderer.to_ansi_string(list);
+    assert(terminal_plain_text(output) == expected);
+    TerminalRenderer stream_renderer(256, 1);
+    std::ostringstream stream;
+    stream_renderer.render(list, stream);
+    assert(stream.str() == output);
+
+    // Numeric character references survive the HTML parser as text. Their
+    // ESC, BEL and DEL must not become terminal instructions.
+    auto doc = HtmlParser::parse(R"html(<!doctype html><body style="margin:0"><div>Hi&#27;[2J&#7;X&#127;</div></body>)html");
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 200, 40);
+    TerminalRenderer page(20, 2);
+    const auto plain = terminal_plain_text(page.to_ansi_string(DisplayList::build(root)));
+    assert(plain.substr(0, 10) == "Hi?[2J?X? ");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -34306,6 +34339,9 @@ int main() {
     // Phase 183: terminal clips, scrolling, shadows, text, borders and focus.
     RUN_TEST(terminal_outline_keeps_real_edges_and_clips);
     RUN_TEST(terminal_text_and_shadows_stay_inside_nested_clips);
+
+    // Phase 203: page text is not a source of terminal controls.
+    RUN_TEST(terminal_page_text_cannot_inject_controls);
 
     // Phase 195: a `calc()` percentage is of the declaration (font size,
     // line-height), not of the viewport.

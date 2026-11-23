@@ -33809,6 +33809,87 @@ TEST(parameter_scopes_loop_completions_class_fields_and_early_syntax_errors) {
     assert(failed.empty());
 }
 
+TEST(global_declarations_have_descriptors) {
+    using namespace litebird;
+    // Phase 197, finding 201. The global declarations live in the global
+    // environment, and the global object reaches them through its
+    // `lookup_fallback`, so `hasOwnProperty` saw them and
+    // `Object.getOwnPropertyDescriptor` did not. Every expected value below
+    // was printed by Node.js v22.22.3 before being asserted here.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function shape(o, k) {
+            var d = Object.getOwnPropertyDescriptor(o, k);
+            return d === undefined ? null : [d.value === undefined ? 'u' : typeof d.value,
+                                             d.writable, d.enumerable, d.configurable];
+        }
+
+        // A constructor the global object owns: writable, non-enumerable,
+        // configurable, and the value is what reading the name gives.
+        check('Object', function () { return shape(this, 'Object'); }, '["function",true,false,true]');
+        check('Error', function () { return shape(this, 'Error'); }, '["function",true,false,true]');
+        check('TypeError', function () { return shape(this, 'TypeError'); }, '["function",true,false,true]');
+        check('Math', function () { return shape(this, 'Math'); }, '["object",true,false,true]');
+        check('JSON', function () { return shape(this, 'JSON'); }, '["object",true,false,true]');
+        check('eval', function () { return shape(this, 'eval'); }, '["function",true,false,true]');
+        check('parseInt', function () { return shape(this, 'parseInt'); }, '["function",true,false,true]');
+        check('globalThis is its own property', function () {
+            return Object.getOwnPropertyDescriptor(this, 'globalThis').value === this;
+        }, 'true');
+
+        // The one kind the standard makes non-configurable as well.
+        check('undefined', function () { return shape(this, 'undefined'); }, '["u",false,false,false]');
+        check('NaN', function () { return shape(this, 'NaN'); }, '["number",false,false,false]');
+        check('Infinity', function () { return shape(this, 'Infinity'); }, '["number",false,false,false]');
+
+        // `hasOwnProperty` and the descriptor must agree for every global
+        // name, which is the contract propertyHelper.js relies on.
+        check('the two answers agree', function () {
+            var names = 'Object Function Array String Number Boolean Symbol Error EvalError RangeError ' +
+                        'ReferenceError SyntaxError TypeError URIError parseInt parseFloat isNaN ' +
+                        'isFinite eval JSON Math Reflect Promise Map Set WeakMap WeakSet ArrayBuffer ' +
+                        'DataView Date RegExp Int8Array Uint8Array globalThis undefined NaN Infinity ' +
+                        'decodeURI encodeURI';
+            var list = names.split(' '), bad = [];
+            for (var i = 0; i < list.length; i++) {
+                var has = Object.prototype.hasOwnProperty.call(this, list[i]);
+                if (has !== (Object.getOwnPropertyDescriptor(this, list[i]) !== undefined)) bad.push(list[i]);
+            }
+            return bad.length;
+        }, '0');
+
+        // A `var` and a function declaration are properties of the global
+        // object: writable, enumerable, non-configurable. A `let` is not a
+        // property of it at all, which is what keeps them apart.
+        var declaredVar = 1;
+        function declaredFunction() {}
+        let declaredLet = 2;
+        check('a var', function () {
+            return [shape(this, 'declaredVar'), Object.keys(this).indexOf('declaredVar') >= 0];
+        }.bind(this), '[["number",true,true,false],true]');
+        check('a function declaration', function () { return shape(this, 'declaredFunction'); },
+              '["function",true,true,false]');
+        check('a let is not a property', function () { return shape(this, 'declaredLet'); }, 'null');
+        check('a let is not in Object.keys', function () {
+            return Object.keys(this).indexOf('declaredLet');
+        }, '-1');
+
+        // Reflect gives the same answer as Object for these.
+        check('Reflect agrees', function () { return shape(Reflect, 'apply'); }, '["function",true,false,true]');
+
+        var summary = failures.length === 0 ? 'ok' : failures.join(' | ');
+    )JS");
+    assert(!js.last_eval_failed());
+    assert(js.global_env()->get("summary").to_string() == "ok");
+}
+
 TEST(flex_and_grid_box_alignment_properties) {
     using namespace litebird;
     // Phase 180, finding 184: CSS Box Alignment Level 3 in flex and grid —
@@ -34660,6 +34741,7 @@ int main() {
 
     // Phase 180: CSS Box Alignment (`align-self`, `align-content`, `justify-items`/`self`,
     // `place-*`, and column flex `justify-content`).
+    RUN_TEST(global_declarations_have_descriptors);
     RUN_TEST(flex_and_grid_box_alignment_properties);
 
     // Phase 183: terminal clips, scrolling, shadows, text, borders and focus.

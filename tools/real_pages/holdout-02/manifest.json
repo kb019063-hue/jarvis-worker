@@ -1,0 +1,44 @@
+{
+  "protocol": "holdout-02",
+  "viewport": [
+    800,
+    600
+  ],
+  "native_wall_seconds": 45,
+  "policy": "Fresh context/process per task, saved local assets only. No DOM mutation or handler calls by driver. Scroll to locate controls, then use real click/key input. Require initial state, observed transition, readable visible outcome, no crash. Seek no replacement pages. Keep reference failures and timeouts. Visual match is separate: post-action RGBA equality, no tolerance. No engine edits before results. Do not pool with v1 or holdout-01.",
+  "pages": [
+    {
+      "id": "H1",
+      "name": "MDN dom-examples \u00b7 Declarative popover",
+      "repo": "mdn/dom-examples",
+      "sha": "a2c57197c219bd1c87d48aa901f4c2a24b249658",
+      "path": "popover-api/basic-declarative/index.html",
+      "task": "From the untouched page click \"Show popover\"; require the #mypopover popover to become visible with the text \"Popover content\". Then click \"Hide popover\"; require it hidden again."
+    },
+    {
+      "id": "H2",
+      "name": "MDN dom-examples \u00b7 Web Worker multiply",
+      "repo": "mdn/dom-examples",
+      "sha": "a2c57197c219bd1c87d48aa901f4c2a24b249658",
+      "path": "web-workers/simple-web-worker/index.html",
+      "task": "Click the \"Multiply number 1\" input, type 6, press Tab to blur (fires change). Click the \"Multiply number 2\" input, type 7, press Tab to blur. Require the result line to read exactly \"Result: 42\"."
+    },
+    {
+      "id": "H3",
+      "name": "MDN dom-examples \u00b7 insertAdjacentElement",
+      "repo": "mdn/dom-examples",
+      "sha": "a2c57197c219bd1c87d48aa901f4c2a24b249658",
+      "path": "insert-adjacent/insertAdjacentElement.html",
+      "task": "Click the first red box to select it, then click \"Insert after\"; require the section to contain five boxes (it held four) and the first box to carry the aqua selection border."
+    },
+    {
+      "id": "H4",
+      "name": "MDN dom-examples \u00b7 URL parameter puzzle",
+      "repo": "mdn/dom-examples",
+      "sha": "a2c57197c219bd1c87d48aa901f4c2a24b249658",
+      "nav": true,
+      "path": "url-params/index.html",
+      "task": "Click the example link whose query is ?firstName=Ayse&food=rice%20pudding; require the parameter table to grow two body rows in sorted order (firstName first, food second) with percent-decoded values, and the output line to contain \"Current URL:\"."
+    }
+  ]
+}

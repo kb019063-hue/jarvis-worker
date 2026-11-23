@@ -21,10 +21,8 @@
     "counts it as neither a pass nor a failure. The entry is a debt, not a",
     "silence: if the page starts passing, the run prints FIXED and exits 1, so",
     "the reason has to come out in the same commit that fixes the bug.",
-    "Zero pages carry a `known_failure` since Phase 180 (finding 184), which",
-    "cleared the final two recorded entries \u2014 `justify-content` in a column",
-    "flex container and `align-self` \u2014 alongside `align-content`, `justify-items`,",
-    "and `justify-self` in flex and grid."
+    "Phase 180 cleared the earlier known failures; Phase 193 added one for",
+    "inline white-space:nowrap failing to prevent replaced-element wrapping."
   ],
   "tests": [
     {
@@ -1668,6 +1666,849 @@
           "describe": "cell (1,1) sits at (70, 80)"
         }
       ]
+    },
+    {
+      "name": "inline_br_starts_a_second_line_of_replaced_elements",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.line{width:45px;font-size:0;line-height:20px}img{width:20px;height:20px;vertical-align:top}</style></head><body><div class=\"line\"><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"><br><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "first inline image occupies the first line"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 20,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "br starts the second image at the next 20px line"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 0,
+          "width": 25,
+          "height": 40,
+          "colour": "#ffffff",
+          "describe": "the right of both lines stays blank"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 45,
+          "height": 5,
+          "colour": "#ffffff",
+          "describe": "there is no third line"
+        }
+      ],
+      "note": "The images are solid 20px squares and the line height is 20px; no glyph shape or system font is needed."
+    },
+    {
+      "name": "inline_replaced_elements_wrap_to_the_next_line",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.line{width:45px;font-size:0;line-height:20px}img{width:20px;height:20px;vertical-align:top}</style></head><body><div class=\"line\"><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"> <img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"> <img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "two 20px images fit on the 45px first line"
+        },
+        {
+          "kind": "rect",
+          "x": 40,
+          "y": 0,
+          "width": 5,
+          "height": 20,
+          "colour": "#ffffff",
+          "describe": "the last 5px of the first line is blank"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 20,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "the third image wraps to the start of the second line"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 25,
+          "height": 20,
+          "colour": "#ffffff",
+          "describe": "the rest of the second line is blank"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 45,
+          "height": 5,
+          "colour": "#ffffff",
+          "describe": "there is no third line"
+        }
+      ],
+      "note": "font-size zero removes the advance of the separating spaces without removing their line-break opportunities."
+    },
+    {
+      "name": "inline_nowrap_keeps_replaced_elements_on_one_line",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.line{width:45px;font-size:0;line-height:20px}img{width:20px;height:20px;vertical-align:top}</style></head><body><div class=\"line\"><span style=\"white-space:nowrap\"><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"> <img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"> <img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"></span></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "all three images remain on one line, overflowing the 45px container"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 20,
+          "width": 60,
+          "height": 20,
+          "colour": "#ffffff",
+          "describe": "nowrap does not create a second line"
+        }
+      ],
+      "known_failure": "white-space:nowrap does not prevent wrapping inline replaced elements: the third 20px image appears on the second line instead of overflowing the 45px container.",
+      "note": "The span inherits nowrap to the images; the viewport is wide enough for the overflow."
+    },
+    {
+      "name": "table_cell_backgrounds_fill_their_border_box",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}table{border-collapse:collapse;border-spacing:0}td{width:50px;height:40px;padding:0;border:0}.a{background:#ff0000}.b{background:#00ff00}.c{background:#0000ff}.d{background:#ffff00}</style></head><body><table><tr><td class='a'></td><td class='b'></td></tr><tr><td class='c'></td><td class='d'></td></tr></table></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 50,
+          "height": 40,
+          "colour": "#ff0000",
+          "describe": "row 0 col 0 cell background fills [0..50, 0..40]"
+        },
+        {
+          "kind": "rect",
+          "x": 50,
+          "y": 0,
+          "width": 50,
+          "height": 40,
+          "colour": "#00ff00",
+          "describe": "row 0 col 1 cell background fills [50..100, 0..40]"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 50,
+          "height": 40,
+          "colour": "#0000ff",
+          "describe": "row 1 col 0 cell background fills [0..50, 40..80]"
+        },
+        {
+          "kind": "rect",
+          "x": 50,
+          "y": 40,
+          "width": 50,
+          "height": 40,
+          "colour": "#ffff00",
+          "describe": "row 1 col 1 cell background fills [50..100, 40..80]"
+        },
+        {
+          "kind": "pixel",
+          "x": 105,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "right of the 100px table remains white"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 85,
+          "colour": "#ffffff",
+          "describe": "below the 80px table remains white"
+        }
+      ],
+      "note": "CSS 2.1 \u00a717.5.1: each table cell paints its own background over its border box."
+    },
+    {
+      "name": "table_layers_cell_over_row_over_tbody_over_table",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}table{border-collapse:collapse;border-spacing:0;background:#ff0000}tbody{background:#00ff00}tr.r1{background:#0000ff}td{width:50px;height:40px;padding:0;border:0}td.c1{background:#ffff00}td.c4{background:#ff00ff}</style></head><body><table><tbody><tr class='r1'><td class='c1'></td><td></td></tr><tr><td></td><td class='c4'></td></tr></tbody></table></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 50,
+          "height": 40,
+          "colour": "#ffff00",
+          "describe": "cell background paints above row, tbody, and table"
+        },
+        {
+          "kind": "rect",
+          "x": 50,
+          "y": 0,
+          "width": 50,
+          "height": 40,
+          "colour": "#0000ff",
+          "describe": "transparent cell exposes row background above tbody and table"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 50,
+          "height": 40,
+          "colour": "#00ff00",
+          "describe": "transparent cell and row expose tbody background above table"
+        },
+        {
+          "kind": "rect",
+          "x": 50,
+          "y": 40,
+          "width": 50,
+          "height": 40,
+          "colour": "#ff00ff",
+          "describe": "second row opaque cell paints above tbody and table"
+        }
+      ],
+      "known_failure": "tbody (display:table-row-group) backgrounds are not painted: the transparent cell at (0, 40) exposes the red table background instead of the green tbody background (while tr over table and td over tr do paint).",
+      "note": "CSS 2.1 \u00a717.5.1 six-layer table background stack: cell > row > row-group (tbody) > column > column-group > table."
+    },
+    {
+      "name": "table_colgroup_col_background_shows_through_transparent_cells",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}table{border-collapse:collapse;border-spacing:0;background:#ff0000}col.c1{background:#00ff00}td{width:50px;height:40px;padding:0;border:0}td.o{background:#0000ff}</style></head><body><table><colgroup><col class='c1'><col></colgroup><tr><td></td><td class='o'></td></tr><tr><td></td><td></td></tr></table></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 50,
+          "height": 80,
+          "colour": "#00ff00",
+          "describe": "transparent cells in column 0 expose the green col background above the red table"
+        },
+        {
+          "kind": "rect",
+          "x": 50,
+          "y": 0,
+          "width": 50,
+          "height": 40,
+          "colour": "#0000ff",
+          "describe": "opaque cell paints above column and table"
+        },
+        {
+          "kind": "rect",
+          "x": 50,
+          "y": 40,
+          "width": 50,
+          "height": 40,
+          "colour": "#ff0000",
+          "describe": "transparent cell in an unstyled column exposes the red table background"
+        }
+      ],
+      "known_failure": "table column (<col>) backgrounds are not painted: transparent cells in column 0 paint the red table background at [0..50, 0..80] instead of the green <col> background.",
+      "note": "CSS 2.1 \u00a717.5.1: column backgrounds sit above the table background and below row/cell backgrounds."
+    },
+    {
+      "name": "table_border_spacing_exposes_table_background_between_cells",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}table{border-collapse:separate;border-spacing:10px;background:#0000ff}td{width:40px;height:30px;padding:0;border:0}.a{background:#ff0000}.b{background:#00ff00}</style></head><body><table><tr><td class='a'></td><td class='b'></td></tr></table></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 110,
+          "height": 10,
+          "colour": "#0000ff",
+          "describe": "top border-spacing gutter shows the table background"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 110,
+          "height": 10,
+          "colour": "#0000ff",
+          "describe": "bottom border-spacing gutter shows the table background"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 10,
+          "width": 10,
+          "height": 30,
+          "colour": "#0000ff",
+          "describe": "left border-spacing gutter shows the table background"
+        },
+        {
+          "kind": "rect",
+          "x": 10,
+          "y": 10,
+          "width": 40,
+          "height": 30,
+          "colour": "#ff0000",
+          "describe": "first cell sits at [10..50, 10..40]"
+        },
+        {
+          "kind": "rect",
+          "x": 50,
+          "y": 10,
+          "width": 10,
+          "height": 30,
+          "colour": "#0000ff",
+          "describe": "inter-cell border-spacing gutter shows the table background"
+        },
+        {
+          "kind": "rect",
+          "x": 60,
+          "y": 10,
+          "width": 40,
+          "height": 30,
+          "colour": "#00ff00",
+          "describe": "second cell sits at [60..100, 10..40]"
+        },
+        {
+          "kind": "rect",
+          "x": 100,
+          "y": 10,
+          "width": 10,
+          "height": 30,
+          "colour": "#0000ff",
+          "describe": "right border-spacing gutter shows the table background"
+        }
+      ],
+      "note": "CSS 2.1 \u00a717.6.1 separated borders model: border-spacing gutters around and between cells are filled with the table background."
+    },
+    {
+      "name": "table_cell_background_fills_row_height_of_taller_sibling",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}table{border-collapse:collapse;border-spacing:0}td{width:50px;padding:0;border:0;vertical-align:top}.a{background:#ff0000}.b{background:#00ff00}.short{width:20px;height:20px;background:#ff0000}.tall{width:20px;height:60px;background:#00ff00}</style></head><body><table><tr><td class='a'><div class='short'></div></td><td class='b'><div class='tall'></div></td></tr></table></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 50,
+          "height": 60,
+          "colour": "#ff0000",
+          "describe": "shorter cell background stretches to the 60px row height"
+        },
+        {
+          "kind": "rect",
+          "x": 50,
+          "y": 0,
+          "width": 50,
+          "height": 60,
+          "colour": "#00ff00",
+          "describe": "taller cell fills [50..100, 0..60]"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 65,
+          "colour": "#ffffff",
+          "describe": "below the 60px row remains white"
+        }
+      ],
+      "known_failure": "A table cell with shorter content does not stretch its painted background to the row height of a taller sibling: cell 0 stops painting red at y=20, leaving [0..50, 20..60] white.",
+      "note": "CSS 2.1 \u00a717.5.3: every cell in a row takes the full height of the row."
+    },
+    {
+      "name": "table_cell_padding_and_border_paint_around_content",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}table{border-collapse:separate;border-spacing:0}td{box-sizing:content-box;width:40px;height:20px;padding:10px;border:5px solid #0000ff;background:#ff0000;vertical-align:top}.inner{width:40px;height:20px;background:#00ff00}</style></head><body><table><tr><td><div class='inner'></div></td></tr></table></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 70,
+          "height": 5,
+          "colour": "#0000ff",
+          "describe": "top 5px cell border"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 45,
+          "width": 70,
+          "height": 5,
+          "colour": "#0000ff",
+          "describe": "bottom 5px cell border"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 5,
+          "width": 5,
+          "height": 40,
+          "colour": "#0000ff",
+          "describe": "left 5px cell border"
+        },
+        {
+          "kind": "rect",
+          "x": 65,
+          "y": 5,
+          "width": 5,
+          "height": 40,
+          "colour": "#0000ff",
+          "describe": "right 5px cell border"
+        },
+        {
+          "kind": "rect",
+          "x": 5,
+          "y": 5,
+          "width": 60,
+          "height": 10,
+          "colour": "#ff0000",
+          "describe": "top 10px cell padding paints the cell background"
+        },
+        {
+          "kind": "rect",
+          "x": 5,
+          "y": 35,
+          "width": 60,
+          "height": 10,
+          "colour": "#ff0000",
+          "describe": "bottom 10px cell padding paints the cell background"
+        },
+        {
+          "kind": "rect",
+          "x": 15,
+          "y": 15,
+          "width": 40,
+          "height": 20,
+          "colour": "#00ff00",
+          "describe": "40x20 content sits inside border + padding"
+        }
+      ],
+      "note": "CSS 2.1 \u00a717.6.1: under box-sizing:content-box, cell border and padding wrap the content area and padding paints the cell background."
+    },
+    {
+      "name": "table_colspan_cell_background_spans_two_columns",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}table{border-collapse:collapse;border-spacing:0}td{padding:0;border:0}.span{height:30px;background:#ff0000}.l{width:50px;height:30px;background:#00ff00}.r{width:50px;height:30px;background:#0000ff}</style></head><body><table><tr><td colspan='2' class='span'></td></tr><tr><td class='l'></td><td class='r'></td></tr></table></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 100,
+          "height": 30,
+          "colour": "#ff0000",
+          "describe": "colspan=2 cell background spans both 50px columns"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 30,
+          "width": 50,
+          "height": 30,
+          "colour": "#00ff00",
+          "describe": "second row first column"
+        },
+        {
+          "kind": "rect",
+          "x": 50,
+          "y": 30,
+          "width": 50,
+          "height": 30,
+          "colour": "#0000ff",
+          "describe": "second row second column"
+        }
+      ],
+      "note": "A colspan=2 cell paints its background across the combined width of both spanned columns."
+    },
+    {
+      "name": "table_rowspan_cell_background_spans_two_rows",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}table{border-collapse:collapse;border-spacing:0}td{padding:0;border:0}.span{width:40px;background:#ff0000}.t{width:60px;height:30px;background:#00ff00}.b{width:60px;height:30px;background:#0000ff}</style></head><body><table><tr><td rowspan='2' class='span'></td><td class='t'></td></tr><tr><td class='b'></td></tr></table></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 60,
+          "colour": "#ff0000",
+          "describe": "rowspan=2 cell background covers both 30px rows"
+        },
+        {
+          "kind": "rect",
+          "x": 40,
+          "y": 0,
+          "width": 60,
+          "height": 30,
+          "colour": "#00ff00",
+          "describe": "first row second column sits at [40..100, 0..30]"
+        },
+        {
+          "kind": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 60,
+          "height": 30,
+          "colour": "#0000ff",
+          "describe": "second row second column sits at [40..100, 30..60]"
+        }
+      ],
+      "note": "A rowspan=2 cell paints its background continuously across both spanned rows."
+    },
+    {
+      "name": "css_display_table_cell_backgrounds_match_html_table",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.tbl{display:table;border-collapse:collapse;border-spacing:0}.row{display:table-row}.cell{display:table-cell;width:50px;height:40px}.a{background:#ff0000}.b{background:#0000ff}.c{background:#00ff00}.d{background:#ffff00}</style></head><body><div class='tbl'><div class='row'><div class='cell a'></div><div class='cell b'></div></div><div class='row'><div class='cell c'></div><div class='cell d'></div></div></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 50,
+          "height": 40,
+          "colour": "#ff0000",
+          "describe": "CSS table-cell (0,0) red"
+        },
+        {
+          "kind": "rect",
+          "x": 50,
+          "y": 0,
+          "width": 50,
+          "height": 40,
+          "colour": "#0000ff",
+          "describe": "CSS table-cell (0,1) blue"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 50,
+          "height": 40,
+          "colour": "#00ff00",
+          "describe": "CSS table-cell (1,0) green"
+        },
+        {
+          "kind": "rect",
+          "x": 50,
+          "y": 40,
+          "width": 50,
+          "height": 40,
+          "colour": "#ffff00",
+          "describe": "CSS table-cell (1,1) yellow"
+        }
+      ],
+      "note": "CSS display:table / table-row / table-cell elements follow the same cell-background painting rules as HTML tables."
+    },
+    {
+      "name": "inline_text_align_center_and_right_position_replaced_elements",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.row{width:100px;font-size:0;line-height:20px;background:#eeeeee}.c{text-align:center}.r{text-align:right}img{width:20px;height:20px;vertical-align:top}</style></head><body><div class='row c'><img src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='></div><div class='row r'><img src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 20,
+          "colour": "#eeeeee",
+          "describe": "left margin of centered 20px item in 100px line is 40px"
+        },
+        {
+          "kind": "rect",
+          "x": 40,
+          "y": 0,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "centered item sits at x=40..60"
+        },
+        {
+          "kind": "rect",
+          "x": 60,
+          "y": 0,
+          "width": 40,
+          "height": 20,
+          "colour": "#eeeeee",
+          "describe": "right margin of centered 20px item is 40px"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 20,
+          "width": 80,
+          "height": 20,
+          "colour": "#eeeeee",
+          "describe": "left of right-aligned 20px item in 100px line is 80px"
+        },
+        {
+          "kind": "rect",
+          "x": 80,
+          "y": 20,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "right-aligned item sits at x=80..100"
+        }
+      ],
+      "note": "CSS 2.1 \u00a716.2: text-align:center and text-align:right align inline-level boxes horizontally within their line box without depending on glyph metrics."
+    },
+    {
+      "name": "inline_line_height_expands_line_box_and_container_height",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.line{width:60px;font-size:0;line-height:30px;background:#eeeeee}img{width:20px;height:10px;vertical-align:top}</style></head><body><div class='line'><img src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='><br><img src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 0,
+          "width": 40,
+          "height": 60,
+          "colour": "#eeeeee",
+          "describe": "two 30px line boxes expand the container background to 60px tall"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 20,
+          "width": 20,
+          "height": 10,
+          "colour": "#eeeeee",
+          "describe": "y=20..30 between the two 30px lines remains container background"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 60,
+          "width": 60,
+          "height": 5,
+          "colour": "#ffffff",
+          "describe": "below the 60px container remains white"
+        }
+      ],
+      "note": "CSS 2.1 \u00a710.8: line-height:30px establishes two 30px-tall line boxes (60px total) even when the inline replaced elements are only 10px tall."
+    },
+    {
+      "name": "inline_block_boxes_flow_horizontally_and_wrap",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.c{width:50px;font-size:0;line-height:20px}.b{display:inline-block;width:20px;height:20px;vertical-align:top}.r{background:#ff0000}.g{background:#00ff00}.bl{background:#0000ff}</style></head><body><div class='c'><span class='b r'></span> <span class='b g'></span> <span class='b bl'></span></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "first inline-block starts at x=0, y=0"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 0,
+          "width": 20,
+          "height": 20,
+          "colour": "#00ff00",
+          "describe": "second inline-block sits beside the first on line 1"
+        },
+        {
+          "kind": "rect",
+          "x": 40,
+          "y": 0,
+          "width": 10,
+          "height": 20,
+          "colour": "#ffffff",
+          "describe": "remaining 10px of line 1 is blank"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 20,
+          "width": 20,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "third inline-block wraps onto line 2 at y=20"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 30,
+          "height": 20,
+          "colour": "#ffffff",
+          "describe": "rest of line 2 is blank"
+        }
+      ],
+      "known_failure": "display:inline-block elements do not participate in horizontal inline flow: Litebird stacks all three boxes vertically at x=0 (y=0..20, 20..40, 40..60) like block boxes.",
+      "note": "CSS 2.1 \u00a79.2.4 and \u00a79.4.2: inline-block generates an inline-level block container that flows horizontally on lines and wraps at the container width."
+    },
+    {
+      "name": "inline_vertical_align_top_and_bottom_on_replaced_elements",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.line{width:100px;font-size:0;line-height:40px;background:#eeeeee}.tall{width:20px;height:40px;vertical-align:top}.top{width:20px;height:10px;vertical-align:top}.bot{width:20px;height:10px;vertical-align:bottom}</style></head><body><div class='line'><img class='tall' src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='><img class='top' src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNg+M8AAAICAQB7CYF4AAAAAElFTkSuQmCC'><img class='bot' src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC'></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 20,
+          "height": 40,
+          "colour": "#ff0000",
+          "describe": "40px tall inline image establishes the 40px line box"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 0,
+          "width": 20,
+          "height": 10,
+          "colour": "#00ff00",
+          "describe": "vertical-align:top places the 10px image at y=0..10"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 10,
+          "width": 20,
+          "height": 30,
+          "colour": "#eeeeee",
+          "describe": "below the top-aligned image is container background"
+        },
+        {
+          "kind": "rect",
+          "x": 40,
+          "y": 0,
+          "width": 20,
+          "height": 30,
+          "colour": "#eeeeee",
+          "describe": "above the bottom-aligned image is container background"
+        },
+        {
+          "kind": "rect",
+          "x": 40,
+          "y": 30,
+          "width": 20,
+          "height": 10,
+          "colour": "#0000ff",
+          "describe": "vertical-align:bottom places the 10px image at y=30..40"
+        }
+      ],
+      "known_failure": "vertical-align:top and vertical-align:bottom are not applied to inline replaced elements: Litebird vertically centers both 10px images at y=15..25 inside the 40px line box.",
+      "note": "CSS 2.1 \u00a710.8.1: vertical-align:top and vertical-align:bottom align boxes to the line box edges independently of font metrics."
+    },
+    {
+      "name": "inline_white_space_pre_breaks_on_source_newlines",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.line{width:100px;font-size:0;line-height:20px;white-space:pre}img{width:20px;height:20px;vertical-align:top}</style></head><body><div class='line'><img src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='>\n<img src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "first image sits on line 1"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 0,
+          "width": 80,
+          "height": 20,
+          "colour": "#ffffff",
+          "describe": "newline under white-space:pre forces a break after image 1"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 20,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "second image starts on line 2 at y=20"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 80,
+          "height": 20,
+          "colour": "#ffffff",
+          "describe": "rest of line 2 is blank"
+        }
+      ],
+      "known_failure": "white-space:pre does not force a line break on a literal newline between inline replaced elements: both 20px images paint side by side at x=0..40, y=0..20.",
+      "note": "CSS 2.1 \u00a716.6.1: under white-space:pre, source newlines are preserved as forced line breaks."
+    },
+    {
+      "name": "inline_span_horizontal_margin_and_padding_offset_child",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.line{width:100px;font-size:0;line-height:20px;background:#eeeeee}span{margin-left:10px;padding-left:10px}img{width:20px;height:20px;vertical-align:top}</style></head><body><div class='line'><span><img src='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=='></span></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 20,
+          "height": 20,
+          "colour": "#eeeeee",
+          "describe": "10px inline margin-left + 10px padding-left offset child to x=20"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 0,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "inline image sits at x=20..40"
+        },
+        {
+          "kind": "rect",
+          "x": 40,
+          "y": 0,
+          "width": 60,
+          "height": 20,
+          "colour": "#eeeeee",
+          "describe": "right of the image stays background"
+        }
+      ],
+      "known_failure": "Inline box horizontal margin-left and padding-left do not offset a child replaced element: Litebird paints the 20px image starting at x=0 and widened to x=0..30 instead of x=20..40.",
+      "note": "CSS 2.1 \u00a78.3, \u00a78.4, and \u00a79.4.2: horizontal margin and padding on an inline box advance the inline cursor before its child content."
+    },
+    {
+      "name": "a_data_uri_avif_image_scales_to_its_box",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}img{display:block;width:40px;height:40px}</style></head><body><img src=\"data:image/avif;base64,AAAAHGZ0eXBhdmlmAAAAAGF2aWZtaWYxbWlhZgAAAOptZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0AAAAAAAAAAAAAAAAAAAAAA5waXRtAAAAAAABAAAAImlsb2MAAAAAREAAAQABAAAAAAEOAAEAAAAAAAAAFAAAACNpaW5mAAAAAAABAAAAFWluZmUCAAAAAAEAAGF2MDEAAAAAamlwcnAAAABLaXBjbwAAABNjb2xybmNseAACAAIABoAAAAAMYXYxQ4EADAAAAAAUaXNwZQAAAAAAAAAEAAAABAAAABBwaXhpAAAAAAMICAgAAAAXaXBtYQAAAAAAAAABAAEEgYIDhAAAABxtZGF0EgAKBRgEfYEIMgkQAAAAB8gkxmI=\"></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 40,
+          "colour": "#000000",
+          "describe": "4x4 solid black AVIF (Y=0, Cb=128, Cr=128) scaled to 40x40 fills [0..40, 0..40] with #000000"
+        },
+        {
+          "kind": "pixel",
+          "x": 41,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "right of the 40px AVIF image remains white"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 41,
+          "colour": "#ffffff",
+          "describe": "below the 40px AVIF image remains white"
+        }
+      ],
+      "known_failure": "AVIF has no AV1 intra-frame picture decoder yet: AvifContainer parses the 4x4 container, but ImageDecoder::decode returns nullptr so <img src='data:image/avif;...'> paints no pixels (#ffffff instead of #000000).",
+      "note": "Uses the libheif-verified solid #000000 4x4 AVIF from tests/media/avif/corpus.json; Y=0, Cb=128, Cr=128 maps to exact (0,0,0) across every YCbCr-to-RGB matrix."
     }
   ]
 }

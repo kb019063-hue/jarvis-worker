@@ -1295,8 +1295,43 @@ void install_array_builtins(JsIntrinsics& realm) {
         }
         return join.call_with_this(array, {});
     });
+    // §23.1.3.28: not a join. Every place is asked for the element first
+    // (Get(O, k)), and the element that is not `undefined` or `null` is asked
+    // for its own `toLocaleString` and that is called with the *boxed*
+    // element as `this`. A hole is never asked for, and nor is `undefined`:
+    // both are the empty string, and only the separators remain.
+    //
+    // Until this it was `join_array(receiver, ",")`, so
+    // `Number.prototype.toLocaleString = () => "X"` left `[1,2]` as "1,2"
+    // and `[1,,3]` as "1,,3" (finding 196).
     js_define_method(ap, "toLocaleString", 0, [](Args) {
-        return JsValue::make_string(join_array(receiver("toLocaleString"), ","));
+        JsValue array = receiver("toLocaleString");
+        const JsValue* primitive = js_wrapped_primitive(array);
+        const JsValue object = (primitive && (primitive->type == JsType::String ||
+                                              primitive->type == JsType::Number ||
+                                              primitive->type == JsType::Boolean))
+                                   ? *primitive
+                                   : array;
+        const size_t length = length_of(object);
+        std::string out;
+        for (size_t index = 0; index < length; ++index) {
+            if (index) out += ",";
+            // Get, not HasProperty: a place the prototype has is read, and a
+            // hole reads `undefined` without running anything.
+            const JsValue element = get_index(object, index);
+            if (element.is_nullish()) continue;
+            // Invoke(nextElement, "toLocaleString"): §23.1.3.28 step 7.c
+            // passes the element it read, primitive and all — there is no
+            // ToObject in the step. A strict method then sees the number it
+            // was given and a sloppy one the call boxes it into, which is what
+            // test262's `primitive_this_value` and `…_getter` ask for.
+            const JsValue method = element.get_property("toLocaleString");
+            if (!method.is_function()) {
+                js_throw_type_error("Array.prototype.toLocaleString: the element has no toLocaleString");
+            }
+            out += js_to_string(method.call_with_this(element, {}));
+        }
+        return JsValue::make_string(out);
     });
     js_define_method(ap, "reverse", 0, [](Args) {
         JsValue array = this_object("reverse");
@@ -1895,27 +1930,66 @@ void install_array_builtins(JsIntrinsics& realm) {
             JsValue array = receiver(name);
             const size_t length = array_like_length(array, name);
             JsValue callback = require_callback(js_arg(args, 0), name);
-            // reduce visits the places that are there, in order (or in reverse
-            // for reduceRight), and never asks about one that is not: a
-            // receiver with a huge `length` and one place reduces in one step.
-            const IndexWalk walk = present_indices(array, length);
-            const size_t count = walk.indices.size();
-            size_t step = 0;
+            // reduce visits the places that are there, in order, and never
+            // asks about one that is not: a receiver with a huge `length` and
+            // one place reduces in one step.
+            //
+            // The places are asked for as the walk reaches them, not listed
+            // before it starts. A callback can make a place appear ahead of
+            // itself — `reduce/15.4.4.21-9-1.js` writes `arr[2]` from the
+            // callback while two is still a hole in front of the walk — and
+            // the standard asks `HasProperty` at each index as it arrives, so
+            // the place that appeared is visited. Listing them first answered
+            // "75" where Node.js v22.22.3 answers "105".
             JsValue accumulator;
-            auto place = [&](size_t k) { return walk.indices[from_end ? count - 1 - k : k]; };
-            if (args.size() >= 2) {
-                accumulator = args[1];
-            } else {
-                if (count == 0) js_throw_type_error("Reduce of empty array with no initial value");
-                accumulator = get_index(array, place(0));
-                ++step;
-            }
-            for (; step < count; ++step) {
-                const size_t i = place(step);
-                if (!has_index_property(array, i)) continue;   // a callback can delete it first
+            bool started = args.size() >= 2;
+            if (started) accumulator = args[1];
+            // One place, in the order the walk reaches it: the first one starts
+            // the accumulator when there is no initial value, and every other
+            // one is handed to the callback.
+            auto visit = [&](size_t i) {
+                if (!started) {
+                    accumulator = get_index(array, i);
+                    started = true;
+                    return;
+                }
                 JsValue item = get_index(array, i);
                 accumulator = callback.call({accumulator, item, JsValue::make_number(static_cast<double>(i)), array});
+            };
+            if (from_end) {
+                // §23.1.3.22 walks k downwards from len-1 to 0 and asks
+                // `HasProperty` at each index as it arrives — so a place a
+                // callback creates *below* itself is still reached. Walking
+                // the places upwards and then reversing the list answers
+                // differently: `[1,,,9]` with a callback that fills 1 and 2
+                // from index 3 reaches neither of them, and answered 18
+                // where Node.js v22.22.3 answers 21.
+                //
+                // A length that cannot be counted cannot be walked downwards
+                // either, so it takes the places that are there, in reverse.
+                // That is the same deviation `find` makes at the same bound,
+                // and it changes only an answer that could not be produced.
+                if (length > kMaxWalkedIndices) {
+                    const IndexWalk walk = present_indices(array, length);
+                    for (size_t k = walk.indices.size(); k-- > 0;) {
+                        if (!has_index_property(array, walk.indices[k])) continue;
+                        visit(walk.indices[k]);
+                    }
+                } else {
+                    for (size_t step = 0; step < length; ++step) {
+                        const size_t i = length - 1 - step;
+                        if (!has_index_property(array, i)) continue;
+                        visit(i);
+                    }
+                }
+                if (!started) js_throw_type_error("Reduce of empty array with no initial value");
+                return accumulator;
             }
+            walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
+                visit(i);
+                return true;
+            });
+            if (!started) js_throw_type_error("Reduce of empty array with no initial value");
             return accumulator;
         };
     };

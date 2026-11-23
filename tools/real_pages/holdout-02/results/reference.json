@@ -1,0 +1,142 @@
+{
+  "browser": "HeadlessChrome/131.0.6778.0",
+  "rows": [
+    {
+      "id": "H1",
+      "pass": true,
+      "trace": [
+        {
+          "check": "initially hidden",
+          "got": "true",
+          "want": "true"
+        },
+        {
+          "click": "[popovertargetaction=show]",
+          "x": 63.5,
+          "y": 18.5
+        },
+        {
+          "check": "shown with text",
+          "got": "true",
+          "want": "true"
+        },
+        {
+          "click": "[popovertargetaction=hide]",
+          "x": 176.8046875,
+          "y": 18.5
+        },
+        {
+          "check": "hidden again",
+          "got": "true",
+          "want": "true"
+        }
+      ],
+      "missing": [],
+      "errors": []
+    },
+    {
+      "id": "H2",
+      "pass": true,
+      "trace": [
+        {
+          "check": "initial result",
+          "got": "Result: 0",
+          "want": "Result: 0"
+        },
+        {
+          "click": "#number1",
+          "x": 494.6875,
+          "y": 248.4375
+        },
+        {
+          "click": "#number2",
+          "x": 494.6875,
+          "y": 298.4375
+        },
+        {
+          "check": "result after change events",
+          "got": "Result: 42",
+          "want": "Result: 42"
+        }
+      ],
+      "missing": [],
+      "errors": []
+    },
+    {
+      "id": "H3",
+      "pass": true,
+      "trace": [
+        {
+          "check": "four boxes at load",
+          "got": "4",
+          "want": "4"
+        },
+        {
+          "click": "section div",
+          "x": 39,
+          "y": 101
+        },
+        {
+          "check": "first box selected (aqua border)",
+          "got": "true",
+          "want": "true"
+        },
+        {
+          "click": ".after",
+          "x": 159.453125,
+          "y": 146.5
+        },
+        {
+          "check": "five boxes after the insert",
+          "got": "5",
+          "want": "5"
+        }
+      ],
+      "missing": [],
+      "errors": []
+    },
+    {
+      "id": "H4",
+      "pass": true,
+      "trace": [
+        {
+          "check": "only the header row at load",
+          "got": "1",
+          "want": "1"
+        },
+        {
+          "click": "a[href='?firstName=Ayse&food=rice%20pudding']",
+          "x": 208.96875,
+          "y": 168.5
+        },
+        {
+          "check": "two body rows after navigation",
+          "got": "3",
+          "want": "3"
+        },
+        {
+          "check": "keys sorted: firstName first",
+          "got": "firstName",
+          "want": "firstName"
+        },
+        {
+          "check": "percent-decoding: rice pudding",
+          "got": "rice pudding",
+          "want": "rice pudding"
+        },
+        {
+          "check": "sorted second row: food",
+          "got": "food",
+          "want": "food"
+        },
+        {
+          "check": "output line present",
+          "got": "true",
+          "want": "true"
+        }
+      ],
+      "missing": [],
+      "errors": []
+    }
+  ]
+}

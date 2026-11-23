@@ -246,7 +246,38 @@ void setup_html_element(Iface& I) {
     define_common_element_members(I, &is_html_node);
 }
 
+// SVGAnimatedString is a live view of an element's class attribute. Keep the
+// node and its wrapper alive when script retains the view on its own, just as
+// DOMTokenList does. Animation itself is not implemented for this attribute.
+struct SvgAnimatedClassState : JsExotic {
+    std::shared_ptr<Element> element;
+    void trace(Heap& heap) override { trace_node(heap, element.get()); }
+};
+
+void setup_svg_animated_string(Iface& I) {
+    I.accessor("baseVal", [](Realm&) {
+        const auto& state = this_state<SvgAnimatedClassState>("SVGAnimatedString");
+        const auto* text = state.element->attribute("class");
+        return str(text ? *text : "");
+    }, [](Realm&, const JsValue& value) {
+        auto& state = this_state<SvgAnimatedClassState>("SVGAnimatedString");
+        state.element->set_attribute("class", to_str(value));
+    });
+    I.getter("animVal", [](Realm&) {
+        const auto& state = this_state<SvgAnimatedClassState>("SVGAnimatedString");
+        const auto* text = state.element->attribute("class");
+        return str(text ? *text : "");
+    });
+}
+
 void setup_svg_element(Iface& I) {
+    I.node_getter(&is_svg_node, "className", [](Realm& r, Node& self) {
+        return cached(wrap(r, self), "svgClassName", [&]() {
+            auto state = std::make_shared<SvgAnimatedClassState>();
+            state->element = shared(static_cast<Element&>(self));
+            return r.make("SVGAnimatedString", state);
+        });
+    });
     I.node_getter(&is_svg_node, "ownerSVGElement", [](Realm& r, Node& self) {
         for (auto at = self.parent(); at && at->is_element(); at = at->parent()) {
             auto& element = static_cast<Element&>(*at);
@@ -1005,6 +1036,24 @@ void setup_offscreen_canvas(Iface& I) {
         if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {blob});
         return undefined();
     });
+    I.method("transferToImageBitmap", 0, [](Realm& r, Args) {
+        auto& st = this_state<OffscreenCanvasState>("OffscreenCanvas");
+        if (st.width <= 0 || st.height <= 0 ||
+            !RasterBudget::allows(static_cast<std::int64_t>(st.width), static_cast<std::int64_t>(st.height))) {
+            throw_dom(r, "InvalidStateError",
+                      "OffscreenCanvas.transferToImageBitmap: canvas has invalid or over-budget dimensions.");
+        }
+        std::vector<uint32_t> pixels;
+        if (st.context) {
+            if (auto img = st.context->image_data(); img && img->is_valid()) {
+                pixels = img->pixels;
+            }
+            st.context->resize(std::max(st.width, 1), std::max(st.height, 1));
+        } else {
+            pixels.assign(static_cast<std::size_t>(st.width) * static_cast<std::size_t>(st.height), 0);
+        }
+        return make_image_bitmap(r, st.width, st.height, std::move(pixels));
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1562,6 +1611,7 @@ void reflect_attributes(Iface& I, const char* description) {
 void register_html_interfaces() {
     const auto element_ctor = &construct_custom_element;
     register_interface({"HTMLElement", "Element", setup_html_element, element_ctor, 0, nullptr});
+    register_interface({"SVGAnimatedString", nullptr, setup_svg_animated_string, nullptr, 0, nullptr});
     register_interface({"SVGElement", "Element", setup_svg_element, nullptr, 0, nullptr});
     register_interface({"SVGGraphicsElement", "SVGElement", nullptr, nullptr, 0, nullptr});
     register_interface({"SVGSVGElement", "SVGGraphicsElement", nullptr, nullptr, 0, nullptr});

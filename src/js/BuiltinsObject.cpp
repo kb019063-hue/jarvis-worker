@@ -4,6 +4,7 @@
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/DomBindings.hpp"
+#include "litebird/js/JsInterpreter.hpp"
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
@@ -245,6 +246,34 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
     if (object.is_function() && object.function_data() && (key == "name" || key == "length")) {
         return data(object.get_property(key), false, false, true);
     }
+    // The global object owns the global declarations: §9.1.1.4 makes them
+    // non-configurable data properties of it. They live in the global
+    // environment rather than in the object's property table -- the object
+    // finds them through its `lookup_fallback` -- so the descriptor is
+    // derived from the binding, or `Object.getOwnPropertyDescriptor(this,
+    // "Object")` would answer `undefined` for a name that
+    // `hasOwnProperty(this, "Object")` reports as present. It is asked
+    // before the exotic below, which claims these names through
+    // `exotic->has` and then describes none of them, and would otherwise
+    // answer `undefined` on the way out.
+    //
+    // Only a *variable* declaration is one of these. What `let`, `const` and
+    // `class` declare is not a property of the global object at all, which is
+    // what `is_lexical` marks (`Object.getOwnPropertyDescriptor(this, "x")`
+    // is undefined after `let x`), and a non-writable global such as
+    // `undefined` is the one kind the standard does make non-configurable.
+    if (object.is_object_like() && object.object_val) {
+        dom::Realm& realm = dom::realm_of(JsIntrinsics::get());
+        if (object.object_val == realm.window.object_val) {
+            if (auto scope = realm.global_scope.lock()) {
+                const JsEnvironment::Binding* binding = scope->find_own(key);
+                if (binding && !binding->is_lexical) {
+                    return data(binding->value, !binding->is_readonly, false, !binding->is_readonly);
+                }
+            }
+        }
+    }
+
     // A property the object computes instead of storing: the indices and
     // names of a list, of a NamedNodeMap or of an HTMLCollection. The value
     // is what reading it gives, and it is configurable as every such
@@ -497,7 +526,6 @@ std::string object_tag(const JsValue& value) {
         }
         if (cell->is_array) return "Array";
     }
-    if (value.promise_value()) return "Promise";
     return "Object";
 }
 
@@ -624,9 +652,23 @@ void install_object_builtins(JsIntrinsics& realm) {
     js_define_method(op, "toString", 0, [](Args) {
         return JsValue::make_string("[object " + object_tag(self()) + "]");
     });
+    // §20.1.3.5: `Invoke(this, "toString")` — the method is looked up on the
+    // receiver and called, so a `toString` an element's own prototype has is
+    // the one asked, and `Boolean.prototype.toString = function () { return
+    // typeof this; }` is visible through it. This was `js_to_string(self())`,
+    // which for every object is "[object Object]" and asks nothing: test262's
+    // `Array.prototype.toLocaleString/primitive_this_value` reached the
+    // element's `toLocaleString` here and got that text (finding 196).
     js_define_method(op, "toLocaleString", 0, [](Args) {
         JsValue me = self();
-        return JsValue::make_string(js_to_string(me));
+        if (me.is_nullish()) {
+            js_throw_type_error("Object.prototype.toLocaleString called on null or undefined");
+        }
+        JsValue to_string = me.get_property("toString");
+        if (!to_string.is_function()) {
+            js_throw_type_error("Object.prototype.toLocaleString: toString is not a function");
+        }
+        return to_string.call_with_this(me, {});
     });
     js_define_method(op, "valueOf", 0, [](Args) { return self(); });
 

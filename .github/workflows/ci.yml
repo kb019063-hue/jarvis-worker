@@ -51,6 +51,8 @@ jobs:
         run: make -j"$(nproc)"
       - name: Engine test suites
         run: make test
+      - name: Shell labels cannot inject terminal controls
+        run: make verify-terminal-shell-safety
       - name: GC invariants hold through the shell
         # Unreachable cycles and closure captures must be reclaimed, churn
         # must not grow the live set, what a global names must stay intact.
@@ -122,6 +124,7 @@ jobs:
         # and runs 1,800 mutated JPEG/GIF/SVG inputs through media_check.
         run: |
           make verify-media
+          make verify-avif
           make fuzz-media
       - name: CSS Color 4/5 rational oracle, WPT vectors, and fuzzing
         # Cross-checks all 15 color spaces against an independent exact-rational
@@ -204,6 +207,8 @@ jobs:
           python-version: "3.11"
       - name: Build
         run: make -j"$(nproc)"
+      - name: Two-build pixel comparator negative controls
+        run: make diff-render-self-test
       - name: Reftests
         # `ROADMAP.md` Tier 1 row 8: "Nothing measures a pixel." This measures
         # them. Every page in tests/render/reftests.json is rendered, and the
@@ -211,6 +216,8 @@ jobs:
         # the engine is not asked to grade its own writer — then compared with
         # what the reftest asserts, exactly, with no tolerance.
         run: make render-conformance
+      - name: Compare a real build with itself
+        run: make diff-render BEFORE=build/litebird AFTER=build/litebird DIFF_RENDER_ARGS="--filter inline_"
   conformance:
     name: DOM conformance (html5lib corpus)
     runs-on: ubuntu-latest
@@ -315,6 +322,12 @@ jobs:
         run: python3 tools/conformance/verify_async_generator.py
       - name: Eval context, declaration instantiation, and early errors against Node.js
         run: python3 tools/conformance/verify_eval_context.py
+      - name: Promise subclass capabilities and chains against Node.js
+        # 22 programs answering questions about NewPromiseCapability, species,
+        # chain value propagation, thenable adoption and rejecting through a
+        # `then` with no handler: each run through the engine and Node.js, and
+        # the two outputs required to be equal, line for line (Phase 196).
+        run: python3 tools/conformance/verify_promise_subclass.py
       - name: String results against Node.js
         # 36 subject strings through every string method and 51 regular
         # expressions: 50,580 results, each compared with what Node computes on

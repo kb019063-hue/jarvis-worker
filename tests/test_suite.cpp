@@ -2706,6 +2706,98 @@ TEST(the_font_shorthand_resets_font_kerning) {
     std::fflush(stdout);
 }
 
+TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for) {
+    using namespace litebird;
+
+    // A box's outline is its own rectangle, drawn outside the border box and
+    // taking no room from anything (CSS 2.1 §16.3): `outline: 5px solid`
+    // paints a 5px ring around a box that is still 100 by 40 in the layout,
+    // where a `border` would have made it 110. The CSSOM has always answered
+    // `5px solid rgb(0, 255, 0)` for it, and the display list had nothing:
+    // `ComputedStyle` had no outline, so `emit_chrome` had nothing to draw.
+    // An outline the painter never receives is the same bug as a property the
+    // resolver never stored, and the difference only shows up in ink.
+    // Each box is indented far enough that its ring fits on the canvas: a
+    // ring at a zero offset starts at the border box and grows outward, and
+    // the painter clips anything at a negative coordinate.
+    auto doc = HtmlParser::parse(
+        "<body style=\"margin:0;padding:40px\">"
+        "<div id=a style=\"width:100px;height:40px;background:#ff0000;outline:5px solid #00ff00\"></div>"
+        "<div id=b style=\"width:100px;height:40px;background:#ff0000;outline:5px solid #00ff00;outline-offset:10px;margin-top:60px\"></div>"
+        "<div id=c style=\"width:100px;height:40px;background:#ff0000;outline:5px solid #00ff00;outline-style:none;margin-top:60px\"></div>"
+        "</body>");
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 800.0f, 400.0f);
+    assert(root);
+
+    // The ring takes no room: the box is the declaration's size, and the
+    // three boxes are 40 high one after another with nothing added.
+    auto el = doc->get_element_by_id("a");
+    assert(el && el->has_layout_box());
+    const Rect border_box = el->bounding_box();
+    assert(border_box.width == 100 && border_box.height == 40);
+
+    BitmapRenderer bmp(200, 400);
+    bmp.clear(Color::white());
+    bmp.render(DisplayList::build(root));
+
+    auto at = [&](float x, float y) { return bmp.get_pixel(static_cast<int>(x), static_cast<int>(y)); };
+    auto is_green = [](const Color& c) { return c.g > 200 && c.r < 60 && c.b < 60; };
+    auto is_red = [](const Color& c) { return c.r > 200 && c.g < 60 && c.b < 60; };
+    auto is_white = [](const Color& c) { return c.r > 240 && c.g > 240 && c.b > 240; };
+
+    // A zero offset leaves the ring flush against the border box and outside
+    // it: the fill is untouched, the 5px band beyond the edge is the
+    // outline's green, and nothing is painted past it.
+    assert(is_red(at(border_box.x + 20, border_box.y + 20)));
+    assert(is_green(at(border_box.x + border_box.width + 2, border_box.y + 20)));
+    assert(is_white(at(border_box.x + border_box.width + 12, border_box.y + 20)));
+    // ...and with `outline-offset: 10px` the ring is lifted clear: the fill is
+    // still red, nothing is drawn in the 10px gap, green 12px out, white past
+    // the ring's far edge.
+    auto b = doc->get_element_by_id("b");
+    assert(b && b->has_layout_box());
+    const Rect b_box = b->bounding_box();
+    assert(is_red(at(b_box.x + 2, b_box.y + 20)));
+    assert(is_white(at(b_box.x - 5, b_box.y + 20)));
+    assert(is_green(at(b_box.x - 12, b_box.y + 20)));
+    assert(is_white(at(b_box.x - 20, b_box.y + 20)));
+    // `outline-style: none` draws nothing, whatever the width says.
+    auto c = doc->get_element_by_id("c");
+    assert(c && c->has_layout_box());
+    const Rect c_box = c->bounding_box();
+    assert(is_white(at(c_box.x - 3, c_box.y + 20)));
+    assert(is_white(at(c_box.x - 1, c_box.y + 20)));
+
+    std::printf("      [outline] painted; no room taken; offset and none honoured\n");
+    std::fflush(stdout);
+
+    // The same value, read back through getComputedStyle, is the one that was
+    // painted: the two used to be different questions with only one answer.
+    auto page = std::make_unique<TestPage>();
+    JsInterpreter& js = page->js;
+    js.eval(R"JS(
+        function outlined(css) {
+            var d = document.createElement('div');
+            d.setAttribute('style', css);
+            document.body.appendChild(d);
+            return d;
+        }
+        var o1 = outlined('outline:5px solid #00ff00');
+        var o2 = outlined('outline:thin solid red');
+        var o3 = outlined('outline:5px solid #00ff00;outline-style:none');
+        var o4 = outlined('outline:5px solid #ff0000;outline-offset:-3px');
+    )JS");
+    auto cs = [&](const char* var, const char* prop) {
+        return js.eval(std::string("getComputedStyle(") + var + ")." + prop).to_string();
+    };
+    assert(cs("o1", "outlineWidth") == "5px" && cs("o1", "outlineStyle") == "solid" &&
+           cs("o1", "outlineColor") == "rgb(0, 255, 0)");
+    assert(cs("o2", "outlineWidth") == "1px" && cs("o2", "outlineColor") == "rgb(255, 0, 0)");
+    assert(cs("o3", "outlineStyle") == "none");
+    assert(cs("o4", "outlineOffset") == "-3px");
+}
+
 TEST(the_painter_honours_font_kerning_none) {
     using namespace litebird;
 
@@ -4799,6 +4891,38 @@ TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs) {
     std::fflush(stdout);
 }
 
+TEST(hebrew_fixed_points_are_ordered_before_shaping) {
+    using namespace litebird;
+    const std::vector<TestGlyphSpec> glyphs = {
+        {0, 500, false, 0, 0, 0, 0},
+        {0x05E9, 600, true, 40, 0, 560, 500},
+        {0x05B8, 0, true, 10, 0, 20, 10},
+        {0x05C1, 0, true, 10, 0, 20, 10},
+        {0x05BC, 0, true, 10, 0, 20, 10},
+        {0x05C7, 0, true, 10, 0, 20, 10},
+        {' ', 200, false, 0, 0, 0, 0},
+        {0x0301, 0, true, 10, 0, 20, 10},
+    };
+    TrueTypeFont f;
+    assert(f.load_memory(build_synthetic_sfnt(1000, 800, -200, glyphs, {})));
+    auto ids = [&](const std::vector<uint32_t>& cps) {
+        std::vector<uint16_t> out;
+        for (const auto& g : f.shape_glyphs(cps, true, false)) out.push_back(g.glyph);
+        return out;
+    };
+    // No host font and no GDEF needed: preprocessing is a codepoint rule.
+    assert((ids({0x05E9, 0x05B8, 0x05C1}) == std::vector<uint16_t>{1, 3, 2}));
+    assert(ids({0x05E9, 0x05B8, 0x05C1}) == ids({0x05E9, 0x05C1, 0x05B8}));
+    assert((ids({0x05E9, 0x05B8, 0x05BC, 0x05C1}) == std::vector<uint16_t>{1, 3, 4, 2}));
+    // Equal-ranked qamats/qamats-qatan stay stable, including repeated marks.
+    assert((ids({0x05E9, 0x05C7, 0x05B8, 0x05B8}) == std::vector<uint16_t>{1, 5, 2, 2}));
+    // Neither a base, space, nor an unhandled combining mark is crossed.
+    assert((ids({0x05E9, 0x05B8, 0x05E9, 0x05C1}) == std::vector<uint16_t>{1, 2, 1, 3}));
+    assert((ids({0x05E9, 0x05B8, ' ', 0x05C1}) == std::vector<uint16_t>{1, 2, 6, 3}));
+    assert((ids({0x05E9, 0x05B8, 0x0301, 0x05C1}) == std::vector<uint16_t>{1, 2, 7, 3}));
+    assert(ids({}).empty());
+}
+
 TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely) {
     using namespace litebird;
 
@@ -5357,6 +5481,56 @@ TEST(browser_shell_navigation_and_hit_testing) {
     assert(frame.find("Litebird DevTools") != std::string::npos);
 }
 
+TEST(shell_frame_labels_cannot_inject_terminal_controls) {
+    using namespace litebird;
+    // A real navigation keeps an attacker-controlled filename unchanged,
+    // while the terminal frame prints a safe representation of it.
+    const std::string path = "/tmp/litebird-shell-" + std::to_string(getpid()) + "-\033]0;bad\007.html";
+    { std::ofstream file(path); file << "<!doctype html><button>click</button>"; }
+    BrowserShell shell(200, 150, 20, 10);
+    assert(shell.navigate_to(path));
+    std::remove(path.c_str());
+    assert(shell.current_url() == path);
+    assert(shell.status_message() == "Loaded " + path);
+    std::string frame = shell.render_terminal_frame();
+    const std::string shown = "/tmp/litebird-shell-" + std::to_string(getpid()) + "-?]0;bad?.html";
+    assert(frame.find("URL: [\033[1m" + shown + "\033[22m]") != std::string::npos);
+    assert(frame.find("Loaded " + shown) != std::string::npos);
+
+    // Exercise every byte in both the focused ID and the status text. The
+    // original DOM and status are unchanged; controls, C1 and UTF-8 bytes
+    // are replaced only when emitted. Focus updates the cached text.
+    std::string bytes, safe;
+    for (int i = 0; i != 256; ++i) {
+        bytes.push_back(static_cast<char>(i));
+        safe.push_back(i >= 0x20 && i <= 0x7e ? static_cast<char>(i) : '?');
+    }
+    auto button = shell.focused_element();
+    assert(button);
+    button->set_attribute("id", bytes);
+    button->append_child(std::make_shared<Text>(bytes));
+    shell.relayout();
+    shell.focus_next();
+    assert(shell.focused_element()->id() == bytes);
+    assert(shell.status_message().find(bytes) != std::string::npos);
+    frame = shell.render_terminal_frame(true);
+    assert(frame.find("Focus: <button#" + safe + ">") != std::string::npos);
+    assert(frame.find("Focused: <button> \"click" + safe + "\"") != std::string::npos);
+    assert(frame.find("\033]0;bad\007") == std::string::npos);
+    std::ostringstream printed;
+    shell.print_terminal_frame(printed, false);
+    assert(printed.str() == shell.render_terminal_frame(false));
+
+    // A failed navigation also includes the untrusted URL in the status.
+    const std::string missing = "/tmp/litebird-no-such-" + std::to_string(getpid()) + "-\033[2J\r";
+    assert(!shell.navigate_to(missing));
+    assert(shell.status_message().find(missing) != std::string::npos);
+    frame = shell.render_terminal_frame();
+    assert(frame.find("Error loading /tmp/litebird-no-such-") != std::string::npos);
+    assert(frame.find("?[2J?") != std::string::npos);
+    assert(frame.find("\033[2J") == std::string::npos);
+}
+
 TEST(css_positioning_and_stacking_contexts) {
     using namespace litebird;
 
@@ -5858,6 +6032,134 @@ TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion
     )JS");
     EventLoop::default_loop().run_microtasks();
     assert(js.eval("then_trace.join('|')").to_string() == "next|then|close|getter");
+}
+
+// ---------------------------------------------------------------------------
+// Phase 196: a Promise subclass makes its own promises
+// ---------------------------------------------------------------------------
+TEST(promise_subclass_makes_its_own_promises_and_a_rejection_keeps_its_reject) {
+    using namespace litebird;
+    // The expectation for every question here was taken from Node.js: the
+    // engine is not asked to grade itself. `tools/conformance/verify_promise_
+    // subclass.py` runs the same questions through both, and this suite keeps
+    // the ones the engine has to answer without a second binary on the box.
+    TestPage page;
+    JsInterpreter& js = page.load("<!DOCTYPE html><body></body>");
+    auto text = [&js](const std::string& source) { return js.eval(source).to_string(); };
+
+    // 1. A subclass's instance is that subclass, and the native parent filled
+    //    in its state: `then` finds it through the cell `super(...)` was given.
+    assert(text(R"(
+        class P extends Promise { constructor(fn) { super(fn); } }
+        var p = new P(function (resolve) { resolve(1); });
+        [p instanceof P, p instanceof Promise,
+         Object.getPrototypeOf(p) === P.prototype].join()
+    )") == "true,true,true");
+
+    // 2. `then` asks SpeciesConstructor: what it makes is a P, and the chain
+    //    gives each step the value the step before it returned.
+    // Nothing has run yet when this returns: the reactions are queued.
+    text(R"(
+        var seen = [];
+        var q = p.then(function (v) { seen.push('one:' + v); return v * 2; })
+                 .then(function (v) { seen.push('two:' + v); return v + 5; })
+                 .then(function (v) { seen.push('three:' + v); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("seen.join()") == "one:1,two:2,three:7");
+    assert(text("q instanceof P") == "true");
+
+    // 3. A handler that answers a promise has it adopted, not used as a value.
+    text(R"(
+        var got = [];
+        Promise.resolve(1).then(function () { return Promise.resolve(7); })
+                          .then(function (v) { got.push(v); });
+        Promise.resolve(3).then(function (v) { return Promise.resolve(v * 2); })
+                          .then(function (v) { got.push(v); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("got.join()") == "7,6");
+
+    // 4. A rejection that passes through a `then` with no handler for it is
+    //    still a rejection: `catch` further down sees the same reason. This is
+    //    the half a capability's [[Reject]] is for, and settling it through
+    //    [[Resolve]] made it a value.
+    text(R"(
+        var trace = [];
+        Promise.reject(new Error("boom")).then(function () { trace.push('wrong'); })
+            .catch(function (e) { trace.push('caught:' + e.message); });
+        Promise.reject(2).then().then(function (v) { trace.push('no:' + v); },
+                                      function (e) { trace.push('second:' + e); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("trace.join()") == "caught:boom,second:2");
+
+    // 5. Every static that makes a promise makes the receiver's.
+    assert(text(R"(
+        [P.resolve(1) instanceof P, P.reject(1) instanceof P, P.all([1]) instanceof P,
+         P.allSettled([1]) instanceof P, P.any([1]) instanceof P, P.race([1]) instanceof P,
+         P.withResolvers().promise instanceof P].join()
+    )") == "true,true,true,true,true,true,true");
+
+    // 6. PromiseResolve returns a promise of the constructor unchanged, and
+    //    wraps one that is not. The combinators depend on the first half: a
+    //    wrapping hides a throwing `then` getter from js_iterate, which is what
+    //    closes the iterator.
+    // `p` is a P, so only P's own resolve answers it unchanged; %Promise%'s
+    // makes a plain promise around it.
+    assert(text("P.resolve(p) === p") == "true");
+    assert(text("Promise.resolve(p) === p") == "false");
+    assert(text("var plain = Promise.resolve(1); Promise.resolve(plain) === plain") == "true");
+    assert(text("Promise.resolve(1) === 1") == "false");
+
+    // 7. `new.target.prototype` is read once for a built-in that builds its own
+    //    object, and the executor is refused before it is read at all.
+    assert(text(R"(
+        var reads = 0;
+        function counting() {
+            var nt = function () {}.bind(null);
+            Object.defineProperty(nt, 'prototype', { get: function () { reads++; return { tag: 'G' }; } });
+            return nt;
+        }
+        var before = reads;
+        var made = Reflect.construct(Promise, [function () {}], counting());
+        [reads - before, made.tag, made instanceof Promise].join()
+    )") == "1,G,false");
+    assert(text(R"(
+        var before = reads;
+        try { Reflect.construct(Promise, [], counting()); 'no throw'; }
+        catch (e) { e.name + ',' + (reads - before); }
+    )") == "TypeError,0");
+
+    // 8. The resolving pair the constructor is handed: anonymous, `length` 1,
+    //    and no [[Construct]] (§27.2.1.3.2, §27.2.1.4.2).
+    assert(text(R"(
+        var resolveName;
+        new Promise(function (resolve) { resolveName = resolve; });
+        var ctor;
+        try { new resolveName(function () {}); ctor = 'constructed'; } catch (e) { ctor = e.name; }
+        [resolveName.name === '', resolveName.length, ctor].join()
+    )") == "true,1,TypeError");
+
+    // 9. Species is read, and a species that is not the constructor is honoured.
+    assert(text("P[Symbol.species] === P && Promise[Symbol.species] === Promise") == "true");
+    assert(text(R"(
+        class Odd extends Promise { static get [Symbol.species]() { return Promise; } }
+        var o = new Odd(function (r) { r(1); });
+        [o.then(function () {}) instanceof Odd, o.then(function () {}).constructor === Promise].join()
+    )") == "false,true");
+
+    // 10. `finally` goes through `then`, so a subclass's species is honoured
+    //     there too, and it keeps the value and the reason.
+    text(R"(
+        var f = [];
+        p.finally(function () { f.push('ran'); }).then(function (v) { f.push('value:' + v); });
+        Promise.reject(new Error('kept')).finally(function () { f.push('ran2'); })
+            .catch(function (e) { f.push('reason:' + e.message); });
+    )");
+    EventLoop::default_loop().run_microtasks();
+    assert(text("f.join()") == "ran,ran2,value:1,reason:kept");
+    assert(text("p.finally(function () {}) instanceof P") == "true");
 }
 
 TEST(css_flex_wrapping_and_grid_layout) {
@@ -6410,6 +6712,33 @@ TEST(crypto_get_random_values_and_random_uuid) {
     // Non-TypedArray and >65536 bytes are validated in DomCryptoBindings.cpp.
 }
 
+TEST(subtle_crypto_digest_sha256) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    assert(interp.eval("typeof crypto.subtle === 'object' && typeof crypto.subtle.digest === 'function'").is_truthy());
+
+    // Known SHA-256("abc") = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+    interp.eval(R"(
+        var hex = null;
+        var data = new TextEncoder().encode('abc');
+        crypto.subtle.digest('SHA-256', data).then(function(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) {
+                s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            }
+            hex = s;
+        });
+    )");
+    assert(interp.eval("hex === 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'").is_truthy());
+
+    // Unsupported algorithm rejects with NotSupportedError
+    interp.eval("var rejAlg = null; crypto.subtle.digest({ name: 'MD5' }, new Uint8Array(0)).catch(function(e) { rejAlg = e.name; });");
+    assert(interp.eval("rejAlg === 'NotSupportedError'").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -6486,6 +6815,22 @@ TEST(image_bitmap_and_create_image_bitmap) {
     // Unsupported source rejects
     interp.eval("var rejBad = null; createImageBitmap(123).catch(function(e) { rejBad = e.name; });");
     assert(interp.eval("rejBad === 'TypeError'").is_truthy());
+}
+
+TEST(offscreen_canvas_transfer_to_image_bitmap) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var oc = new OffscreenCanvas(4, 3);
+        var ctx = oc.getContext('2d');
+        ctx.fillStyle = '#00ff00';
+        ctx.fillRect(0, 0, 4, 3);
+        var bm = oc.transferToImageBitmap();
+    )");
+    assert(interp.eval("bm instanceof ImageBitmap").is_truthy());
+    assert(interp.eval("bm.width === 4 && bm.height === 3").is_truthy());
 }
 
 void test_css_media_queries() {
@@ -9721,109 +10066,6 @@ TEST(computed_width_and_height_are_used_values) {
         var d = styleOf('width:calc(100% - 20px);height:10px');
         return getComputedStyle(d).width;
     })())JS").to_string() == "calc(100% - 20px)");
-}
-
-TEST(a_counter_is_written_where_the_walk_found_it) {
-    using namespace litebird;
-    // Phase 204. `i++` no longer builds a `Reference` -- a std::string copy of
-    // the name and a copy of a JsValue -- reads the binding, converts it and
-    // walks the scope chain a second time to write it. One walk finds the
-    // binding and the write lands on it. A fast path that finds the wrong
-    // binding, or refuses in different words, would change what a script
-    // means; these are the cases that decide it. Each one makes the *engine*
-    // throw where it is wrong, so the suite fails on the engine's own script
-    // rather than on a comparison written here.
-    TestPage page;
-    JsInterpreter& js = page.js;
-    js.eval(R"JS(
-        function fail(what) { throw new Error(what); }
-
-        // The counter of a loop, and the answer the loop gives.
-        (function () {
-            var count = 0;
-            for (var i = 0; i < 1000; i++) { count = count + i; }
-            if (count !== 499500) fail('loop sum ' + count);
-        })();
-
-        // Prefix and postfix, on a number, on a variable that is a string, and
-        // on an object property (`a.n++` is not the fast path and must agree
-        // with it).
-        (function () {
-            var i = 5, j = 5, s = '4', a = { n: 5 };
-            var post = i++, pre = ++j, text = s++, prop = a.n++;
-            if (post !== 5 || i !== 6) fail('postfix ' + post + ' ' + i);
-            if (pre !== 6 || j !== 6) fail('prefix ' + pre + ' ' + j);
-            if (text !== 4 || s !== 5) fail('string counter ' + text + ' ' + s);
-            if (prop !== 5 || a.n !== 6) fail('property counter ' + prop + ' ' + a.n);
-            if ((i--) !== 6 || i !== 5) fail('decrement ' + i);
-        })();
-
-        // A shadowed counter is the inner one, and the outer is untouched.
-        (function () {
-            var i = 100;
-            function inner() {
-                var i = 0;
-                for (i = 0; i < 4; i++) {}
-                return i;
-            }
-            if (inner() !== 4) fail('shadowed counter ' + inner());
-            if (i !== 100) fail('outer counter ' + i);
-        })();
-
-        // A write an eval makes to the counter is what the next iteration
-        // reads: the binding is the same one.
-        (function () {
-            var i = 0, seen = '';
-            for (i = 0; i < 3; i++) {
-                // `i = 1` while `i` is 0: the update makes it 2, the body sees
-                // 1, and the write truly landed on the same binding. (Checked
-                // against Node.js v22.22.3, which prints 1,2,.)
-                if (i === 0) eval('i = 1;');
-                seen = seen + i + ',';
-            }
-            if (seen !== '1,2,') fail('eval wrote the counter: ' + seen);
-        })();
-
-        // A global counter, which resolves through the global scope.
-        (function () {
-            window.g = 0;
-            function bump() { for (var k = 0; k < 5; k++) { window.g++; } }
-            bump();
-            if (window.g !== 5) fail('global counter ' + window.g);
-        })();
-
-        // Every refusal keeps its own exception and its own words.
-        (function () {
-            function attempt(body) {
-                try { return 'no throw: ' + body(); }
-                catch (e) { return e.constructor.name + ': ' + e.message; }
-            }
-            var constant = attempt(function () { const c = 1; c++; return c; });
-            if (constant !== 'TypeError: Assignment to constant variable.') fail('const: ' + constant);
-            var prefix = attempt(function () { const c = 1; return ++c; });
-            if (prefix !== 'TypeError: Assignment to constant variable.') fail('const prefix: ' + prefix);
-            var tdz = attempt(function () { tdz2++; let tdz2 = 2; return tdz2; });
-            if (tdz !== "ReferenceError: Cannot access 'tdz2' before initialization") fail('tdz: ' + tdz);
-        })();
-
-        // A `for (let ...)` head gives every iteration its own binding, and a
-        // function made in the body keeps the iteration it was made in.
-        (function () {
-            var fns = [];
-            for (let n = 0; n < 3; n++) { fns.push(function () { return n; }); }
-            var total = fns[0]() + fns[1]() + fns[2]();
-            if (total !== 3) fail('per-iteration bindings ' + total);
-        })();
-
-        // A name that is not declared anywhere is a ReferenceError, not a
-        // crash and not a silent success.
-        (function () {
-            try { neverDeclaredAnywhere++; return fail('no throw on an undeclared name'); }
-            catch (e) {
-                if (e.constructor.name !== 'ReferenceError') fail('undeclared: ' + e.constructor.name);
-            }
-        })();
-    )JS");
 }
 
 TEST(a_calc_percentage_is_of_the_declaration_not_the_viewport) {
@@ -20862,6 +21104,157 @@ TEST(worker_options_module_policy_and_global_scope) {
     std::remove(secret_js.c_str());
 }
 
+/// A JS string literal holding `text`, escaping what a literal must escape.
+/// The worker sources below are handed to `new Worker('data:...')` through
+/// `encodeURIComponent`, so what they run must survive one more level of
+/// quoting than a pasted URL would.
+static std::string js_quote_for_suite(const std::string& text) {
+    std::string out = "\"";
+    for (char c : text) {
+        if (c == '\\' || c == '"') out += '\\';
+        out += c;
+    }
+    out += '"';
+    return out;
+}
+
+TEST(text_codecs_are_installed_in_a_worker_scope) {
+    using namespace litebird;
+
+    // Phase 206, finding 210. The row's last open item: `TextDecoder` and
+    // `TextEncoder` were installed on every global, a worker's included, and
+    // nothing said so. `install_text_codec_builtins` is called from
+    // `JsInterpreter`'s setup, which a worker runs for its own realm — but a
+    // later change could have moved it behind `if (m_document)` and every
+    // window suite would still pass.
+    //
+    // What is asserted here is the interface *through a worker's global*, in
+    // one script run inside the worker and answered by `postMessage`, and the
+    // answers are Node v22.22.3's (measured outside, in a worker there too).
+    auto wait_for = [](JsInterpreter& js, const std::string& expr) {
+        const auto start = std::chrono::steady_clock::now();
+        while (std::chrono::steady_clock::now() - start < std::chrono::seconds(4)) {
+            EventLoop::default_loop().tick();
+            EventLoop::default_loop().run_microtasks();
+            if (js.eval(expr).is_truthy()) return true;
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return js.eval(expr).is_truthy();
+    };
+
+    auto doc = std::make_shared<Document>();
+    doc->set_url("https://example.test/app/page.html");
+    JsInterpreter js(doc);
+    js.load_page("<!DOCTYPE html><body></body>");
+    js.notify_document_loaded();
+
+    // The same probes on the window's global first, so a failure says which
+    // scope is missing them rather than only that one is.
+    js.eval(R"JS(
+        var winProbe = [typeof TextDecoder, typeof TextEncoder].join(',');
+    )JS");
+    assert(js.eval("winProbe").to_string() == "function,function");
+
+    const std::string worker_source =
+        "var out = [];"
+        "function t(name, f) {"
+        "  var v; try { v = String(f()); } catch (e) { v = 'THREW ' + e.name; }"
+        "  out.push(name + ' => ' + v);"
+        "}"
+        "t('typeof', function () { return typeof TextDecoder + ',' + typeof TextEncoder; });"
+        "t('toStringTag', function () {"
+        "  return Object.prototype.toString.call(new TextDecoder()) + ' ' +"
+        "         Object.prototype.toString.call(new TextEncoder()); });"
+        "t('encoding', function () { return new TextDecoder().encoding + ' ' + new TextEncoder().encoding; });"
+        "t('latin1 label', function () { return new TextDecoder('latin1').encoding; });"
+        "t('options', function () {"
+        "  return new TextDecoder('utf-8', {fatal: true}).fatal + ' ' + new TextDecoder().ignoreBOM; });"
+        "t('constructor needs new', function () {"
+        "  try { TextDecoder(); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('unknown label', function () {"
+        "  try { new TextDecoder('utf-32'); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('replacement label', function () {"
+        "  try { new TextDecoder('replacement'); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('decode of a plain array', function () {"
+        "  try { new TextDecoder().decode([1, 2]); return 'no throw'; } catch (e) { return e.name; } });"
+        "t('round trip', function () {"
+        "  return new TextDecoder().decode(new TextEncoder().encode('h\\u00e9llo \\u20ac')); });"
+        "t('encode answers a Uint8Array', function () {"
+        "  return Object.prototype.toString.call(new TextEncoder().encode('a')); });"
+        "t('encodeInto', function () {"
+        "  var buf = new Uint8Array(3); var r = new TextEncoder().encodeInto('ab', buf);"
+        "  return r.read + ',' + r.written + ',' + buf[0] + ',' + buf[1]; });"
+        "t('a lone surrogate is three bytes', function () {"
+        "  return new TextEncoder().encode('\\uD800').join(','); });"
+        "t('stream split inside a character', function () {"
+        "  var d = new TextDecoder();"
+        "  return d.decode(new Uint8Array([0xE2]), {stream: true}) + '|' +"
+        "         d.decode(new Uint8Array([0x82, 0xAC])) + '|' + d.decode(); });"
+        "t('fatal error resets the decoder', function () {"
+        "  var d = new TextDecoder('utf-8', {fatal: true});"
+        "  try { d.decode(new Uint8Array([0xFF]), {stream: true}); } catch (e) {}"
+        "  return d.decode(new Uint8Array([0x41])); });"
+        "t('BOM stripped', function () {"
+        "  return new TextDecoder().decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x41])); });"
+        "t('FE FF is data to UTF-16LE', function () {"
+        "  var v = new TextDecoder('utf-16le').decode(new Uint8Array([0xFE, 0xFF, 0x00, 0x41]));"
+        "  return v.length + ':' + v.charCodeAt(0).toString(16); });"
+        "t('ignoreBOM keeps it', function () {"
+        "  return new TextDecoder('utf-8', {ignoreBOM: true})"
+        "      .decode(new Uint8Array([0xEF, 0xBB, 0xBF, 0x41])).length; });"
+        "t('instanceof its own constructor', function () {"
+        "  return (new TextDecoder() instanceof TextDecoder) + ',' +"
+        "         (new TextEncoder() instanceof TextEncoder); });"
+        "postMessage(out);";
+
+    // The source goes through the interpreter as a JS string literal, so it is
+    // quoted here rather than pasted into a `data:` URL with its own escapes.
+    js.eval("var workerSrc = " + js_quote_for_suite(worker_source) + ";");
+    js.eval(
+        "var workerOut = null;"
+        "var workerErr = '';"
+        "var codecWorker = new Worker('data:text/javascript,' + encodeURIComponent(workerSrc));"
+        "codecWorker.onmessage = function (e) { workerOut = e.data; };"
+        "codecWorker.onerror = function (e) { workerErr = e.message; };");
+    const bool arrived = wait_for(js, "workerOut !== null");
+    if (!arrived) std::cerr << "worker said: " << js.eval("workerErr").to_string() << "\n";
+    assert(arrived);
+    js.eval("codecWorker.terminate();");
+
+    // The expected answers, each one Node v22.22.3's.
+    const char* const expected[] = {
+        "typeof => function,function",
+        "toStringTag => [object TextDecoder] [object TextEncoder]",
+        "encoding => utf-8 utf-8",
+        "latin1 label => windows-1252",
+        "options => true false",
+        "constructor needs new => TypeError",
+        "unknown label => RangeError",
+        "replacement label => RangeError",
+        "decode of a plain array => TypeError",
+        "round trip => h\u00e9llo \u20ac",
+        "encode answers a Uint8Array => [object Uint8Array]",
+        "encodeInto => 2,2,97,98",
+        "a lone surrogate is three bytes => 239,191,189",
+        "stream split inside a character => |\u20ac|",
+        "fatal error resets the decoder => A",
+        "BOM stripped => A",
+        "FE FF is data to UTF-16LE => 2:fffe",
+        "ignoreBOM keeps it => 2",
+        "instanceof its own constructor => true,true",
+    };
+    const std::size_t count = sizeof(expected) / sizeof(expected[0]);
+    assert(js.eval("workerOut.length").to_number() == static_cast<double>(count));
+    const std::string joined = js.eval("workerOut.join('\\n')").to_string();
+    std::string want;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (i) want += "\n";
+        want += expected[i];
+    }
+    if (joined != want) std::cerr << "worker codecs:\n" << joined << "\n--- expected ---\n" << want << "\n";
+    assert(joined == want);
+}
+
 TEST(worker_event_target_error_and_message_dispatch) {
     using namespace litebird;
 
@@ -24266,6 +24659,95 @@ TEST(js_direct_eval_follows_syntax_and_variable_environment_rules) {
     assert(!js.last_eval_failed());
     assert(js.global_env()->get("phase80Summary").to_string() ==
            "undefined SyntaxError:0 9 2 2 3 4 function function TypeError TypeError");
+}
+
+TEST(js_direct_eval_inherits_the_callers_grammar) {
+    // Written for #226, which was closed on 22 November 2026: #211 (Phase 171)
+    // had landed the same behaviour by another route, and with no suite of its
+    // own for it. These are the behaviours #226 pinned, as its agent wrote
+    // them; `main` and Node.js v22.22.3 give the line below.
+    using namespace litebird;
+    JsInterpreter js;
+    js.eval(R"js(
+        var out = [];
+
+        // Strictness is inherited, not re-derived from the eval's own text.
+        // Strict code makes `var static` a syntax error; sloppy code does not.
+        function strictInherits() {
+            'use strict';
+            try { eval('var static;'); return 'no error'; }
+            catch (e) { return e.name; }
+        }
+        function sloppyDoesNot() {
+            try { eval('var static;'); return 'declared'; }
+            catch (e) { return e.name; }
+        }
+        out.push(strictInherits(), sloppyDoesNot());
+
+        // A class field initialiser and a static block ban `arguments`, and a
+        // direct eval written there is handed that ban. The text must be
+        // rejected before any of it runs.
+        var effects = 0;
+        class Banned {
+            field = eval('effects = 1; arguments;');
+            static { try { eval('arguments'); } catch (e) { Banned.block = e.name; } }
+        }
+        try { new Banned(); out.push('no error'); } catch (e) { out.push(e.name + ':' + effects); }
+        out.push(Banned.block);
+
+        // The ban follows arrows into their bodies, because an arrow declares
+        // no `arguments` of its own, but an ordinary function does declare
+        // one -- and a `function` declaration's parameters are ordinary code.
+        class Arrows {
+            field = eval('() => arguments');
+        }
+        try { new Arrows().field(); out.push('no error'); } catch (e) { out.push(e.name); }
+        class Functions {
+            field = eval('function g({ p = arguments } = {}) { return arguments.length; } g(7, 8)');
+        }
+        out.push(new Functions().field);
+
+        // §19.2.1.3 EvalDeclarationInstantiation: a sloppy eval's `var` cannot
+        // collide with a lexical binding the caller's scope chain declares.
+        function blockLet() { { let x; try { eval('var x;'); return 'no error'; } catch (e) { return e.name; } } }
+        function bodyLet() { let x; try { eval('var x;'); return 'no error'; } catch (e) { return e.name; } }
+        function bodyVar() { var x; try { eval('var x;'); return 'no collision'; } catch (e) { return e.name; } }
+        function paramVar() { return (function (x) { try { eval('var x;'); return 'no collision'; } catch (e) { return e.name; } })(1); }
+        function siblingLet() { { let x; } try { eval('var x;'); return 'no collision'; } catch (e) { return e.name; } }
+        out.push(blockLet(), bodyLet(), bodyVar(), paramVar(), siblingLet());
+        // Strict eval text puts its `var`s in an environment of its own, so the
+        // same text that collides above merely shadows there.
+        function strictTextShadows() {
+            let x = 'caller';
+            eval('"use strict"; var x = "eval";');
+            return x;
+        }
+        out.push(strictTextShadows());
+
+        // `break`, `continue` and `return` are judged against the eval's own
+        // text: the caller's loop does not enclose it, and neither does the
+        // caller's function.
+        function breakOutside() { for (;;) { try { eval('break;'); return 'no error'; } catch (e) { return e.name; } } }
+        function continueOutside() { try { eval('continue;'); return 'no error'; } catch (e) { return e.name; } }
+        function returnOutside() { try { eval('return 1;'); return 'no error'; } catch (e) { return e.name; } }
+        function insideOwnLoop() { return eval('for (var i = 0; i < 3; i++) { continue; } i'); }
+        function insideOwnSwitch() { return eval('switch (1) { case 1: break; } "done"'); }
+        out.push(breakOutside(), continueOutside(), returnOutside(), insideOwnLoop(), insideOwnSwitch());
+
+        // Indirect eval is global code: it inherits neither the caller's
+        // strictness nor the ban on `arguments`.
+        function indirectIsGlobal() {
+            'use strict';
+            try { return (0, eval)('var static; typeof static'); } catch (e) { return e.name; }
+        }
+        out.push(indirectIsGlobal());
+
+        var summary = out.join(' ');
+    )js");
+    assert(!js.last_eval_failed());
+    assert(js.global_env()->get("summary").to_string() ==
+           "SyntaxError declared SyntaxError:0 SyntaxError SyntaxError 2 SyntaxError SyntaxError "
+           "no collision no collision no collision caller SyntaxError SyntaxError SyntaxError 3 done undefined");
 }
 
 TEST(js_lexical_temporal_dead_zone_blocks_and_classes) {
@@ -28851,6 +29333,173 @@ TEST(dataview_and_the_iterating_typed_array_methods) {
     assert(text("class L extends Int16Array {}; var l = new L([3, 1]); l.toSorted() instanceof L") == "true");
 }
 
+TEST(an_array_to_locale_string_asks_every_element)
+{
+    TestPage page;
+    JsInterpreter& js = page.js;
+    auto text = [&](const std::string& source) { return js.eval(source).to_string(); };
+    // §23.1.3.28 is not `join`. `Array.prototype.toLocaleString` was
+    // `join_array(receiver, ",")`, which read every place as `join` does and
+    // formatted the numbers itself, so a patched `Number.prototype.
+    // toLocaleString` was never asked (finding 196). §20.1.3.5 was
+    // `js_to_string(self())` — "[object Object]", asking nothing — where the
+    // standard is `Invoke(this, "toString")`.
+    js.eval("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- the element is asked, so a patched method shows ------------------
+    assert(text("Number.prototype.toLocaleString = function () { return 'X'; }; [1,2].toLocaleString()")
+           == "X,X");
+    // A hole and `undefined` are the empty string, with nothing asked: two
+    // separators and no 'undefined' text.
+    assert(text("[1,,3].toLocaleString()") == "X,,X");
+    assert(text("String([null,2].toLocaleString())") == ",X");
+    assert(text("[].toLocaleString()") == "");
+    // §23.1.3.28 step 7.c has no ToObject: a strict method sees the number it
+    // was given, and a sloppy one is boxed by the call.
+    assert(text("Number.prototype.toLocaleString = function () { 'use strict'; return typeof this; };"
+                "[7].toLocaleString()") == "number");
+    assert(text("Number.prototype.toLocaleString = function () { return typeof this; };"
+                "[7].toLocaleString()") == "object");
+
+    // ---- the place is read as `[k]` is, and a prototype's index counts ----
+    assert(text("delete Number.prototype.toLocaleString; Array.prototype[1] = 'P';"
+                "Array.prototype.toLocaleString.call([0,,2])") == "0,P,2");
+    assert(text("delete Array.prototype[1]; [0,,2].toLocaleString()") == "0,,2");
+    // A getter on a place runs once, as one read of it.
+    assert(text("var asked = 0; var g = [1,,3];"
+                "Object.defineProperty(g, '0', { get: function () { asked++; return 5; } });"
+                "g.toLocaleString() + ' ' + asked") == "5,,3 1");
+
+    // ---- the element's own method, wherever it is found -------------------
+    assert(text("[{toLocaleString: function () { return 'own'; }}].toLocaleString()") == "own");
+    assert(text("[Object.create({toLocaleString: function () { return 'I'; }})].toLocaleString()") == "I");
+    assert(text("errName(function () { [{toLocaleString: 1}].toLocaleString(); })") == "TypeError");
+    // ToObject is the method's own business: a primitive receiver and a
+    // string's places are both accepted.
+    assert(text("Array.prototype.toLocaleString.call(42)") == "");
+    assert(text("Array.prototype.toLocaleString.call('abc')") == "a,b,c");
+    assert(text("errName(function () { Array.prototype.toLocaleString.call(null); })") == "TypeError");
+
+    // ---- §20.1.3.5: Object.prototype.toLocaleString calls this.toString ---
+    // test262's `primitive_this_value` reaches an element's inherited
+    // `toLocaleString` and needs the patched `toString` to be the one called.
+    assert(text("({toLocaleString: Object.prototype.toLocaleString,"
+                "toString: function () { return 'mine'; }}).toLocaleString()") == "mine");
+    // `"use strict"` in the override is what makes `typeof this` the primitive:
+    // a sloppy function's `this` is boxed by §10.2.1.2, which is why test262
+    // runs its file `onlyStrict`.
+    assert(text("Boolean.prototype.toString = function () { 'use strict'; return typeof this; };"
+                "[true,false].toLocaleString()") == "boolean,boolean");
+    assert(text("Boolean.prototype.toString = function () { return typeof this; };"
+                "[true,false].toLocaleString()") == "object,object");
+    assert(text("String(({toLocaleString: Object.prototype.toLocaleString}).toLocaleString())")
+           == "[object Object]");
+    assert(text("errName(function () { Object.prototype.toLocaleString.call(null); })") == "TypeError");
+}
+
+TEST(a_counter_is_written_where_the_walk_found_it) {
+    using namespace litebird;
+    // Phase 204. `i++` no longer builds a `Reference` -- a std::string copy of
+    // the name and a copy of a JsValue -- reads the binding, converts it and
+    // walks the scope chain a second time to write it. One walk finds the
+    // binding and the write lands on it. A fast path that finds the wrong
+    // binding, or refuses in different words, would change what a script
+    // means; these are the cases that decide it. Each one makes the *engine*
+    // throw where it is wrong, so the suite fails on the engine's own script
+    // rather than on a comparison written here.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    js.eval(R"JS(
+        function fail(what) { throw new Error(what); }
+
+        // The counter of a loop, and the answer the loop gives.
+        (function () {
+            var count = 0;
+            for (var i = 0; i < 1000; i++) { count = count + i; }
+            if (count !== 499500) fail('loop sum ' + count);
+        })();
+
+        // Prefix and postfix, on a number, on a variable that is a string, and
+        // on an object property (`a.n++` is not the fast path and must agree
+        // with it).
+        (function () {
+            var i = 5, j = 5, s = '4', a = { n: 5 };
+            var post = i++, pre = ++j, text = s++, prop = a.n++;
+            if (post !== 5 || i !== 6) fail('postfix ' + post + ' ' + i);
+            if (pre !== 6 || j !== 6) fail('prefix ' + pre + ' ' + j);
+            if (text !== 4 || s !== 5) fail('string counter ' + text + ' ' + s);
+            if (prop !== 5 || a.n !== 6) fail('property counter ' + prop + ' ' + a.n);
+            if ((i--) !== 6 || i !== 5) fail('decrement ' + i);
+        })();
+
+        // A shadowed counter is the inner one, and the outer is untouched.
+        (function () {
+            var i = 100;
+            function inner() {
+                var i = 0;
+                for (i = 0; i < 4; i++) {}
+                return i;
+            }
+            if (inner() !== 4) fail('shadowed counter ' + inner());
+            if (i !== 100) fail('outer counter ' + i);
+        })();
+
+        // A write an eval makes to the counter is what the next iteration
+        // reads: the binding is the same one.
+        (function () {
+            var i = 0, seen = '';
+            for (i = 0; i < 3; i++) {
+                // `i = 1` while `i` is 0: the update makes it 2, the body sees
+                // 1, and the write truly landed on the same binding. (Checked
+                // against Node.js v22.22.3, which prints 1,2,.)
+                if (i === 0) eval('i = 1;');
+                seen = seen + i + ',';
+            }
+            if (seen !== '1,2,') fail('eval wrote the counter: ' + seen);
+        })();
+
+        // A global counter, which resolves through the global scope.
+        (function () {
+            window.g = 0;
+            function bump() { for (var k = 0; k < 5; k++) { window.g++; } }
+            bump();
+            if (window.g !== 5) fail('global counter ' + window.g);
+        })();
+
+        // Every refusal keeps its own exception and its own words.
+        (function () {
+            function attempt(body) {
+                try { return 'no throw: ' + body(); }
+                catch (e) { return e.constructor.name + ': ' + e.message; }
+            }
+            var constant = attempt(function () { const c = 1; c++; return c; });
+            if (constant !== 'TypeError: Assignment to constant variable.') fail('const: ' + constant);
+            var prefix = attempt(function () { const c = 1; return ++c; });
+            if (prefix !== 'TypeError: Assignment to constant variable.') fail('const prefix: ' + prefix);
+            var tdz = attempt(function () { tdz2++; let tdz2 = 2; return tdz2; });
+            if (tdz !== "ReferenceError: Cannot access 'tdz2' before initialization") fail('tdz: ' + tdz);
+        })();
+
+        // A `for (let ...)` head gives every iteration its own binding, and a
+        // function made in the body keeps the iteration it was made in.
+        (function () {
+            var fns = [];
+            for (let n = 0; n < 3; n++) { fns.push(function () { return n; }); }
+            var total = fns[0]() + fns[1]() + fns[2]();
+            if (total !== 3) fail('per-iteration bindings ' + total);
+        })();
+
+        // A name that is not declared anywhere is a ReferenceError, not a
+        // crash and not a silent success.
+        (function () {
+            try { neverDeclaredAnywhere++; return fail('no throw on an undeclared name'); }
+            catch (e) {
+                if (e.constructor.name !== 'ReferenceError') fail('undeclared: ' + e.constructor.name);
+            }
+        })();
+    )JS");
+}
+
 TEST(a_typed_array_to_locale_string_asks_every_element)
 {
     using namespace litebird;
@@ -30876,6 +31525,62 @@ TEST(gc_reclaims_a_bound_functions_target) {
     heap.collect_garbage();
 }
 
+TEST(a_bound_function_as_a_prototype_keeps_its_target)
+{
+    using namespace litebird;
+
+    // The other side of `gc_reclaims_a_bound_functions_target`. That suite says
+    // a target nothing refers to is freed; this one says a target that only the
+    // *prototype* of a live object refers to is not. `count_value` counts a
+    // payload's captures and bound target, so a payload one handle holds is not
+    // a root, and the mark pass is the only thing that keeps those alive. It
+    // marked neither, so a bound function reached only as an object's prototype
+    // lost the bound `this` after a collection: its target's payload was found
+    // owned and freed while the live function went on reading it. `prototypes.dat`
+    // recorded the answer for a year ("collect: a function that is reachable only
+    // as a prototype stays alive, with what it closed over") and answered
+    // `undefined`; finding 212.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    auto text = [&](const std::string& source) { return js.eval(source).to_string(); };
+    js.eval(R"JS(
+        function churn() {
+            var junk = [];
+            for (var i = 0; i < 400; i++) junk.push({ i: i, s: 'x' + i });
+            return junk.length;
+        }
+        // Every escape of the target is the prototype link: `bound` is the only
+        // thing that refers to the function, and the function the only thing
+        // that refers to `this`'s object.
+        var bound = (function () {
+            var target = { v: 'kept' };
+            return Object.create(function () { return this.v; }.bind(target));
+        })();
+    )JS");
+    // A plain function as a prototype was already right: nothing but its own
+    // cell has to be kept alive.
+    js.eval(R"JS(
+        var plain = (function () {
+            var secret = 'S';
+            function Hidden() { return secret; }
+            return Object.create(Hidden);
+        })();
+    )JS");
+    assert(text("gc(); churn(); gc(); churn();"
+                "String(Object.getPrototypeOf(bound)())") == "kept");
+    assert(text("typeof Object.getPrototypeOf(plain) + ' ' + String(Object.getPrototypeOf(plain)())")
+           == "function S");
+    // The bound arguments and the entry point's other captures travel the same
+    // way: `instanceof` still asks the target, and `new` still constructs it.
+    assert(text("gc(); churn();"
+                "(function () { function T(x) { this.x = x; } return Object.create(T.bind(null, 7)); })()"
+                " && 'built'") == "built");
+    assert(text("gc(); churn();"
+                "(function () { var t = { v: 'again' };"
+                "  return String(Object.getPrototypeOf(Object.create(function () { return this.v; }"
+                "  .bind(t)))()); })()") == "again");
+}
+
 TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour) {
     using namespace litebird;
 
@@ -31259,6 +31964,115 @@ TEST(display_contents_generates_no_box_and_splices_its_children) {
     bodyless_bitmap.render(DisplayList::build(bodyless_root));
     assert(bodyless_bitmap.get_pixel(0, 0) == Color::white());
     assert(bodyless_bitmap.get_pixel(199, 149) == Color::white());
+}
+
+// Phase 215 / finding 219. `::before` and `::after` parsed and matched
+// nothing, and there was no generated box anywhere in layout or paint, so an
+// icon-font-only control -- an anchor whose whole content is a class whose
+// `::before` supplies the glyph -- computed a zero box, painted nothing and
+// could not be hit-tested. The end-to-end oracle is holdout-01's Rust Book
+// "Next chapter" anchor, which the holdout recorded as 760x0 and 0x0.
+TEST(pseudo_elements_generate_a_box_that_can_be_hit) {
+    using namespace litebird;
+    const std::string html =
+        "<!doctype html><html><head><style>"
+        "body{margin:0;font-size:16px}"
+        ".nav{display:block;padding:8px 0}"
+        ".fa-angle-right:before{content:\"\\f105\"}"
+        "i.fa{font-style:normal}"
+        "#b::after{content:'YYY'}"
+        "</style></head><body>"
+        "<a class=\"nav\" href=\"#next\"><i class=\"fa fa-angle-right\"></i></a>"
+        "<div id=\"b\">mid</div>"
+        "</body></html>";
+    auto doc = HtmlParser::parse(html);
+    StyleResolver resolver = DocumentStyles::build_resolver(*doc, nullptr, 800.0f, 600.0f);
+    auto root = LayoutTree::build(doc, resolver, 800, 600);
+    assert(root);
+
+    auto find_texts = [](const LayoutBox* box, std::vector<const LayoutBox*>& out) {
+        std::vector<const LayoutBox*> stack{box};
+        while (!stack.empty()) {
+            const LayoutBox* b = stack.back();
+            stack.pop_back();
+            if (b->box_type == BoxType::TextNode) out.push_back(b);
+            for (const auto& c : b->children) stack.push_back(c.get());
+        }
+    };
+    // 1. The generated text is a real box in the tree -- a TextBox, not a new
+    //    kind of object -- holding the U+F105 the Font Awesome rule supplies,
+    //    and the `::after` string after the element's own children.
+    std::vector<const LayoutBox*> texts;
+    find_texts(root.get(), texts);
+    bool saw_glyph = false, saw_yyy = false;
+    for (const auto* t : texts) {
+        // U+F105 is EF 84 85 in UTF-8; EF BC 85 would be U+FF05, which is what
+        // this suite asserted the first time it was run.
+        if (t->text.size() == 3 && static_cast<unsigned char>(t->text[0]) == 0xEF &&
+            static_cast<unsigned char>(t->text[1]) == 0x84 && static_cast<unsigned char>(t->text[2]) == 0x85) {
+            saw_glyph = true;
+        }
+        if (t->text == "YYY") saw_yyy = true;
+    }
+    assert(saw_glyph);
+    assert(saw_yyy);
+
+    // 2. The icon-only anchor has a box with height where it had none.
+    std::vector<const LayoutBox*> stack{root.get()};
+    const LayoutBox* anchor = nullptr;
+    while (!stack.empty()) {
+        const LayoutBox* b = stack.back();
+        stack.pop_back();
+        if (b->node && b->node->is_element() && b->node->as_element()->tag_name() == "a") anchor = b;
+        for (const auto& c : b->children) stack.push_back(c.get());
+    }
+    assert(anchor);
+    assert(anchor->dimensions.content.height > 0.0f);
+
+    // 3. The DOM did not change. A pseudo-element is not a node the page can
+    //    see, which is what CSSOM says and what every script in the world
+    //    relies on when it reads `textContent`.
+    // Found by walking, not by `query_selector`, so the assertion is about the
+    // generated box and not about whether a class selector keys the index.
+    std::shared_ptr<Element> anchor_el;
+    { std::vector<std::shared_ptr<Node>> nodes; nodes.push_back(doc);
+      while (!nodes.empty()) { auto n = nodes.back(); nodes.pop_back();
+        if (n->is_element() && n->as_element()->tag_name() == "a") {
+            anchor_el = std::static_pointer_cast<Element>(n); break;
+        }
+        for (const auto& c : n->children()) nodes.push_back(c); } }
+    assert(anchor_el);
+    assert(anchor_el->text_content().empty());
+    const auto b_el = doc->get_element_by_id("b");
+    assert(b_el && b_el->text_content() == "mid");
+
+    // 4. The generated text belongs to the pseudo-element's style, not the
+    //    element's: `getComputedStyle(el).content` is still `normal`.
+    const ComputedStyle base = resolver.resolve_style(b_el, nullptr);
+    assert(base.content.empty());
+    assert(resolver.resolve_pseudo_element(b_el, 2, base).content == "YYY");
+    assert(resolver.resolve_pseudo_element(b_el, 1, base).content.empty());
+
+    // 5. A value this engine cannot mean generates nothing, rather than the
+    //    literal text of the declaration: `counter(x)` is not the string
+    //    "counter(x)", and `none` is not the string "none".
+    auto none_doc = HtmlParser::parse(
+        "<!doctype html><html><head><style>"
+        "p::before{content:counter(x)}"
+        "div::before{content:none}"
+        "span::before{content:attr(title)}"
+        "</style></head><body><p>a</p><div>b</div><span title=\"t\">c</span></body></html>");
+    StyleResolver none_resolver = DocumentStyles::build_resolver(*none_doc, nullptr, 800.0f, 600.0f);
+    auto none_root = LayoutTree::build(none_doc, none_resolver, 800, 600);
+    assert(none_root);
+    std::vector<const LayoutBox*> none_texts;
+    find_texts(none_root.get(), none_texts);
+    for (const auto* t : none_texts) {
+        assert(t->text != "counter(x)");
+        assert(t->text != "none");
+        assert(t->text != "attr(title)");
+        assert(t->text != "t");
+    }
 }
 
 TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips) {
@@ -32653,6 +33467,105 @@ TEST(textdecoder_reaches_script_in_pieces) {
         // x-user-defined carries every byte: nothing is ever held back.
         report('x-user-defined holds nothing', stream('x-user-defined', [[0x80], [0x81]]),
                '\uF780\uF781');
+
+        // ---- the byte order mark belongs to UTF-8 and UTF-16 --------------
+        // §7.1 skips the first scalar value of a decoder when it is U+FEFF,
+        // and that is the whole rule: which *bytes* are a byte order mark is
+        // the encoding's business, and the two UTF-16 ones disagree about the
+        // same two bytes. Everything below was taken from Node v22.22.3.
+        function cps(s) {
+            var out = [];
+            for (var ch of s) out.push(ch.codePointAt(0).toString(16));
+            return out.join(',');
+        }
+        report('UTF-16LE reads FE FF as U+FFFE, not as a BOM',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xFE, 0xFF, 0x00, 0x41]))), 'fffe,4100');
+        report('UTF-16BE reads FF FE as U+FFFE, not as a BOM',
+               cps(new TextDecoder('utf-16be').decode(bytes([0xFF, 0xFE, 0x41, 0x00]))), 'fffe,4100');
+        report('UTF-8 keeps FE FF as two replacements',
+               cps(new TextDecoder().decode(bytes([0xFF, 0xFE, 0x41, 0x00]))), 'fffd,fffd,41,0');
+        report('UTF-16LE does not read the UTF-8 BOM',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), 'bbef,41bf');
+        report('windows-1252 has no BOM at all',
+               cps(new TextDecoder('windows-1252').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), 'ef,bb,bf,41');
+        report('windows-1251 has no BOM at all either',
+               cps(new TextDecoder('windows-1251').decode(bytes([0xEF, 0xBB, 0xBF, 0x41]))), '43f,bb,457,41');
+        report('a BOM on its own decodes to nothing',
+               new TextDecoder().decode(bytes([0xEF, 0xBB, 0xBF])), '');
+        report('a UTF-16 BOM on its own decodes to nothing',
+               new TextDecoder('utf-16le').decode(bytes([0xFF, 0xFE])), '');
+        report('only the first scalar value is asked',
+               cps(new TextDecoder().decode(bytes([0x41, 0xEF, 0xBB, 0xBF]))), '41,feff');
+        report('a second BOM in the same call is data',
+               cps(new TextDecoder().decode(bytes([0xEF, 0xBB, 0xBF, 0xEF, 0xBB, 0xBF]))), 'feff');
+        report('a UTF-16 BOM is stripped after it is decoded',
+               cps(new TextDecoder('utf-16le').decode(bytes([0xFF, 0xFE, 0xFF, 0xFE, 0x41, 0x00]))), 'feff,41');
+        // §7.2 step 1: a decode without {stream: true} is a new decoder, so
+        // the BOM is sniffed again; one *inside* a stream is data.
+        var bomTwice = new TextDecoder();
+        report('a new stream sniffs its own BOM',
+               bomTwice.decode(bytes([0xEF, 0xBB, 0xBF, 0x41])) + '|' +
+               bomTwice.decode(bytes([0xEF, 0xBB, 0xBF, 0x42])), 'A|B');
+        var bomMidStream = new TextDecoder();
+        report('a BOM after a stream chunk is data',
+               bomMidStream.decode(bytes([0x41]), {stream: true}) + '|' +
+               bomMidStream.decode(bytes([0xEF, 0xBB, 0xBF, 0x42])), 'A|\uFEFFB');
+        // Step 5 of §7.2: a fatal error resets the decoder, so the next call
+        // is a new one and does not continue the stream that failed.
+        var afterError = new TextDecoder('utf-8', {fatal: true});
+        try { afterError.decode(bytes([0xFF]), {stream: true}); } catch (e) {}
+        report('a fatal error resets the decoder', afterError.decode(bytes([0x41])), 'A');
+        // Phase 209, finding 213. The single cuts above miss a defect that
+        // needs *two*: cutting one chunk in the middle of a double-byte pair
+        // is only wrong when the decoder has already been left in the
+        // double-byte mode by an earlier chunk, because the count of bytes to
+        // hold back was scanned from a mode that started at ASCII every time.
+        // So here is the row's own oracle in full -- every partition of every
+        // byte string, not one cut of it -- over the encodings whose decoders
+        // carry a mode or a pending character.
+        var partitions = [
+            ['iso-2022-jp', [0x1B, 0x24, 0x42, 0x24, 0x22, 0x24, 0x24, 0x1B, 0x28, 0x42, 0x41]],
+            ['iso-2022-jp', [0x1B, 0x28, 0x4A, 0x5C, 0x7E, 0x41]],
+            ['iso-2022-jp', [0x1B, 0x28, 0x49, 0x21, 0x22, 0x1B, 0x28, 0x42]],
+            ['iso-2022-jp', [0x1B, 0x24, 0x40, 0x24, 0x22]],
+            ['iso-2022-jp', [0x41, 0x1B, 0x24, 0x42, 0x24, 0x22, 0x42]],
+            ['iso-2022-jp', [0x1B, 0x24, 0x42, 0x24]],
+            ['iso-2022-jp', [0x1B, 0x24]],
+            ['iso-2022-jp', [0x1B, 0x28, 0x42, 0x41]],
+            ['utf-8', [0xEF, 0xBB, 0xBF, 0x41, 0xC3, 0xA9, 0xF0, 0x9F, 0x98, 0x80, 0x42]],
+            ['utf-8', [0xF0, 0x9F, 0x98]],
+            ['utf-16le', [0xFF, 0xFE, 0x41, 0x00, 0x42, 0x00]],
+            ['shift_jis', [0x82, 0xA0, 0x82, 0xA2, 0x41]],
+            ['euc-kr', [0xB0, 0xA1, 0xB0, 0xA2, 0x41]],
+            ['big5', [0xA4, 0x40, 0xA4, 0x41, 0x41]],
+            ['gb18030', [0x81, 0x30, 0x81, 0x30, 0x41]],
+            ['windows-1252', [0x80, 0x81, 0x41]]
+        ];
+        var pChecks = 0, pDiffer = 0, firstDiffer = '';
+        for (var pc = 0; pc < partitions.length; pc++) {
+            var pEnc = partitions[pc][0], pData = partitions[pc][1];
+            var pWhole = new TextDecoder(pEnc).decode(bytes(pData));
+            for (var pm = 0; pm < (1 << (pData.length - 1)); pm++) {
+                var parts = [], from = 0;
+                for (var bit = 0; bit < pData.length - 1; bit++) {
+                    if (pm & (1 << bit)) { parts.push(pData.slice(from, bit + 1)); from = bit + 1; }
+                }
+                parts.push(pData.slice(from));
+                pChecks++;
+                if (stream(pEnc, parts) !== pWhole) {
+                    pDiffer++;
+                    if (!firstDiffer) firstDiffer = pEnc + ' partition ' + pm;
+                }
+            }
+        }
+        report('every partition of a byte string answers what one call answers (' +
+               pChecks + ' partitions)', pDiffer, 0);
+        if (firstDiffer) failures.push('first partition that differed: ' + firstDiffer);
+        // The ISO-2022-JP mode is decoder state too, and is reset with it.
+        var modeReset = new TextDecoder('iso-2022-jp');
+        modeReset.decode(bytes([0x1B, 0x24, 0x42, 0x21, 0x21]));
+        report('a one-shot call does not leave the escape mode behind',
+               modeReset.decode(bytes([0x41])), 'A');
         failures;
     )JS");
     const std::string failed = js.eval("failures.join('\\n')").to_string();
@@ -33674,6 +34587,87 @@ TEST(parameter_scopes_loop_completions_class_fields_and_early_syntax_errors) {
     assert(failed.empty());
 }
 
+TEST(global_declarations_have_descriptors) {
+    using namespace litebird;
+    // Phase 197, finding 201. The global declarations live in the global
+    // environment, and the global object reaches them through its
+    // `lookup_fallback`, so `hasOwnProperty` saw them and
+    // `Object.getOwnPropertyDescriptor` did not. Every expected value below
+    // was printed by Node.js v22.22.3 before being asserted here.
+    TestPage page;
+    JsInterpreter& js = page.js;
+    js.eval(R"JS(
+        var failures = [];
+        function check(what, f, want) {
+            var got;
+            try { got = JSON.stringify(f()); } catch (e) { got = 'throws ' + e.name; }
+            if (got !== want) failures.push(what + ': got ' + got + ', expected ' + want);
+        }
+        function shape(o, k) {
+            var d = Object.getOwnPropertyDescriptor(o, k);
+            return d === undefined ? null : [d.value === undefined ? 'u' : typeof d.value,
+                                             d.writable, d.enumerable, d.configurable];
+        }
+
+        // A constructor the global object owns: writable, non-enumerable,
+        // configurable, and the value is what reading the name gives.
+        check('Object', function () { return shape(this, 'Object'); }, '["function",true,false,true]');
+        check('Error', function () { return shape(this, 'Error'); }, '["function",true,false,true]');
+        check('TypeError', function () { return shape(this, 'TypeError'); }, '["function",true,false,true]');
+        check('Math', function () { return shape(this, 'Math'); }, '["object",true,false,true]');
+        check('JSON', function () { return shape(this, 'JSON'); }, '["object",true,false,true]');
+        check('eval', function () { return shape(this, 'eval'); }, '["function",true,false,true]');
+        check('parseInt', function () { return shape(this, 'parseInt'); }, '["function",true,false,true]');
+        check('globalThis is its own property', function () {
+            return Object.getOwnPropertyDescriptor(this, 'globalThis').value === this;
+        }, 'true');
+
+        // The one kind the standard makes non-configurable as well.
+        check('undefined', function () { return shape(this, 'undefined'); }, '["u",false,false,false]');
+        check('NaN', function () { return shape(this, 'NaN'); }, '["number",false,false,false]');
+        check('Infinity', function () { return shape(this, 'Infinity'); }, '["number",false,false,false]');
+
+        // `hasOwnProperty` and the descriptor must agree for every global
+        // name, which is the contract propertyHelper.js relies on.
+        check('the two answers agree', function () {
+            var names = 'Object Function Array String Number Boolean Symbol Error EvalError RangeError ' +
+                        'ReferenceError SyntaxError TypeError URIError parseInt parseFloat isNaN ' +
+                        'isFinite eval JSON Math Reflect Promise Map Set WeakMap WeakSet ArrayBuffer ' +
+                        'DataView Date RegExp Int8Array Uint8Array globalThis undefined NaN Infinity ' +
+                        'decodeURI encodeURI';
+            var list = names.split(' '), bad = [];
+            for (var i = 0; i < list.length; i++) {
+                var has = Object.prototype.hasOwnProperty.call(this, list[i]);
+                if (has !== (Object.getOwnPropertyDescriptor(this, list[i]) !== undefined)) bad.push(list[i]);
+            }
+            return bad.length;
+        }, '0');
+
+        // A `var` and a function declaration are properties of the global
+        // object: writable, enumerable, non-configurable. A `let` is not a
+        // property of it at all, which is what keeps them apart.
+        var declaredVar = 1;
+        function declaredFunction() {}
+        let declaredLet = 2;
+        check('a var', function () {
+            return [shape(this, 'declaredVar'), Object.keys(this).indexOf('declaredVar') >= 0];
+        }.bind(this), '[["number",true,true,false],true]');
+        check('a function declaration', function () { return shape(this, 'declaredFunction'); },
+              '["function",true,true,false]');
+        check('a let is not a property', function () { return shape(this, 'declaredLet'); }, 'null');
+        check('a let is not in Object.keys', function () {
+            return Object.keys(this).indexOf('declaredLet');
+        }, '-1');
+
+        // Reflect gives the same answer as Object for these.
+        check('Reflect agrees', function () { return shape(Reflect, 'apply'); }, '["function",true,false,true]');
+
+        var summary = failures.length === 0 ? 'ok' : failures.join(' | ');
+    )JS");
+    assert(!js.last_eval_failed());
+    assert(js.global_env()->get("summary").to_string() == "ok");
+}
+
 TEST(flex_and_grid_box_alignment_properties) {
     using namespace litebird;
     // Phase 180, finding 184: CSS Box Alignment Level 3 in flex and grid —
@@ -33901,6 +34895,309 @@ TEST(flex_and_grid_box_alignment_properties) {
     }
 }
 
+TEST(terminal_page_text_cannot_inject_controls) {
+    using namespace litebird;
+    std::string bytes;
+    std::string expected;
+    for (int i = 0; i < 256; ++i) {
+        bytes.push_back(static_cast<char>(i));
+        expected.push_back(i >= 0x20 && i <= 0x7e ? static_cast<char>(i) : '?');
+    }
+    expected += '\n';
+    DrawTextCommand text;
+    text.position = Point(0, 0);
+    text.text = bytes;
+    text.color = Color::black();
+    DisplayList list;
+    list.add(text);
+    TerminalRenderer string_renderer(256, 1);
+    const std::string output = string_renderer.to_ansi_string(list);
+    assert(terminal_plain_text(output) == expected);
+    TerminalRenderer stream_renderer(256, 1);
+    std::ostringstream stream;
+    stream_renderer.render(list, stream);
+    assert(stream.str() == output);
+
+    // Numeric character references survive the HTML parser as text. Their
+    // ESC, BEL and DEL must not become terminal instructions.
+    auto doc = HtmlParser::parse(R"html(<!doctype html><body style="margin:0"><div>Hi&#27;[2J&#7;X&#127;</div></body>)html");
+    StyleResolver resolver;
+    auto root = LayoutTree::build(doc, resolver, 200, 40);
+    TerminalRenderer page(20, 2);
+    const auto plain = terminal_plain_text(page.to_ansi_string(DisplayList::build(root)));
+    assert(plain.substr(0, 10) == "Hi?[2J?X? ");
+}
+
+void test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties() {
+    auto eval = [](const char* src) -> std::string {
+        JsInterpreter js;
+        return js.eval(src).to_string();
+    };
+
+    // 1. Object spread copies own enumerable symbol keys alongside string keys
+    //    and skips non-enumerable symbols and strings.
+    assert(eval(R"(
+        const s1 = Symbol('a'), s2 = Symbol('b'), sHidden = Symbol('h');
+        const src = { x: 1, [s1]: 2, [s2]: 3 };
+        Object.defineProperty(src, 'ne', { value: 4, enumerable: false });
+        Object.defineProperty(src, sHidden, { value: 5, enumerable: false });
+        const copy = { ...src };
+        [copy.x, copy[s1], copy[s2], 'ne' in copy, sHidden in copy,
+         Object.getOwnPropertySymbols(copy).length, Reflect.ownKeys(copy).length].join(',');
+    )") == "1,2,3,false,false,2,3");
+
+    // 2. Object spread preserves [[OwnPropertyKeys]] order (indices, strings, symbols)
+    //    and keeps same-description symbols distinct.
+    assert(eval(R"(
+        const a = Symbol('same'), b = Symbol('same');
+        const log = [];
+        const src = {};
+        Object.defineProperty(src, a, { enumerable: true, get() { log.push('a'); return 'A'; } });
+        Object.defineProperty(src, 'z', { enumerable: true, get() { log.push('z'); return 'Z'; } });
+        Object.defineProperty(src, '2', { enumerable: true, get() { log.push('2'); return 'two'; } });
+        Object.defineProperty(src, b, { enumerable: true, get() { log.push('b'); return 'B'; } });
+        Object.defineProperty(src, '0', { enumerable: true, get() { log.push('0'); return 'zero'; } });
+        const copy = { ...src };
+        log.join(':') + '|' + [copy[0], copy[2], copy.z, copy[a], copy[b]].join(',');
+    )") == "0:2:z:a:b|zero,two,Z,A,B");
+
+    // 3. Object spread uses CreateDataProperty rather than [[Set]]: earlier own
+    //    setters and prototype setters are not invoked.
+    assert(eval(R"(
+        const s = Symbol('setter');
+        let calls = 0;
+        const proto = {};
+        Object.defineProperty(proto, 'p', { set() { calls++; } });
+        Object.defineProperty(proto, s, { set() { calls++; } });
+        const target = {
+            __proto__: proto,
+            set own(v) { calls++; },
+            set [s](v) { calls++; },
+            ...{ own: 10, p: 20, [s]: 30 }
+        };
+        const dOwn = Object.getOwnPropertyDescriptor(target, 'own');
+        const dSym = Object.getOwnPropertyDescriptor(target, s);
+        [calls, target.own, target.p, target[s], dOwn.value, dOwn.writable, dSym.value, dSym.writable].join(',');
+    )") == "0,10,20,30,10,true,30,true");
+
+    // 4. Object rest destructuring (declaration, assignment, parameter) copies own
+    //    enumerable symbols, excludes destructured computed symbol keys, and skips
+    //    non-enumerable symbols.
+    assert(eval(R"(
+        const sDrop = Symbol('drop'), sKeep = Symbol('keep'), sHidden = Symbol('h');
+        const src = { a: 1, b: 2, [sDrop]: 10, [sKeep]: 20 };
+        Object.defineProperty(src, sHidden, { value: 30, enumerable: false });
+        const { a, [sDrop]: picked, ...rest } = src;
+        let p2, assignRest;
+        ({ [sDrop]: p2, ...assignRest } = src);
+        const paramRest = (({ a: _, ...r }) => r)(src);
+        [a, picked, rest.b, sDrop in rest, rest[sKeep], sHidden in rest,
+         Object.getOwnPropertySymbols(rest).length,
+         p2, sDrop in assignRest, assignRest[sKeep],
+         paramRest[sDrop], paramRest[sKeep]].join(',');
+    )") == "1,10,2,false,20,false,1,10,false,20,10,20");
+
+    // 5. CopyDataProperties checks live own-enumerability per snapshotted key
+    //    (ECMA-262 7.3.24 step 6.c).
+    assert(eval(R"(
+        const sHide = Symbol('hide'), sReveal = Symbol('reveal'), sNew = Symbol('new');
+        const src = {};
+        Object.defineProperty(src, 'trigger', {
+            enumerable: true,
+            get() {
+                delete this.removed;
+                Object.defineProperty(this, sHide, { enumerable: false });
+                Object.defineProperty(this, sReveal, { enumerable: true });
+                this[sNew] = 99;
+                return 1;
+            }
+        });
+        src.removed = 2;
+        src[sHide] = 3;
+        Object.defineProperty(src, sReveal, { value: 4, enumerable: false, configurable: true });
+        const out = { ...src };
+        [out.trigger, 'removed' in out, sHide in out, out[sReveal], sNew in out].join(',');
+    )") == "1,false,false,4,false");
+
+    // 6. Spread and rest across strings, sparse arrays, TypedArrays, functions, nullish,
+    //    and without invoking Object.prototype setters.
+    assert(eval(R"(
+        const s = Symbol('extra');
+        function fn() {}
+        fn.x = 1; fn[s] = 2;
+        const arr = [10, , 30]; arr[s] = 40;
+        const ta = new Uint8Array([5, 6]); ta[s] = 7;
+        let protoCalls = 0;
+        Object.defineProperty(Object.prototype, s, { configurable: true, set() { protoCalls++; } });
+        let out = '';
+        try {
+            const { 0: first, ...strRest } = 'hi';
+            const { ...fnRest } = fn;
+            const arrCopy = { ...arr };
+            const taCopy = { ...ta };
+            const nullCopy = { ...null, ...undefined, ok: 1 };
+            out = [protoCalls, first, strRest[1], 'length' in strRest,
+                   fnRest.x, fnRest[s], 'name' in fnRest,
+                   arrCopy[0], '1' in arrCopy, arrCopy[2], arrCopy[s],
+                   taCopy[0], taCopy[1], taCopy[s], nullCopy.ok].join(',');
+        } finally {
+            delete Object.prototype[s];
+        }
+        out;
+    )") == "0,h,i,false,1,2,false,10,false,30,40,5,6,7,1");
+}
+
+void test_reduce_asks_for_each_place_as_it_reaches_it() {
+    auto eval = [](const char* src) -> std::string {
+        JsInterpreter js;
+        return js.eval(src).to_string();
+    };
+    // ECMA-262 §23.1.3.21 (reduce) and §23.1.3.22 (reduceRight) ask
+    // `HasProperty(O, Pk)` once per index, in the order the method walks, and
+    // the walk is bounded by the length read before the first callback. This
+    // engine listed the places that were there *before* the walk started and
+    // then only asked whether each of those had survived, so a place a
+    // callback created ahead of itself was never visited:
+    // `reduce/15.4.4.21-9-1.js` writes `arr[2]` from the callback while two is
+    // still a hole, and answered "75" where Node.js v22.22.3 answers "105".
+    //
+    // Every expectation below is what Node.js v22.22.3 prints for the same
+    // expression, and each names something the snapshot answers differently:
+    // a place created ahead of the walk, a place removed ahead of it, the
+    // length being fixed at the start, and reduceRight walking down.
+    //
+    // What the "before" column of finding 217 measured: of these twelve, the
+    // snapshot answers six wrongly (fill_hole_ahead, neg_result, add_ahead_once,
+    // rr_fill_below, plain_object, grow_mid).
+
+    // ---- a place the callback creates ahead of the walk is visited ---------
+    // The test262 case: a hole at 2 is filled by the callback at index 1, and
+    // the walk that reaches 2 afterwards sees it. A place created past the
+    // end is not visited, because the length was read first.
+    assert(eval(R"(
+        var arr = [1, 2, , 4, '5'];
+        arr.reduce(function (p, c) { arr[5] = 6; arr[2] = 3; return p + c; });
+    )") == "105");
+    // With an initial value the callback sees index 0 as well, so the place
+    // that appears at 2 is one the walk has not passed.
+    assert(eval(R"(
+        var seen = [];
+        [10, , 20, 30].reduce(function (p, c, i) { seen.push(i); return c - 1; }, 0);
+        seen.join(',');
+    )") == "0,2,3");
+
+    // ---- a place the callback removes ahead of the walk is not visited -----
+    assert(eval(R"(
+        var arr = [1, 2, 3, 4];
+        arr.reduce(function (p, c, i) { if (i === 0) delete arr[2]; return p + c; });
+    )") == "10");
+
+    // ---- the length is read once, before any callback ---------------------
+    // §23.1.3.21 step 3. A callback that lengthens the array cannot extend
+    // the walk; one that shortens it cannot end the walk early.
+    assert(eval(R"(
+        var arr = [1, 2, 3];
+        arr.reduce(function (p, c, i) { if (i === 0) arr.length = 1; return p + c; });
+    )") == "6");
+    assert(eval(R"(
+        var arr = [1, 2];
+        arr.reduce(function (p, c, i) { if (i === 0) arr.length = 99; return p + c; });
+    )") == "3");
+
+    // ---- a place the callback adds past the length is never visited --------
+    // The two places walked are handed to the callback and the three added at
+    // 3, 4 and 5 are not, so the callback runs twice and the array ends up
+    // six long.
+    assert(eval(R"(
+        var arr = [1, 2, 3];
+        var calls = 0;
+        arr.reduce(function (p, c, i) { calls++; arr[i + 3] = 9; return p; });
+        calls + ':' + arr.length;
+    )") == "2:6");
+
+    // ---- reduceRight walks from the top down ------------------------------
+    // The accumulator starts at the last place, so index 4 is not given to
+    // the callback; the hole at 3 is skipped and 2, 1 and 0 follow.
+    assert(eval(R"(
+        var seen = [];
+        var sum = [1, 2, 3, , 5].reduceRight(function (p, c, i) { seen.push(i); return p + c; });
+        seen.join(',') + '|' + sum;
+    )") == "2,1,0|11");
+    // A place the callback fills below itself is visited when the walk
+    // reaches it. This is the case that separates the standard's downward
+    // walk from listing the places upwards and reversing the list: with no
+    // initial value the callback never runs at index 2 here, so a version
+    // that fills the hole from index 2 looks right — the next case, where the
+    // callback does run at the top, answers 18 instead of 21.
+    assert(eval(R"(
+        var arr = [1, , 3];
+        arr.reduceRight(function (p, c, i) { if (i === 2) arr[1] = 2; return p + c; });
+    )") == "4");
+    assert(eval(R"(
+        var arr = [1, , 3];
+        arr.reduceRight(function (p, c, i) { if (i === 2) arr[1] = 2; return p + c; }, 0);
+    )") == "6");
+    assert(eval(R"(
+        var arr = [9, , , 9];
+        arr.reduceRight(function (p, c, i) { if (i === 3) { arr[1] = 1; arr[2] = 2; } return p + c; }, 0);
+    )") == "21");
+    // A place removed ahead of the walk — below it, for reduceRight — is
+    // skipped.
+    assert(eval(R"(
+        var arr = [1, 2, 3, 4];
+        arr.reduceRight(function (p, c, i) { if (i === 3) delete arr[1]; return p + c; });
+    )") == "10");
+
+    // ---- a receiver that is not an array ----------------------------------
+    // `HasProperty` is asked of the object as it is now, so a place a callback
+    // defines on a plain object's index is seen through the chain as any
+    // other would be.
+    assert(eval(R"(
+        var o = { length: 3, 0: 1 };
+        o.reduce = Array.prototype.reduce;
+        o.reduce(function (p, c, i) { if (i === 0) { o[1] = 2; o[2] = 3; } return p + c; });
+    )") == "1");
+    // Nothing to reduce and no initial value is a TypeError; a hole is not a
+    // place, so `[, ,]` is empty too; with an initial value nothing is asked.
+    assert(eval(R"(
+        function name(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }
+        name(function () { [].reduce(function () {}); }) + '|' +
+        name(function () { [, , ].reduce(function () {}); }) + '|' +
+        String([].reduce(function () {}, 7));
+    )") == "TypeError|TypeError|7");
+    assert(eval(R"(
+        var calls = 0;
+        [, , ].reduce(function () { calls++; }, 'start') + ':' + calls;
+    )") == "start:0");
+}
+
+
+
+TEST(svg_class_name_is_a_live_animated_string) {
+    TestPage page;
+    auto& js = page.js;
+    auto S = [&](const char* code) { return js.eval(code).to_string(); };
+    assert(S("var s=document.createElementNS('http://www.w3.org/2000/svg','svg');"
+             "var e=document.createElementNS('http://www.w3.org/2000/svg','rect');"
+             "var a=e.className; [typeof a,a instanceof SVGAnimatedString,a===e.className,"
+             "a.baseVal,a.animVal,s.className.baseVal].join('|')") == "object|true|true|||");
+    assert(S("e.setAttribute('class','one'); [a.baseVal,a.animVal,e.classList.contains('one')].join('|')") == "one|one|true");
+    assert(S("a.baseVal='two three'; [e.getAttribute('class'),a.animVal,e.classList.contains('three')].join('|')") == "two three|two three|true");
+    assert(S("e.classList.add('four'); [a.baseVal,a.animVal].join('|')") == "two three four|two three four");
+    assert(S("e.removeAttribute('class'); [a.baseVal,a.animVal,e.hasAttribute('class')].join('|')") == "||false");
+    assert(S("a.baseVal=null; [a.baseVal,a.animVal,e.getAttribute('class')].join('|')") == "null|null|null");
+    assert(S("a.animVal='bad'; e.className='bad'; [e.className===a,a.baseVal,a.animVal].join('|')") == "true|null|null");
+    assert(S("var h=document.createElement('div'); h.className='ordinary'; [typeof h.className,h.className].join('|')") == "string|ordinary");
+    assert(S("try { Object.getOwnPropertyDescriptor(SVGAnimatedString.prototype,'baseVal').get.call({}); 'no'; } catch(e) { e.name; }") == "TypeError");
+    assert(S("try { new SVGAnimatedString(); 'no'; } catch(e) { e.name; }") == "TypeError");
+
+    // A view held on its own keeps its detached element, including its JS
+    // wrapper, alive through a collection and continues to reflect it.
+    assert(S("var v=(function(){var n=document.createElementNS('http://www.w3.org/2000/svg','g'); n.setAttribute('class','kept'); return n.className;})(); e=null; a=null; 'ok'") == "ok");
+    litebird::Heap::default_heap().collect_garbage();
+    assert(S("[v.baseVal,v.animVal,(v.baseVal='after'),v.animVal].join('|')") == "kept|kept|after|after");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -33954,6 +35251,10 @@ int main() {
     RUN_TEST(incremental_layout_and_invalidation);
     RUN_TEST(js_async_promises_and_json);
     RUN_TEST(promise_combinators_resolve_before_advancing_and_close_on_abrupt_completion);
+    // Phase 196: a Promise subclass makes its own promises — NewPromiseCapability,
+    // SpeciesConstructor, the capability pair, and the promise state reachable
+    // from the object `super(...)` was handed.
+    RUN_TEST(promise_subclass_makes_its_own_promises_and_a_rejection_keeps_its_reject);
     RUN_TEST(css_flex_wrapping_and_grid_layout);
     RUN_TEST(dom_3phase_events_and_form_controls);
     RUN_TEST(image_decoding_and_rendering);
@@ -33962,8 +35263,10 @@ int main() {
     RUN_TEST(html5_canvas_2d_context);
     RUN_TEST(canvas_to_data_url_is_the_png_it_painted);
     RUN_TEST(crypto_get_random_values_and_random_uuid);
+    RUN_TEST(subtle_crypto_digest_sha256);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
+    RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
     RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);
@@ -34142,6 +35445,9 @@ int main() {
     RUN_TEST(worker_event_target_error_and_message_dispatch);
     RUN_TEST(worker_concurrent_startup_nested_and_clean_shutdown);
 
+    // Phase 206: TextDecoder/TextEncoder on a worker's own global.
+    RUN_TEST(text_codecs_are_installed_in_a_worker_scope);
+
     // Phase 66: module-worker graph loading and structured-clone message packets.
     RUN_TEST(structured_clone_message_delivery_and_refusal);
     RUN_TEST(module_worker_static_graph_loading_and_refusal);
@@ -34202,6 +35508,7 @@ int main() {
 
     // Phase 80: direct-eval syntax and variable-environment follow-ups.
     RUN_TEST(js_direct_eval_follows_syntax_and_variable_environment_rules);
+    RUN_TEST(js_direct_eval_inherits_the_callers_grammar);
 
     // Phase 63: iteration asks the value for its iterator.
     RUN_TEST(js_iteration_asks_the_value_for_its_iterator);
@@ -34355,6 +35662,7 @@ int main() {
     RUN_TEST(gpos_cursive_attachment_ltr_rtl_and_contextual_pos);
     RUN_TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs);
     RUN_TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs);
+    RUN_TEST(hebrew_fixed_points_are_ordered_before_shaping);
     RUN_TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely);
 
     // Phase 127: TextDecoder and TextEncoder reachable from script.
@@ -34377,6 +35685,7 @@ int main() {
     // Phase 170: root/body canvas color, compositing, scoping and scrolling.
     RUN_TEST(document_canvas_background_is_scoped_and_keeps_computed_styles);
     RUN_TEST(display_contents_generates_no_box_and_splices_its_children);
+    RUN_TEST(pseudo_elements_generate_a_box_that_can_be_hit);
     RUN_TEST(canvas_alpha_survives_transparent_targets_and_viewport_clips);
     RUN_TEST(browser_shell_canvas_stays_in_the_viewport_while_scrolling);
 
@@ -34388,6 +35697,7 @@ int main() {
 
     // Phase 168: what a native entry point captures is traced by the collector.
     RUN_TEST(gc_reclaims_a_bound_functions_target);
+    RUN_TEST(a_bound_function_as_a_prototype_keeps_its_target);
     RUN_TEST(a_bound_function_keeps_its_arguments_and_construct_behaviour);
 
     // Phase 169: WebSocket permessage-deflate (RFC 7692) & stateful DEFLATE/INFLATE codec.
@@ -34404,21 +35714,53 @@ int main() {
 
     // Phase 180: CSS Box Alignment (`align-self`, `align-content`, `justify-items`/`self`,
     // `place-*`, and column flex `justify-content`).
+    RUN_TEST(global_declarations_have_descriptors);
     RUN_TEST(flex_and_grid_box_alignment_properties);
 
     // Phase 183: terminal clips, scrolling, shadows, text, borders and focus.
     RUN_TEST(terminal_outline_keeps_real_edges_and_clips);
     RUN_TEST(terminal_text_and_shadows_stay_inside_nested_clips);
 
+    // Phase 203: page text is not a source of terminal controls.
+    RUN_TEST(terminal_page_text_cannot_inject_controls);
+
+    // Phase 212: shell chrome emits labels as text, not terminal commands.
+    RUN_TEST(shell_frame_labels_cannot_inject_terminal_controls);
+
     // Phase 195: a `calc()` percentage is of the declaration (font size,
     // line-height), not of the viewport.
     RUN_TEST(a_calc_percentage_is_of_the_declaration_not_the_viewport);
 
+    // Phase 198: object spread and rest destructuring copy own enumerable
+    // symbols and follow ECMA-262 §7.3.24 CopyDataProperties.
+    RUN_TEST(object_spread_and_rest_copy_symbols_and_follow_copy_data_properties);
+
+    // Phase 192: `Array.prototype.toLocaleString` asks each element (§23.1.3.28),
+    // and `Object.prototype.toLocaleString` is `Invoke(this, "toString")` (§20.1.3.5).
+    RUN_TEST(an_array_to_locale_string_asks_every_element);
+
     // Phase 204: a counter is written where the walk found it.
     RUN_TEST(a_counter_is_written_where_the_walk_found_it);
 
+    // Phase 202: a box's outline is a ring outside the border box that takes
+    // no room; it is stored by the cascade and painted.
+    RUN_TEST(the_painter_draws_the_outline_the_layout_reserved_no_room_for);
+
+    // Phase 213: `reduce`/`reduceRight` ask `HasProperty` at each index as the
+    // walk reaches it, so a place a callback creates ahead of itself is seen.
+    RUN_TEST(reduce_asks_for_each_place_as_it_reaches_it);
+
+    // Phase 214: SVG className is a live, retained SVGAnimatedString.
+    RUN_TEST(svg_class_name_is_a_live_animated_string);
+
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";
+    // A new `RUN_TEST` line does not go at the end of the list above. Every
+    // pull request that puts one there changes the same place as every other
+    // that does, and only the first of them can be merged as it is
+    // (AGENTS.md, "Working together", point 2). Put it under the line of a
+    // related suite, further up. This comment stands below the summary so
+    // that it is not in that place itself.
     return 0;
 }
 

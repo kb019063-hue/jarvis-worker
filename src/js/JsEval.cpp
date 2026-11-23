@@ -45,6 +45,111 @@ struct FlagScope {
     ~FlagScope() { flag = saved; }
 };
 
+bool parse_copy_index(const std::string& s, size_t& out) {
+    if (s.empty() || (s.size() > 1 && s[0] == '0')) return false;
+    size_t v = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+        const size_t digit = static_cast<size_t>(c - '0');
+        if (v > (std::numeric_limits<size_t>::max() - digit) / 10) return false;
+        v = v * 10 + digit;
+    }
+    out = v;
+    return true;
+}
+
+/// Checks whether `key` is currently an own enumerable property of `source`,
+/// matching the live `[[GetOwnProperty]](nextKey)` + `desc.[[Enumerable]]`
+/// check inside ECMA-262 §7.3.24 `CopyDataProperties`.
+bool is_own_enumerable_for_copy(const JsValue& source, const std::string& key) {
+    if (source.type == JsType::String) {
+        size_t idx = 0;
+        return parse_copy_index(key, idx) && idx < source.string_val.length();
+    }
+    JsObject* cell = source.property_cell();
+    if (cell) {
+        if (cell->klass == ObjectClass::String) {
+            const auto* wrapped = static_cast<const JsValue*>(cell->internal.get());
+            size_t idx = 0;
+            if (wrapped && wrapped->type == JsType::String &&
+                parse_copy_index(key, idx) && idx < wrapped->string_val.length()) {
+                return true;
+            }
+        }
+        if (cell->is_array) {
+            if (key == "length") return false;
+            size_t idx = 0;
+            if (parse_copy_index(key, idx) &&
+                idx < cell->array_elements.size() && !source.is_array_hole(idx)) {
+                return true;
+            }
+        }
+        auto it = cell->properties.find(key);
+        if (it != cell->properties.end()) {
+            return (it->flags & PropertyMap::Enumerable) != 0;
+        }
+        if (cell->exotic && cell->exotic->has(cell, key)) {
+            bool enumerable = true;
+            bool writable = false;
+            if (cell->exotic->computed_property(cell, key, enumerable, writable)) {
+                return enumerable;
+            }
+            return true;
+        }
+        return false;
+    }
+    if (const PropertyMap* map = source.loose_properties()) {
+        auto it = map->find(key);
+        if (it != map->end()) return (it->flags & PropertyMap::Enumerable) != 0;
+    }
+    return false;
+}
+
+/// ECMA-262 §7.3.24 `CopyDataProperties(target, source, excludedItems)` — used
+/// by both object spread (`{...source}`) and object rest destructuring
+/// (`{...rest} = source`). Snapshots `[[OwnPropertyKeys]]` (string keys in
+/// `own_keys` order followed by own symbol keys in creation order), skips any
+/// key in `excluded`, checks live own-enumerability before reading, and writes
+/// via `CreateDataPropertyOrThrow` (`define_property`) rather than `[[Set]]`.
+void copy_data_properties(JsValue& target, const JsValue& source,
+                          const std::vector<std::string>* excluded) {
+    if (source.is_nullish()) return;
+
+    auto is_excluded = [&](const std::string& key) {
+        return excluded && std::find(excluded->begin(), excluded->end(), key) != excluded->end();
+    };
+
+    std::vector<std::string> cross_keys;
+    if (litebird::dom::cross_origin_own_keys(source, false, cross_keys)) {
+        for (const auto& key : cross_keys) {
+            if (is_excluded(key)) continue;
+            target.define_property(key, source.get_property(key), PropertyMap::Default);
+        }
+        return;
+    }
+
+    // Snapshot every own key (string keys first, then symbol keys in creation
+    // order), including non-enumerable ones so a getter that flips a later
+    // key's enumerability is observed when that key is reached.
+    std::vector<std::string> keys = source.own_keys(/*include_non_enumerable=*/true);
+    const PropertyMap* snap_map = source.property_cell() ? &source.property_cell()->properties
+                                                         : source.loose_properties();
+    if (snap_map) {
+        for (const auto& entry : *snap_map) {
+            JsValue symbol;
+            if (!js_symbol_from_key(entry.first, symbol)) continue;
+            keys.push_back(entry.first);
+        }
+    }
+
+    for (const auto& key : keys) {
+        if (is_excluded(key)) continue;
+        if (!is_own_enumerable_for_copy(source, key)) continue;
+        JsValue prop_val = source.get_property(key);
+        target.define_property(key, std::move(prop_val), PropertyMap::Default);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Active scopes
 // ---------------------------------------------------------------------------
@@ -2047,15 +2152,10 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
             std::vector<std::string> used;
             for (const auto& element : pattern.elements) {
                 if (element.rest) {
-                    // Everything not already picked out, own and enumerable.
+                    // ECMA-262 §7.3.24 CopyDataProperties: everything own and
+                    // enumerable (string and symbol keys) not already picked out.
                     JsValue rest = JsValue::make_object();
-                    std::vector<std::string> rest_keys;
-                    if (!litebird::dom::cross_origin_own_keys(value, false, rest_keys))
-                        rest_keys = value.own_keys();
-                    for (const auto& key : rest_keys) {
-                        if (std::find(used.begin(), used.end(), key) != used.end()) continue;
-                        rest.set_property(key, value.get_property(key));
-                    }
+                    copy_data_properties(rest, value, &used);
                     bind_pattern(*element.target, rest, env, mode);
                     continue;
                 }
@@ -2991,15 +3091,10 @@ JsValue JsInterpreter::eval_object_literal(const ObjectLiteralExpr* expr, const 
     JsValue object = JsValue::make_object();
     for (const auto& prop : expr->properties) {
         if (prop.kind == ObjectProperty::Kind::Spread) {
-            // {...source}: own enumerable properties, in order.
+            // {...source}: ECMA-262 §7.3.24 CopyDataProperties (own enumerable
+            // string and symbol keys, written via CreateDataProperty).
             JsValue source = evaluate(prop.value.get(), env);
-            if (source.is_nullish()) continue;
-            std::vector<std::string> spread_keys;
-            if (!litebird::dom::cross_origin_own_keys(source, false, spread_keys))
-                spread_keys = source.own_keys();
-            for (const auto& key : spread_keys) {
-                object.set_property(key, source.get_property(key));
-            }
+            copy_data_properties(object, source, nullptr);
             continue;
         }
 

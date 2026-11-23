@@ -2785,10 +2785,43 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             feat_masks.assign(run_end - run_start, kGsubFeatGlobal);
         }
 
+        // Hebrew fixed-position marks have a shaping order, not their Unicode
+        // canonical combining-class order: shin/sin dots precede vowels. Apply
+        // it before GSUB (ccmp can inspect adjacency), not after positioning.
+        // SBL Hebrew ordering, also used by HarfBuzz's modified CCC 10..25.
+        // Scope is deliberately contiguous Hebrew points; other marks and
+        // controls are barriers until general normalization is implemented.
+        std::vector<uint32_t> hebrew;
+        if (script_tag == kTagHebr) {
+            auto rank = [](uint32_t cp) -> unsigned {
+                switch (cp) {
+                case 0x05C1: return 10; case 0x05C2: return 11;
+                case 0x05BC: return 12; case 0x05BF: return 13;
+                case 0x05B9: case 0x05BA: return 14;
+                case 0x05B1: return 15; case 0x05B2: return 16;
+                case 0x05B3: return 17; case 0x05B5: return 18;
+                case 0x05B6: return 19; case 0x05B7: return 20;
+                case 0x05B8: case 0x05C7: return 21;
+                case 0x05B0: return 22; case 0x05B4: return 23;
+                case 0x05BB: return 24; case 0x05BD: return 25;
+                default: return 0;
+                }
+            };
+            hebrew.assign(codepoints.begin() + run_start, codepoints.begin() + run_end);
+            for (std::size_t start = 0; start < hebrew.size();) {
+                if (!rank(hebrew[start])) { ++start; continue; }
+                std::size_t end = start + 1;
+                while (end < hebrew.size() && rank(hebrew[end])) ++end;
+                std::stable_sort(hebrew.begin() + start, hebrew.begin() + end,
+                                 [&](uint32_t a, uint32_t b) { return rank(a) < rank(b); });
+                start = end;
+            }
+        }
+
         std::vector<ShapingGlyph> run;
         run.reserve(run_end - run_start);
         for (std::size_t i = run_start; i < run_end; ++i) {
-            const uint32_t cp = codepoints[i];
+            const uint32_t cp = hebrew.empty() ? codepoints[i] : hebrew[i - run_start];
             ShapingGlyph sg;
             sg.glyph = glyph_index(cp);
             sg.feature_mask = feat_masks[i - run_start];

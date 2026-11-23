@@ -1005,6 +1005,24 @@ void setup_offscreen_canvas(Iface& I) {
         if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {blob});
         return undefined();
     });
+    I.method("transferToImageBitmap", 0, [](Realm& r, Args) {
+        auto& st = this_state<OffscreenCanvasState>("OffscreenCanvas");
+        if (st.width <= 0 || st.height <= 0 ||
+            !RasterBudget::allows(static_cast<std::int64_t>(st.width), static_cast<std::int64_t>(st.height))) {
+            throw_dom(r, "InvalidStateError",
+                      "OffscreenCanvas.transferToImageBitmap: canvas has invalid or over-budget dimensions.");
+        }
+        std::vector<uint32_t> pixels;
+        if (st.context) {
+            if (auto img = st.context->image_data(); img && img->is_valid()) {
+                pixels = img->pixels;
+            }
+            st.context->resize(std::max(st.width, 1), std::max(st.height, 1));
+        } else {
+            pixels.assign(static_cast<std::size_t>(st.width) * static_cast<std::size_t>(st.height), 0);
+        }
+        return make_image_bitmap(r, st.width, st.height, std::move(pixels));
+    });
 }
 
 // ---------------------------------------------------------------------------

@@ -173,6 +173,11 @@ DEEP_ASAN_DEPTH ?= 10000
 
 all: $(TARGET)
 
+## Check untrusted shell labels without writing attack bytes to a terminal.
+.PHONY: verify-terminal-shell-safety
+verify-terminal-shell-safety: $(TARGET)
+	@python3 tools/conformance/verify_terminal_shell_safety.py --binary $(TARGET)
+
 $(BUILD_DIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@

@@ -74,6 +74,9 @@ public:
     void focus_element(int index);
     bool activate_focused();
     bool click_at(float x, float y);
+    /// A click through the DOM's own activation path, so the element's
+    /// activation behavior runs (see `Element::click`).
+    bool dispatch_click(const std::shared_ptr<Element>& target);
     bool hover_at(float x, float y);
     bool type_text(const std::string& text);
     bool handle_key(const std::string& key);

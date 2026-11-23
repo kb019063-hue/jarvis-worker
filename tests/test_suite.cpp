@@ -35523,10 +35523,23 @@ TEST(terminal_page_text_cannot_inject_controls) {
     using namespace litebird;
     std::string bytes;
     std::string expected;
+    // Phase 241: a cell is a character, so a byte string is read as UTF-8.
+    // A byte that is printable ASCII is its own cell; a byte that cannot begin
+    // or continue a well-formed sequence is U+FFFD, the replacement character
+    // the Unicode standard names for exactly this. The guarantee this test
+    // exists for is unchanged and is what the loop asserts: no byte of the
+    // input reaches the stream as a control character.
     for (int i = 0; i < 256; ++i) {
         bytes.push_back(static_cast<char>(i));
-        expected.push_back(i >= 0x20 && i <= 0x7e ? static_cast<char>(i) : '?');
+        if (i >= 0x20 && i <= 0x7e) {
+            expected.push_back(static_cast<char>(i));
+        } else if (i < 0x80) {
+            expected += "\xEF\xBF\xBD";  // C0 and DEL: one replacement character each
+        }
     }
+    // 0x80..0xFF are continuation bytes with no lead byte before them, so every
+    // one of them is a replacement character in a cell of its own.
+    for (int i = 0x80; i <= 0xff; ++i) expected += "\xEF\xBF\xBD";
     expected += '\n';
     DrawTextCommand text;
     text.position = Point(0, 0);
@@ -35549,7 +35562,10 @@ TEST(terminal_page_text_cannot_inject_controls) {
     auto root = LayoutTree::build(doc, resolver, 200, 40);
     TerminalRenderer page(20, 2);
     const auto plain = terminal_plain_text(page.to_ansi_string(DisplayList::build(root)));
-    assert(plain.substr(0, 10) == "Hi?[2J?X? ");
+    // The characters the page asked for are no longer visible as `?` but as
+    // U+FFFD, which is the character that means "this was not text": ESC, BEL
+    // and DEL each become one, and the stream carries no control byte.
+    assert(plain.substr(0, 16) == "Hi\xEF\xBF\xBD[2J\xEF\xBF\xBDX\xEF\xBF\xBD ");
 }
 
 void test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties() {

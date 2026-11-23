@@ -41,6 +41,7 @@ SRCS = src/common/Color.cpp \
        src/render/Canvas2D.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
+       src/render/TerminalWidthTables.cpp \
        src/render/BitmapRenderer.cpp \
        src/render/ImageFilter.cpp \
        src/js/JsValue.cpp \

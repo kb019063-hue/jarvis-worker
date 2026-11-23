@@ -6488,6 +6488,22 @@ TEST(image_bitmap_and_create_image_bitmap) {
     assert(interp.eval("rejBad === 'TypeError'").is_truthy());
 }
 
+TEST(offscreen_canvas_transfer_to_image_bitmap) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var oc = new OffscreenCanvas(4, 3);
+        var ctx = oc.getContext('2d');
+        ctx.fillStyle = '#00ff00';
+        ctx.fillRect(0, 0, 4, 3);
+        var bm = oc.transferToImageBitmap();
+    )");
+    assert(interp.eval("bm instanceof ImageBitmap").is_truthy());
+    assert(interp.eval("bm.width === 4 && bm.height === 3").is_truthy());
+}
+
 void test_css_media_queries() {
     using namespace litebird;
     std::string css = R"(
@@ -33549,6 +33565,7 @@ int main() {
     RUN_TEST(crypto_get_random_values_and_random_uuid);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
+    RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);
     RUN_TEST(css_media_queries);
     RUN_TEST(css_pseudo_classes);
     RUN_TEST(svg_text_uses_canvas_glyphs_and_svg_positioning);

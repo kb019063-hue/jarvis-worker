@@ -21,10 +21,8 @@
     "counts it as neither a pass nor a failure. The entry is a debt, not a",
     "silence: if the page starts passing, the run prints FIXED and exits 1, so",
     "the reason has to come out in the same commit that fixes the bug.",
-    "Zero pages carry a `known_failure` since Phase 180 (finding 184), which",
-    "cleared the final two recorded entries \u2014 `justify-content` in a column",
-    "flex container and `align-self` \u2014 alongside `align-content`, `justify-items`,",
-    "and `justify-self` in flex and grid."
+    "Phase 180 cleared the earlier known failures; Phase 193 added one for",
+    "inline white-space:nowrap failing to prevent replaced-element wrapping."
   ],
   "tests": [
     {
@@ -1668,6 +1666,127 @@
           "describe": "cell (1,1) sits at (70, 80)"
         }
       ]
+    },
+    {
+      "name": "inline_br_starts_a_second_line_of_replaced_elements",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.line{width:45px;font-size:0;line-height:20px}img{width:20px;height:20px;vertical-align:top}</style></head><body><div class=\"line\"><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"><br><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "first inline image occupies the first line"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 20,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "br starts the second image at the next 20px line"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 0,
+          "width": 25,
+          "height": 40,
+          "colour": "#ffffff",
+          "describe": "the right of both lines stays blank"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 45,
+          "height": 5,
+          "colour": "#ffffff",
+          "describe": "there is no third line"
+        }
+      ],
+      "note": "The images are solid 20px squares and the line height is 20px; no glyph shape or system font is needed."
+    },
+    {
+      "name": "inline_replaced_elements_wrap_to_the_next_line",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.line{width:45px;font-size:0;line-height:20px}img{width:20px;height:20px;vertical-align:top}</style></head><body><div class=\"line\"><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"> <img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"> <img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 40,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "two 20px images fit on the 45px first line"
+        },
+        {
+          "kind": "rect",
+          "x": 40,
+          "y": 0,
+          "width": 5,
+          "height": 20,
+          "colour": "#ffffff",
+          "describe": "the last 5px of the first line is blank"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 20,
+          "width": 20,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "the third image wraps to the start of the second line"
+        },
+        {
+          "kind": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 25,
+          "height": 20,
+          "colour": "#ffffff",
+          "describe": "the rest of the second line is blank"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 40,
+          "width": 45,
+          "height": 5,
+          "colour": "#ffffff",
+          "describe": "there is no third line"
+        }
+      ],
+      "note": "font-size zero removes the advance of the separating spaces without removing their line-break opportunities."
+    },
+    {
+      "name": "inline_nowrap_keeps_replaced_elements_on_one_line",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}.line{width:45px;font-size:0;line-height:20px}img{width:20px;height:20px;vertical-align:top}</style></head><body><div class=\"line\"><span style=\"white-space:nowrap\"><img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"> <img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"> <img src=\"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\"></span></div></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 60,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "all three images remain on one line, overflowing the 45px container"
+        },
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 20,
+          "width": 60,
+          "height": 20,
+          "colour": "#ffffff",
+          "describe": "nowrap does not create a second line"
+        }
+      ],
+      "known_failure": "white-space:nowrap does not prevent wrapping inline replaced elements: the third 20px image appears on the second line instead of overflowing the 45px container.",
+      "note": "The span inherits nowrap to the images; the viewport is wide enough for the overflow."
     }
   ]
 }

@@ -57,6 +57,8 @@ jobs:
         # `make test` checks the same in-process; this checks the path the
         # shell takes. Seconds.
         run: make gc-oracle
+      - name: Shaping comparator negative controls (not engine conformance)
+        run: make shaping-oracle-self-test
       - name: Bidi conformance (Unicode's own two suites)
         run: make bidi-conformance
       - name: Sized-float index keeps placements fast
@@ -202,6 +204,8 @@ jobs:
           python-version: "3.11"
       - name: Build
         run: make -j"$(nproc)"
+      - name: Two-build pixel comparator negative controls
+        run: make diff-render-self-test
       - name: Reftests
         # `ROADMAP.md` Tier 1 row 8: "Nothing measures a pixel." This measures
         # them. Every page in tests/render/reftests.json is rendered, and the
@@ -209,6 +213,8 @@ jobs:
         # the engine is not asked to grade its own writer — then compared with
         # what the reftest asserts, exactly, with no tolerance.
         run: make render-conformance
+      - name: Compare a real build with itself
+        run: make diff-render BEFORE=build/litebird AFTER=build/litebird DIFF_RENDER_ARGS="--filter inline_"
   conformance:
     name: DOM conformance (html5lib corpus)
     runs-on: ubuntu-latest

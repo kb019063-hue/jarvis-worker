@@ -1817,7 +1817,23 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         val = resolve_var_functions(val, style.custom_properties);
     }
     if (val.find('(') != std::string::npos) {
-        val = resolve_calc_functions(val, m_viewport_width);
+        // A percentage inside a `calc()` is a share of whatever the property
+        // is measured against, and only some properties have that in the
+        // cascade. A `font-size` percentage is of the inherited font size and
+        // a `line-height` percentage of the element's own -- both are known
+        // right here, and both were being made a share of the viewport
+        // instead: `font-size: calc(50% + 2px)` in a 20px paragraph computed
+        // to 402px and laid out a 502px line box for one character.
+        //
+        // Every other property is measured against the containing block,
+        // which is layout's to know and not the cascade's. Those still get
+        // the viewport, which is the wrong basis and the one finding 199
+        // leaves open: an unparsed `calc()` at least leaves no box behind,
+        // and a `calc()` of percentages gets a basis layout can supply.
+        float basis = m_viewport_width;
+        if (prop == "font-size") basis = m_em_base;
+        else if (prop == "line-height") basis = style.font_size;
+        val = resolve_calc_functions(val, basis);
     }
     css_trim(val);
     std::string val_lower = val;
@@ -1836,6 +1852,7 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         else if (val_lower == "table-row-group" || val_lower == "table-header-group" ||
                  val_lower == "table-footer-group") style.display = Display::TableRowGroup;
         else if (val_lower == "table-caption") style.display = Display::TableCaption;
+        else if (val_lower == "contents") style.display = Display::Contents;
         else if (val_lower == "table-column" || val_lower == "table-column-group") style.display = Display::None;
     } else if (prop == "float") {
         if (val == "left") style.float_type = FloatType::Left;

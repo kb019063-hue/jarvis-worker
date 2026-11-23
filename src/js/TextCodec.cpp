@@ -105,11 +105,16 @@ struct DecoderState : JsExotic {
     /// chunk completes them. Empty between streams, which is how a one-shot
     /// `decode()` stays what it was.
     std::string stream_bytes;
-    /// §11.1.1 "BOM seen": once a stream has been started, the bom sniffs it
-    /// did decide whether to strip are done, and a later chunk's leading BOM
-    /// is data rather than a byte order mark. `ignoreBOM` false is what makes
-    /// the first sniff possible at all; with it true nothing is ever stripped.
-    bool bom_decided{false};
+    /// §7.1 "BOM seen": the first scalar value a *decoder* produces is skipped
+    /// when it is U+FEFF, and only that one. It is not a byte prefix: the
+    /// bytes `FE FF` are a byte order mark under UTF-16BE and the character
+    /// U+FFFE under UTF-16LE, and no other encoding has one at all.
+    bool bom_seen{false};
+    /// §7.2 "do not flush": true while a `{stream: true}` decode is in
+    /// progress. It is what decides whether the next `decode()` continues the
+    /// decoder it has or takes a new one — a new one has nothing held back, no
+    /// ISO-2022-JP mode and no BOM seen.
+    bool do_not_flush{false};
     /// The mode an ISO-2022-JP stream ended its last chunk in: 0 ASCII,
     /// 1 Roman, 2 Katakana, 3 double-byte. The only decoder state that
     /// crosses a chunk boundary (§11.1.1), because an escape sequence governs
@@ -198,12 +203,18 @@ void setup_decoder(JsObject* proto, JsValue& constructor);
 /// does, and stops at the first character the chunk does not finish. Bytes
 /// already held back from an earlier chunk are always at the front, so the
 /// boundary is never in doubt.
-std::size_t pending_tail(EncodingId encoding, std::string_view bytes) {
+std::size_t pending_tail(EncodingId encoding, std::string_view bytes, int iso_mode_in = 0) {
     const std::size_t n = bytes.size();
     auto byte = [&](std::size_t i) { return static_cast<unsigned char>(bytes[i]); };
-    // ISO-2022-JP is the only one that carries a mode between characters; it
-    // is scanned in the same pass, so the mode is a local.
-    enum class IsoMode { Ascii, Double } iso_mode = IsoMode::Ascii;
+    // ISO-2022-JP is the only one that carries a mode between characters. The
+    // mode used to be a local starting at ASCII, which was wrong twice over:
+    // a chunk that continues a stream does not start in ASCII, and the held
+    // bytes this chunk is prefixed with are the *rest of a character* whose
+    // lead byte is in that mode. Both made the scan read a double-byte pair's
+    // trailing byte as a byte of its own, so the whole pair was passed to the
+    // decoder and decoded in the wrong mode (finding 213).
+    enum class IsoMode { Ascii, Double } iso_mode =
+        iso_mode_in == 3 ? IsoMode::Double : IsoMode::Ascii;
     std::size_t i = 0;
     while (i < n) {
         std::size_t need = 1;
@@ -283,27 +294,32 @@ std::size_t pending_tail(EncodingId encoding, std::string_view bytes) {
     return 0;
 }
 
-/// The bom sniff for a stream: the first chunk decides, and a BOM split across
-/// chunks is waited for. Answers how many bytes of `bytes` are the BOM (0 when
-/// there is none, or when `ignoreBOM`).
-std::size_t stream_bom(DecoderState& state, std::string_view bytes) {
-    if (state.ignore_bom || state.bom_decided) return 0;
-    // The three BOMs the standard knows, longest first.
-    static const char* const kBoms[] = {"\xEF\xBB\xBF", "\xFE\xFF", "\xFF\xFE"};
-    static const std::size_t kLengths[] = {3, 2, 2};
-    for (int i = 0; i < 3; ++i) {
-        const std::size_t length = kLengths[i];
-        if (bytes.size() < length) {
-            if (std::string_view(kBoms[i], bytes.size()) == bytes) return 0;   // still could be it
-            continue;
-        }
-        if (std::string_view(kBoms[i], length) == bytes.substr(0, length)) {
-            state.bom_decided = true;
-            return length;
-        }
-    }
-    state.bom_decided = true;
-    return 0;
+/// Whether this encoding is one whose decoder can produce a byte order mark:
+/// U+FEFF, which §7.1 says is skipped, is the UTF-8 BOM's scalar value and the
+/// UTF-16 one's, and nothing else in the standard decodes to it.
+bool has_byte_order_mark(EncodingId encoding) {
+    return encoding == EncodingId::Utf8 || encoding == EncodingId::Utf16BE ||
+           encoding == EncodingId::Utf16LE;
+}
+
+/// §7.1 "serialize I/O queue": the BOM is dropped after it is decoded, not
+/// before, because which bytes are one depends on the encoding — and it is
+/// dropped only from the first scalar value of a decoder, once.
+void strip_byte_order_mark(DecoderState& state, std::string& out) {
+    if (state.ignore_bom || state.bom_seen || out.empty()) return;
+    if (!has_byte_order_mark(state.encoding)) return;
+    state.bom_seen = true;
+    // U+FEFF in the UTF-8 the decoder answers in.
+    if (out.size() >= 3 && out.compare(0, 3, "\xEF\xBB\xBF") == 0) out.erase(0, 3);
+}
+
+/// A `decode()` that does not continue a stream starts from nothing: §7.2's
+/// first step builds a new decoder, a new I/O queue and sets "BOM seen" to
+/// false whenever "do not flush" was false on entry.
+void restart_decoder(DecoderState& state) {
+    state.stream_bytes.clear();
+    state.bom_seen = false;
+    state.iso_mode = 0;
 }
 
 JsValue make_decoder(const DecoderState& state, const JsValue* derived) {
@@ -375,30 +391,23 @@ void setup_decoder(JsObject* proto, JsValue& constructor) {
         const bool stream = read_stream_option(args.size() > 1 ? args[1] : JsValue::make_undefined());
         std::string bytes = bytes_from(args.empty() ? JsValue::make_undefined() : args[0]);
 
+        // §7.2 step 1: a decode that does not continue a stream is a new
+        // decoder, whatever the last one was in the middle of.
+        if (!state->do_not_flush) restart_decoder(*state);
+        state->do_not_flush = stream;
+
         // §11.1.1: the bytes a previous chunk ended inside of are this chunk's
-        // beginning, and a BOM is looked for in the first chunk of a stream
-        // (or in a one-shot call, which is a stream of one).
+        // beginning. A BOM split across two chunks needs no rule of its own:
+        // an incomplete character is held back by `pending_tail` below.
         if (!state->stream_bytes.empty()) {
             bytes = state->stream_bytes + bytes;
             state->stream_bytes.clear();
-        }
-        if (!state->bom_decided) {
-            const std::size_t bom = stream_bom(*state, bytes);
-            // A BOM that cannot be complete yet is waited for — but only in a
-            // stream. A one-shot `decode()` has all the bytes it will get, so
-            // "it might still be a BOM" is answered no, and the bytes are data.
-            if (!state->bom_decided && stream) {
-                state->stream_bytes = bytes;
-                return JsValue::make_string(std::string());
-            }
-            if (bom > 0) bytes.erase(0, bom);
-            state->bom_decided = true;
         }
 
         // The part the encoding is not inside of, and what is left over.
         std::string head = bytes;
         if (stream) {
-            const std::size_t tail = pending_tail(state->encoding, bytes);
+            const std::size_t tail = pending_tail(state->encoding, bytes, state->iso_mode);
             head.assign(bytes, 0, bytes.size() - tail);
             state->stream_bytes.assign(bytes, bytes.size() - tail, tail);
         }
@@ -407,8 +416,14 @@ void setup_decoder(JsObject* proto, JsValue& constructor) {
         const bool ok = decode_stream_chunk(head, state->encoding, out, state->fatal, state->iso_mode,
                                             &state->iso_mode);
         if (!ok) {
+            // §7.2 step 5: "do not flush" is cleared before the throw, so the
+            // next call starts a new decoder rather than continuing a stream
+            // that has already failed.
+            state->do_not_flush = false;
+            restart_decoder(*state);
             js_throw_type_error("Failed to execute 'decode' on 'TextDecoder': The encoded data was not valid.");
         }
+        strip_byte_order_mark(*state, out);
         return JsValue::make_string(out);
     });
 

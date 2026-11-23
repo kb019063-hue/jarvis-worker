@@ -28,6 +28,20 @@ check('insert rule', function() { var t=new CSSStyleSheet(); return [t.insertRul
 check('delete rule', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face { font-family: Test; }'); t.deleteRule(0); return t.cssRules.length; });
 check('set descriptor', function() { var st=s.cssRules[0].style; st.setProperty('font-display','block'); return st.getPropertyValue('font-display'); });
 check('remove descriptor', function() { var st=s.cssRules[0].style; return [st.removeProperty('font-display'),st.getPropertyValue('font-display')]; });
+check('css text', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face { font-family: Example; src: local(Example); font-display: swap }'); return [t.cssRules[0].cssText,t.cssRules[0].style.cssText]; });
+check('empty rule', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face {}'); return t.cssRules[0].cssText; });
+check('invalid declarations', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face { color: red; font-display: nonsense; font-weight: bogus; font-family: X !important; --x: x; }'); return t.cssRules[0].style.cssText; });
+check('property access', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face { font-family: Test; font-display: swap; src: local(Test); }'); var st=t.cssRules[0].style; return [st.fontFamily,st.fontDisplay,st.src,st[1]]; });
+check('style writes', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face {}'); var st=t.cssRules[0].style; st.fontFamily='Test'; st.fontDisplay='swap'; return [st.cssText,st.length]; });
+check('invalid write preserved', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face { font-display: swap; font-weight: 400 }'); var st=t.cssRules[0].style; st.setProperty('font-display','invalid'); st.setProperty('font-weight','bad'); return st.cssText; });
+check('priority and refresh', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face { font-display: swap; }'); var st=t.cssRules[0].style; st.setProperty('font-display','block','important'); t.insertRule('p { color:red; }',1); return [st.getPropertyValue('font-display'),st.getPropertyPriority('font-display'),st.cssText]; });
+check('cssText write', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face {}'); var st=t.cssRules[0].style; st.cssText='font-family: Test; src: local(Test); color: red; font-display: swap !important;'; return st.cssText; });
+check('url serialization', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face { src: url(font.woff2) format("woff2"), local(Test); }'); return t.cssRules[0].style.getPropertyValue('src'); });
+check('retained after delete', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face { font-family: Test }'); var r=t.cssRules[0], st=r.style; t.deleteRule(0); st.fontFamily='Other'; return [r.style===st,st.fontFamily,t.cssRules.length]; });
+check('brace in string', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face { src: url("a}b.woff"); } p { color: red }'); return [t.cssRules.length,t.cssRules[0].style.getPropertyValue('src')]; });
+check('invalid prelude', function() { var t=new CSSStyleSheet(); t.replaceSync('@font-face bogus { font-family: Test }'); return t.cssRules.length; });
+check('getter receiver', function() { try { Object.getOwnPropertyDescriptor(CSSFontFaceRule.prototype,'style').get.call({}); return 'no error'; } catch(e) { return e.name; } });
+check('cross sheet identity', function() { var a=new CSSStyleSheet(), b=new CSSStyleSheet(); a.replaceSync('@font-face {}'); b.replaceSync('@font-face {}'); var r=a.cssRules[0], st=r.style, other=b.cssRules[0]; return [a.cssRules[0]===r,st.parentRule===r,other!==r]; });
 check('invalid constructor', function() { try { new CSSFontFaceRule(); return 'no error'; } catch(e) { return e.name; } });
 '''
 BROWSER = r'''
@@ -48,7 +62,7 @@ def main():
                FONT_HTML=HTML, FONT_SCRIPT=SCRIPT)
     browser = subprocess.run(['node', '-e', BROWSER], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60, check=True)
     expected = json.loads(browser.stdout)
-    names = ('rule count', 'brand and type', 'rule identity', 'declarations', 'style identity', 'nested rule', 'insert rule', 'delete rule', 'set descriptor', 'remove descriptor', 'invalid constructor')
+    names = ('rule count', 'brand and type', 'rule identity', 'declarations', 'style identity', 'nested rule', 'insert rule', 'delete rule', 'set descriptor', 'remove descriptor', 'css text', 'empty rule', 'invalid declarations', 'property access', 'style writes', 'invalid write preserved', 'priority and refresh', 'cssText write', 'url serialization', 'retained after delete', 'brace in string', 'invalid prelude', 'getter receiver', 'cross sheet identity', 'invalid constructor')
     if len(expected) != len(names) or any(not line.startswith(name + ": ") for name, line in zip(names, expected)):
         raise ValueError("Chromium reference did not return all answers")
     with tempfile.TemporaryDirectory(prefix='font-face-') as tmp:

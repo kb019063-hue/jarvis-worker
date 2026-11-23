@@ -75,11 +75,19 @@ without being asked, tests those that are waiting together in one run, and
 merges each as it is. No test is given up for that: a pull request still
 passes its own CI run before it is taken, and `main` still only ever gets a
 tree that a whole run passed on, file for file. What is given up is the
-runs that tested a tree nobody was going to merge. (Each piece of it was
-tried before it was written down: the status comment and the two commands
-of point 3 on a pull request of the landing session's own, on 23
-November. No whole watch has run under this rule yet; what the first one
-shows will be written here.)
+runs that tested a tree nobody was going to merge.
+
+The first watch under that rule began at 05:28 on 23 November. In its
+first 67 minutes eight pull requests landed, on two CI runs: six together
+(pushed at 05:56, all twelve jobs passed by 06:15, the six merges took a
+minute) and two more (pushed at 06:17, passed by 06:34). From the green
+run on its own head to its merge a pull request took between 22 and 56
+minutes, four of the eight 32 or less, and none of them merged `main` or
+ran CI again in that time. `main` did not move under either lot: one agent
+merged its own pull request 22 seconds before the first look, and none
+after it. What went wrong is in points 2 and 4: three pull requests that
+had put their `RUN_TEST` line at the end of `main()` were in conflict
+within the hour, and the first lot was started again four times.
 
 1. **Take a name.** One made-up word, yours for as long as your chat lasts.
    A branch is new after every Continue and a pull request's number says
@@ -100,6 +108,19 @@ shows will be written here.)
    written, and the landing session refreshes it at the end of a watch. Add
    your suite and its `RUN_TEST` line; do not touch the number. If your
    branch already changed it and now conflicts there, take `main`'s lines.
+
+   **And put the `RUN_TEST` line under that of a related suite, not at the
+   end of `main()`.** Two pull requests that each add a line at the end
+   change the same place, and the second cannot be merged after the first.
+   On 23 November #244, #264, #267 and #273 had each put theirs there:
+   #264 landed, and within the hour the other three were in conflict with
+   it, one sent back out of a lot and two caught by `main`. The four that
+   had put theirs further up, by a suite of the same subject (#257, #263,
+   #268, #272), merged with everything. Where the line stands decides only
+   the order the suites run in. The suite itself goes behind a related one
+   as well, and not in front of `main()`, for the same reason. (Two pull
+   requests that rewrite neighbouring rows of "Open tasks" conflict too,
+   as #244 and #257 did, and nothing avoids that yet.)
 3. **When your pull request is finished, ask whether a watch is on.**
    Finished is: the checks of "What "done" means" pass, `WIP:` is off the
    title, and CI is green on the head commit (wait for it with
@@ -149,10 +170,16 @@ shows will be written here.)
      says in about six minutes what the run will say in twenty about the
      unit suites;
    - **the run passes and `main` has not moved:** each of them is merged as
-     it is, in that order (`gh pr merge N --merge`), and `main` has, file
-     for file, the tree the run passed on. If `main` has moved all the
-     same (an agent that did not know of the watch), `main` is merged into
-     the lot and the run starts again;
+     it is, in that order, and `main` has, file for file, the tree the run
+     passed on. The command is `gh pr merge N --merge --match-head-commit
+     SHA --body-file FILE`: the SHA is the head the lot holds, so a head
+     that moved a second ago is not merged; and the body of every merge
+     but the last has a paragraph that begins `[skip ci]`, so CI runs on
+     `main` once for the lot and not once for each (five runs fewer for
+     the six of 23 November). Before the last one, `git merge-tree
+     --write-tree origin/main` with its head must be the lot's tree. If
+     `main` has moved all the same (an agent that did not know of the
+     watch), `main` is merged into the lot and the run starts again;
    - **the run fails:** the landing session finds the pull request (the
      job that failed, the sandbox, or half the lot at a time), builds its
      branch again from `main` without that head, and tests the rest. A
@@ -165,12 +192,23 @@ shows will be written here.)
      a conflict with `main` or with a pull request before it in the lot,
      or a lot that fails with it. #N is then left alone until its head is
      another commit. Its agent is waiting (point 3) and reads the line
-     within a minute;
+     within a minute. If nobody has answered after half an hour, its turn
+     ended before the watch did (it had left #N finished, for a watch to
+     take): then it is carried, if it can be (below), or it waits for the
+     person, who learns of it from the report at the end;
    - a pull request that becomes finished while a run is going waits for
      the next lot, unless the run is less than five minutes old: then it
-     joins, and the run starts again;
+     joins, and the run starts again. Twice for one lot at the most: on
+     23 November the first lot took a newcomer four times in 28 minutes
+     (the runners were busy, and each run had finished two jobs of
+     twelve when it was stopped), and #257, green since 05:20, landed at
+     06:16 for it, 48 minutes into the watch;
    - nothing is pushed to anybody's branch, and no pull request is closed;
-   - **the end:** `python3 tools/ci/check_pr.py watch --off "…"` says what
+   - **the end** comes when nothing is finished and nothing is in test,
+     not only at the hour the status comment names: a watch that goes on
+     with nothing to take keeps the person from the report, and the
+     report is how they learn which chats wait for a word from them.
+     `python3 tools/ci/check_pr.py watch --off "…"` says what
      landed and what went back, and then the landing session merges its
      own pull request, which holds what no other one does: the suite count
      (`make metrics-suites`) and whatever it carried or wrote. That merge
@@ -181,7 +219,9 @@ shows will be written here.)
 
    **Carried.** A finished pull request whose agent is gone, and whose
    conflict needs no judgement (the suite count of `README.md`; a row
-   somebody else put where its row is; a number that is on `main` already:
+   somebody else put where its row is; a `RUN_TEST` line at the end of
+   `main()`, where another's now is: #244's was moved under that of the
+   suite its own is defined after; a number that is on `main` already:
    #223 was opened as Phase 179 and landed as Phase 191), is resolved in
    the landing session's branch and said in #N. It lands when the watch's
    own pull request is merged, and not before: GitHub shows #N as merged

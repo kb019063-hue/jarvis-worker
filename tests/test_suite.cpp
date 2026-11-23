@@ -35620,6 +35620,12 @@ int main() {
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";
+    // A new `RUN_TEST` line does not go at the end of the list above. Every
+    // pull request that puts one there changes the same place as every other
+    // that does, and only the first of them can be merged as it is
+    // (AGENTS.md, "Working together", point 2). Put it under the line of a
+    // related suite, further up. This comment stands below the summary so
+    // that it is not in that place itself.
     return 0;
 }
 

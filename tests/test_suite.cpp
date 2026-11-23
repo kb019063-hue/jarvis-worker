@@ -33851,6 +33851,125 @@ TEST(flex_and_grid_box_alignment_properties) {
     }
 }
 
+void test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties() {
+    auto eval = [](const char* src) -> std::string {
+        JsInterpreter js;
+        return js.eval(src).to_string();
+    };
+
+    // 1. Object spread copies own enumerable symbol keys alongside string keys
+    //    and skips non-enumerable symbols and strings.
+    assert(eval(R"(
+        const s1 = Symbol('a'), s2 = Symbol('b'), sHidden = Symbol('h');
+        const src = { x: 1, [s1]: 2, [s2]: 3 };
+        Object.defineProperty(src, 'ne', { value: 4, enumerable: false });
+        Object.defineProperty(src, sHidden, { value: 5, enumerable: false });
+        const copy = { ...src };
+        [copy.x, copy[s1], copy[s2], 'ne' in copy, sHidden in copy,
+         Object.getOwnPropertySymbols(copy).length, Reflect.ownKeys(copy).length].join(',');
+    )") == "1,2,3,false,false,2,3");
+
+    // 2. Object spread preserves [[OwnPropertyKeys]] order (indices, strings, symbols)
+    //    and keeps same-description symbols distinct.
+    assert(eval(R"(
+        const a = Symbol('same'), b = Symbol('same');
+        const log = [];
+        const src = {};
+        Object.defineProperty(src, a, { enumerable: true, get() { log.push('a'); return 'A'; } });
+        Object.defineProperty(src, 'z', { enumerable: true, get() { log.push('z'); return 'Z'; } });
+        Object.defineProperty(src, '2', { enumerable: true, get() { log.push('2'); return 'two'; } });
+        Object.defineProperty(src, b, { enumerable: true, get() { log.push('b'); return 'B'; } });
+        Object.defineProperty(src, '0', { enumerable: true, get() { log.push('0'); return 'zero'; } });
+        const copy = { ...src };
+        log.join(':') + '|' + [copy[0], copy[2], copy.z, copy[a], copy[b]].join(',');
+    )") == "0:2:z:a:b|zero,two,Z,A,B");
+
+    // 3. Object spread uses CreateDataProperty rather than [[Set]]: earlier own
+    //    setters and prototype setters are not invoked.
+    assert(eval(R"(
+        const s = Symbol('setter');
+        let calls = 0;
+        const proto = {};
+        Object.defineProperty(proto, 'p', { set() { calls++; } });
+        Object.defineProperty(proto, s, { set() { calls++; } });
+        const target = {
+            __proto__: proto,
+            set own(v) { calls++; },
+            set [s](v) { calls++; },
+            ...{ own: 10, p: 20, [s]: 30 }
+        };
+        const dOwn = Object.getOwnPropertyDescriptor(target, 'own');
+        const dSym = Object.getOwnPropertyDescriptor(target, s);
+        [calls, target.own, target.p, target[s], dOwn.value, dOwn.writable, dSym.value, dSym.writable].join(',');
+    )") == "0,10,20,30,10,true,30,true");
+
+    // 4. Object rest destructuring (declaration, assignment, parameter) copies own
+    //    enumerable symbols, excludes destructured computed symbol keys, and skips
+    //    non-enumerable symbols.
+    assert(eval(R"(
+        const sDrop = Symbol('drop'), sKeep = Symbol('keep'), sHidden = Symbol('h');
+        const src = { a: 1, b: 2, [sDrop]: 10, [sKeep]: 20 };
+        Object.defineProperty(src, sHidden, { value: 30, enumerable: false });
+        const { a, [sDrop]: picked, ...rest } = src;
+        let p2, assignRest;
+        ({ [sDrop]: p2, ...assignRest } = src);
+        const paramRest = (({ a: _, ...r }) => r)(src);
+        [a, picked, rest.b, sDrop in rest, rest[sKeep], sHidden in rest,
+         Object.getOwnPropertySymbols(rest).length,
+         p2, sDrop in assignRest, assignRest[sKeep],
+         paramRest[sDrop], paramRest[sKeep]].join(',');
+    )") == "1,10,2,false,20,false,1,10,false,20,10,20");
+
+    // 5. CopyDataProperties checks live own-enumerability per snapshotted key
+    //    (ECMA-262 7.3.24 step 6.c).
+    assert(eval(R"(
+        const sHide = Symbol('hide'), sReveal = Symbol('reveal'), sNew = Symbol('new');
+        const src = {};
+        Object.defineProperty(src, 'trigger', {
+            enumerable: true,
+            get() {
+                delete this.removed;
+                Object.defineProperty(this, sHide, { enumerable: false });
+                Object.defineProperty(this, sReveal, { enumerable: true });
+                this[sNew] = 99;
+                return 1;
+            }
+        });
+        src.removed = 2;
+        src[sHide] = 3;
+        Object.defineProperty(src, sReveal, { value: 4, enumerable: false, configurable: true });
+        const out = { ...src };
+        [out.trigger, 'removed' in out, sHide in out, out[sReveal], sNew in out].join(',');
+    )") == "1,false,false,4,false");
+
+    // 6. Spread and rest across strings, sparse arrays, TypedArrays, functions, nullish,
+    //    and without invoking Object.prototype setters.
+    assert(eval(R"(
+        const s = Symbol('extra');
+        function fn() {}
+        fn.x = 1; fn[s] = 2;
+        const arr = [10, , 30]; arr[s] = 40;
+        const ta = new Uint8Array([5, 6]); ta[s] = 7;
+        let protoCalls = 0;
+        Object.defineProperty(Object.prototype, s, { configurable: true, set() { protoCalls++; } });
+        let out = '';
+        try {
+            const { 0: first, ...strRest } = 'hi';
+            const { ...fnRest } = fn;
+            const arrCopy = { ...arr };
+            const taCopy = { ...ta };
+            const nullCopy = { ...null, ...undefined, ok: 1 };
+            out = [protoCalls, first, strRest[1], 'length' in strRest,
+                   fnRest.x, fnRest[s], 'name' in fnRest,
+                   arrCopy[0], '1' in arrCopy, arrCopy[2], arrCopy[s],
+                   taCopy[0], taCopy[1], taCopy[s], nullCopy.ok].join(',');
+        } finally {
+            delete Object.prototype[s];
+        }
+        out;
+    )") == "0,h,i,false,1,2,false,10,false,30,40,5,6,7,1");
+}
+
 int main() {
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
 
@@ -34363,6 +34482,10 @@ int main() {
     // Phase 195: a `calc()` percentage is of the declaration (font size,
     // line-height), not of the viewport.
     RUN_TEST(a_calc_percentage_is_of_the_declaration_not_the_viewport);
+
+    // Phase 198: object spread and rest destructuring copy own enumerable
+    // symbols and follow ECMA-262 §7.3.24 CopyDataProperties.
+    RUN_TEST(object_spread_and_rest_copy_symbols_and_follow_copy_data_properties);
 
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";

@@ -47,7 +47,7 @@ Every expected line is Node v22.22.3's, and the suite compares the whole
 joined answer, so a probe that stops running is a failure too:
 
 ```bash
-make test      # All 349 engine test suites passed successfully!
+make test      # All 355 engine test suites passed successfully!
 ```
 
 The suite is not vacuous. Putting `if (m_document)` in front of

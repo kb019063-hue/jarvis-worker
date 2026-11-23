@@ -1,0 +1,35 @@
+[
+  {
+    "id": "H1",
+    "reviewed_user_action": "blocked",
+    "raw_different_pre_pixels": 46759,
+    "raw_different_post_pixels": 199651,
+    "pixels": 480000,
+    "visual_verdict": "not comparable: different end state (Chromium reached Installation, Litebird stayed on Getting Started; the nav anchors contain only a font-awesome ::before glyph and paint nothing)"
+  },
+  {
+    "id": "H2",
+    "reviewed_user_action": "completed with geometry defect",
+    "raw_different_pre_pixels": 89560,
+    "raw_different_post_pixels": 239229,
+    "pixels": 480000,
+    "visual_verdict": "fail: nonidentical at equivalent task outcome (tab 2 focused, aria-selected true, biography visibly displayed at y~560 while getBoundingClientRect reports y~2061; the frame contradicts the failed geometry assertion)"
+  },
+  {
+    "id": "H3",
+    "reviewed_user_action": "completed (gates pass)",
+    "raw_different_pre_pixels": 2389,
+    "raw_different_open_pixels": 36424,
+    "raw_different_post_pixels": 2836,
+    "pixels": 480000,
+    "visual_verdict": "after frame near-identical (2,836; dialog closed, update button carries the focus ring in both); open frame missing the modal chrome (36,424; dialog content flush top-left on a gray canvas, no border/padding/centering, native select paints nothing)"
+  },
+  {
+    "id": "H4",
+    "reviewed_user_action": "incomplete",
+    "raw_different_pre_pixels": 114815,
+    "raw_different_post_pixels": 135510,
+    "pixels": 480000,
+    "visual_verdict": "not comparable: different end state (item was added and is shown in Litebird; completion toggle never activated; Chromium completed the task)"
+  }
+]

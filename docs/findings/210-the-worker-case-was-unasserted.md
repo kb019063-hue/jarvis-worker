@@ -21,7 +21,7 @@ answers are Node v22.22.3's line for line, and the whole answer is compared.
 
 ## 3. Evidence
 
-`make test` **349/349**. Guarding the install with `if (m_document)` and
+`make test` **355/355**. Guarding the install with `if (m_document)` and
 rebuilding makes the suite print nineteen differing lines and fail on its
 assertion — `typeof => undefined,undefined` against `function,function` — and
 restoring the call makes it pass. No engine file is changed by this phase.

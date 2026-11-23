@@ -5,6 +5,15 @@
 namespace litebird {
 
 namespace {
+// A cell is currently a byte, not a Unicode character. Never put untrusted
+// bytes into the ANSI stream: C0, DEL, C1 and malformed UTF-8 can otherwise
+// act as terminal commands. Until cells carry Unicode, use one safe ASCII
+// placeholder for every non-printable/non-ASCII byte.
+char safe_cell_character(char ch) {
+    const auto byte = static_cast<unsigned char>(ch);
+    return byte >= 0x20 && byte <= 0x7e ? ch : '?';
+}
+
 Color over_opaque(Color src, Color dst) {
     const unsigned a = src.a;
     auto over = [a](unsigned s, unsigned d) -> uint8_t {
@@ -297,7 +306,7 @@ void TerminalRenderer::render(const DisplayList& display_list, std::ostream& os)
             os << "\033[38;2;" << (int)cell.fg.r << ";" << (int)cell.fg.g << ";" << (int)cell.fg.b << "m";
             os << "\033[48;2;" << (int)cell.bg.r << ";" << (int)cell.bg.g << ";" << (int)cell.bg.b << "m";
             if (cell.bold) os << "\033[1m";
-            os << cell.ch;
+            os << safe_cell_character(cell.ch);
             if (cell.bold) os << "\033[22m";
         }
         // Reset and newline
@@ -318,7 +327,7 @@ std::string TerminalRenderer::to_ansi_string(const DisplayList& display_list) {
             ss << "\033[38;2;" << (int)cell.fg.r << ";" << (int)cell.fg.g << ";" << (int)cell.fg.b << "m";
             ss << "\033[48;2;" << (int)cell.bg.r << ";" << (int)cell.bg.g << ";" << (int)cell.bg.b << "m";
             if (cell.bold) ss << "\033[1m";
-            ss << cell.ch;
+            ss << safe_cell_character(cell.ch);
             if (cell.bold) ss << "\033[22m";
         }
         ss << "\033[0m\n";

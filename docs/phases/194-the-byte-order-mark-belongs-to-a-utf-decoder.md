@@ -92,6 +92,26 @@ a new stream sniffs its own BOM:            got "A|﻿B", expected "A|B"
 and the ISO-2022-JP one fails on the way to the assertion, because the mode
 left behind makes the second call throw.
 
+Nothing else moved:
+
+| Check | Result |
+| :--- | :--- |
+| `make js-conformance` | 1146/1158 (99.0%), 0 crashes |
+| `make conformance` | 1973/1973 |
+| `make dom-conformance` | 678/678 |
+| `make wpt` | 9567/9824, the same 257 listed |
+| `make url-conformance` | 1188/1188 |
+| `make xml-conformance` | 1718/1718 |
+| `make diff-trees` / `make diff-xml` | 1500/1500 trees equal, no crash |
+| `make deep` | 1332 runs, 0 failed |
+| `make security-fetch` / `-worker` / `-https` | 3/3, 17/17, 20/20 |
+| `make asan` | `build-asan/litebird` built; the changed codec run under ASan+UBSan reports nothing |
+
+`make asan`'s unit step is killed for memory on this machine (3.9 GB; the
+suite's own comments say it needs more and CI's runners have 16 GB), so the
+sanitizer evidence here is the built binary and the decoder probes run through
+it, not the whole suite.
+
 ## 4. What is still open
 
 - **`TextDecoderStream` and `TextEncoderStream` do not exist**; nothing here

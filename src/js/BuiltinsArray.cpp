@@ -1930,27 +1930,66 @@ void install_array_builtins(JsIntrinsics& realm) {
             JsValue array = receiver(name);
             const size_t length = array_like_length(array, name);
             JsValue callback = require_callback(js_arg(args, 0), name);
-            // reduce visits the places that are there, in order (or in reverse
-            // for reduceRight), and never asks about one that is not: a
-            // receiver with a huge `length` and one place reduces in one step.
-            const IndexWalk walk = present_indices(array, length);
-            const size_t count = walk.indices.size();
-            size_t step = 0;
+            // reduce visits the places that are there, in order, and never
+            // asks about one that is not: a receiver with a huge `length` and
+            // one place reduces in one step.
+            //
+            // The places are asked for as the walk reaches them, not listed
+            // before it starts. A callback can make a place appear ahead of
+            // itself — `reduce/15.4.4.21-9-1.js` writes `arr[2]` from the
+            // callback while two is still a hole in front of the walk — and
+            // the standard asks `HasProperty` at each index as it arrives, so
+            // the place that appeared is visited. Listing them first answered
+            // "75" where Node.js v22.22.3 answers "105".
             JsValue accumulator;
-            auto place = [&](size_t k) { return walk.indices[from_end ? count - 1 - k : k]; };
-            if (args.size() >= 2) {
-                accumulator = args[1];
-            } else {
-                if (count == 0) js_throw_type_error("Reduce of empty array with no initial value");
-                accumulator = get_index(array, place(0));
-                ++step;
-            }
-            for (; step < count; ++step) {
-                const size_t i = place(step);
-                if (!has_index_property(array, i)) continue;   // a callback can delete it first
+            bool started = args.size() >= 2;
+            if (started) accumulator = args[1];
+            // One place, in the order the walk reaches it: the first one starts
+            // the accumulator when there is no initial value, and every other
+            // one is handed to the callback.
+            auto visit = [&](size_t i) {
+                if (!started) {
+                    accumulator = get_index(array, i);
+                    started = true;
+                    return;
+                }
                 JsValue item = get_index(array, i);
                 accumulator = callback.call({accumulator, item, JsValue::make_number(static_cast<double>(i)), array});
+            };
+            if (from_end) {
+                // §23.1.3.22 walks k downwards from len-1 to 0 and asks
+                // `HasProperty` at each index as it arrives — so a place a
+                // callback creates *below* itself is still reached. Walking
+                // the places upwards and then reversing the list answers
+                // differently: `[1,,,9]` with a callback that fills 1 and 2
+                // from index 3 reaches neither of them, and answered 18
+                // where Node.js v22.22.3 answers 21.
+                //
+                // A length that cannot be counted cannot be walked downwards
+                // either, so it takes the places that are there, in reverse.
+                // That is the same deviation `find` makes at the same bound,
+                // and it changes only an answer that could not be produced.
+                if (length > kMaxWalkedIndices) {
+                    const IndexWalk walk = present_indices(array, length);
+                    for (size_t k = walk.indices.size(); k-- > 0;) {
+                        if (!has_index_property(array, walk.indices[k])) continue;
+                        visit(walk.indices[k]);
+                    }
+                } else {
+                    for (size_t step = 0; step < length; ++step) {
+                        const size_t i = length - 1 - step;
+                        if (!has_index_property(array, i)) continue;
+                        visit(i);
+                    }
+                }
+                if (!started) js_throw_type_error("Reduce of empty array with no initial value");
+                return accumulator;
             }
+            walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
+                visit(i);
+                return true;
+            });
+            if (!started) js_throw_type_error("Reduce of empty array with no initial value");
             return accumulator;
         };
     };

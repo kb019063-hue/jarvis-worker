@@ -68,6 +68,25 @@ whose base URL is `https://example.test/app/page.html`; the rejection's message
 is read in a second block after `run_microtasks()`, because a handler is a
 microtask and checking it in the same block only ever sees "(pending)".
 
+Nothing else moved:
+
+| Check | Result |
+| :--- | :--- |
+| `make js-conformance` | 1148/1158 (99.1%), 0 crashes — two more than the 1146 of the merge this branch starts from, and `make metrics` moved the figure, the README/ROADMAP markers and CI's `--min-pass` floor up with it |
+| `make conformance` / `make dom-conformance` | 1973/1973 · 678/678 |
+| `make wpt` | 9567/9824, the same 257 listed |
+| `make url-conformance` / `make xml-conformance` | 1188/1188 · 1718/1718 |
+| `make diff-trees` / `make diff-xml` | 1500/1500 trees equal, no crash |
+| `make deep` | 1332 runs, 0 failed |
+| `make security-fetch` / `-worker` / `-https` / `-websocket` | 3/3 · 17/17 · 20/20 · 40/40 |
+| `build-asan/litebird` | builds, and answers the six grammar probes above under ASan+UBSan with no report |
+
+`make deep` reported two 60-second timeouts the first two times it was run,
+each time while the ASan build was using both cores of this sandbox; alone it
+is 1332 runs, 0 failed. The sanitizer *unit* step is killed for memory here
+(3.9 GB) and runs on CI's runners, so the local sanitizer evidence is the built
+binary and the probe above.
+
 ## 4. What is still open
 
 - **Nothing is loaded.** There is no module loader behind the call: an

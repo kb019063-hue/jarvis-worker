@@ -5183,6 +5183,51 @@ TEST(collection_stress_asks_at_a_seeded_allocation_count) {
     assert(tight.take_gc_stress_request());
 }
 
+// A queued promise reaction is work outstanding, not garbage: the microtask
+// queue roots it, and the collector is right to leave it alone. The AGENTS.md
+// row for the GC audit read that queue depth as a leak, because it counted
+// `alive_cells` at the bottom of the loop where the reactions had not run yet.
+// This checks the two halves of that claim: mid-loop the cells are held, and
+// one turn later -- after the queue has drained -- they are gone.
+TEST(a_promise_reaction_is_a_queue_not_a_leak) {
+    using namespace litebird;
+
+    JsInterpreter js;
+    js.eval(R"JS(
+        var base = 0, seenMid = 0, seenAfter = 0, drained = false;
+        var iterations = 500;
+        function start() {
+            for (var i = 0; i < iterations; i++) {
+                Promise.resolve(1).then(function f(v) { return v; });
+            }
+            gc();
+            seenMid = gc().alive_cells - base;
+            setTimeout(function () {
+                gc();
+                seenAfter = gc().alive_cells - base;
+                drained = true;
+            }, 0);
+        }
+        // Take the baseline after this script's own frame has been popped, so
+        // it does not count the interpreter's own working set.
+        setTimeout(function () { gc(); base = gc().alive_cells; start(); }, 0);
+    )JS");
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
+
+    const auto& global = js.global_object();
+    const double mid = global.get_property("seenMid").to_number();
+    const double after = global.get_property("seenAfter").to_number();
+    assert(global.get_property("drained").is_truthy());
+
+    // The queued reactions are still on the heap mid-loop: the queue is visible
+    // in the count, which is exactly what the row mistook for a leak. Two cells
+    // (a promise and its reaction record) per queued reaction.
+    assert(mid >= 500.0);
+    // After the queue drains, all but a handful of cells come back. A real leak
+    // of two cells an iteration would leave a thousand.
+    assert(after <= 64.0);
+}
+
 TEST(dom_event_target_and_bubbling) {
     using namespace litebird;
 
@@ -35136,6 +35181,7 @@ int main() {
     RUN_TEST(the_font_shorthand_resets_font_kerning);
     RUN_TEST(the_painter_honours_font_kerning_none);
     RUN_TEST(garbage_collector_and_cycles);
+    RUN_TEST(a_promise_reaction_is_a_queue_not_a_leak);
     RUN_TEST(collection_stress_asks_at_a_seeded_allocation_count);
     RUN_TEST(dom_event_target_and_bubbling);
     RUN_TEST(event_loop_and_timers);

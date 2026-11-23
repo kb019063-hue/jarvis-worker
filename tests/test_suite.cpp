@@ -28626,67 +28626,63 @@ TEST(dataview_and_the_iterating_typed_array_methods) {
 
 TEST(an_array_to_locale_string_asks_every_element)
 {
-    using namespace litebird;
-
-    JsInterpreter js(nullptr);
-    auto text = [&](const char* source) { return js.eval(source).to_string(); };
-    text("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
-
-    // ---- the element is asked, so a patched method shows ------------------
-    // §23.1.3.28 is not `join`: `Array.prototype.toLocaleString` was
+    TestPage page;
+    JsInterpreter& js = page.js;
+    auto text = [&](const std::string& source) { return js.eval(source).to_string(); };
+    // §23.1.3.28 is not `join`. `Array.prototype.toLocaleString` was
     // `join_array(receiver, ",")`, which read every place as `join` does and
     // formatted the numbers itself, so a patched `Number.prototype.
-    // toLocaleString` was never asked (finding 196).
-    assert(text("Number.prototype.toLocaleString = function () { return 'X'; };"
-                "[1,2].toLocaleString()") == "X,X");
-    // A hole and `undefined` are the empty string with nothing asked: `,` and
-    // `,` between the two X's, and no 'undefined' text.
+    // toLocaleString` was never asked (finding 196). §20.1.3.5 was
+    // `js_to_string(self())` — "[object Object]", asking nothing — where the
+    // standard is `Invoke(this, "toString")`.
+    js.eval("function errName(f) { try { f(); return 'no error'; } catch (e) { return e.name; } }");
+
+    // ---- the element is asked, so a patched method shows ------------------
+    assert(text("Number.prototype.toLocaleString = function () { return 'X'; }; [1,2].toLocaleString()")
+           == "X,X");
+    // A hole and `undefined` are the empty string, with nothing asked: two
+    // separators and no 'undefined' text.
     assert(text("[1,,3].toLocaleString()") == "X,,X");
     assert(text("String([null,2].toLocaleString())") == ",X");
     assert(text("[].toLocaleString()") == "");
-    // The element is passed, not its wrapper: §23.1.3.28 step 7.c has no
-    // ToObject, so a strict method sees the number and a sloppy one is boxed
-    // by the call. test262's `primitive_this_value` asks the same for String.
+    // §23.1.3.28 step 7.c has no ToObject: a strict method sees the number it
+    // was given, and a sloppy one is boxed by the call.
     assert(text("Number.prototype.toLocaleString = function () { 'use strict'; return typeof this; };"
                 "[7].toLocaleString()") == "number");
     assert(text("Number.prototype.toLocaleString = function () { return typeof this; };"
                 "[7].toLocaleString()") == "object");
-    assert(text("Boolean.prototype.toLocaleString = function () { 'use strict'; return typeof this; };"
-                "[true,false].toLocaleString()") == "boolean,boolean");
 
     // ---- the place is read as `[k]` is, and a prototype's index counts ----
-    // Get, not HasProperty: a hole that the prototype fills is an element and
-    // is asked. A hole that nothing fills is `undefined` and is not.
-    assert(text("delete Number.prototype.toLocaleString;"
-                "Array.prototype[1] = 'P';"
+    assert(text("delete Number.prototype.toLocaleString; Array.prototype[1] = 'P';"
                 "Array.prototype.toLocaleString.call([0,,2])") == "0,P,2");
     assert(text("delete Array.prototype[1]; [0,,2].toLocaleString()") == "0,,2");
     // A getter on a place runs once, as one read of it.
-    assert(text("var asked = 0; var a = [1,,3];"
-                "Object.defineProperty(a, '0', { get: function () { asked++; return 5; } });"
-                "a.toLocaleString() + ' ' + asked") == "5,,3 1");
+    assert(text("var asked = 0; var g = [1,,3];"
+                "Object.defineProperty(g, '0', { get: function () { asked++; return 5; } });"
+                "g.toLocaleString() + ' ' + asked") == "5,,3 1");
 
     // ---- the element's own method, wherever it is found -------------------
-    // A method on the element, one on its prototype chain, and a non-callable
-    // one are three different things.
     assert(text("[{toLocaleString: function () { return 'own'; }}].toLocaleString()") == "own");
     assert(text("[Object.create({toLocaleString: function () { return 'I'; }})].toLocaleString()") == "I");
     assert(text("errName(function () { [{toLocaleString: 1}].toLocaleString(); })") == "TypeError");
-    // ToObject is the method's own business: `Array.prototype.toLocaleString`
-    // accepts a primitive receiver, a string's places included.
+    // ToObject is the method's own business: a primitive receiver and a
+    // string's places are both accepted.
     assert(text("Array.prototype.toLocaleString.call(42)") == "");
     assert(text("Array.prototype.toLocaleString.call('abc')") == "a,b,c");
     assert(text("errName(function () { Array.prototype.toLocaleString.call(null); })") == "TypeError");
 
     // ---- §20.1.3.5: Object.prototype.toLocaleString calls this.toString ---
-    // The method was `js_to_string(self())`, which is "[object Object]" for
-    // every object and asks nothing; test262's `primitive_this_value` reaches
-    // the element's inherited `toLocaleString` and needs the patched
-    // `Boolean.prototype.toString` to be the one called.
+    // test262's `primitive_this_value` reaches an element's inherited
+    // `toLocaleString` and needs the patched `toString` to be the one called.
     assert(text("({toLocaleString: Object.prototype.toLocaleString,"
-                "  toString: function () { return 'mine'; }}).toLocaleString()") == "mine");
-    assert(text("Boolean.prototype.toString = function () { return typeof this; };"
+                "toString: function () { return 'mine'; }}).toLocaleString()") == "mine");
+    // `"use strict"` in the override is what makes `typeof this` the primitive:
+    // a sloppy function's `this` is boxed by §10.2.1.2, which is why test262
+    // runs its file `onlyStrict`.
+    assert(text("Boolean.prototype.toString = function () { 'use strict'; return typeof this; };"
                 "[true,false].toLocaleString()") == "boolean,boolean");
+    assert(text("Boolean.prototype.toString = function () { return typeof this; };"
+                "[true,false].toLocaleString()") == "object,object");
     assert(text("String(({toLocaleString: Object.prototype.toLocaleString}).toLocaleString())")
            == "[object Object]");
     assert(text("errName(function () { Object.prototype.toLocaleString.call(null); })") == "TypeError");

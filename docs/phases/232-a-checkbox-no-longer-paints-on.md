@@ -1,7 +1,7 @@
-# Phase 229 — a checkbox no longer paints "on"
+# Phase 232 — a checkbox no longer paints "on"
 
 Task row: **A checkbox paints the literal string `on`.** (`AGENTS.md` → Open tasks).
-Finding 233.
+Finding 236.
 
 ## 1. What was wrong
 

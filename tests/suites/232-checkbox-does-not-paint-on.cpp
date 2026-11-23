@@ -1,4 +1,4 @@
-// Phase 229, finding 233: a checkbox does not paint the literal string "on".
+// Phase 232, finding 236: a checkbox does not paint the literal string "on".
 TEST(a_checkbox_does_not_paint_the_string_on) {
     using namespace litebird;
     // The overlay in BrowserShell::render_png_frame used to paint every

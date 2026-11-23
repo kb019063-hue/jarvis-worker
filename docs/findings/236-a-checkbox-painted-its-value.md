@@ -1,6 +1,6 @@
-# Finding 233 — a checkbox painted its value
+# Finding 236 — a checkbox painted its value
 
-Phase 229.
+Phase 232.
 
 ## What was wrong
 

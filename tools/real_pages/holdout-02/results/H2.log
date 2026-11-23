@@ -1,0 +1,6 @@
+stage: open
+READ	Result: 0
+HIT	#number1 @ 196,275 -> input#number1
+HIT	#number2 @ 196,301 -> input#number2
+READ	Result: 0
+END

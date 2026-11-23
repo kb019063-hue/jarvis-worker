@@ -2727,9 +2727,13 @@ TEST(every_text_decoration_line_is_painted_at_the_faces_own_ink) {
     auto root = LayoutTree::build(doc, resolver, 400.0f, 400.0f);
     assert(root);
 
-    // The lines the painter is told to draw, one box at a time.
+    // The lines the painter is told to draw, one box at a time. The list is
+    // held in a named variable: iterating `DisplayList::build(root).commands()`
+    // directly reads the temporary's vector after its owner has gone
+    // (AddressSanitizer's stack-use-after-scope in the sanitizer job).
+    const DisplayList list = DisplayList::build(root);
     std::vector<Rect> lines;
-    for (const auto& cmd : DisplayList::build(root).commands()) {
+    for (const auto& cmd : list.commands()) {
         std::visit([&](auto&& a) {
             using T = std::decay_t<decltype(a)>;
             if constexpr (std::is_same_v<T, DrawRectCommand>) lines.push_back(a.rect);
@@ -2797,7 +2801,8 @@ TEST(every_text_decoration_line_is_painted_at_the_faces_own_ink) {
     auto bare_root = LayoutTree::build(bare, bare_resolver, 200.0f, 100.0f);
     assert(bare_root);
     int bare_lines = 0;
-    for (const auto& cmd : DisplayList::build(bare_root).commands()) {
+    const DisplayList bare_list = DisplayList::build(bare_root);
+    for (const auto& cmd : bare_list.commands()) {
         std::visit([&](auto&& a) {
             using T = std::decay_t<decltype(a)>;
             if constexpr (std::is_same_v<T, DrawRectCommand>) ++bare_lines;

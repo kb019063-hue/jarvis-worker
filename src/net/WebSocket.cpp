@@ -20,6 +20,7 @@
 #include <cstring>
 #include <dlfcn.h>
 #include <fcntl.h>
+#include <initializer_list>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
@@ -639,6 +640,266 @@ int poll_sock_or_wake(int sock,
         if (pfds[0].revents & POLLIN) return 1;
     }
     return -1;
+}
+
+struct WebSocketProxy {
+    bool enabled{false};
+    bool invalid{false};
+    std::string host;
+    uint16_t port{0};
+    std::string error;
+};
+
+bool read_nonempty_env(std::initializer_list<const char*> names, std::string& value) {
+    for (const char* name : names) {
+        const char* raw = std::getenv(name);
+        if (raw && *raw) {
+            value = raw;
+            return true;
+        }
+    }
+    value.clear();
+    return false;
+}
+
+std::string normalized_proxy_host(std::string host) {
+    host = ascii_lower(host);
+    if (host.size() > 1 && host.back() == '.') host.pop_back();
+    return host;
+}
+
+bool parse_proxy_port(std::string_view text, uint16_t& port) {
+    if (text.empty()) return false;
+    unsigned value = 0;
+    for (unsigned char c : text) {
+        if (c < '0' || c > '9') return false;
+        value = value * 10u + static_cast<unsigned>(c - '0');
+        if (value > 65535u) return false;
+    }
+    if (value == 0) return false;
+    port = static_cast<uint16_t>(value);
+    return true;
+}
+
+bool split_no_proxy_entry(std::string_view entry,
+                          std::string& host,
+                          bool& has_port,
+                          uint16_t& port) {
+    has_port = false;
+    if (entry.empty()) return false;
+    if (entry.front() == '[') {
+        const std::size_t close = entry.find(']');
+        if (close == std::string_view::npos || close == 1) return false;
+        host.assign(entry.substr(1, close - 1));
+        const std::string_view suffix = entry.substr(close + 1);
+        if (!suffix.empty()) {
+            if (suffix.front() != ':' || !parse_proxy_port(suffix.substr(1), port)) return false;
+            has_port = true;
+        }
+        return true;
+    }
+
+    const std::size_t first_colon = entry.find(':');
+    const std::size_t last_colon = entry.rfind(':');
+    if (first_colon != std::string_view::npos && first_colon == last_colon) {
+        host.assign(entry.substr(0, first_colon));
+        if (!parse_proxy_port(entry.substr(first_colon + 1), port)) return false;
+        has_port = true;
+    } else {
+        // An unbracketed IPv6 literal has several colons and no port suffix.
+        host.assign(entry);
+    }
+    return !host.empty();
+}
+
+bool no_proxy_matches(std::string_view list, const std::string& target_host, uint16_t target_port) {
+    const std::string target = normalized_proxy_host(target_host);
+    std::size_t pos = 0;
+    while (pos <= list.size()) {
+        const std::size_t comma = list.find(',', pos);
+        const std::size_t end = comma == std::string_view::npos ? list.size() : comma;
+        const std::string entry = trim_ows(list.substr(pos, end - pos));
+        if (entry == "*") return true;
+
+        std::string candidate;
+        bool has_port = false;
+        uint16_t port = 0;
+        if (split_no_proxy_entry(entry, candidate, has_port, port) &&
+            (!has_port || port == target_port)) {
+            if (candidate.rfind("*.", 0) == 0) {
+                candidate.erase(0, 2);
+            } else if (!candidate.empty() && candidate.front() == '.') {
+                candidate.erase(0, 1);
+            }
+            candidate = normalized_proxy_host(std::move(candidate));
+            if (candidate == "*") return true;
+            if (candidate == target) return true;
+            if (!is_ip_literal(candidate) && !is_ip_literal(target) &&
+                target.size() > candidate.size() &&
+                target.compare(target.size() - candidate.size(), candidate.size(), candidate) == 0 &&
+                target[target.size() - candidate.size() - 1] == '.') {
+                return true;
+            }
+        }
+        if (comma == std::string_view::npos) break;
+        pos = comma + 1;
+    }
+    return false;
+}
+
+WebSocketProxy websocket_proxy_for(bool secure, const std::string& target_host, uint16_t target_port) {
+    WebSocketProxy out;
+    // Proxying plain ws:// is deliberately not implied by this HTTPS proxy path.
+    if (!secure) return out;
+
+    std::string raw_proxy;
+    if (!read_nonempty_env({"HTTPS_PROXY", "https_proxy"}, raw_proxy) &&
+        !read_nonempty_env({"ALL_PROXY", "all_proxy"}, raw_proxy)) {
+        return out;
+    }
+
+    std::string no_proxy;
+    (void)read_nonempty_env({"NO_PROXY", "no_proxy"}, no_proxy);
+    if (no_proxy_matches(no_proxy, target_host, target_port)) return out;
+
+    out.enabled = true;
+    Url parsed;
+    if (!Url::parse(raw_proxy, nullptr, parsed) || parsed.scheme != "http" ||
+        !parsed.has_host || parsed.host.empty() || parsed.port == 0 || parsed.port > 65535 ||
+        raw_proxy.find('@') != std::string::npos || !parsed.username.empty() || !parsed.password.empty() ||
+        parsed.has_query || parsed.has_fragment ||
+        (!parsed.pathname().empty() && parsed.pathname() != "/")) {
+        out.invalid = true;
+        out.error = "Invalid WebSocket HTTP proxy URL";
+        return out;
+    }
+
+    out.host = parsed.host;
+    if (out.host.size() >= 2 && out.host.front() == '[' && out.host.back() == ']') {
+        out.host = out.host.substr(1, out.host.size() - 2);
+    }
+    out.port = parsed.port > 0 ? static_cast<uint16_t>(parsed.port) : static_cast<uint16_t>(80);
+    return out;
+}
+
+std::string websocket_connect_authority(const std::string& host, uint16_t port) {
+    const std::string authority_host = host.find(':') == std::string::npos ? host : "[" + host + "]";
+    return authority_host + ":" + std::to_string(port);
+}
+
+bool validate_connect_response(std::string_view response, int& status_code) {
+    const std::size_t line_end = response.find("\r\n");
+    const std::string_view status_line = line_end == std::string_view::npos
+        ? response
+        : response.substr(0, line_end);
+    if (status_line.size() < 12 ||
+        (status_line.substr(0, 9) != "HTTP/1.0 " && status_line.substr(0, 9) != "HTTP/1.1 ") ||
+        status_line[9] < '0' || status_line[9] > '9' ||
+        status_line[10] < '0' || status_line[10] > '9' ||
+        status_line[11] < '0' || status_line[11] > '9' ||
+        (status_line.size() > 12 && status_line[12] != ' ')) {
+        return false;
+    }
+    status_code = (status_line[9] - '0') * 100 + (status_line[10] - '0') * 10 +
+                  (status_line[11] - '0');
+    for (unsigned char c : status_line.substr(12)) {
+        if ((c < 0x20 && c != '\t') || c == 0x7f) return false;
+    }
+
+    if (line_end == std::string_view::npos) return true;
+    std::size_t pos = line_end + 2;
+    while (pos < response.size()) {
+        const std::size_t next = response.find("\r\n", pos);
+        const std::string_view line = next == std::string_view::npos
+            ? response.substr(pos)
+            : response.substr(pos, next - pos);
+        const std::size_t colon = line.find(':');
+        if (colon == std::string_view::npos || !is_http_token(line.substr(0, colon))) return false;
+        for (unsigned char c : line.substr(colon + 1)) {
+            if ((c < 0x20 && c != '\t') || c == 0x7f) return false;
+        }
+        if (next == std::string_view::npos) break;
+        pos = next + 2;
+    }
+    return true;
+}
+
+bool establish_http_connect_tunnel(int sock,
+                                  int wake_rd,
+                                  const std::string& target_authority,
+                                  const std::atomic<bool>& stop_requested,
+                                  std::string& error) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kHandshakeTimeoutMs);
+    const std::string request = "CONNECT " + target_authority + " HTTP/1.1\r\n" +
+                                "Host: " + target_authority + "\r\n\r\n";
+    std::size_t sent = 0;
+    while (sent < request.size() && !stop_requested.load(std::memory_order_acquire)) {
+        const ssize_t n = ::send(sock, request.data() + sent, request.size() - sent, MSG_NOSIGNAL);
+        if (n > 0) {
+            sent += static_cast<std::size_t>(n);
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            const int ready = poll_sock_or_wake(sock, wake_rd, true, deadline, stop_requested);
+            if (ready > 0) continue;
+            error = ready == 0 ? "WebSocket HTTP proxy CONNECT timed out"
+                               : "WebSocket HTTP proxy CONNECT interrupted";
+            return false;
+        }
+        error = "WebSocket HTTP proxy CONNECT write failed";
+        return false;
+    }
+    if (sent != request.size()) {
+        error = "WebSocket HTTP proxy CONNECT interrupted";
+        return false;
+    }
+
+    std::string response;
+    std::size_t header_end = std::string::npos;
+    while (header_end == std::string::npos && response.size() < kMaxHandshakeBytes &&
+           !stop_requested.load(std::memory_order_acquire)) {
+        char byte = 0;
+        const ssize_t n = ::recv(sock, &byte, 1, 0);
+        if (n == 1) {
+            response.push_back(byte);
+            if (response.size() >= 4 &&
+                response.compare(response.size() - 4, 4, "\r\n\r\n") == 0) {
+                header_end = response.size() - 4;
+            }
+            continue;
+        }
+        if (n == 0) {
+            error = "WebSocket HTTP proxy closed during CONNECT";
+            return false;
+        }
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            const int ready = poll_sock_or_wake(sock, wake_rd, false, deadline, stop_requested);
+            if (ready > 0) continue;
+            error = ready == 0 ? "WebSocket HTTP proxy CONNECT timed out"
+                               : "WebSocket HTTP proxy CONNECT interrupted";
+            return false;
+        }
+        error = "WebSocket HTTP proxy CONNECT read failed";
+        return false;
+    }
+    if (header_end == std::string::npos || header_end >= kMaxHandshakeBytes) {
+        error = "WebSocket HTTP proxy CONNECT response exceeded its size limit";
+        return false;
+    }
+
+    int status_code = 0;
+    const std::string_view header_block(response.data(), header_end);
+    if (!validate_connect_response(header_block, status_code)) {
+        error = "Malformed WebSocket HTTP proxy CONNECT response";
+        return false;
+    }
+    if (status_code < 200 || status_code >= 300) {
+        error = "WebSocket HTTP proxy CONNECT failed (" + std::to_string(status_code) + ")";
+        return false;
+    }
+    return true;
 }
 
 } // namespace
@@ -1575,14 +1836,23 @@ void WebSocketObject::receiver_thread_loop() {
         return;
     }
 
+    const WebSocketProxy proxy = websocket_proxy_for(m_secure, m_connect_host, m_port);
+    if (proxy.invalid) {
+        finish_abnormal(proxy.error.c_str());
+        return;
+    }
+    const std::string& endpoint_host = proxy.enabled ? proxy.host : m_connect_host;
+    const uint16_t endpoint_port = proxy.enabled ? proxy.port : m_port;
+
     // 1. Thread-safe address resolution + non-blocking TCP connect with timeout
     struct addrinfo hints{};
     hints.ai_family = AF_UNSPEC;
     hints.ai_socktype = SOCK_STREAM;
     struct addrinfo* res = nullptr;
-    const std::string port_str = std::to_string(m_port);
-    if (::getaddrinfo(m_connect_host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) {
-        finish_abnormal("WebSocket address resolution failed");
+    const std::string port_str = std::to_string(endpoint_port);
+    if (::getaddrinfo(endpoint_host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) {
+        finish_abnormal(proxy.enabled ? "WebSocket proxy address resolution failed"
+                                      : "WebSocket address resolution failed");
         return;
     }
 
@@ -1640,6 +1910,19 @@ void WebSocketObject::receiver_thread_loop() {
             sock = -1;
         }
     };
+
+    // The HTTP proxy socket becomes the end-to-end target socket only after a
+    // successful CONNECT. TLS below still verifies the WebSocket URL's host.
+    if (proxy.enabled) {
+        std::string proxy_error;
+        if (!establish_http_connect_tunnel(sock, m_wake_fds[0],
+                                           websocket_connect_authority(m_connect_host, m_port),
+                                           m_stop_requested, proxy_error)) {
+            cleanup_transport();
+            finish_abnormal(proxy_error.c_str());
+            return;
+        }
+    }
 
     // 2. Optional TLS handshake & strict hostname / IP SAN verification
     if (m_secure) {

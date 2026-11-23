@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Reduced Hebrew mark-order probes; accepts compare.py's CLI arguments."""
 import sys
+import itertools
 import subprocess
 import compare
 
@@ -16,6 +17,14 @@ compare.CASES = [
 
 if __name__ == "__main__":
     try:
+        if "--permutations" in sys.argv:
+            sys.argv.remove("--permutations")
+            compare.CASES = [
+                (f"{base:04x}-" + "-".join(f"{cp:04x}" for cp in marks),
+                 "".join(map(chr, (base, *marks))), "Hebr", "rtl")
+                for base in (0x05E9, 0x05D1)
+                for marks in itertools.permutations((0x05B8, 0x05C1, 0x05BC))
+            ]
         sys.exit(compare.main())
     except (OSError, ValueError, subprocess.SubprocessError, ImportError) as exc:
         print(f"shaping oracle error: {exc}", file=sys.stderr)

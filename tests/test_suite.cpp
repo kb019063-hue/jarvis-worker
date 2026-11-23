@@ -4799,6 +4799,38 @@ TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs) {
     std::fflush(stdout);
 }
 
+TEST(hebrew_fixed_points_are_ordered_before_shaping) {
+    using namespace litebird;
+    const std::vector<TestGlyphSpec> glyphs = {
+        {0, 500, false, 0, 0, 0, 0},
+        {0x05E9, 600, true, 40, 0, 560, 500},
+        {0x05B8, 0, true, 10, 0, 20, 10},
+        {0x05C1, 0, true, 10, 0, 20, 10},
+        {0x05BC, 0, true, 10, 0, 20, 10},
+        {0x05C7, 0, true, 10, 0, 20, 10},
+        {' ', 200, false, 0, 0, 0, 0},
+        {0x0301, 0, true, 10, 0, 20, 10},
+    };
+    TrueTypeFont f;
+    assert(f.load_memory(build_synthetic_sfnt(1000, 800, -200, glyphs, {})));
+    auto ids = [&](const std::vector<uint32_t>& cps) {
+        std::vector<uint16_t> out;
+        for (const auto& g : f.shape_glyphs(cps, true, false)) out.push_back(g.glyph);
+        return out;
+    };
+    // No host font and no GDEF needed: preprocessing is a codepoint rule.
+    assert((ids({0x05E9, 0x05B8, 0x05C1}) == std::vector<uint16_t>{1, 3, 2}));
+    assert(ids({0x05E9, 0x05B8, 0x05C1}) == ids({0x05E9, 0x05C1, 0x05B8}));
+    assert((ids({0x05E9, 0x05B8, 0x05BC, 0x05C1}) == std::vector<uint16_t>{1, 3, 4, 2}));
+    // Equal-ranked qamats/qamats-qatan stay stable, including repeated marks.
+    assert((ids({0x05E9, 0x05C7, 0x05B8, 0x05B8}) == std::vector<uint16_t>{1, 5, 2, 2}));
+    // Neither a base, space, nor an unhandled combining mark is crossed.
+    assert((ids({0x05E9, 0x05B8, 0x05E9, 0x05C1}) == std::vector<uint16_t>{1, 2, 1, 3}));
+    assert((ids({0x05E9, 0x05B8, ' ', 0x05C1}) == std::vector<uint16_t>{1, 2, 6, 3}));
+    assert((ids({0x05E9, 0x05B8, 0x0301, 0x05C1}) == std::vector<uint16_t>{1, 2, 7, 3}));
+    assert(ids({}).empty());
+}
+
 TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely) {
     using namespace litebird;
 
@@ -34252,6 +34284,7 @@ int main() {
     RUN_TEST(gpos_cursive_attachment_ltr_rtl_and_contextual_pos);
     RUN_TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs);
     RUN_TEST(canvas2d_and_html_paint_arabic_cursive_and_contextual_glyphs);
+    RUN_TEST(hebrew_fixed_points_are_ordered_before_shaping);
     RUN_TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely);
 
     // Phase 127: TextDecoder and TextEncoder reachable from script.

@@ -173,6 +173,18 @@ DEEP_ASAN_DEPTH ?= 10000
 
 all: $(TARGET)
 
+## Compare query/fragment-only resolution with Node's URL implementation.
+.PHONY: verify-relative-navigation
+verify-relative-navigation: $(BUILD_DIR)/relative_navigation_fixture
+	@python3 tools/conformance/verify_relative_navigation.py --binary $(BUILD_DIR)/relative_navigation_fixture
+
+$(BUILD_DIR)/relative_navigation_fixture: $(OBJS) tools/conformance/relative_navigation_fixture.cpp
+	$(CXX) $(CXXFLAGS) $(OBJS) tools/conformance/relative_navigation_fixture.cpp -o $@
+
+## The original offline driver, for rechecking exposed holdout-02 tasks.
+$(BUILD_DIR)/holdout_02_driver: $(OBJS) tools/real_pages/holdout-02/drive.cpp
+	$(CXX) $(CXXFLAGS) $(OBJS) tools/real_pages/holdout-02/drive.cpp -o $@
+
 ## Check untrusted shell labels without writing attack bytes to a terminal.
 .PHONY: verify-terminal-shell-safety
 verify-terminal-shell-safety: $(TARGET)
@@ -193,9 +205,31 @@ $(BUILD_DIR)/main.o: src/main.cpp
 
 -include $(OBJS:.o=.d) $(BUILD_DIR)/main.d
 
-$(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp
+## The suites that are files of their own (tests/suites/README.md). A new suite
+## is one new file there and no line anywhere else, so that no two pull requests
+## change the same place for it. tests/test_suite.cpp reads them through a list
+## that is written here from the names of the files: for each a namespace named
+## after the file, and inside it the file. The list is written at every build
+## and replaced only when it would say something else, so a build with nothing
+## new compiles nothing, and a file that was added, removed or renamed is seen.
+SUITE_FILES := $(sort $(wildcard tests/suites/*.cpp))
+SUITE_LIST := $(BUILD_DIR)/suite_files.inc
+
+.PHONY: FORCE
+FORCE:
+
+$(SUITE_LIST): FORCE
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(OBJS) tests/test_suite.cpp -o $@
+	@{ echo '// Written by the Makefile from the names in tests/suites/. Not kept in git.'; \
+	   for f in $(SUITE_FILES); do \
+	     n=$$(basename "$$f" .cpp | tr -c 'A-Za-z0-9\n' '_'); \
+	     printf 'namespace suite_%s {\n#include "%s"\n}\n' "$$n" "$$f"; \
+	   done; } > $@.new
+	@cmp -s $@.new $@ && rm -f $@.new || mv $@.new $@
+
+$(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp $(SUITE_FILES) $(SUITE_LIST)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) -iquote . -iquote $(BUILD_DIR) $(OBJS) tests/test_suite.cpp -o $@
 
 $(CROSS_ORIGIN_TARGET): $(OBJS) tests/cross_origin_windows.cpp
 	@mkdir -p $(BUILD_DIR)

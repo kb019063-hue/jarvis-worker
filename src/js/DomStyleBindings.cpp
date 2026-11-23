@@ -419,6 +419,85 @@ const std::unordered_map<std::string, PropertyRule>& property_rules() {
         rules["font-size"] = {ValueKind::FontSize, {"xx-small", "x-small", "small", "medium", "large", "x-large",
                                                     "xx-large", "xxx-large", "smaller", "larger"}};
         rules["line-height"] = {ValueKind::LineHeight, {"normal"}};
+
+        // Keyword properties that had no rule at all. With no rule,
+        // `canonicalize_css_value` treats the declaration as free text: it is
+        // stored and `getPropertyValue` hands it back, so
+        // `setProperty("table-layout", "totallybogusvalue")` looked accepted and
+        // a browser would have dropped the declaration. The set of values is
+        // CSS's; a value outside it is not a declaration this engine should
+        // keep, because nothing downstream can use it.
+        rules["table-layout"] = {ValueKind::Keyword, {"auto", "fixed"}};
+        rules["border-collapse"] = {ValueKind::Keyword, {"separate", "collapse"}};
+        rules["empty-cells"] = {ValueKind::Keyword, {"show", "hide"}};
+        rules["caption-side"] = {ValueKind::Keyword, {"top", "bottom", "block-start", "block-end", "inline-start",
+                                                      "inline-end"}};
+        rules["writing-mode"] = {ValueKind::Keyword, {"horizontal-tb", "vertical-rl", "vertical-lr", "sideways-rl",
+                                                      "sideways-lr", "lr", "lr-tb", "rl", "rl-tb", "tb", "tb-rl"}};
+        rules["direction"] = {ValueKind::Keyword, {"ltr", "rtl"}};
+        rules["unicode-bidi"] = {ValueKind::Keyword, {"normal", "embed", "isolate", "bidi-override",
+                                                      "isolate-override", "plaintext"}};
+        rules["mix-blend-mode"] = {ValueKind::Keyword, {"normal", "multiply", "screen", "overlay", "darken",
+                                                        "lighten", "color-dodge", "color-burn", "hard-light",
+                                                        "soft-light", "difference", "exclusion", "hue",
+                                                        "saturation", "color", "luminosity", "plus-lighter"}};
+        rules["isolation"] = {ValueKind::Keyword, {"auto", "isolate"}};
+        rules["object-fit"] = {ValueKind::Keyword, {"fill", "contain", "cover", "none", "scale-down"}};
+        rules["white-space"] = {ValueKind::Keyword, {"normal", "pre", "nowrap", "pre-wrap", "pre-line",
+                                                     "break-spaces"}};
+        rules["word-break"] = {ValueKind::Keyword, {"normal", "break-all", "keep-all", "break-word"}};
+        rules["overflow-wrap"] = {ValueKind::Keyword, {"normal", "break-word", "anywhere"}};
+        rules["hyphens"] = {ValueKind::Keyword, {"none", "manual", "auto"}};
+        rules["vertical-align"] = {ValueKind::Keyword, {"baseline", "sub", "super", "text-top", "text-bottom",
+                                                       "middle", "top", "bottom"}};
+        rules["pointer-events"] = {ValueKind::Keyword, {"auto", "none", "visiblePainted", "visibleFill",
+                                                        "visibleStroke", "visible", "painted", "fill", "stroke",
+                                                        "all", "bounding-box"}};
+        rules["user-select"] = {ValueKind::Keyword, {"auto", "text", "none", "contain", "all"}};
+        rules["resize"] = {ValueKind::Keyword, {"none", "both", "horizontal", "vertical", "block", "inline"}};
+        rules["list-style-type"] = {ValueKind::Keyword, {"none", "disc", "circle", "square", "decimal",
+                                                         "decimal-leading-zero", "lower-roman", "upper-roman",
+                                                         "lower-alpha", "upper-alpha", "lower-latin",
+                                                         "upper-latin", "lower-greek", "georgian", "armenian",
+                                                         "disclosure-open", "disclosure-closed"}};
+        rules["background-repeat"] = {ValueKind::Keyword, {"repeat", "repeat-x", "repeat-y", "no-repeat", "space",
+                                                           "round"}};
+        rules["background-attachment"] = {ValueKind::Keyword, {"scroll", "fixed", "local"}};
+        rules["background-clip"] = {ValueKind::Keyword, {"border-box", "padding-box", "content-box", "text"}};
+        rules["background-origin"] = {ValueKind::Keyword, {"border-box", "padding-box", "content-box"}};
+        rules["appearance"] = {ValueKind::Keyword, {"none", "auto", "button", "textfield", "menulist", "checkbox",
+                                                    "radio", "searchfield", "textarea", "listbox"}};
+        // `font-weight: 700` is as valid as `bold`, so the rule is a keyword
+        // *or* a number: `Number` is what the switch below falls through to
+        // when no keyword matches, and the keywords are tried first.
+        rules["font-weight"] = {ValueKind::Number, {"normal", "bold", "bolder", "lighter"}};
+        rules["touch-action"] = {ValueKind::Keyword, {"auto", "none", "manipulation", "pan-x", "pan-y",
+                                                      "pan-left", "pan-right", "pan-up", "pan-down",
+                                                      "pinch-zoom"}};
+        rules["scroll-behavior"] = {ValueKind::Keyword, {"auto", "smooth"}};
+        rules["image-rendering"] = {ValueKind::Keyword, {"auto", "smooth", "high-quality", "crisp-edges",
+                                                         "pixelated"}};
+        rules["justify-content"] = {ValueKind::Keyword, {"normal", "flex-start", "flex-end", "center",
+                                                         "space-between", "space-around", "space-evenly",
+                                                         "stretch", "start", "end", "left", "right"}};
+        rules["align-items"] = {ValueKind::Keyword, {"normal", "stretch", "flex-start", "flex-end", "center",
+                                                     "baseline", "start", "end", "self-start", "self-end"}};
+        rules["align-self"] = {ValueKind::Keyword, {"auto", "normal", "stretch", "flex-start", "flex-end", "center",
+                                                    "baseline", "start", "end", "self-start", "self-end"}};
+        rules["align-content"] = {ValueKind::Keyword, {"normal", "flex-start", "flex-end", "center",
+                                                       "space-between", "space-around", "space-evenly", "stretch",
+                                                       "start", "end", "baseline"}};
+        rules["justify-items"] = {ValueKind::Keyword, {"normal", "stretch", "start", "end", "center", "left",
+                                                       "right", "baseline", "self-start", "self-end"}};
+        rules["will-change"] = {ValueKind::Keyword, {"auto", "scroll-position", "contents", "transform", "opacity",
+                                                     "filter"}};
+        rules["cursor"] = {ValueKind::Keyword, {"auto", "default", "none", "context-menu", "help", "pointer",
+                                                "progress", "wait", "cell", "crosshair", "text", "vertical-text",
+                                                "alias", "copy", "move", "no-drop", "not-allowed", "grab",
+                                                "grabbing", "e-resize", "n-resize", "ne-resize", "nw-resize",
+                                                "s-resize", "se-resize", "sw-resize", "w-resize", "ew-resize",
+                                                "ns-resize", "nesw-resize", "nwse-resize", "col-resize",
+                                                "row-resize", "all-scroll", "zoom-in", "zoom-out"}};
         return rules;
     }();
     return s_rules;

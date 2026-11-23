@@ -313,6 +313,12 @@ jobs:
         run: python3 tools/conformance/verify_async_generator.py
       - name: Eval context, declaration instantiation, and early errors against Node.js
         run: python3 tools/conformance/verify_eval_context.py
+      - name: Promise subclass capabilities and chains against Node.js
+        # 22 programs answering questions about NewPromiseCapability, species,
+        # chain value propagation, thenable adoption and rejecting through a
+        # `then` with no handler: each run through the engine and Node.js, and
+        # the two outputs required to be equal, line for line (Phase 196).
+        run: python3 tools/conformance/verify_promise_subclass.py
       - name: String results against Node.js
         # 36 subject strings through every string method and 51 regular
         # expressions: 50,580 results, each compared with what Node computes on

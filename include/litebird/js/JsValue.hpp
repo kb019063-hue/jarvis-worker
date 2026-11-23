@@ -258,7 +258,12 @@ public:
     const std::shared_ptr<Node>& dom_node_value() const;
     const std::shared_ptr<CanvasRenderingContext2D>& canvas_context() const;
     const std::shared_ptr<CanvasGradient>& canvas_gradient_value() const;
-    const std::shared_ptr<struct PromiseData>& promise_value() const;
+    /// The promise state of this value, or null when it is not a promise. A
+    /// value made from a promise cell -- `class P extends Promise {}` hands
+    /// `new`'s object to the parent's native constructor, which fills it in
+    /// (see Promise::create_promise_instance) -- is a promise too, so the
+    /// state is read from the cell when the value itself carries none.
+    std::shared_ptr<struct PromiseData> promise_value() const;
     const std::shared_ptr<struct GeneratorData>& generator_value() const;
 
     void set_function_params(std::vector<std::string> value);

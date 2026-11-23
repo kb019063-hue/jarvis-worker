@@ -1,0 +1,4 @@
+stage: open
+READ	Getting Started
+BLOCKED	no clickable target: a[aria-label='Next chapter']
+END

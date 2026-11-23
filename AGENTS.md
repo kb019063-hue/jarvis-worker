@@ -639,6 +639,21 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   comment on a pull request and rewrite its own comment
   (`gh api -X PATCH repos/OWNER/REPO/issues/comments/ID -F body=@FILE`),
   so what agents have to tell each other is said on one: the board.
+- **Every session uses the same GitHub token, and its REST limit is 5,000
+  requests an hour for all of them together.** On 23 November at 02:30,
+  with nine agents' pull requests open and most of them waiting for CI, it
+  was used up (`gh api rate_limit`: `core`, 5000 of 5000). For the sixteen
+  minutes to the reset, every `gh run view`, `gh run list` and
+  `gh api repos/…` of every session answered `HTTP 403: API rate limit
+  exceeded`. That is not the block a merged pull request brings ("Remote
+  GitHub access is blocked for this branch"), and it says nothing about the
+  pull request. What goes through GraphQL has a limit of its own (23 of
+  5,000 were used at that moment) and went on working: `gh pr checks N`,
+  `gh pr view N --json statusCheckRollup`, `gh pr list`, `gh pr comment`
+  and `gh pr merge`; so did `git fetch` and `git push`. So wait for CI with
+  `gh pr checks N`, once a minute: not with `gh run watch`, which asks
+  again every few seconds, and not with a loop over `gh run view`.
+  `gh api rate_limit` says what is left and costs nothing.
 
 **The sandbox**
 

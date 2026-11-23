@@ -199,3 +199,59 @@ changed/missing/shifted coverage, invalid glyph IDs and fields; actual FreeType
 identity, missing glyph, half-em shift, advance-only change and .notdef tests;
 and rejection of a font hash mismatch. The integration test is explicit and
 fails if the font or FreeType is missing; it does not silently skip coverage.
+
+## Font-unit outline diagnostic: reduce the Latin difference
+
+The ink result above is not solely a pixel-rounding effect. With the same
+DejaVu Sans hash, HarfBuzz 12.1.0 and FreeType 2.13.2, the reduced input
+`a + U+0301` has identical base contours and terminal advance (1255 units),
+but the acute's four-point contour is translated **10 font units left** in
+Litebird's run. HarfBuzz's contour bounds are `(453,1262)..(932,1638)`;
+Litebird's are `(443,1262)..(922,1638)`. Their translation-independent shape
+hashes agree. Litebird also has a one-point degenerate contour; the diagnostic
+deliberately retains it rather than assuming every contour paints ink.
+
+`latin_diagnostic.py` isolates five inputs: plain `a`, precomposed `á`,
+decomposed `a + acute`, `x + dot below + acute`, and the original combined
+string. Only the decomposed `a` and original string disagree. The ink diagnostic
+reproduces exactly the earlier 11/24/49 changed pixels for both at 16/32/64 px;
+the other three match at each size. This is a statement about the specified
+font, not a universal rule that a font's separately positioned mark and its
+precomposed glyph must have identical outlines.
+
+```sh
+# The same optional FreeType requirements as ink.py.
+build/shaping-venv/bin/python tools/shaping/latin_diagnostic.py \
+  --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf --output build/latin.json
+build/shaping-venv/bin/python tools/shaping/outlines.py \
+  --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
+  --report build/latin.json --output build/latin-outlines.json
+build/shaping-venv/bin/python tools/shaping/ink.py \
+  --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf \
+  --report build/latin.json --output build/latin-ink.json
+python3 tools/shaping/test_outlines.py
+build/shaping-venv/bin/python tools/shaping/test_outlines.py \
+  --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf
+```
+
+The first three commands intentionally exit 1 on differences. No original
+report is modified. Outline exit 2 is an input/dependency error; missing glyphs
+are unsupported and never pass by matching .notdef shapes.
+
+`outlines.py` verifies font SHA-256 and units per em, loads those exact bytes,
+and asks FreeType for unhinted, unscaled, expanded outlines. It adds the recorded
+pen and offset in font units, before any pixel quantization. It compares a
+multiset of contours, preserving duplicates, point tags (on/conic/cubic),
+winding and fill-rule flags while ignoring only the cyclic start of a contour.
+JSON preserves every unmatched point, its control-point bounds (not exact
+Bezier ink bounds), and a translation-independent shape hash. Terminal advances
+are compared separately, and reference versions and source-report hash recorded.
+
+Limits: matching contour multisets does **not** guarantee equal pixels. Glyph
+grouping, draw order and overlap compositing are not compared. Different Bezier
+representations can describe the same curve and still fail this strict test.
+FreeType expands composites and supplies both outlines; this is not independent
+verification of its outline parser, nor of Litebird's rasterizer. Arbitrary
+font/case resource usage is not benchmarked. General normalization and a
+font-independent engine repair remain separate work; no font-specific 10-unit
+adjustment belongs in the engine.

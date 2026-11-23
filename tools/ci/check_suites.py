@@ -35,8 +35,24 @@ a tree between the document and the interpreter needs `TestPage::Built`, and
 converting one is a judgement about what its prologue is for. The count is
 reported so it can be watched going down, and so a new one is noticed.
 
-A suite in a file of its own (`tests/*_suite.cpp`) would have no prologue to
-share with anything and this would not apply; every suite is in the one file.
+A suite in a file of its own has no prologue to share with anything, and none
+of this applies to it. Since 23 November 2026 that is where a new suite goes:
+one file in tests/suites/, read at the end of tests/test_suite.cpp inside a
+namespace named after the file (tests/suites/README.md says why: 44 of the 285
+merges of `main` into a branch were in conflict in the one file). What this
+tool holds such a file to is what makes that work:
+
+  - its name is a number and words, `218-text-decoration-lines.cpp`;
+  - it has one `TEST(name)`, at the start of a line: the suite count is the
+    number of files, and tools/ci/check_pr.py counts names without reading;
+  - it has no `#include`: it would be read inside the file's namespace, and a
+    header that had not been read before would declare `std` in there;
+  - it has no `RUN_TEST` and no `main`;
+  - no two suites, in the files or in tests/test_suite.cpp, have one name.
+
+And of tests/test_suite.cpp it now says what nothing did: a `TEST(name)` there
+with no `RUN_TEST(name)` line is a suite that is never run. (`make test` ends
+with status 1 for it too; this says it without a build.)
 """
 import re
 import sys
@@ -44,6 +60,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 SUITE_FILE = ROOT / "tests" / "test_suite.cpp"
+SUITE_DIR = ROOT / "tests" / "suites"
 
 # The prologue, as lines that may be indented by any amount. `Document` and
 # `JsInterpreter` by their unqualified names, because that is how the suites
@@ -57,6 +74,8 @@ BOILERPLATE = (
 BETWEEN = ("set_url(", "append_child(", "set_attribute(", "load_page(")
 
 SUITE_START = re.compile(r"(?m)^TEST\((\w+)\)\s*\{")
+OWN_FILE_NAME = re.compile(r"\d+(-[a-z0-9]+)+\.cpp")
+LISTED = re.compile(r"(?m)^    RUN_TEST\((\w+)\)")
 
 
 def suites(text: str) -> list[tuple[str, str]]:
@@ -109,12 +128,63 @@ def is_script_suite(body: str) -> bool:
     return "JsInterpreter" in body
 
 
+def own_file_problems(name: str, text: str) -> list[str]:
+    """What is wrong with one file of tests/suites/, by its name and its text."""
+    problems = []
+    if not OWN_FILE_NAME.fullmatch(name):
+        problems.append(f"tests/suites/{name}: the name is a number and words in small letters, "
+                        "`218-text-decoration-lines.cpp`")
+    names = [n for n, _body in suites(text)]
+    if len(names) != 1:
+        problems.append(f"tests/suites/{name}: {len(names)} `TEST(name) {{` at the start of a line; "
+                        "a file is one suite, and two suites are two files")
+    if re.search(r"(?m)^\s*#\s*include\b", text):
+        problems.append(f"tests/suites/{name}: an `#include`. The file is read inside a namespace, at the end of "
+                        "tests/test_suite.cpp; a header it needs goes to the list at the top of that file")
+    if re.search(r"(?m)^\s*RUN_TEST\s*\(", text) or re.search(r"(?m)^int\s+main\s*\(", text):
+        problems.append(f"tests/suites/{name}: a `RUN_TEST` or a `main`. A file here is run without either")
+    return problems
+
+
+def never_run(text: str) -> list[str]:
+    """The `TEST(name)` of tests/test_suite.cpp that `main()` has no `RUN_TEST(name)` line for."""
+    listed = set(LISTED.findall(text))
+    return [name for name, _body in suites(text) if name not in listed]
+
+
+def twice(names: list[str]) -> list[str]:
+    """The names more than one suite has."""
+    seen: set[str] = set()
+    out = []
+    for name in names:
+        if name in seen and name not in out:
+            out.append(name)
+        seen.add(name)
+    return out
+
+
 def report(list_only: bool) -> int:
     if not SUITE_FILE.is_file():
         print(f"check_suites: {SUITE_FILE} is not here")
         return 1
     text = SUITE_FILE.read_text()
     found = suites(text)
+    own = sorted(SUITE_DIR.glob("*.cpp")) if SUITE_DIR.is_dir() else []
+    problems = [f"tests/test_suite.cpp: TEST({name}) has no RUN_TEST({name}) line in main(): it is never run"
+                for name in never_run(text)]
+    own_names = []
+    for path in own:
+        own_text = path.read_text()
+        problems += own_file_problems(path.name, own_text)
+        own_names += [n for n, _body in suites(own_text)]
+    problems += [f"two suites are called {name}" for name in twice([n for n, _b in found] + own_names)]
+    if not list_only:
+        if problems:
+            print(f"  NO    {len(problems)} thing(s) wrong with where the suites are (tests/suites/README.md):")
+            for problem in problems:
+                print(f"        {problem}")
+            return 1
+        print(f"  ok    {len(own)} suite(s) are files of their own in tests/suites/, each in the form of its README")
     script = [(n, b) for n, b in found if is_script_suite(b)]
     by_helper = [(n, b) for n, b in script if through_the_helper(b)]
     inline = [(n, b) for n, b in script if not through_the_helper(b)]
@@ -125,7 +195,7 @@ def report(list_only: bool) -> int:
             print(f"  {name}" + (f"  (builds a tree: {', '.join(between)})" if between else ""))
         return 0
 
-    print(f"  ok    {len(found)} suites, {len(script)} of them run script: "
+    print(f"  ok    {len(found)} suites in tests/test_suite.cpp, {len(script)} of them run script: "
           f"{len(by_helper)} through TestPage, {len(inline)} writing their own prologue")
     # A converted suite that still sets its own URL is using the helper's page
     # for a document that is not the helper's page.
@@ -192,6 +262,32 @@ def self_test() -> int:
         ("...and so does one that builds a tree", needs_its_own_page(built), False),
         ("two suites are found, and each is its own text", len(suites(inline + helper)), 2),
         ("the name is the name in TEST(...)", [n for n, _b in suites(inline + helper)], ["mine", "mine"]),
+        # A suite that is a file of its own (tests/suites/).
+        ("a file with one TEST, a helper beside it and a comment above is in form",
+         own_file_problems("218-text-decoration-lines.cpp",
+                           "// Phase 218.\nstatic int f() { return 1; }\n" + helper), []),
+        ("a TEST whose brace is on the next line is one suite too",
+         own_file_problems("218-a.cpp", "TEST(mine)\n{\n}\n"), []),
+        ("two suites in one file are two files", len(own_file_problems("218-a.cpp", inline + helper)), 1),
+        ("a file with no TEST is no suite", len(own_file_problems("218-a.cpp", "static void test_mine() {}\n")), 1),
+        ("an indented TEST is not at the start of a line, and is not counted",
+         len(own_file_problems("218-a.cpp", "namespace x {\n    TEST(mine) {\n    }\n}\n")), 1),
+        ("an #include is refused, indented or not",
+         [len(own_file_problems("218-a.cpp", lead + "#include <map>\n" + helper)) for lead in ("", "  ")], [1, 1]),
+        ("...and a line that only says the word is not one",
+         own_file_problems("218-a.cpp", "// no #include here\n" + helper), []),
+        ("a RUN_TEST in a file is refused, and a comment that names one is not",
+         [len(own_file_problems("218-a.cpp", helper + line)) for line in
+          ("    RUN_TEST(mine);\n", "// no RUN_TEST(mine) line\n", "int main() {\n}\n")], [1, 0, 1]),
+        ("the name of the file is a number and words",
+         [len(own_file_problems(name, helper)) for name in
+          ("218-a.cpp", "000-a-suite-in-a-file-of-its-own.cpp", "a.cpp", "218_a.cpp", "218-A.cpp", "218.cpp")],
+         [0, 0, 1, 1, 1, 1]),
+        ("a TEST of the big file without its RUN_TEST line is never run",
+         never_run("TEST(one) {\n}\nTEST(two) {\n}\nint main() {\n    RUN_TEST(one);\n    // RUN_TEST(two);\n}\n"),
+         ["two"]),
+        ("...and with it, it is", never_run("TEST(one) {\n}\nint main() {\n    RUN_TEST(one);\n}\n"), []),
+        ("a name two suites have is found once", twice(["a", "b", "a", "c", "a", "b"]), ["a", "b"]),
     ]
     failed = 0
     for name, got, wanted in cases:

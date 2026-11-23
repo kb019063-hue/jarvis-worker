@@ -1,0 +1,2 @@
+# Optional shared-rasterizer diagnostic; original shaping oracle needs only requirements.txt.
+freetype-py==2.5.1

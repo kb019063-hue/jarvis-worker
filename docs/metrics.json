@@ -28,7 +28,7 @@
     "js_conformance": {
       "pass": 1146,
       "command": "make js-conformance",
-      "date": "2026-11-21",
+      "date": "2026-11-23",
       "note": "the total is the corpus on disk; only the pass count needs a run. 1137 before Phase 102, which fixed the two cases iteration.dat records for array destructuring; 1141 before Phase 114, which made `instanceof` ask Symbol.hasInstance and stopped prototypes.dat aborting on the case that asks for it; 1144 after Phase 140, which made the array methods ask Symbol.species (prototypes.dat, \"methods of a built-in make the subclass of the object they are called on\"); 1145 after merging main on 21 November, which fixed one iteration.dat case; 1146 after merging later main, which fixed another iteration.dat case"
     },
     "dom_conformance": {
@@ -43,14 +43,14 @@
       "date": "2026-11-20"
     },
     "test262_default_directories": {
-      "before_pass": 12657,
+      "before_pass": 14969,
       "before_of": 15686,
-      "now_pass": 13660,
+      "now_pass": 14980,
       "now_of": 15686,
-      "fixed": 1003,
+      "fixed": 11,
       "command": "python3 tools/conformance/run_test262.py --binary before=<branch point> --binary now=build/litebird",
-      "date": "2026-11-20",
-      "note": "the 21 default directories; 'before' is the commit the phase started from"
+      "date": "2026-11-23",
+      "note": "the 21 default directories; 'before' is the commit the phase started from. Phase 199 fixed 11 with 0 lost (39 global names had hasOwnProperty true and no descriptor)"
     },
     "test262_class_directories": {
       "before_pass": 6832,

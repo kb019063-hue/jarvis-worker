@@ -316,6 +316,8 @@ def reason(port: int, host: str, trust: Path) -> str:
     still print PASS.
     """
     ctx = ssl.create_default_context(cafile=str(trust))
+    # A trusted certificate may terminate the chain even when not self-signed.
+    ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
     try:
         with socket.create_connection((host, port), timeout=3) as raw:
             with ctx.wrap_socket(raw, server_hostname=host) as tls:
@@ -417,6 +419,21 @@ def main() -> int:
              identities['chained'][1], 'localhost', root_ca[0], 'unable to get local issuer certificate', None, None),
             ('intermediate marked not a CA', served['bad-issuer'], identities['bad-issuer'][1],
              'localhost', root_ca[0], 'invalid CA certificate', None, None),
+            # A local trust store may anchor at an intermediate or even the leaf;
+            # trust still does not waive identity or validity checks.
+            ('trusted intermediate without root', identities['chained'][0],
+             identities['chained'][1], 'localhost', intermediate[0], None, None, None),
+            ('trusted intermediate with server chain', served['chained'],
+             identities['chained'][1], 'localhost', intermediate[0], None, None, None),
+            ('directly trusted leaf', identities['chained'][0], identities['chained'][1],
+             'localhost', identities['chained'][0], None, None, None),
+            ('directly trusted wrong identity', identities['wrong'][0], identities['wrong'][1],
+             'localhost', identities['wrong'][0], 'hostname mismatch', None, None),
+            ('trusted intermediate expired leaf', identities['expired'][0], identities['expired'][1],
+             'localhost', intermediate[0], 'certificate has expired', None, None),
+            ('expired trusted intermediate', identities['expired-issuer'][0],
+             identities['expired-issuer'][1], 'localhost', expired_intermediate[0],
+             'certificate has expired', None, None),
             # Dates: the leaf, and separately the intermediate, outside its validity.
             ('expired certificate', served['expired'], identities['expired'][1], 'localhost',
              root_ca[0], 'certificate has expired', None, None),

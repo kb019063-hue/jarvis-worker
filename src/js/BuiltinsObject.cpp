@@ -217,7 +217,19 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
         }
     }
     if (cell && cell->is_array) {
-        if (key == "length") return data(JsValue::make_number(static_cast<double>(cell->array_elements.size())), true, false, false);
+        if (key == "length") {
+            // The count, with the attributes the descriptor gave it: a
+            // `{ writable: false }` definition is in the map, and the map is
+            // what has the answer (finding 253).
+            auto length_entry = cell->properties.find("length");
+            if (length_entry != cell->properties.end()) {
+                return data(JsValue::make_number(static_cast<double>(cell->array_elements.size())),
+                            (length_entry->flags & PropertyMap::Writable) != 0,
+                            (length_entry->flags & PropertyMap::Enumerable) != 0,
+                            (length_entry->flags & PropertyMap::Configurable) != 0);
+            }
+            return data(JsValue::make_number(static_cast<double>(cell->array_elements.size())), true, false, false);
+        }
         if (parse_index(key, index)) {
             if (index >= cell->array_elements.size()) return JsValue::make_undefined();
             if (!object.is_array_hole(index)) return data(cell->array_elements[index], true, true, true);
@@ -397,9 +409,55 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     const bool in_range = array_index && index < cell->array_elements.size();
     const bool element_there = in_range && !object.is_array_hole(index);
     const bool mapped_hole = in_range && !element_there && cell->properties.find(key) != cell->properties.end();
-    if (cell && cell->is_array && !wants_accessor && (array_index || key == "length") && !mapped_hole) {
+    // The shortcut only holds while the attributes asked for are the ones a
+    // stored element has anyway: writable, enumerable and configurable, and
+    // for `length` not configurable. A descriptor that wants any of them
+    // *off* cannot be stored in the dense representation at all — it has no
+    // attribute bits — so the write goes to the property map, which is where
+    // `Object.defineProperty(a, "0", { writable: false })` has to end up or
+    // `push` on an array whose `length` was frozen goes on growing it
+    // (finding 253). A place that is already there becomes a hole in the
+    // elements so that the map's entry is what a read finds, the way
+    // JsValue::define_accessor leaves it; one that is not there grows the
+    // elements to cover it, for the same reason.
+    const bool plain_attributes =
+        (!writable.present || writable.value.is_truthy()) &&
+        (!enumerable.present || enumerable.value.is_truthy()) &&
+        (!configurable.present || (key == "length" ? !configurable.value.is_truthy()
+                                                   : configurable.value.is_truthy()));
+    if (cell && cell->is_array && !wants_accessor && (array_index || key == "length") && !mapped_hole &&
+        plain_attributes) {
         if (value.present) object.set_property(key, value.value);
         return true;
+    }
+    // What the place holds now: an element keeps its value and its three
+    // attributes when a descriptor is written over it, so they are read
+    // before the place is made a hole below.
+    const JsValue element_value = element_there ? object.array_element(index) : JsValue::make_undefined();
+    // An index whose attributes are not the plain ones, and `length` when its
+    // writability was asked about: the place stays a hole (or, for `length`,
+    // stays the count) and the attributes live in the property map, which is
+    // where a read asks first once `has_accessors` says the map has
+    // something the elements do not (finding 253).
+    if (cell && cell->is_array && !wants_accessor && array_index && !mapped_hole && !plain_attributes) {
+        if (in_range && element_there) { object.set_array_hole(index); cell->has_accessors = true; }
+    }
+    // ArraySetLength: a `length` given as a value must be a valid array
+    // length, and a negative one is a RangeError before any attribute is
+    // looked at (finding 253).
+    if (cell && cell->is_array && key == "length" && value.present) {
+        const double asked = value.value.to_number();
+        if (!(asked >= 0) || asked != std::floor(asked) || asked > 4294967295.0) {
+            js_throw_range_error("Invalid array length");
+        }
+    }
+    if (cell && cell->is_array && !wants_accessor && key == "length" && writable.present &&
+        !writable.value.is_truthy()) {
+        cell->has_accessors = true;
+        // The count is still the value; only the attributes are new.
+        object.define_property("length",
+                               JsValue::make_number(static_cast<double>(cell->array_elements.size())),
+                               static_cast<uint8_t>(PropertyMap::Enumerable | PropertyMap::Configurable));
     }
     // An accessor asked for on an index that is an element. The element is a
     // property that exists, though the map does not have it: writable,
@@ -456,7 +514,8 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     }
 
     uint8_t flags = exists ? existing->flags
-                  : element_there ? static_cast<uint8_t>(PropertyMap::Enumerable | PropertyMap::Configurable) : 0;
+                  : element_there ? static_cast<uint8_t>(PropertyMap::Enumerable | PropertyMap::Writable |
+                                                         PropertyMap::Configurable) : 0;
     auto apply = [&](const Field& field, uint8_t bit) {
         if (!field.present) return;
         if (field.value.is_truthy()) flags = static_cast<uint8_t>(flags | bit);
@@ -486,6 +545,7 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     apply(writable, PropertyMap::Writable);
     JsValue new_value = value.present ? value.value
                       : (exists && !(existing->flags & PropertyMap::Accessor)) ? existing->second
+                      : element_there ? element_value
                       : JsValue::make_undefined();
     object.define_property(key, new_value, flags);
     return true;

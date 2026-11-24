@@ -172,7 +172,7 @@ fixed. They are not cases and the runner does not read them:
 | Files | What they show |
 | :--- | :--- |
 | `open/inline-style.html`, `.js` | `el.style`: shorthands kept whole, `length` and `item()`, values not rewritten in CSSOM's form. 27 lines, 15 differ; a few of those are jsdom's (it drops the quotes of a font family) |
-| `open/dates-and-svg.html`, `.js` | Date and time inputs, the SVG DOM. 7 lines, all differ. (Until Phase 28 the file was `dates-and-xml` and had three lines more, for `DOMParser` with an XML type; those are cases in `xml.dat` now) |
+| `open/dates-and-svg.html`, `.js` | Date and time inputs, the SVG DOM. 12 lines, 8 the same (Phase 374 added the five SVG-interface lines; the four that still differ are jsdom following an older SVG 2 draft for `marker`/`pattern`/`view` `viewBox`, and jsdom having no `getBBox()` — the specification, not jsdom, is the reference for both). (Until Phase 28 the file was `dates-and-xml` and had three lines more, for `DOMParser` with an XML type; those are cases in `xml.dat` now) |
 
 ```bash
 python3 tools/conformance/compare_with_jsdom.py tests/dom-conformance/open/inline-style.html tests/dom-conformance/open/inline-style.js

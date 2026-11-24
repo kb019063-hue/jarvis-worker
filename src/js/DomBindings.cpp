@@ -502,6 +502,46 @@ std::shared_ptr<Document> document_of(Realm& realm, const Node& node) {
 // Which interface a node is an instance of
 // ---------------------------------------------------------------------------
 
+// SVG's graphics elements: the interfaces that inherit SVGGraphicsElement and
+// so answer `getBBox()`. SVG 2 §1.4 defines the set; the tag names below are
+// the rendered ones, since a `marker`, `pattern` or `symbol` is not rendered
+// where it stands but is still a graphics element by its interface.
+const char* svg_graphics_interface_for_tag(const std::string& tag) {
+    static const std::unordered_map<std::string, const char*> s_table = {
+        {"g", "SVGGElement"}, {"rect", "SVGRectElement"}, {"circle", "SVGCircleElement"},
+        {"ellipse", "SVGEllipseElement"}, {"line", "SVGLineElement"}, {"path", "SVGPathElement"},
+        {"polygon", "SVGPolygonElement"}, {"polyline", "SVGPolylineElement"},
+        {"text", "SVGTextElement"}, {"tspan", "SVGTSpanElement"}, {"textPath", "SVGTextPathElement"},
+        {"image", "SVGImageElement"}, {"foreignObject", "SVGForeignObjectElement"},
+        {"use", "SVGUseElement"}, {"a", "SVGAElement"}, {"switch", "SVGSwitchElement"},
+    };
+    const auto found = s_table.find(tag);
+    return found == s_table.end() ? nullptr : found->second;
+}
+
+// SVG elements that have an interface of their own but are not graphics
+// elements, so they inherit SVGElement directly and have no `getBBox()`. SVG 2
+// §5.13 names these; `defs`, `desc`, `metadata`, `style` and `script` are here
+// so that `constructor.name` is the interface the standard gives them rather
+// than a bare "SVGElement".
+const char* svg_plain_interface_for_tag(const std::string& tag) {
+    static const std::unordered_map<std::string, const char*> s_table = {
+        {"defs", "SVGDefsElement"}, {"desc", "SVGDescElement"}, {"metadata", "SVGMetadataElement"},
+        {"style", "SVGStyleElement"}, {"script", "SVGScriptElement"}, {"stop", "SVGStopElement"},
+        {"linearGradient", "SVGLinearGradientElement"}, {"radialGradient", "SVGRadialGradientElement"},
+        {"clipPath", "SVGClipPathElement"}, {"mask", "SVGMaskElement"}, {"filter", "SVGFilterElement"},
+        {"feGaussianBlur", "SVGFEGaussianBlurElement"}, {"feOffset", "SVGFEOffsetElement"},
+        {"feBlend", "SVGFEBlendElement"}, {"feColorMatrix", "SVGFEColorMatrixElement"},
+        {"feFlood", "SVGFEFloodElement"}, {"feComposite", "SVGFECompositeElement"},
+        {"feMerge", "SVGFEMergeElement"}, {"feImage", "SVGFEImageElement"},
+        {"feTile", "SVGFETileElement"}, {"feTurbulence", "SVGFETurbulenceElement"},
+        {"feDropShadow", "SVGFEDropShadowElement"}, {"animate", "SVGAnimateElement"},
+        {"set", "SVGSetElement"}, {"animateTransform", "SVGAnimateTransformElement"},
+    };
+    const auto found = s_table.find(tag);
+    return found == s_table.end() ? nullptr : found->second;
+}
+
 const char* html_interface_for_tag(const std::string& tag) {
     static const std::unordered_map<std::string, const char*> s_table = {
         {"a", "HTMLAnchorElement"}, {"area", "HTMLAreaElement"}, {"audio", "HTMLAudioElement"},
@@ -599,10 +639,22 @@ std::string interface_for(const Node& node) {
             switch (element.element_namespace()) {
                 case ElementNamespace::HTML:
                     return html_interface_for_tag(element.tag_name());
-                case ElementNamespace::SVG:
-                    if (element.tag_name() == "svg") return "SVGSVGElement";
-                    if (element.tag_name() == "title") return "SVGTitleElement";
+                case ElementNamespace::SVG: {
+                    // A symbol, marker, pattern and view have interfaces of
+                    // their own in SVG 2 (§5.13.8, §12.13.1, §13.6.9, §17.4)
+                    // and each includes SVGFitToViewBox, so their `constructor`
+                    // and their prototype chain differ from a plain SVGElement.
+                    const std::string& tag = element.tag_name();
+                    if (tag == "svg") return "SVGSVGElement";
+                    if (tag == "symbol") return "SVGSymbolElement";
+                    if (tag == "marker") return "SVGMarkerElement";
+                    if (tag == "pattern") return "SVGPatternElement";
+                    if (tag == "view") return "SVGViewElement";
+                    if (tag == "title") return "SVGTitleElement";
+                    if (const char* graphics = svg_graphics_interface_for_tag(tag)) return graphics;
+                    if (const char* plain = svg_plain_interface_for_tag(tag)) return plain;
                     return "SVGElement";
+                }
                 case ElementNamespace::MathML:
                 case ElementNamespace::Other:
                     return "Element";

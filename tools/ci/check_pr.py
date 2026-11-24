@@ -735,9 +735,9 @@ def check_runs(sha: str) -> tuple[str, list[str]]:
 
 def short_run_note(head: str, number: int | None = None) -> str:
     """What to say of a short run to somebody who is about to merge on it."""
-    return (f"only the short run of CI passed on {head[:7]} (build, unit suites, documents, the corpora): the pull "
-            "request has the label `lot`, which the landing session puts on while a watch is on, and the sanitizer "
-            "jobs and the deep pages were skipped. Nobody merges on that"
+    return (f"only the short run of CI passed on {head[:7]} (build, unit suites, documents, the corpora): its title "
+            "began with WIP: when the run started, or it has the label `lot`, which the landing session puts on "
+            "while a watch is on, and the sanitizer jobs and the deep pages were skipped. Nobody merges on that"
             + ("" if number is None else
                f". The label is off now, which starts every job on {head[:7]}: ask again when they have ended"))
 
@@ -1078,8 +1078,14 @@ def why_not_taken(pr: dict, comments: list[dict]) -> str:
     """
     if NOT_A_CLAIM_RE.match(pr["title"]):
         return "it is the board or a watch"
-    if pr.get("isDraft") or pr["title"].startswith("WIP"):
+    if pr["title"].startswith("WIP"):
         return "its title still begins with WIP:"
+    if pr.get("isDraft"):
+        # Said by itself: on 24 November #385 was a draft whose title had
+        # lost its WIP:, its agent was told "its title still begins with
+        # WIP:", and the landing session's own tool, which read titles
+        # only, took it into a lot. GitHub merges no draft.
+        return f"it is a draft: `gh pr ready {pr['number']}` when it is finished"
     taken = taken_at(comments, pr["number"])
     if taken and pr["headRefOid"].startswith(taken):
         return ""       # the landing session has said so, of this very head
@@ -1269,7 +1275,7 @@ def check_merge(number: int, landing: bool = False) -> int:
     """`landing` is the landing session asking, about a pull request it is about
     to merge during its own watch: the answer is then the one given when no
     watch is on."""
-    pr = gh_json("pr", "view", str(number), "--json", "number,title,body,state,mergeable,headRefOid,files,labels")
+    pr = gh_json("pr", "view", str(number), "--json", "number,title,body,state,mergeable,headRefOid,files,labels,isDraft")
     report = Report()
     if pr["state"] != "OPEN":
         sys.exit(f"#{number} is {pr['state'].lower()}")
@@ -1292,6 +1298,9 @@ def check_merge(number: int, landing: bool = False) -> int:
 
     if pr["title"].startswith("WIP"):
         report.no("the title still begins with WIP:")
+    elif pr.get("isDraft"):
+        report.no(f"the title has no WIP:, and #{number} is a draft: GitHub merges no draft, and the landing session "
+                  f"takes none. `gh pr ready {number}` when it is finished")
     else:
         report.ok("the title has no WIP:")
 
@@ -1329,15 +1338,29 @@ def check_merge(number: int, landing: bool = False) -> int:
         (report.ok if ok else report.no)(text)
     if "short" in (head_state, ran_state) and not watch_on and not landing:
         # No watch is on, so this agent merges, and the whole of CI has not
-        # run on what it would merge. Taking the label off starts them.
-        if any(label.get("name") == LOT_LABEL for label in pr.get("labels") or []):
+        # run on what it would merge. A run is short for one of two reasons
+        # (.github/workflows/ci.yml): the label `lot`, or a title that began
+        # with WIP: when the run started.
+        labelled = any(label.get("name") == LOT_LABEL for label in pr.get("labels") or [])
+        if pr["title"].startswith("WIP"):
+            # Any run started now would be short again.
+            report.note(f"every job of CI runs on #{number} once its title has no WIP: take the WIP: off, then ask again")
+        elif labelled:
+            # Taking the label off starts every job.
             gh("api", "-X", "DELETE", f"{REPO}/issues/{number}/labels/{LOT_LABEL}", check=False)
             report.note(f"the label `{LOT_LABEL}` is off #{number} now, which starts every job of CI on {head[:7]}: "
                         f"ask again when they have ended (`gh pr checks {number}`). If none has started in a minute, "
                         "push an empty commit")
         else:
-            report.note(f"#{number} has no label `{LOT_LABEL}` any more: every job of CI runs on its next push "
-                        "(an empty commit will do), if they are not running already")
+            # No label to take off: the title began with WIP: when the run
+            # started. Putting the label on starts nothing; taking it off
+            # starts every job, now that the title has no WIP:.
+            gh("api", "-X", "POST", f"{REPO}/issues/{number}/labels", "-f", f"labels[]={LOT_LABEL}", check=False)
+            gh("api", "-X", "DELETE", f"{REPO}/issues/{number}/labels/{LOT_LABEL}", check=False)
+            report.note(f"the run on {head[:7]} was the short one because the title began with WIP: when it started. "
+                        f"Every job of CI has been started on {head[:7]} now (the label `{LOT_LABEL}` was put on #{number} "
+                        f"and taken off, which does it): ask again when they have ended (`gh pr checks {number}`). "
+                        "If none has started in a minute, push an empty commit")
     if quick:
         tree, called, why_not = tree_to_merge(number, head, main_sha, behind)
         if tree is None:
@@ -1718,6 +1741,8 @@ def self_test() -> int:
          why_not_taken(waiting(mergeable="UNKNOWN"), board), ""),
         ("a title that begins with WIP: is not finished",
          why_not_taken(waiting(title="WIP: a change"), board), "its title still begins with WIP:"),
+        ("a draft is not finished whatever its title says, and is told so in its own words",
+         why_not_taken(dict(waiting(), isDraft=True), board), "it is a draft: `gh pr ready 7` when it is finished"),
         ("CI still running on a finished pull request: taken, its run and the lot's go side by side",
          why_not_taken(waiting(checks=green[:11] + [check("job 11", None, "QUEUED")]), board), ""),
         ("CI failed: not taken, and the job is named",

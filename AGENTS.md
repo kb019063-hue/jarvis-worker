@@ -289,6 +289,20 @@ within the hour, and the first lot was started again four times.
      lot's, and by the run on `main` after the lot. That last one now
      builds, keeps the objects and runs the plain unit suites, no more
      (`[objects only]` in the lot's last merge);
+   - **a pull request whose title begins with `WIP:` gets the short run
+     too, watch or no watch**, from its first push. The label comes with
+     the landing session's next look, which is after that push: at 18:10
+     on 24 November three pull requests that had just been opened each
+     started all fourteen jobs, and the lot of 18:12, which a finished
+     pull request was waiting for, had ten jobs without a runner two and
+     a half minutes after its push. Work in progress is merged on no run
+     at all. When the `WIP:` is off, every job runs before the merge: in
+     the lot while a watch is on, and with no watch because `merge N`
+     starts them on your head (it puts the label on and takes it off).
+     **With no watch, take the `WIP:` off before your last push**, and
+     that push's run is the whole one already. A sanitizer job you want
+     to see on work in progress: `make asan-build` and the part here
+     (`make help` lists them), or the push with the `WIP:` off;
    - **when a lot's run fails, every member that could be at fault stays
      out of the next lot until it is known which one it was.** The run
      names the job, not the pull request. On 24 November the lot of 08:38
@@ -859,12 +873,12 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   With the compiling gone a run is as long as its longest job, and on 24
   November that was the unit suites in the sanitizer build: one process,
   8 min 52 s of a run of 10.4 minutes, on a machine with four cores. CI
-  now runs them as **three processes side by side**
-  (`make asan-unit ASAN_UNIT_STRETCHES=3`): told to, `tests/test_suite.cpp`
-  runs one of three equal stretches of its order, and
-  `tools/ci/run_stretches.py` passes when the three passed and add up to
-  every suite. `make asan-unit` here is one process, as it was: three of
-  them want more memory than 4 GB. The deep pages of the sanitizer build
+  now runs them as **several processes side by side**
+  (`make asan-unit ASAN_UNIT_STRETCHES=balanced`): told to,
+  `tests/test_suite.cpp` runs one stretch of its order, and
+  `tools/ci/run_stretches.py` passes when every stretch passed and they
+  add up to every suite. `make asan-unit` here is one process, as it was:
+  one stretch alone holds 4.8 GB. The deep pages of the sanitizer build
   are a job of their own ("Sanitizers: deep and oversized pages"), which
   with the web-platform-tests in front of them was 9 min 43 s. **A suite
   must not need a suite before it**: the first suite of a stretch has
@@ -901,6 +915,69 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   (45356130854, 9.2 minutes from the push) those took 5.8, 5.2, 5.0 and
   4.3 minutes, and the longest job was the unit suites again, 8.9
   minutes, of which the suites were 7.6.
+
+  That evening the unit suites were measured, and the time was not where
+  anybody had looked. Of the step's 466 seconds, 146 compiled the suites'
+  binary (one translation unit, one compiler) and 320 ran the suites; of
+  three equal stretches one took 320 seconds and the others 22 and 24,
+  because the suites that nest pages 200,000 deep stand together in the
+  middle of the order (79, 37 and 30 seconds). Since then:
+  - the job ends with **a notice that gives each stretch's time and
+    memory, its slowest suites, and the suite at which half of its time
+    was over** (the job's annotations, as for a failure);
+  - the stretches begin where `UNIT_SUITE_CUTS` in the Makefile says, and
+    the two that hold the deep suites start when the others have ended
+    (`UNIT_SUITE_LATE`);
+  - **a suite that measures time gives itself room.** Some fifty places
+    say "this takes a fifth of a second: fail above five". In the
+    sanitizer build, beside a process that was turning over 4.8 GB, one
+    of them took more than five (run 45459129005; it cost #376 nine
+    minutes, and the fault was the landing session's, which had put the
+    deep suites beside it). A stretch that fails beside the others, with
+    no sanitizer's report in what it wrote, is now run once more by
+    itself, and passes with a warning on the job if it passes then. A
+    bound that is a multiple of something the suite measured in the same
+    run needs no second chance;
+  - the suites' binary is an object of its own, compiled beside the
+    engine and not after it: `make -j2 test` here does the same;
+  - the sanitizer build is made without GCC's variable tracking
+    (`-fno-var-tracking`), a pass for debuggers that took more than half
+    of the compile time of the two files it was measured on here (in CI
+    an object then took 2.3 to 3.0 seconds where it had taken 3.5 to 4.3,
+    in runs that were not otherwise alike);
+  - the XML suite is a job of its own again, and the deep pages are two
+    jobs (the dumps; the terminal and html5lib): **sixteen jobs in a
+    run, seven in the short run**.
+
+  With all of it a run of every job, its objects in ccache, was 5.3
+  minutes from the push (run 45473629683), where the first of that
+  evening had been 8.5 (run 45451780819). The unit suites were 117
+  seconds, as six stretches: four side by side, then the two deep ones.
+  The four took 236 seconds between them for what two had done in 162, so
+  more processes than that buy little; and the longest job is now the
+  script corpora of the sanitizer build, 5.2 minutes, of which 88
+  seconds were its build.
+
+  The run after that one was 6.4 minutes (45475379777), and it is the
+  one to remember. Its machine was slower: the five stretches that can
+  be compared took 1.4 to 1.8 times as long. The suite that had failed
+  at 18:24
+  (`inner_html_is_parsed_as_the_content_of_its_element`, "under five
+  seconds") failed again, this time beside three ordinary stretches; its
+  stretch was run again by itself, passed in 69 seconds, and the job
+  passed with a warning that named the suite. **When that warning names
+  a suite, give the suite's bound room in the sanitizer build**
+  (`#if defined(__SANITIZE_ADDRESS__)`, as that suite now has, and as
+  the large XMLHttpRequest response had before it): a warning that comes
+  with every other run is one nobody reads, and the second run of the
+  stretch is a minute of every run it comes with.
+
+  A third run, with that bound changed, needed no second run of anything
+  and was 6.0 minutes (45477108702), and its four stretches side by side
+  took 91 to 121 seconds where the first run's had taken 55 to 64. **What
+  the suites take depends on the machine by a factor of two**: 117, 176
+  and 204 seconds for the same six stretches in three runs within half
+  an hour. One run says little about a change to CI; compare several.
 
 **The turn, and what a merge does to it**
 
@@ -1217,6 +1294,7 @@ files every pull request changes", point 4).
 | **A `CanvasPattern` is a paint since Phase 370** ([`docs/phases/370-a-pattern-is-a-paint.md`](docs/phases/370-a-pattern-is-a-paint.md), [finding 370](docs/findings/370-the-pattern-painted-nothing.md)): before it, `createPattern` returned a correct object, `ctx.fillStyle === pattern` was `true`, and a 16×16 `fillRect` came out `0,0,0` — so the suite asserts **pixels**, not properties. `fillStyle`/`strokeStyle` now take three shapes (colour, `CanvasGradient`, `CanvasPattern`), each clearing the other two; the pattern is a fourth payload on `JsValue`, and it is sampled in **three** rasteriser places (`fillRect`'s fast path, `rasterize_paths`, `stroke_paths`). A pattern's tile is placed in **device space** — the inverse CTM is for gradients, which are user-space; applying it to a pattern moves the tile with the canvas. **Three defects the pixels found:** `no-repeat` repeated on both axes (the condition was `!= "repeat-y"`, true of `no-repeat`) and nothing could see it until the pattern painted; `restore()` did not restore a style on the object (the same own-property shadowing as Phase 280, and it **predates** this phase — a gradient after `restore()` was wrong too); and a style read back as `"[CanvasPattern]"` instead of the object that was set. The fix removes the own property when the style is not a colour. Sampling is filtered since Phase 382; the tile is still a copy taken at `createPattern` time, where §4.12.5.1 has a canvas-backed pattern see later drawing. | `src/js/JsValue.cpp`, `include/litebird/js/JsValue.hpp`, `src/render/Canvas2D.cpp`, `include/litebird/render/Canvas2D.hpp`, `src/js/DomHtmlBindings.cpp`, `tests/suites/370-a-pattern-is-a-paint.cpp` | [`docs/phases/370-a-pattern-is-a-paint.md`](docs/phases/370-a-pattern-is-a-paint.md), [`docs/findings/370-the-pattern-painted-nothing.md`](docs/findings/370-the-pattern-painted-nothing.md); HTML §4.12.5.1 | A test that reads a pixel must read the pixel it was asked for: `return d[0]` after computing `i` read pixel 0 in every assertion and made a correct engine look wrong. And a tile that separates `repeat` from `repeat-x` has to vary on **both** axes — a striped one cannot |
 | | | | |
 | **Images are sampled bilinearly since Phase 382, and the two properties that choose it exist** ([`docs/phases/382-image-smoothing.md`](docs/phases/382-image-smoothing.md), [finding 382](docs/findings/382-no-smoothing-anywhere.md)): `imageSmoothingEnabled` and `imageSmoothingQuality` were **`undefined`** on the context, and every sample this engine took was the nearest pixel — `drawImage` of a 2×2 to 8×8 came out in 8-pixel blocks. Both are **live accessors** registered in `to_js_value`, beside `globalAlpha`/`lineCap`, deliberately not copied onto the object: `fillStyle` and three others *are* copied, and Phases 280 and 370 each had to repair state that copy had shadowed. The enabled flag coerces (`0`/`""` turn it off) and starts `true`; the quality is an **enumeration** — a fourth value is ignored, not stored — and starts `"low"`. Both are carried by `save()`/`restore()` and put back by `reset()`. **An image at 1:1 must come out exactly, either way** (the half-pixel placement makes the weights `1,0,0,0`), which is what a filter that always blurs fails. **A pattern is the harder case and it broke Phase 370:** a pattern has no destination rectangle, so the CTM scale must be passed in at the call site — without that, smoothing on by default blended a 1:1 tile edge (`128,128,0` for `0,255,0`) and the four repetition rules stopped holding. **Still open:** `imageSmoothingQuality` selects nothing (all three filter the same, bilinear only); downscaling is bilinear too, so a fine checkerboard shrunk far enough still aliases where a box filter would not; a sheared pattern's scale is the longer axis of the CTM inverse. | `src/render/Canvas2D.cpp`, `include/litebird/render/Canvas2D.hpp`, `tests/suites/382-image-smoothing.cpp` | [`docs/phases/382-image-smoothing.md`](docs/phases/382-image-smoothing.md), [`docs/findings/382-no-smoothing-anywhere.md`](docs/findings/382-no-smoothing-anywhere.md); HTML §4.12.5.1 | Assert **both settings**: a filter that ignores the switch passes the scaled draw and fails 1:1, a switch that does nothing passes 1:1 and fails the scaled one. And hand-written pixel expectations in this area have been wrong twice where the engine was right — count the block size before asserting it |
+| | | | |
 | **`createImageBitmap` reads its whole argument list since Phase 272** ([`docs/phases/272-createimagebitmap-crop-and-source.md`](docs/phases/272-createimagebitmap-crop-and-source.md), [finding 276](docs/findings/276-the-crop-was-optional-because-nobody-passed-it.md)): the binding was `I.method("createImageBitmap", 1, …)` and never read `args[1]`, so HTML §8.11.2's source rectangle, its `resizeWidth`/`resizeHeight`, its `flipY`, and both of the method's first two steps went unperformed — `createImageBitmap(cv8x8, 0,0, 4,4)` answered **8x8** and the promise still resolved, which a page cannot notice. The two overloads are now told apart by count; a zero `sw`/`sh` is a **`RangeError`** checked before the image (step 1) and a zero resize dimension an **`InvalidStateError`** (step 2), which are different kinds on purpose. A **`Blob`** — listed in §8.11.2 and refused with a `TypeError` — is now decoded from its bytes through `ImageDecoder::decode_bytes` (not an image → `InvalidStateError`), and an **`<img>`** reads `load_image_for_element`, the pixels `drawImage` uses. `ImageData`'s pixels are now **copied** instead of left zeroed — that one resolved with the right dimensions and a transparent bitmap, so only a pixel comparison sees it. The crop is "with formatting": a rectangle larger than the source **pads with transparent black**, and one past the edge is entirely transparent. **Still open:** `premultiplyAlpha` and `colorSpaceConversion` are parsed and ignored (premultiplying is a decision for the whole canvas stack), `resizeQuality: "high"` is not honoured, a `Blob` decodes synchronously rather than in parallel, and `createImageBitmap` in a worker scope is untested. | `src/js/DomWindowBindings.cpp`, `tests/suites/272-create-image-bitmap-crop-and-resize.cpp` | [`docs/phases/272-createimagebitmap-crop-and-source.md`](docs/phases/272-createimagebitmap-crop-and-source.md), [`docs/findings/276-the-crop-was-optional-because-nobody-passed-it.md`](docs/findings/276-the-crop-was-optional-because-nobody-passed-it.md); HTML §8.11.2, `ImageBitmap` | **A resolved promise is not a correct answer.** Assert the dimensions *and* the pixels: the three defects found here all settled successfully, and the `ImageData` one settled with the right size. Four wrong versions were compiled and each failed a different assertion |
 | | | | |
 | **AVIF, still: an AV1 intra-frame decoder.** The container is read since Phase 172 ([`docs/phases/172-the-avif-container-read-and-the-picture-still-open.md`](docs/phases/172-the-avif-container-read-and-the-picture-still-open.md), finding 172): `AvifContainer` parses `ftyp`, `pitm`, `iloc`, `iinf`/`infe`, `iprp`/`ipco`/`ipma`, `ispe`, `pixi`, `av1C` and `colr`, bounds-checks every length and offset against its parent, and hands back the primary `av01` item's bytes, its size, its bit depths and its decoder configuration. 200,000 mutated files through it under ASan and UBSan: no crash. **Phase 218** ([`docs/phases/218-avif-picture-and-container-oracle.md`](docs/phases/218-avif-picture-and-container-oracle.md), [finding 222](docs/findings/222-avif-picture-decoding-unmeasured.md)) adds the CI-enforced differential oracle `make verify-avif` (`tools/conformance/verify_avif.py`, `tests/media/avif/corpus.json`, `media_check --probe-avif`/`--decode-avif`/`--fuzz-batch avif`, also wired into `asan-verify`) with an independent ISO-BMFF + AV1 §5.3 OBU parser, 6 committed libheif-verified AVIF fixtures + 3 live libheif patterns, 8 hostile/malformed/unsupported refusals, 200 deterministic fuzz mutations, 5 negative controls, and an end-to-end `<img src="data:image/avif;base64,...">` `known_failure` reftest in `tests/render/reftests.json` — grading any future AV1 decoder pixel-by-pixel against libheif RGBA (`KNOWN` -> `FIXED` gate). What is still missing is the picture: there is no AV1 decoder, so `ImageDecoder::decode` returns `nullptr` for an AVIF and both the unit test and `verify-avif` / `reftests.json` assert that on purpose, so the day one lands they flip and say the row is done. AV1 is not VP8: `Vp8Decoder.cpp` is 1,451 lines and 583 of tables for a much smaller codec, so this is several sessions, not one. The AV1 specification's own §9.4 lists the default CDF tables normatively, which is where `Vp8Tables.cpp` took VP8's from RFC 6386 — take them from there, not from libaom. Alpha is a second `av01` item marked by an `auxl` reference (`iref`/`auxC`, not read here); a tiled image's primary is a `grid` item (refused, `Unsupported`); a sequence (`avis`) keeps frames in a track, not in `meta`; `irot`, `imir` and `clap` change presentation and are not read | `src/render/AvifContainer.cpp`, `include/litebird/render/AvifContainer.hpp`, `src/render/ImageDecoder.cpp`, `tools/media_check.cpp`, `tools/conformance/verify_avif.py`, `tests/media/avif/corpus.json` | [`docs/phases/172-the-avif-container-read-and-the-picture-still-open.md`](docs/phases/172-the-avif-container-read-and-the-picture-still-open.md), section 4; [`docs/findings/172-the-box-was-read-as-a-picture.md`](docs/findings/172-the-box-was-read-as-a-picture.md); [`docs/phases/218-avif-picture-and-container-oracle.md`](docs/phases/218-avif-picture-and-container-oracle.md), [finding 222](docs/findings/222-avif-picture-decoding-unmeasured.md); the AV1 specification §9.4 (default CDF tables), ISO/IEC 14496-12 (the box structure), ISO/IEC 23000-22 and the AV1 Image File Format specification | The row used to be one word, which read as one task and is several. The oracle (`make verify-avif`) is now in CI and ready to grade any AV1 intra-frame decoder pixel-by-pixel against libheif | `src/render/AvifContainer.cpp` (`Walk`) |

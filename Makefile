@@ -2,7 +2,19 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Iinclude -MMD -MP
 BUILD_DIR ?= build
 
-ASAN_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP \
+## -fno-var-tracking: with -g and optimisation GCC works out, for a
+## debugger, where every variable lives at every instruction. Under the
+## sanitizers that one pass was more than half of the compile time of the
+## two files it was measured on here: 54 seconds of src/layout/LayoutBox.cpp
+## against 22 without it, 87 of src/css/StyleResolver.cpp against 37 (24
+## November 2026, g++ 12, one core). In CI, where the whole engine was
+## compiled without it once (run 45471158220), a job's build took 2.3 to
+## 3.0 seconds for each object it had to compile, against 3.5 and 4.3 in
+## the two lots measured with it (other objects, so the two are not the
+## same work). Nothing a sanitizer reports comes from the pass: a report
+## names functions, files and lines, and those stay. A debugger on this
+## build may say "optimized out" of a variable where it used to show it.
+ASAN_FLAGS = -std=c++20 -O1 -g -fno-var-tracking -Wall -Wextra -Iinclude -MMD -MP \
              -fsanitize=address,undefined -fno-omit-frame-pointer
 
 SRCS = src/common/Color.cpp \
@@ -279,9 +291,27 @@ $(SUITE_LIST): FORCE
 	   done; } > $@.new
 	@cmp -s $@.new $@ && rm -f $@.new || mv $@.new $@
 
-$(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp $(SUITE_FILES) $(SUITE_LIST)
+## The suites are one translation unit: tests/test_suite.cpp and, through
+## the list above, every file of tests/suites/, 43,000 lines in all. One
+## compiler takes 64 seconds for it here and 147 in the sanitizer build in
+## CI, which is most of `make test` after any change. It is compiled to an
+## object of its own and linked afterwards. Until 24 November 2026 one
+## command did both with the engine's objects on its line, so it could only
+## begin when the last of them was there; now `make -j` compiles it beside
+## the engine (`make -j2 test` from nothing is the longer of the two, not
+## their sum). ccache is told to leave this one alone: nearly every change
+## adds a suite or touches a header it includes, so the object would be kept
+## and almost never asked for again, in a cache that is full of the engine's.
+TEST_OBJ := $(BUILD_DIR)/test_suite.o
+$(TEST_OBJ): tests/test_suite.cpp tests/js_string_stress.hpp $(SUITE_FILES) $(SUITE_LIST)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -iquote . -iquote $(BUILD_DIR) $(OBJS) tests/test_suite.cpp -o $@
+	CCACHE_DISABLE=1 $(CXX) $(CXXFLAGS) -iquote . -iquote $(BUILD_DIR) -c tests/test_suite.cpp -o $@
+
+-include $(TEST_OBJ:.o=.d)
+
+$(TEST_TARGET): $(OBJS) $(TEST_OBJ)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(OBJS) $(TEST_OBJ) -o $@
 
 $(CROSS_ORIGIN_TARGET): $(OBJS) tests/cross_origin_windows.cpp
 	@mkdir -p $(BUILD_DIR)
@@ -310,10 +340,42 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@./$(CROSS_ORIGIN_TARGET)
 
 ## `make test` with the suites as $(STRETCHES) processes side by side: every
-## suite is run once, by one of them (tools/ci/run_stretches.py).
+## suite is run once, by one of them (tools/ci/run_stretches.py). STRETCHES
+## is a number of equal stretches, or `balanced`: the stretches that begin
+## at the start of the order and at the suites UNIT_SUITE_CUTS names.
+## Equal stretches are equal in suites, not in time: in the sanitizer
+## build of 24 November 2026 three of them took 22, 322 and 24 seconds,
+## because the suites that nest pages 200,000 deep stand together in the
+## middle of the order (79, 37 and 30 seconds of the 322). The cuts put the
+## first of those and the next two into stretches of their own, and those
+## two stretches (UNIT_SUITE_LATE) are started when the others have ended:
+## some fifty places in the suites measure time, and one of them failed in
+## its sixth second beside a process that was turning over 5 GB. When a run
+## says the stretches have drifted apart (its last lines, and in CI a notice
+## on the job, give the time of each and name the slowest suites), move a
+## cut: a name here must be a suite of tests/test_suite.cpp's own list, in
+## the order of that list, or every stretch fails.
+##
+## The five names make six stretches. The second and the fourth cut out the
+## deep suites (stretches 2 and 3, the late ones); the first and the last
+## halve what stands before and after them, at the suites a run named as
+## the middle of each ("half of it over when ... began", run 45471158220):
+## four stretches side by side on the four cores of CI's machines, then the
+## two deep ones. In the sanitizer build that was 117 seconds (run
+## 45473629683): 61, 56, 64 and 55 for the four, then 53 beside 35. As four
+## stretches, two and then two, it had been 140: 77 beside 85, then 55
+## beside 36. Twice the processes were not twice as fast: the four took 236
+## seconds between them for what the two had done in 162, so a seventh
+## stretch would buy little, and the deep ones are now the larger part.
+## The machine counts for as much as the cuts: in the next run (45475379777)
+## the same six took 89, 79, 69 and 75, then 87 beside 63, and one of the
+## four failed a bound of five seconds beside the others and passed when it
+## was run again by itself (run_stretches.py does that): 245 seconds.
 STRETCHES ?= 3
+UNIT_SUITE_CUTS ?= inner_html_of_an_xml_document_is_xml,deep_nesting_never_exhausts_the_native_stack,dom_trees_of_any_depth_can_be_walked_and_released,html_parser_void_element_with_a_slash_closes_nothing_else,svg_real_world_paths_arcs_gradients_use_clip_and_guards
+UNIT_SUITE_LATE ?= 2,3
 test-in-stretches: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
-	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(STRETCHES)
+	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(if $(filter balanced,$(STRETCHES)),$(UNIT_SUITE_CUTS) $(UNIT_SUITE_LATE),$(STRETCHES))
 	@./$(CROSS_ORIGIN_TARGET)
 
 ## The numbers the documents publish: every "A / B (P%)" must divide, the two
@@ -571,8 +633,16 @@ fuzz:
 ## after the deep part is missing from the tree, the layout or the paint list.
 ## Then random pages that keep the parser at its nesting limit. About ten
 ## minutes on two cores.
+##
+## CI runs it as two jobs side by side, `make deep DEEP_KINDS="--runs dumps"`
+## and `make deep DEEP_KINDS="--not-runs dumps"`: every page is given to the
+## engine three ways (dumps, terminal, html5lib), each a run of its own, and
+## the dumps were 530 of 1,270 seconds of work on 24 November 2026, when the
+## one job was the third longest of a run. "Every kind but the dumps" and not
+## the two names, so that a kind added to tools/fuzz/deep_pages.py is run.
+DEEP_KINDS ?=
 deep: $(TARGET)
-	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM)
+	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM) $(DEEP_KINDS)
 
 ## Address + UB sanitizer build, then the test suite, the JavaScript, DOM and
 ## URL corpora, the XML suite, the web-platform-tests, generated XML, a fuzz
@@ -613,16 +683,25 @@ asan-core:
 
 ## The sanitizer build itself: build-asan/litebird, which every other part and
 ## asan-deep run.
+##
+## ASAN_BUILD_ALSO names more to build in the same `make`, beside the engine:
+## CI's job for the unit suites gives it build-asan/test_suite, so that the
+## one compiler the suites need (147 seconds) works while the others build
+## the engine, where it used to start when they had finished. (Not in the
+## run that only keeps the objects: ccache is not given that one, see
+## TEST_OBJ.)
+ASAN_BUILD_ALSO ?=
 asan-build:
-	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all $(ASAN_BUILD_ALSO)
 
 ## The unit suites, built and run with the sanitizers. ASAN_UNIT_STRETCHES=3
 ## runs them as three processes side by side (tests/test_suite.cpp,
-## tools/ci/run_stretches.py), which is what CI does: one process took 8 min
-## 52 s there on 24 November 2026, on a machine with four cores and 16 GB,
-## and that was the length of a whole CI run. Here it is one process unless
-## you say otherwise: three of them in the sanitizer build want more memory
-## than a machine with 4 GB has.
+## tools/ci/run_stretches.py), and ASAN_UNIT_STRETCHES=balanced as the six
+## of `test-in-stretches` above, which is what CI does: one process took 8
+## min 52 s there on 24 November 2026, on a machine with four cores and 16
+## GB, and that was the length of a whole CI run. Here it is one process
+## unless you say otherwise: several of them in the sanitizer build want more
+## memory than a machine with 4 GB has (one stretch alone held 5 GB).
 ASAN_UNIT_STRETCHES ?= 1
 asan-unit:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" $(if $(filter 1,$(ASAN_UNIT_STRETCHES)),test,test-in-stretches STRETCHES=$(ASAN_UNIT_STRETCHES))

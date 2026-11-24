@@ -210,6 +210,11 @@ verify-terminal-shell-safety: $(TARGET)
 verify-worker-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_worker_error_terminal.py --binary $(TARGET)
 
+## Check uncaught JS diagnostics without printing attack bytes.
+.PHONY: verify-js-error-terminal-safety
+verify-js-error-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_js_error_terminal.py --binary $(TARGET)
+
 $(BUILD_DIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@

@@ -10,8 +10,13 @@
 #include "litebird/render/ImageDecoder.hpp"
 #include "litebird/js/ImageBitmap.hpp"
 
+#include <array>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
+#include <unordered_map>
+#include <vector>
 
 namespace litebird {
 namespace dom {
@@ -45,6 +50,164 @@ bool is_hyperlink(const Node& node) {
 }
 bool is_media(const Node& node) {
     return is_html_element(node, "audio") || is_html_element(node, "video");
+}
+
+// --- HTMLMediaElement state (WHATWG HTML §4.8.11) ---------------------------
+//
+// A media element keeps a playback state that outlives its content
+// attributes: the volume, whether it is muted right now (the `muted` content
+// attribute is only the *default*, which `defaultMuted` reflects), where it
+// is, and how fast it plays. It lives beside the wrapper the realm caches
+// for the element, under hidden names, so nothing enumerates it.
+double media_slot_number(const JsValue& wrapper, const char* name, double fallback) {
+    if (const JsValue* stored = slot(wrapper, name)) return to_double(*stored);
+    return fallback;
+}
+void media_slot_set_number(const JsValue& wrapper, const char* name, double value) {
+    set_slot(wrapper, name, JsValue::make_number(value));
+}
+bool media_slot_bool(const JsValue& wrapper, const char* name, bool fallback) {
+    if (const JsValue* stored = slot(wrapper, name)) return to_double(*stored) != 0.0;
+    return fallback;
+}
+void media_slot_set_bool(const JsValue& wrapper, const char* name, bool value) {
+    set_slot(wrapper, name, JsValue::make_number(value ? 1.0 : 0.0));
+}
+/// The state's number, refused when it is not finite (a WebIDL `double`
+/// never is): the message a browser gives for `el.currentTime = NaN`.
+double media_finite_double(Realm&, const JsValue& value, const char* what) {
+    const double asked = to_double(value);
+    if (!std::isfinite(asked)) {
+        js_throw_type_error(std::string("Failed to set the '") + what +
+                            "' property on 'HTMLMediaElement': The provided double value is non-finite.");
+    }
+    return asked;
+}
+
+// --- TimeRanges (WHATWG HTML, "TimeRanges") ---------------------------------
+//
+// This engine never fetches or decodes a resource, so every range list it
+// hands out is empty: `length` is 0, and `start`/`end` throw the
+// `IndexSizeError` the spec requires for an index past the end, which is
+// every index here.
+void setup_time_ranges(Iface& I) {
+    I.getter("length", [](Realm&) { return num(0); });
+    auto at = [](Realm& r, Args args, const char* name) -> JsValue {
+        require_args(args, 1, name);
+        const uint32_t index = to_ulong(js_arg(args, 0));
+        throw_dom(r, "IndexSizeError",
+                  std::string(name) + ": index " + std::to_string(index) + " is out of range (the list is empty).");
+        return undefined(); // unreachable: throw_dom throws
+    };
+    I.method("start", 1, [at](Realm& r, Args args) -> JsValue { return at(r, args, "TimeRanges.start"); });
+    I.method("end", 1, [at](Realm& r, Args args) -> JsValue { return at(r, args, "TimeRanges.end"); });
+}
+JsValue make_time_ranges(Realm& realm) { return realm.make("TimeRanges", nullptr); }
+
+// --- MediaError (WHATWG HTML §4.8.11.3) -------------------------------------
+//
+// `element.error` is always null here (nothing ever loads, so nothing ever
+// fails), but the interface and its constants are what a page that exists
+// against a browser has to find.
+void setup_media_error(Iface& I) {
+    I.constant("MEDIA_ERR_ABORTED", 1);
+    I.constant("MEDIA_ERR_NETWORK", 2);
+    I.constant("MEDIA_ERR_DECODE", 3);
+    I.constant("MEDIA_ERR_SRC_NOT_SUPPORTED", 4);
+}
+
+// --- canPlayType ------------------------------------------------------------
+//
+// The engine has no demux or codec stack, so it cannot say "probably" to
+// anything. It can say which container/codec pairs are on the machine every
+// browser is installed on, and `maybe` is exactly the answer that is true of
+// them ("might be able to play"). Anything unrecognized, or a codec the type
+// does not carry, is the empty string.
+std::string media_trim(const std::string& text) {
+    const std::string::size_type begin = text.find_first_not_of(" \t\r\n");
+    if (begin == std::string::npos) return std::string();
+    const std::string::size_type end = text.find_last_not_of(" \t\r\n");
+    return text.substr(begin, end - begin + 1);
+}
+const std::unordered_map<std::string, std::vector<std::string>>& can_play_table() {
+    // Prefixes: "avc1.42E01E" is avc1; "mp4a.40.2" is mp4a; "vp09.00.10.08" is vp09.
+    static const std::unordered_map<std::string, std::vector<std::string>> table = {
+        {"audio/wav", {"1", "pcm"}},
+        {"audio/wave", {"1", "pcm"}},
+        {"audio/x-wav", {"1", "pcm"}},
+        {"audio/mpeg", {"mp3", "mp4a"}},
+        {"audio/mp3", {"mp3", "mp4a"}},
+        {"audio/ogg", {"vorbis", "opus", "flac"}},
+        {"audio/flac", {}},
+        {"audio/x-flac", {}},
+        {"audio/webm", {"opus", "vorbis"}},
+        {"audio/aac", {"aac", "mp4a"}},
+        {"audio/mp4", {"mp4a"}},
+        {"audio/x-m4a", {"mp4a"}},
+        {"video/mp4", {"avc1", "avc3", "mp4v", "mp4a", "vp8", "vp9", "vp09", "av01", "hev1", "hvc1"}},
+        {"video/webm", {"vp8", "vp9", "vp09", "av01", "opus", "vorbis"}},
+        {"video/ogg", {"theora", "vorbis"}},
+    };
+    return table;
+}
+std::string can_play_type(const std::string& input) {
+    // Split on ';': the first word is the MIME type, the rest are parameters.
+    std::string type;
+    std::vector<std::string> codecs;
+    bool has_codecs = false;
+    const std::string lowered = ascii_lower(input);
+    std::string::size_type start = 0;
+    for (;;) {
+        const std::string::size_type semi = lowered.find(';', start);
+        const std::string piece = media_trim(lowered.substr(start, semi == std::string::npos
+                                                                   ? std::string::npos
+                                                                   : semi - start));
+        if (start == 0 && type.empty() && semi == std::string::npos) { type = piece; break; }
+        if (type.empty() && piece.find('=') == std::string::npos) {
+            type = piece;
+        } else {
+            const std::string::size_type eq = piece.find('=');
+            if (eq != std::string::npos && media_trim(piece.substr(0, eq)) == "codecs") {
+                std::string value = media_trim(piece.substr(eq + 1));
+                while (value.size() >= 2 && ((value.front() == '"' && value.back() == '"') ||
+                                             (value.front() == '\'' && value.back() == '\'')))
+                    value = value.substr(1, value.size() - 2);
+                // The codecs parameter is a comma-separated list.
+                std::string::size_type list_start = 0;
+                for (;;) {
+                    const std::string::size_type comma = value.find(',', list_start);
+                    std::string token = media_trim(value.substr(list_start, comma == std::string::npos
+                                                                     ? std::string::npos
+                                                                     : comma - list_start));
+                    if (token.size() >= 2 && ((token.front() == '"' && token.back() == '"') ||
+                                              (token.front() == '\'' && token.back() == '\'')))
+                        token = token.substr(1, token.size() - 2);
+                    if (!token.empty()) codecs.push_back(token);
+                    if (comma == std::string::npos) break;
+                    list_start = comma + 1;
+                }
+                has_codecs = true;
+            }
+        }
+        if (semi == std::string::npos) break;
+        start = semi + 1;
+    }
+    const auto& table = can_play_table();
+    const auto it = table.find(type);
+    if (it == table.end()) return std::string();
+    if (!has_codecs) return "maybe";
+    if (codecs.empty()) return std::string();
+    for (const std::string& token : codecs) {
+        bool ok = false;
+        for (const std::string& known : it->second) {
+            if (token == known) { ok = true; break; }
+            // A dot-separated suffix is the same codec with its profile (avc1.42E01E).
+            if (token.size() > known.size() && token.compare(0, known.size(), known) == 0 &&
+                token[known.size()] == '.') { ok = true; break; }
+        }
+        if (!ok) return std::string();
+    }
+    return "maybe";
 }
 
 using Html = ElementMembers<&is_html_node>;
@@ -268,6 +431,202 @@ void setup_svg_animated_string(Iface& I) {
         const auto& state = this_state<SvgAnimatedClassState>("SVGAnimatedString");
         const auto* text = state.element->attribute("class");
         return str(text ? *text : "");
+    });
+}
+
+// A viewBox has one base rectangle and an animated rectangle. Both are live
+// views of the same element. Without SVG animation the animated value follows
+// the base, but is a distinct, read-only object.
+struct SvgViewBoxState {
+    std::shared_ptr<Element> element;
+    std::array<float, 4> values{};
+    std::string source;
+    bool has_attribute{false};
+    bool loaded{false};
+};
+
+struct SvgAnimatedRectState : JsExotic {
+    std::shared_ptr<SvgViewBoxState> box;
+    void trace(Heap& heap) override { trace_node(heap, box->element.get()); }
+};
+
+struct SvgRectState : JsExotic {
+    std::shared_ptr<SvgViewBoxState> box;
+    bool animated{false};
+    void trace(Heap& heap) override { trace_node(heap, box->element.get()); }
+};
+
+bool svg_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'; }
+bool svg_digit(char c) { return c >= '0' && c <= '9'; }
+
+// SVG's number grammar permits adjacent signs and decimal points (1-2 or
+// 1.2.3), as well as comma/whitespace separators. strtof alone is not the
+// grammar: it would also accept infinities, hex numbers, and NaN.
+// SVG's parser accumulates decimal digits in float precision, including
+// the successive powers of one tenth. This is observable for values such as
+// 0.333333; parsing directly as a double and narrowing rounds differently.
+float svg_decimal_float(const std::string& text) {
+    std::size_t at = 0;
+    bool negative = false;
+    if (text[at] == '+' || text[at] == '-') { negative = text[at] == '-'; ++at; }
+    float value = 0.0f;
+    while (at < text.size() && svg_digit(text[at])) {
+        value = value * 10.0f + static_cast<float>(text[at++] - '0');
+    }
+    if (at < text.size() && text[at] == '.') {
+        ++at;
+        float scale = 0.1f;
+        float fraction = 0.0f;
+        while (at < text.size() && svg_digit(text[at])) {
+            const float part = static_cast<float>(text[at++] - '0') * scale;
+            fraction += part;
+            scale *= 0.1f;
+        }
+        value += fraction;
+    }
+    if (at < text.size() && (text[at] == 'e' || text[at] == 'E')) {
+        const long exponent = std::strtol(text.c_str() + at + 1, nullptr, 10);
+        if (exponent < -1000) value = 0.0f;
+        else if (exponent > 1000) value = std::numeric_limits<float>::infinity();
+        else value *= std::pow(10.0f, static_cast<float>(exponent));
+    }
+    return negative ? -value : value;
+}
+
+bool parse_svg_view_box(const std::string& text, std::array<float, 4>& out) {
+    std::array<float, 4> parsed{};
+    std::size_t at = 0;
+    for (std::size_t i = 0; i < parsed.size(); ++i) {
+        while (at < text.size() && svg_space(text[at])) ++at;
+        const std::size_t start = at;
+        if (at < text.size() && (text[at] == '+' || text[at] == '-')) ++at;
+        bool digits = false;
+        while (at < text.size() && svg_digit(text[at])) { ++at; digits = true; }
+        if (at < text.size() && text[at] == '.') {
+            ++at;
+            const std::size_t fraction = at;
+            while (at < text.size() && svg_digit(text[at])) { ++at; digits = true; }
+            if (at == fraction) return false;
+        }
+        if (!digits) return false;
+        if (at < text.size() && (text[at] == 'e' || text[at] == 'E')) {
+            ++at;
+            if (at < text.size() && (text[at] == '+' || text[at] == '-')) ++at;
+            const std::size_t exponent = at;
+            while (at < text.size() && svg_digit(text[at])) ++at;
+            if (at == exponent) return false;
+        }
+        const std::string number = text.substr(start, at - start);
+        if (!std::isfinite(std::strtof(number.c_str(), nullptr))) return false;
+        parsed[i] = svg_decimal_float(number);
+        if (!std::isfinite(parsed[i])) return false;
+        while (at < text.size() && svg_space(text[at])) ++at;
+        if (i + 1 < parsed.size() && at < text.size() && text[at] == ',') ++at;
+    }
+    if (at != text.size()) return false;
+    out = parsed;
+    return true;
+}
+
+void sync_svg_view_box(SvgViewBoxState& state) {
+    const std::string* attribute = state.element->attribute("viewBox");
+    if (state.loaded && state.has_attribute == (attribute != nullptr) &&
+        (!attribute || *attribute == state.source)) return;
+    state.loaded = true;
+    state.has_attribute = attribute != nullptr;
+    state.source = attribute ? *attribute : std::string();
+    state.values = {};
+    if (attribute) parse_svg_view_box(*attribute, state.values);
+}
+
+// Chromium serializes the float with six significant digits. Fixed notation
+// is used from 1e-6 through values below 1e6; exponent notation keeps six
+// significant digits and omits leading zeroes in the exponent.
+std::string serialize_svg_float(float value) {
+    if (std::isnan(value)) return "NaN";
+    if (std::isinf(value)) return std::signbit(value) ? "-Infinity" : "Infinity";
+    if (value == 0) return "0";
+    char buffer[64];
+    std::snprintf(buffer, sizeof(buffer), "%.5e", static_cast<double>(value));
+    std::string text(buffer);
+    const auto e = text.find('e');
+    const int exponent = std::atoi(text.c_str() + e + 1);
+    const bool negative = text[0] == '-';
+    std::string mantissa = text.substr(negative ? 1 : 0, e - (negative ? 1 : 0));
+    if (exponent < -6 || exponent >= 6) {
+        return (negative ? "-" : "") + mantissa + "e" + (exponent >= 0 ? "+" : "-") +
+               std::to_string(std::abs(exponent));
+    }
+    mantissa.erase(1, 1); // decimal point: six digits remain
+    const int point = exponent + 1;
+    std::string result;
+    if (point <= 0) result = "0." + std::string(static_cast<std::size_t>(-point), '0') + mantissa;
+    else if (point >= static_cast<int>(mantissa.size())) result = mantissa + std::string(point - mantissa.size(), '0');
+    else result = mantissa.substr(0, point) + "." + mantissa.substr(point);
+    if (result.find('.') != std::string::npos) {
+        while (!result.empty() && result.back() == '0') result.pop_back();
+        if (!result.empty() && result.back() == '.') result.pop_back();
+    }
+    return (negative ? "-" : "") + result;
+}
+
+void setup_svg_rect(Iface& I) {
+    static const char* names[] = {"x", "y", "width", "height"};
+    for (std::size_t i = 0; i < 4; ++i) {
+        I.accessor(names[i], [i](Realm&) {
+            auto& state = this_state<SvgRectState>("SVGRect");
+            sync_svg_view_box(*state.box);
+            return num(state.box->values[i]);
+        }, [i](Realm& realm, const JsValue& value) {
+            auto& state = this_state<SvgRectState>("SVGRect");
+            // WebIDL converts before the read-only animated rectangle refuses.
+            const double number = to_double(value);
+            const float converted = std::isfinite(number) && std::fabs(number) > std::numeric_limits<float>::max()
+                ? std::copysign(std::numeric_limits<float>::infinity(), number)
+                : static_cast<float>(number);
+            if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated rectangle is read-only.");
+            sync_svg_view_box(*state.box);
+            state.box->values[i] = converted;
+            std::string text;
+            for (float n : state.box->values) {
+                if (!text.empty()) text += ' ';
+                text += serialize_svg_float(n);
+            }
+            state.box->element->set_attribute("viewBox", text);
+            state.box->source = text;
+            state.box->has_attribute = true;
+            state.box->loaded = true;
+        });
+    }
+}
+
+void setup_svg_animated_rect(Iface& I) {
+    for (const auto& member : {std::pair<const char*, bool>{"baseVal", false}, {"animVal", true}}) {
+        const bool animated = member.second;
+        I.getter(member.first, [animated](Realm& realm) {
+            auto& state = this_state<SvgAnimatedRectState>("SVGAnimatedRect");
+            return cached(JsValue::current_this(), animated ? "svgRectAnim" : "svgRectBase", [&]() {
+                auto rect = std::make_shared<SvgRectState>();
+                rect->box = state.box;
+                rect->animated = animated;
+                return realm.make("SVGRect", rect);
+            });
+        });
+    }
+}
+
+bool is_svg_svg(const Node& node) {
+    return is_svg_node(node) && static_cast<const Element&>(node).tag_name() == "svg";
+}
+
+void setup_svg_svg_element(Iface& I) {
+    I.node_getter(&is_svg_svg, "viewBox", [](Realm& realm, Node& node) {
+        return cached(wrap(realm, node), "svgViewBox", [&]() {
+            auto state = std::make_shared<SvgAnimatedRectState>();
+            state->box = std::make_shared<SvgViewBoxState>();
+            state->box->element = shared(static_cast<Element&>(node));
+            return realm.make("SVGAnimatedRect", state);
+        });
     });
 }
 
@@ -1080,27 +1439,76 @@ void setup_canvas(Iface& I) {
 void setup_media(Iface& I) {
     ElementMembers<&is_media> M(I);
     reflect(I, "r:src s:preload b:autoplay b:loop b:controls b:defaultMuted:muted s:crossOrigin:crossorigin");
+    I.constant("NETWORK_EMPTY", 0);
+    I.constant("NETWORK_IDLE", 1);
+    I.constant("NETWORK_LOADING", 2);
+    I.constant("NETWORK_NO_SOURCE", 3);
+    I.constant("HAVE_NOTHING", 0);
+    I.constant("HAVE_METADATA", 1);
+    I.constant("HAVE_CURRENT_DATA", 2);
+    I.constant("HAVE_FUTURE_DATA", 3);
+    I.constant("HAVE_ENOUGH_DATA", 4);
     M.getter("currentSrc", [](Realm&, Element&) { return str(""); });
     M.getter("paused", [](Realm&, Element&) { return boolean(true); });
     M.getter("ended", [](Realm&, Element&) { return boolean(false); });
     M.getter("duration", [](Realm&, Element&) { return num(std::numeric_limits<double>::quiet_NaN()); });
     M.getter("readyState", [](Realm&, Element&) { return num(0); });
     M.getter("networkState", [](Realm&, Element&) { return num(0); });
-    M.accessor("currentTime", [](Realm&, Element&) { return num(0); }, [](Realm&, Element&, const JsValue&) {});
-    M.accessor("volume", [](Realm&, Element&) { return num(1); }, [](Realm&, Element&, const JsValue&) {});
+    // Nothing ever loads, so nothing ever fails: the IDL is null, not an error with code 0.
+    M.getter("error", [](Realm&, Element&) { return null(); });
+    // Empty TimeRanges: no resource has loaded, so there is nothing buffered,
+    // nothing seekable yet, and nothing played.
+    M.getter("buffered", [](Realm& r, Element&) { return make_time_ranges(r); });
+    M.getter("seekable", [](Realm& r, Element&) { return make_time_ranges(r); });
+    M.getter("played", [](Realm& r, Element&) { return make_time_ranges(r); });
+    M.accessor("currentTime",
+        [](Realm& r, Element& el) { return num(media_slot_number(wrap(r, el), "mediaCurrentTime", 0.0)); },
+        [](Realm& r, Element& el, const JsValue& value) {
+            const double asked = media_finite_double(r, value, "currentTime");
+            media_slot_set_number(wrap(r, el), "mediaCurrentTime", asked);
+        });
+    M.accessor("volume",
+        [](Realm& r, Element& el) { return num(media_slot_number(wrap(r, el), "mediaVolume", 1.0)); },
+        [](Realm& r, Element& el, const JsValue& value) {
+            const double asked = media_finite_double(r, value, "volume");
+            if (asked < 0.0 || asked > 1.0) {
+                throw_dom(r, "IndexSizeError",
+                          "Failed to set the 'volume' property on 'HTMLMediaElement': "
+                          "The provided double value is outside the range [0, 1].");
+            }
+            media_slot_set_number(wrap(r, el), "mediaVolume", asked);
+        });
+    // `muted` is the live state and does not touch the `muted` content
+    // attribute (`defaultMuted` reflects that, per HTML §4.8.11.3).
     M.accessor("muted",
-        [](Realm&, Element& el) { return boolean(el.has_attribute("muted")); },
-        [](Realm&, Element&, const JsValue&) {});
-    M.accessor("playbackRate", [](Realm&, Element&) { return num(1); }, [](Realm&, Element&, const JsValue&) {});
+        [](Realm& r, Element& el) { return boolean(media_slot_bool(wrap(r, el), "mediaMuted", false)); },
+        [](Realm& r, Element& el, const JsValue& value) {
+            media_slot_set_bool(wrap(r, el), "mediaMuted", to_bool(value));
+        });
+    M.accessor("playbackRate",
+        [](Realm& r, Element& el) { return num(media_slot_number(wrap(r, el), "mediaPlaybackRate", 1.0)); },
+        [](Realm& r, Element& el, const JsValue& value) {
+            const double asked = media_finite_double(r, value, "playbackRate");
+            media_slot_set_number(wrap(r, el), "mediaPlaybackRate", asked);
+        });
     for (const char* name : {"pause", "load"}) {
         M.method(name, 0, [](Realm&, Element&, Args) { return undefined(); });
     }
+    // This engine cannot start playback at all — no fetch, demux or codec
+    // stack, and no output device. The promise rejects with the error a
+    // browser gives for a resource it cannot play (HTML §4.8.11.9.3) instead
+    // of resolving a playback that never begins.
     M.method("play", 0, [](Realm& r, Element&, Args) {
         JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
         if (!promise.is_function()) return undefined();
-        return js_call(promise.get_property("resolve"), promise, {});
+        JsValue err = make_dom_exception(r, "NotSupportedError",
+                                         "The element has no supported sources: this engine cannot play any media resource.");
+        return js_call(promise.get_property("reject"), promise, {err});
     });
-    M.method("canPlayType", 1, [](Realm&, Element&, Args) { return str(""); });
+    M.method("canPlayType", 1, [](Realm&, Element&, Args args) {
+        if (js_arg(args, 0).is_undefined()) return str("");
+        return str(can_play_type(to_str(js_arg(args, 0))));
+    });
 }
 
 struct OffscreenCanvasState : JsExotic {
@@ -1761,6 +2169,17 @@ void setup_link_element(Iface& I) {
 
 } // namespace
 
+void note_svg_view_box_changed(Element& element, const AttributeChange& change) {
+    if (element.element_namespace() != ElementNamespace::SVG || element.tag_name() != "svg" ||
+        change.namespace_uri || !change.local_name || *change.local_name != "viewBox") return;
+    auto* wrapper = static_cast<JsObject*>(element.script_object());
+    if (!wrapper) return;
+    auto found = wrapper->properties.find("%svgViewBox");
+    if (found == wrapper->properties.end()) return;
+    auto* state = state_of<SvgAnimatedRectState>(found->second);
+    if (state) state->box->loaded = false;
+}
+
 void reflect_attributes(Iface& I, const char* description) {
     reflect(I, description);
 }
@@ -1769,9 +2188,11 @@ void register_html_interfaces() {
     const auto element_ctor = &construct_custom_element;
     register_interface({"HTMLElement", "Element", setup_html_element, element_ctor, 0, nullptr});
     register_interface({"SVGAnimatedString", nullptr, setup_svg_animated_string, nullptr, 0, nullptr});
+    register_interface({"SVGAnimatedRect", nullptr, setup_svg_animated_rect, nullptr, 0, nullptr});
+    register_interface({"SVGRect", nullptr, setup_svg_rect, nullptr, 0, nullptr});
     register_interface({"SVGElement", "Element", setup_svg_element, nullptr, 0, nullptr});
     register_interface({"SVGGraphicsElement", "SVGElement", nullptr, nullptr, 0, nullptr});
-    register_interface({"SVGSVGElement", "SVGGraphicsElement", nullptr, nullptr, 0, nullptr});
+    register_interface({"SVGSVGElement", "SVGGraphicsElement", setup_svg_svg_element, nullptr, 0, nullptr});
     register_interface({"SVGTitleElement", "SVGElement", nullptr, nullptr, 0, nullptr});
 
     for (const auto& simple : kSimple) {
@@ -1793,6 +2214,10 @@ void register_html_interfaces() {
     register_interface({"HTMLMediaElement", "HTMLElement", setup_media, element_ctor, 0, nullptr});
     register_interface({"HTMLAudioElement", "HTMLMediaElement", nullptr, element_ctor, 0, nullptr});
     register_interface({"HTMLVideoElement", "HTMLMediaElement", setup_video, element_ctor, 0, nullptr});
+    // HTML §4.8.11.3 and §"TimeRanges": constructible by name from a script,
+    // not constructible by `new` (Chrome and Firefox agree).
+    register_interface({"TimeRanges", nullptr, setup_time_ranges, nullptr, 0, nullptr});
+    register_interface({"MediaError", nullptr, setup_media_error, nullptr, 0, nullptr});
     register_interface({"HTMLTableElement", "HTMLElement", setup_table, element_ctor, 0, nullptr});
     register_interface({"HTMLTableSectionElement", "HTMLElement", setup_table_section, element_ctor, 0, nullptr});
     register_interface({"HTMLTableRowElement", "HTMLElement", setup_table_row, element_ctor, 0, nullptr});

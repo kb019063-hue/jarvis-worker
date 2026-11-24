@@ -2765,12 +2765,41 @@ bool TrueTypeFont::apply_gpos_lookup_at(uint16_t lookup_index,
 }
 
 std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
-    const std::vector<uint32_t>& input, bool kerning, bool visual_rtl) const {
+    const std::vector<uint32_t>& original, bool kerning, bool visual_rtl) const {
     std::vector<PositionedGlyph> result;
-    if (!m_loaded || input.empty()) return result;
+    if (!m_loaded || original.empty()) return result;
+
+    // A missing Latin composite can use canonical parts in this same face.
+    // Keep an existing glyph, and never substitute a partly covered expansion.
+    // Recursion follows only the generated canonical table, not compatibility
+    // mappings. Bounds are defensive; Unicode's decomposition depth is small.
+    std::vector<uint32_t> input;
+    input.reserve(original.size());
+    auto expand = [&](auto& self, uint32_t cp, std::vector<uint32_t>& parts, unsigned depth) -> bool {
+        if (parts.size() >= 32 || depth > 16) return false;
+        if (glyph_index(cp) != 0) { parts.push_back(cp); return true; }
+        using namespace unicode::tables;
+        const auto* entry = std::lower_bound(kCanonDecomp, kCanonDecomp + kCanonDecompCount,
+            cp, [](const DecompEntry& d, uint32_t c) { return d.cp < c; });
+        if (entry == kCanonDecomp + kCanonDecompCount || entry->cp != cp) return false;
+        for (unsigned j = 0; j < entry->len; ++j) {
+            if (!self(self, kDecompPool[entry->offset + j], parts, depth + 1)) return false;
+        }
+        return true;
+    };
+    for (uint32_t cp : original) {
+        if (classify_codepoint_script(cp) == kTagLatn && glyph_index(cp) == 0) {
+            std::vector<uint32_t> parts;
+            if (expand(expand, cp, parts, 0)) {
+                input.insert(input.end(), parts.begin(), parts.end());
+                continue;
+            }
+        }
+        input.push_back(cp);
+    }
 
     // Font-aware adjacent canonical composition for Latin runs. This is not
-    // NFC: do not reorder marks, decompose input, cross script boundaries, or
+    // NFC: do not reorder marks, cross script boundaries, or
     // replace a supported base+mark with a composite missing from this face.
     // Use the existing Unicode 17 canonical pairs (composition exclusions are
     // already absent), not a font-specific correction or compatibility map.

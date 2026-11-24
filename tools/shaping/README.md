@@ -267,3 +267,38 @@ matches, 4 raw differences and 1 unsupported; all 13 supported cases match
 absolute placement. Full normalization is not claimed. Coverage guards,
 synthetic tests, reproducible commands and remaining limitations are in
 `docs/phases/234-latin-font-aware-composition.md`.
+
+## Missing-composite coverage probe (Phase 240)
+
+Create a local test font with only three cmap mappings removed. Outlines and
+positioning tables remain intact. Do not distribute it as the original font.
+Generated fonts and reports belong in ignored `build/`.
+
+```sh
+build/shaping-venv/bin/pip install fonttools==4.61.1
+build/shaping-venv/bin/python - <<'PY'
+from fontTools.ttLib import TTFont
+f = TTFont('/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', recalcTimestamp=False)
+for table in f['cmap'].tables:
+    if table.isUnicode():
+        for cp in (0x00e1, 0x00e5, 0x01fb):
+            table.cmap.pop(cp, None)
+f.save('build/dejavu-missing-composites.ttf')
+PY
+build/shaping-venv/bin/python tools/shaping/decomposition_diagnostic.py \
+  --font build/dejavu-missing-composites.ttf --output build/decomposition.json
+```
+
+Using the source DejaVu Sans hash recorded above and HarfBuzz 12.1.0, Phase 240
+changes seven raw comparisons from 3 matches / 1 mismatch / 3 unsupported to
+**5 matches / 2 mismatches / 0 unsupported**. Exact generated font bytes are
+identified in the JSON report. Missing á and å now match; ǻ decomposes but
+retains a positioning disagreement also present for explicit a + ring + acute:
+Litebird's acute y-offset is 649, HarfBuzz's is 0. The latter input already
+failed before the fix. The command correctly exits 1; do not interpret absence
+of .notdef as correct positioning. A build of the parent can be selected with
+`--probe` for the before run. The existing 14-case corpus remains unchanged.
+
+Scope: missing Latin codepoints only, canonical mappings only, complete
+same-face coverage required. No changes to fallback-face selection, existing
+composite glyphs, other scripts, normalization ordering or stacked-mark GPOS.

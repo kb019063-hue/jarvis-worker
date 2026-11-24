@@ -86,6 +86,28 @@ bool parse_text_align(std::string_view val_lower, TextAlign& out) {
     return false;
 }
 
+bool parse_white_space(std::string_view val_lower, WhiteSpace& out) {
+    if (ascii_iequals(val_lower, "normal")) { out = WhiteSpace::Normal; return true; }
+    if (ascii_iequals(val_lower, "nowrap")) { out = WhiteSpace::Nowrap; return true; }
+    if (ascii_iequals(val_lower, "pre")) { out = WhiteSpace::Pre; return true; }
+    if (ascii_iequals(val_lower, "pre-wrap")) { out = WhiteSpace::PreWrap; return true; }
+    if (ascii_iequals(val_lower, "pre-line")) { out = WhiteSpace::PreLine; return true; }
+    if (ascii_iequals(val_lower, "break-spaces")) { out = WhiteSpace::BreakSpaces; return true; }
+    return false;
+}
+
+bool parse_vertical_align(std::string_view val_lower, VerticalAlign& out) {
+    if (ascii_iequals(val_lower, "baseline")) { out = VerticalAlign::Baseline; return true; }
+    if (ascii_iequals(val_lower, "top")) { out = VerticalAlign::Top; return true; }
+    if (ascii_iequals(val_lower, "bottom")) { out = VerticalAlign::Bottom; return true; }
+    if (ascii_iequals(val_lower, "middle")) { out = VerticalAlign::Middle; return true; }
+    if (ascii_iequals(val_lower, "text-top")) { out = VerticalAlign::TextTop; return true; }
+    if (ascii_iequals(val_lower, "text-bottom")) { out = VerticalAlign::TextBottom; return true; }
+    if (ascii_iequals(val_lower, "sub")) { out = VerticalAlign::Sub; return true; }
+    if (ascii_iequals(val_lower, "super")) { out = VerticalAlign::Super; return true; }
+    return false;
+}
+
 bool parse_text_decoration(std::string_view val_lower, TextDecoration& out) {
     std::string_view trimmed = css_trim_view(val_lower);
     if (ascii_iequals(trimmed, "none")) {
@@ -184,6 +206,8 @@ std::size_t ComputedStyle::hash() const {
         (static_cast<uint32_t>(box_sizing) << 20) |
         (static_cast<uint32_t>(containment) << 21);
     hash_combine(h, flags);
+    hash_combine(h, (static_cast<std::size_t>(white_space) << 4) |
+                    static_cast<std::size_t>(vertical_align));
     hash_combine(h, hash_float(border_spacing_x));
     hash_combine(h, hash_float(border_spacing_y));
     if (has_top || has_right || has_bottom || has_left || has_z_index) {
@@ -373,6 +397,7 @@ SharedComputedStyle ComputedStylePool::inherited_only(const SharedComputedStyle&
     s.line_height_number = key->line_height_number;
     s.text_align = key->text_align;
     s.text_decoration = key->text_decoration;
+    s.white_space = key->white_space;
     s.border_collapse = key->border_collapse;
     s.border_spacing_x = key->border_spacing_x;
     s.border_spacing_y = key->border_spacing_y;
@@ -2629,6 +2654,18 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         parse_text_align(val_lower, style.text_align);
     } else if (prop == "text-decoration") {
         parse_text_decoration(val_lower, style.text_decoration);
+    } else if (prop == "white-space") {
+        if (val_lower == "initial") {
+            style.white_space = WhiteSpace::Normal;
+        } else if (val_lower != "inherit" && val_lower != "unset") {
+            parse_white_space(val_lower, style.white_space);
+        }
+    } else if (prop == "vertical-align") {
+        if (val_lower == "initial" || val_lower == "unset") {
+            style.vertical_align = VerticalAlign::Baseline;
+        } else if (val_lower != "inherit") {
+            parse_vertical_align(val_lower, style.vertical_align);
+        }
     } else if (prop == "opacity") {
         try { style.opacity = std::clamp(std::stof(val), 0.0f, 1.0f); } catch (...) {}
     } else if (prop == "animation-name") {
@@ -3348,6 +3385,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.font_kerning = parent_style->font_kerning;
         if (!parent_style->font_family.empty()) style.font_family = parent_style->font_family;
         style.text_align = parent_style->text_align;
+        style.white_space = parent_style->white_space;
         if (!parent_style->custom_properties.empty()) style.custom_properties = parent_style->custom_properties;
         // empty-cells and caption-side inherit per CSS 2.1 17.5.1.2 and 17.4.1.
         style.empty_cells = parent_style->empty_cells;

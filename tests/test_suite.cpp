@@ -333,7 +333,6 @@ TEST(color_parsing) {
     assert(c4.r == 0 && c4.g == 0 && c4.b == 255);
 }
 
-
 TEST(css_color_keywords_match_the_css_specification) {
     using namespace litebird;
 
@@ -2618,7 +2617,6 @@ TEST(the_canvas_measures_the_ligature_it_paints) {
     assert(painted == as_codepoint);   // the ligature glyph, drawn by the canvas
     assert(painted != separately);     // ...and not the two letters
 }
-
 
 TEST(font_kerning_none_reaches_the_box_and_the_painter) {
     using namespace litebird;
@@ -5102,7 +5100,6 @@ TEST(complex_shaping_rejects_malformed_and_cyclic_tables_safely) {
     std::fflush(stdout);
 }
 
-
 TEST(inline_formatting_context) {
     using namespace litebird;
     std::string html = R"(
@@ -6948,6 +6945,90 @@ TEST(subtle_crypto_hmac_sign_and_verify) {
     assert(interp.eval("key instanceof CryptoKey && key.type === 'secret' && key.extractable === false").is_truthy());
     assert(interp.eval("sigHex === '5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843'").is_truthy());
     assert(interp.eval("okTrue === true && okFalse === false").is_truthy());
+}
+
+TEST(subtle_crypto_export_and_generate_key) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var genKey = null;
+        var rawBuf = null;
+        var verified = null;
+        var rejNonExt = null;
+        var enc = new TextEncoder();
+        crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256' }, true, ['sign', 'verify'])
+            .then(function(k) {
+                genKey = k;
+                return crypto.subtle.exportKey('raw', k);
+            })
+            .then(function(buf) {
+                rawBuf = buf;
+                return crypto.subtle.sign('HMAC', genKey, enc.encode('hello'));
+            })
+            .then(function(sig) {
+                return crypto.subtle.verify('HMAC', genKey, sig, enc.encode('hello'));
+            })
+            .then(function(v) {
+                verified = v;
+            });
+
+        crypto.subtle.importKey('raw', enc.encode('secret'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+            .then(function(k) { return crypto.subtle.exportKey('raw', k); })
+            .catch(function(e) { rejNonExt = e.name; });
+    )");
+    assert(interp.eval("genKey instanceof CryptoKey && genKey.extractable === true").is_truthy());
+    assert(interp.eval("rawBuf instanceof ArrayBuffer && rawBuf.byteLength === 64").is_truthy());
+    assert(interp.eval("verified === true").is_truthy());
+    assert(interp.eval("rejNonExt === 'InvalidAccessError'").is_truthy());
+}
+
+TEST(subtle_crypto_pbkdf2_derive_bits_and_key) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // RFC 6070 / RFC 7914 PBKDF2-HMAC-SHA256("password", "salt", 1, 32)
+    // = 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
+    interp.eval(R"(
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var enc = new TextEncoder();
+        var bitsHex = null;
+        var derivedKey = null;
+        var derivedOk = null;
+        crypto.subtle.importKey('raw', enc.encode('password'), 'PBKDF2', false, ['deriveBits', 'deriveKey'])
+            .then(function(base) {
+                return crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode('salt'), iterations: 1, hash: 'SHA-256' }, base, 256)
+                    .then(function(bits) {
+                        bitsHex = toHex(bits);
+                        return crypto.subtle.deriveKey(
+                            { name: 'PBKDF2', salt: enc.encode('salt'), iterations: 1, hash: 'SHA-256' },
+                            base,
+                            { name: 'HMAC', hash: 'SHA-256', length: 256 },
+                            true,
+                            ['sign', 'verify']
+                        );
+                    });
+            })
+            .then(function(k) {
+                derivedKey = k;
+                return crypto.subtle.sign('HMAC', k, enc.encode('msg'));
+            })
+            .then(function(sig) {
+                return crypto.subtle.verify('HMAC', derivedKey, sig, enc.encode('msg'));
+            })
+            .then(function(v) {
+                derivedOk = v;
+            });
+    )");
+    assert(interp.eval("bitsHex === '120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b'").is_truthy());
+    assert(interp.eval("derivedKey instanceof CryptoKey && derivedOk === true").is_truthy());
 }
 
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
@@ -13096,7 +13177,6 @@ TEST(table_completeness) {
     assert(saw_green_rect);
     assert(saw_blue_rect);
 }
-
 
 TEST(float_shrinks_inline_line_boxes) {
     using namespace litebird;
@@ -35490,10 +35570,23 @@ TEST(terminal_page_text_cannot_inject_controls) {
     using namespace litebird;
     std::string bytes;
     std::string expected;
+    // Phase 241: a cell is a character, so a byte string is read as UTF-8.
+    // A byte that is printable ASCII is its own cell; a byte that cannot begin
+    // or continue a well-formed sequence is U+FFFD, the replacement character
+    // the Unicode standard names for exactly this. The guarantee this test
+    // exists for is unchanged and is what the loop asserts: no byte of the
+    // input reaches the stream as a control character.
     for (int i = 0; i < 256; ++i) {
         bytes.push_back(static_cast<char>(i));
-        expected.push_back(i >= 0x20 && i <= 0x7e ? static_cast<char>(i) : '?');
+        if (i >= 0x20 && i <= 0x7e) {
+            expected.push_back(static_cast<char>(i));
+        } else if (i < 0x80) {
+            expected += "\xEF\xBF\xBD";  // C0 and DEL: one replacement character each
+        }
     }
+    // 0x80..0xFF are continuation bytes with no lead byte before them, so every
+    // one of them is a replacement character in a cell of its own.
+    for (int i = 0x80; i <= 0xff; ++i) expected += "\xEF\xBF\xBD";
     expected += '\n';
     DrawTextCommand text;
     text.position = Point(0, 0);
@@ -35516,7 +35609,10 @@ TEST(terminal_page_text_cannot_inject_controls) {
     auto root = LayoutTree::build(doc, resolver, 200, 40);
     TerminalRenderer page(20, 2);
     const auto plain = terminal_plain_text(page.to_ansi_string(DisplayList::build(root)));
-    assert(plain.substr(0, 10) == "Hi?[2J?X? ");
+    // The characters the page asked for are no longer visible as `?` but as
+    // U+FFFD, which is the character that means "this was not text": ESC, BEL
+    // and DEL each become one, and the stream carries no control byte.
+    assert(plain.substr(0, 16) == "Hi\xEF\xBF\xBD[2J\xEF\xBF\xBDX\xEF\xBF\xBD ");
 }
 
 void test_object_spread_and_rest_copy_symbols_and_follow_copy_data_properties() {
@@ -35763,7 +35859,6 @@ void test_reduce_asks_for_each_place_as_it_reaches_it() {
 }
 
 
-
 TEST(svg_class_name_is_a_live_animated_string) {
     TestPage page;
     auto& js = page.js;
@@ -35861,6 +35956,8 @@ int main() {
     RUN_TEST(subtle_crypto_digest_sha256);
     RUN_TEST(subtle_crypto_digest_sha1_sha384_sha512);
     RUN_TEST(subtle_crypto_hmac_sign_and_verify);
+    RUN_TEST(subtle_crypto_export_and_generate_key);
+    RUN_TEST(subtle_crypto_pbkdf2_derive_bits_and_key);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);
@@ -36345,6 +36442,8 @@ int main() {
     // Phase 192: `Array.prototype.toLocaleString` asks each element (§23.1.3.28),
     // and `Object.prototype.toLocaleString` is `Invoke(this, "toString")` (§20.1.3.5).
     RUN_TEST(an_array_to_locale_string_asks_every_element);
+
+    // Phase 204: a counter is written where the walk found it.
 
     // Phase 202: a box's outline is a ring outside the border box that takes
     // no room; it is stored by the cascade and painted.

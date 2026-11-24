@@ -39,6 +39,9 @@ import subprocess
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import check_rows  # noqa: E402  (the rows of "Open tasks": tools/ci/check_rows.py)
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Ceilings in bytes. Lowered as sections move to docs/, never raised to let a
@@ -57,6 +60,14 @@ DRIFT: dict[str, re.Pattern[str]] = {
     "ARCHITECTURE.md": re.compile(r"^##\s+Phase\s+\d+\b", re.IGNORECASE),
     "AUDIT.md": re.compile(r"^##\s+\d+\."),
 }
+
+# A line of the list "Resolved findings" at the end of AUDIT.md. The list has
+# the findings that were moved out of that document and some that were added
+# by hand since; every new line went to its end, so two pull requests that
+# each added one were in conflict there (#254 and #281 against #285, on 23
+# November 2026). The file in docs/findings/ is the entry; the list gets no
+# more (AGENTS.md, "The files every pull request changes", point 3).
+LISTED_FINDING = re.compile(r"^- \*\*Finding \d+\*\* — \[")
 
 
 def _git(*args: str) -> subprocess.CompletedProcess[str]:
@@ -184,6 +195,17 @@ def check_drift(base: str | None, why_not: str | None) -> int:
                   f" (docs/README.md)")
         else:
             print(f"  ok    {name}: no new write-up headings")
+    # Two notes, and neither a failure: a pull request that is finished
+    # would have to go round CI again for a line of an index or of a table.
+    listed = [line for line in added_lines(base, "AUDIT.md") or [] if LISTED_FINDING.match(line)]
+    if listed:
+        print(f"  note  AUDIT.md: {len(listed)} new line(s) in the list \"Resolved findings\". "
+              f"Add none: the file in docs/findings/ is the entry, and a line at the end of "
+              f"that list is in conflict with every other pull request's "
+              f"(AGENTS.md, \"The files every pull request changes\", point 3)")
+    rows = check_rows.report((ROOT / "AGENTS.md").read_text(encoding="utf-8").split("\n"))
+    if rows:
+        print(rows)
     return failures
 
 

@@ -194,6 +194,26 @@ enum class TextAlign : uint8_t {
     End
 };
 
+enum class WhiteSpace : uint8_t {
+    Normal,
+    Nowrap,
+    Pre,
+    PreWrap,
+    PreLine,
+    BreakSpaces
+};
+
+enum class VerticalAlign : uint8_t {
+    Baseline,
+    Top,
+    Bottom,
+    Middle,
+    TextTop,
+    TextBottom,
+    Sub,
+    Super
+};
+
 enum class TextDecoration : uint8_t {
     None = 0,
     Underline = 1 << 0,
@@ -311,6 +331,8 @@ struct ComputedStyle {
     float line_height_number{-1.0f};
     TextAlign text_align{TextAlign::Left};
     TextDecoration text_decoration{TextDecoration::None};
+    WhiteSpace white_space{WhiteSpace::Normal};
+    VerticalAlign vertical_align{VerticalAlign::Baseline};
 
     bool has_underline() const {
         return (static_cast<uint8_t>(text_decoration) & static_cast<uint8_t>(TextDecoration::Underline)) != 0;

@@ -69,9 +69,17 @@ public:
     const std::vector<InteractiveElement>& interactive_elements() const { return m_interactive_elements; }
     int focused_element_index() const { return m_focused_index; }
     std::shared_ptr<Element> focused_element() const;
+    /// Move both the ring and the document's focus, so `focus`/`blur` and
+    /// `focusin`/`focusout` reach the page's listeners and
+    /// `document.activeElement` follows the ring.
+    void set_document_focus(const std::shared_ptr<Element>& element);
     void focus_next();
     void focus_prev();
     void focus_element(int index);
+    /// A focused element that a dialog took away, or that left the document,
+    /// is behind the ring's index. Drop it, so the next Tab starts from the
+    /// document's own focus rather than from a stale index.
+    void forget_focus_if_gone();
     bool activate_focused();
     bool click_at(float x, float y);
     /// A click through the DOM's own activation path, so the element's

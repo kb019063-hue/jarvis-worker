@@ -71,6 +71,10 @@ public:
     /// §4.12.5.1's `CanvasPattern.setTransform`, applied to the tile before it
     /// is sampled. Identity until a page sets one.
     TransformMatrix2D transform{TransformMatrix2D::identity()};
+    /// The colour of the tile at a **device-space** point, through the
+    /// pattern's own `setTransform` and its repetition rule. The caller has not
+    /// applied the context's CTM: a pattern is placed in device space.
+    Color sample_at_device(float x, float y) const;
     Color sample_at(int px, int py) const;
 };
 
@@ -138,6 +142,13 @@ public:
     // clears both, and the rasteriser prefers the gradient when both are set.
     std::shared_ptr<CanvasPattern> fill_pattern{nullptr};
     std::shared_ptr<CanvasPattern> stroke_pattern{nullptr};
+    /// The script object of the gradient or pattern a style was set to, so that
+    /// reading `fillStyle` back answers **that object** — §4.12.5.1 says the
+    /// getter returns the object that was set — and not a marker or a colour.
+    /// Undefined when the style is a colour. `save()`/`restore()` carry it, and
+    /// `reset()` clears it.
+    JsValue fill_paint;
+    JsValue stroke_paint;
 
     std::shared_ptr<CanvasGradient> create_linear_gradient(float x0, float y0, float x1, float y1);
     std::shared_ptr<CanvasGradient> create_radial_gradient(float x0, float y0, float r0, float x1, float y1, float r1);
@@ -148,6 +159,7 @@ public:
     /// four strings — which the binding turns into the `null` a page sees.
     std::shared_ptr<CanvasPattern> create_pattern(const std::shared_ptr<ImageData>& image,
                                                  const std::string& repetition);
+    size_t dbg_stack() const { return m_state_stack.size(); }
 
     // State stack
     void save();
@@ -263,6 +275,10 @@ private:
         std::string text_baseline;
         std::shared_ptr<CanvasGradient> fill_gradient;
         std::shared_ptr<CanvasGradient> stroke_gradient;
+        std::shared_ptr<CanvasPattern> fill_pattern;
+        std::shared_ptr<CanvasPattern> stroke_pattern;
+        JsValue fill_paint;
+        JsValue stroke_paint;
         TransformMatrix2D ctm;
         std::vector<uint8_t> clip_mask;
     };
@@ -308,7 +324,11 @@ private:
         FillRule rule,
         const Color& solid_color,
         const std::shared_ptr<CanvasGradient>& gradient,
-        const TransformMatrix2D& grad_inv_ctm
+        const TransformMatrix2D& grad_inv_ctm,
+        /// §4.12.5.1's pattern paint, when the style is a `CanvasPattern`. It is
+        /// given the same device-space point the gradient is, so the rasteriser
+        /// need not know which of the three the style is.
+        const std::shared_ptr<CanvasPattern>& pattern = nullptr
     );
     void rasterize_paths_to_mask(
         const std::vector<SubPath>& paths,

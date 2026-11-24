@@ -1578,6 +1578,10 @@ void install_canvas_create_pattern(Realm& r, JsValue context_object,
             auto pattern = get_ctx()->create_pattern(source.pixels, repetition);
             if (!pattern) return null();
             JsValue object = JsValue::make_object();
+            // The object carries the pattern as its payload, which is how
+            // `fillStyle` recognises it: `JsValue::set_property` looks for
+            // `canvas_pattern_value()` beside `canvas_gradient_value()`.
+            object.set_canvas_pattern_value(pattern);
             object.set_property("setTransform", make_function(r, "setTransform", 0,
                 [pattern, &r](Realm&, Args set_args) {
                     // §4.12.5.1: no argument (or null) clears it; six numbers
@@ -1598,6 +1602,14 @@ void install_canvas_create_pattern(Realm& r, JsValue context_object,
                 }));
             return object;
         }));
+}
+
+/// Removes an **own data property** from `object`, so that a live read falls
+/// through to `JsValue::get_property`'s canvas fast-path. `clear_slot` is not
+/// this: it erases the hidden `%name` slot, and the property the context object
+/// shadows the fast-path with is an ordinary one called `name`.
+void drop_own(JsValue& object, const std::string& name) {
+    if (JsObject* cell = object.property_cell()) cell->properties.erase(name);
 }
 
 /// §4.12.5.1's `reset()`, bound here rather than in `Canvas2D.cpp` because
@@ -1622,6 +1634,10 @@ void install_canvas_reset(Realm& r, JsValue context_object,
             get_ctx()->reset();
             // The four `to_js_value` copies, from the state reset left.
             const CanvasRenderingContext2D* c = get_ctx();
+            // `reset()` leaves a colour, never a paint, so both are colours here;
+            // a slot left from before is cleared so the read cannot find one.
+            drop_own(*self, "fillStyle");
+            drop_own(*self, "strokeStyle");
             self->set_property("fillStyle", JsValue::make_string(c->fill_style.to_hex()));
             self->set_property("strokeStyle", JsValue::make_string(c->stroke_style.to_hex()));
             self->set_property("lineWidth", JsValue::make_number(c->line_width));
@@ -1629,6 +1645,47 @@ void install_canvas_reset(Realm& r, JsValue context_object,
                               JsValue::make_string(c->global_composite_operation));
             return undefined();
         }));
+}
+
+/// `save()` and `restore()`, wrapped here for the same reason `reset()` is:
+/// `to_js_value` copied `fillStyle` and `strokeStyle` onto **this object** as
+/// own data properties, and an own property shadows the live read. The renderer
+/// puts the saved styles back; without writing them to the object afterwards the
+/// context keeps answering with the colour it had inside the `save()` — measured
+/// with a gradient too, so this was wrong before patterns existed: a gradient set
+/// before `save()`, a colour inside it, and `restore()` left `g.fillStyle` as
+/// the colour while the renderer painted the gradient.
+void install_canvas_save_restore(Realm& r, JsValue context_object,
+                                 const std::shared_ptr<CanvasRenderingContext2D>& context) {
+    auto get_ctx = [context]() -> CanvasRenderingContext2D* { return context.get(); };
+    auto self = std::make_shared<JsValue>(context_object);
+    // The two styles are the only state `to_js_value` copies that `save()` can
+    // change; `lineWidth` and `globalCompositeOperation` are here for the day a
+    // saved state carries them, and cost two writes.
+    auto sync = [get_ctx, self]() {
+        const CanvasRenderingContext2D* c = get_ctx();
+        // A style is a colour, a gradient or a pattern, and only the first has a
+        // string form here. Writing `to_hex()` over a restored gradient or
+        // pattern would replace the paint with the colour it happens to have
+        // beside it, which is a wrong drawing and not a wrong string: measured
+        // as `save()`, `fillStyle = pattern`, `restore()` leaving the canvas
+        // black. So a style that is not a colour has its own property **removed**
+        // and the live read in `JsValue::get_property` answers it, which is what
+        // answers a gradient set by `createLinearGradient` today.
+        const bool fill_is_colour = !c->fill_gradient && !c->fill_pattern;
+        const bool stroke_is_colour = !c->stroke_gradient && !c->stroke_pattern;
+        if (fill_is_colour) self->set_property("fillStyle", JsValue::make_string(c->fill_style.to_hex()));
+        else drop_own(*self, "fillStyle");
+        if (stroke_is_colour) self->set_property("strokeStyle", JsValue::make_string(c->stroke_style.to_hex()));
+        else drop_own(*self, "strokeStyle");
+        self->set_property("lineWidth", JsValue::make_number(c->line_width));
+        self->set_property("globalCompositeOperation",
+                           JsValue::make_string(c->global_composite_operation));
+    };
+    context_object.set_property("save", make_function(r, "save", 0,
+        [get_ctx, sync](Realm&, Args) { get_ctx()->save(); (void)sync; return undefined(); }));
+    context_object.set_property("restore", make_function(r, "restore", 0,
+        [get_ctx, sync](Realm&, Args) { get_ctx()->restore(); sync(); return undefined(); }));
 }
 
 // --- WebGL 1.0 / 2.0 WebIDL bindings (Khronos WebGL 1.0 §5 / 2.0 §3) --------
@@ -2741,6 +2798,7 @@ void setup_canvas(Iface& I) {
                 // Phase 280: `reset()` and `createPattern()` are object-level
                 // state, so they are installed here with the rest.
                 install_canvas_reset(r, object, backing);
+                install_canvas_save_restore(r, object, backing);
                 install_canvas_create_pattern(r, object, backing);
                 return object;
             });

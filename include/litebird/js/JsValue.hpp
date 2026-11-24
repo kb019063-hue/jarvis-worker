@@ -139,6 +139,7 @@ private:
 struct BytecodeFunction;
 class CanvasRenderingContext2D;
 class CanvasGradient;
+class CanvasPattern;
 
 class JsValue {
 public:
@@ -218,6 +219,7 @@ public:
                                      std::shared_ptr<Node>,
                                      std::shared_ptr<CanvasRenderingContext2D>,
                                      std::shared_ptr<CanvasGradient>,
+                                     std::shared_ptr<CanvasPattern>,
                                      std::shared_ptr<struct PromiseData>,
                                      std::shared_ptr<struct GeneratorData>>;
         Payload payload;
@@ -258,6 +260,9 @@ public:
     const std::shared_ptr<Node>& dom_node_value() const;
     const std::shared_ptr<CanvasRenderingContext2D>& canvas_context() const;
     const std::shared_ptr<CanvasGradient>& canvas_gradient_value() const;
+    /// §4.12.5.1's `CanvasPattern`, when this value is one. A `fillStyle` is
+    /// three things: a colour, a gradient or a pattern, and this is the third.
+    const std::shared_ptr<CanvasPattern>& canvas_pattern_value() const;
     const std::shared_ptr<struct PromiseData>& promise_value() const;
     const std::shared_ptr<struct GeneratorData>& generator_value() const;
 
@@ -272,6 +277,7 @@ public:
     void set_native_function(NativeFn value);
     void set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> value);
     void set_canvas_gradient_value(std::shared_ptr<CanvasGradient> value);
+    void set_canvas_pattern_value(std::shared_ptr<CanvasPattern> value);
     void set_promise_value(std::shared_ptr<struct PromiseData> value);
     void set_generator_value(std::shared_ptr<struct GeneratorData> value);
 

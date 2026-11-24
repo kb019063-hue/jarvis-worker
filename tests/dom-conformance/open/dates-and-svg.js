@@ -10,4 +10,23 @@ t('stepping a date', function () { var i = inp('date', '2026-03-04'); i.stepUp(2
 t('stepping a time', function () { var i = inp('time', '12:30'); i.stepUp(); return i.value; });
 // The SVG DOM.
 t('svg elements', function () { var c = document.getElementById('ci'), s = document.getElementById('svg'); return [typeof c.className, c.className && c.className.baseVal, typeof s.viewBox, c.constructor.name, s.constructor.name]; });
+// The SVG interfaces, and the three answers one wrong table used to cost
+// (Phase 374). The negative lines are the point: SVG 2 §7.7 gives `viewBox` to
+// svg/symbol/marker/pattern/view and no other element, so a `g` or a `rect`
+// answering `undefined` is the correct reading, not a gap.
+t('svg interface names', function () { var NS = 'http://www.w3.org/2000/svg';
+  return ['g', 'rect', 'symbol', 'marker', 'pattern', 'view', 'defs'].map(function (tag) {
+    return document.createElementNS(NS, tag).constructor.name; }); });
+t('svg graphics instanceof', function () { var NS = 'http://www.w3.org/2000/svg';
+  return ['g', 'symbol', 'marker'].map(function (tag) {
+    return document.createElementNS(NS, tag) instanceof SVGGraphicsElement; }); });
+t('svg viewBox on the five, absent on the rest', function () { var NS = 'http://www.w3.org/2000/svg';
+  return ['svg', 'symbol', 'marker', 'pattern', 'view', 'g', 'rect', 'defs'].map(function (tag) {
+    return typeof document.createElementNS(NS, tag).viewBox; }); });
+t('svg symbol viewBox reads its attribute', function () { var NS = 'http://www.w3.org/2000/svg';
+  var y = document.createElementNS(NS, 'symbol'); y.setAttribute('viewBox', '1 2 3 4');
+  var b = y.viewBox.baseVal; return [b.x, b.y, b.width, b.height]; });
+t('getBBox and createSVGRect exist', function () { var NS = 'http://www.w3.org/2000/svg';
+  var g = document.createElementNS(NS, 'g'), s = document.getElementById('svg');
+  return [typeof g.getBBox, s.createSVGRect().constructor.name, g.getBBox() instanceof SVGRect]; });
 console.log(out.join('\n'));

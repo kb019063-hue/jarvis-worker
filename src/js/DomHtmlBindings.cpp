@@ -545,9 +545,13 @@ struct SvgAnimatedRectState : JsExotic {
 };
 
 struct SvgRectState : JsExotic {
+    // A rectangle either reflects an element's `viewBox` (`box` set) or stands
+    // on its own: `getBBox()` and `createSVGRect()` make one with no attribute
+    // behind it, whose members a script may still write.
     std::shared_ptr<SvgViewBoxState> box;
+    std::array<float, 4> values{};
     bool animated{false};
-    void trace(Heap& heap) override { trace_node(heap, box->element.get()); }
+    void trace(Heap& heap) override { if (box) trace_node(heap, box->element.get()); }
 };
 
 bool svg_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'; }
@@ -669,6 +673,7 @@ void setup_svg_rect(Iface& I) {
     for (std::size_t i = 0; i < 4; ++i) {
         I.accessor(names[i], [i](Realm&) {
             auto& state = this_state<SvgRectState>("SVGRect");
+            if (!state.box) return num(state.values[i]);
             sync_svg_view_box(*state.box);
             return num(state.box->values[i]);
         }, [i](Realm& realm, const JsValue& value) {
@@ -679,6 +684,10 @@ void setup_svg_rect(Iface& I) {
                 ? std::copysign(std::numeric_limits<float>::infinity(), number)
                 : static_cast<float>(number);
             if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated rectangle is read-only.");
+            if (!state.box) {
+                state.values[i] = converted;
+                return;
+            }
             sync_svg_view_box(*state.box);
             state.box->values[i] = converted;
             std::string text;
@@ -713,8 +722,19 @@ bool is_svg_svg(const Node& node) {
     return is_svg_node(node) && static_cast<const Element&>(node).tag_name() == "svg";
 }
 
-void setup_svg_svg_element(Iface& I) {
-    I.node_getter(&is_svg_svg, "viewBox", [](Realm& realm, Node& node) {
+// Which SVG elements carry `viewBox`. SVG 2 §7.7: "All elements that establish a
+// new viewport ... plus the marker, pattern and view elements have attribute
+// viewBox", and each of those interfaces includes SVGFitToViewBox (§4.6.9), the
+// mixin whose one attribute is `viewBox`. `g`, `rect` and the rest have none:
+// asking them for it is `undefined`, which is what a browser answers.
+bool svg_fits_to_view_box(const Node& node) {
+    if (!is_svg_node(node)) return false;
+    const std::string& tag = static_cast<const Element&>(node).tag_name();
+    return tag == "svg" || tag == "symbol" || tag == "marker" || tag == "pattern" || tag == "view";
+}
+
+void setup_svg_fit_to_view_box(Iface& I) {
+    I.node_getter(&svg_fits_to_view_box, "viewBox", [](Realm& realm, Node& node) {
         return cached(wrap(realm, node), "svgViewBox", [&]() {
             auto state = std::make_shared<SvgAnimatedRectState>();
             state->box = std::make_shared<SvgViewBoxState>();
@@ -723,6 +743,38 @@ void setup_svg_svg_element(Iface& I) {
         });
     });
 }
+
+// A graphics element's bounding box: the geometry the layout gave it, as an
+// SVGRect of its own. SVG 2 §4.4.2 defines it in current user space; with no
+// transforms implemented that is the painted border box, which is what the
+// layout already computes for getBoundingClientRect.
+bool is_svg_graphics_element(const Node& node) {
+    if (!is_svg_node(node)) return false;
+    const std::string& tag = static_cast<const Element&>(node).tag_name();
+    return tag == "svg" || tag == "symbol" || tag == "marker" || tag == "pattern" || tag == "view" ||
+           tag == "g" || tag == "rect" || tag == "circle" || tag == "ellipse" || tag == "line" ||
+           tag == "path" || tag == "polygon" || tag == "polyline" || tag == "text" || tag == "tspan" ||
+           tag == "textPath" || tag == "use" || tag == "image" || tag == "foreignObject" || tag == "a";
+}
+
+void setup_svg_graphics_element(Iface& I) {
+    I.node_method(&is_svg_graphics_element, "getBBox", 0, [](Realm& realm, Node& node, Args) {
+        auto rect = std::make_shared<SvgRectState>();
+        const Rect box = static_cast<Element&>(node).bounding_box();
+        rect->values = {static_cast<float>(box.x), static_cast<float>(box.y),
+                        static_cast<float>(box.width), static_cast<float>(box.height)};
+        return realm.make("SVGRect", rect);
+    });
+}
+
+// `createSVGRect()` is SVGSVGElement's, SVG 2 §5.13.2: a fresh empty rect.
+void setup_svg_svg_element(Iface& I) {
+    setup_svg_fit_to_view_box(I);
+    I.method("createSVGRect", 0, [](Realm& realm, Args) {
+        return realm.make("SVGRect", std::make_shared<SvgRectState>());
+    });
+}
+
 
 void setup_svg_element(Iface& I) {
     I.node_getter(&is_svg_node, "className", [](Realm& r, Node& self) {
@@ -3636,8 +3688,32 @@ void register_html_interfaces() {
     register_interface({"SVGAnimatedRect", nullptr, setup_svg_animated_rect, nullptr, 0, nullptr});
     register_interface({"SVGRect", nullptr, setup_svg_rect, nullptr, 0, nullptr});
     register_interface({"SVGElement", "Element", setup_svg_element, nullptr, 0, nullptr});
-    register_interface({"SVGGraphicsElement", "SVGElement", nullptr, nullptr, 0, nullptr});
+    register_interface({"SVGGraphicsElement", "SVGElement", setup_svg_graphics_element, nullptr, 0, nullptr});
     register_interface({"SVGSVGElement", "SVGGraphicsElement", setup_svg_svg_element, nullptr, 0, nullptr});
+    register_interface({"SVGSymbolElement", "SVGGraphicsElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
+    register_interface({"SVGMarkerElement", "SVGElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
+    register_interface({"SVGPatternElement", "SVGElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
+    register_interface({"SVGViewElement", "SVGElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
+    // The graphics elements: place in the chain is all that is set here, because
+    // `getBBox` is SVGGraphicsElement's and is reached through the parent.
+    for (const char* name : {"SVGGElement", "SVGRectElement", "SVGCircleElement", "SVGEllipseElement",
+                             "SVGLineElement", "SVGPathElement", "SVGPolygonElement", "SVGPolylineElement",
+                             "SVGTextElement", "SVGTSpanElement", "SVGTextPathElement", "SVGImageElement",
+                             "SVGForeignObjectElement", "SVGUseElement", "SVGAElement", "SVGSwitchElement"}) {
+        register_interface({name, "SVGGraphicsElement", nullptr, nullptr, 0, nullptr});
+    }
+    // Interfaces of their own, but not graphics elements: they inherit
+    // SVGElement, so none of them has `getBBox()`.
+    for (const char* name : {"SVGDefsElement", "SVGDescElement", "SVGMetadataElement", "SVGStyleElement",
+                             "SVGScriptElement", "SVGStopElement", "SVGLinearGradientElement",
+                             "SVGRadialGradientElement", "SVGClipPathElement", "SVGMaskElement",
+                             "SVGFilterElement", "SVGFEGaussianBlurElement", "SVGFEOffsetElement",
+                             "SVGFEBlendElement", "SVGFEColorMatrixElement", "SVGFEFloodElement",
+                             "SVGFECompositeElement", "SVGFEMergeElement", "SVGFEImageElement",
+                             "SVGFETileElement", "SVGFETurbulenceElement", "SVGFEDropShadowElement",
+                             "SVGAnimateElement", "SVGSetElement", "SVGAnimateTransformElement"}) {
+        register_interface({name, "SVGElement", nullptr, nullptr, 0, nullptr});
+    }
     register_interface({"SVGTitleElement", "SVGElement", nullptr, nullptr, 0, nullptr});
 
     for (const auto& simple : kSimple) {

@@ -972,6 +972,13 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   with every other run is one nobody reads, and the second run of the
   stretch is a minute of every run it comes with.
 
+  A third run, with that bound changed, needed no second run of anything
+  and was 6.0 minutes (45477108702), and its four stretches side by side
+  took 91 to 121 seconds where the first run's had taken 55 to 64. **What
+  the suites take depends on the machine by a factor of two**: 117, 176
+  and 204 seconds for the same six stretches in three runs within half
+  an hour. One run says little about a change to CI; compare several.
+
 **The turn, and what a merge does to it**
 
 - **An agent works while its turn lasts, and not in between.** A turn begins

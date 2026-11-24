@@ -136,6 +136,8 @@ jobs:
         run: make verify-js-error-terminal-safety
       - name: CLI file and navigation errors cannot inject terminal controls
         run: make verify-cli-error-terminal-safety
+      - name: A page's own text cannot inject terminal controls through a dump
+        run: make verify-page-text-terminal-safety
       - name: Pathless URL references agree with Node
         run: make verify-relative-navigation
       - name: Path-bearing URL references agree with Node

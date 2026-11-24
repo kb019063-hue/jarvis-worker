@@ -1,4 +1,5 @@
 #include "litebird/dom/Document.hpp"
+#include "litebird/common/TerminalText.hpp"
 #include "litebird/css/DocumentStyles.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
@@ -238,7 +239,7 @@ void Document::clear_subresource_caches() {
 
 void Document::dump_open(std::ostream& os, const std::string& indent, bool) const {
     os << indent << "#document";
-    if (!m_title.empty()) os << " (title: \"" << m_title << "\")";
+    if (!m_title.empty()) os << " (title: \"" << terminal_safe(m_title) << "\")";
     os << "\n";
 }
 

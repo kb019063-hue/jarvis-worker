@@ -1,4 +1,5 @@
 #include "litebird/dom/Node.hpp"
+#include "litebird/common/TerminalText.hpp"
 #include "litebird/js/JsOps.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/dom/Text.hpp"
@@ -1126,7 +1127,8 @@ std::shared_ptr<ShadowRoot> Element::attach_shadow(const std::string& mode_str) 
 void Element::dump_open(std::ostream& os, const std::string& indent, bool has_content) const {
     os << indent << "<" << m_tag_name;
     for (const auto& attribute : m_attributes) {
-        os << " " << attribute.name << "=\"" << attribute.value << "\"";
+        os << " " << terminal_safe(attribute.name) << "=\"" << terminal_safe(attribute.value)
+           << "\"";
     }
     os << (has_content ? ">\n" : " />\n");
 }
@@ -1136,12 +1138,23 @@ void Element::dump_close(std::ostream& os, const std::string& indent) const {
 }
 
 void Text::dump_open(std::ostream& os, const std::string& indent, bool) const {
+    // The writer's own two escapes first, so a newline in a text node still
+    // prints as the two characters `\n`; what is left goes through
+    // terminal_safe, because the rest of a text node is the page's to choose.
     os << indent << "#text: \"";
+    // The text between them accumulates in `rest` so that a multi-byte
+    // character is filtered whole rather than one byte at a time.
+    std::string rest;
+    auto flush = [&os, &rest] {
+        os << terminal_safe(rest);
+        rest.clear();
+    };
     for (char c : m_text) {
-        if (c == '\n') os << "\\n";
-        else if (c == '\t') os << "\\t";
-        else os << c;
+        if (c == '\n') { flush(); os << "\\n"; }
+        else if (c == '\t') { flush(); os << "\\t"; }
+        else rest.push_back(c);
     }
+    flush();
     os << "\"\n";
 }
 

@@ -59,4 +59,49 @@ JsValue typed_array_from_bytes(const std::string& bytes);
 /// buffer, not a short write.
 bool typed_array_write(const JsValue& view, const uint8_t* bytes, std::size_t count);
 
+/// What a byte-carrying object is, for structured cloning and the transfer
+/// list: the three shapes the standard gives them, and the element type and
+/// geometry a typed-array view keeps.
+///
+/// `kind` is 0 for none, 1 for an `ArrayBuffer`, 2 for a typed-array view and
+/// 3 for a `DataView`. `element_type` is the view's index into
+/// `%TypedArray%`'s constructors (0 is Int8, 1 Uint8 … 7 Float64), and
+/// `byte_offset`/`byte_length`/`length_tracking` are the view's window. A
+/// detached buffer answers false: there are no bytes to copy, and the
+/// standard's structured clone throws for one.
+struct BufferViewInfo {
+    int kind{0};
+    int element_type{0};
+    std::size_t byte_offset{0};
+    std::size_t byte_length{0};
+    bool length_tracking{false};
+};
+bool buffer_view_info(const JsValue& value, BufferViewInfo& out);
+
+/// A view of a given element type over `bytes`, copied into the current realm,
+/// with the constructor's own prototype — the object a structured clone gives
+/// back. `element_type` is `BufferViewInfo::element_type`.
+JsValue typed_array_view_from_bytes(int element_type, const std::string& bytes);
+/// A `DataView` over a copy of `bytes`: the object `new DataView(buffer)` makes.
+JsValue data_view_from_bytes(const std::string& bytes);
+
+/// `new <element_type>Array(buffer, byte_offset, length)`, and
+/// `new DataView(buffer, byte_offset, byte_length)`, for a buffer that is
+/// already an object of this realm. A structured clone uses these so that a
+/// view and the views beside it share the one cloned buffer.
+JsValue typed_array_view_over(int element_type, const JsValue& buffer,
+                              std::size_t byte_offset, std::size_t byte_length,
+                              bool length_tracking);
+JsValue data_view_over(const JsValue& buffer, std::size_t byte_offset,
+                       std::size_t byte_length);
+
+/// `ArrayBufferCopyAndDetach` (ECMA-262 §25.1.3.4) with no length argument: the
+/// bytes leave `value` and a fresh buffer holds them, which is what a transfer
+/// does. False when `value` is not a buffer or is already detached.
+bool array_buffer_transfer(const JsValue& value, JsValue& out);
+
+/// The prototype each typed-array constructor's instances have, by element
+/// type. Used where a clone has to name the constructor the bytes belong to.
+JsObject* typed_array_prototype_for(int element_type);
+
 } // namespace litebird

@@ -5,6 +5,7 @@
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/DomBindings.hpp"
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/js/TypedArray.hpp"
 #include <algorithm>
 #include <cmath>
 #include <unordered_map>
@@ -529,39 +530,163 @@ std::string object_tag(const JsValue& value) {
     return "Object";
 }
 
-JsValue structured_clone(const JsValue& value, std::unordered_map<const void*, JsValue>& seen) {
+// ---------------------------------------------------------------------------
+// structuredClone
+// ---------------------------------------------------------------------------
+//
+// The HTML structured-clone algorithm, for the types this engine has. A clone
+// keeps the type of what it copies — a Map comes back a Map with its entries,
+// a RegExp a RegExp with its pattern and flags — and keeps the shape of the
+// graph: two references to one object are one object afterwards, and a cycle
+// is a cycle.
+//
+// What is here and what is not is the standard's split. Functions and host
+// objects are refused with a DataCloneError (§2.7.3 of the HTML standard's
+// "StructuredSerializeInternal"), a Symbol throws a TypeError because it has
+// no representation at all, and WeakMap and WeakSet are refused because their
+// entries are exactly what a script may not read back.
+
+struct CloneState {
+    std::unordered_map<const void*, JsValue> seen;
+    /// The buffers a transfer list moved out of the object graph, by identity:
+    /// the clone of one is the buffer it was transferred to, not a copy.
+    std::unordered_map<const void*, JsValue> transferred;
+};
+
+// The exception the standard names: a DOMException called DataCloneError, so
+// `e.name` is that rather than a message that begins with it.
+[[noreturn]] void throw_data_clone(const char* what) {
+    dom::throw_dom(dom::current_realm(), "DataCloneError",
+                   std::string(what) + " could not be cloned.");
+}
+
+JsValue structured_clone(const JsValue& value, CloneState& state);
+
+JsValue structured_clone(const JsValue& value, CloneState& state) {
     js_check_stack();
+    if (value.type == JsType::Symbol) {
+        js_throw_type_error("structuredClone: a Symbol cannot be cloned");
+    }
     if (!value.is_object_like()) return value;
     if (value.is_function() || value.dom_node_value()) {
-        js_throw_error(JsErrorKind::Error, "DataCloneError: value could not be cloned");
+        throw_data_clone(value.is_function() ? "a function" : "a host object");
     }
-    auto it = seen.find(value.identity());
-    if (it != seen.end()) return it->second;
+    auto it = state.seen.find(value.identity());
+    if (it != state.seen.end()) return it->second;
 
     JsObject* cell = value.object_val;
+
+    // A transferred buffer was already moved; every reference to it in the
+    // graph — a view's `buffer` among them — answers the same new buffer.
+    if (const auto moved = state.transferred.find(value.identity()); moved != state.transferred.end()) {
+        return moved->second;
+    }
+
+    // --- the keyed collections -------------------------------------------
+    {
+        bool entries = false;
+        if (is_keyed_collection(value, entries)) {
+            // An empty collection first, registered before its entries are
+            // cloned, so a map that holds itself clones like anything else.
+            // The entries are added to that same object: an identity the
+            // graph already points at must not be swapped afterwards.
+            JsValue copy = make_collection_copy(entries, {});
+            state.seen.emplace(value.identity(), copy);
+            std::vector<std::pair<JsValue, JsValue>> items;
+            collection_entries(value, entries, items);
+            for (const auto& [key, item] : items)
+                add_collection_copy_entry(copy, structured_clone(key, state),
+                                          structured_clone(item, state));
+            return copy;
+        }
+    }
+
+    // --- a regular expression --------------------------------------------
+    if (cell->klass == ObjectClass::RegExp) {
+        std::string source, flags;
+        if (!js_regexp_source_and_flags(value, source, flags)) throw_data_clone("a RegExp");
+        JsValue copy = js_regexp_create(source, flags);
+        state.seen.emplace(value.identity(), copy);
+        return copy;
+    }
+
+    // --- the byte-carrying types ------------------------------------------
+    BufferViewInfo info;
+    if (buffer_view_info(value, info)) {
+        std::string bytes;
+        if (!typed_array_bytes(value, bytes)) throw_data_clone("a detached ArrayBuffer");
+        if (info.kind == 1) {
+            JsValue copy = array_buffer_from_bytes(bytes);
+            state.seen.emplace(value.identity(), copy);
+            return copy;
+        }
+        // A view is cloned with the buffer it is a window on: `clone.buffer` is
+        // the same object the source's `buffer` cloned to, which the seen map
+        // is what remembers. So the view is built over the clone of the
+        // buffer, at the same offset and with the same length.
+        const JsValue source_buffer = value.get_property("buffer");
+        JsValue cloned_buffer = structured_clone(source_buffer, state);
+        JsValue copy = (info.kind == 2)
+            ? typed_array_view_over(info.element_type, cloned_buffer, info.byte_offset,
+                                    info.byte_length, info.length_tracking)
+            : data_view_over(cloned_buffer, info.byte_offset, info.byte_length);
+        state.seen.emplace(value.identity(), copy);
+        return copy;
+    }
+
+    // --- arrays ------------------------------------------------------------
     if (cell->is_array) {
         JsValue copy = JsValue::make_array();
-        seen.emplace(value.identity(), copy);
+        state.seen.emplace(value.identity(), copy);
         for (size_t i = 0; i < cell->array_elements.size(); ++i) {
             // Structured clone keeps a hole a hole (the standard skips the
             // index rather than writing undefined into it).
             if (value.is_array_hole(i)) copy.object_val->array_elements.push_back(JsValue::make_undefined());
-            else copy.object_val->array_elements.push_back(structured_clone(cell->array_elements[i], seen));
+            else copy.object_val->array_elements.push_back(structured_clone(cell->array_elements[i], state));
             if (value.is_array_hole(i)) copy.set_array_hole(i);
         }
         return copy;
     }
+
+    // --- ordinary objects, Date, Error -------------------------------------
     JsValue copy = JsValue::make_object();
-    seen.emplace(value.identity(), copy);
+    state.seen.emplace(value.identity(), copy);
     if (cell->klass == ObjectClass::Date || cell->klass == ObjectClass::Error) {
         copy.object_val->prototype = cell->prototype;
         copy.object_val->klass = cell->klass;
         copy.object_val->internal = cell->internal;
+    } else if (cell->klass != ObjectClass::Plain || cell->exotic || cell->internal) {
+        // A Promise, a generator, an iterator, a WeakMap, a host object with
+        // computed properties: no clone of them is defined, and a plain object
+        // that answered one of their methods would be worse than a refusal.
+        throw_data_clone("a host or exotic object");
     }
     for (const auto& key : reflected_own_keys(value, cell->klass == ObjectClass::Error)) {
-        copy.set_property(key, structured_clone(value.get_property(key), seen));
+        copy.set_property(key, structured_clone(value.get_property(key), state));
     }
     return copy;
+}
+
+// The transfer list, read the way §2.7.6 (StructuredSerializeWithTransfer)
+// reads it: every entry must be an ArrayBuffer, no buffer may appear twice,
+// and the buffers leave the source graph detached.
+void transfer_buffers(const JsValue& list, CloneState& state) {
+    if (list.is_undefined()) return;
+    const std::vector<JsValue> items = array_like_to_vector(list);
+    std::vector<const void*> seen;
+    for (const JsValue& item : items) {
+        BufferViewInfo info;
+        if (!buffer_view_info(item, info) || info.kind != 1) {
+            throw_data_clone("a transferable that is not an ArrayBuffer");
+        }
+        if (std::find(seen.begin(), seen.end(), item.identity()) != seen.end()) {
+            throw_data_clone("a transferable that is listed twice");
+        }
+        seen.push_back(item.identity());
+        JsValue moved;
+        if (!array_buffer_transfer(item, moved)) throw_data_clone("a detached ArrayBuffer");
+        state.transferred.emplace(item.identity(), moved);
+    }
 }
 
 const char* kErrorNames[7] = {"Error", "TypeError", "RangeError", "SyntaxError",
@@ -1219,9 +1344,14 @@ void install_object_builtins(JsIntrinsics& realm) {
     realm.add_global("Reflect", reflect);
 
     // ---- Miscellaneous globals --------------------------------------------
+    // structuredClone(value, { transfer: [...] }) — HTML §2.7.7. The options
+    // bag is read before the value is, as the standard orders it, so a bad
+    // transfer list throws before any getter in the graph runs.
     realm.add_global("structuredClone", js_make_native("structuredClone", 1, [](Args args) {
-        std::unordered_map<const void*, JsValue> seen;
-        return structured_clone(js_arg(args, 0), seen);
+        CloneState state;
+        const JsValue& options = js_arg(args, 1);
+        if (options.is_object_like()) transfer_buffers(options.get_property("transfer"), state);
+        return structured_clone(js_arg(args, 0), state);
     }));
 }
 

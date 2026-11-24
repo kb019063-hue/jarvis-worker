@@ -2890,19 +2890,38 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             apply_gsub_plan(gsub_plan, run, next_lig_id);
         }
 
-        // Strip surviving default-ignorable join controls (`U+200C`/`U+200D`) so
-        // they never paint `.notdef` boxes or interfere with `GPOS` adjacency.
-        run.erase(std::remove_if(run.begin(), run.end(),
-                                 [](const ShapingGlyph& sg) {
-                                     return (sg.feature_mask & (1u << 31)) != 0u;
-                                 }),
-                  run.end());
-
         const std::size_t n = run.size();
         for (std::size_t i = 0; i < n; ++i) {
             const uint16_t g = run[i].glyph;
             const uint16_t adv = (g < m_advance_widths.size()) ? m_advance_widths[g] : m_advance_widths[0];
             run[i].x_advance = static_cast<int32_t>(adv);
+        }
+
+        // A surviving default-ignorable join control (`U+200C`/`U+200D`) paints
+        // nothing and advances nothing -- but it stays in the stream, with the
+        // glyph its font maps it to and a zero advance, the way HarfBuzz emits
+        // it. It used to be erased here instead, which was wrong twice over:
+        // the glyph count then differed from the reference for any text holding
+        // one, and `mark_base` is an *index into this vector*, so erasing an
+        // element slid every later mark onto the base before its own.
+        for (ShapingGlyph& sg : run) {
+            if ((sg.feature_mask & (1u << 31)) == 0u) continue;
+            // OpenType makes a default-ignorable an *invisible glyph*: it keeps
+            // its slot in the stream so that `mark_base` indices and the glyph
+            // count stay right, and it reports the space glyph rather than the
+            // font's own `cmap` entry for the control. Nothing paints and
+            // nothing advances.
+            sg.glyph = glyph_index(0x0020u);
+            sg.x_advance = 0;
+            sg.y_advance = 0;
+            sg.x_offset = 0;
+            sg.y_offset = 0;
+            sg.mark_base = -1;
+            sg.lig_id = 0;
+            sg.lig_comp = 0;
+            sg.cursive_chain = -1;
+            sg.cursive_dx = 0;
+            sg.cursive_dy = 0;
         }
 
         const GposScriptPlan* gpos_plan = find_gpos_script(script_tag);

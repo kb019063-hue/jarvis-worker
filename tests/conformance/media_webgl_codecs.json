@@ -28,32 +28,28 @@
       "domain": "audio_video",
       "spec": "WHATWG HTML §4.8.11 (NETWORK_* and HAVE_* interface constants)",
       "script": "return [HTMLMediaElement.NETWORK_EMPTY, HTMLMediaElement.NETWORK_IDLE, HTMLMediaElement.NETWORK_LOADING, HTMLMediaElement.NETWORK_NO_SOURCE, HTMLMediaElement.HAVE_NOTHING, HTMLMediaElement.HAVE_METADATA, HTMLMediaElement.HAVE_CURRENT_DATA, HTMLMediaElement.HAVE_FUTURE_DATA, HTMLMediaElement.HAVE_ENOUGH_DATA];",
-      "expected": [0, 1, 2, 3, 0, 1, 2, 3, 4],
-      "known_failure": "HTMLMediaElement NETWORK_* and HAVE_* constants are not defined"
+      "expected": [0, 1, 2, 3, 0, 1, 2, 3, 4]
     },
     {
       "name": "media_element_volume_setter_and_range_error",
       "domain": "audio_video",
       "spec": "WHATWG HTML §4.8.11.15 (volume persistence and IndexSizeError outside [0, 1])",
       "script": "var a = document.createElement('audio'); a.volume = 0.25; var after = a.volume; var lowErr = 'none', highErr = 'none'; try { a.volume = -0.1; } catch (e) { lowErr = e.name; } try { a.volume = 1.5; } catch (e) { highErr = e.name; } return [after, lowErr, highErr];",
-      "expected": [0.25, "IndexSizeError", "IndexSizeError"],
-      "known_failure": "HTMLMediaElement.volume setter is a no-op stub returning 1 without range validation"
+      "expected": [0.25, "IndexSizeError", "IndexSizeError"]
     },
     {
       "name": "media_element_muted_current_time_and_playback_rate",
       "domain": "audio_video",
       "spec": "WHATWG HTML §4.8.11.15 (mutable playback state independent of muted content attribute)",
       "script": "var a = document.createElement('audio'); a.muted = true; a.currentTime = 12.5; a.playbackRate = 1.5; return [a.muted, a.hasAttribute('muted'), a.currentTime, a.playbackRate];",
-      "expected": [true, false, 12.5, 1.5],
-      "known_failure": "HTMLMediaElement muted, currentTime, and playbackRate setters are no-op stubs"
+      "expected": [true, false, 12.5, 1.5]
     },
     {
       "name": "media_element_time_ranges_and_media_error",
       "domain": "audio_video",
       "spec": "WHATWG HTML §4.8.11 (buffered, seekable, played TimeRanges and MediaError)",
       "script": "var a = document.createElement('audio'); var okBuf = !!(a.buffered && a.buffered.length === 0 && typeof a.buffered.start === 'function' && typeof a.buffered.end === 'function'); var okSeek = !!(a.seekable && a.seekable.length === 0); var okPlay = !!(a.played && a.played.length === 0); var errConsts = typeof MediaError === 'function' ? [MediaError.MEDIA_ERR_ABORTED, MediaError.MEDIA_ERR_NETWORK, MediaError.MEDIA_ERR_DECODE, MediaError.MEDIA_ERR_SRC_NOT_SUPPORTED] : null; return [okBuf, okSeek, okPlay, a.error === null, errConsts];",
-      "expected": [true, true, true, true, [1, 2, 3, 4]],
-      "known_failure": "TimeRanges (buffered/seekable/played) and MediaError are not implemented"
+      "expected": [true, true, true, true, [1, 2, 3, 4]]
     },
     {
       "name": "media_element_can_play_type_rejects_unknown",
@@ -67,8 +63,7 @@
       "domain": "audio_video",
       "spec": "WHATWG HTML §4.8.11.3 (canPlayType reports support for at least one standard audio codec and one standard video codec)",
       "script": "var a = document.createElement('audio'), v = document.createElement('video'); var audioOk = ['audio/wav; codecs=\"1\"', 'audio/mpeg', 'audio/ogg; codecs=\"vorbis\"'].some(function(t){ var r = a.canPlayType(t); return r === 'probably' || r === 'maybe'; }); var videoOk = ['video/mp4; codecs=\"avc1.42E01E\"', 'video/webm; codecs=\"vp8\"', 'video/webm; codecs=\"vp9\"'].some(function(t){ var r = v.canPlayType(t); return r === 'probably' || r === 'maybe'; }); return [audioOk, videoOk];",
-      "expected": [true, true],
-      "known_failure": "HTMLMediaElement.canPlayType always returns '' (no audio/video demuxer or codec stack)"
+      "expected": [true, true]
     },
     {
       "name": "media_element_play_without_source_rejects",
@@ -76,8 +71,7 @@
       "spec": "WHATWG HTML §4.8.11.8 (play() with no media resource rejects with NotSupportedError)",
       "async": true,
       "script": "var a = document.createElement('audio'); return a.play().then(function(){ return 'resolved'; }, function(e){ return 'rejected:' + (e && e.name ? e.name : String(e)); });",
-      "expected": "rejected:NotSupportedError",
-      "known_failure": "HTMLMediaElement.play() unconditionally resolves with undefined even when no source is loaded"
+      "expected": "rejected:NotSupportedError"
     },
     {
       "name": "media_element_wav_data_uri_loads_metadata",

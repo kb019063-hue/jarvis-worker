@@ -321,6 +321,13 @@ bool parse_array_index(const std::string& name, size_t& out) {
 bool is_hidden_key(const std::string& key) {
     if (key.size() >= 2 && key[0] == '@' && key[1] == '@') return true;
     if (!key.empty() && key[0] == '%') return true;      // internal slots
+    // `__name__` is the engine's own bookkeeping -- `__get_x__`, `__set_x__`
+    // and the rest -- and is not a property a script made. `__proto__` is the
+    // exception: it is Annex B.2.2.1's real accessor on `Object.prototype`, so
+    // hiding it was why `Object.getOwnPropertyNames(Object.prototype)` left it
+    // out after it had been installed, while
+    // `Object.getOwnPropertyDescriptor` answered for it.
+    if (key == "__proto__") return false;
     return key.size() >= 5 && key[0] == '_' && key[1] == '_' &&
            key[key.size() - 1] == '_' && key[key.size() - 2] == '_';
 }
@@ -1393,6 +1400,37 @@ void JsValue::define_private_accessor(const std::string& key, const JsValue& get
 }
 
 // The EventTarget methods, for any node: elements, text nodes and the document.
+namespace {
+
+/// True when `Object.prototype`'s own `__proto__` entry is no longer the
+/// accessor `install_object_builtins` put there -- a script replaced it, and
+/// the replacement is what a read must call.
+bool object_proto_has_replaced_accessor() {
+    const JsObject* op = JsIntrinsics::get().object_proto;
+    if (!op) return false;
+    const auto it = op->properties.find("__proto__");
+    if (it == op->properties.end()) return true;      // removed: nothing to stand in for
+    if (!(it->flags & PropertyMap::Accessor)) return true;
+    const JsValue& getter = it->second;
+    // The installed getter is a native whose name is "get __proto__".
+    if (!getter.is_function() || !getter.function_data()) return true;
+    return getter.function_data()->name != "get __proto__";
+}
+
+/// True when `start` reaches `Object.prototype`, which is where the `__proto__`
+/// accessor lives. An object that replaced that prototype with `null` (or with
+/// anything else not ending there) has no `__proto__` to answer with.
+bool prototype_chain_has_object_proto(JsObject* start) {
+    JsObject* proto = start;
+    for (int depth = 0; proto && depth < 1000; ++depth) {
+        if (proto == JsIntrinsics::get().object_proto) return true;
+        proto = proto->prototype;
+    }
+    return false;
+}
+
+} // namespace
+
 JsValue JsValue::get_property(const std::string& name) const {
     // Primitives have no properties of their own; they borrow the methods of
     // their wrapper prototype (String.prototype and friends).
@@ -1428,7 +1466,30 @@ JsValue JsValue::get_property(const std::string& name) const {
         if (fd && fd->node && fd->is_constructor) obj = property_cell(true);
     }
     if (obj) {
-        if (name == "__proto__") {
+        // `__proto__` is an accessor on `Object.prototype` (Annex B.2.2.1,
+        // installed by `install_object_builtins`). This synthesis is the answer
+        // for a receiver that has no such own accessor -- which is every object
+        // whose prototype is not `Object.prototype`, since the accessor is
+        // inherited through the chain and found there before this runs.
+        //
+        // It stays because it is what makes `obj.__proto__` work for a receiver
+        // built before that accessor existed, and because it is faster than a
+        // chain walk; it must not run when the object has its own `__proto__`
+        // entry, or `Object.defineProperty(o, "__proto__", ...)` would be
+        // invisible to reads.
+        // The answer for `__proto__` here is the receiver's [[Prototype]] -- but
+        // only when the receiver would have reached the accessor on
+        // `Object.prototype`. A receiver whose chain does not include it has no
+        // `__proto__` at all: after `o.__proto__ = null`, Node answers
+        // `undefined`, not `null`, because the accessor went with the prototype.
+        // The synthesis answers only while the accessor it stands in for is
+        // still there. `Object.defineProperty(Object.prototype, "__proto__",
+        // {...})` replaces it, and from then on the replacement must be what
+        // reads: Node answers the script's getter, and a synthesis that ran
+        // first would answer the internal slot and hide it.
+        if (name == "__proto__" && obj->properties.find("__proto__") == obj->properties.end() &&
+            !object_proto_has_replaced_accessor() &&
+            prototype_chain_has_object_proto(obj->prototype)) {
             if (obj->prototype) return JsValue::make_object(obj->prototype);
             return JsValue::make_null();
         }
@@ -1634,7 +1695,16 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
             }
         }
         if (obj->assign_hook && (*obj->assign_hook)(name, val)) return true;
-        if (sets_prototype) {
+        // The same rule as the read side: this stands in for the accessor on
+        // `Object.prototype` and must not run when it has been replaced or when
+        // the receiver has an entry of its own -- otherwise a script's setter
+        // would be silently skipped, and `o.__proto__ = v` would move the
+        // prototype instead of calling it.
+        const bool own_proto_entry = sets_prototype &&
+            obj->properties.find("__proto__") != obj->properties.end();
+        const bool proto_still_ours = sets_prototype &&
+            !own_proto_entry && !object_proto_has_replaced_accessor();
+        if (proto_still_ours) {
             // Anything but an object or null is ignored, as the setter on
             // Object.prototype does. A change that is refused throws.
             if (!val.is_object_like() && val.type != JsType::Null) return false;

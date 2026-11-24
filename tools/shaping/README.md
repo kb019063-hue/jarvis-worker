@@ -332,3 +332,22 @@ ordering and blocking for marks following Latin starters, not full NFC:
 supported composites are not decomposed to interleave a following mark,
 leading mark runs and other scripts are unchanged. Details and test controls
 are in `docs/phases/266-latin-mark-order.md`.
+
+## Supported composites before following marks (Phase 270)
+
+`supported_composite_diagnostic.py` uses the same
+CLI as the other shaping probes. It compares á/å/ê followed by dot below with
+the corresponding explicit component sequences, plus equal-class and standalone
+controls. On the recorded DejaVu Sans with HarfBuzz 12.1.0: **5/8 → 8/8 exact
+matches** after covered recursive decomposition before a following Latin mark.
+DejaVu Serif also matches all eight. The standard corpus remains unchanged.
+
+```sh
+build/shaping-venv/bin/python tools/shaping/supported_composite_diagnostic.py \
+  --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf --output build/supported.json
+```
+
+If even one leaf is absent from the face, expansion is rejected and the original
+is kept. Standalone supported composites and class-zero boundaries remain intact.
+No full-NFC, other-script or browser-pixel claim: details and regression controls
+are in `docs/phases/270-supported-latin-composites.md`.

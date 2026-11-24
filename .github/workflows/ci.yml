@@ -38,8 +38,11 @@ on:
 # three times over: by its own run, by the lot's, and by the run on `main`
 # after the lot.
 #
-# - **The short run of a pull request that has the label `lot`**: "Build &
-#   unit tests" and "Documentation shape", and every other job is skipped.
+# - **The short run of a pull request that has the label `lot`**: the jobs
+#   of the plain build that take a minute or two ("Build & unit tests",
+#   "Documentation shape", the reftests, and the four corpus jobs: html5lib,
+#   JavaScript, script DOM and URLs, XML and web-platform-tests). The six
+#   sanitizer jobs and the deep pages, which are the long ones, are skipped.
 #   The landing session puts the label on while a watch is on
 #   (`tools/watch/watch.sh look`), because the whole of CI then runs on the
 #   lot the pull request lands in, on `main` as it will be, which its own
@@ -47,6 +50,17 @@ on:
 #   job. With no watch, `python3 tools/ci/check_pr.py merge N` takes the
 #   label off before it says "ready", which starts every job (`unlabeled`,
 #   above): nothing is merged by its own agent on a short run.
+#
+#   For its first four hours the short run was the first two of those jobs
+#   and no more. On 24 November two lots in a row failed for it (pushed
+#   08:38 and 08:44 UTC): #368 failed one case of the html5lib corpus and
+#   #366 was in both, their own runs were green because those jobs were not
+#   in them, and the lot's run names the job that failed and not the pull
+#   request. Three others waited sixteen minutes more, and which of the two
+#   it was had to be found by building each alone. The corpus jobs take 12
+#   to 70 seconds each when the objects are in ccache; with them in its own
+#   run, a pull request that breaks a corpus fails by itself, within two
+#   minutes of its push, and `watch.sh lot` says which one it was.
 # - **The run on `main` after the last merge of a lot** (`[objects only]` in
 #   that merge's message, written by `tools/watch/watch.sh land`): the lot's
 #   run passed every job on that very tree minutes before. What this run is
@@ -325,9 +339,9 @@ jobs:
   render-conformance:
     name: Render reftests (pixels)
     runs-on: ubuntu-latest
-    # Not in the short run of a pull request, nor after the last merge of a lot
-    # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    # Not after the last merge of a lot (the top of this file). It is part of
+    # the short run.
+    if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     defaults:
       run:
         # A step that fails keeps what it printed, for the last step of the
@@ -365,9 +379,9 @@ jobs:
   conformance:
     name: DOM conformance (html5lib corpus)
     runs-on: ubuntu-latest
-    # Not in the short run of a pull request, nor after the last merge of a lot
-    # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    # Not after the last merge of a lot (the top of this file). It is part of
+    # the short run.
+    if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     defaults:
       run:
         # A step that fails keeps what it printed, for the last step of the
@@ -431,9 +445,9 @@ jobs:
   js-conformance:
     name: JavaScript conformance (Node-verified corpus)
     runs-on: ubuntu-latest
-    # Not in the short run of a pull request, nor after the last merge of a lot
-    # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    # Not after the last merge of a lot (the top of this file). It is part of
+    # the short run.
+    if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     defaults:
       run:
         # A step that fails keeps what it printed, for the last step of the
@@ -550,9 +564,9 @@ jobs:
   dom-conformance:
     name: Script DOM conformance (jsdom-verified corpus) and URLs (web-platform-tests)
     runs-on: ubuntu-latest
-    # Not in the short run of a pull request, nor after the last merge of a lot
-    # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    # Not after the last merge of a lot (the top of this file). It is part of
+    # the short run.
+    if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     defaults:
       run:
         # A step that fails keeps what it printed, for the last step of the
@@ -607,9 +621,9 @@ jobs:
   xml-and-wpt:
     name: XML (W3C suite, Expat and libxml2) and web-platform-tests
     runs-on: ubuntu-latest
-    # Not in the short run of a pull request, nor after the last merge of a lot
-    # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    # Not after the last merge of a lot (the top of this file). It is part of
+    # the short run.
+    if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     defaults:
       run:
         # A step that fails keeps what it printed, for the last step of the

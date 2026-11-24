@@ -260,15 +260,25 @@ within the hour, and the first lot was started again four times.
      one lot (#305, #313, #321) and none of them cost a run;
    - **while a watch is on, a pull request's own run is the short one.**
      The landing session puts the label `lot` on it (`watch.sh look`), and
-     CI then runs "Build & unit tests" and "Documentation shape" on it
-     and skips every other job. The whole of CI runs on the lot it
+     CI then runs on it the jobs of the plain build that take a minute or
+     two: "Build & unit tests", "Documentation shape", the reftests and
+     the four corpus jobs (html5lib, JavaScript, script DOM and URLs, XML
+     and web-platform-tests). The six sanitizer jobs and the deep pages
+     are skipped. The whole of CI runs on the lot it
      lands in, on `main` as it will be, which its own run never saw.
      **Jobs "skipped" on your pull request are that, and nothing to mend**;
      `python3 tools/ci/check_pr.py merge N` says so. You still run the
      checks of "What "done" means" here before the last push: a pull
      request that fails a job in the lot takes the others in it back a
-     run. When no watch is on, `merge N` takes the label off, which
-     starts every job, and says "not ready" until they have passed:
+     run, and the lot's run names the job, not the pull request. For its first
+     four hours the short run was two jobs, and on 24 November two lots in a
+     row failed for it: #368 had changed what the tree dump writes and failed
+     one case of the html5lib corpus, its own run was green because that job
+     was not in it, and which member of the lot it was had to be found by
+     building each alone, while five others waited. With the corpus jobs in its
+     own run, such a pull request fails by itself two minutes after its push.
+     When no watch is on, `merge N` takes the label off, which starts every
+     job, and says "not ready" until they have passed:
      nobody merges on a short run. The reason is the queue: a run was
      twelve jobs and no more than twenty were seen running at once. At
      04:57 on 24 November 19 were running and 25 waiting, in
@@ -515,12 +525,17 @@ asan`.
   needs `pip install lxml`.
 - A unit suite that passes in the normal build can fail in the sanitizer
   build, and CI's log cannot be read from every sandbox: run `make asan`
-  here first. When one of CI's four sanitizer jobs fails all the same, its
-  last step says what failed in the job's annotations, which the API itself serves:
+  here first. When a job of CI fails all the same, **its last step says
+  what failed in the job's annotations**, which the API itself serves:
   `gh run view RUN --json jobs` for the job's id, then
   `gh api repos/OWNER/REPO/check-runs/JOB_ID/annotations --jq '.[].message'`.
-  (`tools/ci/annotate_failure.py`; any job that keeps its output with
-  `tee` can end with the same step.) The name of the step that failed is a
+  Every job does that since 24 November (`tools/ci/annotate_failure.py`;
+  the steps of the jobs that are not sanitizer jobs run in
+  `tools/ci/logged.sh`, which keeps a failed step's output for it). Until
+  then "Build & unit tests" said `exit code 2` and no more: #364's agent
+  was told which suite had failed, and at which line, by the landing
+  session, which had built the pull request again to find out. In a
+  sanitizer job the name of the step that failed is a
   part of `make asan-core`, and `make asan-build` and then that part
   (`make asan-unit`, say; `make help` lists the nine) runs it here without
   the rest.
@@ -855,12 +870,28 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
     part before `asan-build`. With one job none of this could happen; with
     four, a part that is in the Makefile and in no job would be a green run
     that did not make the check.
-  - **`asan-fuzz` runs after `asan-xml`, in the same job.** The XML fuzzer
-    mutates the documents of the W3C suite, which `asan-xml` unpacks under
-    `build/xml-conformance/`. Without them it does not fail: it mutates the
-    dozen documents written in the script, passes, and has checked far
-    less. The one job ran them in this order and nothing said that it
-    mattered; the check above now requires it.
+  - **`asan-fuzz` needs the documents of the W3C XML suite unpacked before
+    it.** The XML fuzzer mutates them (`build/xml-conformance/`). Without
+    them it does not fail: it mutates the dozen documents written in the
+    script, passes, and has checked far less. The one job ran `asan-xml`,
+    which unpacks them, in front of it, and nothing said that it mattered.
+    The fuzzing is a job of its own now, which unpacks them for itself
+    (`run_xml_conformance.py --unpack-only`), and the check above requires
+    that step or `asan-xml` before `asan-fuzz` in the same job.
+
+  The jobs were divided once more on 24 November, by the times of two
+  runs. In the lot of 07:41 (run 45350008834, 12.1 minutes) the longest
+  job was the XML suite with the fuzzing, 12.0 minutes: 5.2 of build, 2.2
+  of suite, 4.3 of fuzzing. In the next, whose objects were all in ccache
+  (run 45351810983, 8.1 minutes), it was the script corpora with the
+  verifiers, the generated XML and the string stress tests, 8.0 minutes,
+  beside a web-platform-tests job of 3.6. Now the fuzzing is alone, the
+  XML suite runs after the web-platform-tests, and the verifiers, the
+  generated XML and the string stress tests are a job of their own: six
+  sanitizer jobs, fourteen jobs in a run. In the first run with them
+  (45356130854, 9.2 minutes from the push) those took 5.8, 5.2, 5.0 and
+  4.3 minutes, and the longest job was the unit suites again, 8.9
+  minutes, of which the suites were 7.6.
 
 **The turn, and what a merge does to it**
 

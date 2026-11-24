@@ -313,3 +313,22 @@ For both ring/acute spellings the acute y-offset is now 0 rather than 649.
 The font construction and diagnostic commands are unchanged; there is no
 allowed-failure baseline. The broader 14-case corpus and 12 Hebrew placement
 controls are unchanged. Details: `docs/phases/250-gpos-lookup-order.md`.
+
+## Latin canonical ordering and blocking (Phase 266)
+
+`mark_order_diagnostic.py` uses the same CLI as `compare.py`. Eight inputs pair
+acute/dot-below and acute/cedilla orders, test equal-class blocking, and compare
+uncomposable x with reordered marks. On the recorded DejaVu Sans and HarfBuzz
+12.1.0 the repair improves exact matches from **5/8 to 8/8**; DejaVu Serif also
+matches all eight after the change. Use `--probe` to select a before binary.
+
+```sh
+build/shaping-venv/bin/python tools/shaping/mark_order_diagnostic.py \
+  --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf --output build/mark-order.json
+```
+
+The original corpus and its raw RTL differences remain unchanged. This is
+ordering and blocking for marks following Latin starters, not full NFC:
+supported composites are not decomposed to interleave a following mark,
+leading mark runs and other scripts are unchanged. Details and test controls
+are in `docs/phases/266-latin-mark-order.md`.

@@ -41,11 +41,19 @@ private:
         float radius = 0.0f;
     };
 
+    struct OpacityLayer {
+        std::vector<Color> saved_pixels;
+        float opacity{1.0f};
+        bool skipped{false};
+    };
+
     int m_width;
     int m_height;
     std::vector<Color> m_pixels;
     std::vector<TransformMatrix2D> m_transform_stack;
     std::vector<ClipRegion> m_clip_stack;
+    std::vector<OpacityLayer> m_opacity_stack;
+    int m_skip_depth{0};
 };
 
 } // namespace litebird

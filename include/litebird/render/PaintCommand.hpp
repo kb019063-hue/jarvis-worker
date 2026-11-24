@@ -17,6 +17,7 @@ namespace litebird {
 /// outside the iframe. An enclosing clip, if any, still applies.
 struct DrawCanvasCommand {
     Color color;
+    std::optional<LinearGradient> gradient{std::nullopt};
 };
 
 /// The UA's `::backdrop`: a colour over the whole viewport, painted behind a
@@ -30,6 +31,7 @@ struct DrawRectCommand {
     Rect rect;
     Color color;
     float border_radius{0.0f};
+    std::optional<LinearGradient> gradient{std::nullopt};
 };
 
 struct DrawShadowCommand {
@@ -104,7 +106,15 @@ struct PushClipCommand {
 
 struct PopClipCommand {};
 
-using PaintCommand = std::variant<DrawCanvasCommand, DrawBackdropCommand, DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand, DrawImageCommand, PushTransformCommand, PopTransformCommand, PushClipCommand, PopClipCommand>;
+/// Begins an isolated compositing group whose contents are blended onto the
+/// parent target multiplied by `opacity` (CSS Color 4 §3.2).
+struct PushOpacityCommand {
+    float opacity{1.0f};
+};
+
+struct PopOpacityCommand {};
+
+using PaintCommand = std::variant<DrawCanvasCommand, DrawBackdropCommand, DrawRectCommand, DrawShadowCommand, DrawBorderCommand, DrawTextCommand, DrawImageCommand, PushTransformCommand, PopTransformCommand, PushClipCommand, PopClipCommand, PushOpacityCommand, PopOpacityCommand>;
 
 class DisplayList {
 public:

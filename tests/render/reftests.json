@@ -1919,7 +1919,6 @@
           "describe": "transparent cell in an unstyled column exposes the red table background"
         }
       ],
-      "known_failure": "table column (<col>) backgrounds are not painted: transparent cells in column 0 paint the red table background at [0..50, 0..80] instead of the green <col> background.",
       "note": "CSS 2.1 \u00a717.5.1: column backgrounds sit above the table background and below row/cell backgrounds."
     },
     {
@@ -2436,7 +2435,6 @@
           "describe": "rest of line 2 is blank"
         }
       ],
-      "known_failure": "white-space:pre does not force a line break on a literal newline between inline replaced elements: both 20px images paint side by side at x=0..40, y=0..20.",
       "note": "CSS 2.1 \u00a716.6.1: under white-space:pre, source newlines are preserved as forced line breaks."
     },
     {

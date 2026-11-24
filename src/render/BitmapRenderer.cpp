@@ -146,20 +146,8 @@ bool BitmapRenderer::clip_coverage(int x, int y, float& coverage) const {
     return true;
 }
 
-void BitmapRenderer::set_pixel(int x, int y, Color color) {
-    if (x < 0 || x >= m_width || y < 0 || y >= m_height) return;
-    float coverage = 1.0f;
-    if (!clip_coverage(x, y, coverage)) return;
-    // A pixel on the curve of a rounded clip is clipped by the *part of it*
-    // that is inside, so the ink keeps that fraction of its alpha rather than
-    // all of it or none. This is what makes the child's edge land on the same
-    // anti-aliased curve a background of the same box paints (finding 156).
-    if (coverage < 1.0f && color.a > 0) {
-        color.a = static_cast<uint8_t>(color.a * coverage);
-    }
+static void blend_over(Color& dest, Color color) {
     if (color.a == 0) return;
-
-    auto& dest = m_pixels[y * m_width + x];
     if (color.a == 255 || dest.a == 0) {
         dest = color;
     } else if (dest.a == 255) {
@@ -174,10 +162,10 @@ void BitmapRenderer::set_pixel(int x, int y, Color color) {
         dest.g = over(color.g, dest.g);
         dest.b = over(color.b, dest.b);
     } else {
-        // Iframe bitmaps are initially transparent. Preserve straight alpha so
-        // their canvas and descendants can later composite over the embedding
-        // document rather than being flattened to white. alpha_n is the output
-        // alpha with denominator 255*255; each channel has the same divisor.
+        // Iframe bitmaps and opacity layers start transparent. Preserve straight
+        // alpha so they can later composite over the parent buffer rather than
+        // being flattened to white. alpha_n is the output alpha with denominator
+        // 255*255; each channel has the same divisor.
         const unsigned a = color.a;
         const unsigned remaining = 255u - a;
         const unsigned alpha_n = a * 255u + dest.a * remaining;
@@ -190,6 +178,64 @@ void BitmapRenderer::set_pixel(int x, int y, Color color) {
         dest.b = over(color.b, dest.b);
         dest.a = static_cast<uint8_t>((alpha_n + 127u) / 255u);
     }
+}
+
+static Color sample_linear_gradient(const LinearGradient& grad, float px, float py, const Rect& bounds) {
+    if (grad.stops.empty()) return Color::transparent();
+    if (grad.stops.size() == 1 || bounds.width <= 0.0f || bounds.height <= 0.0f) {
+        return grad.stops.front().color;
+    }
+    constexpr float kDegToRad = 3.14159265358979323846f / 180.0f;
+    const float rad = grad.angle_deg * kDegToRad;
+    // CSS Images 3 §3.4.1: 0deg points upward (0, -1), 90deg rightward (+1, 0),
+    // 180deg downward (0, +1).
+    const float dx = std::sin(rad);
+    const float dy = -std::cos(rad);
+    const float grad_len = std::abs(bounds.width * dx) + std::abs(bounds.height * dy);
+    if (grad_len <= 0.0f) return grad.stops.front().color;
+
+    const float cx = bounds.x + bounds.width * 0.5f;
+    const float cy = bounds.y + bounds.height * 0.5f;
+    const float proj = (px - cx) * dx + (py - cy) * dy;
+    const float t = (proj / grad_len) + 0.5f;
+
+    if (t <= grad.stops.front().position) return grad.stops.front().color;
+    if (t >= grad.stops.back().position) return grad.stops.back().color;
+
+    for (std::size_t i = 0; i + 1 < grad.stops.size(); ++i) {
+        const auto& s0 = grad.stops[i];
+        const auto& s1 = grad.stops[i + 1];
+        if (t <= s1.position) {
+            const float span = s1.position - s0.position;
+            const float f = (span > 0.0f) ? std::clamp((t - s0.position) / span, 0.0f, 1.0f) : 1.0f;
+            auto lerp_ch = [f](uint8_t a, uint8_t b) -> uint8_t {
+                return static_cast<uint8_t>(std::clamp(
+                    static_cast<int>(std::lround(static_cast<float>(a) + (static_cast<float>(b) - static_cast<float>(a)) * f)),
+                    0, 255));
+            };
+            return Color(lerp_ch(s0.color.r, s1.color.r),
+                         lerp_ch(s0.color.g, s1.color.g),
+                         lerp_ch(s0.color.b, s1.color.b),
+                         lerp_ch(s0.color.a, s1.color.a));
+        }
+    }
+    return grad.stops.back().color;
+}
+
+void BitmapRenderer::set_pixel(int x, int y, Color color) {
+    if (x < 0 || x >= m_width || y < 0 || y >= m_height) return;
+    float coverage = 1.0f;
+    if (!clip_coverage(x, y, coverage)) return;
+    // A pixel on the curve of a rounded clip is clipped by the *part of it*
+    // that is inside, so the ink keeps that fraction of its alpha rather than
+    // all of it or none. This is what makes the child's edge land on the same
+    // anti-aliased curve a background of the same box paints (finding 156).
+    if (coverage < 1.0f && color.a > 0) {
+        color.a = static_cast<uint8_t>(color.a * coverage);
+    }
+    if (color.a == 0) return;
+
+    blend_over(m_pixels[y * m_width + x], color);
 }
 
 void BitmapRenderer::fill_rect(int rx, int ry, int rw, int rh, Color color) {
@@ -239,11 +285,56 @@ void BitmapRenderer::draw_char(int x, int y, char c, Color color, int scale) {
 void BitmapRenderer::execute_command(const PaintCommand& cmd) {
     std::visit([this](auto&& arg) {
         using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, DrawCanvasCommand>) {
+        if constexpr (std::is_same_v<T, PushOpacityCommand>) {
+            OpacityLayer layer;
+            layer.opacity = std::clamp(arg.opacity, 0.0f, 1.0f);
+            if (m_skip_depth > 0 || layer.opacity <= 0.0f) {
+                layer.skipped = true;
+                ++m_skip_depth;
+            } else if (layer.opacity < 1.0f) {
+                layer.saved_pixels = std::move(m_pixels);
+                m_pixels.assign(static_cast<std::size_t>(m_width) * static_cast<std::size_t>(m_height),
+                                Color::transparent());
+            }
+            m_opacity_stack.push_back(std::move(layer));
+            return;
+        } else if constexpr (std::is_same_v<T, PopOpacityCommand>) {
+            if (m_opacity_stack.empty()) return;
+            OpacityLayer layer = std::move(m_opacity_stack.back());
+            m_opacity_stack.pop_back();
+            if (layer.skipped) {
+                if (m_skip_depth > 0) --m_skip_depth;
+            } else if (!layer.saved_pixels.empty()) {
+                std::vector<Color> group = std::move(m_pixels);
+                m_pixels = std::move(layer.saved_pixels);
+                const std::size_t count = std::min(group.size(), m_pixels.size());
+                for (std::size_t i = 0; i < count; ++i) {
+                    Color c = group[i];
+                    if (c.a == 0) continue;
+                    c.a = static_cast<uint8_t>(std::clamp(
+                        static_cast<int>(std::lround(static_cast<float>(c.a) * layer.opacity)),
+                        0, 255));
+                    blend_over(m_pixels[i], c);
+                }
+            }
+            return;
+        } else if (m_skip_depth > 0) {
+            return;
+        } else if constexpr (std::is_same_v<T, DrawCanvasCommand>) {
             // The canvas is in viewport/device space, not in the scroll or
             // element transform currently on the command stack. Clipping is
             // still applied by set_pixel, allowing an enclosing target clip.
             if (!arg.color.is_transparent()) fill_rect(0, 0, m_width, m_height, arg.color);
+            if (arg.gradient && !arg.gradient->stops.empty()) {
+                const Rect bounds(0.0f, 0.0f, static_cast<float>(m_width), static_cast<float>(m_height));
+                for (int y = 0; y < m_height; ++y) {
+                    for (int x = 0; x < m_width; ++x) {
+                        Color c = sample_linear_gradient(*arg.gradient, static_cast<float>(x) + 0.5f,
+                                                         static_cast<float>(y) + 0.5f, bounds);
+                        if (!c.is_transparent()) set_pixel(x, y, c);
+                    }
+                }
+            }
         } else if constexpr (std::is_same_v<T, DrawBackdropCommand>) {
             // The UA `::backdrop`: a colour over the whole viewport, on top of
             // everything the document has drawn so far. Not clipped by an
@@ -296,14 +387,31 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
             }
         } else if constexpr (std::is_same_v<T, DrawRectCommand>) {
             Rect tr = current_transform().map_rect(arg.rect);
+            const bool has_grad = arg.gradient && !arg.gradient->stops.empty();
             if (arg.border_radius <= 0.5f) {
-                fill_rect(
-                    static_cast<int>(tr.x),
-                    static_cast<int>(tr.y),
-                    static_cast<int>(tr.width),
-                    static_cast<int>(tr.height),
-                    arg.color
-                );
+                if (!arg.color.is_transparent()) {
+                    fill_rect(
+                        static_cast<int>(tr.x),
+                        static_cast<int>(tr.y),
+                        static_cast<int>(tr.width),
+                        static_cast<int>(tr.height),
+                        arg.color
+                    );
+                }
+                if (has_grad) {
+                    int x0 = std::clamp(static_cast<int>(tr.x), 0, m_width);
+                    int y0 = std::clamp(static_cast<int>(tr.y), 0, m_height);
+                    int x1 = std::clamp(static_cast<int>(tr.x + tr.width), 0, m_width);
+                    int y1 = std::clamp(static_cast<int>(tr.y + tr.height), 0, m_height);
+                    for (int y = y0; y < y1; ++y) {
+                        for (int x = x0; x < x1; ++x) {
+                            Color c = sample_linear_gradient(*arg.gradient,
+                                                             static_cast<float>(x) + 0.5f,
+                                                             static_cast<float>(y) + 0.5f, tr);
+                            if (!c.is_transparent()) set_pixel(x, y, c);
+                        }
+                    }
+                }
             } else {
                 float rx = tr.x;
                 float ry = tr.y;
@@ -321,9 +429,18 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
                         float dist = rounded_box_sdf(x + 0.5f, y + 0.5f, rx, ry, rw, rh, r);
                         if (dist <= 0.5f) {
                             float cov = std::clamp(0.5f - dist, 0.0f, 1.0f);
-                            Color c = arg.color;
-                            c.a = static_cast<uint8_t>(c.a * cov);
-                            set_pixel(x, y, c);
+                            if (!arg.color.is_transparent()) {
+                                Color c = arg.color;
+                                c.a = static_cast<uint8_t>(c.a * cov);
+                                set_pixel(x, y, c);
+                            }
+                            if (has_grad) {
+                                Color c = sample_linear_gradient(*arg.gradient,
+                                                                 static_cast<float>(x) + 0.5f,
+                                                                 static_cast<float>(y) + 0.5f, tr);
+                                c.a = static_cast<uint8_t>(c.a * cov);
+                                set_pixel(x, y, c);
+                            }
                         }
                     }
                 }
@@ -405,8 +522,13 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
 }
 
 void BitmapRenderer::render(const DisplayList& display_list) {
+    m_opacity_stack.clear();
+    m_skip_depth = 0;
     for (const auto& cmd : display_list.commands()) {
         execute_command(cmd);
+    }
+    while (!m_opacity_stack.empty()) {
+        execute_command(PopOpacityCommand{});
     }
 }
 

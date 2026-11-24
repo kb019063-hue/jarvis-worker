@@ -42,6 +42,10 @@ struct InlineFragment {
     std::string text;               // Word or text content
     SharedComputedStyle style{default_computed_style()}; // Visual styling for this fragment
     std::shared_ptr<LayoutBox> box; // Originating layout box
+    /// Non-transparent backgrounds of enclosing inline ancestors beneath this
+    /// fragment's own background, stored innermost-ancestor-first so painting
+    /// in reverse composites outermost -> innermost behind `style->background_color`.
+    std::vector<Color> ancestor_backgrounds;
     bool is_text{true};
     bool is_space{false};
     bool preserve_space{false};     // Preserved whitespace or inline margin/padding advance (not stripped)
@@ -152,6 +156,10 @@ public:
     /// The canvas is independent of box geometry and viewport scrolling.
     bool has_document_canvas{false};
     Color canvas_background{Color::transparent()};
+    std::shared_ptr<const LinearGradient> canvas_gradient;
+    /// Document root (`<html>`) opacity applied to the entire document paint
+    /// including its propagated canvas background (CSS Color 4 §3.2).
+    float root_opacity{1.0f};
     /// The selected root/body background is painted on the canvas instead of
     /// as this box's chrome. Computed styles remain unchanged and shareable;
     /// inline-body line fragments follow the separately observed browser rule.

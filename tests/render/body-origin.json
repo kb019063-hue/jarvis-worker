@@ -873,7 +873,6 @@
     {
       "name": "inline_body_under_a_translucent_inline_child",
       "html": "<!doctype html><body style=\"margin:0;display:inline;background:rgba(255,0,0,.5);font:20px/20px monospace;color:transparent\"><span style=\"background:rgba(0,0,255,.5)\">MMMMMMMM</span></body>",
-      "known_failure": "Inline painting stores one flattened background per text fragment, so a translucent descendant replaces the propagated inline body's own fragment background instead of compositing over it. Chromium paints canvas red, then the body's fragment red, then the child's blue; Litebird skips the middle layer.",
       "assert": [
         {
           "kind": "pixel",
@@ -901,7 +900,6 @@
     {
       "name": "root_background_image_blocks_body_propagation",
       "html": "<!doctype html><html style=\"background-image:linear-gradient(#0000ff,#0000ff)\"><body style=\"margin:20px;background:#ff0000;height:50px\"></body></html>",
-      "known_failure": "Background images are not represented by the layout style or painted. A non-none root image should prevent body propagation: Chromium paints blue outside and the red body box inside; Litebird instead propagates red everywhere.",
       "assert": [
         {
           "kind": "pixel",
@@ -929,7 +927,6 @@
     {
       "name": "root_opacity_applies_to_the_document_paint",
       "html": "<!doctype html><html style=\"opacity:0;background:#0000ff\"><body style=\"background:#ff0000;height:50px\"></body></html>",
-      "known_failure": "Element opacity groups are not applied by the display-list painter. Chromium composites the zero-opacity root to white; Litebird still paints its root canvas and body.",
       "assert": [
         {
           "kind": "pixel",
@@ -957,7 +954,6 @@
     {
       "name": "hidden_body_children_do_not_paint_but_canvas_does",
       "html": "<!doctype html><body style=\"visibility:hidden;background:#ff0000\"><div style=\"width:40px;height:40px;background:#0000ff\"></div></body>",
-      "known_failure": "The painter does not implement visibility:hidden for descendants; only the separate canvas propagation behavior is implemented.",
       "assert": [
         {
           "kind": "pixel",

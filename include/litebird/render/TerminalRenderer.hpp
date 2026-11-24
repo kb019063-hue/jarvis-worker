@@ -73,6 +73,8 @@ private:
     std::vector<TerminalCell> m_grid;
     std::vector<TransformMatrix2D> m_transform_stack;
     std::vector<Rect> m_clip_stack;
+    std::vector<bool> m_opacity_skip_stack;
+    int m_skip_depth{0};
 
     /// True when the terminal cell's top-left device point survives clipping.
     bool inside_clip(int col, int row) const;

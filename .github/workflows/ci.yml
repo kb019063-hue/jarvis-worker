@@ -42,7 +42,7 @@ on:
 #   title begins with `WIP:`**: the jobs
 #   of the plain build that take a minute or two ("Build & unit tests",
 #   "Documentation shape", the reftests, and the four corpus jobs: html5lib,
-#   JavaScript, script DOM and URLs, XML and web-platform-tests). The six
+#   JavaScript, script DOM and URLs, XML and web-platform-tests). The
 #   sanitizer jobs and the deep pages, which are the long ones, are skipped.
 #   The landing session puts the label on while a watch is on
 #   (`tools/watch/watch.sh look`), because the whole of CI then runs on the
@@ -870,7 +870,7 @@ jobs:
         # Until 24 November 2026 the fuzzing was a step after the XML suite
         # in one job, which unpacked them; that job was the longest of a
         # run (12.0 minutes of a run of 12.1, run 45350008834). Now the
-        # suite is run beside the web-platform-tests and this job unpacks
+        # suite is a job of its own and this job unpacks
         # the documents for itself, and fails here if they are not there.
         # tools/ci/check_ci_parts.py fails the run if this step is taken
         # out or put after the fuzzing.
@@ -899,7 +899,50 @@ jobs:
         run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
 
   sanitizers-wpt:
-    name: "Sanitizers: web-platform-tests and the XML suite"
+    name: "Sanitizers: web-platform-tests"
+    runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: asan
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Address randomisation the sanitizers can live with
+        # See the string stress tests in the last of these jobs. Every
+        # sanitizer step has always run after this setting, so each job makes
+        # it before it builds.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
+      - name: Sanitizer build
+        # As in the first of these jobs.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+      - name: Web-platform-tests in the sanitizer build
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-wpt 2>&1 | tee "$RUNNER_TEMP/part-asan-wpt.log"
+      - name: What failed, as annotations
+        # As in the first of these jobs.
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
+
+  # A job of its own since 24 November 2026, for the second time. It was
+  # one with the fuzzing until that morning, then a step behind the
+  # web-platform-tests, and that job was the second longest of a run whose
+  # objects were all in ccache: 7.5 minutes of 8.5 (run 45451780819: 276
+  # seconds of web-platform-tests, then 139 of this).
+  sanitizers-xml:
+    name: "Sanitizers: the XML suite"
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
@@ -932,15 +975,7 @@ jobs:
         run: |
           set -o pipefail
           make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
-      - name: Web-platform-tests in the sanitizer build
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-        run: |
-          set -o pipefail
-          make -j"$(nproc)" asan-wpt 2>&1 | tee "$RUNNER_TEMP/part-asan-wpt.log"
       - name: W3C XML suite in the sanitizer build
-        # Here since 24 November 2026, from the job it shared with the
-        # fuzzing (that job says why).
         env:
           ASAN_OPTIONS: detect_leaks=0
           GITHUB_TOKEN: ${{ github.token }}

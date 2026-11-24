@@ -859,6 +859,10 @@ def main() -> int:
     slowest = (0.0, "")
     total_runs = 0
     print_lock = threading.Lock()
+    began = time.time()
+    # Seconds of work by kind of run and by kind of page, for the last line:
+    # where the time of this check goes cannot be read from its length.
+    work: dict[str, float] = {}
 
     def one(job: tuple[int, Page, str], alone: bool = False) -> tuple[str, float]:
         index, page, kind = job
@@ -900,6 +904,8 @@ def main() -> int:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
             for job, (failure, seconds) in zip(jobs, pool.map(one, jobs)):
                 total_runs += 1
+                for key in (job[2], "random pages" if job[1].name.startswith("random page ") else "generated pages"):
+                    work[key] = work.get(key, 0.0) + seconds
                 if failure == AGAIN:
                     slow.append(job)
                     continue
@@ -925,6 +931,13 @@ def main() -> int:
         print(f"deep pages: {len(slow)} run(s) went over {args.timeout:g} s beside the others and were run again by themselves")
     print(f"deep pages: {total_runs} runs over {len(pages)} pages at depth {args.depth} on a {args.stack_mb} MB stack, "
           f"{len(failures)} failed; slowest {slowest[0]:.1f} s ({slowest[1]})")
+    spent = (f"{time.time() - began:.0f} s on the clock with {max(1, args.jobs)} at a time; seconds of work: "
+             + ", ".join(f"{key} {seconds:.0f}" for key, seconds in sorted(work.items())))
+    print(f"deep pages: {spent}")
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        # A notice on the job: read through the API where the log cannot be.
+        print(f"::notice title=deep pages, {Path(args.binary).parent.name}::{total_runs} runs over {len(pages)} pages; {spent}; "
+              f"slowest {slowest[0]:.1f} s ({slowest[1]})")
     return 1 if failures else 0
 
 

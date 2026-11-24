@@ -20,6 +20,14 @@ Anything else it did to AGENTS.md (text outside the table, a row taken out,
 a row that cannot be found here) is not for this tool: it says so and
 changes nothing. A conflict in any other file is never the landing
 session's to resolve.
+
+    python3 tools/watch/carry_rows.py --check ONTO origin/prN
+
+asks only, with no merge begun and nothing written: could the conflict of
+origin/prN with the commit ONTO be carried? It answers in one line and
+exits 0 for yes. `watch.sh plan` asks it for every pull request that
+conflicts in AGENTS.md alone, so that what to do with one (carry it, or
+send it back with the one row named) is read and not worked out by hand.
 """
 
 from __future__ import annotations
@@ -143,15 +151,21 @@ def self_test() -> int:
 def main(arguments: list[str]) -> int:
     if arguments == ["--self-test"]:
         return self_test()
-    if len(arguments) != 1:
+    check = arguments[:1] == ["--check"]
+    if len(arguments) != (3 if check else 1):
         sys.exit(__doc__)
-    ref = arguments[0]
-    base = git("merge-base", "HEAD", ref).strip()
+    onto, ref = (arguments[1], arguments[2]) if check else ("HEAD", arguments[0])
+    base = git("merge-base", onto, ref).strip()
     old = git("show", f"{base}:{rows.DOCUMENT}").split("\n")
     theirs = git("show", f"{ref}:{rows.DOCUMENT}").split("\n")
     rewritten, added = changes(old, theirs, git("diff", "--unified=0", base, ref, "--", rows.DOCUMENT))
-    ours = git("show", f"HEAD:{rows.DOCUMENT}").split("\n")
+    ours = git("show", f"{onto}:{rows.DOCUMENT}").split("\n")
     out = carried(ours, rewritten, added)
+    if check:
+        titles = [(rows.title_of(new) or new[2:50])[:60] for _, new in rewritten] + \
+                 [(rows.title_of(new) or new[2:50])[:60] for _, new in added]
+        print(f"rows only, can be carried: {len(rewritten)} rewritten, {len(added)} put in ({'; '.join(titles)})")
+        return 0
     (ROOT / rows.DOCUMENT).write_text("\n".join(out), encoding="utf-8")
     for old_row, new in rewritten:
         print(f"rewritten here: {(rows.title_of(new) or new[:50])[:70]}")

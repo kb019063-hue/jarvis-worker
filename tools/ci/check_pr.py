@@ -735,9 +735,9 @@ def check_runs(sha: str) -> tuple[str, list[str]]:
 
 def short_run_note(head: str, number: int | None = None) -> str:
     """What to say of a short run to somebody who is about to merge on it."""
-    return (f"only the short run of CI passed on {head[:7]} (build, unit suites, documents): the pull request has "
-            "the label `lot`, which the landing session puts on while a watch is on, and every other job "
-            "was skipped. Nobody merges on that"
+    return (f"only the short run of CI passed on {head[:7]} (build, unit suites, documents, the corpora): the pull "
+            "request has the label `lot`, which the landing session puts on while a watch is on, and the sanitizer "
+            "jobs and the deep pages were skipped. Nobody merges on that"
             + ("" if number is None else
                f". The label is off now, which starts every job on {head[:7]}: ask again when they have ended"))
 
@@ -840,8 +840,8 @@ def ci_verdict(e: Evidence, watch_on: bool = False) -> tuple[list[tuple[bool, st
         lines.append((True, f"CI passed on the head commit {head}"))
     elif e.head_state == "short":
         if watch_on:
-            lines.append((True, f"the short run of CI passed on the head commit {head} (build, unit suites, documents); "
-                                "the whole of CI runs on the lot it lands in"))
+            lines.append((True, f"the short run of CI passed on the head commit {head} (build, unit suites, documents, "
+                                "the corpora); the whole of CI runs on the lot it lands in"))
         else:
             lines.append((False, short_run_note(e.head)))
     elif e.head_state == "running":

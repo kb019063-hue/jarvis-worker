@@ -58,7 +58,7 @@ The pinned test262 directory `language/expressions/assignment/dstr` now passes
 **368/368**, compared with **349/368** on the pre-change `JsEval.cpp` (19 gained,
 0 lost). The entire `language/expressions/assignment` directory passes
 **466/485**, compared with **447/485** before the change (19 gained, 0 lost).
-`make test` passes all **409 engine suites** and **114 cross-origin checks**.
+`make test` passes all **410 engine suites** and **114 cross-origin checks**.
 
 The 19 remaining failures in the wider assignment directory are outside `dstr`;
 they include Proxy-only coverage and cases blocked by features this engine does

@@ -57,7 +57,7 @@ source, and the four refusals — with the Date, Error, cycle, shared-object
 and plain-object cases as controls that the change kept what worked.
 
 ```bash
-make test      # All 399 engine test suites passed successfully!
+make test      # All 403 engine test suites passed successfully!
 ```
 
 | Check | Result |

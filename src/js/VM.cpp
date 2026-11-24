@@ -15,6 +15,13 @@
 #include <stdexcept>
 
 namespace litebird {
+// ECMA-262 §7.3.24, the same routine the tree-walker's object literal and
+// object rest destructuring call. Declared here rather than in JsOps.hpp
+// because that header is another open pull request's (#366); the definition
+// stays in JsEval.cpp.
+void copy_data_properties(JsValue& target, const JsValue& source,
+                          const std::vector<std::string>* excluded);
+
 
 VM::VM(std::shared_ptr<Document> doc) : m_document(std::move(doc)) {
     m_stack.reserve(2048);
@@ -594,6 +601,23 @@ JsValue VM::run() {
                     obj.set_property(k, std::move(v));
                 }
                 push(obj);
+                break;
+            }
+            case OpCode::OpObjectDefine: {
+                JsValue value = pop();
+                JsValue key = pop();
+                // The object being built sits below the operands; it stays on
+                // the stack for the rest of the literal (peek is const-only).
+                JsValue& target = m_stack.back();
+                target.define_property(key.string_val.str(), std::move(value), PropertyMap::Default);
+                break;
+            }
+            case OpCode::OpObjectSpread: {
+                JsValue source = pop();
+                // As with OpObjectDefine, the object under construction is
+                // the value just below the source.
+                JsValue& target = m_stack.back();
+                copy_data_properties(target, source, nullptr);
                 break;
             }
 

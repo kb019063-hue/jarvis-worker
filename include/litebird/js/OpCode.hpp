@@ -27,6 +27,10 @@ enum class OpCode : uint8_t {
     OpSetIndex,
     OpNewArray,
     OpNewObject,
+    // The object literal with a spread, built left to right on the stack:
+    // one empty object is pushed first, and every property defines onto it.
+    OpObjectDefine, // define a `key: value` pair on the object below the operands
+    OpObjectSpread, // Object.keys-order copy of a source's own enumerable properties
 
     // Arithmetic
     OpAdd,
@@ -77,6 +81,8 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpSetIndex:     return "OP_SET_INDEX";
         case OpCode::OpNewArray:     return "OP_NEW_ARRAY";
         case OpCode::OpNewObject:    return "OP_NEW_OBJECT";
+    case OpCode::OpObjectDefine: return "OP_OBJECT_DEFINE";
+    case OpCode::OpObjectSpread: return "OP_OBJECT_SPREAD";
         case OpCode::OpAdd:          return "OP_ADD";
         case OpCode::OpSubtract:     return "OP_SUBTRACT";
         case OpCode::OpMultiply:     return "OP_MULTIPLY";

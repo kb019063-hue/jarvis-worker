@@ -21,17 +21,12 @@ namespace litebird {
 // `JsOps.cpp`, and `make verify-js-error-terminal-safety`); the human dumps
 // never did.
 //
-// What comes out is the same text with every byte a terminal acts on replaced
-// by U+FFFD, which is what "a character that is not a character" looks like in
-// the output and cannot be mistaken for one of the page's own. Everything else
-// — a tab, a newline, and every byte of a UTF-8 sequence — is untouched, so a
-// dump of an ordinary page is byte for byte what it was, and the tools that
-// read these dumps (`#text: "` in `tools/fuzz/deep_pages.py`) still find them.
-//
-// The 8-bit forms only arise from a latin-1 or windows-1252 document, where a
-// single byte really is U+009B. In UTF-8, `0x9B` cannot start a character
-// (a continuation byte always follows a lead byte), so replacing a lone one
-// cannot damage text that was meant.
+// C0 controls (except tab and newline), DEL and C1 controls are replaced by
+// U+FFFD. C1 controls are refused both as raw bytes and as UTF-8 scalars;
+// malformed UTF-8 is replaced one byte at a time. Other valid UTF-8, including
+// a 0x9B continuation byte in an ordinary character, is retained unchanged.
+// This assumes a UTF-8 terminal: in an 8-bit mode a continuation byte may be
+// interpreted as a control. The `--dump-dom-webplatform` data is not filtered.
 std::string terminal_safe(std::string text);
 
 } // namespace litebird

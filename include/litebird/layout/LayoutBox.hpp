@@ -229,6 +229,8 @@ private:
     void layout_float(float containing_width);
     /// Largest unbreakable inline content width, used as a table column floor.
     static float min_content_width(const LayoutBox& box, float fallback);
+    /// Unwrapped preferred width, used by fit-content and shrink-to-fit sizing.
+    static float max_content_width(const LayoutBox& box, float fallback);
     void layout_flex(float containing_width);
     void layout_grid(float containing_width);
     void layout_image(float containing_width);

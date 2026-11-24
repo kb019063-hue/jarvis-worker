@@ -1371,7 +1371,15 @@ void WorkerObject::dispatch_page_error(const std::string& message,
     }
 
     if (!had_handler && !control->default_prevented) {
-        std::cerr << "Uncaught (in worker) " << message << std::endl;
+        // The message comes from script or a load error, not from the terminal.
+        // Apply the same conservative byte policy as the shell frame at the
+        // output boundary only; ErrorEvent.message above remains unchanged.
+        std::string terminal_message = message;
+        for (char& byte : terminal_message) {
+            const auto c = static_cast<unsigned char>(byte);
+            if (c < 0x20 || c > 0x7e) byte = '?';
+        }
+        std::cerr << "Uncaught (in worker) " << terminal_message << std::endl;
     }
 }
 

@@ -292,6 +292,33 @@ std::vector<uint8_t> pbkdf2_bytes(const std::string& hash_alg, const std::vector
     return out;
 }
 
+std::vector<uint8_t> hkdf_bytes(const std::string& hash_alg, const std::vector<uint8_t>& ikm,
+                                const std::vector<uint8_t>& salt, const std::vector<uint8_t>& info,
+                                std::size_t okm_len) {
+    std::size_t hash_len = 32u;
+    if (hash_alg == "sha-1") hash_len = 20u;
+    else if (hash_alg == "sha-384") hash_len = 48u;
+    else if (hash_alg == "sha-512") hash_len = 64u;
+
+    std::vector<uint8_t> effective_salt = salt.empty() ? std::vector<uint8_t>(hash_len, 0u) : salt;
+    std::vector<uint8_t> prk = hmac_bytes(hash_alg, effective_salt, ikm);
+
+    std::vector<uint8_t> out;
+    out.reserve(okm_len);
+    std::vector<uint8_t> t_prev;
+    uint8_t counter = 1;
+    while (out.size() < okm_len) {
+        std::vector<uint8_t> input = t_prev;
+        input.insert(input.end(), info.begin(), info.end());
+        input.push_back(counter);
+        t_prev = hmac_bytes(hash_alg, prk, input);
+        const std::size_t need = std::min(t_prev.size(), okm_len - out.size());
+        out.insert(out.end(), t_prev.begin(), t_prev.begin() + static_cast<std::ptrdiff_t>(need));
+        ++counter;
+    }
+    return out;
+}
+
 struct CryptoKeyState : JsExotic {
     std::string type = "secret";
     bool extractable = false;
@@ -399,17 +426,17 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[2];
         std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
                                                         : ascii_lower_str(to_str(alg_val));
-        if (alg_name == "pbkdf2") {
+        if (alg_name == "pbkdf2" || alg_name == "hkdf") {
             auto state = std::make_shared<CryptoKeyState>();
             state->extractable = args[3].is_truthy();
-            state->hash_alg = "pbkdf2";
+            state->hash_alg = alg_name;
             state->key_bytes = std::move(key_bytes);
             JsValue key = r.make("CryptoKey", state);
             if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
             return undefined();
         }
         if (alg_name != "hmac" || !alg_val.is_object_like()) {
-            return reject_with("NotSupportedError", "SubtleCrypto.importKey: only HMAC and PBKDF2 are supported.");
+            return reject_with("NotSupportedError", "SubtleCrypto.importKey: only HMAC, PBKDF2, and HKDF are supported.");
         }
         JsValue hash_val = alg_val.get_property("hash");
         std::string hash_alg = hash_val.is_object_like() ? ascii_lower_str(to_str(hash_val.get_property("name")))
@@ -554,20 +581,18 @@ void setup_subtle_crypto(Iface& I) {
         };
         if (args.size() < 3) return reject_with("TypeError", "SubtleCrypto.deriveBits: 3 arguments required.");
         const JsValue& alg_val = args[0];
-        if (!alg_val.is_object_like() || ascii_lower_str(to_str(alg_val.get_property("name"))) != "pbkdf2") {
-            return reject_with("NotSupportedError", "SubtleCrypto.deriveBits: only PBKDF2 is supported.");
+        const std::string alg_name = alg_val.is_object_like()
+            ? ascii_lower_str(to_str(alg_val.get_property("name"))) : std::string();
+        if (alg_name != "pbkdf2" && alg_name != "hkdf") {
+            return reject_with("NotSupportedError", "SubtleCrypto.deriveBits: only PBKDF2 and HKDF are supported.");
         }
         CryptoKeyState* base_key = state_of<CryptoKeyState>(args[1]);
-        if (!base_key || base_key->hash_alg != "pbkdf2") {
-            return reject_with("InvalidAccessError", "SubtleCrypto.deriveBits: baseKey must be a PBKDF2 CryptoKey.");
+        if (!base_key || base_key->hash_alg != alg_name) {
+            return reject_with("InvalidAccessError", "SubtleCrypto.deriveBits: baseKey algorithm mismatch.");
         }
         std::vector<uint8_t> salt;
         if (!read_buffer_source(r, alg_val.get_property("salt"), salt)) {
             return reject_with("TypeError", "SubtleCrypto.deriveBits: salt must be a BufferSource.");
-        }
-        const double iter_d = to_double(alg_val.get_property("iterations"));
-        if (!(iter_d >= 1.0)) {
-            return reject_with("OperationError", "SubtleCrypto.deriveBits: iterations must be >= 1.");
         }
         JsValue hash_val = alg_val.get_property("hash");
         std::string hash_alg = hash_val.is_object_like() ? ascii_lower_str(to_str(hash_val.get_property("name")))
@@ -581,8 +606,20 @@ void setup_subtle_crypto(Iface& I) {
             return reject_with("OperationError", "SubtleCrypto.deriveBits: length must be a non-negative multiple of 8.");
         }
         const std::size_t dk_len = static_cast<std::size_t>(len_bits / 8);
-        std::vector<uint8_t> derived = pbkdf2_bytes(hash_alg, base_key->key_bytes, salt,
-                                                    static_cast<uint32_t>(iter_d), dk_len);
+        std::vector<uint8_t> derived;
+        if (alg_name == "pbkdf2") {
+            const double iter_d = to_double(alg_val.get_property("iterations"));
+            if (!(iter_d >= 1.0)) {
+                return reject_with("OperationError", "SubtleCrypto.deriveBits: iterations must be >= 1.");
+            }
+            derived = pbkdf2_bytes(hash_alg, base_key->key_bytes, salt, static_cast<uint32_t>(iter_d), dk_len);
+        } else {
+            std::vector<uint8_t> info;
+            if (!read_buffer_source(r, alg_val.get_property("info"), info)) {
+                return reject_with("TypeError", "SubtleCrypto.deriveBits: info must be a BufferSource.");
+            }
+            derived = hkdf_bytes(hash_alg, base_key->key_bytes, salt, info, dk_len);
+        }
         JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
         JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
         JsValue out_ab = js_construct(ab_ctor, {num(static_cast<double>(derived.size()))});
@@ -603,20 +640,18 @@ void setup_subtle_crypto(Iface& I) {
         };
         if (args.size() < 5) return reject_with("TypeError", "SubtleCrypto.deriveKey: 5 arguments required.");
         const JsValue& alg_val = args[0];
-        if (!alg_val.is_object_like() || ascii_lower_str(to_str(alg_val.get_property("name"))) != "pbkdf2") {
-            return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: only PBKDF2 is supported.");
+        const std::string alg_name = alg_val.is_object_like()
+            ? ascii_lower_str(to_str(alg_val.get_property("name"))) : std::string();
+        if (alg_name != "pbkdf2" && alg_name != "hkdf") {
+            return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: only PBKDF2 and HKDF are supported.");
         }
         CryptoKeyState* base_key = state_of<CryptoKeyState>(args[1]);
-        if (!base_key || base_key->hash_alg != "pbkdf2") {
-            return reject_with("InvalidAccessError", "SubtleCrypto.deriveKey: baseKey must be a PBKDF2 CryptoKey.");
+        if (!base_key || base_key->hash_alg != alg_name) {
+            return reject_with("InvalidAccessError", "SubtleCrypto.deriveKey: baseKey algorithm mismatch.");
         }
         std::vector<uint8_t> salt;
         if (!read_buffer_source(r, alg_val.get_property("salt"), salt)) {
             return reject_with("TypeError", "SubtleCrypto.deriveKey: salt must be a BufferSource.");
-        }
-        const double iter_d = to_double(alg_val.get_property("iterations"));
-        if (!(iter_d >= 1.0)) {
-            return reject_with("OperationError", "SubtleCrypto.deriveKey: iterations must be >= 1.");
         }
         JsValue hash_val = alg_val.get_property("hash");
         std::string hash_alg = hash_val.is_object_like() ? ascii_lower_str(to_str(hash_val.get_property("name")))
@@ -642,8 +677,19 @@ void setup_subtle_crypto(Iface& I) {
         auto state = std::make_shared<CryptoKeyState>();
         state->extractable = args[3].is_truthy();
         state->hash_alg = dhash_alg;
-        state->key_bytes = pbkdf2_bytes(hash_alg, base_key->key_bytes, salt,
-                                        static_cast<uint32_t>(iter_d), dk_len);
+        if (alg_name == "pbkdf2") {
+            const double iter_d = to_double(alg_val.get_property("iterations"));
+            if (!(iter_d >= 1.0)) {
+                return reject_with("OperationError", "SubtleCrypto.deriveKey: iterations must be >= 1.");
+            }
+            state->key_bytes = pbkdf2_bytes(hash_alg, base_key->key_bytes, salt, static_cast<uint32_t>(iter_d), dk_len);
+        } else {
+            std::vector<uint8_t> info;
+            if (!read_buffer_source(r, alg_val.get_property("info"), info)) {
+                return reject_with("TypeError", "SubtleCrypto.deriveKey: info must be a BufferSource.");
+            }
+            state->key_bytes = hkdf_bytes(hash_alg, base_key->key_bytes, salt, info, dk_len);
+        }
         JsValue key = r.make("CryptoKey", state);
         if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
         return undefined();

@@ -65,6 +65,28 @@ stay true, and nothing paints because the advance and the offsets are zero.
 remain `mismatch`; both are mark *ordering and offset* questions inside an RTL
 cluster, not stream shape, and neither is touched here.
 
+## Another agent was working the same row
+
+Phase 266 (finding 270, agent Rowan) landed on `main` between this branch
+starting and merging, and it works the row this phase cites: Latin mark ordering
+and canonical blocking. The two are **complementary, not overlapping**, and the
+merge proved it:
+
+- Rowan's work composes across lower-class marks and sorts Latin marks by
+  combining class. It does not touch the join-control erase, which is still
+  present on `main` at `FontRenderer.cpp:2922`.
+- With both merged, `make shaping-oracle` is **still 11 matches** — Rowan's
+  phase changed nothing in the 14-case corpus (their own doc says so), and this
+  one changes nothing in their eight-case Latin differential.
+- One assertion in Rowan's new suite had encoded the erase:
+  `ids(a, ZWNJ, acute) == {1, 3}` — two glyphs. It is now `{1, 8, 3}` with a
+  comment saying which fact the line is about. ZWNJ is still a **composition
+  barrier** (that is why the acute does not compose onto the `a`); it is just
+  also a slot, which is this finding's whole point.
+
+Two agents working one row is the row's own fault for being a list. This phase
+takes the join-control half and says so.
+
 ## Two things this phase deliberately did **not** ship
 
 Both were written, measured, and taken back out because the measurement did not

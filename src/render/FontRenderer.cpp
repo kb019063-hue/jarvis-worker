@@ -2798,29 +2798,58 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         input.push_back(cp);
     }
 
-    // Font-aware adjacent canonical composition for Latin runs. This is not
-    // NFC: do not reorder marks, cross script boundaries, or
-    // replace a supported base+mark with a composite missing from this face.
-    // Use the existing Unicode 17 canonical pairs (composition exclusions are
-    // already absent), not a font-specific correction or compatibility map.
+    // Canonical order for nonzero-class marks following a Latin starter.
+    // Keep equal classes stable and do not cross a starter or script boundary.
+    // Existing composites are not decomposed here: this is not full NFC.
+    auto combining_class = [](uint32_t cp) -> uint8_t {
+        using namespace unicode::tables;
+        const auto* r = std::lower_bound(kCccRanges, kCccRanges + kCccRangesCount,
+            cp, [](const CccRange& range, uint32_t c) { return range.hi < c; });
+        return r != kCccRanges + kCccRangesCount && r->lo <= cp ? r->ccc : 0;
+    };
     const auto input_scripts = itemize_codepoint_scripts(input);
+    for (std::size_t i = 0; i < input.size();) {
+        if (classify_codepoint_script(input[i]) != kTagLatn || combining_class(input[i])) {
+            ++i;
+            continue;
+        }
+        std::size_t end = i + 1;
+        while (end < input.size() && input_scripts[end] == kTagLatn && combining_class(input[end])) ++end;
+        std::stable_sort(input.begin() + i + 1, input.begin() + end,
+            [&](uint32_t a, uint32_t b) { return combining_class(a) < combining_class(b); });
+        i = end;
+    }
+
+    // Font-aware canonical composition. An intervening unconsumed mark blocks
+    // when its class is equal or greater; lower classes may be crossed. A
+    // consumed mark does not become a blocker. Never choose a missing glyph.
     std::vector<uint32_t> codepoints;
     codepoints.reserve(input.size());
+    const std::size_t no_starter = input.size();
+    std::size_t starter = no_starter;
+    uint8_t last_class = 0;
     for (std::size_t i = 0; i < input.size(); ++i) {
+        const uint8_t cls = combining_class(input[i]);
         bool composed = false;
-        if (i && input_scripts[i] == kTagLatn && input_scripts[i - 1] == kTagLatn &&
-            classify_codepoint_script(codepoints.back()) == kTagLatn) {
+        if (starter != no_starter && cls && input_scripts[i] == kTagLatn && last_class < cls) {
             using namespace unicode::tables;
-            const uint64_t key = (uint64_t(codepoints.back()) << 21) | input[i];
+            const uint64_t key = (uint64_t(codepoints[starter]) << 21) | input[i];
             const auto* pair = std::lower_bound(kComposePairs, kComposePairs + kComposePairsCount,
                 key, [](const ComposePair& p, uint64_t k) { return p.key < k; });
             if (pair != kComposePairs + kComposePairsCount && pair->key == key &&
                 glyph_index(pair->composite) != 0) {
-                codepoints.back() = pair->composite;
+                codepoints[starter] = pair->composite;
                 composed = true;
             }
         }
-        if (!composed) codepoints.push_back(input[i]);
+        if (!composed) {
+            if (!cls || input_scripts[i] != kTagLatn) {
+                starter = !cls && classify_codepoint_script(input[i]) == kTagLatn
+                    ? codepoints.size() : no_starter;
+            }
+            codepoints.push_back(input[i]);
+            last_class = cls;
+        }
     }
     const std::vector<uint32_t> scripts = itemize_codepoint_scripts(codepoints);
     uint16_t next_lig_id = 1;

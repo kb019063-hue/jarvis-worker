@@ -62,24 +62,32 @@ iterated, a subclass's prototype, and six `Promise.any` cases run on a timer —
 fulfilment that wins, and the identity of a reason object.
 
 ```bash
-make test      # All 414 engine test suites passed successfully!
+make test      # All 421 engine test suites passed successfully!
 ```
 
 | Check | Result |
 | :--- | :--- |
 | `make test262` on `built-ins/AggregateError` | 0/25 → **21/25** |
-| `make test262` on `built-ins/Promise built-ins/NativeErrors built-ins/Error` | 698/919, unchanged |
+| `make test262` on `built-ins/Promise` and `built-ins/AggregateError` | 572/757 (75.6%) |
 | `make js-conformance` | 1149/1158 (99.2%), 0 crashes — unchanged |
 | `make conformance` / `make dom-conformance` | 1973/1973 · 678/678 |
 | `make wpt` | 9569/9824, the same 255 listed |
 | `make url-conformance` / `make xml-conformance` | 1188/1188 · 1718/1718 |
 | `make diff-trees` / `make diff-xml` | 1500/1500 trees equal, no crash |
-| `make render-conformance` | 64/66 and 40/41, only the recorded failures |
+| `make render-conformance` | 65/66 and 40/41, only the recorded failures |
 | `make security-fetch` / `-worker` / `-https` / `-websocket` | 3/3 · 17/17 · 27/27 · 61/61 |
 | `make verify-gc-stress` | 11830 |
 
 Negative control: with the three source files as `main` has them and this suite
 in place, it fails at its first assertion — `AggregateError` is not defined.
+
+The six `Promise.any` cases settle on timers, so the suite runs
+`EventLoop::default_loop().run_until_idle` before it reads the answers, and the
+last question is asked from a timer rather than after a fixed wait. The first
+draft waited on a 100 ms timer without running the loop at all: its answers
+never ran, and the timer it left behind made `event_loop_and_timers` fail in
+two of three runs. Nothing depends on real time now — the delays only fix the
+order the reasons arrive in.
 
 ## 4. What is still open
 

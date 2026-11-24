@@ -101,7 +101,7 @@ TEST(aggregate_error_collects_the_reasons) {
                 out.push('name ' + e.name);
             });
         // The reasons are the ones that rejected, in the order given.
-        Promise.any([new Promise(function (_, r) { setTimeout(function () { r('c'); }, 20); }),
+        Promise.any([new Promise(function (_, r) { setTimeout(function () { r('c'); }, 3); }),
                      Promise.reject('a'),
                      new Promise(function (_, r) { setTimeout(function () { r('b'); }, 1); })])
             .catch(function (e) { out.push('order ' + JSON.stringify(e.errors)); });
@@ -120,14 +120,19 @@ TEST(aggregate_error_collects_the_reasons) {
             .catch(function (e) { out.push('identity ' + (e.errors[0] === reason)); });
 
         setTimeout(function () {
-            ok('Promise.any answers', out.sort().join(' | '), [
+            ok('Promise.any answered everything', out.length, 9);
+            ok('Promise.any answers', out.slice().sort().join(' | '), [
                 'empty true/0', 'errors ["a","b"]', 'fulfilled won', 'identity true',
                 'instanceof true', 'message All promises were rejected', 'name AggregateError',
                 'order ["c","a","b"]', 'undefined reason [null]/1'
             ].sort().join(' | '));
             failures.length ? failures.join('\n') : 'ok';
-        }, 100);
+        }, 10);
     )JS");
+    // The Promise.any cases settle on timers, and the last of them asks
+    // the questions above. Nothing here depends on how long they took: the
+    // loop is run until there is no work left.
+    EventLoop::default_loop().run_until_idle(std::chrono::seconds(5));
     const std::string failed = js.eval("failures.length ? failures.join('\\n') : ''").to_string();
     if (!failed.empty()) std::cerr << failed << "\n";
     assert(failed.empty());

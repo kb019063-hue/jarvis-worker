@@ -18,6 +18,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 namespace litebird {
 
@@ -541,6 +542,21 @@ bool JsValue::take_call_context(JsValue& this_out, bool& is_construct_out, JsVal
     return true;
 }
 
+namespace {
+
+/// The %Function.prototype% a function of this shape hangs under: its kind's
+/// own prototype for an async or a generator function, the ordinary one for
+/// everything else.
+JsObject* function_kind_prototype(const JsValue::FunctionData* fd) {
+    const JsIntrinsics& realm = JsIntrinsics::get();
+    if (fd == nullptr) return realm.function_proto;
+    if (fd->is_generator) return realm.generator_function_proto;
+    if (fd->is_async) return realm.async_function_proto;
+    return realm.function_proto;
+}
+
+}   // namespace
+
 JsObject* JsValue::property_cell(bool create) const {
     if (object_val) return object_val;
     if (!is_function() || !m_extra) return nullptr;
@@ -551,7 +567,11 @@ JsObject* JsValue::property_cell(bool create) const {
     const FunctionData* fd = function_data();
     if (type != JsType::Function || !fd || !fd->node) return nullptr;
     m_extra->cell = Heap::default_heap().allocate_object();
-    m_extra->cell->prototype = JsIntrinsics::get().function_proto;
+    // Which %Function.prototype% this one hangs under (§20.2.3.2,
+    // §27.3.3.2): an async function and a generator function each have one of
+    // their own, because `typeof` says "function" for all three and only the
+    // chain can tell them apart.
+    m_extra->cell->prototype = function_kind_prototype(fd);
     m_extra->cell->klass = ObjectClass::Function;
     return m_extra->cell;
 }

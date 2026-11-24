@@ -354,6 +354,14 @@ JsValue js_read_structured_clone(const JsStructuredClone& clone);
 struct JsIntrinsics {
     JsObject* object_proto{nullptr};
     JsObject* function_proto{nullptr};
+    /// §20.2.3.2 / §27.3.3.2: an async or a generator function is not an
+    /// ordinary one — it has a prototype of its own between it and
+    /// %Function.prototype%, carrying the kind's `@@toStringTag` and its
+    /// `constructor`. Both exist for the same reason: `typeof` is "function"
+    /// either way, and only the prototype chain can tell the three kinds
+    /// apart.
+    JsObject* async_function_proto{nullptr};
+    JsObject* generator_function_proto{nullptr};
     JsObject* array_proto{nullptr};
     JsObject* string_proto{nullptr};
     JsObject* number_proto{nullptr};

@@ -6,6 +6,7 @@
     python3 tools/ci/check_pr.py merge N     # when #N is finished: merge it, or leave it to the watch
     python3 tools/ci/check_pr.py landed N    # during a watch: wait for the landing session's answer
     python3 tools/ci/check_pr.py watch       # is a watch on, and what would it take now
+    python3 tools/ci/check_pr.py numbers     # the open pull requests that must change a number first
     python3 tools/ci/check_pr.py --self-test # how a claim and the board are read, on fixed texts; no network
 
 AGENTS.md says what a claim is and what has to be true before a merge. Each
@@ -556,6 +557,32 @@ def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bo
             problems.append((True, f"#{other['number']} had {', '.join(both)} first: stay out of "
                                    f"{'it' if len(both) == 1 else 'them'}, or tell the person you work for"))
     return problems
+
+
+def number_clashes(claims: list[dict], main: Main) -> list[tuple[int, str]]:
+    """(pull request, why) for every open claim that has to change a number
+    before it can land: the number is on `main`, or an earlier pull request
+    says it.
+
+    The landing session asks this before it takes a pull request. On 24
+    November #336 was taken as Phase 269, which #333 had said seven minutes
+    before it; its agent found that out from `merge N`, renumbered, and
+    pushed under the lot, twice in a quarter of an hour (the second number
+    was #343's). One push cost the lot a run that was nine minutes old, the
+    other left #336's last commit out of what landed.
+    """
+    found: list[tuple[int, str]] = []
+    for claim in claims:
+        for blocking, text in claim_problems(claim, claims, main):
+            if blocking and re.match(r"(?:Phase|finding) \d+", text):
+                found.append((claim["number"], text))
+    return found
+
+
+def show_number_clashes() -> int:
+    for number, why in number_clashes(open_claims(), on_main()):
+        print(f"#{number}: {why}")
+    return 0
 
 
 def show_claims() -> int:
@@ -1453,6 +1480,19 @@ def self_test() -> int:
          written, [(True, "Phase 6 is on main already"), (True, "finding 8 is on main already")]),
         ("a number above the floors that has no write-up is free", free, []),
     ]
+    # What the landing session asks before it takes a pull request: who has a
+    # number to change. #1 said Phase 9 first, #2 says it too and finding 11
+    # alone, #3 says a phase that has a write-up on main.
+    first = dict(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 9, finding 10\nAgent: Heron\n"), number=1)
+    second = dict(claim("Task: a row\nFiles: `src/d.cpp`\nPhase 9, finding 11\nAgent: Marten\n"), number=2)
+    third = dict(claim("Task: a row\nFiles: `src/e.cpp`\nPhase 6, finding 12\nAgent: Kestrel\n"), number=3)
+    cases += [
+        ("the later of two that say one phase has a number to change, and so has one whose phase is on main; the first has not",
+         number_clashes([first, second, third], main),
+         [(2, "Phase 9: #1 had it first. This one moves"), (3, "Phase 6 is on main already")]),
+        ("files that two pull requests share are not a number to change",
+         number_clashes([dict(first, number=4), dict(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 13, finding 14\n"), number=5)], main), []),
+    ]
     # When a merge needs no new CI run: what is a document, what is a check
     # that reads documents, and what the two sides of a merge may have changed.
     def kinds(name: str) -> tuple[bool, bool]:
@@ -1726,6 +1766,8 @@ def main() -> int:
         return check_landed(int(arguments[1].lstrip("#")), wait)
     if arguments == ["watch"]:
         return show_watch()
+    if arguments == ["numbers"]:
+        return show_number_clashes()
     if arguments[:1] == ["watch"] and len(arguments) in (3, 5) and arguments[1] in ("--beat", "--off"):
         name = "Lander"
         if len(arguments) == 5:

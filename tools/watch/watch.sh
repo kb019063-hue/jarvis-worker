@@ -8,6 +8,7 @@
 #   tools/watch/watch.sh look            the beat, and what changed since the look before
 #   tools/watch/watch.sh st              a look, the lot, and the CI state of every open pull request
 #   tools/watch/watch.sh cands           the pull requests that can be taken now, one line of numbers
+#                                        (why not, and why without a green run of its own, on stderr)
 #   tools/watch/watch.sh plan N [N...]   which of them merge after one another onto main (one line of
 #                                        numbers); the others, and the files, on stderr. Changes nothing
 #   tools/watch/watch.sh build N [N...]  this branch = main + an empty commit + those heads in the
@@ -179,10 +180,18 @@ st)
 
 cands)
   timeout 60 git fetch -q origin main
+  # A pull request whose phase or finding number is on main, or was another
+  # open one's first, will be renumbered by its agent (`check_pr.py merge N`
+  # tells it to), and that push would move it under the lot: it is taken
+  # when it has moved. To take one all the same, give its number to `plan`.
+  clashes="$(timeout 90 python3 tools/ci/check_pr.py numbers 2>/dev/null)"
   open_ones | while read -r n full wip mergeable; do
     [ "$wip" = "fin" ] || continue
     grep -q "^$n ${full:0:7}$" "$STATE/sentback" 2>/dev/null && continue   # sent back, and has not moved
     grep -qx "$n" "$STATE/ignore" 2>/dev/null && continue                     # nobody's: left alone
+    if echo "$clashes" | grep -q "^#$n: "; then
+      echo "#$n ${full:0:7}: not taken, it has a number to change: $(echo "$clashes" | grep "^#$n: " | head -1 | cut -d' ' -f2-)" >&2; continue
+    fi
     fetch_pr "$n" || continue
     if takeable "$n" "$full"; then printf '%s ' "$n"; [ "$WHY" = "green" ] || echo "#$n ${full:0:7}: $WHY" >&2; fi
   done; echo ;;

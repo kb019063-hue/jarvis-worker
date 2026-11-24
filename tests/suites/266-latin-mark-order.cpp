@@ -40,8 +40,8 @@ TEST(latin_mark_order_and_composition_respect_blocking) {
     // is what this line is about, so it is asserted separately from the slots.
     assert((ids(f, {'a', 0x200C, 0x0301}) == std::vector<uint16_t>{1, 8, 3}));
     assert((f.shape_glyphs({'a', 0x200C, 0x0301})[1].x_advance == 0));
-    // Leading marks and non-Latin bases are deliberately outside this repair.
-    assert((ids(f, {0x0301, 0x0323}) == std::vector<uint16_t>{3, 6}));
+    // Phase 279 orders leading Latin-resolved marks; non-Latin runs stay unchanged.
+    assert((ids(f, {0x0301, 0x0323}) == std::vector<uint16_t>{6, 3}));
     assert((ids(f, {0x05E9, 0x0301, 0x0323}) == std::vector<uint16_t>{9, 3, 6}));
     auto missing = make(false);
     assert((ids(missing, {'a', 0x0301, 0x0327}) == std::vector<uint16_t>{1, 5, 3}));

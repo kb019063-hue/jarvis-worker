@@ -1545,6 +1545,92 @@ JsValue canvas_to_blob(Realm& r, Element& el, Args args) {
     return undefined();
 }
 
+/// §4.12.5.1's `createPattern(image, repetition)`, bound here because the
+/// `CanvasPattern` it answers is a script object and only this file makes
+/// those.
+///
+/// **What this phase answers, and what it does not.** The method exists, takes
+/// the two arguments, and answers `null` in each of the two cases the standard
+/// makes `null`: an unrecognised `repetition`, which is step 2 (the step's
+/// wording is "throw" in older drafts and "return null" in HTML's current
+/// text), and an image this engine cannot read. It does **not** yet paint the
+/// tile when it is assigned to `fillStyle`: a pattern colour is sampled through
+/// the paint the rasteriser keeps, and a `CanvasPattern` value has no slot
+/// there — `fillStyle` accepts a `CanvasGradient` and a colour, and a pattern
+/// needs a third kind. That is a separate change to `JsValue`'s canvas paint
+/// and to `rasterize_paths`, and it is named in the finding rather than
+/// half-done here. A page that gets a `CanvasPattern` from this method and
+/// assigns it gets the same silent no-op it got from the method being
+/// `undefined`, and now a pattern object to inspect — which is the smaller
+/// lie, but it is still not the whole method.
+void install_canvas_create_pattern(Realm& r, JsValue context_object,
+                                   const std::shared_ptr<CanvasRenderingContext2D>& context) {
+    auto get_ctx = [context]() -> CanvasRenderingContext2D* { return context.get(); };
+    context_object.set_property("createPattern", make_function(r, "createPattern", 2,
+        [get_ctx, &r](Realm&, Args args) {
+            require_args(args, 2, "CanvasRenderingContext2D.createPattern");
+            // A source this engine cannot read is `null`, which is what a
+            // source that is not an image is: §4.12.5.1's "check the
+            // usability of the image argument" failing takes this branch.
+            DrawSource source;
+            if (!draw_source_from(args[0], source) || !source.pixels) return null();
+            const std::string repetition = args[1].to_string();
+            auto pattern = get_ctx()->create_pattern(source.pixels, repetition);
+            if (!pattern) return null();
+            JsValue object = JsValue::make_object();
+            object.set_property("setTransform", make_function(r, "setTransform", 0,
+                [pattern, &r](Realm&, Args set_args) {
+                    // §4.12.5.1: no argument (or null) clears it; six numbers
+                    // are the matrix in column order, which is the same order
+                    // `setTransform` on the context takes.
+                    if (set_args.empty() || set_args[0].is_nullish()) {
+                        pattern->transform = TransformMatrix2D::identity();
+                    } else if (set_args.size() >= 6) {
+                        pattern->transform = TransformMatrix2D{
+                            static_cast<float>(set_args[0].to_number()),
+                            static_cast<float>(set_args[1].to_number()),
+                            static_cast<float>(set_args[2].to_number()),
+                            static_cast<float>(set_args[3].to_number()),
+                            static_cast<float>(set_args[4].to_number()),
+                            static_cast<float>(set_args[5].to_number())};
+                    }
+                    return undefined();
+                }));
+            return object;
+        }));
+}
+
+/// §4.12.5.1's `reset()`, bound here rather than in `Canvas2D.cpp` because
+/// four of the properties it resets were copied onto **this object** by
+/// `CanvasRenderingContext2D::to_js_value` — `fillStyle`, `strokeStyle`,
+/// `lineWidth` and `globalCompositeOperation` are own data properties, and an
+/// own property shadows the live read in `JsValue::get_property`. The
+/// renderer's `reset()` puts its fields back and this writes the same four
+/// back to the object, so that the object and the renderer agree afterwards.
+/// Without the second half the context keeps answering with the colour it had
+/// before the reset, which is what a test that only checks `.lineWidth` catches
+/// and one that only checks that `reset` exists does not.
+void install_canvas_reset(Realm& r, JsValue context_object,
+                          const std::shared_ptr<CanvasRenderingContext2D>& context) {
+    auto get_ctx = [context]() -> CanvasRenderingContext2D* { return context.get(); };
+    // The object is captured through a shared_ptr because a native function's
+    // body must be callable when it is const, and writing these four
+    // properties is a write to the object.
+    auto self = std::make_shared<JsValue>(context_object);
+    context_object.set_property("reset", make_function(r, "reset", 0,
+        [get_ctx, self](Realm&, Args) {
+            get_ctx()->reset();
+            // The four `to_js_value` copies, from the state reset left.
+            const CanvasRenderingContext2D* c = get_ctx();
+            self->set_property("fillStyle", JsValue::make_string(c->fill_style.to_hex()));
+            self->set_property("strokeStyle", JsValue::make_string(c->stroke_style.to_hex()));
+            self->set_property("lineWidth", JsValue::make_number(c->line_width));
+            self->set_property("globalCompositeOperation",
+                              JsValue::make_string(c->global_composite_operation));
+            return undefined();
+        }));
+}
+
 // --- WebGL 1.0 / 2.0 WebIDL bindings (Khronos WebGL 1.0 §5 / 2.0 §3) --------
 
 struct WebGLHandleState : JsExotic {
@@ -2652,6 +2738,10 @@ void setup_canvas(Iface& I) {
                 // added here rather than in Canvas2D.cpp.
                 install_image_data_methods(r, object, backing);
                 install_draw_image(r, object, backing);
+                // Phase 280: `reset()` and `createPattern()` are object-level
+                // state, so they are installed here with the rest.
+                install_canvas_reset(r, object, backing);
+                install_canvas_create_pattern(r, object, backing);
                 return object;
             });
         }

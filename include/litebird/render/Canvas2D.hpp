@@ -29,10 +29,14 @@ struct ColorStop {
 
 class CanvasGradient {
 public:
-    enum class Type { Linear, Radial } type{Type::Linear};
+    enum class Type { Linear, Radial, Conic } type{Type::Linear};
     // Linear coordinates: (x0, y0) -> (x1, y1)
     // Radial coordinates: start circle (x0, y0, r0) -> end circle (x1, y1, r1)
+    // Conic: the centre is (x0, y0) and `start_angle` (radians, from the
+    // positive x axis, clockwise as the canvas' y axis grows down) is where
+    // `t` is 0. §4.12.5.1's `createConicGradient` is the only way to make one.
     float x0{0.0f}, y0{0.0f}, x1{0.0f}, y1{0.0f};
+    float start_angle{0.0f};
     float r0{0.0f}, r1{0.0f};
     GradientSpread spread{GradientSpread::Pad};
     TransformMatrix2D transform{TransformMatrix2D::identity()};
@@ -47,6 +51,27 @@ public:
 
     Color sample_at(float px, float py) const;
     JsValue to_js_value(std::shared_ptr<CanvasGradient> self);
+};
+
+/// §4.12.5.1's `CanvasPattern`: a tile drawn from an image or a canvas, with
+/// a repetition rule. It is not a `CanvasGradient`, so `fillStyle` needs a
+/// second kind of paint; `sample_at` answers a device-space point's colour
+/// the same way so that the rasteriser need not know which it has.
+class CanvasPattern {
+public:
+    /// "repeat" | "repeat-x" | "repeat-y" | "no-repeat". The empty string is
+    /// the `null` a `createPattern` with an unknown repetition returns.
+    std::string repetition{"repeat"};
+    int width{0};
+    int height{0};
+    std::vector<uint32_t> pixels; // 0xAARRGGBB, the tile
+    /// Whether the source the tile came from was origin-clean; a pattern made
+    /// from a tainted canvas taints what it paints.
+    bool origin_clean{true};
+    /// §4.12.5.1's `CanvasPattern.setTransform`, applied to the tile before it
+    /// is sampled. Identity until a page sets one.
+    TransformMatrix2D transform{TransformMatrix2D::identity()};
+    Color sample_at(int px, int py) const;
 };
 
 class CanvasRenderingContext2D {
@@ -109,13 +134,30 @@ public:
     // Gradients
     std::shared_ptr<CanvasGradient> fill_gradient{nullptr};
     std::shared_ptr<CanvasGradient> stroke_gradient{nullptr};
+    // Patterns. A style is one or the other; setting `fillStyle` to a colour
+    // clears both, and the rasteriser prefers the gradient when both are set.
+    std::shared_ptr<CanvasPattern> fill_pattern{nullptr};
+    std::shared_ptr<CanvasPattern> stroke_pattern{nullptr};
 
     std::shared_ptr<CanvasGradient> create_linear_gradient(float x0, float y0, float x1, float y1);
     std::shared_ptr<CanvasGradient> create_radial_gradient(float x0, float y0, float r0, float x1, float y1, float r1);
+    /// §4.12.5.1's `createConicGradient(startAngle, x, y)`.
+    std::shared_ptr<CanvasGradient> create_conic_gradient(float start_angle, float x, float y);
+    /// §4.12.5.1's `createPattern(image, repetition)`. Null when the image is
+    /// one this engine cannot read, or when `repetition` is not one of the
+    /// four strings — which the binding turns into the `null` a page sees.
+    std::shared_ptr<CanvasPattern> create_pattern(const std::shared_ptr<ImageData>& image,
+                                                 const std::string& repetition);
 
     // State stack
     void save();
     void restore();
+    /// HTML §4.12.5.1's `reset()`: the drawing state back to its initial
+    /// values, the current default path emptied, the transformation matrix
+    /// identity, the clip region empty, and the state stack emptied. It is
+    /// not `restore()`, which puts back the state that `save()` recorded:
+    /// `reset()` ignores what was saved.
+    void reset();
 
     // Current Transformation Matrix (CTM)
     void translate(float tx, float ty);
@@ -134,6 +176,11 @@ public:
     // Rectangles
     void fill_rect(float x, float y, float w, float h);
     void stroke_rect(float x, float y, float w, float h);
+    /// Whether `(x, y)` is on the stroke of the current default path: within
+    /// half the line width of one of its segments, which is the region
+    /// `stroke()` would ink. The same device-space geometry `is_point_in_path`
+    /// walks, so the two answer consistently for one path.
+    bool is_point_in_stroke(float x, float y) const;
     void clear_rect(float x, float y, float w, float h);
 
     // Paths

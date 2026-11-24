@@ -1,4 +1,5 @@
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/render/FontRenderer.hpp"
 #include "litebird/render/RasterBudget.hpp"
 #include <algorithm>
@@ -431,6 +432,32 @@ void CanvasRenderingContext2D::restore() {
     } else {
         m_clip_mask.clear();
     }
+}
+
+void CanvasRenderingContext2D::reset() {
+    // §4.12.5.1, "reset the rendering context to its default state". Every
+    // field `save()` records is put back to the value a new context has, and
+    // the stack is emptied rather than popped: `reset()` does not answer the
+    // saves that are still open, it discards them.
+    fill_style = Color::black();
+    stroke_style = Color::black();
+    line_width = 1.0f;
+    global_composite_operation = "source-over";
+    global_alpha = 1.0f;
+    line_cap = "butt";
+    line_join = "miter";
+    miter_limit = 10.0f;
+    line_dash.clear();
+    line_dash_offset = 0.0f;
+    font = "10px sans-serif";
+    text_align = "start";
+    text_baseline = "alphabetic";
+    fill_gradient.reset();
+    stroke_gradient.reset();
+    m_ctm = TransformMatrix2D::identity();
+    m_clip_mask.clear();
+    m_state_stack.clear();
+    m_paths.clear();
 }
 
 void CanvasRenderingContext2D::translate(float tx, float ty) {
@@ -876,14 +903,31 @@ Color CanvasGradient::sample_at(float px, float py) const {
     }
 
     float t = 0.0f;
-    if (type == Type::Linear) {
+    if (type == Type::Conic) {
+        // §4.12.5.1: t is the angle from the start angle to the point, taken
+        // clockwise in the canvas' coordinates (y grows down) and divided by
+        // a full turn. A point at the exact centre has no angle and gets the
+        // start of the ramp, which is what the spec's "if x and y are both
+        // zero" case amounts to here.
+        const float dx = px - x0;
+        const float dy = py - y0;
+        if (dx != 0.0f || dy != 0.0f) {
+            constexpr float kTau = 6.28318530717958647692f;
+            float angle = std::atan2(dy, dx) - start_angle;
+            // Normalised into [0, 1): a negative angle has gone the long way
+            // round, so it is brought back by whole turns rather than clamped.
+            while (angle < 0.0f) angle += kTau;
+            while (angle >= kTau) angle -= kTau;
+            t = angle / kTau;
+        }
+    } else if (type == Type::Linear) {
         const float dx = x1 - x0;
         const float dy = y1 - y0;
         const float len2 = dx * dx + dy * dy;
         if (len2 > 1e-6f) {
             t = ((px - x0) * dx + (py - y0) * dy) / len2;
         }
-    } else {
+    } else if (type == Type::Radial) {
         // Two-circle radial gradient: (x0, y0, r0) -> (x1, y1, r1)
         if (std::abs(x0 - x1) < 1e-5f && std::abs(y0 - y1) < 1e-5f) {
             const float dist = std::sqrt((px - x0) * (px - x0) + (py - y0) * (py - y0));
@@ -978,6 +1022,59 @@ std::shared_ptr<CanvasGradient> CanvasRenderingContext2D::create_radial_gradient
     grad->y1 = y1;
     grad->r1 = r1;
     return grad;
+}
+
+std::shared_ptr<CanvasGradient> CanvasRenderingContext2D::create_conic_gradient(float start_angle, float x, float y) {
+    auto grad = std::make_shared<CanvasGradient>();
+    grad->type = CanvasGradient::Type::Conic;
+    grad->start_angle = start_angle;
+    grad->x0 = x;
+    grad->y0 = y;
+    return grad;
+}
+
+Color CanvasPattern::sample_at(int px, int py) const {
+    if (width <= 0 || height <= 0 ||
+        pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) {
+        return Color(0, 0, 0, 0);
+    }
+    // "repeat" tiles in both directions, "repeat-x" only across, and
+    // "repeat-y" only down; the axis that does not repeat takes the nearest
+    // edge of the tile, which is what the specification's figures show. A
+    // negative coordinate must wrap rather than clamp, or the tile would
+    // start at the origin instead of continuing backwards through it.
+    auto wrap = [](int v, int n) {
+        if (v >= 0) return v % n;
+        return ((v % n) + n) % n;
+    };
+    auto clamp = [](int v, int n) {
+        if (v < 0) return 0;
+        if (v >= n) return n - 1;
+        return v;
+    };
+    const bool rx = repetition != "repeat-y";
+    const bool ry = repetition != "repeat-x";
+    const int tx = rx ? wrap(px, width) : clamp(px, width);
+    const int ty = ry ? wrap(py, height) : clamp(py, height);
+    const std::uint32_t argb = pixels[static_cast<std::size_t>(ty) * static_cast<std::size_t>(width) +
+                                     static_cast<std::size_t>(tx)];
+    return Color::from_argb(argb);
+}
+
+std::shared_ptr<CanvasPattern> CanvasRenderingContext2D::create_pattern(
+    const std::shared_ptr<ImageData>& image, const std::string& repetition) {
+    if (!image || !image->is_valid()) return nullptr;
+    // §4.12.5.1 step 2: an unrecognised repetition is null, not an exception.
+    if (repetition != "repeat" && repetition != "repeat-x" && repetition != "repeat-y" &&
+        repetition != "no-repeat") {
+        return nullptr;
+    }
+    auto pattern = std::make_shared<CanvasPattern>();
+    pattern->repetition = repetition;
+    pattern->width = image->width;
+    pattern->height = image->height;
+    pattern->pixels = image->pixels;
+    return pattern;
 }
 
 void CanvasRenderingContext2D::fill_rect(float x, float y, float w, float h) {
@@ -1796,6 +1893,48 @@ bool CanvasRenderingContext2D::is_point_in_path(float x, float y, FillRule rule)
     return (rule == FillRule::EvenOdd) ? ((crossings & 1) != 0) : (winding != 0);
 }
 
+bool CanvasRenderingContext2D::is_point_in_stroke(float x, float y) const {
+    if (!is_finite_f(x) || !is_finite_f(y)) return false;
+    // The stroke region is every point within half the line width of the
+    // path, measured to the segment and not to its ends: a butt cap adds
+    // nothing, so a point beyond the end of a segment is outside however
+    // close it is to it. `lineWidth` is in user units and the path is stored
+    // in device space, so the width is scaled by the CTM's longest axis —
+    // which is exact for a uniform transform and the honest approximation
+    // for a sheared one.
+    const float sx = std::sqrt(m_ctm.a * m_ctm.a + m_ctm.b * m_ctm.b);
+    const float sy = std::sqrt(m_ctm.c * m_ctm.c + m_ctm.d * m_ctm.d);
+    const float scale = std::max(sx, sy);
+    const float half = std::max(0.0f, line_width) * (scale > 0.0f ? scale : 1.0f) * 0.5f;
+    for (const auto& sp : m_paths) {
+        const std::size_t n = sp.points.size();
+        if (n < 2) continue;
+        // A closed subpath has its last segment back to the first; an open one
+        // does not, which is the same rule `is_point_in_path` uses to decide
+        // whether the wrap-around segment exists.
+        const std::size_t segments = sp.closed ? n : n - 1;
+        for (std::size_t i = 0; i < segments; ++i) {
+            const Point& p = sp.points[i];
+            const Point& q = sp.points[(i + 1) % n];
+            const float vx = q.x - p.x;
+            const float vy = q.y - p.y;
+            const float len2 = vx * vx + vy * vy;
+            float t = 0.0f;
+            if (len2 > 0.0f) {
+                t = ((x - p.x) * vx + (y - p.y) * vy) / len2;
+                // Clamped, not wrapped: past either end the nearest point of
+                // the segment is the end itself, which is where the cap is.
+                if (t < 0.0f) t = 0.0f;
+                if (t > 1.0f) t = 1.0f;
+            }
+            const float dx = x - (p.x + t * vx);
+            const float dy = y - (p.y + t * vy);
+            if (std::sqrt(dx * dx + dy * dy) <= half) return true;
+        }
+    }
+    return false;
+}
+
 std::vector<uint8_t> CanvasRenderingContext2D::get_image_data_rgba(int sx, int sy, int sw, int sh) const {
     if (sw < 0) { sx += sw; sw = -sw; }
     if (sh < 0) { sy += sh; sh = -sh; }
@@ -2175,6 +2314,24 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
         return grad->to_js_value(grad);
     }));
 
+    ctx.set_property("createConicGradient", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+        // §4.12.5.1: `createConicGradient(startAngle, x, y)`. The angle is in
+        // radians and is where the ramp's 0 is, measured from the positive x
+        // axis; a missing coordinate is 0, which the binding's expected count
+        // would otherwise have refused.
+        const float angle = args.size() > 0 ? static_cast<float>(args[0].to_number()) : 0.0f;
+        const float x = args.size() > 1 ? static_cast<float>(args[1].to_number()) : 0.0f;
+        const float y = args.size() > 2 ? static_cast<float>(args[2].to_number()) : 0.0f;
+        if (!std::isfinite(angle) || !std::isfinite(x) || !std::isfinite(y)) {
+            // Step 1: a non-finite argument is a TypeError. Throwing from a
+            // native function body is this engine's way of doing that.
+            js_throw_type_error("Failed to execute 'createConicGradient' on 'CanvasRenderingContext2D': "
+                                "the provided double value is non-finite.");
+        }
+        auto grad = get_ctx()->create_conic_gradient(angle, x, y);
+        return grad->to_js_value(grad);
+    }));
+
     ctx.set_property("stroke", JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
         get_ctx()->stroke();
         return JsValue::make_undefined();
@@ -2188,6 +2345,15 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
     ctx.set_property("clip", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
         get_ctx()->clip(parse_fill_rule_arg(args, 0));
         return JsValue::make_undefined();
+    }));
+
+    ctx.set_property("isPointInStroke", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+        if (args.size() >= 2) {
+            return JsValue::make_boolean(get_ctx()->is_point_in_stroke(
+                static_cast<float>(args[0].to_number()),
+                static_cast<float>(args[1].to_number())));
+        }
+        return JsValue::make_boolean(false);
     }));
 
     ctx.set_property("isPointInPath", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {

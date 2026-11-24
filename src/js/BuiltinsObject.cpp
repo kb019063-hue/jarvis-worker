@@ -439,7 +439,23 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     // where a read asks first once `has_accessors` says the map has
     // something the elements do not (finding 253).
     if (cell && cell->is_array && !wants_accessor && array_index && !mapped_hole && !plain_attributes) {
-        if (in_range && element_there) { object.set_array_hole(index); cell->has_accessors = true; }
+        // A place the elements already cover becomes a hole so that the map's
+        // entry is what a read finds; one past the end has to be *covered*
+        // first, because an index the elements do not reach is not a place the
+        // map can answer for — the read never asks. Both halves are needed:
+        // with only the first, `Object.defineProperty(Array.prototype, '0',
+        // { writable: false })` left the value in the elements and the
+        // attributes in the map, so `hasOwnProperty` said `false` while `[0]`
+        // read `'p'` (finding 269).
+        if (in_range && element_there) {
+            object.set_array_hole(index);
+        } else if (cell->extensible) {
+            const size_t previous = cell->array_elements.size();
+            cell->array_elements.resize(index + 1, JsValue::make_undefined());
+            if (!cell->array_holes) cell->array_holes = std::make_unique<JsObject::Holes>();
+            for (size_t i = previous; i <= index; ++i) cell->array_holes->set(i);
+        }
+        cell->has_accessors = true;
     }
     // ArraySetLength: a `length` given as a value must be a valid array
     // length, and a negative one is a RangeError before any attribute is

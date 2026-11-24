@@ -1058,7 +1058,11 @@ void install_array_builtins(JsIntrinsics& realm) {
             JsValue made = make_result(static_cast<size_t>(-1));
             iterate_with_method(source, method, [&](const JsValue& value) {
                 const JsValue item = mapped(value, items.size());
-                set_place_or_throw(made, items.size(), item);
+                // §23.1.2.1 step 5.g.iii calls CreateDataPropertyOrThrow: `made`
+                // is the answer being built, not a receiver being moved, so a
+                // property the chain answers for must never redirect it
+                // (finding 269).
+                create_data_property_or_throw(made, items.size(), item);
                 items.push_back(item);
                 return true;
             });
@@ -1077,7 +1081,7 @@ void install_array_builtins(JsIntrinsics& realm) {
             JsValue made = make_result(static_cast<size_t>(length));
             for (double i = 0; i < length; ++i) {
                 const JsValue item = mapped(source.get_property(js_number_to_string(i)), static_cast<size_t>(i));
-                set_place_or_throw(made, static_cast<size_t>(i), item);
+                create_data_property_or_throw(made, static_cast<size_t>(i), item);
                 items.push_back(item);
             }
             set_length_or_throw(made, items.size());
@@ -1292,7 +1296,11 @@ void install_array_builtins(JsIntrinsics& realm) {
             // (§23.1.3.31 step 14).
             JsValue removed = array_species_create(array, dropped, "splice");
             for (size_t i = 0; i < dropped; ++i) {
-                if (has_place(array, start + i)) set_place_or_throw(removed, i, get_place(array, start + i));
+                // The array `splice` returns is built, not moved: §23.1.3.31
+                // step 20.b calls CreateDataPropertyOrThrow on it, so a place
+                // the chain answers for cannot swallow the value
+                // (finding 269).
+                if (has_place(array, start + i)) create_data_property_or_throw(removed, i, get_place(array, start + i));
             }
             set_length_or_throw(removed, dropped);
             if (inserted < dropped) {

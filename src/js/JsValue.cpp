@@ -1531,6 +1531,72 @@ JsValue JsValue::get_property(const std::string& name) const {
     return JsValue::make_undefined();
 }
 
+namespace {
+
+/// What an array element write has to ask the prototype chain, and the one
+/// question the element path used to skip (ECMAScript §10.1.9.2,
+/// OrdinarySetWithOwnDescriptor).
+///
+/// A key the array does not have of its own — a hole, or a place past the end
+/// — is a key the chain may have something to say about, and an index is a
+/// key. Three answers are possible, and each is one line of the standard:
+///
+/// * an accessor with a setter: the setter runs with the array as `this` and
+///   the place stays a hole (the element is *not* written);
+/// * an accessor with no setter, or a **non-writable** data property: the
+///   write is refused, which is `false` here and a TypeError in strict code;
+/// * a **writable** data property, or nothing at all: the ordinary element
+///   write happens and shadows the prototype, which is `false` returned with
+///   `handled` still false.
+///
+/// The bug this replaces set `handled` as soon as a map had the key, so a
+/// *data* property on the prototype refused a write that should have shadowed
+/// it — `Object.defineProperty(Array.prototype, '0', { value: 'p', writable:
+/// true })` then `[][0] = 5` left the array empty where a browser fills it.
+/// A data property is therefore never `handled` here: the element write below
+/// already shadows it, and only an accessor can redirect the write to code.
+///
+/// Worth a walk only when some accessor whose name is an index exists
+/// anywhere, so an ordinary program pays one relaxed load per element write.
+bool set_through_prototype(const JsValue& receiver, const std::string& name, const JsValue& val,
+                           bool& handled) {
+    handled = false;
+    // Any property whose name is an index, anywhere: an accessor *or* a data
+    // property that was given attributes. Both can answer a write, and the
+    // count of them is the same one the hole-read question keeps (above), so
+    // an ordinary program — whose maps hold no index at all — pays one
+    // relaxed load per element write and no walk.
+    if (g_index_named_keys.load(std::memory_order_relaxed) == 0) return false;
+    const JsObject* cell = receiver.object_val.get();
+    if (cell == nullptr || cell->prototype == nullptr) return false;
+    int guard = 0;
+    for (JsObject* proto = cell->prototype; proto && guard < kMaxPrototypeChain;
+         proto = proto->prototype, ++guard) {
+        const auto found = proto->properties.find(name);
+        if (found == proto->properties.end()) continue;
+        if (found->flags & PropertyMap::Accessor) {
+            handled = true;
+            if (found->setter && found->setter->is_function()) {
+                found->setter->call_with_this(receiver, {val});
+                return true;
+            }
+            return false;      // an accessor with no setter: refused
+        }
+        // A data property the prototype keeps in its map — an index it was
+        // given attributes for, since an ordinary element has none (Phase
+        // 249). Non-writable refuses the write; writable is left to the
+        // element write, which shadows it.
+        if (!(found->flags & PropertyMap::Writable)) {
+            handled = true;
+            return false;
+        }
+        return false;
+    }
+    return false;
+}
+
+}   // namespace
+
 // Returns false when the write was refused — nothing was stored, and a
 // strict-mode assignment must throw a TypeError, as [[Set]]'s false requires.
 bool JsValue::set_property(const std::string& name, JsValue val) {
@@ -1648,6 +1714,20 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                         mapped->second = std::move(val);
                         return true;
                     }
+                }
+                // A place the array does not own — a hole, or past the end —
+                // is a key the prototype chain may answer for, and an index is
+                // a key (§10.1.9.2). A setter there runs instead of the write,
+                // a non-writable data property or a getter with no setter
+                // refuses it, and a writable data property is shadowed by the
+                // element write below, as the standard has it. An element the
+                // array already has is its own property and the chain has no
+                // say, so this is asked only for a place it does not own.
+                if (index >= obj->array_elements.size() ||
+                    (obj->array_holes && obj->array_holes->empty_slot(index))) {
+                    bool handled = false;
+                    const bool answer = set_through_prototype(*this, name, val, handled);
+                    if (handled) return answer;
                 }
                 if (index >= obj->array_elements.size()) {
                     if (!obj->extensible) return false;

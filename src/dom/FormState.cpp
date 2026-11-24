@@ -684,6 +684,17 @@ bool is_labelable(const Element& element) {
     return tag == "button" || tag == "select" || tag == "textarea" || tag == "meter" || tag == "output" || tag == "progress";
 }
 
+bool is_interactive_content(const Element& element) {
+    if (element.is_foreign()) return false;
+    const std::string& tag = element.tag_name();
+    if (tag == "a" || tag == "area") return element.has_attribute("href");
+    if (tag == "audio" || tag == "video") return element.has_attribute("controls");
+    if (tag == "img" || tag == "object") return element.has_attribute("usemap");
+    if (tag == "input") return input_type(element) != "hidden";
+    return tag == "button" || tag == "details" || tag == "embed" || tag == "iframe" || tag == "label" ||
+           tag == "select" || tag == "summary" || tag == "textarea";
+}
+
 std::string input_type(const Element& input) {
     const std::string* text = input.attribute("type");
     if (!text) return "text";

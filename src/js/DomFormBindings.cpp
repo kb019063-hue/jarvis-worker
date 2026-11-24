@@ -566,7 +566,11 @@ void after_click(Realm& realm, Activation& activation, const JsValue& event, boo
         Node* origin = node_ptr(source);
         for (std::shared_ptr<Node> at = origin ? origin->shared_from_this() : nullptr; at && at.get() != &target; at = at->parent()) {
             if (at == control) return;
-            if (at->is_element() && has_activation_behavior(static_cast<Element&>(*at))) return;
+            // Interactive content is a broader category than elements with a
+            // click default action. For example, <button type=button> is
+            // interactive even though it has no activation behavior of its
+            // own; clicking it must not activate the surrounding label.
+            if (at->is_element() && forms::is_interactive_content(static_cast<Element&>(*at))) return;
         }
         JsValue click = make_event(realm, "PointerEvent", "click", true, true, {{"view", window_of(realm)}}, true);
         dispatch(realm, wrap(realm, control), click, false);

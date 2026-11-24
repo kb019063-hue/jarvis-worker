@@ -7368,6 +7368,34 @@ TEST(subtle_crypto_wrap_and_unwrap_key) {
     assert(interp.eval("nonExtractErr !== null").is_truthy());
 }
 
+TEST(subtle_crypto_jwk_import_and_export) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var jwkOut = null;
+        var rtHex = null;
+        var jwkIn = { kty: 'oct', k: 'AAECAwQFBgcICQoLDA0ODw', alg: 'A128GCM', ext: true };
+        crypto.subtle.importKey('jwk', jwkIn, 'AES-GCM', true, ['encrypt', 'decrypt'])
+            .then(function(k) {
+                return crypto.subtle.exportKey('jwk', k)
+                    .then(function(j) {
+                        jwkOut = j;
+                        return crypto.subtle.exportKey('raw', k);
+                    });
+            })
+            .then(function(raw) {
+                var u8 = new Uint8Array(raw);
+                var s = '';
+                for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+                rtHex = s;
+            });
+    )");
+    assert(interp.eval("jwkOut !== null && jwkOut.kty === 'oct' && jwkOut.k === 'AAECAwQFBgcICQoLDA0ODw' && jwkOut.alg === 'A128GCM' && jwkOut.ext === true").is_truthy());
+    assert(interp.eval("rtHex === '000102030405060708090a0b0c0d0e0f'").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36308,6 +36336,7 @@ int main() {
     RUN_TEST(subtle_crypto_aes_gcm_encrypt_and_decrypt);
     RUN_TEST(subtle_crypto_aes_cbc_encrypt_and_decrypt);
     RUN_TEST(subtle_crypto_wrap_and_unwrap_key);
+    RUN_TEST(subtle_crypto_jwk_import_and_export);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

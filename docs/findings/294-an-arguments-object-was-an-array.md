@@ -1,4 +1,4 @@
-# Finding 286 — an arguments object was an Array with a label on it
+# Finding 294 — an arguments object was an Array with a label on it
 
 **Severity:** the wrong prototype, so every inherited name came from the wrong
 place. `typeof arguments.push` was `"function"`, and a delete refusal's message

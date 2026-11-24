@@ -1,4 +1,4 @@
-// Phase 281, finding 286: an arguments object is an ordinary object with the
+// Phase 289, finding 294: an arguments object is an ordinary object with the
 // array iteration protocol, not an Array.
 TEST(arguments_is_an_object_with_the_array_iteration_protocol) {
     // §10.4.4: an arguments object's [[Prototype]] is %Object.prototype%, not

@@ -1,8 +1,8 @@
-# Phase 281 — an arguments object is an object
+# Phase 289 — an arguments object is an object
 
 Task: Phase 123's row names it — "`arguments`' prototype is `Array.prototype`
 here, so its message says `#<Array>` where V8 says `#<Object>`". §10.4.4 gives
-an arguments object `%Object.prototype%`. Finding 286.
+an arguments object `%Object.prototype%`. Finding 294.
 
 ## 1. What was wrong
 
@@ -80,7 +80,7 @@ With §10.4.4.7 installed the same corpus is **21,326, +4 fixed and 0 broken**.
 The regression was real, was caught by measuring rather than by reasoning, and
 its cause was in the standard the row already cited.
 
-The new suite is `tests/suites/281-arguments-is-an-object.cpp`: the prototype,
+The new suite is `tests/suites/289-arguments-is-an-object.cpp`: the prototype,
 `Array.isArray`, `typeof args.push`, `[object Arguments]`, the three iteration
 forms, the identity of `@@iterator` with `Array.prototype.values`, the exact
 `#<Object>` message, and that the places and `length` did not move.

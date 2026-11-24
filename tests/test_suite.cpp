@@ -150,8 +150,19 @@ static void note_suite_run(void (*run)()) {
 /// Every suite has one place in the order (the files of tests/suites/ first,
 /// then the list in `main()`), and a place belongs to one stretch, so N
 /// processes that all pass have run every suite once.
+///
+/// Equal stretches are equal in suites, not in time. In the sanitizer build
+/// of 24 November 2026 three stretches of 147 suites took 22, 322 and 24
+/// seconds: five suites of the middle one took 190 of them (pages nested
+/// 200,000 deep, and the like). So the stretches can also be told where to
+/// begin: `LITEBIRD_SUITE_CUTS=a,b,c` beside `LITEBIRD_SUITE_SHARD=K/4`
+/// makes four stretches, the first from the start and the others from the
+/// suites named a, b and c, which must come in that order. A name that is
+/// not a suite of the run ends it with status 2, in every process.
 static std::size_t g_shard = 0, g_shards = 1;
 static bool g_divided = false;    ///< LITEBIRD_SUITE_SHARD was given, be it 0/1
+static std::vector<std::string> g_cuts;   ///< LITEBIRD_SUITE_CUTS, in order
+static std::size_t g_cuts_passed = 0;     ///< how many of them the order has reached
 static std::size_t g_place = 0;   ///< the place in the order of the next suite
 static std::size_t g_places = 0;  ///< how many places there are
 /// True the first time `main()` goes down its list, when the run is divided:
@@ -171,15 +182,49 @@ static void read_the_shard() {
     g_shard = k;
     g_shards = n;
     g_divided = true;
+    const char* cuts = std::getenv("LITEBIRD_SUITE_CUTS");
+    if (cuts == nullptr || *cuts == '\0') return;
+    std::string name;
+    for (const char* c = cuts;; ++c) {
+        if (*c == ',' || *c == '\0') {
+            g_cuts.push_back(name);
+            name.clear();
+            if (*c == '\0') break;
+        } else {
+            name += *c;
+        }
+    }
+    if (g_cuts.size() + 1 != g_shards) {
+        std::cout << "\033[1;31mFAILED\033[0m: LITEBIRD_SUITE_CUTS names "
+                  << g_cuts.size() << " suites, which makes "
+                  << g_cuts.size() + 1 << " stretches, and LITEBIRD_SUITE_SHARD"
+                  << " says there are " << g_shards << "\n" << std::flush;
+        std::_Exit(2);
+    }
+}
+/// Before each time down the list. After the first, which counts: every
+/// name of LITEBIRD_SUITE_CUTS was the name of a suite, in the order given.
+static void begin_a_pass_down_the_list(bool counted_before) {
+    if (counted_before && g_cuts_passed != g_cuts.size()) {
+        std::cout << "\033[1;31mFAILED\033[0m: LITEBIRD_SUITE_CUTS names \""
+                  << g_cuts[g_cuts_passed] << "\", which is not a suite of "
+                  << "this run, or does not come after the name before it\n"
+                  << std::flush;
+        std::_Exit(2);
+    }
+    g_cuts_passed = 0;
 }
 /// Whether the next suite in the order is this process's. Asked once a suite.
-static bool this_process_runs_the_next_suite() {
+static bool this_process_runs_the_next_suite(const char* name) {
+    if (g_cuts_passed < g_cuts.size() && g_cuts[g_cuts_passed] == name)
+        ++g_cuts_passed;  // a new stretch begins at this suite
     if (g_counting_places) {
         ++g_places;
         return false;
     }
     const std::size_t place = g_place++;
     if (g_shards <= 1 || g_places == 0) return true;
+    if (!g_cuts.empty()) return g_cuts_passed == g_shard;
     return place * g_shards / g_places == g_shard;
 }
 static void note_suite_is_elsewhere(void (*run)()) {
@@ -283,7 +328,7 @@ static void say_the_slowest_suites() {
 }
 
 #define RUN_TEST(name) do { \
-    if (!this_process_runs_the_next_suite()) { \
+    if (!this_process_runs_the_next_suite(#name)) { \
         note_suite_is_elsewhere(&test_##name); \
         break; \
     } \
@@ -307,7 +352,7 @@ static void say_the_slowest_suites() {
 static void run_the_suites_in_files_of_their_own() {
     for (std::size_t i = 0; i < suite_list().size(); ++i) {
         if (!suite_list()[i].own_file) continue;
-        if (!this_process_runs_the_next_suite()) {
+        if (!this_process_runs_the_next_suite(suite_list()[i].name)) {
             if (!g_counting_places) suite_list()[i].elsewhere = true;
             continue;
         }
@@ -36291,6 +36336,7 @@ int main() {
     // to run the ones that are its own. A whole run goes down it once.
     for (int pass = g_divided ? 0 : 1; pass < 2; ++pass) {
     g_counting_places = pass == 0;
+    begin_a_pass_down_the_list(g_divided && pass == 1);
 
     // The suites of tests/suites/, which have no line here, and then the list.
     run_the_suites_in_files_of_their_own();

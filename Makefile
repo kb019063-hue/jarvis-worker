@@ -310,10 +310,22 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@./$(CROSS_ORIGIN_TARGET)
 
 ## `make test` with the suites as $(STRETCHES) processes side by side: every
-## suite is run once, by one of them (tools/ci/run_stretches.py).
+## suite is run once, by one of them (tools/ci/run_stretches.py). STRETCHES
+## is a number of equal stretches, or `balanced`: four stretches, which
+## begin at the start of the order and at the three suites UNIT_SUITE_CUTS
+## names. Equal stretches are equal in suites, not in time: in the sanitizer
+## build of 24 November 2026 three of them took 22, 322 and 24 seconds,
+## because the suites that nest pages 200,000 deep stand together in the
+## middle of the order (79, 37 and 30 seconds of the 322). The cuts put the
+## first of those and the next two into stretches of their own. When a run
+## says the stretches have drifted apart (its last lines, and in CI a notice
+## on the job, give the time of each and name the slowest suites), move a
+## cut: a name here must be a suite of tests/test_suite.cpp's own list, in
+## the order of that list, or every stretch fails.
 STRETCHES ?= 3
+UNIT_SUITE_CUTS ?= deep_nesting_never_exhausts_the_native_stack,dom_trees_of_any_depth_can_be_walked_and_released,html_parser_void_element_with_a_slash_closes_nothing_else
 test-in-stretches: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
-	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(STRETCHES)
+	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(if $(filter balanced,$(STRETCHES)),$(UNIT_SUITE_CUTS),$(STRETCHES))
 	@./$(CROSS_ORIGIN_TARGET)
 
 ## The numbers the documents publish: every "A / B (P%)" must divide, the two
@@ -618,11 +630,12 @@ asan-build:
 
 ## The unit suites, built and run with the sanitizers. ASAN_UNIT_STRETCHES=3
 ## runs them as three processes side by side (tests/test_suite.cpp,
-## tools/ci/run_stretches.py), which is what CI does: one process took 8 min
-## 52 s there on 24 November 2026, on a machine with four cores and 16 GB,
-## and that was the length of a whole CI run. Here it is one process unless
-## you say otherwise: three of them in the sanitizer build want more memory
-## than a machine with 4 GB has.
+## tools/ci/run_stretches.py), and ASAN_UNIT_STRETCHES=balanced as the four
+## of `test-in-stretches` above, which is what CI does: one process took 8
+## min 52 s there on 24 November 2026, on a machine with four cores and 16
+## GB, and that was the length of a whole CI run. Here it is one process
+## unless you say otherwise: several of them in the sanitizer build want more
+## memory than a machine with 4 GB has (one stretch alone held 5 GB).
 ASAN_UNIT_STRETCHES ?= 1
 asan-unit:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" $(if $(filter 1,$(ASAN_UNIT_STRETCHES)),test,test-in-stretches STRETCHES=$(ASAN_UNIT_STRETCHES))

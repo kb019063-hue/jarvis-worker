@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Run the unit suites as several processes side by side.
 
-    python3 tools/ci/run_stretches.py BINARY N     # N stretches of BINARY's suites
+    python3 tools/ci/run_stretches.py BINARY N       # N equal stretches of BINARY's suites
+    python3 tools/ci/run_stretches.py BINARY a,b,c   # four: from the start, and from the suites a, b, c
     python3 tools/ci/run_stretches.py --self-test
 
 `BINARY` is the test binary (`build/test_suite`, `build-asan/test_suite`).
@@ -18,6 +19,13 @@ wrote, one after another in the order of a whole run, and passes when
 It is what `make asan-unit` runs. One process took 8 min 52 s there in CI on
 24 November 2026, on a machine with four cores, and that was the length of a
 whole CI run.
+
+Equal stretches are equal in suites, not in time: three of them took 22, 322
+and 24 seconds that evening, because the few suites that nest pages 200,000
+deep stand together in the middle of the order. So the second argument may
+instead name the suites at which a new stretch begins, in the order of the
+run (`LITEBIRD_SUITE_CUTS`, tests/test_suite.cpp); the Makefile keeps the
+names (`UNIT_SUITE_CUTS`). A name that is not a suite fails every stretch.
 
 A stretch that fails is printed last, so that the end of the output is the
 failure, which is where a person and tools/ci/annotate_failure.py look.
@@ -81,13 +89,39 @@ def measured(results: list[tuple[int, str]], seconds: list[float], megabytes: li
             + (f". The slowest suites of stretch {slowest}: {named.group(1).strip()}" if named else ""))
 
 
-def run(binary: str, count: int) -> int:
+def stretches_of(argument: str) -> tuple[int, str] | None:
+    """(how many stretches, the names they begin at) for the second argument:
+    a number of equal stretches, or the names, comma-separated."""
+    if argument.isdigit():
+        return (int(argument), "") if int(argument) >= 1 else None
+    names = argument.split(",")
+    if not all(re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) for name in names):
+        return None
+    return len(names) + 1, argument
+
+
+def machine() -> str:
+    """The cores and the memory of this machine, for the notice."""
+    memory = ""
+    try:
+        with open("/proc/meminfo", encoding="ascii") as info:
+            found = re.search(r"MemTotal:\s+(\d+) kB", info.read())
+            memory = f", {int(found.group(1)) // 1024} MB of memory" if found else ""
+    except OSError:
+        pass
+    return f"{os.cpu_count() or '?'} cores{memory}"
+
+
+def run(binary: str, count: int, cuts: str = "") -> int:
     started = time.time()
     with tempfile.TemporaryDirectory(prefix="litebird-stretches-") as directory:
         processes = []
         for index in range(count):
             log = open(os.path.join(directory, f"stretch{index}.log"), "wb")
             environment = dict(os.environ, LITEBIRD_SUITE_SHARD=f"{index}/{count}")
+            environment.pop("LITEBIRD_SUITE_CUTS", None)
+            if cuts:
+                environment["LITEBIRD_SUITE_CUTS"] = cuts
             processes.append((subprocess.Popen([binary], stdout=log, stderr=subprocess.STDOUT, env=environment), log))
         # Each is waited for by itself (`wait4`), for the moment it ended and
         # the most memory it held: waiting for them in order would give the
@@ -121,7 +155,7 @@ def run(binary: str, count: int) -> int:
             sys.stdout.write("\n")
     passed, line = verdict(results)
     whole = time.time() - started
-    times = measured(results, seconds, megabytes, whole)
+    times = measured(results, seconds, megabytes, whole) + f". The machine: {machine()}"
     print(f"\nThe unit suites as {times}")
     if os.environ.get("GITHUB_ACTIONS") == "true":
         # A notice on the job: read through the API where the log cannot be.
@@ -164,6 +198,12 @@ def self_test() -> int:
          "2 processes side by side, 300 s in all (the slowest is stretch 1); "
          "stretch 0: 210 suites in 20 s, 700 MB at most; stretch 1: 210 suites in 300 s, 5000 MB at most. "
          "The slowest suites of stretch 1: deep 250 s, wide 30 s"),
+        ("a number is that many equal stretches", stretches_of("3"), (3, "")),
+        ("names are one stretch more than there are names", stretches_of("deep_one,wide_two,last_3"), (4, "deep_one,wide_two,last_3")),
+        ("one name is two stretches", stretches_of("deep_one"), (2, "deep_one")),
+        ("nought is not a number of stretches", stretches_of("0"), None),
+        ("an empty name is not a name", stretches_of("deep_one,,wide_two"), None),
+        ("nor is anything that could not be a suite", stretches_of("deep-one"), None),
         ("a stretch that died says no count, and the line is still written",
          measured([(134, "Running test: b... Assertion failed\n")], [12.0], [300], 12.0),
          "1 processes side by side, 12 s in all (the slowest is stretch 0); stretch 0: no count in 12 s, 300 MB at most"),
@@ -180,10 +220,11 @@ def self_test() -> int:
 def main(arguments: list[str]) -> int:
     if arguments == ["--self-test"]:
         return self_test()
-    if len(arguments) != 2 or not arguments[1].isdigit() or int(arguments[1]) < 1:
+    stretches = stretches_of(arguments[1]) if len(arguments) == 2 else None
+    if stretches is None:
         print(__doc__.strip(), file=sys.stderr)
         return 2
-    return run(arguments[0], int(arguments[1]))
+    return run(arguments[0], stretches[0], stretches[1])
 
 
 if __name__ == "__main__":

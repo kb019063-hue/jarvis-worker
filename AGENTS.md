@@ -342,8 +342,8 @@ within the hour, and the first lot was started again four times.
    as it is in the lot, and refuses anything else. And since a watch can
    pause, a pull request is carried too when its agent is there and it
    has gone back twice for a document: on 24 November #317 went back
-   three times in half an hour for empty rows it had put in by hand, each
-   time against a table that had moved on.
+   twice in a quarter of an hour (03:32 and 03:44 UTC) for empty rows it
+   had put in by hand, each time against a table that had moved on.
 
    **Two pull requests that each pass can fail together**, which is what
    the run on the lot is for. On 22 November #176 filled the answer of

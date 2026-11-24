@@ -1,0 +1,66 @@
+name: Compile through ccache
+description: >
+  Puts ccache in front of g++ and fetches the objects that the last run on
+  main compiled, so that a job compiles what its pull request changed and
+  not the whole engine again.
+
+# Until 24 November 2026 every one of the eleven jobs that build compiled the
+# whole engine from nothing: seven the plain build (85 to 158 seconds) and four
+# the sanitizer build (292 to 377 seconds), 37 of the 75 minutes of runner time
+# a run took, and the sanitizer build was more than half of the longest job.
+# ccache keys an object on the preprocessed source and the compiler's
+# arguments, so an object is taken from the cache only when compiling would
+# have made the same one.
+#
+# The objects come from the last run on `main` (a cache saved by a run on the
+# default branch can be read by every pull request; one saved by a pull
+# request's run can be read by that pull request alone, so those runs save
+# none). The jobs "Build & unit tests" and "Sanitizers: unit suites" save
+# them, in ci.yml.
+
+inputs:
+  objects:
+    description: "Which build the objects are of: plain (`make`) or asan (`make asan-build`)"
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: ccache in front of the compiler
+      shell: bash
+      run: |
+        # A job that cannot get ccache compiles everything, as every job did
+        # before. It must not fail for want of it.
+        if ! command -v ccache >/dev/null 2>&1; then
+          sudo apt-get install -y -qq ccache >/dev/null 2>&1 || {
+            sudo apt-get update -qq >/dev/null 2>&1 || true
+            sudo apt-get install -y -qq ccache >/dev/null 2>&1 || true
+          }
+        fi
+        if command -v ccache >/dev/null 2>&1 && [ -x /usr/lib/ccache/g++ ]; then
+          # /usr/lib/ccache holds a `g++` that is ccache; the Makefile's
+          # `CXX ?= g++` finds it first and nothing else has to change.
+          echo "/usr/lib/ccache" >> "$GITHUB_PATH"
+          {
+            echo "CCACHE_DIR=$HOME/.ccache"
+            echo "CCACHE_MAXSIZE=500M"
+            # The compiler is told apart by what it is, not by when the
+            # runner's image installed it.
+            echo "CCACHE_COMPILERCHECK=content"
+            # A checkout is seconds old when the build begins, and nothing
+            # writes a source file during it.
+            echo "CCACHE_SLOPPINESS=include_file_mtime,include_file_ctime"
+          } >> "$GITHUB_ENV"
+        else
+          echo "::warning title=ccache::ccache could not be installed; this job compiles everything"
+        fi
+    - name: The objects of the last run on main
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.ccache
+        key: ccache-${{ inputs.objects }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          ccache-${{ inputs.objects }}-
+    - name: Count from here
+      shell: bash
+      run: ccache --zero-stats >/dev/null 2>&1 || true

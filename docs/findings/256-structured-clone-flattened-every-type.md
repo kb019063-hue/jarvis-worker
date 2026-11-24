@@ -37,7 +37,7 @@ phase write-up.
 
 ## 3. Evidence
 
-`make test` **394/394**, with
+`make test` **399/399**, with
 `tests/suites/252-structured-clone-keeps-its-types.cpp` holding every row to
 Node's answer. On `main`'s four files the suite fails at its first assertion.
 The JS corpus, the DOM corpora, WPT, the URL and XML suites, the tree

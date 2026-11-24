@@ -57,19 +57,19 @@ source, and the four refusals — with the Date, Error, cycle, shared-object
 and plain-object cases as controls that the change kept what worked.
 
 ```bash
-make test      # All 394 engine test suites passed successfully!
+make test      # All 399 engine test suites passed successfully!
 ```
 
 | Check | Result |
 | :--- | :--- |
 | `make js-conformance` | 1149/1158 (99.2%), 0 crashes — unchanged |
 | `make conformance` / `make dom-conformance` | 1973/1973 · 678/678 |
-| `make wpt` | 9567/9824, the same 257 listed |
+| `make wpt` | 9569/9824, the same 255 listed |
 | `make url-conformance` / `make xml-conformance` | 1188/1188 · 1718/1718 |
 | `make render-conformance` | 62/66 and 36/41, the same recorded failures |
 | `make diff-trees` / `make diff-xml` | 1500/1500 trees equal, no crash |
 | `make deep` | 1332 runs, 0 failed |
-| `make security-fetch` / `-worker` / `-https` / `-websocket` | 3/3 · 17/17 · 21/21 · 50/50 |
+| `make security-fetch` / `-worker` / `-https` / `-websocket` | 3/3 · 17/17 · 27/27 · 50/50 |
 | `make verify-gc-stress` | 11830 |
 | `build-asan/litebird` + the same 20-case probe | identical answers, no sanitizer report |
 

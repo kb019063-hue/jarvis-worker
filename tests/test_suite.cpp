@@ -7210,6 +7210,51 @@ TEST(subtle_crypto_aes_gcm_encrypt_and_decrypt) {
     assert(interp.eval("tamperErr === 'OperationError'").is_truthy());
 }
 
+TEST(subtle_crypto_aes_cbc_encrypt_and_decrypt) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // NIST SP 800-38A F.2.1 CBC-AES128.Encrypt (first 16-byte block)
+    // Key = 2b7e151628aed2a6abf7158809cf4f3c
+    // IV  = 000102030405060708090a0b0c0d0e0f
+    // PT  = 6bc1bee22e409f96e93d7e117393172a
+    // First CT block = 7649abac8119b246cee98e9b12e9197d (plus 16-byte PKCS#7 padding block)
+    interp.eval(R"(
+        function fromHex(h) {
+            var a = new Uint8Array(h.length / 2);
+            for (var i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16);
+            return a;
+        }
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var keyBytes = fromHex('2b7e151628aed2a6abf7158809cf4f3c');
+        var iv = fromHex('000102030405060708090a0b0c0d0e0f');
+        var pt = fromHex('6bc1bee22e409f96e93d7e117393172a');
+        var ctHex = null;
+        var rtHex = null;
+
+        crypto.subtle.importKey('raw', keyBytes, 'AES-CBC', false, ['encrypt', 'decrypt'])
+            .then(function(k) {
+                return crypto.subtle.encrypt({ name: 'AES-CBC', iv: iv }, k, pt)
+                    .then(function(ct) {
+                        ctHex = toHex(ct);
+                        return crypto.subtle.decrypt({ name: 'AES-CBC', iv: iv }, k, ct);
+                    });
+            })
+            .then(function(rt) {
+                rtHex = toHex(rt);
+            });
+    )");
+    assert(interp.eval("ctHex.substr(0, 32) === '7649abac8119b246cee98e9b12e9197d'").is_truthy());
+    assert(interp.eval("ctHex.length === 64").is_truthy());
+    assert(interp.eval("rtHex === '6bc1bee22e409f96e93d7e117393172a'").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36142,6 +36187,7 @@ int main() {
     RUN_TEST(subtle_crypto_hkdf_derive_bits_and_key);
     RUN_TEST(subtle_crypto_aes_ctr_encrypt_and_decrypt);
     RUN_TEST(subtle_crypto_aes_gcm_encrypt_and_decrypt);
+    RUN_TEST(subtle_crypto_aes_cbc_encrypt_and_decrypt);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

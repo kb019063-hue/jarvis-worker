@@ -102,7 +102,43 @@ and `built-ins/Object/prototype/toString/symbol-tag-override-instances.js`
 (the tag). Nothing was lost anywhere, and `language` — which the arguments
 object phase broke 75 of by moving a prototype alone — is untouched.
 
-## 5. What is still open
+## 5. The crash the landing session found
+
+The first push crashed: `make wpt` on `dom/nodes/Document-createElementNS.html`
+died of a segmentation fault (CI run 45357940902, and in the lander's own lot),
+and so did the unit suite `generator_gc_reclaims_frames_and_threads` from
+#363 — a suite this phase never touches. One fault, two faces.
+
+**The cause was a missing GC root.** The realm keeps the objects it owns alive
+by naming them in one explicit list (`m_roots`, in the `JsIntrinsics`
+constructor). Every prototype is in it, because nothing else points at them.
+`async_function_proto` and `generator_function_proto` were not: they were
+allocated, given a parent and properties, and then left for the collector to
+reclaim as unreachable. `make_object` on a collected cell reads freed memory,
+so what followed was undefined — a large page that happens to collect garbage
+(such as this WPT file) crashed, a small page did not, and an unrelated GC
+suite crashed when the timing went another way.
+
+```cpp
+// The list the two new prototypes were missing from.
+for (JsObject* cell : {object_proto, function_proto,
+                       async_function_proto, generator_function_proto,   // added
+                       array_proto, ...})
+    m_roots.push_back(JsValue::make_object(cell));
+```
+
+Two corrections came out of finding it. The kind prototypes are plain objects,
+not `ObjectClass::Function` — that class tells `make_object` to read the cell
+as a function's cell, and these have no function behind them. And an earlier
+guess of mine (that the class alone was the fault) was wrong: the binary had
+silently not rebuilt, so the guess looked confirmed when it was not. The
+bisect was only worth reading once every step checked that `Build complete`
+had actually printed.
+
+After the fix: `make wpt` 9,570/9,824 with 0 unexpected, `make test` 447/447
+with `main` (including #363's suite), and the WPT page 596/596.
+
+## 6. What is still open
 
 - The two kind prototypes are not *callable*: `typeof p.call` is `"function"`
   in Node and `"undefined"` here. Nothing in the standard's own pages reaches

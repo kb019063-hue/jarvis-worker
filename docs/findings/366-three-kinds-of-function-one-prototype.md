@@ -79,6 +79,27 @@ project's most repeated lesson:
    lists `length,name,arguments,caller,prototype`; only the first two are the
    order §10.2.4/§10.2.5 promise. The assertion was narrowed to the prefix.
 
+## The crash it caused, and why it took three tries to find
+
+The first push segfaulted on `dom/nodes/Document-createElementNS.html` and, in
+the landing session's lot, in `generator_gc_reclaims_frames_and_threads` — a
+suite in `src/js/Generator.cpp` that this phase never changes. Two crashes,
+one fault: **the two new prototypes were never added to the realm's GC roots.**
+`JsIntrinsics` keeps its objects alive by naming them in one explicit list, and
+an object that only the realm points at is otherwise freed. Reading one after
+the collector took it is undefined behaviour, and it stayed invisible until a
+page big enough to trigger a collection came along.
+
+The lesson is about the bisect, not the bug. I guessed the object class was at
+fault and "confirmed" it — but `make` had silently not rebuilt, so the binary
+was stale and the guess was never tested. Every remaining step then checked
+that `Build complete` had printed before believing an exit code. Four bisect
+iterations were wasted on results from a binary that did not contain the edit.
+
+This project has been bitten by a stale binary before; what is new here is that
+a *missing* rebuild can impersonate a fix as easily as it can impersonate a
+regression.
+
 ## Evidence
 
 `make test` 426 → **427/427**. test262 **+4, 0 broken**: the three

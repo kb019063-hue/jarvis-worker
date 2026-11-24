@@ -1668,7 +1668,11 @@ JsIntrinsics::JsIntrinsics() {
     // reaches for it.
     auto make_function_kind = [&]() {
         JsObject* obj = make(function_proto);
-        obj->klass = ObjectClass::Function;
+        // Not `ObjectClass::Function`: that class is how `make_object` finds a
+        // function's cell (`obj->function_value()`), and these objects have no
+        // function behind them. With the class set but no value, make_object
+        // answered a JsValue of type Object with a *null* object_val, and
+        // whatever reached the prototype that way dereferenced it.
         return obj;
     };
     async_function_proto = make_function_kind();
@@ -1697,7 +1701,8 @@ JsIntrinsics::JsIntrinsics() {
     error_protos[static_cast<int>(JsErrorKind::Error)] = make(object_proto);
     for (int i = 1; i < 7; ++i) error_protos[i] = make(error_protos[0]);
 
-    for (JsObject* cell : {object_proto, function_proto, array_proto, string_proto, number_proto,
+    for (JsObject* cell : {object_proto, function_proto, async_function_proto, generator_function_proto,
+                           array_proto, string_proto, number_proto,
                            boolean_proto, symbol_proto, iterator_proto, array_iterator_proto,
                            map_iterator_proto, set_iterator_proto, string_iterator_proto,
                            regexp_string_iterator_proto, dom_iterator_proto, regexp_proto, date_proto,

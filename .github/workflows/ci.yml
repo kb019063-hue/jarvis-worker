@@ -824,14 +824,18 @@ jobs:
         # in front of all of them instead of beside them. From nothing it is
         # five to six minutes; with the objects of main's last run (the
         # ccache step above) it compiles what the pull request changed.
-        env:
-          ASAN_OPTIONS: detect_leaks=0
         # In this job the binary of the unit suites is built in the same
         # `make` (ASAN_BUILD_ALSO, the Makefile): one compiler needs 147
         # seconds for it, and it used to start when the engine was built.
+        # Not after the last merge of a lot: that run leaves the suites
+        # out, and the binary's object is the one ccache is not given
+        # (TEST_OBJ, the Makefile), so no later run would have it.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          ALSO: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) && 'build-asan/test_suite' || '' }}
         run: |
           set -o pipefail
-          make -j"$(nproc)" asan-build ASAN_BUILD_ALSO=build-asan/test_suite 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+          make -j"$(nproc)" asan-build ASAN_BUILD_ALSO="$ALSO" 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
       - name: What ccache had for it, as a notice on the run
         if: always()
         run: |
@@ -856,16 +860,17 @@ jobs:
         # suite that passes in the normal build can fail in this one.
         env:
           ASAN_OPTIONS: detect_leaks=0
-        # As four processes side by side (ASAN_UNIT_STRETCHES, the
-        # Makefile): as one, this step took 8 min 52 s and was the length of
-        # the run. As three equal stretches it was still 5 min 22 s of
-        # suites, one stretch of 322 seconds beside two of 22 and 24, so the
-        # stretches now begin where UNIT_SUITE_CUTS in the Makefile says,
-        # and the two that hold the deep suites run when the others have
-        # ended (UNIT_SUITE_LATE): beside them a suite that measures time
-        # ran out of it. A stretch that fails beside the others and has no
-        # sanitizer's report is run once more by itself; if it passes then,
-        # the job passes with a warning that names it.
+        # As six processes (ASAN_UNIT_STRETCHES, the Makefile): as one,
+        # this step took 8 min 52 s and was the length of the run. As three
+        # equal stretches it was still 5 min 22 s of suites, one stretch of
+        # 322 seconds beside two of 22 and 24, so the stretches now begin
+        # where UNIT_SUITE_CUTS in the Makefile says: four side by side,
+        # and the two that hold the deep suites when those have ended
+        # (UNIT_SUITE_LATE), because beside them a suite that measures time
+        # ran out of it. That is 117 seconds of suites (run 45473629683).
+        # A stretch that fails beside the others and has no sanitizer's
+        # report is run once more by itself; if it passes then, the job
+        # passes with a warning that names it.
         # The step ends with a notice on the job: the time and the memory
         # of each stretch, and the slowest suites of the slowest.
         run: |

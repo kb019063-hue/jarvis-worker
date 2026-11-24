@@ -341,9 +341,9 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 
 ## `make test` with the suites as $(STRETCHES) processes side by side: every
 ## suite is run once, by one of them (tools/ci/run_stretches.py). STRETCHES
-## is a number of equal stretches, or `balanced`: four stretches, which
-## begin at the start of the order and at the three suites UNIT_SUITE_CUTS
-## names. Equal stretches are equal in suites, not in time: in the sanitizer
+## is a number of equal stretches, or `balanced`: the stretches that begin
+## at the start of the order and at the suites UNIT_SUITE_CUTS names.
+## Equal stretches are equal in suites, not in time: in the sanitizer
 ## build of 24 November 2026 three of them took 22, 322 and 24 seconds,
 ## because the suites that nest pages 200,000 deep stand together in the
 ## middle of the order (79, 37 and 30 seconds of the 322). The cuts put the
@@ -360,8 +360,13 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 ## deep suites (stretches 2 and 3, the late ones); the first and the last
 ## halve what stands before and after them, at the suites a run named as
 ## the middle of each ("half of it over when ... began", run 45471158220):
-## four stretches of some forty seconds side by side on the four cores of
-## CI's machines, then the two deep ones.
+## four stretches side by side on the four cores of CI's machines, then the
+## two deep ones. In the sanitizer build that was 117 seconds (run
+## 45473629683): 61, 56, 64 and 55 for the four, then 53 beside 35. As four
+## stretches, two and then two, it had been 140: 77 beside 85, then 55
+## beside 36. Twice the processes were not twice as fast: the four took 236
+## seconds between them for what the two had done in 162, so a seventh
+## stretch would buy little, and the deep ones are now the larger part.
 STRETCHES ?= 3
 UNIT_SUITE_CUTS ?= inner_html_of_an_xml_document_is_xml,deep_nesting_never_exhausts_the_native_stack,dom_trees_of_any_depth_can_be_walked_and_released,html_parser_void_element_with_a_slash_closes_nothing_else,svg_real_world_paths_arcs_gradients_use_clip_and_guards
 UNIT_SUITE_LATE ?= 2,3
@@ -678,14 +683,16 @@ asan-core:
 ## ASAN_BUILD_ALSO names more to build in the same `make`, beside the engine:
 ## CI's job for the unit suites gives it build-asan/test_suite, so that the
 ## one compiler the suites need (147 seconds) works while the others build
-## the engine, where it used to start when they had finished.
+## the engine, where it used to start when they had finished. (Not in the
+## run that only keeps the objects: ccache is not given that one, see
+## TEST_OBJ.)
 ASAN_BUILD_ALSO ?=
 asan-build:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all $(ASAN_BUILD_ALSO)
 
 ## The unit suites, built and run with the sanitizers. ASAN_UNIT_STRETCHES=3
 ## runs them as three processes side by side (tests/test_suite.cpp,
-## tools/ci/run_stretches.py), and ASAN_UNIT_STRETCHES=balanced as the four
+## tools/ci/run_stretches.py), and ASAN_UNIT_STRETCHES=balanced as the six
 ## of `test-in-stretches` above, which is what CI does: one process took 8
 ## min 52 s there on 24 November 2026, on a machine with four cores and 16
 ## GB, and that was the length of a whole CI run. Here it is one process

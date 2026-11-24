@@ -39,6 +39,7 @@ SRCS = src/common/Color.cpp \
        src/render/GifDecoder.cpp \
        src/render/Vp8Decoder.cpp src/render/Vp8Tables.cpp src/render/WebPDecoder.cpp \
        src/render/Canvas2D.cpp \
+       src/render/MediaAudioCodecs.cpp \
        src/render/WebGL.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
@@ -82,6 +83,7 @@ SRCS = src/common/Color.cpp \
        src/js/DomDocumentBindings.cpp \
        src/js/DomTraversalBindings.cpp \
        src/js/DomHtmlBindings.cpp \
+       src/js/DomMediaBindings.cpp \
        src/js/DomFormBindings.cpp \
        src/js/DomFileBindings.cpp \
        src/js/DomCryptoBindings.cpp \
@@ -171,7 +173,7 @@ DEEP_RANDOM ?= 300
 DEEP_ASAN_RANDOM ?= 150
 DEEP_ASAN_DEPTH ?= 10000
 
-.PHONY: all clean test run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media verify-avif fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full gc-oracle deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics metrics-suites bench-css bench-attributes bench-tokenizer-attributes bench-surrogates bench-js-core verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket check-suites help
+.PHONY: all clean test test-in-stretches run conformance js-conformance test262 dom-conformance url-conformance xml-conformance wpt diff-strings verify-regexp verify-string-unicode diff-trees diff-xml fuzz fuzz-media verify-media verify-avif fuzz-color verify-color verify-brotli fuzz-brotli verify-gc-stress verify-gc-stress-full gc-oracle deep asan asan-core asan-deep tsan bench bench-floats bench-collections bench-styles check-numbers metrics metrics-suites bench-css bench-attributes bench-tokenizer-attributes bench-surrogates bench-js-core verify-promise-iterators verify-collection-iterators security-fetch security-https security-worker security-websocket check-suites help
 
 all: $(TARGET)
 
@@ -215,6 +217,11 @@ verify-terminal-shell-safety: $(TARGET)
 .PHONY: verify-worker-terminal-safety
 verify-worker-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_worker_error_terminal.py --binary $(TARGET)
+
+## Check uncaught JS diagnostics without printing attack bytes.
+.PHONY: verify-js-error-terminal-safety
+verify-js-error-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_js_error_terminal.py --binary $(TARGET)
 
 $(BUILD_DIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
@@ -281,6 +288,13 @@ $(BROTLI_CHECK_TARGET): $(BUILD_DIR)/net/Brotli.o $(BUILD_DIR)/net/BrotliTables.
 
 test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@./$(TEST_TARGET)
+	@./$(CROSS_ORIGIN_TARGET)
+
+## `make test` with the suites as $(STRETCHES) processes side by side: every
+## suite is run once, by one of them (tools/ci/run_stretches.py).
+STRETCHES ?= 3
+test-in-stretches: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
+	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(STRETCHES)
 	@./$(CROSS_ORIGIN_TARGET)
 
 ## The numbers the documents publish: every "A / B (P%)" must divide, the two
@@ -472,6 +486,14 @@ diff-xml: $(TARGET)
 diff-strings: $(TARGET)
 	@python3 tools/conformance/diff_strings.py --show 5 --max-differ $(STRING_DIFF_CEILING)
 
+## Every decoder held to the index table it reads: 27 single-byte tables both
+## ways, all 23,940 euc-kr / 19,782 big5 / 11,280 shift_jis pointers, and every
+## gb18030 range. Then the same tables against Node's TextDecoder, which is a
+## second implementation and is wrong on three encodings this tool names. Needs
+## Node.js for the cross-check (`--no-node` skips it).
+verify-encoding-tables: $(TARGET)
+	@python3 tools/conformance/verify_encoding_tables.py --build
+
 ## Differential + seeded fuzz verification of RegExp Unicode 17.0 properties,
 ## v (unicodeSets) set operations, d (hasIndices), and ES2025 modifiers,
 ## duplicate named capturing groups, and RegExp.escape().
@@ -566,9 +588,16 @@ asan-core:
 asan-build:
 	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
 
-## The unit suites, built and run with the sanitizers.
+## The unit suites, built and run with the sanitizers. ASAN_UNIT_STRETCHES=3
+## runs them as three processes side by side (tests/test_suite.cpp,
+## tools/ci/run_stretches.py), which is what CI does: one process took 8 min
+## 52 s there on 24 November 2026, on a machine with four cores and 16 GB,
+## and that was the length of a whole CI run. Here it is one process unless
+## you say otherwise: three of them in the sanitizer build want more memory
+## than a machine with 4 GB has.
+ASAN_UNIT_STRETCHES ?= 1
 asan-unit:
-	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" test
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" $(if $(filter 1,$(ASAN_UNIT_STRETCHES)),test,test-in-stretches STRETCHES=$(ASAN_UNIT_STRETCHES))
 
 ## The checks that have a verifier of their own: media, colour, Brotli, regular
 ## expressions, string operations, and the three security ones (HTTPS, worker

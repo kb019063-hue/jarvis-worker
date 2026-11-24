@@ -124,6 +124,20 @@ AGREES: list[Case] = [
          "indexing an array in a loop"),
     Case("let s = 0; for (let z = 0; z < 4; z++) { s += z; } String(s)",
          "a let loop counter"),
+
+    # `typeof`, the one unary operator the compiler refused. The VM answers
+    # with the tree-walker's own `js_typeof_value`, so the two cannot drift;
+    # an undeclared global is `undefined` on both paths, which is the one
+    # place `typeof` must not throw (ECMA-262 §13.5.3).
+    Case("String(typeof 1)", "typeof a number"),
+    Case("String(typeof 'x') + String(typeof true) + String(typeof undefined)",
+         "typeof a string, a boolean and an undefined"),
+    Case("String(typeof null) + ' ' + String(typeof Symbol('s')) + ' ' + String(typeof Symbol)",
+         "typeof null is object; typeof a symbol and of the Symbol function"),
+    Case("String(typeof neverDeclaredAnywhere)",
+         "typeof an unresolvable reference is undefined, not a ReferenceError"),
+    Case("function f() { return 1; } String(typeof f) + String(typeof f())",
+         "typeof a function and of its return"),
 ]
 
 # The compiler refuses these. Kept here so the count of what is left has a
@@ -134,7 +148,6 @@ REFUSES: list[Case] = [
     Case("switch (1) { case 1: break; }", "Switch"),
     Case("try { 1; } catch (e) { 2; }", "Statement"),
     Case("var s = \"\"; for (var k of [1,2]) { s += k; } String(s)", "Statement"),
-    Case("String(typeof 1)", "unary operator"),
     Case("var o = {a: 1, ...{b: 2}}; String(o.b)", "object literal form"),
     Case("function f() { return 1; } String(f`x`)", "expression"),
 ]

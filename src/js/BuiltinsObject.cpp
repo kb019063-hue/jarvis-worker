@@ -221,9 +221,12 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
             // The count, with the attributes the descriptor gave it: a
             // `{ writable: false }` definition is in the map, and the map is
             // what has the answer (finding 253).
+            // The entry's *value* is the count when the array has one: a
+            // length that names places nothing was written to holds no
+            // elements (Phase 288), so the elements are not the count.
             auto length_entry = cell->properties.find("length");
             if (length_entry != cell->properties.end()) {
-                return data(JsValue::make_number(static_cast<double>(cell->array_elements.size())),
+                return data(JsValue::make_number(js_to_number(length_entry->second)),
                             (length_entry->flags & PropertyMap::Writable) != 0,
                             (length_entry->flags & PropertyMap::Enumerable) != 0,
                             (length_entry->flags & PropertyMap::Configurable) != 0);
@@ -451,6 +454,10 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         if (in_range && element_there) {
             object.set_array_hole(index);
         } else if (cell->extensible) {
+            // A place past the end is one the array does not have yet, and
+            // defining an accessor on it materialises it: the descriptor goes
+            // in the map below, and the place it sits on has to exist for
+            // `index in arr` to say so.
             const size_t previous = cell->array_elements.size();
             cell->array_elements.resize(index + 1, JsValue::make_undefined());
             if (!cell->array_holes) cell->array_holes = std::make_unique<JsObject::Holes>();

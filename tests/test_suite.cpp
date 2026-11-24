@@ -115,6 +115,7 @@ struct ListedSuite {
     void (*run)();
     bool own_file;  ///< in a file of tests/suites/: main() has no line for it
     int runs;       ///< how often it was run; one, when main() has returned
+    bool elsewhere = false;  ///< another process of a divided run has it
 };
 static std::vector<ListedSuite>& suite_list() {
     // Made at first use, which is before the first `TEST`, and never
@@ -131,6 +132,60 @@ static bool list_suite(const char* name, void (*run)()) {
 static void note_suite_run(void (*run)()) {
     for (auto& suite : suite_list())
         if (suite.run == run) ++suite.runs;
+}
+
+/// The suites as several processes side by side: with
+/// `LITEBIRD_SUITE_SHARD=K/N` in the environment, this process runs the K-th
+/// (from 0) of N equal stretches of the order and leaves the rest to the
+/// others. Without it every suite is run here, as always, and `make test`
+/// does not set it.
+///
+/// It is there for the sanitizer build (`make asan-unit`). In CI on 24
+/// November 2026 the suites took 8 min 52 s there, one process on a machine
+/// with four cores, and that step was the length of a whole CI run: every
+/// other job was done in under ten minutes, most in under seven.
+///
+/// Stretches and not every N-th suite, so that a suite keeps the suites that
+/// ran before it; the first of a stretch is the only one that loses them.
+/// Every suite has one place in the order (the files of tests/suites/ first,
+/// then the list in `main()`), and a place belongs to one stretch, so N
+/// processes that all pass have run every suite once.
+static std::size_t g_shard = 0, g_shards = 1;
+static bool g_divided = false;    ///< LITEBIRD_SUITE_SHARD was given, be it 0/1
+static std::size_t g_place = 0;   ///< the place in the order of the next suite
+static std::size_t g_places = 0;  ///< how many places there are
+/// True the first time `main()` goes down its list, when the run is divided:
+/// nothing is run, the places are counted. (The list of `TEST`s is not the
+/// number: thirteen suites from before there was a `TEST` are run by a
+/// `RUN_TEST` line and are not in it.)
+static bool g_counting_places = false;
+static void read_the_shard() {
+    const char* text = std::getenv("LITEBIRD_SUITE_SHARD");
+    if (text == nullptr || *text == '\0') return;
+    unsigned long k = 0, n = 0;
+    if (std::sscanf(text, "%lu/%lu", &k, &n) != 2 || n == 0 || k >= n) {
+        std::cout << "\033[1;31mFAILED\033[0m: LITEBIRD_SUITE_SHARD is \""
+                  << text << "\", not K/N with K below N\n" << std::flush;
+        std::_Exit(2);
+    }
+    g_shard = k;
+    g_shards = n;
+    g_divided = true;
+}
+/// Whether the next suite in the order is this process's. Asked once a suite.
+static bool this_process_runs_the_next_suite() {
+    if (g_counting_places) {
+        ++g_places;
+        return false;
+    }
+    const std::size_t place = g_place++;
+    if (g_shards <= 1 || g_places == 0) return true;
+    return place * g_shards / g_places == g_shard;
+}
+static void note_suite_is_elsewhere(void (*run)()) {
+    if (g_counting_places) return;
+    for (auto& suite : suite_list())
+        if (suite.run == run) suite.elsewhere = true;
 }
 #define TEST(name) \
     void test_##name(); \
@@ -156,7 +211,8 @@ struct EverySuiteRanOnce {
         if (g_tests_run == 0) return;  // main() did not get as far as a suite
         int wrong = 0;
         for (const auto& suite : suite_list()) {
-            if (suite.runs == 1) continue;
+            if (suite.runs == 1 && !suite.elsewhere) continue;
+            if (suite.runs == 0 && suite.elsewhere) continue;  // a divided run
             ++wrong;
             std::cout << "\033[1;31mFAILED\033[0m: the suite " << suite.name
                       << " was run " << suite.runs << " times, not once"
@@ -199,6 +255,10 @@ static void give_memory_back() {}
 #endif
 
 #define RUN_TEST(name) do { \
+    if (!this_process_runs_the_next_suite()) { \
+        note_suite_is_elsewhere(&test_##name); \
+        break; \
+    } \
     ++g_tests_run; \
     std::cout << "Running test: " #name "... " << std::flush; \
     test_##name(); \
@@ -217,6 +277,10 @@ static void give_memory_back() {}
 static void run_the_suites_in_files_of_their_own() {
     for (std::size_t i = 0; i < suite_list().size(); ++i) {
         if (!suite_list()[i].own_file) continue;
+        if (!this_process_runs_the_next_suite()) {
+            if (!g_counting_places) suite_list()[i].elsewhere = true;
+            continue;
+        }
         ++g_tests_run;
         std::cout << "Running test: " << suite_list()[i].name << "... "
                   << std::flush;
@@ -7208,6 +7272,51 @@ TEST(subtle_crypto_aes_gcm_encrypt_and_decrypt) {
     assert(interp.eval("ctHex === '42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f59854d5c2af327cd64a62cf35abd2ba6fab4'").is_truthy());
     assert(interp.eval("rtHex === ptHex").is_truthy());
     assert(interp.eval("tamperErr === 'OperationError'").is_truthy());
+}
+
+TEST(subtle_crypto_aes_cbc_encrypt_and_decrypt) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // NIST SP 800-38A F.2.1 CBC-AES128.Encrypt (first 16-byte block)
+    // Key = 2b7e151628aed2a6abf7158809cf4f3c
+    // IV  = 000102030405060708090a0b0c0d0e0f
+    // PT  = 6bc1bee22e409f96e93d7e117393172a
+    // First CT block = 7649abac8119b246cee98e9b12e9197d (plus 16-byte PKCS#7 padding block)
+    interp.eval(R"(
+        function fromHex(h) {
+            var a = new Uint8Array(h.length / 2);
+            for (var i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16);
+            return a;
+        }
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var keyBytes = fromHex('2b7e151628aed2a6abf7158809cf4f3c');
+        var iv = fromHex('000102030405060708090a0b0c0d0e0f');
+        var pt = fromHex('6bc1bee22e409f96e93d7e117393172a');
+        var ctHex = null;
+        var rtHex = null;
+
+        crypto.subtle.importKey('raw', keyBytes, 'AES-CBC', false, ['encrypt', 'decrypt'])
+            .then(function(k) {
+                return crypto.subtle.encrypt({ name: 'AES-CBC', iv: iv }, k, pt)
+                    .then(function(ct) {
+                        ctHex = toHex(ct);
+                        return crypto.subtle.decrypt({ name: 'AES-CBC', iv: iv }, k, ct);
+                    });
+            })
+            .then(function(rt) {
+                rtHex = toHex(rt);
+            });
+    )");
+    assert(interp.eval("ctHex.substr(0, 32) === '7649abac8119b246cee98e9b12e9197d'").is_truthy());
+    assert(interp.eval("ctHex.length === 64").is_truthy());
+    assert(interp.eval("rtHex === '6bc1bee22e409f96e93d7e117393172a'").is_truthy());
 }
 
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
@@ -36066,7 +36175,13 @@ TEST(svg_class_name_is_a_live_animated_string) {
 }
 
 int main() {
+    read_the_shard();
     std::cout << "\n=== Running Litebird Browser Engine Test Suite ===\n\n";
+
+    // A divided run goes down the list twice: once to count the places, then
+    // to run the ones that are its own. A whole run goes down it once.
+    for (int pass = g_divided ? 0 : 1; pass < 2; ++pass) {
+    g_counting_places = pass == 0;
 
     // The suites of tests/suites/, which have no line here, and then the list.
     run_the_suites_in_files_of_their_own();
@@ -36142,6 +36257,7 @@ int main() {
     RUN_TEST(subtle_crypto_hkdf_derive_bits_and_key);
     RUN_TEST(subtle_crypto_aes_ctr_encrypt_and_decrypt);
     RUN_TEST(subtle_crypto_aes_gcm_encrypt_and_decrypt);
+    RUN_TEST(subtle_crypto_aes_cbc_encrypt_and_decrypt);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);
@@ -36640,6 +36756,16 @@ int main() {
     // Phase 214: SVG className is a live, retained SVGAnimatedString.
     RUN_TEST(svg_class_name_is_a_live_animated_string);
 
+    }  // the second time down the list, or the only one
+
+    if (g_divided) {
+        // Not the sentence of a whole run: a count of suites that is a third
+        // of them must not be read as the number of suites there are.
+        std::cout << "\n\033[1;32mStretch " << g_shard << " of " << g_shards
+                  << ": its " << g_tests_run << " of the " << g_places
+                  << " engine test suites passed.\033[0m\n\n";
+        return 0;
+    }
     std::cout << "\n\033[1;32mAll " << g_tests_run
               << " engine test suites passed successfully!\033[0m\n\n";
     // A new suite gets no line in the list above, and is not written into

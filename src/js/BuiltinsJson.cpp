@@ -338,7 +338,11 @@ public:
         const std::string outer_indent = m_indent;
         m_indent += m_gap;
         if (value.is_array()) {
-            const size_t length = value.object_val->array_elements.size();
+            // The array's length, not its storage: a length that names places
+            // nothing was written to holds no elements (Phase 288), and JSON
+            // writes those places as `null` exactly as it writes a hole.
+            const size_t length = static_cast<size_t>(
+                js_to_number(value.get_property("length")));
             if (length == 0) {
                 out += "[]";
             } else {

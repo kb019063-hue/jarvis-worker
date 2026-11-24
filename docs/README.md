@@ -11,8 +11,11 @@ free finding number — which meant reading 731 KB of markdown to extract two
 numbers, and still colliding, because two agents that looked at the same moment
 took the same one.
 
-So a write-up goes here instead, and the number comes from
-`python3 tools/next_ids.py`.
+So a write-up goes here instead, and the number is the number of the pull
+request that brings it: #360 writes `phases/360-….md` and
+`findings/360-….md` (AGENTS.md, "Before starting", point 2; until 24 November
+2026 the number came from `python3 tools/next_ids.py`, the next free one, and
+agents who asked in the same minute still collided).
 
 ## A phase write-up
 

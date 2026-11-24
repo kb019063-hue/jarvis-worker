@@ -1078,8 +1078,14 @@ def why_not_taken(pr: dict, comments: list[dict]) -> str:
     """
     if NOT_A_CLAIM_RE.match(pr["title"]):
         return "it is the board or a watch"
-    if pr.get("isDraft") or pr["title"].startswith("WIP"):
+    if pr["title"].startswith("WIP"):
         return "its title still begins with WIP:"
+    if pr.get("isDraft"):
+        # Said by itself: on 24 November #385 was a draft whose title had
+        # lost its WIP:, its agent was told "its title still begins with
+        # WIP:", and the landing session's own tool, which read titles
+        # only, took it into a lot. GitHub merges no draft.
+        return f"it is a draft: `gh pr ready {pr['number']}` when it is finished"
     taken = taken_at(comments, pr["number"])
     if taken and pr["headRefOid"].startswith(taken):
         return ""       # the landing session has said so, of this very head
@@ -1269,7 +1275,7 @@ def check_merge(number: int, landing: bool = False) -> int:
     """`landing` is the landing session asking, about a pull request it is about
     to merge during its own watch: the answer is then the one given when no
     watch is on."""
-    pr = gh_json("pr", "view", str(number), "--json", "number,title,body,state,mergeable,headRefOid,files,labels")
+    pr = gh_json("pr", "view", str(number), "--json", "number,title,body,state,mergeable,headRefOid,files,labels,isDraft")
     report = Report()
     if pr["state"] != "OPEN":
         sys.exit(f"#{number} is {pr['state'].lower()}")
@@ -1292,6 +1298,9 @@ def check_merge(number: int, landing: bool = False) -> int:
 
     if pr["title"].startswith("WIP"):
         report.no("the title still begins with WIP:")
+    elif pr.get("isDraft"):
+        report.no(f"the title has no WIP:, and #{number} is a draft: GitHub merges no draft, and the landing session "
+                  f"takes none. `gh pr ready {number}` when it is finished")
     else:
         report.ok("the title has no WIP:")
 
@@ -1732,6 +1741,8 @@ def self_test() -> int:
          why_not_taken(waiting(mergeable="UNKNOWN"), board), ""),
         ("a title that begins with WIP: is not finished",
          why_not_taken(waiting(title="WIP: a change"), board), "its title still begins with WIP:"),
+        ("a draft is not finished whatever its title says, and is told so in its own words",
+         why_not_taken(dict(waiting(), isDraft=True), board), "it is a draft: `gh pr ready 7` when it is finished"),
         ("CI still running on a finished pull request: taken, its run and the lot's go side by side",
          why_not_taken(waiting(checks=green[:11] + [check("job 11", None, "QUEUED")]), board), ""),
         ("CI failed: not taken, and the job is named",

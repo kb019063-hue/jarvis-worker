@@ -137,8 +137,11 @@ note() {  # note N FILE -> "#N COMMENTID"
   echo "#$1 ${url##*-}"
 }
 open_ones() {  # "N FULLSHA fin|WIP MERGEABLE..." of every open pull request that is a claim
-  timeout 40 gh pr list --state open --limit 100 --json number,title,headRefOid,mergeable \
-    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.title | test("^WIP")) then "WIP" else "fin" end) \(.mergeable)"' | sort -n
+  # A draft is work in progress whatever its title says, as it is for
+  # check_pr.py: GitHub does not merge one. On 24 November #385, a draft
+  # whose title had lost its WIP:, was taken into a lot for three minutes.
+  timeout 40 gh pr list --state open --limit 100 --json number,title,headRefOid,mergeable,isDraft \
+    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "fin" end) \(.mergeable)"' | sort -n
 }
 fetch_pr() { timeout 60 git fetch -q origin "+refs/pull/$1/head:refs/remotes/origin/pr$1"; }
 agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^Agent: *(\\w+)") | .captures[0].string] | first) // "-"' 2>/dev/null; }
@@ -245,7 +248,7 @@ build)
   for n in $nums; do
     fetch_pr "$n" || { echo "could not fetch #$n"; exit 9; }
     full="$(git rev-parse "origin/pr$n")"
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title --jq '"\(.state) \(.headRefOid) \(if (.title | test("^WIP")) then "WIP" else "finished" end)"')"
+    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title,isDraft --jq '"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"')"
     [ "$st" = "OPEN $full finished" ] || { echo "#$n: '$st' is not OPEN and finished at ${full:0:7}"; exit 6; }
     takeable "$n" "$full" || { echo "#$n ${full:0:7} is not green: $(runs_of "$full")"; exit 6; }
     echo "$n ${full:0:7}" >> "$STATE/lot.heads.new"
@@ -400,7 +403,7 @@ rehead)
   while read -r n sha; do
     fetch_pr "$n" || exit 9
     full="$(git rev-parse "origin/pr$n")"
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title --jq '"\(.state) \(.headRefOid) \(if (.title | test("^WIP")) then "WIP" else "finished" end)"')"
+    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title,isDraft --jq '"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"')"
     [ "$st" = "OPEN $full finished" ] || { echo "#$n: '$st' is not OPEN and finished at ${full:0:7}"; exit 3; }
     if [ "${full:0:7}" != "$sha" ]; then
       takeable "$n" "$full" || { echo "#$n moved to ${full:0:7}, and that head cannot be taken: $(runs_of "$full")"; exit 3; }

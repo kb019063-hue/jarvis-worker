@@ -32805,7 +32805,7 @@ TEST(pseudo_elements_generate_a_box_that_can_be_hit) {
         "<!doctype html><html><head><style>"
         "p::before{content:counter(x)}"
         "div::before{content:none}"
-        "span::before{content:attr(title)}"
+        "span::before{content:attr(data-missing)}"
         "</style></head><body><p>a</p><div>b</div><span title=\"t\">c</span></body></html>");
     StyleResolver none_resolver = DocumentStyles::build_resolver(*none_doc, nullptr, 800.0f, 600.0f);
     auto none_root = LayoutTree::build(none_doc, none_resolver, 800, 600);

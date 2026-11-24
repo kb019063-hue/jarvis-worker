@@ -317,15 +317,19 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 ## build of 24 November 2026 three of them took 22, 322 and 24 seconds,
 ## because the suites that nest pages 200,000 deep stand together in the
 ## middle of the order (79, 37 and 30 seconds of the 322). The cuts put the
-## first of those and the next two into stretches of their own. When a run
+## first of those and the next two into stretches of their own, and those
+## two stretches (UNIT_SUITE_LATE) are started when the others have ended:
+## some fifty places in the suites measure time, and one of them failed in
+## its sixth second beside a process that was turning over 5 GB. When a run
 ## says the stretches have drifted apart (its last lines, and in CI a notice
 ## on the job, give the time of each and name the slowest suites), move a
 ## cut: a name here must be a suite of tests/test_suite.cpp's own list, in
 ## the order of that list, or every stretch fails.
 STRETCHES ?= 3
 UNIT_SUITE_CUTS ?= deep_nesting_never_exhausts_the_native_stack,dom_trees_of_any_depth_can_be_walked_and_released,html_parser_void_element_with_a_slash_closes_nothing_else
+UNIT_SUITE_LATE ?= 1,2
 test-in-stretches: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
-	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(if $(filter balanced,$(STRETCHES)),$(UNIT_SUITE_CUTS),$(STRETCHES))
+	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(if $(filter balanced,$(STRETCHES)),$(UNIT_SUITE_CUTS) $(UNIT_SUITE_LATE),$(STRETCHES))
 	@./$(CROSS_ORIGIN_TARGET)
 
 ## The numbers the documents publish: every "A / B (P%)" must divide, the two

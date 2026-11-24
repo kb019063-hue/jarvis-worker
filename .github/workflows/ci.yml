@@ -819,7 +819,12 @@ jobs:
         # Makefile): as one, this step took 8 min 52 s and was the length of
         # the run. As three equal stretches it was still 5 min 22 s of
         # suites, one stretch of 322 seconds beside two of 22 and 24, so the
-        # stretches now begin where UNIT_SUITE_CUTS in the Makefile says.
+        # stretches now begin where UNIT_SUITE_CUTS in the Makefile says,
+        # and the two that hold the deep suites run when the others have
+        # ended (UNIT_SUITE_LATE): beside them a suite that measures time
+        # ran out of it. A stretch that fails beside the others and has no
+        # sanitizer's report is run once more by itself; if it passes then,
+        # the job passes with a warning that names it.
         # The step ends with a notice on the job: the time and the memory
         # of each stretch, and the slowest suites of the slowest.
         run: |

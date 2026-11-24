@@ -623,14 +623,23 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         // Postfix must yield the pre-change value; discard the new one.
         if (!update->prefix) emit_opcode(OpCode::OpPop);
     } else if (auto unary = dynamic_cast<const UnaryExpr*>(expr)) {
-        if (unary->op != JsTokenType::Minus && unary->op != JsTokenType::Bang) {
+        // ECMA-262 §13.5.3: `typeof` never throws, not even for an unresolvable
+        // reference. The VM answers an undeclared global with `undefined`
+        // (OpGetGlobal), which is the type such an operand has, so the
+        // operand is compiled the ordinary way and no reference token is
+        // needed here. `void` is still refused: nobody has asked for it.
+        if (unary->op == JsTokenType::Typeof) {
+            compile_expr(unary->operand.get());
+            emit_opcode(OpCode::OpTypeOf);
+        } else if (unary->op == JsTokenType::Minus || unary->op == JsTokenType::Bang) {
+            compile_expr(unary->operand.get());
+            if (unary->op == JsTokenType::Minus) {
+                emit_opcode(OpCode::OpNegate);
+            } else {
+                emit_opcode(OpCode::OpNot);
+            }
+        } else {
             throw std::runtime_error("This unary operator is not supported by the bytecode compiler");
-        }
-        compile_expr(unary->operand.get());
-        if (unary->op == JsTokenType::Minus) {
-            emit_opcode(OpCode::OpNegate);
-        } else if (unary->op == JsTokenType::Bang) {
-            emit_opcode(OpCode::OpNot);
         }
     } else if (auto binary = dynamic_cast<const BinaryExpr*>(expr)) {
         if (binary->op == JsTokenType::Power || binary->op == JsTokenType::Nullish) {

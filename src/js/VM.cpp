@@ -696,6 +696,13 @@ JsValue VM::run() {
                 push(JsValue::make_number(-val.to_number()));
                 break;
             }
+            case OpCode::OpTypeOf: {
+                // The same function the tree-walker asks, so the two answers
+                // cannot drift apart for any value that reaches both.
+                JsValue val = pop();
+                push(js_typeof_value(val));
+                break;
+            }
 
             case OpCode::OpJump: {
                 uint16_t offset = read_short();

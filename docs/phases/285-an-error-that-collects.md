@@ -62,14 +62,14 @@ iterated, a subclass's prototype, and six `Promise.any` cases run on a timer —
 fulfilment that wins, and the identity of a reason object.
 
 ```bash
-make test      # All 421 engine test suites passed successfully!
+make test      # All 425 engine test suites passed successfully!
 ```
 
 | Check | Result |
 | :--- | :--- |
 | `make test262` on `built-ins/AggregateError` | 0/25 → **21/25** |
 | `make test262` on `built-ins/Promise` and `built-ins/AggregateError` | 572/757 (75.6%) |
-| `make js-conformance` | 1149/1158 (99.2%), 0 crashes — unchanged |
+| `make js-conformance` | 1150/1158 (99.3%), 0 crashes |
 | `make conformance` / `make dom-conformance` | 1973/1973 · 678/678 |
 | `make wpt` | 9569/9824, the same 255 listed |
 | `make url-conformance` / `make xml-conformance` | 1188/1188 · 1718/1718 |

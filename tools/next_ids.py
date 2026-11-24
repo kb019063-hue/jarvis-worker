@@ -1,5 +1,18 @@
 #!/usr/bin/env python3
-"""The next free phase number and the next free finding number.
+"""The phase and finding numbers that are taken, and what a new pull request takes.
+
+Since 24 November 2026 a new pull request takes **its own number** for
+both: open the pull request, and the number GitHub gives it is its phase and
+its finding (AGENTS.md, "Before starting", point 2). GitHub gives no two
+pull requests the same number, so nobody has to ask anybody. Until then this
+printed "the next free pair", and two agents who asked in the same minute
+both took it: on the morning of the 24th five pull requests in one hour had
+a number another one had said first, and were renumbered after they were
+finished (#336 twice, under a lot that was being tested).
+
+What this still does: it says which numbers are taken (`--taken`, which
+`tools/ci/check_pr.py` asks for; `--sources`; `--json`), for the checks that
+ask whether a number is on `main` already.
 
 Why this exists
 ---------------
@@ -13,8 +26,8 @@ This reads the same sources an agent would — the documents in the tree, the
 `docs/phases/` write-ups, `docs/state.json`, and the open pull requests, which
 are claims no file in the tree knows about yet — and prints the two numbers.
 
-    python3 tools/next_ids.py             # what to claim
-    python3 tools/next_ids.py --sources   # and where each number came from
+    python3 tools/next_ids.py             # what to claim: your pull request's own number
+    python3 tools/next_ids.py --sources   # the highest number each source has
     python3 tools/next_ids.py --json      # for scripts and CI
     python3 tools/next_ids.py --pr-body   # the block a WIP pull request opens with
     python3 tools/next_ids.py --self-test # the cases the parsing is trusted for
@@ -234,9 +247,22 @@ def scan_open_prs() -> tuple[dict[str, tuple[list[int], list[int]]], str | None]
     for pr in prs:
         text = f"{pr.get('title', '')}\n{pr.get('body', '') or ''}"
         phases, findings = scan_text(text)
+        if takes_its_own_number(pr.get("body") or "") and isinstance(pr.get("number"), int):
+            phases = phases + [pr["number"]]
+            findings = findings + [pr["number"]]
         if phases or findings:
             found[f"PR #{pr.get('number', '?')}"] = (phases, findings)
     return found, None
+
+
+OWN_NUMBER_RE = re.compile(r"(?im)^Phase and finding:\s*(?:this|the) pull request'?s?(?: own)? number\b")
+OWN_NUMBER_LINE = "Phase and finding: this pull request's number"
+
+
+def takes_its_own_number(body: str) -> bool:
+    """Whether a pull request's text says its numbers are its own number
+    (the third line of a claim, among the first sixteen)."""
+    return OWN_NUMBER_RE.search("\n".join(body.replace("\r\n", "\n").split("\n")[:16])) is not None
 
 
 def scan_main(sha: str | None = None) -> tuple[str, tuple[set[int], set[int]], str | None]:
@@ -568,7 +594,20 @@ def self_test() -> int:
         print(f"  [{'ok  ' if ok else 'FAIL'}] {name}")
         print(f"         {detail}")
 
-    total = len(SELF_TEST_CASES) + len(ref_results) + len(floor_results)
+    own_cases = [
+        ("the third line of a claim says so", "Task: a row\nFiles: `src/a.cpp`\n" + OWN_NUMBER_LINE + "\nAgent: Heron\n", True),
+        ("a claim with numbers of the old kind does not", "Task: a row\nFiles: `src/a.cpp`\nPhase 5, finding 7\n", False),
+        ("the line far down a text is prose about the rule, not a claim", "text\n" * 20 + OWN_NUMBER_LINE + "\n", False),
+        ("what --pr-body prints is such a claim", "Task: <the row of the table>\nFiles: <what it will change>\n" + OWN_NUMBER_LINE, True),
+    ]
+    print(f"\na pull request that takes its own number: {len(own_cases)} cases")
+    for name, body, want in own_cases:
+        ok = takes_its_own_number(body) == want
+        if not ok:
+            failed += 1
+        print(f"  [{'ok  ' if ok else 'FAIL'}] {name}")
+
+    total = len(SELF_TEST_CASES) + len(ref_results) + len(floor_results) + len(own_cases)
     print(f"\n{total - failed}/{total} pass")
     return 1 if failed else 0
 
@@ -633,12 +672,15 @@ def main() -> int:
     elif args.pr_body:
         print("Task: <the row of the table>")
         print("Files: <what it will change>")
-        print(f"Phase {phase}, finding {finding}")
+        print(OWN_NUMBER_LINE)
         # The fourth line since 22 November 2026: AGENTS.md, "Working together".
         print("Agent: <the name you gave yourself>")
     else:
-        print(f"next phase:   {phase}")
-        print(f"next finding: {finding}")
+        print("Your phase and your finding are the number of your pull request.")
+        print("Open it first (`--pr-body` prints the lines its text begins with), and use")
+        print("the number GitHub gives it for both: Phase N, finding N, docs/phases/N-*.md,")
+        print("docs/findings/N-*.md, tests/suites/N-*.cpp. (AGENTS.md, \"Before starting\".)")
+        print(f"For the record, the highest taken so far: phase {phase - 1}, finding {finding - 1}.")
         if args.sources:
             print()
             width = max(len(k) for k in sources)

@@ -382,6 +382,15 @@ struct JsIntrinsics {
     JsObject* text_encoder_proto{nullptr};
     JsObject* error_protos[7]{};          // indexed by JsErrorKind
 
+    /// `AggregateError.prototype`, made the first time one is needed: the
+    /// error types above are made in the constructor of this class, and this
+    /// one belongs to BuiltinsObject.cpp, which installs the built-in library.
+    /// It is a root for as long as the realm exists, and its `[[Prototype]]`
+    /// is `Error.prototype`, like the seven.
+    JsObject* aggregate_error_proto{nullptr};
+    /// Made on first use (BuiltinsObject.cpp), and rooted from then on.
+    JsObject* aggregate_error_prototype();
+
     /// `Array.prototype[Symbol.iterator]` and `String.prototype[Symbol.iterator]`
     /// as install() left them. Not where a script's replacement goes: these
     /// are what js_iterates_as_builtin() compares the current method with.

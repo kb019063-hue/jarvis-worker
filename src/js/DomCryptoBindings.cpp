@@ -377,6 +377,129 @@ void aes_encrypt_block(const uint8_t* key, std::size_t key_len, const uint8_t in
     for (int i = 0; i < 16; ++i) out[i] = s[i];
 }
 
+void aes_decrypt_block(const uint8_t* key, std::size_t key_len, const uint8_t in[16], uint8_t out[16]) {
+    static constexpr uint8_t kSbox[256] = {
+        0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
+        0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
+        0xb7,0xfd,0x93,0x26,0x36,0x3f,0xf7,0xcc,0x34,0xa5,0xe5,0xf1,0x71,0xd8,0x31,0x15,
+        0x04,0xc7,0x23,0xc3,0x18,0x96,0x05,0x9a,0x07,0x12,0x80,0xe2,0xeb,0x27,0xb2,0x75,
+        0x09,0x83,0x2c,0x1a,0x1b,0x6e,0x5a,0xa0,0x52,0x3b,0xd6,0xb3,0x29,0xe3,0x2f,0x84,
+        0x53,0xd1,0x00,0xed,0x20,0xfc,0xb1,0x5b,0x6a,0xcb,0xbe,0x39,0x4a,0x4c,0x58,0xcf,
+        0xd0,0xef,0xaa,0xfb,0x43,0x4d,0x33,0x85,0x45,0xf9,0x02,0x7f,0x50,0x3c,0x9f,0xa8,
+        0x51,0xa3,0x40,0x8f,0x92,0x9d,0x38,0xf5,0xbc,0xb6,0xda,0x21,0x10,0xff,0xf3,0xd2,
+        0xcd,0x0c,0x13,0xec,0x5f,0x97,0x44,0x17,0xc4,0xa7,0x7e,0x3d,0x64,0x5d,0x19,0x73,
+        0x60,0x81,0x4f,0xdc,0x22,0x2a,0x90,0x88,0x46,0xee,0xb8,0x14,0xde,0x5e,0x0b,0xdb,
+        0xe0,0x32,0x3a,0x0a,0x49,0x06,0x24,0x5c,0xc2,0xd3,0xac,0x62,0x91,0x95,0xe4,0x79,
+        0xe7,0xc8,0x37,0x6d,0x8d,0xd5,0x4e,0xa9,0x6c,0x56,0xf4,0xea,0x65,0x7a,0xae,0x08,
+        0xba,0x78,0x25,0x2e,0x1c,0xa6,0xb4,0xc6,0xe8,0xdd,0x74,0x1f,0x4b,0xbd,0x8b,0x8a,
+        0x70,0x3e,0xb5,0x66,0x48,0x03,0xf6,0x0e,0x61,0x35,0x57,0xb9,0x86,0xc1,0x1d,0x9e,
+        0xe1,0xf8,0x98,0x11,0x69,0xd9,0x8e,0x94,0x9b,0x1e,0x87,0xe9,0xce,0x55,0x28,0xdf,
+        0x8c,0xa1,0x89,0x0d,0xbf,0xe6,0x42,0x68,0x41,0x99,0x2d,0x0f,0xb0,0x54,0xbb,0x16
+    };
+    static constexpr uint8_t kInvSbox[256] = {
+        0x52,0x09,0x6a,0xd5,0x30,0x36,0xa5,0x38,0xbf,0x40,0xa3,0x9e,0x81,0xf3,0xd7,0xfb,
+        0x7c,0xe3,0x39,0x82,0x9b,0x2f,0xff,0x87,0x34,0x8e,0x43,0x44,0xc4,0xde,0xe9,0xcb,
+        0x54,0x7b,0x94,0x32,0xa6,0xc2,0x23,0x3d,0xee,0x4c,0x95,0x0b,0x42,0xfa,0xc3,0x4e,
+        0x08,0x2e,0xa1,0x66,0x28,0xd9,0x24,0xb2,0x76,0x5b,0xa2,0x49,0x6d,0x8b,0xd1,0x25,
+        0x72,0xf8,0xf6,0x64,0x86,0x68,0x98,0x16,0xd4,0xa4,0x5c,0xcc,0x5d,0x65,0xb6,0x92,
+        0x6c,0x70,0x48,0x50,0xfd,0xed,0xb9,0xda,0x5e,0x15,0x46,0x57,0xa7,0x8d,0x9d,0x84,
+        0x90,0xd8,0xab,0x00,0x8c,0xbc,0xd3,0x0a,0xf7,0xe4,0x58,0x05,0xb8,0xb3,0x45,0x06,
+        0xd0,0x2c,0x1e,0x8f,0xca,0x3f,0x0f,0x02,0xc1,0xaf,0xbd,0x03,0x01,0x13,0x8a,0x6b,
+        0x3a,0x91,0x11,0x41,0x4f,0x67,0xdc,0xea,0x97,0xf2,0xcf,0xce,0xf0,0xb4,0xe6,0x73,
+        0x96,0xac,0x74,0x22,0xe7,0xad,0x35,0x85,0xe2,0xf9,0x37,0xe8,0x1c,0x75,0xdf,0x6e,
+        0x47,0xf1,0x1a,0x71,0x1d,0x29,0xc5,0x89,0x6f,0xb7,0x62,0x0e,0xaa,0x18,0xbe,0x1b,
+        0xfc,0x56,0x3e,0x4b,0xc6,0xd2,0x79,0x20,0x9a,0xdb,0xc0,0xfe,0x78,0xcd,0x5a,0xf4,
+        0x1f,0xdd,0xa8,0x33,0x88,0x07,0xc7,0x31,0xb1,0x12,0x10,0x59,0x27,0x80,0xec,0x5f,
+        0x60,0x51,0x7f,0xa9,0x19,0xb5,0x4a,0x0d,0x2d,0xe5,0x7a,0x9f,0x93,0xc9,0x9c,0xef,
+        0xa0,0xe0,0x3b,0x4d,0xae,0x2a,0xf5,0xb0,0xc8,0xeb,0xbb,0x3c,0x83,0x53,0x99,0x61,
+        0x17,0x2b,0x04,0x7e,0xba,0x77,0xd6,0x26,0xe1,0x69,0x14,0x63,0x55,0x21,0x0c,0x7d
+    };
+    static constexpr uint8_t kRcon[11] = {0x00,0x01,0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x1b,0x36};
+    const int nk = static_cast<int>(key_len / 4u);
+    const int nr = nk + 6;
+    uint8_t rk[240]{};
+    for (std::size_t i = 0; i < key_len; ++i) rk[i] = key[i];
+    for (int i = nk; i < 4 * (nr + 1); ++i) {
+        uint8_t t[4] = {rk[4*(i-1)], rk[4*(i-1)+1], rk[4*(i-1)+2], rk[4*(i-1)+3]};
+        if (i % nk == 0) {
+            uint8_t tmp = t[0];
+            t[0] = kSbox[t[1]] ^ kRcon[i / nk]; t[1] = kSbox[t[2]]; t[2] = kSbox[t[3]]; t[3] = kSbox[tmp];
+        } else if (nk > 6 && (i % nk) == 4) {
+            for (int j = 0; j < 4; ++j) t[j] = kSbox[t[j]];
+        }
+        for (int j = 0; j < 4; ++j) rk[4*i + j] = rk[4*(i - nk) + j] ^ t[j];
+    }
+    auto xtime = [](uint8_t x) -> uint8_t { return static_cast<uint8_t>((x << 1) ^ ((x & 0x80u) ? 0x1bu : 0x00u)); };
+    auto mul = [&](uint8_t a, uint8_t b) -> uint8_t {
+        uint8_t r = 0;
+        for (int i = 0; i < 8; ++i) {
+            if (b & 1u) r ^= a;
+            a = xtime(a);
+            b >>= 1;
+        }
+        return r;
+    };
+    uint8_t s[16];
+    for (int i = 0; i < 16; ++i) s[i] = in[i] ^ rk[16 * nr + i];
+    for (int r = nr - 1; r >= 0; --r) {
+        uint8_t t13 = s[13]; s[13] = s[9]; s[9] = s[5]; s[5] = s[1]; s[1] = t13;
+        uint8_t t2 = s[2], t6 = s[6]; s[2] = s[10]; s[6] = s[14]; s[10] = t2; s[14] = t6;
+        uint8_t t3 = s[3]; s[3] = s[7]; s[7] = s[11]; s[11] = s[15]; s[15] = t3;
+        for (int i = 0; i < 16; ++i) s[i] = kInvSbox[s[i]];
+        for (int i = 0; i < 16; ++i) s[i] ^= rk[16 * r + i];
+        if (r > 0) {
+            for (int c = 0; c < 4; ++c) {
+                uint8_t a0 = s[4*c], a1 = s[4*c+1], a2 = s[4*c+2], a3 = s[4*c+3];
+                s[4*c]   = mul(a0, 0x0e) ^ mul(a1, 0x0b) ^ mul(a2, 0x0d) ^ mul(a3, 0x09);
+                s[4*c+1] = mul(a0, 0x09) ^ mul(a1, 0x0e) ^ mul(a2, 0x0b) ^ mul(a3, 0x0d);
+                s[4*c+2] = mul(a0, 0x0d) ^ mul(a1, 0x09) ^ mul(a2, 0x0e) ^ mul(a3, 0x0b);
+                s[4*c+3] = mul(a0, 0x0b) ^ mul(a1, 0x0d) ^ mul(a2, 0x09) ^ mul(a3, 0x0e);
+            }
+        }
+    }
+    for (int i = 0; i < 16; ++i) out[i] = s[i];
+}
+
+std::vector<uint8_t> aes_cbc_encrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& iv,
+                                     const std::vector<uint8_t>& pt) {
+    const std::size_t pad = 16u - (pt.size() % 16u);
+    std::vector<uint8_t> padded = pt;
+    padded.resize(pt.size() + pad, static_cast<uint8_t>(pad));
+    std::vector<uint8_t> out(padded.size());
+    uint8_t prev[16];
+    for (int i = 0; i < 16; ++i) prev[i] = iv[static_cast<std::size_t>(i)];
+    for (std::size_t off = 0; off < padded.size(); off += 16u) {
+        uint8_t blk[16];
+        for (int i = 0; i < 16; ++i) blk[i] = padded[off + static_cast<std::size_t>(i)] ^ prev[i];
+        aes_encrypt_block(key.data(), key.size(), blk, &out[off]);
+        for (int i = 0; i < 16; ++i) prev[i] = out[off + static_cast<std::size_t>(i)];
+    }
+    return out;
+}
+
+bool aes_cbc_decrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& iv,
+                     const std::vector<uint8_t>& ct, std::vector<uint8_t>& pt_out) {
+    if (ct.empty() || (ct.size() % 16u) != 0) return false;
+    pt_out.resize(ct.size());
+    uint8_t prev[16];
+    for (int i = 0; i < 16; ++i) prev[i] = iv[static_cast<std::size_t>(i)];
+    for (std::size_t off = 0; off < ct.size(); off += 16u) {
+        uint8_t dec[16];
+        aes_decrypt_block(key.data(), key.size(), &ct[off], dec);
+        for (int i = 0; i < 16; ++i) {
+            pt_out[off + static_cast<std::size_t>(i)] = dec[i] ^ prev[i];
+            prev[i] = ct[off + static_cast<std::size_t>(i)];
+        }
+    }
+    const uint8_t pad = pt_out.back();
+    if (pad == 0 || pad > 16u || pad > pt_out.size()) return false;
+    for (std::size_t i = pt_out.size() - pad; i < pt_out.size(); ++i) {
+        if (pt_out[i] != pad) return false;
+    }
+    pt_out.resize(pt_out.size() - pad);
+    return true;
+}
+
 std::vector<uint8_t> aes_ctr_crypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& counter_in,
                                    int length_bits, const std::vector<uint8_t>& data) {
     std::vector<uint8_t> ctr = counter_in;
@@ -642,7 +765,7 @@ void setup_subtle_crypto(Iface& I) {
             if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
             return undefined();
         }
-        if (alg_name == "aes-ctr" || alg_name == "aes-gcm") {
+        if (alg_name == "aes-ctr" || alg_name == "aes-gcm" || alg_name == "aes-cbc") {
             if (key_bytes.size() != 16u && key_bytes.size() != 24u && key_bytes.size() != 32u) {
                 return reject_with("DataError", "SubtleCrypto.importKey: AES key must be 128, 192, or 256 bits.");
             }
@@ -767,7 +890,7 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[0];
         std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
                                                         : ascii_lower_str(to_str(alg_val));
-        if ((alg_name == "aes-ctr" || alg_name == "aes-gcm") && alg_val.is_object_like()) {
+        if ((alg_name == "aes-ctr" || alg_name == "aes-gcm" || alg_name == "aes-cbc") && alg_val.is_object_like()) {
             const int len_bits = static_cast<int>(to_double(alg_val.get_property("length")));
             if (len_bits != 128 && len_bits != 192 && len_bits != 256) {
                 return reject_with("OperationError", "SubtleCrypto.generateKey: AES length must be 128, 192, or 256.");
@@ -940,8 +1063,8 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[0];
         const std::string alg_name = alg_val.is_object_like()
             ? ascii_lower_str(to_str(alg_val.get_property("name"))) : std::string();
-        if (alg_name != "aes-ctr" && alg_name != "aes-gcm") {
-            return reject_with("NotSupportedError", std::string("SubtleCrypto.") + op_name + ": only AES-CTR and AES-GCM are supported.");
+        if (alg_name != "aes-ctr" && alg_name != "aes-gcm" && alg_name != "aes-cbc") {
+            return reject_with("NotSupportedError", std::string("SubtleCrypto.") + op_name + ": only AES-CTR, AES-GCM, and AES-CBC are supported.");
         }
         CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
         if (!key || key->hash_alg != alg_name) {
@@ -962,6 +1085,16 @@ void setup_subtle_crypto(Iface& I) {
                 return reject_with("OperationError", std::string("SubtleCrypto.") + op_name + ": counter length must be 1..128.");
             }
             out = aes_ctr_crypt(key->key_bytes, counter, length_bits, data);
+        } else if (alg_name == "aes-cbc") {
+            std::vector<uint8_t> iv;
+            if (!read_buffer_source(r, alg_val.get_property("iv"), iv) || iv.size() != 16u) {
+                return reject_with("OperationError", std::string("SubtleCrypto.") + op_name + ": AES-CBC iv must be 16 bytes.");
+            }
+            if (is_encrypt) {
+                out = aes_cbc_encrypt(key->key_bytes, iv, data);
+            } else if (!aes_cbc_decrypt(key->key_bytes, iv, data, out)) {
+                return reject_with("OperationError", "SubtleCrypto.decrypt: AES-CBC invalid padding or ciphertext.");
+            }
         } else {
             std::vector<uint8_t> iv, aad;
             if (!read_buffer_source(r, alg_val.get_property("iv"), iv) || iv.empty()) {
@@ -998,6 +1131,129 @@ void setup_subtle_crypto(Iface& I) {
 
     I.method("encrypt", 3, [aes_cipher_op](Realm& r, Args args) { return aes_cipher_op(r, args, true); });
     I.method("decrypt", 3, [aes_cipher_op](Realm& r, Args args) { return aes_cipher_op(r, args, false); });
+
+    I.method("wrapKey", 4, [aes_cipher_op](Realm& r, Args args) {
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const char* name, const std::string& msg) -> JsValue {
+            JsValue err = make_dom_exception(r, msg, name);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        if (args.size() < 4) return reject_with("TypeError", "SubtleCrypto.wrapKey: 4 arguments required.");
+        if (ascii_lower(to_str(args[0])) != "raw") {
+            return reject_with("NotSupportedError", "SubtleCrypto.wrapKey: only 'raw' format is supported.");
+        }
+        auto* key = state_of<CryptoKeyState>(args[1]);
+        auto* wrap_key = state_of<CryptoKeyState>(args[2]);
+        if (!key || !wrap_key) return reject_with("TypeError", "SubtleCrypto.wrapKey: CryptoKey required.");
+        if (!key->extractable) return reject_with("InvalidAccessError", "SubtleCrypto.wrapKey: key is not extractable.");
+
+        JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
+        JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
+        JsValue raw_ab = js_construct(ab_ctor, {num(static_cast<double>(key->key_bytes.size()))});
+        JsValue raw_u8 = js_construct(u8_ctor, {raw_ab});
+        for (std::size_t i = 0; i < key->key_bytes.size(); ++i) {
+            raw_u8.set_property(std::to_string(i), num(static_cast<double>(key->key_bytes[i])));
+        }
+        std::vector<JsValue> enc_args = {args[3], args[2], raw_ab};
+        return aes_cipher_op(r, enc_args, true);
+    });
+
+    I.method("unwrapKey", 7, [](Realm& r, Args args) {
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const char* name, const std::string& msg) -> JsValue {
+            JsValue err = make_dom_exception(r, msg, name);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        if (args.size() < 7) return reject_with("TypeError", "SubtleCrypto.unwrapKey: 7 arguments required.");
+        if (ascii_lower(to_str(args[0])) != "raw") {
+            return reject_with("NotSupportedError", "SubtleCrypto.unwrapKey: only 'raw' format is supported.");
+        }
+        std::vector<uint8_t> wrapped;
+        if (!read_buffer_source(r, args[1], wrapped)) {
+            return reject_with("TypeError", "SubtleCrypto.unwrapKey: wrappedKey must be a BufferSource.");
+        }
+        auto* unwrap_key = state_of<CryptoKeyState>(args[2]);
+        if (!unwrap_key) return reject_with("TypeError", "SubtleCrypto.unwrapKey: unwrappingKey must be a CryptoKey.");
+
+        JsValue wrap_alg = args[3];
+        std::string wrap_name = ascii_lower(wrap_alg.is_object_like() ? to_str(wrap_alg.get_property("name")) : to_str(wrap_alg));
+
+        std::vector<uint8_t> raw_bytes;
+        if (wrap_name == "aes-ctr") {
+            std::vector<uint8_t> counter;
+            if (!read_buffer_source(r, wrap_alg.get_property("counter"), counter) || counter.size() != 16u) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-CTR counter must be 16 bytes.");
+            }
+            JsValue len_val = wrap_alg.get_property("length");
+            double len_d = !len_val.is_undefined() ? len_val.to_number() : 0.0;
+            std::size_t length_bits = (len_d >= 1.0 && len_d <= 128.0) ? static_cast<std::size_t>(len_d) : 0u;
+            if (length_bits == 0u) return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-CTR length must be 1..128.");
+            raw_bytes = aes_ctr_crypt(unwrap_key->key_bytes, counter, length_bits, wrapped);
+        } else if (wrap_name == "aes-cbc") {
+            std::vector<uint8_t> iv;
+            if (!read_buffer_source(r, wrap_alg.get_property("iv"), iv) || iv.size() != 16u) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-CBC iv must be 16 bytes.");
+            }
+            if (!aes_cbc_decrypt(unwrap_key->key_bytes, iv, wrapped, raw_bytes)) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-CBC invalid padding or ciphertext.");
+            }
+        } else if (wrap_name == "aes-gcm") {
+            std::vector<uint8_t> iv;
+            if (!read_buffer_source(r, wrap_alg.get_property("iv"), iv) || iv.empty()) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-GCM iv must be non-empty.");
+            }
+            std::vector<uint8_t> aad;
+            JsValue aad_val = wrap_alg.get_property("additionalData");
+            if (!aad_val.is_nullish()) {
+                if (!read_buffer_source(r, aad_val, aad)) {
+                    return reject_with("TypeError", "SubtleCrypto.unwrapKey: additionalData must be a BufferSource.");
+                }
+            }
+            std::size_t tag_bits = 128u;
+            JsValue tl_val = wrap_alg.get_property("tagLength");
+            if (!tl_val.is_undefined()) tag_bits = static_cast<std::size_t>(tl_val.to_number());
+            if (tag_bits != 32u && tag_bits != 64u && tag_bits != 96u && tag_bits != 104u &&
+                tag_bits != 112u && tag_bits != 120u && tag_bits != 128u) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: invalid AES-GCM tagLength.");
+            }
+            if (!aes_gcm_decrypt(unwrap_key->key_bytes, iv, aad, wrapped, tag_bits / 8u, raw_bytes)) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-GCM authentication tag mismatch.");
+            }
+        } else {
+            return reject_with("NotSupportedError", "SubtleCrypto.unwrapKey: unsupported wrapping algorithm.");
+        }
+
+        JsValue target_alg = args[4];
+        std::string target_name = ascii_lower(target_alg.is_object_like() ? to_str(target_alg.get_property("name")) : to_str(target_alg));
+        std::string canonical_alg;
+        if (target_name == "aes-gcm") canonical_alg = "AES-GCM";
+        else if (target_name == "aes-cbc") canonical_alg = "AES-CBC";
+        else if (target_name == "aes-ctr") canonical_alg = "AES-CTR";
+        else if (target_name == "hmac") canonical_alg = "HMAC";
+        else return reject_with("NotSupportedError", "SubtleCrypto.unwrapKey: unsupported unwrappedKeyAlgorithm.");
+
+        if (canonical_alg != "HMAC" && raw_bytes.size() != 16u && raw_bytes.size() != 24u && raw_bytes.size() != 32u) {
+            return reject_with("DataError", "SubtleCrypto.unwrapKey: AES key must be 128, 192, or 256 bits.");
+        }
+
+        auto state = std::make_shared<CryptoKeyState>();
+        state->type = "secret";
+        state->extractable = args[5].is_truthy();
+        state->key_bytes = std::move(raw_bytes);
+        if (canonical_alg == "HMAC" && target_alg.is_object_like()) {
+            JsValue hash_val = target_alg.get_property("hash");
+            std::string h = ascii_lower(hash_val.is_object_like() ? to_str(hash_val.get_property("name")) : to_str(hash_val));
+            if (h == "sha-1") state->hash_alg = "SHA-1";
+            else if (h == "sha-384") state->hash_alg = "SHA-384";
+            else if (h == "sha-512") state->hash_alg = "SHA-512";
+            else state->hash_alg = "SHA-256";
+        }
+        JsValue key_obj = r.make("CryptoKey", state);
+        if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key_obj});
+        return key_obj;
+    });
 }
 
 void setup_crypto(Iface& I) {

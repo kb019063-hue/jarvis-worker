@@ -8,6 +8,7 @@
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/render/Canvas2D.hpp"
 #include "litebird/render/ImageDecoder.hpp"
+#include "litebird/render/MediaAudioCodecs.hpp"
 #include "litebird/render/WebGL.hpp"
 #include "litebird/js/ImageBitmap.hpp"
 #include "litebird/js/TypedArray.hpp"
@@ -22,6 +23,8 @@
 
 namespace litebird {
 namespace dom {
+
+void register_media_interfaces();
 
 namespace {
 
@@ -87,35 +90,124 @@ double media_finite_double(Realm&, const JsValue& value, const char* what) {
 }
 
 // --- TimeRanges (WHATWG HTML, "TimeRanges") ---------------------------------
-//
-// This engine never fetches or decodes a resource, so every range list it
-// hands out is empty: `length` is 0, and `start`/`end` throw the
-// `IndexSizeError` the spec requires for an index past the end, which is
-// every index here.
+struct TimeRangesState : JsExotic {
+    std::vector<std::pair<double, double>> ranges;
+};
+
 void setup_time_ranges(Iface& I) {
-    I.getter("length", [](Realm&) { return num(0); });
-    auto at = [](Realm& r, Args args, const char* name) -> JsValue {
+    I.getter("length", [](Realm&) {
+        if (auto* st = state_of<TimeRangesState>(JsValue::current_this())) {
+            return num(static_cast<double>(st->ranges.size()));
+        }
+        return num(0);
+    });
+    auto at = [](Realm& r, Args args, const char* name, bool is_end) -> JsValue {
         require_args(args, 1, name);
         const uint32_t index = to_ulong(js_arg(args, 0));
-        throw_dom(r, "IndexSizeError",
-                  std::string(name) + ": index " + std::to_string(index) + " is out of range (the list is empty).");
-        return undefined(); // unreachable: throw_dom throws
+        auto* st = state_of<TimeRangesState>(JsValue::current_this());
+        if (!st || index >= st->ranges.size()) {
+            throw_dom(r, "IndexSizeError",
+                      std::string(name) + ": index " + std::to_string(index) + " is out of range.");
+            return undefined();
+        }
+        return num(is_end ? st->ranges[index].second : st->ranges[index].first);
     };
-    I.method("start", 1, [at](Realm& r, Args args) -> JsValue { return at(r, args, "TimeRanges.start"); });
-    I.method("end", 1, [at](Realm& r, Args args) -> JsValue { return at(r, args, "TimeRanges.end"); });
+    I.method("start", 1, [at](Realm& r, Args args) -> JsValue { return at(r, args, "TimeRanges.start", false); });
+    I.method("end", 1, [at](Realm& r, Args args) -> JsValue { return at(r, args, "TimeRanges.end", true); });
 }
-JsValue make_time_ranges(Realm& realm) { return realm.make("TimeRanges", nullptr); }
+
+JsValue make_time_ranges(Realm& realm, std::vector<std::pair<double, double>> ranges = {}) {
+    auto st = std::make_shared<TimeRangesState>();
+    st->ranges = std::move(ranges);
+    return realm.make("TimeRanges", st);
+}
 
 // --- MediaError (WHATWG HTML §4.8.11.3) -------------------------------------
-//
-// `element.error` is always null here (nothing ever loads, so nothing ever
-// fails), but the interface and its constants are what a page that exists
-// against a browser has to find.
+struct MediaErrorState : JsExotic {
+    int code{0};
+    std::string message;
+};
+
 void setup_media_error(Iface& I) {
     I.constant("MEDIA_ERR_ABORTED", 1);
     I.constant("MEDIA_ERR_NETWORK", 2);
     I.constant("MEDIA_ERR_DECODE", 3);
     I.constant("MEDIA_ERR_SRC_NOT_SUPPORTED", 4);
+    I.getter("code", [](Realm&) {
+        auto* st = state_of<MediaErrorState>(JsValue::current_this());
+        return num(st ? st->code : 0);
+    });
+    I.getter("message", [](Realm&) {
+        auto* st = state_of<MediaErrorState>(JsValue::current_this());
+        return str(st ? st->message : "");
+    });
+}
+
+JsValue make_media_error(Realm& r, int code, const std::string& msg) {
+    auto st = std::make_shared<MediaErrorState>();
+    st->code = code;
+    st->message = msg;
+    return r.make("MediaError", st);
+}
+
+std::string media_slot_string(const JsValue& wrapper, const char* name) {
+    if (const JsValue* stored = slot(wrapper, name)) return to_str(*stored);
+    return {};
+}
+void media_slot_set_string(const JsValue& wrapper, const char* name, const std::string& value) {
+    set_slot(wrapper, name, str(value));
+}
+
+std::string media_resolve_candidate_src(Element& el) {
+    if (const std::string s = el.get_attribute("src"); !s.empty()) return s;
+    for (const auto& child : el.children()) {
+        if (child && child->is_element()) {
+            auto* ce = static_cast<Element*>(child.get());
+            if (ascii_lower(ce->tag_name()) == "source") {
+                if (const std::string s = ce->get_attribute("src"); !s.empty()) return s;
+            }
+        }
+    }
+    return {};
+}
+
+void media_sync_source(Realm& r, Element& el, bool force = false) {
+    JsValue wrapper = wrap(r, el);
+    const std::string src = media_resolve_candidate_src(el);
+    const std::string loaded = media_slot_string(wrapper, "mediaLoadedSrc");
+    if (!force && src == loaded) return;
+
+    media_slot_set_string(wrapper, "mediaLoadedSrc", src);
+    if (src.empty()) {
+        media_slot_set_number(wrapper, "mediaReadyState", 0.0);
+        media_slot_set_number(wrapper, "mediaNetworkState", 0.0);
+        media_slot_set_number(wrapper, "mediaDuration", std::numeric_limits<double>::quiet_NaN());
+        media_slot_set_string(wrapper, "mediaCurrentSrc", "");
+        media_slot_set_number(wrapper, "mediaErrorCode", 0.0);
+        media_slot_set_string(wrapper, "mediaErrorMsg", "");
+        return;
+    }
+
+    const std::string lower_prefix = ascii_lower(src.substr(0, std::min<std::size_t>(src.size(), 5)));
+    if (lower_prefix == "data:") {
+        WavAudio wav;
+        std::string err;
+        if (decode_wav_data_uri(src, wav, err)) {
+            media_slot_set_number(wrapper, "mediaReadyState", 4.0);   // HAVE_ENOUGH_DATA
+            media_slot_set_number(wrapper, "mediaNetworkState", 1.0); // NETWORK_IDLE
+            media_slot_set_number(wrapper, "mediaDuration", wav.duration_seconds);
+            media_slot_set_string(wrapper, "mediaCurrentSrc", src);
+            media_slot_set_number(wrapper, "mediaErrorCode", 0.0);
+            media_slot_set_string(wrapper, "mediaErrorMsg", "");
+            return;
+        }
+        media_slot_set_number(wrapper, "mediaReadyState", 0.0);
+        media_slot_set_number(wrapper, "mediaNetworkState", 3.0); // NETWORK_NO_SOURCE
+        media_slot_set_number(wrapper, "mediaDuration", std::numeric_limits<double>::quiet_NaN());
+        media_slot_set_string(wrapper, "mediaCurrentSrc", "");
+        media_slot_set_number(wrapper, "mediaErrorCode", 4.0); // MEDIA_ERR_SRC_NOT_SUPPORTED
+        media_slot_set_string(wrapper, "mediaErrorMsg", err);
+    }
 }
 
 // --- canPlayType ------------------------------------------------------------
@@ -1453,6 +1545,92 @@ JsValue canvas_to_blob(Realm& r, Element& el, Args args) {
     return undefined();
 }
 
+/// §4.12.5.1's `createPattern(image, repetition)`, bound here because the
+/// `CanvasPattern` it answers is a script object and only this file makes
+/// those.
+///
+/// **What this phase answers, and what it does not.** The method exists, takes
+/// the two arguments, and answers `null` in each of the two cases the standard
+/// makes `null`: an unrecognised `repetition`, which is step 2 (the step's
+/// wording is "throw" in older drafts and "return null" in HTML's current
+/// text), and an image this engine cannot read. It does **not** yet paint the
+/// tile when it is assigned to `fillStyle`: a pattern colour is sampled through
+/// the paint the rasteriser keeps, and a `CanvasPattern` value has no slot
+/// there — `fillStyle` accepts a `CanvasGradient` and a colour, and a pattern
+/// needs a third kind. That is a separate change to `JsValue`'s canvas paint
+/// and to `rasterize_paths`, and it is named in the finding rather than
+/// half-done here. A page that gets a `CanvasPattern` from this method and
+/// assigns it gets the same silent no-op it got from the method being
+/// `undefined`, and now a pattern object to inspect — which is the smaller
+/// lie, but it is still not the whole method.
+void install_canvas_create_pattern(Realm& r, JsValue context_object,
+                                   const std::shared_ptr<CanvasRenderingContext2D>& context) {
+    auto get_ctx = [context]() -> CanvasRenderingContext2D* { return context.get(); };
+    context_object.set_property("createPattern", make_function(r, "createPattern", 2,
+        [get_ctx, &r](Realm&, Args args) {
+            require_args(args, 2, "CanvasRenderingContext2D.createPattern");
+            // A source this engine cannot read is `null`, which is what a
+            // source that is not an image is: §4.12.5.1's "check the
+            // usability of the image argument" failing takes this branch.
+            DrawSource source;
+            if (!draw_source_from(args[0], source) || !source.pixels) return null();
+            const std::string repetition = args[1].to_string();
+            auto pattern = get_ctx()->create_pattern(source.pixels, repetition);
+            if (!pattern) return null();
+            JsValue object = JsValue::make_object();
+            object.set_property("setTransform", make_function(r, "setTransform", 0,
+                [pattern, &r](Realm&, Args set_args) {
+                    // §4.12.5.1: no argument (or null) clears it; six numbers
+                    // are the matrix in column order, which is the same order
+                    // `setTransform` on the context takes.
+                    if (set_args.empty() || set_args[0].is_nullish()) {
+                        pattern->transform = TransformMatrix2D::identity();
+                    } else if (set_args.size() >= 6) {
+                        pattern->transform = TransformMatrix2D{
+                            static_cast<float>(set_args[0].to_number()),
+                            static_cast<float>(set_args[1].to_number()),
+                            static_cast<float>(set_args[2].to_number()),
+                            static_cast<float>(set_args[3].to_number()),
+                            static_cast<float>(set_args[4].to_number()),
+                            static_cast<float>(set_args[5].to_number())};
+                    }
+                    return undefined();
+                }));
+            return object;
+        }));
+}
+
+/// §4.12.5.1's `reset()`, bound here rather than in `Canvas2D.cpp` because
+/// four of the properties it resets were copied onto **this object** by
+/// `CanvasRenderingContext2D::to_js_value` — `fillStyle`, `strokeStyle`,
+/// `lineWidth` and `globalCompositeOperation` are own data properties, and an
+/// own property shadows the live read in `JsValue::get_property`. The
+/// renderer's `reset()` puts its fields back and this writes the same four
+/// back to the object, so that the object and the renderer agree afterwards.
+/// Without the second half the context keeps answering with the colour it had
+/// before the reset, which is what a test that only checks `.lineWidth` catches
+/// and one that only checks that `reset` exists does not.
+void install_canvas_reset(Realm& r, JsValue context_object,
+                          const std::shared_ptr<CanvasRenderingContext2D>& context) {
+    auto get_ctx = [context]() -> CanvasRenderingContext2D* { return context.get(); };
+    // The object is captured through a shared_ptr because a native function's
+    // body must be callable when it is const, and writing these four
+    // properties is a write to the object.
+    auto self = std::make_shared<JsValue>(context_object);
+    context_object.set_property("reset", make_function(r, "reset", 0,
+        [get_ctx, self](Realm&, Args) {
+            get_ctx()->reset();
+            // The four `to_js_value` copies, from the state reset left.
+            const CanvasRenderingContext2D* c = get_ctx();
+            self->set_property("fillStyle", JsValue::make_string(c->fill_style.to_hex()));
+            self->set_property("strokeStyle", JsValue::make_string(c->stroke_style.to_hex()));
+            self->set_property("lineWidth", JsValue::make_number(c->line_width));
+            self->set_property("globalCompositeOperation",
+                              JsValue::make_string(c->global_composite_operation));
+            return undefined();
+        }));
+}
+
 // --- WebGL 1.0 / 2.0 WebIDL bindings (Khronos WebGL 1.0 §5 / 2.0 §3) --------
 
 struct WebGLHandleState : JsExotic {
@@ -2560,6 +2738,10 @@ void setup_canvas(Iface& I) {
                 // added here rather than in Canvas2D.cpp.
                 install_image_data_methods(r, object, backing);
                 install_draw_image(r, object, backing);
+                // Phase 280: `reset()` and `createPattern()` are object-level
+                // state, so they are installed here with the rest.
+                install_canvas_reset(r, object, backing);
+                install_canvas_create_pattern(r, object, backing);
                 return object;
             });
         }
@@ -2578,7 +2760,17 @@ void setup_canvas(Iface& I) {
 
 void setup_media(Iface& I) {
     ElementMembers<&is_media> M(I);
-    reflect(I, "r:src s:preload b:autoplay b:loop b:controls b:defaultMuted:muted s:crossOrigin:crossorigin");
+    reflect(I, "s:preload b:autoplay b:loop b:controls b:defaultMuted:muted s:crossOrigin:crossorigin");
+    M.accessor("src",
+        [](Realm& r, Element& el) {
+            const std::string raw = el.get_attribute("src");
+            if (raw.empty()) return str("");
+            return str(resolve_url(r, el, raw));
+        },
+        [](Realm& r, Element& el, const JsValue& value) {
+            el.set_attribute("src", to_str(value));
+            media_sync_source(r, el, true);
+        });
     I.constant("NETWORK_EMPTY", 0);
     I.constant("NETWORK_IDLE", 1);
     I.constant("NETWORK_LOADING", 2);
@@ -2588,18 +2780,47 @@ void setup_media(Iface& I) {
     I.constant("HAVE_CURRENT_DATA", 2);
     I.constant("HAVE_FUTURE_DATA", 3);
     I.constant("HAVE_ENOUGH_DATA", 4);
-    M.getter("currentSrc", [](Realm&, Element&) { return str(""); });
-    M.getter("paused", [](Realm&, Element&) { return boolean(true); });
-    M.getter("ended", [](Realm&, Element&) { return boolean(false); });
-    M.getter("duration", [](Realm&, Element&) { return num(std::numeric_limits<double>::quiet_NaN()); });
-    M.getter("readyState", [](Realm&, Element&) { return num(0); });
-    M.getter("networkState", [](Realm&, Element&) { return num(0); });
-    // Nothing ever loads, so nothing ever fails: the IDL is null, not an error with code 0.
-    M.getter("error", [](Realm&, Element&) { return null(); });
-    // Empty TimeRanges: no resource has loaded, so there is nothing buffered,
-    // nothing seekable yet, and nothing played.
-    M.getter("buffered", [](Realm& r, Element&) { return make_time_ranges(r); });
-    M.getter("seekable", [](Realm& r, Element&) { return make_time_ranges(r); });
+    M.getter("currentSrc", [](Realm& r, Element& el) {
+        media_sync_source(r, el);
+        return str(media_slot_string(wrap(r, el), "mediaCurrentSrc"));
+    });
+    M.getter("paused", [](Realm& r, Element& el) {
+        return boolean(media_slot_bool(wrap(r, el), "mediaPaused", true));
+    });
+    M.getter("ended", [](Realm& r, Element& el) {
+        return boolean(media_slot_bool(wrap(r, el), "mediaEnded", false));
+    });
+    M.getter("duration", [](Realm& r, Element& el) {
+        media_sync_source(r, el);
+        return num(media_slot_number(wrap(r, el), "mediaDuration", std::numeric_limits<double>::quiet_NaN()));
+    });
+    M.getter("readyState", [](Realm& r, Element& el) {
+        media_sync_source(r, el);
+        return num(media_slot_number(wrap(r, el), "mediaReadyState", 0.0));
+    });
+    M.getter("networkState", [](Realm& r, Element& el) {
+        media_sync_source(r, el);
+        return num(media_slot_number(wrap(r, el), "mediaNetworkState", 0.0));
+    });
+    M.getter("error", [](Realm& r, Element& el) {
+        media_sync_source(r, el);
+        JsValue w = wrap(r, el);
+        const int code = static_cast<int>(media_slot_number(w, "mediaErrorCode", 0.0));
+        if (code == 0) return null();
+        return make_media_error(r, code, media_slot_string(w, "mediaErrorMsg"));
+    });
+    M.getter("buffered", [](Realm& r, Element& el) {
+        media_sync_source(r, el);
+        const double dur = media_slot_number(wrap(r, el), "mediaDuration", std::numeric_limits<double>::quiet_NaN());
+        if (std::isfinite(dur) && dur > 0.0) return make_time_ranges(r, {{0.0, dur}});
+        return make_time_ranges(r);
+    });
+    M.getter("seekable", [](Realm& r, Element& el) {
+        media_sync_source(r, el);
+        const double dur = media_slot_number(wrap(r, el), "mediaDuration", std::numeric_limits<double>::quiet_NaN());
+        if (std::isfinite(dur) && dur > 0.0) return make_time_ranges(r, {{0.0, dur}});
+        return make_time_ranges(r);
+    });
     M.getter("played", [](Realm& r, Element&) { return make_time_ranges(r); });
     M.accessor("currentTime",
         [](Realm& r, Element& el) { return num(media_slot_number(wrap(r, el), "mediaCurrentTime", 0.0)); },
@@ -2631,18 +2852,30 @@ void setup_media(Iface& I) {
             const double asked = media_finite_double(r, value, "playbackRate");
             media_slot_set_number(wrap(r, el), "mediaPlaybackRate", asked);
         });
-    for (const char* name : {"pause", "load"}) {
-        M.method(name, 0, [](Realm&, Element&, Args) { return undefined(); });
-    }
-    // This engine cannot start playback at all — no fetch, demux or codec
-    // stack, and no output device. The promise rejects with the error a
-    // browser gives for a resource it cannot play (HTML §4.8.11.9.3) instead
-    // of resolving a playback that never begins.
-    M.method("play", 0, [](Realm& r, Element&, Args) {
+    M.method("pause", 0, [](Realm& r, Element& el, Args) {
+        media_slot_set_bool(wrap(r, el), "mediaPaused", true);
+        return undefined();
+    });
+    M.method("load", 0, [](Realm& r, Element& el, Args) {
+        JsValue w = wrap(r, el);
+        media_slot_set_bool(w, "mediaPaused", true);
+        media_slot_set_bool(w, "mediaEnded", false);
+        media_slot_set_number(w, "mediaCurrentTime", 0.0);
+        media_sync_source(r, el, true);
+        return undefined();
+    });
+    M.method("play", 0, [](Realm& r, Element& el, Args) {
+        media_sync_source(r, el);
         JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
         if (!promise.is_function()) return undefined();
+        JsValue w = wrap(r, el);
+        if (media_slot_number(w, "mediaReadyState", 0.0) >= 1.0) {
+            media_slot_set_bool(w, "mediaPaused", false);
+            media_slot_set_bool(w, "mediaEnded", false);
+            return js_call(promise.get_property("resolve"), promise, {undefined()});
+        }
         JsValue err = make_dom_exception(r, "NotSupportedError",
-                                         "The element has no supported sources: this engine cannot play any media resource.");
+                                         "The element has no supported sources.");
         return js_call(promise.get_property("reject"), promise, {err});
     });
     M.method("canPlayType", 1, [](Realm&, Element&, Args args) {
@@ -3391,6 +3624,11 @@ void register_html_interfaces() {
     register_interface({"HTMLTemplateElement", "HTMLElement", setup_template, element_ctor, 0, nullptr});
     register_interface({"HTMLSlotElement", "HTMLElement", setup_slot, element_ctor, 0, nullptr});
     register_interface({"HTMLDialogElement", "HTMLElement", setup_dialog, element_ctor, 0, nullptr});
+    register_media_interfaces();
+}
+
+JsValue make_time_ranges_with(Realm& realm, std::vector<std::pair<double, double>> ranges) {
+    return make_time_ranges(realm, std::move(ranges));
 }
 
 } // namespace dom

@@ -43,6 +43,17 @@ namespace {
 
 std::atomic<int> g_uncaught_errors{0};
 
+// Diagnostics may contain script-controlled bytes. Like the shell and worker
+// diagnostic boundaries, retain printable ASCII and replace every other byte;
+// do not alter the value delivered to an error handler or promise reaction.
+std::string terminal_diagnostic(std::string text) {
+    for (char& byte : text) {
+        const auto c = static_cast<unsigned char>(byte);
+        if (c < 0x20 || c > 0x7e) byte = '?';
+    }
+    return text;
+}
+
 const char* error_kind_name(JsErrorKind kind) {
     switch (kind) {
         case JsErrorKind::Error: return "Error";
@@ -175,7 +186,7 @@ bool (*js_uncaught_handler)(const JsValue& value) = nullptr;
 void js_report_uncaught(const JsValue& value) {
     if (js_uncaught_handler && js_uncaught_handler(value)) return;
     g_uncaught_errors.fetch_add(1);
-    std::cerr << "Uncaught " << js_output_text(js_describe_thrown(value)) << std::endl;
+    std::cerr << "Uncaught " << terminal_diagnostic(js_output_text(js_describe_thrown(value))) << std::endl;
 }
 
 void js_report_uncaught(const std::exception& ex) {
@@ -186,16 +197,16 @@ void js_report_uncaught(const std::exception& ex) {
     if (dynamic_cast<const JsSyntaxError*>(&ex)) {
         if (js_uncaught_handler && js_uncaught_handler(js_make_error(JsErrorKind::SyntaxError, ex.what()))) return;
         g_uncaught_errors.fetch_add(1);
-        std::cerr << "Uncaught SyntaxError: " << ex.what() << std::endl;
+        std::cerr << "Uncaught SyntaxError: " << terminal_diagnostic(ex.what()) << std::endl;
         return;
     }
     g_uncaught_errors.fetch_add(1);
-    std::cerr << "Uncaught " << ex.what() << std::endl;
+    std::cerr << "Uncaught " << terminal_diagnostic(ex.what()) << std::endl;
 }
 
 void js_report_unhandled_rejection(const JsValue& reason) {
     g_uncaught_errors.fetch_add(1);
-    std::cerr << "Uncaught (in promise) " << js_output_text(js_describe_thrown(reason)) << std::endl;
+    std::cerr << "Uncaught (in promise) " << terminal_diagnostic(js_output_text(js_describe_thrown(reason))) << std::endl;
 }
 
 JsScriptScope::JsScriptScope() : m_loop(EventLoop::default_loop()) {
@@ -1249,7 +1260,11 @@ const std::string& iterator_name() {
 /// `visit` runs script and the array may grow or shrink under it; the array
 /// iterator reads it the same way.
 void visit_elements(const JsValue& array, const std::function<bool(const JsValue&)>& visit) {
-    for (size_t i = 0; i < array.object_val->array_elements.size(); ++i) {
+    // The length, not the storage: a length that names places nothing was
+    // written to holds no elements (Phase 288) and still yields them. It is
+    // asked again each step, because `visit` runs script and the array can
+    // grow underneath it -- `for (x of a) a.push(4)` sees the 4.
+    for (size_t i = 0; i < static_cast<size_t>(js_to_number(array.get_property("length"))); ++i) {
         // The array iterator reads every place, so a hole is yielded too:
         // `[...a]` and `for (x of a)` see a value there. It is what `a[i]`
         // reads, which is `undefined` unless the index has an accessor of
@@ -1401,7 +1416,10 @@ bool js_iterates_as_builtin(const JsValue& value) {
     // array of another realm, one whose prototype was set).
     const JsObject* cell = value.object_val.get();
     if (cell->exotic || cell->has_legacy_getters || cell->prototype != realm.array_proto) return false;
-    if (!cell->properties.empty() && cell->properties.find(iterator_name()) != cell->properties.end()) return false;
+    // A `length` entry is not a reason to stop: every array whose length
+    // names places nothing written to has one (Phase 288), and the iterator
+    // reads such an array exactly as it reads any other.
+    if (cell->properties.find(iterator_name()) != cell->properties.end()) return false;
     return holds_installed_method(realm.array_proto, realm.array_iterator_method) &&
            holds_installed_next(realm.array_iterator_proto, realm.array_iterator_next);
 }

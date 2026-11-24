@@ -2650,9 +2650,9 @@ bool TrueTypeFont::apply_gpos_lookup_at(uint16_t lookup_index,
             return false;
         }
         if (lk.type == 4) {
-            if (m_has_gdef_glyph_class && m_gdef_glyph_class.class_of(run[j].glyph) == 2) {
-                return false;
-            }
+            // BaseCoverage, not GDEF's glyph class, decides whether this
+            // non-mark glyph can be a MarkToBase target. Fonts may include
+            // ligature-class glyphs here; lookup flags still apply above.
             for (const GposSubRef& ref : lk.subtables) {
                 const auto& st = m_gpos_mark_base[ref.index];
                 const int mi = st.mark_cov.index(run[pos].glyph);
@@ -2831,7 +2831,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         i = end;
     }
 
-    // Font-aware canonical composition. An intervening unconsumed mark blocks
+    // Font-aware Latin and Arabic canonical composition. An intervening unconsumed mark blocks
     // when its class is equal or greater; lower classes may be crossed. A
     // consumed mark does not become a blocker. Never choose a missing glyph.
     std::vector<uint32_t> codepoints;
@@ -2839,10 +2839,11 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
     const std::size_t no_starter = input.size();
     std::size_t starter = no_starter;
     uint8_t last_class = 0;
+    uint32_t starter_script = 0;
     for (std::size_t i = 0; i < input.size(); ++i) {
         const uint8_t cls = combining_class(input[i]);
         bool composed = false;
-        if (starter != no_starter && cls && input_scripts[i] == kTagLatn && last_class < cls) {
+        if (starter != no_starter && cls && input_scripts[i] == starter_script && last_class < cls) {
             using namespace unicode::tables;
             const uint64_t key = (uint64_t(codepoints[starter]) << 21) | input[i];
             const auto* pair = std::lower_bound(kComposePairs, kComposePairs + kComposePairsCount,
@@ -2854,9 +2855,10 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             }
         }
         if (!composed) {
-            if (!cls || input_scripts[i] != kTagLatn) {
-                starter = !cls && classify_codepoint_script(input[i]) == kTagLatn
-                    ? codepoints.size() : no_starter;
+            if (!cls || input_scripts[i] != starter_script) {
+                const uint32_t strong = classify_codepoint_script(input[i]);
+                starter_script = !cls && (strong == kTagLatn || strong == kTagArab) ? strong : 0;
+                starter = starter_script ? codepoints.size() : no_starter;
             }
             codepoints.push_back(input[i]);
             last_class = cls;

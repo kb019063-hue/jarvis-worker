@@ -21,6 +21,14 @@
 
 namespace litebird {
 
+/// How far past the elements an index may be before extending the element
+/// vector would be paying for holes it does not need. A place just past the
+/// end extends the vector (that is what makes `a[a.length] = x` cheap and
+/// dense); a place far past it only moves the length, and the places skipped
+/// stay the holes they are. 2^16 places is 5.7 MiB of `JsValue` — the point
+/// where "extend it anyway" stops being obviously right.
+static constexpr size_t kMaxDenseGap = 1u << 16;
+
 static thread_local JsValue::FunctionCaller s_function_caller = nullptr;
 
 namespace {
@@ -393,6 +401,15 @@ bool lookup_chain(JsObject* start, const std::string& name, const JsValue& recei
             // object asked, because `length` on the array is where the
             // standard's lookup ends.
             if (name == "length") {
+                // The count, not the storage: a length that names places
+                // nothing was written to holds no elements at all (see the
+                // grow branch in `set_property`), so the entry is the length
+                // and `array_elements` is only where the places below it are.
+                const auto entry = obj->properties.find("length");
+                if (entry != obj->properties.end()) {
+                    out = JsValue::make_number(js_to_number(entry->second));
+                    return true;
+                }
                 out = JsValue::make_number(static_cast<double>(obj->array_elements.size()));
                 return true;
             }
@@ -885,10 +902,16 @@ std::vector<JsValue> JsValue::array_snapshot() const {
     // and the storage is the answer; otherwise each place is read in turn,
     // and the length is looked at again each time, because a getter can
     // change it.
+    // The length, not the storage: a length that names places nothing was
+    // written to holds no elements (Phase 288), and those places are still
+    // places the iterator produces -- `[...a]` on five holes is five
+    // `undefined`, not an empty array.
+    const size_t length = static_cast<size_t>(js_to_number(get_property("length")));
+    out.reserve(length);
     if (js_array_holes_read_undefined(*this)) {
-        for (size_t i = 0; i < object_val->array_elements.size(); ++i) out.push_back(array_element(i));
+        for (size_t i = 0; i < length; ++i) out.push_back(array_element(i));
     } else {
-        for (size_t i = 0; i < object_val->array_elements.size(); ++i) out.push_back(js_array_get(*this, i));
+        for (size_t i = 0; i < length; ++i) out.push_back(js_array_get(*this, i));
     }
     return out;
 }
@@ -1209,7 +1232,14 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
     }
 
     for (const auto& [index, key] : index_keys) { (void)index; keys.push_back(*key); }
-    for (const auto* key : named_keys) keys.push_back(*key);
+    for (const auto* key : named_keys) {
+        // An array's `length` is listed in the array's own order above, and
+        // an entry for it is only where the length names places nothing was
+        // written to: listing it twice is what test262's
+        // `order-after-define-property` catches.
+        if (cell && cell->is_array && include_non_enumerable && *key == "length") continue;
+        keys.push_back(*key);
+    }
     return keys;
 }
 
@@ -1624,7 +1654,13 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                 if (!(requested >= 0) || requested != std::floor(requested) || requested > 4294967295.0) {
                     js_throw_range_error("Invalid array length");
                 }
-                const size_t previous = obj->array_elements.size();
+                // The length this array has now, which is the count in the
+                // entry when a grow stopped materialising places: the elements
+                // can be fewer than the length, never more.
+                size_t previous = obj->array_elements.size();
+                if (const auto entry = obj->properties.find("length"); entry != obj->properties.end()) {
+                    previous = std::max(previous, static_cast<size_t>(js_to_number(entry->second)));
+                }
                 size_t next = static_cast<size_t>(requested);
                 // What `Object.defineProperty` made of an index is in the
                 // property map (has_own_property). A shorter array has lost
@@ -1648,14 +1684,52 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                     }
                     for (const auto& key : lost) obj->properties.erase(key);
                 }
-                obj->array_elements.resize(next, JsValue::make_undefined());
                 // Growing an array adds places that are not properties: holes.
-                if (obj->array_holes) {
+                // A hole is not storage — it is the *absence* of it — and the
+                // places a growing length names are all holes, so materialising
+                // one `JsValue` each is the engine paying 88 bytes for "there
+                // is nothing here". At length 2^32-1 that was 377 GiB: the
+                // allocation either threw `std::bad_alloc` (an exception no
+                // script can catch) or the process was killed, where Node
+                // answers the same assignment instantly because a hole costs
+                // it nothing. So a grow past the places that exist only
+                // remembers the length: the entry written above is what
+                // `length` reads back, and every read, `in`, `Object.keys`,
+                // and index write already treats a place past the end of
+                // `array_elements` as the hole it is.
+                const size_t from_elements = obj->array_elements.size();
+                if (next <= from_elements) {
+                    // Shrinking does lose elements — the places past the new
+                    // length are gone, and their hole bits with them.
+                    obj->array_elements.resize(next, JsValue::make_undefined());
+                    if (obj->array_holes) {
+                        for (size_t i = next; i < from_elements; ++i) obj->array_holes->clear(i);
+                    }
+                } else if (obj->array_holes) {
                     for (size_t i = next; i < previous; ++i) obj->array_holes->clear(i);
-                    for (size_t i = previous; i < next; ++i) obj->array_holes->set(i);
-                } else if (next > previous) {
-                    obj->array_holes = std::make_unique<JsObject::Holes>();
-                    for (size_t i = previous; i < next; ++i) obj->array_holes->set(i);
+                }
+                // The entry is the length now, whichever way it moved. Its
+                // attributes are an array's `length`: writable, not
+                // enumerable, not configurable — so a later length write comes
+                // back through this branch, and `Object.getOwnPropertyDescriptor`
+                // answers what it answered when the element count was the length.
+                // And when the length agrees with the elements again, the
+                // entry goes: the element count *is* the length then, and a
+                // stale entry beside it is a second source of truth. That is
+                // not hypothetical — `log.length = 0; log.push('a')` left the
+                // entry at 0 while the elements had one place, and `push`
+                // answered 0 with the element at index 0.
+                auto existing = obj->properties.find("length");
+                if (next == obj->array_elements.size()) {
+                    if (existing != obj->properties.end()) obj->properties.erase("length");
+                    return !refused;
+                }
+                if (existing != obj->properties.end()) {
+                    existing->second = JsValue::make_number(static_cast<double>(next));
+                } else {
+                    PropertyMap::Entry& entry = obj->properties.entry("length");
+                    entry.second = JsValue::make_number(static_cast<double>(next));
+                    entry.flags = PropertyMap::Writable;
                 }
                 return !refused;
             }
@@ -1697,18 +1771,62 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                 }
                 if (index >= obj->array_elements.size()) {
                     if (!obj->extensible) return false;
-                    // A stray huge index would otherwise allocate gigabytes.
-                    if (index > obj->array_elements.size() + (1u << 24)) {
-                        js_throw_range_error("Array index too far past the end of the array");
-                    }
-                    // The places it skips over are holes, not elements.
+                    // The places it skips over are holes, and a hole is not
+                    // storage (Phase 288). Writing just past the elements
+                    // extends the vector by a little; writing far past them —
+                    // `a[99999999] = 1` — grows the length and stores nothing,
+                    // because Node answers that with a length of 100000000 and
+                    // no allocation. This used to throw a RangeError invented
+                    // here at 2^24, and before that it allocated everything in
+                    // between.
                     const size_t previous = obj->array_elements.size();
-                    obj->array_elements.resize(index + 1, JsValue::make_undefined());
-                    if (!obj->array_holes) obj->array_holes = std::make_unique<JsObject::Holes>();
-                    for (size_t i = previous; i < index; ++i) obj->array_holes->set(i);
+                    if (index > previous + kMaxDenseGap) {
+                        if (!obj->array_holes) obj->array_holes = std::make_unique<JsObject::Holes>();
+                        for (size_t i = previous; i < previous + kMaxDenseGap && i < index; ++i) {
+                            obj->array_holes->set(i);
+                        }
+                    } else {
+                        obj->array_elements.resize(index + 1, JsValue::make_undefined());
+                        if (!obj->array_holes) obj->array_holes = std::make_unique<JsObject::Holes>();
+                        for (size_t i = previous; i < index; ++i) obj->array_holes->set(i);
+                    }
                 }
-                obj->array_elements[index] = std::move(val);
-                clear_array_hole(index);      // writing a hole makes it an element again
+                if (index < obj->array_elements.size()) {
+                    obj->array_elements[index] = std::move(val);
+                    clear_array_hole(index);   // writing a hole makes it an element again
+                } else {
+                    // Past the elements: a place of its own, and the length
+                    // follows it.
+                    obj->properties.entry(name).second = val;
+                }
+                // The length has to reach past the place just written. When an
+                // entry holds it (any array whose length named places nothing
+                // was written to has one, Phase 288) that entry is raised;
+                // without one the element count *is* the length, and extending
+                // the vector already raised it. An entry that agrees with the
+                // count goes, so there is only ever one answer.
+                {
+                    const double wanted = static_cast<double>(index + 1);
+                    auto entry = obj->properties.find("length");
+                    if (entry != obj->properties.end()) {
+                        if (js_to_number(entry->second) < wanted) {
+                            entry->second = JsValue::make_number(wanted);
+                        }
+                    } else if (wanted > static_cast<double>(obj->array_elements.size())) {
+                        // A place past the elements with no entry: the count
+                        // would be the length, but the count does not include
+                        // a place that went to the map, so the length is
+                        // written down.
+                        PropertyMap::Entry& made = obj->properties.entry("length");
+                        made.second = JsValue::make_number(wanted);
+                        made.flags = PropertyMap::Writable;
+                    }
+                    // Not erased here even when it agrees with the count: the
+                    // place just written may live in the map rather than the
+                    // elements, and then the count is not the length at all.
+                    // The length assignment is where the entry goes, and it
+                    // knows both numbers.
+                }
                 return true;
             }
         }

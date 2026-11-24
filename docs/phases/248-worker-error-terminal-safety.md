@@ -23,7 +23,7 @@ mark per non-ASCII byte; it is not Unicode-aware terminal rendering.
 
 ## Verification
 
-- `make test`: 394 engine suites and 114 cross-origin checks pass. The new
+- `make test`: 395 engine suites and 114 cross-origin checks pass. The new
   suite throws all code points U+0000..U+00FF in a real worker and compares
   the entire diagnostic, then checks that a handled error keeps its original
   control characters and does not emit the unhandled diagnostic.

@@ -107,7 +107,7 @@ instructions dumps identically once the U+FFFD marks are removed; and that the
 corpus dump keeps its carriage return while the human dump does not.
 
 ```bash
-make test                                        # All 433 engine test suites passed
+make test                                        # All 441 engine test suites passed
 make verify-page-text-terminal-safety            # 21/21 checks pass
 make verify-js-error-terminal-safety             # 6/6 still pass
 ```
@@ -121,7 +121,7 @@ the split above is what those runs became.)
 
 | Check | Result |
 | :--- | :--- |
-| `make test` | 433 suites, all pass |
+| `make test` | 441 suites, all pass |
 | `make verify-page-text-terminal-safety` | 21/21 |
 | `make conformance` | 1973/1973 |
 | `make dom-conformance` | 678/678 |

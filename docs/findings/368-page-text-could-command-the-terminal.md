@@ -42,7 +42,7 @@ in the output.
 
 ## 3. Evidence
 
-`make test` **433/433**; `make verify-page-text-terminal-safety` **21/21**;
+`make test` **441/441**; `make verify-page-text-terminal-safety` **21/21**;
 `make conformance` 1973/1973 and `make diff-trees` 1500/1500 unchanged, because
 an ordinary page still dumps byte for byte as it did. With the dump files as
 `main` has them, the checker is 17/21 — the four failures are the four fields

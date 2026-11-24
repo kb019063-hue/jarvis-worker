@@ -17,6 +17,16 @@ description: >
 # request's run can be read by that pull request alone, so those runs save
 # none). The jobs "Build & unit tests" and "Sanitizers: unit suites" save
 # them, in ci.yml.
+#
+# One pull request does save its own: a watch's (title `WATCH:`). Its runs
+# are the lots, one after another on the same pull request, and each holds
+# what `main` is about to be. The lot pushed at 04:13 UTC on 24 November, a
+# minute and a half after the one before it had landed, found the objects of
+# 03:57, because main's run on what had just landed saved its own at 04:15:
+# each of the four sanitizer jobs compiled for 4 min 49 s what the lot before
+# had compiled already, and the longest job took 14 min 13 s where it takes
+# seven. GitHub looks for a cache in the pull request's own first and in
+# main's after, so a lot gets the objects of the lot before it.
 
 inputs:
   objects:

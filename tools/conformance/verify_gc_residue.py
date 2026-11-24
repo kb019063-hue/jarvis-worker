@@ -112,6 +112,12 @@ class Case:
     step: str = ""
     report: str = ""
     tolerance: int = DEFAULT_TOLERANCE
+    # The measured drift this case is expected to show while the defect is
+    # open, and why. A case with a `known` reason reports KNOWN and is not
+    # counted as a pass; a case that comes back flat while it still carries a
+    # reason reports FIXED and fails the run, so the corpus cannot accumulate
+    # excuses (the convention `tests/render/reftests.json` uses).
+    known: str = ""
 
 
 CASES: list[Case] = [
@@ -197,6 +203,37 @@ CASES: list[Case] = [
         step="function h() {}"
              "el.addEventListener('x', h); el.removeEventListener('x', h);",
     ),
+    # --- iterators, which hold a frame on another thread -----------------
+    #
+    # A generator's frame is a real OS thread parked mid-body. The collector
+    # cannot scan that stack, so the frame's scope is rooted from
+    # `JsInterpreter`'s registry (`m_generators`) instead — and that registry
+    # is a list of `weak_ptr`, so it cannot keep the frame alive either. A
+    # generator that is never advanced, or advanced to its end, still owns its
+    # thread until `reap()` joins it; a generator that is simply dropped never
+    # reaches `reap()` at all. Four shapes, one per way a page makes one.
+    Case(
+        "generator-never-advanced",
+        step="function* g() { yield 1; } var it = g();",
+        known="7 cells an iteration: `spawn_frame` gives every generator a real OS thread and a `GeneratorData`; the frame is dropped without `reap()` joining it, so the thread's stack and the frame itself are never freed. A loop making generators therefore dies at about 15,700 with `RangeError: Too many suspended functions: out of threads`, and Node v22.22.3 makes 20,000 without trouble",
+    ),
+    Case(
+        "generator-advanced-once",
+        step="function* g() { yield 1; yield 2; } var it = g(); it.next();",
+        known="7 cells an iteration: `spawn_frame` gives every generator a real OS thread and a `GeneratorData`; the frame is dropped without `reap()` joining it, so the thread's stack and the frame itself are never freed. A loop making generators therefore dies at about 15,700 with `RangeError: Too many suspended functions: out of threads`, and Node v22.22.3 makes 20,000 without trouble",
+    ),
+    Case(
+        "generator-finished",
+        step="function* g() { yield 1; } var it = g(); it.next(); it.next();",
+        report="var probe = (function* () { yield 42; })();"
+               "console.log('observed value:', probe.next().value === 42);",
+        known="7 cells an iteration: `spawn_frame` gives every generator a real OS thread and a `GeneratorData`; the frame is dropped without `reap()` joining it, so the thread's stack and the frame itself are never freed. A loop making generators therefore dies at about 15,700 with `RangeError: Too many suspended functions: out of threads`, and Node v22.22.3 makes 20,000 without trouble",
+    ),
+    Case(
+        "generator-holds-value",
+        step="var o = { n: i }; function* g() { var x = o.n; yield x; } var it = g();",
+        known="8 cells an iteration: `spawn_frame` gives every generator a real OS thread and a `GeneratorData`; the frame is dropped without `reap()` joining it, so the thread's stack and the frame itself are never freed. A loop making generators therefore dies at about 15,700 with `RangeError: Too many suspended functions: out of threads`, and Node v22.22.3 makes 20,000 without trouble",
+    ),
     # --- plain objects, as a control ------------------------------------
     Case(
         "object-literal-control",
@@ -279,6 +316,7 @@ def main() -> int:
             results.append(row)
 
     failures = []
+    known = []
     table = []
     for case, a, b, out_small, out_large in results:
         if a < 0 or b < 0:
@@ -288,7 +326,18 @@ def main() -> int:
         # A leak grows with the loop; a backlog does not. Only growth past the
         # tolerance counts against a case: a case that pinned fewer cells at the
         # larger size is not leaking either.
-        if drift > max(args.tolerance, case.tolerance):
+        grew = drift > max(args.tolerance, case.tolerance)
+        if case.known and grew:
+            known.append((case.name, a, b, drift, case.known))
+            continue
+        if case.known:
+            # The defect this case was recording is gone. That is good news, and
+            # it is a failure of the run: the reason has to be removed, or the
+            # corpus starts carrying excuses.
+            failures.append((case, a, b, out_small, out_large,
+                             "FIXED: the case is flat but still carries a known reason"))
+            continue
+        if grew:
             failures.append((case, a, b, out_small, out_large,
                              f"grew by {drift} cells between {args.small} and {args.large} iterations"))
             continue
@@ -308,7 +357,12 @@ def main() -> int:
     if len(failures) > args.show:
         print(f"\n... and {len(failures) - args.show} more")
 
-    print(f"\nflat: {len(table)} of {len(cases)} cases")
+    for name, a, b, drift, why in sorted(known):
+        print(f"\nKNOWN {name}: grew by {drift} cells ({a} -> {b}).")
+        print(f"  {why}")
+
+    print(f"\nflat: {len(table)} of {len(cases)} cases"
+          + (f", {len(known)} known" if known else ""))
     return 0 if not failures else 1
 
 

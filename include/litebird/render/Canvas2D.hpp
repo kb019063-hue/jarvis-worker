@@ -74,8 +74,23 @@ public:
     /// The colour of the tile at a **device-space** point, through the
     /// pattern's own `setTransform` and its repetition rule. The caller has not
     /// applied the context's CTM: a pattern is placed in device space.
-    Color sample_at_device(float x, float y) const;
+    /// `smooth` is the context's `imageSmoothingEnabled` when the pattern is
+    /// drawn; it does not live on the pattern because one pattern may be drawn
+    /// through two contexts with different settings, and the standard puts the
+    /// setting on the context.
+    /// `scale` is how much one tile pixel is magnified on the canvas — 1 at a
+    /// 1:1 draw, which is the only case that must be exact whatever `smooth`
+    /// says.
+    Color sample_at_device(float x, float y, bool smooth = false, float scale = 1.0f) const;
     Color sample_at(int px, int py) const;
+    /// The tile's colour at a **tile-space** point, taken bilinearly from the
+    /// four pixels around it when `smooth` is set and by the nearest pixel when
+    /// it is not. Below 1:1 a filtered column is what keeps a shrunken tile from
+    /// dropping whole rows; above it, the pixels are blended rather than
+    /// repeated in blocks. The weight is the fraction of the point's position
+    /// inside the four-pixel cell, and an edge pixel is clamped to itself so the
+    /// tile does not bleed from the far side.
+    Color sample_filtered(float x, float y, bool smooth) const;
 };
 
 class CanvasRenderingContext2D {
@@ -142,6 +157,12 @@ public:
     // clears both, and the rasteriser prefers the gradient when both are set.
     std::shared_ptr<CanvasPattern> fill_pattern{nullptr};
     std::shared_ptr<CanvasPattern> stroke_pattern{nullptr};
+    /// §4.12.5.1's `imageSmoothingEnabled` and `imageSmoothingQuality`. True and
+    /// `"low"` are the initial values. They are the whole difference between an
+    /// image sampled by its nearest pixel and one interpolated, and before
+    /// Phase 382 neither property existed and every sample was nearest.
+    bool image_smoothing_enabled{true};
+    std::string image_smoothing_quality{"low"};
     /// The script object of the gradient or pattern a style was set to, so that
     /// reading `fillStyle` back answers **that object** — §4.12.5.1 says the
     /// getter returns the object that was set — and not a marker or a colour.
@@ -279,6 +300,8 @@ private:
         std::shared_ptr<CanvasPattern> stroke_pattern;
         JsValue fill_paint;
         JsValue stroke_paint;
+        bool image_smoothing_enabled{true};
+        std::string image_smoothing_quality;
         TransformMatrix2D ctm;
         std::vector<uint8_t> clip_mask;
     };

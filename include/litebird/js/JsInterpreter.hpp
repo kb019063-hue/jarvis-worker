@@ -54,9 +54,26 @@ public:
     static bool undefined_shadowed() { return s_undefined_shadowed.load(std::memory_order_relaxed); }
 
     explicit JsEnvironment(std::shared_ptr<JsEnvironment> parent = nullptr)
-        : m_parent(std::move(parent)), m_is_var_scope(!m_parent), m_agent(Heap::current_agent()) {
+        : m_parent(std::move(parent)), m_is_var_scope(!m_parent),
+          m_has_with_ancestor(m_parent ? m_parent->m_has_with_ancestor : false),
+          m_agent(Heap::current_agent()) {
         register_scope();
     }
+
+    /// Creates an Object Environment Record with `[[IsWithEnvironment]] = true`
+    /// (ECMA-262 §9.1.1.2 / §14.11). Not a variable scope: `var` hoists past it.
+    static std::shared_ptr<JsEnvironment> make_with_scope(std::shared_ptr<JsEnvironment> parent, JsValue object) {
+        auto scope = std::make_shared<JsEnvironment>(std::move(parent));
+        scope->m_is_with_scope = true;
+        scope->m_has_with_ancestor = true;
+        scope->m_with_object = std::move(object);
+        return scope;
+    }
+
+    bool is_with_scope() const { return m_is_with_scope; }
+    bool has_with_ancestor() const { return m_has_with_ancestor; }
+    JsValue& with_object() { return m_with_object; }
+    const JsValue& with_object() const { return m_with_object; }
     ~JsEnvironment() {
         unregister_scope();
         // A scope owns its parent. Let go of a run of parents that only this
@@ -86,6 +103,7 @@ public:
 
     /// Drops every binding. Used by the collector on scopes nothing can reach.
     void clear_bindings() {
+        m_with_object = JsValue::make_undefined();
         if (m_bindings.empty()) return;
         std::vector<Binding> dropped = std::move(m_bindings);
         m_bindings.clear();
@@ -265,6 +283,7 @@ public:
     const std::vector<Binding>& bindings() const { return m_bindings; }
 
     void collect_roots(std::vector<JsValue*>& roots) {
+        if (m_is_with_scope) roots.push_back(&m_with_object);
         for (auto& b : m_bindings) {
             roots.push_back(&b.value);
         }
@@ -350,7 +369,10 @@ private:
 
     std::shared_ptr<JsEnvironment> m_parent;
     bool m_is_var_scope{false};
+    bool m_is_with_scope{false};
+    bool m_has_with_ancestor{false};
     uint32_t m_agent{0};
+    JsValue m_with_object;
     JsEnvironment* m_registry_prev{nullptr};
     JsEnvironment* m_registry_next{nullptr};
     std::vector<Binding> m_bindings;
@@ -498,8 +520,13 @@ private:
     /// An evaluated assignment target: a variable or `base[key]`.
     struct Reference {
         bool is_property{false};
+        /// True when resolved to an Object Environment Record created by `with`.
+        bool is_with{false};
         std::string name;
         JsValue base;
+        /// Non-null when an identifier reference inside a `with` chain resolved
+        /// to a specific declarative environment before evaluating the RHS.
+        JsEnvironment* resolved_env{nullptr};
         /// `a.#p`: `name` is then the source spelling for error messages and
         /// `private_key` is the slot the declaring class minted. The accessors
         /// throw rather than answer `undefined` when the brand is missing.
@@ -606,6 +633,7 @@ private:
                        const std::vector<const std::string*>& labels);
     Flow exec_try(const TryStmt* stmt, const EnvPtr& env, Frame& frame);
     Flow exec_switch(const SwitchStmt* stmt, const EnvPtr& env, Frame& frame);
+    Flow exec_with(const WithStmt* stmt, const EnvPtr& env, Frame& frame);
     void exec_var_decl(const VarDeclStmt* stmt, const EnvPtr& env);
 
     // --- Expressions --------------------------------------------------------
@@ -641,6 +669,9 @@ private:
     std::vector<JsValue> eval_arguments(const std::vector<std::unique_ptr<Expr>>& args, const EnvPtr& env);
 
     // --- Variables and properties -------------------------------------------
+    bool try_lookup_identifier(const std::string& name, const EnvPtr& env, JsValue& out_value,
+                               JsValue* out_with_base = nullptr);
+    Reference resolve_identifier_reference(const std::string& name, const EnvPtr& env);
     JsValue lookup_identifier(const std::string& name, const EnvPtr& env);
     void assign_identifier(const std::string& name, const JsValue& value, const EnvPtr& env);
     JsValue get_member(const JsValue& base, const std::string& key);

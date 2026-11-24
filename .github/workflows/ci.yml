@@ -331,6 +331,8 @@ jobs:
         run: python3 tools/conformance/verify_async_generator.py
       - name: Eval context, declaration instantiation, and early errors against Node.js
         run: python3 tools/conformance/verify_eval_context.py
+      - name: With statements and object environment records against Node.js
+        run: python3 tools/conformance/verify_with_statement.py
       - name: Promise subclass capabilities and chains against Node.js
         # 22 programs answering questions about NewPromiseCapability, species,
         # chain value propagation, thenable adoption and rejecting through a

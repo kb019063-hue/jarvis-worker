@@ -562,16 +562,16 @@ void LayoutBox::layout_block(float containing_width) {
     }
 
     // `width: fit-content` (and shrink-to-fit for `inline-block` with `width: auto`,
-    // CSS 2.1 §10.3.9): as wide as the content wants, and no wider than the
-    // space offered. Measured before the children are placed, because it is the
-    // width they are placed in. Placed before the min/max clamps so that those
-    // still win, as they outrank the keyword.
+    // CSS 2.1 §10.3.9) is min(max-content, max(min-content, available)). Measure
+    // before placing the children, because this is the width they are placed in.
+    // The min/max-width constraints below still win over the keyword.
     if (s.width_fit_content || (s.is_inline_block() && s.width < 0.0f && !ignore_own_width)) {
-        const float natural = children.empty()
-            ? 0.0f
-            : std::max(0.0f, min_content_width(*this, 0.0f) - h_padding_border);
+        const float min_content = std::max(
+            0.0f, min_content_width(*this, 0.0f) - h_padding_border);
+        const float max_content = std::max(
+            min_content, max_content_width(*this, 0.0f) - h_padding_border);
         const float available = std::max(0.0f, containing_width - total_horizontal_spacing);
-        dimensions.content.width = std::min(natural, available);
+        dimensions.content.width = std::min(max_content, std::max(min_content, available));
     }
 
     if (s.min_width >= 0.0f) {
@@ -1899,13 +1899,16 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
     } else {
         dimensions.content.width = std::max(0.0f, containing_width - total_horizontal_spacing);
     }
-    // `width: fit-content`: this entry point is the one a box whose children are
-    // all inline takes, and a dialog's usual content is exactly that. See the
-    // same block in `layout_block` for where it sits and why.
+    // This is the inline-content counterpart to the fit-content sizing in
+    // `layout_block`; both use CSS Sizing's min(max-content,
+    // max(min-content, available)) formula before laying out their children.
     if (s.width_fit_content) {
-        const float natural = std::max(0.0f, min_content_width(*this, 0.0f) - h_padding_border);
+        const float min_content = std::max(
+            0.0f, min_content_width(*this, 0.0f) - h_padding_border);
+        const float max_content = std::max(
+            min_content, max_content_width(*this, 0.0f) - h_padding_border);
         const float available = std::max(0.0f, containing_width - total_horizontal_spacing);
-        dimensions.content.width = std::min(natural, available);
+        dimensions.content.width = std::min(max_content, std::max(min_content, available));
     }
     if (s.min_width >= 0.0f) {
         float min_w = (s.box_sizing == BoxSizing::BorderBox)

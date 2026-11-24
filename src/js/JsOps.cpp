@@ -43,6 +43,17 @@ namespace {
 
 std::atomic<int> g_uncaught_errors{0};
 
+// Diagnostics may contain script-controlled bytes. Like the shell and worker
+// diagnostic boundaries, retain printable ASCII and replace every other byte;
+// do not alter the value delivered to an error handler or promise reaction.
+std::string terminal_diagnostic(std::string text) {
+    for (char& byte : text) {
+        const auto c = static_cast<unsigned char>(byte);
+        if (c < 0x20 || c > 0x7e) byte = '?';
+    }
+    return text;
+}
+
 const char* error_kind_name(JsErrorKind kind) {
     switch (kind) {
         case JsErrorKind::Error: return "Error";
@@ -175,7 +186,7 @@ bool (*js_uncaught_handler)(const JsValue& value) = nullptr;
 void js_report_uncaught(const JsValue& value) {
     if (js_uncaught_handler && js_uncaught_handler(value)) return;
     g_uncaught_errors.fetch_add(1);
-    std::cerr << "Uncaught " << js_output_text(js_describe_thrown(value)) << std::endl;
+    std::cerr << "Uncaught " << terminal_diagnostic(js_output_text(js_describe_thrown(value))) << std::endl;
 }
 
 void js_report_uncaught(const std::exception& ex) {
@@ -186,16 +197,16 @@ void js_report_uncaught(const std::exception& ex) {
     if (dynamic_cast<const JsSyntaxError*>(&ex)) {
         if (js_uncaught_handler && js_uncaught_handler(js_make_error(JsErrorKind::SyntaxError, ex.what()))) return;
         g_uncaught_errors.fetch_add(1);
-        std::cerr << "Uncaught SyntaxError: " << ex.what() << std::endl;
+        std::cerr << "Uncaught SyntaxError: " << terminal_diagnostic(ex.what()) << std::endl;
         return;
     }
     g_uncaught_errors.fetch_add(1);
-    std::cerr << "Uncaught " << ex.what() << std::endl;
+    std::cerr << "Uncaught " << terminal_diagnostic(ex.what()) << std::endl;
 }
 
 void js_report_unhandled_rejection(const JsValue& reason) {
     g_uncaught_errors.fetch_add(1);
-    std::cerr << "Uncaught (in promise) " << js_output_text(js_describe_thrown(reason)) << std::endl;
+    std::cerr << "Uncaught (in promise) " << terminal_diagnostic(js_output_text(js_describe_thrown(reason))) << std::endl;
 }
 
 JsScriptScope::JsScriptScope() : m_loop(EventLoop::default_loop()) {

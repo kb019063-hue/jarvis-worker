@@ -146,7 +146,21 @@ agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^
 cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
 start)
-  echo "$1" > "$STATE/end"; exec "$0" look ;;
+  echo "$1" > "$STATE/end"
+  # What earlier watches sent back is on the board and nowhere else: $STATE
+  # is new with every sandbox. `cands` reads $STATE/sentback, so without
+  # these lines a pull request that was sent back in the watch before, and
+  # has not moved, is a candidate again as soon as its old run counts as
+  # green. On 24 November #366, sent back eight hours earlier for a crash,
+  # was put into a lot that way; it was out again thirty seconds later,
+  # before anything was written to it.
+  if [ -n "$BOARD" ]; then
+    timeout 90 gh pr view "$BOARD" --json comments --jq '.comments[].body | split("\n")[0]' 2>/dev/null \
+      | sed -nE 's/^[A-Za-z]+: #([0-9]+) is yours again \(head ([0-9a-f]{7})[0-9a-f]*\).*/\1 \2/p' > "$STATE/sentback.board"
+    [ -s "$STATE/sentback.board" ] || echo "note: no line of the board says a pull request was sent back (or the board could not be read)" >&2
+    cat "$STATE/sentback.board" "$STATE/sentback" 2>/dev/null | awk '!seen[$0]++' > "$STATE/sentback.new" && mv "$STATE/sentback.new" "$STATE/sentback"
+  fi
+  exec "$0" look ;;
 
 look)
   end="$(cat "$STATE/end" 2>/dev/null)"; [ -n "$end" ] || { echo "no hour: tools/watch/watch.sh start \"YYYY-MM-DD HH:MM\" first"; exit 9; }

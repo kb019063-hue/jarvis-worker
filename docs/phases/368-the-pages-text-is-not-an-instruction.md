@@ -87,7 +87,7 @@ own spaces, a text node in quotes); and that the same page without its
 instructions dumps identically once the U+FFFD marks are removed.
 
 ```bash
-make test                                        # All 431 engine test suites passed
+make test                                        # All 433 engine test suites passed
 make verify-page-text-terminal-safety            # 31/31 checks pass
 make verify-js-error-terminal-safety             # 6/6 still pass
 ```
@@ -100,7 +100,7 @@ page.
 
 | Check | Result |
 | :--- | :--- |
-| `make test` | 431 suites, all pass |
+| `make test` | 433 suites, all pass |
 | `make verify-page-text-terminal-safety` | 31/31 |
 | `make diff-trees` | 1500/1500 trees equal |
 | `make wpt` | 9570/9824, the same 254 listed (unchanged from main) |

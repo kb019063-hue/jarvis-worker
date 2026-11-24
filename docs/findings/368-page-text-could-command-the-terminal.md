@@ -38,7 +38,7 @@ in the output.
 
 ## 3. Evidence
 
-`make test` **431/431**; `make verify-page-text-terminal-safety` **31/31**;
+`make test` **433/433**; `make verify-page-text-terminal-safety` **31/31**;
 `make diff-trees` 1500/1500 unchanged, because an ordinary page still dumps
 byte for byte as it did. With the dump files as `main` has them, the checker is
 25/31 — the six failures are the six fields it exists for.

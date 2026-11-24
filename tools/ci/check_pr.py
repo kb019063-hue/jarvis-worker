@@ -6,6 +6,7 @@
     python3 tools/ci/check_pr.py merge N     # when #N is finished: merge it, or leave it to the watch
     python3 tools/ci/check_pr.py landed N    # during a watch: wait for the landing session's answer
     python3 tools/ci/check_pr.py watch       # is a watch on, and what would it take now
+    python3 tools/ci/check_pr.py numbers     # the open pull requests that must change a number first
     python3 tools/ci/check_pr.py --self-test # how a claim and the board are read, on fixed texts; no network
 
 AGENTS.md says what a claim is and what has to be true before a merge. Each
@@ -224,6 +225,15 @@ YOURS_AGAIN_RE = re.compile(r"^\w+: #(\d+) is yours again \(head ([0-9a-f]{7,40}
 # The line that says which pull requests a lot holds, each with its head:
 # "Lander: lot of 03:01 UTC: #305 (`52fe97d`), #310 (`0a0ffab`) with `main` …".
 LOT_RE = re.compile(r"^\w+: (?:\*\*)?(?:the last )?lot of ")
+# The third line of a claim since 24 November 2026: the pull request's own
+# number is its phase and its finding (AGENTS.md, "Before starting", point
+# 2). GitHub gives every pull request another number, so two agents who
+# start in the same minute cannot take the same one, which the next free
+# pair of `tools/next_ids.py` let them do: in one hour of that morning four
+# pull requests of twelve had to be renumbered after they were finished.
+OWN_NUMBER_RE = re.compile(r"^Phase and finding:\s*(?:this|the) pull request'?s?(?: own)? number\b", re.IGNORECASE)
+# The label that gives a pull request the short run of CI (.github/workflows/ci.yml).
+LOT_LABEL = "lot"
 WATCH_ON_TEXT = (
     "While this line says ON and its last look is less than {quiet} minutes old, only the landing session "
     "merges. A pull request that is finished (no `WIP:` in its title), green on its head commit and "
@@ -302,7 +312,10 @@ def claim_of(pr: dict) -> dict:
     numbers = next((m for m in (re.match(r"Phase (\d+), finding (\d+)\s*$", line) for line in head) if m), None)
     phase = int(numbers.group(1)) if numbers else None
     finding = int(numbers.group(2)) if numbers else None
-    if numbers is None:
+    own_number = numbers is None and any(OWN_NUMBER_RE.match(line) for line in head)
+    if own_number:
+        phase = finding = pr["number"]
+    elif numbers is None:
         # No claim line: what the title says is still a number somebody is using.
         in_title = re.search(r"\bPhase (\d+)\b", pr["title"])
         phase = int(in_title.group(1)) if in_title else None
@@ -318,7 +331,7 @@ def claim_of(pr: dict) -> dict:
             has_files_line = collecting = True
             line = line[len("Files:"):]
         elif collecting and (not line.strip() or line.startswith("Task:") or re.match(r"Phase \d+", line)
-                             or NO_NUMBERS_RE.search(line)):
+                             or OWN_NUMBER_RE.match(line) or NO_NUMBERS_RE.search(line)):
             # The third line of a claim ends the list whichever of its two forms
             # it has. `No phase, no finding: ...` used to be read on as more
             # files, so two pull requests without numbers shared one called
@@ -343,7 +356,7 @@ def claim_of(pr: dict) -> dict:
         "task": task[len("Task:"):].strip() if task else None,
         "agent": agent,
         "files": named | changed,       # what it says it will change, and what it has changed
-        "has_claim_lines": task is not None and has_files_line and (numbers is not None or no_numbers),
+        "has_claim_lines": task is not None and has_files_line and (numbers is not None or own_number or no_numbers),
         "phase": phase,
         "finding": finding,
         "head": pr.get("headRefOid", ""),
@@ -468,6 +481,14 @@ def hours_since(stamp: str) -> float:
 
 
 def next_pair() -> str:
+    """What a new pull request takes: its own number, for both. (Until 24
+    November 2026 this was 'Phase P, finding F', the next free pair, as the
+    allocator gave it; `old_next_pair` still asks for that.)"""
+    return ("a new pull request's phase and finding are its own number: open it, and use the number GitHub gives it "
+            "(AGENTS.md, \"Before starting\", point 2)")
+
+
+def old_next_pair() -> str:
     """'Phase P, finding F': the next free pair, as the allocator gives it.
 
     This file used to work the pair out from the claims it had read, and a
@@ -522,7 +543,8 @@ def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bo
     """What is wrong with a claim: (does this pull request have to change, what)."""
     problems: list[tuple[bool, str]] = []
     if not claim["has_claim_lines"]:
-        problems.append((True, "its text does not begin with the Task:, Files: and `Phase P, finding F` lines"))
+        problems.append((True, "its text does not begin with the Task: and Files: lines and the line of its numbers "
+                               "(`Phase and finding: this pull request's number`)"))
     if claim["has_claim_lines"] and not claim.get("agent"):
         problems.append((False, "no `Agent:` line: give yourself a name and put it under the three lines "
                                 "(AGENTS.md, \"Working together\")"))
@@ -556,6 +578,32 @@ def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bo
     return problems
 
 
+def number_clashes(claims: list[dict], main: Main) -> list[tuple[int, str]]:
+    """(pull request, why) for every open claim that has to change a number
+    before it can land: the number is on `main`, or an earlier pull request
+    says it.
+
+    The landing session asks this before it takes a pull request. On 24
+    November #336 was taken as Phase 269, which #333 had said seven minutes
+    before it; its agent found that out from `merge N`, renumbered, and
+    pushed under the lot, twice in a quarter of an hour (the second number
+    was #343's). One push cost the lot a run that was nine minutes old, the
+    other left #336's last commit out of what landed.
+    """
+    found: list[tuple[int, str]] = []
+    for claim in claims:
+        for blocking, text in claim_problems(claim, claims, main):
+            if blocking and re.match(r"(?:Phase|finding) \d+", text):
+                found.append((claim["number"], text))
+    return found
+
+
+def show_number_clashes() -> int:
+    for number, why in number_clashes(open_claims(), on_main()):
+        print(f"#{number}: {why}")
+    return 0
+
+
 def show_claims() -> int:
     prs = open_pull_requests()
     claims = open_claims(prs)
@@ -573,7 +621,7 @@ def show_claims() -> int:
     for pr in sorted(prs, key=lambda pr: pr["number"]):
         if NOT_A_CLAIM_RE.match(pr["title"]):
             print(f"\n#{pr['number']}  not a claim: {pr['title'][:100]}")
-    print(f"\nnext free: {next_pair()}")
+    print(f"\nnumbers: {next_pair()}")
     return 0
 
 
@@ -650,26 +698,48 @@ def check_claim(number: int) -> int:
     if not report.failed:
         report.ok(f"#{number}: {numbers_of(mine)}; no earlier open pull request has its numbers or its files")
     else:
-        report.note(f"next free: {next_pair()}")
+        report.note(next_pair())
     return 1 if report.failed else 0
 
 
-def check_runs(sha: str) -> tuple[str, list[str]]:
-    """'passed', 'failed', 'running' or 'none' for a commit, and the checks that are not green."""
-    runs = gh_json("api", f"{REPO}/commits/{sha}/check-runs?per_page=100").get("check_runs", [])
-    if not runs:
+def state_of(latest: list[tuple[str, str, str]]) -> tuple[str, list[str]]:
+    """'passed', 'short', 'failed', 'running' or 'none' for the jobs of a commit,
+    each (name, status, conclusion) in lower case, and the ones that are not green.
+
+    'short' is the run a pull request with the label `lot` gets while a watch
+    is on (.github/workflows/ci.yml): the build, the unit suites and the
+    documents passed, and every other job was skipped, because the whole
+    of CI runs on the lot the pull request lands in. It is enough to be taken
+    into a lot. It is not enough for anybody to merge on.
+    """
+    if not latest:
         return "none", []
+    bad = [f"{name}: {conclusion or status}" for name, status, conclusion in latest
+           if conclusion not in ("success", "skipped", "neutral")]
+    if not bad:
+        return ("short" if any(conclusion == "skipped" for _n, _s, conclusion in latest) else "passed"), []
+    if any(status != "completed" for _n, status, _c in latest):
+        return "running", bad
+    return "failed", bad
+
+
+def check_runs(sha: str) -> tuple[str, list[str]]:
+    """`state_of` for a commit."""
+    runs = gh_json("api", f"{REPO}/commits/{sha}/check-runs?per_page=100").get("check_runs", [])
     # A job that was run again leaves both attempts: the last one of a name counts.
     latest: dict[str, dict] = {}
     for entry in sorted(runs, key=lambda r: r.get("started_at") or ""):
         latest[entry["name"]] = entry
-    bad = [f"{r['name']}: {r['conclusion'] or r['status']}" for r in latest.values()
-           if r["conclusion"] not in ("success", "skipped", "neutral")]
-    if not bad:
-        return "passed", []
-    if any(r["status"] != "completed" for r in latest.values()):
-        return "running", bad
-    return "failed", bad
+    return state_of([(r["name"], (r["status"] or "").lower(), (r["conclusion"] or "").lower()) for r in latest.values()])
+
+
+def short_run_note(head: str, number: int | None = None) -> str:
+    """What to say of a short run to somebody who is about to merge on it."""
+    return (f"only the short run of CI passed on {head[:7]} (build, unit suites, documents): the pull request has "
+            "the label `lot`, which the landing session puts on while a watch is on, and every other job "
+            "was skipped. Nobody merges on that"
+            + ("" if number is None else
+               f". The label is off now, which starts every job on {head[:7]}: ask again when they have ended"))
 
 
 def delta(base: str, tip: str) -> tuple[int, list[str] | None]:
@@ -768,11 +838,19 @@ def ci_verdict(e: Evidence, watch_on: bool = False) -> tuple[list[tuple[bool, st
         lines.append((True, f"it changes documents only ({some(e.pr_files)}): it needs no CI run of its own"))
     elif e.head_state == "passed":
         lines.append((True, f"CI passed on the head commit {head}"))
+    elif e.head_state == "short":
+        if watch_on:
+            lines.append((True, f"the short run of CI passed on the head commit {head} (build, unit suites, documents); "
+                                "the whole of CI runs on the lot it lands in"))
+        else:
+            lines.append((False, short_run_note(e.head)))
     elif e.head_state == "running":
         lines.append((False, f"CI on {head}: " + "; ".join(e.head_bad)))
     elif e.ran_on is None:
         lines.append((False, f"no CI run on {head} or on the 30 commits before it"))
-    elif e.ran_state != "passed":
+    elif e.ran_state == "short" and not watch_on:
+        lines.append((False, f"no CI run on {head}, and " + short_run_note(e.ran_on)))
+    elif e.ran_state not in ("passed", "short"):
         lines.append((False, f"no CI run on {head}; the last one, on {e.ran_on[:7]}, {e.ran_state}"))
     elif all_of(DOCUMENT, e.since):
         quick = True
@@ -971,8 +1049,8 @@ def taken_at(comments: list[dict], number: int) -> str | None:
 
 
 def rollup(checks: list[dict] | None) -> tuple[str, list[str]]:
-    """'passed', 'failed', 'running' or 'none' for the checks GitHub lists for a
-    pull request's head (`statusCheckRollup`), and the ones that are not green.
+    """'passed', 'short', 'failed', 'running' or 'none' for the checks GitHub lists
+    for a pull request's head (`statusCheckRollup`), and the ones that are not green.
 
     The same answer as `check_runs`, from the other API: `gh pr view --json`
     asks GraphQL, whose limit is not the one `gh run view` and `gh api repos/…`
@@ -983,17 +1061,10 @@ def rollup(checks: list[dict] | None) -> tuple[str, list[str]]:
         latest[entry.get("name") or entry.get("context") or "?"] = entry    # a job run again: its last attempt
 
     def verdict(check: dict) -> str:
-        return (check.get("conclusion") or check.get("state") or "").upper()
+        return (check.get("conclusion") or check.get("state") or "").lower()
 
-    if not latest:
-        return "none", []
-    bad = [f"{name}: {(verdict(check) or check.get('status') or 'unknown').lower()}"
-           for name, check in latest.items() if verdict(check) not in ("SUCCESS", "SKIPPED", "NEUTRAL")]
-    if not bad:
-        return "passed", []
-    if any((check.get("status") or "COMPLETED").upper() != "COMPLETED" for check in latest.values()):
-        return "running", bad
-    return "failed", bad
+    return state_of([(name, (check.get("status") or "completed").lower(), verdict(check))
+                     for name, check in latest.items()])
 
 
 def why_not_taken(pr: dict, comments: list[dict]) -> str:
@@ -1198,7 +1269,7 @@ def check_merge(number: int, landing: bool = False) -> int:
     """`landing` is the landing session asking, about a pull request it is about
     to merge during its own watch: the answer is then the one given when no
     watch is on."""
-    pr = gh_json("pr", "view", str(number), "--json", "number,title,body,state,mergeable,headRefOid,files")
+    pr = gh_json("pr", "view", str(number), "--json", "number,title,body,state,mergeable,headRefOid,files,labels")
     report = Report()
     if pr["state"] != "OPEN":
         sys.exit(f"#{number} is {pr['state'].lower()}")
@@ -1256,6 +1327,17 @@ def check_merge(number: int, landing: bool = False) -> int:
                                        ran_on, ran_state, since, same_tree), watch_on)
     for ok, text in lines:
         (report.ok if ok else report.no)(text)
+    if "short" in (head_state, ran_state) and not watch_on and not landing:
+        # No watch is on, so this agent merges, and the whole of CI has not
+        # run on what it would merge. Taking the label off starts them.
+        if any(label.get("name") == LOT_LABEL for label in pr.get("labels") or []):
+            gh("api", "-X", "DELETE", f"{REPO}/issues/{number}/labels/{LOT_LABEL}", check=False)
+            report.note(f"the label `{LOT_LABEL}` is off #{number} now, which starts every job of CI on {head[:7]}: "
+                        f"ask again when they have ended (`gh pr checks {number}`). If none has started in a minute, "
+                        "push an empty commit")
+        else:
+            report.note(f"#{number} has no label `{LOT_LABEL}` any more: every job of CI runs on its next push "
+                        "(an empty commit will do), if they are not running already")
     if quick:
         tree, called, why_not = tree_to_merge(number, head, main_sha, behind)
         if tree is None:
@@ -1271,7 +1353,8 @@ def check_merge(number: int, landing: bool = False) -> int:
     claim = claim_of(pr)
     main = on_main()
     if not claim["has_claim_lines"]:
-        report.no("the text does not begin with the Task:, Files: and `Phase P, finding F` lines")
+        report.no("the text does not begin with the Task: and Files: lines and the line of its numbers "
+                  "(`Phase and finding: this pull request's number`)")
     for kind, mine in (("Phase", claim["phase"]), ("finding", claim["finding"])):
         if mine is None:
             continue
@@ -1417,6 +1500,37 @@ def self_test() -> int:
          written, [(True, "Phase 6 is on main already"), (True, "finding 8 is on main already")]),
         ("a number above the floors that has no write-up is free", free, []),
     ]
+    # What the landing session asks before it takes a pull request: who has a
+    # number to change. #1 said Phase 9 first, #2 says it too and finding 11
+    # alone, #3 says a phase that has a write-up on main.
+    first = dict(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 9, finding 10\nAgent: Heron\n"), number=1)
+    second = dict(claim("Task: a row\nFiles: `src/d.cpp`\nPhase 9, finding 11\nAgent: Marten\n"), number=2)
+    third = dict(claim("Task: a row\nFiles: `src/e.cpp`\nPhase 6, finding 12\nAgent: Kestrel\n"), number=3)
+    own = claim_of({"number": 360, "title": "WIP: a change", "files": [],
+                    "body": "Task: a row\nFiles: `src/f.cpp`,\n`src/g.cpp`\nPhase and finding: this pull request's number\nAgent: Heron\n\ntext"})
+    own_too = claim_of({"number": 361, "title": "WIP: another", "files": [],
+                        "body": "Task: a row\nFiles: `src/h.cpp`\nPhase and finding: this pull request's number\nAgent: Marten\n"})
+    cases += [
+        ("a claim whose numbers are the pull request's own number",
+         (own["phase"], own["finding"], own["has_claim_lines"], sorted(own["files"]), own["agent"]),
+         (360, 360, True, ["src/f.cpp", "src/g.cpp"], "Heron")),
+        ("it is called by them", numbers_of(own), "Phase 360, finding 360"),
+        ("two such claims have nothing to change, whenever they were opened", number_clashes([own, own_too], main), []),
+        ("and nothing is wrong with one", [text for blocking, text in claim_problems(own, [own, own_too], main) if blocking], []),
+        ("the line is read whatever its capitals, and with `the` for `this`",
+         [bool(OWN_NUMBER_RE.match(line)) for line in ("Phase and finding: this pull request's number",
+                                                       "phase and finding: the pull request's number (360)",
+                                                       "Phase and finding: this pull request's own number",
+                                                       "Phase 5, finding 7", "Phase and finding: 360")],
+         [True, True, True, False, False]),
+    ]
+    cases += [
+        ("the later of two that say one phase has a number to change, and so has one whose phase is on main; the first has not",
+         number_clashes([first, second, third], main),
+         [(2, "Phase 9: #1 had it first. This one moves"), (3, "Phase 6 is on main already")]),
+        ("files that two pull requests share are not a number to change",
+         number_clashes([dict(first, number=4), dict(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 13, finding 14\n"), number=5)], main), []),
+    ]
     # When a merge needs no new CI run: what is a document, what is a check
     # that reads documents, and what the two sides of a merge may have changed.
     def kinds(name: str) -> tuple[bool, bool]:
@@ -1559,8 +1673,28 @@ def self_test() -> int:
     cases += [
         ("no check on the head: none", rollup([]), ("none", [])),
         ("twelve green jobs: passed", rollup(green), ("passed", [])),
-        ("a skipped job and a neutral one are green",
-         rollup(green + [check("extra", "SKIPPED"), check("other", "NEUTRAL")]), ("passed", [])),
+        ("a neutral job is green",
+         rollup(green + [check("other", "NEUTRAL")]), ("passed", [])),
+        ("two jobs passed and ten were skipped: the short run, not a whole one",
+         rollup(green[:2] + [check(f"heavy {n}", "SKIPPED") for n in range(10)]), ("short", [])),
+        ("a short run that is still going is running",
+         rollup([check("job 0", "SUCCESS"), check("job 1", None, "IN_PROGRESS")] + [check(f"heavy {n}", "SKIPPED") for n in range(10)])[0],
+         "running"),
+        ("a short run whose build failed has failed",
+         rollup([check("job 0", "FAILURE"), check("job 1", "SUCCESS")] + [check(f"heavy {n}", "SKIPPED") for n in range(10)])[0],
+         "failed"),
+        ("the same from the other API",
+         [state_of(jobs)[0] for jobs in ([], [("a", "completed", "success")] * 12,
+                                         [("a", "completed", "success"), ("b", "completed", "skipped")],
+                                         [("a", "in_progress", ""), ("b", "completed", "skipped")],
+                                         [("a", "completed", "failure"), ("b", "completed", "skipped")])],
+         ["none", "passed", "short", "running", "failed"]),
+        ("a short run on the head while a watch is on: that is what the landing session takes",
+         verdict(head_state="short", ran_state="short", watch_on=True), ([True, True], False)),
+        ("a short run on the head and no watch: nobody merges on two jobs",
+         verdict(head_state="short", ran_state="short"), ([True, False], False)),
+        ("no run on the head, the one before it was short, no watch: the same",
+         verdict(head_state="none", ran_on="b" * 40, ran_state="short", since=["README.md"]), ([True, False], False)),
         ("one job still running: running, and it is named",
          rollup(green[:11] + [check("job 11", None, "IN_PROGRESS")]), ("running", ["job 11: in_progress"])),
         ("one job failed and all are done: failed",
@@ -1604,6 +1738,8 @@ def self_test() -> int:
          taken_at([said("Lander: **the last lot of this watch**, 23:41 UTC: #7 (`abcdef0`) as it is")], 7), None if not LOT_RE.match("Lander: **the last lot of this watch**, 23:41 UTC: #7 (`abcdef0`) as it is") else "abcdef0"),
         ("no run on the head of a change to documents only: taken, the lot's run is its run",
          why_not_taken(waiting(checks=[], files=("AGENTS.md", "docs/phases/5-a.md")), board), ""),
+        ("a pull request with a short run is taken: the lot's run is the whole one",
+         why_not_taken(waiting(checks=green[:2] + [check(f"heavy {n}", "SKIPPED") for n in range(10)]), board), ""),
         ("in conflict with main: not taken",
          why_not_taken(waiting(mergeable="CONFLICTING"), board), "it conflicts with main"),
         ("sent back at this very head: left alone until the head is another one",
@@ -1668,6 +1804,8 @@ def main() -> int:
         return check_landed(int(arguments[1].lstrip("#")), wait)
     if arguments == ["watch"]:
         return show_watch()
+    if arguments == ["numbers"]:
+        return show_number_clashes()
     if arguments[:1] == ["watch"] and len(arguments) in (3, 5) and arguments[1] in ("--beat", "--off"):
         name = "Lander"
         if len(arguments) == 5:

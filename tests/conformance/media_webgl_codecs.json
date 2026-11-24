@@ -79,24 +79,21 @@
       "spec": "WHATWG HTML §4.8.11.5 (loading a real 100ms 8kHz mono PCM WAV data URI populates readyState >= HAVE_METADATA and finite duration ~0.1s)",
       "async": true,
       "script": "var a = document.createElement('audio'); a.src = __PCM_WAV_DATA_URI__; return Promise.resolve().then(function(){ return [a.readyState >= 1, Number.isFinite(a.duration) && a.duration >= 0.08 && a.duration <= 0.12]; });",
-      "expected": [true, true],
-      "known_failure": "HTMLMediaElement does not fetch or decode audio resources (readyState stays 0, duration stays NaN)"
+      "expected": [true, true]
     },
     {
       "name": "media_source_and_web_audio_interfaces",
       "domain": "audio_video",
       "spec": "W3C Media Source Extensions §3 (MediaSource) and W3C Web Audio API §1.2 (AudioContext, OfflineAudioContext)",
       "script": "return [typeof MediaSource, typeof MediaSource !== 'undefined' && typeof MediaSource.isTypeSupported === 'function', typeof AudioContext, typeof OfflineAudioContext];",
-      "expected": ["function", true, "function", "function"],
-      "known_failure": "MediaSource (MSE) and Web Audio API (AudioContext / OfflineAudioContext) are not implemented"
+      "expected": ["function", true, "function", "function"]
     },
     {
       "name": "webcodecs_constructors_exist",
       "domain": "webcodecs",
       "spec": "W3C WebCodecs §§3-9 (VideoDecoder, AudioDecoder, VideoEncoder, AudioEncoder, EncodedVideoChunk, EncodedAudioChunk, VideoFrame, AudioData)",
       "script": "return [typeof VideoDecoder, typeof AudioDecoder, typeof VideoEncoder, typeof AudioEncoder, typeof EncodedVideoChunk, typeof EncodedAudioChunk, typeof VideoFrame, typeof AudioData];",
-      "expected": ["function", "function", "function", "function", "function", "function", "function", "function"],
-      "known_failure": "WebCodecs API interfaces are not implemented"
+      "expected": ["function", "function", "function", "function", "function", "function", "function", "function"]
     },
     {
       "name": "webcodecs_video_decoder_is_config_supported",
@@ -104,8 +101,7 @@
       "spec": "W3C WebCodecs §3.2 (VideoDecoder.isConfigSupported resolves with supported: true for baseline VP8)",
       "async": true,
       "script": "if (typeof VideoDecoder !== 'function') return 'missing'; return VideoDecoder.isConfigSupported({ codec: 'vp8', codedWidth: 64, codedHeight: 64 }).then(function(r){ return !!(r && r.supported === true); });",
-      "expected": true,
-      "known_failure": "WebCodecs VideoDecoder is not implemented"
+      "expected": true
     },
     {
       "name": "webcodecs_audio_decoder_is_config_supported",
@@ -113,24 +109,21 @@
       "spec": "W3C WebCodecs §3.1 (AudioDecoder.isConfigSupported resolves with supported: true for Opus)",
       "async": true,
       "script": "if (typeof AudioDecoder !== 'function') return 'missing'; return AudioDecoder.isConfigSupported({ codec: 'opus', sampleRate: 48000, numberOfChannels: 2 }).then(function(r){ return !!(r && r.supported === true); });",
-      "expected": true,
-      "known_failure": "WebCodecs AudioDecoder is not implemented"
+      "expected": true
     },
     {
       "name": "webcodecs_video_frame_rgba_roundtrip",
       "domain": "webcodecs",
       "spec": "W3C WebCodecs §9.4 (VideoFrame construction from raw RGBA buffer, metadata, copyTo, close)",
       "script": "if (typeof VideoFrame !== 'function') return 'missing'; var raw = new Uint8Array(16); raw[0] = 255; raw[3] = 255; var f = new VideoFrame(raw, { format: 'RGBA', codedWidth: 2, codedHeight: 2, timestamp: 42 }); var res = [f.codedWidth, f.codedHeight, f.format, f.timestamp, typeof f.copyTo, typeof f.close]; f.close(); return res;",
-      "expected": [2, 2, "RGBA", 42, "function", "function"],
-      "known_failure": "WebCodecs VideoFrame is not implemented"
+      "expected": [2, 2, "RGBA", 42, "function", "function"]
     },
     {
       "name": "webcodecs_encoded_video_chunk_roundtrip",
       "domain": "webcodecs",
       "spec": "W3C WebCodecs §7.2 (EncodedVideoChunk construction, byteLength, and copyTo round-trip)",
       "script": "if (typeof EncodedVideoChunk !== 'function') return 'missing'; var c = new EncodedVideoChunk({ type: 'key', timestamp: 1000, data: new Uint8Array([10, 20, 30, 40]) }); var out = new Uint8Array(4); c.copyTo(out); return [c.type, c.timestamp, c.byteLength, Array.from(out)];",
-      "expected": ["key", 1000, 4, [10, 20, 30, 40]],
-      "known_failure": "WebCodecs EncodedVideoChunk is not implemented"
+      "expected": ["key", 1000, 4, [10, 20, 30, 40]]
     },
     {
       "name": "webgl_interface_constructors_exist",

@@ -405,6 +405,8 @@ void CanvasRenderingContext2D::save() {
     st.stroke_pattern = stroke_pattern;
     st.fill_paint = fill_paint;
     st.stroke_paint = stroke_paint;
+    st.image_smoothing_enabled = image_smoothing_enabled;
+    st.image_smoothing_quality = image_smoothing_quality;
     st.ctm = m_ctm;
     st.clip_mask = m_clip_mask;
     m_state_stack.push_back(std::move(st));
@@ -433,6 +435,8 @@ void CanvasRenderingContext2D::restore() {
     stroke_pattern = std::move(st.stroke_pattern);
     fill_paint = std::move(st.fill_paint);
     stroke_paint = std::move(st.stroke_paint);
+    image_smoothing_enabled = st.image_smoothing_enabled;
+    image_smoothing_quality = std::move(st.image_smoothing_quality);
     m_ctm = st.ctm;
     const size_t expected_mask_size = static_cast<size_t>(m_width) * static_cast<size_t>(m_height);
     if (st.clip_mask.size() == expected_mask_size) {
@@ -466,6 +470,8 @@ void CanvasRenderingContext2D::reset() {
     stroke_pattern.reset();
     fill_paint = JsValue();
     stroke_paint = JsValue();
+    image_smoothing_enabled = true;
+    image_smoothing_quality = "low";
     m_ctm = TransformMatrix2D::identity();
     m_clip_mask.clear();
     m_state_stack.clear();
@@ -1045,7 +1051,7 @@ std::shared_ptr<CanvasGradient> CanvasRenderingContext2D::create_conic_gradient(
     return grad;
 }
 
-Color CanvasPattern::sample_at_device(float x, float y) const {
+Color CanvasPattern::sample_at_device(float x, float y, bool smooth, float scale) const {
     if (!transform.is_identity()) {
         // The matrix maps the tile's coordinates to the canvas', so a point on
         // the canvas is taken back through the inverse to find the tile pixel.
@@ -1053,9 +1059,52 @@ Color CanvasPattern::sample_at_device(float x, float y) const {
         x = p.x;
         y = p.y;
     }
-    // A fractional point is the pixel it falls in, floored: the tile is an
-    // image, and `createPattern` samples it by nearest neighbour.
-    return sample_at(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)));
+    // A tile drawn at 1:1 is its own pixels, whether smoothing is on or not —
+    // which is what §4.12.5.1's half-pixel placement is for. Only a magnified or
+    // a shrunk tile is filtered, and that has to be decided here because a
+    // pattern has no destination rectangle to read a scale off.
+    const bool filter = smooth && std::abs(scale - 1.0f) > 1e-3f;
+    return sample_filtered(x, y, filter);
+}
+
+Color CanvasPattern::sample_filtered(float x, float y, bool smooth) const {
+    // Nearest neighbour is the pixel the point falls in, which is what every
+    // sample was before Phase 382.
+    if (!smooth) return sample_at(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)));
+    // A point half a pixel off a pixel's centre is exactly that pixel; the
+    // half-pixel shift is what makes a 1:1 draw reproduce the tile rather than
+    // blur it, and it is where an unfiltered draw and a filtered one agree.
+    const float u = x - 0.5f;
+    const float v = y - 0.5f;
+    const float fu = std::floor(u);
+    const float fv = std::floor(v);
+    const float tx = u - fu;
+    const float ty = v - fv;
+    auto at = [this](int px, int py) {
+        // Clamped to the tile, so a sample at the edge does not wrap round to
+        // the opposite edge — repeat is the repetition rule's job, not the
+        // filter's.
+        const int cx = std::clamp(px, 0, width - 1);
+        const int cy = std::clamp(py, 0, height - 1);
+        return Color::from_argb(pixels[static_cast<std::size_t>(cy) * static_cast<std::size_t>(width) +
+                                      static_cast<std::size_t>(cx)]);
+    };
+    const int ix = static_cast<int>(fu);
+    const int iy = static_cast<int>(fv);
+    const Color c00 = at(ix, iy);
+    const Color c10 = at(ix + 1, iy);
+    const Color c01 = at(ix, iy + 1);
+    const Color c11 = at(ix + 1, iy + 1);
+    // Weights sum to 1, so a flat tile comes out its own colour exactly and a
+    // two-colour tile gives every intermediate value as it is crossed.
+    auto mix = [&](unsigned char a, unsigned char b, unsigned char c, unsigned char d) {
+        const float top = a + (b - a) * tx;
+        const float bottom = c + (d - c) * tx;
+        const float value = top + (bottom - top) * ty;
+        return static_cast<unsigned char>(std::clamp(std::lround(value), 0l, 255l));
+    };
+    return Color(mix(c00.r, c10.r, c01.r, c11.r), mix(c00.g, c10.g, c01.g, c11.g),
+                 mix(c00.b, c10.b, c01.b, c11.b), mix(c00.a, c10.a, c01.a, c11.a));
 }
 
 Color CanvasPattern::sample_at(int px, int py) const {
@@ -1127,7 +1176,8 @@ void CanvasRenderingContext2D::fill_rect(float x, float y, float w, float h) {
                     // through its own transform.
                     const Color c = fill_gradient
                         ? fill_gradient->sample_at(static_cast<float>(px), static_cast<float>(py))
-                        : fill_pattern->sample_at_device(static_cast<float>(px), static_cast<float>(py));
+                        : fill_pattern->sample_at_device(static_cast<float>(px), static_cast<float>(py),
+                                                         image_smoothing_enabled, 1.0f);
                     set_pixel_safe(px, py, c);
                 }
             }
@@ -1601,6 +1651,24 @@ void CanvasRenderingContext2D::rasterize_paths(
     // a pattern's tile is placed in device space and its own `setTransform` is
     // the only transform it has, so `grad_inv_ctm` must not be applied to it.
     const bool use_inv_ctm = (gradient != nullptr && !grad_inv_ctm.is_identity());
+    // How much the pattern's tile is magnified where it lands: the longer axis
+    // of the CTM's inverse, which is the transform the path was already mapped
+    // through. 1 when nothing is scaled, and then the tile is its own pixels
+    // exactly. A sheared transform has no single scale, so the longer axis is an
+    // approximation, and it is the one `is_point_in_stroke` uses for line width.
+    float pattern_scale = 1.0f;
+    if (pattern) {
+        const TransformMatrix2D& inv = grad_inv_ctm;
+        pattern_scale = std::max(std::sqrt(inv.a * inv.a + inv.b * inv.b),
+                                 std::sqrt(inv.c * inv.c + inv.d * inv.d));
+        // The pattern's own `setTransform` scales it again.
+        if (!pattern->transform.is_identity()) {
+            const TransformMatrix2D& t = pattern->transform;
+            pattern_scale *= std::max(std::sqrt(t.a * t.a + t.b * t.b),
+                                      std::sqrt(t.c * t.c + t.d * t.d));
+        }
+        if (!std::isfinite(pattern_scale) || pattern_scale <= 0.0f) pattern_scale = 1.0f;
+    }
 
     for (int y = start_y; y <= end_y; ++y) {
         int row_min_x = m_width;
@@ -1671,7 +1739,8 @@ void CanvasRenderingContext2D::rasterize_paths(
                         Point sample_pt(static_cast<float>(px) + 0.5f, static_cast<float>(y) + 0.5f);
                         if (use_inv_ctm) sample_pt = grad_inv_ctm.map_point(sample_pt);
                         const Color c = gradient ? gradient->sample_at(sample_pt.x, sample_pt.y)
-                                                 : pattern->sample_at_device(sample_pt.x, sample_pt.y);
+                                                 : pattern->sample_at_device(sample_pt.x, sample_pt.y,
+                                                                             image_smoothing_enabled, pattern_scale);
                         set_pixel_safe(px, y, c, cov_u8);
                     } else {
                         set_pixel_safe(px, y, solid_color, cov_u8);
@@ -2021,6 +2090,43 @@ void CanvasRenderingContext2D::put_image_data_rgba(const uint8_t* rgba, int w, i
     }
 }
 
+/// A bilinear sample of `img`'s pixels at a point in **image coordinates**.
+/// `smooth` chooses between the four pixels around the point and the one it
+/// falls in. The four weights sum to 1, so a 1:1 draw reproduces the image
+/// exactly and a flat region stays flat.
+static Color sample_image_bilinear(const ImageData& img, float x, float y, bool smooth) {
+    const int w = img.width;
+    const int h = img.height;
+    auto at = [&img, w, h](int px, int py) {
+        // Clamped to the edge: the filter reads the pixels it has, and it must
+        // not wrap round to the far side the way a repetition rule would.
+        return img.get_pixel_color(std::clamp(px, 0, w - 1), std::clamp(py, 0, h - 1));
+    };
+    if (!smooth) return at(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)));
+    // Half a pixel: the centre of the pixel the point is in is at +0.5, so a
+    // sample exactly on a centre takes that pixel and its neighbours equally.
+    const float u = x - 0.5f;
+    const float v = y - 0.5f;
+    const float fu = std::floor(u);
+    const float fv = std::floor(v);
+    const float tx = u - fu;
+    const float ty = v - fv;
+    const int ix = static_cast<int>(fu);
+    const int iy = static_cast<int>(fv);
+    const Color c00 = at(ix, iy);
+    const Color c10 = at(ix + 1, iy);
+    const Color c01 = at(ix, iy + 1);
+    const Color c11 = at(ix + 1, iy + 1);
+    auto mix = [&](unsigned char a, unsigned char b, unsigned char c, unsigned char d) {
+        const float top = static_cast<float>(a) + (static_cast<float>(b) - static_cast<float>(a)) * tx;
+        const float bottom = static_cast<float>(c) + (static_cast<float>(d) - static_cast<float>(c)) * tx;
+        const float value = top + (bottom - top) * ty;
+        return static_cast<unsigned char>(std::clamp(std::lround(value), 0l, 255l));
+    };
+    return Color(mix(c00.r, c10.r, c01.r, c11.r), mix(c00.g, c10.g, c01.g, c11.g),
+                 mix(c00.b, c10.b, c01.b, c11.b), mix(c00.a, c10.a, c01.a, c11.a));
+}
+
 void CanvasRenderingContext2D::draw_image(const std::shared_ptr<ImageData>& img, float dx, float dy, float dw, float dh) {
     if (!has_backing_store() || !img || !img->is_valid()) return;
     if (!is_finite_f(dx) || !is_finite_f(dy) || !is_finite_f(dw) || !is_finite_f(dh)) return;
@@ -2035,19 +2141,22 @@ void CanvasRenderingContext2D::draw_image(const std::shared_ptr<ImageData>& img,
         const int base_x = static_cast<int>(std::round(dx));
         const int base_y = static_cast<int>(std::round(dy));
 
+        // Each destination pixel covers a rectangle of the source, whose centre
+        // is sampled. The old code rounded that centre to the nearest pixel
+        // index, which is why a 4x4 scaled up came out in blocks: with smoothing
+        // off it still does, deliberately, and with it on the centre is kept as
+        // a fraction and the four pixels around it are mixed.
+        const float sx_scale = static_cast<float>(img->width) / static_cast<float>(dest_w);
+        const float sy_scale = static_cast<float>(img->height) / static_cast<float>(dest_h);
         for (int sy = 0; sy < dest_h; ++sy) {
             const int py = base_y + sy;
             if (py < 0 || py >= m_height) continue;
-            const int iy = (dest_h > 1)
-                ? static_cast<int>(std::round(static_cast<float>(sy) / static_cast<float>(dest_h - 1) * static_cast<float>(img->height - 1)))
-                : 0;
+            const float iy = (static_cast<float>(sy) + 0.5f) * sy_scale;
             for (int sx = 0; sx < dest_w; ++sx) {
                 const int px = base_x + sx;
                 if (px < 0 || px >= m_width) continue;
-                const int ix = (dest_w > 1)
-                    ? static_cast<int>(std::round(static_cast<float>(sx) / static_cast<float>(dest_w - 1) * static_cast<float>(img->width - 1)))
-                    : 0;
-                set_pixel_safe(px, py, img->get_pixel_color(ix, iy));
+                const float ix = (static_cast<float>(sx) + 0.5f) * sx_scale;
+                set_pixel_safe(px, py, sample_image_bilinear(*img, ix, iy, image_smoothing_enabled));
             }
         }
         return;
@@ -2068,9 +2177,9 @@ void CanvasRenderingContext2D::draw_image(const std::shared_ptr<ImageData>& img,
             const float u = (up.x - dx) / dest_wf;
             const float v = (up.y - dy) / dest_hf;
             if (u < 0.0f || u >= 1.0f || v < 0.0f || v >= 1.0f) continue;
-            const int ix = std::clamp(static_cast<int>(u * static_cast<float>(img->width)), 0, img->width - 1);
-            const int iy = std::clamp(static_cast<int>(v * static_cast<float>(img->height)), 0, img->height - 1);
-            set_pixel_safe(px, py, img->get_pixel_color(ix, iy));
+            set_pixel_safe(px, py, sample_image_bilinear(*img, u * static_cast<float>(img->width),
+                                                         v * static_cast<float>(img->height),
+                                                         image_smoothing_enabled));
         }
     }
 }
@@ -2427,6 +2536,44 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
                 if (std::isfinite(v) && v >= 0.0 && v <= 1.0) {
                     get_ctx()->global_alpha = static_cast<float>(v);
                 }
+            }
+            return JsValue::make_undefined();
+        }),
+        kAccFlags
+    );
+
+    // §4.12.5.1's `imageSmoothingEnabled` (a boolean, true at the start) and
+    // `imageSmoothingQuality` ("low" | "medium" | "high", "low" at the start).
+    // Neither existed before Phase 382, and the renderer sampled every image by
+    // its nearest pixel whether the page had asked for otherwise or not. These
+    // are live accessors rather than copied data properties, so `save()` and
+    // `restore()` need no second write to the object to be seen.
+    ctx.define_accessor(
+        "imageSmoothingEnabled",
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
+            return JsValue::make_boolean(get_ctx()->image_smoothing_enabled);
+        }),
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+            // The IDL type is `boolean`, so any value is converted: a page that
+            // assigns 0 or "" turns it off, which is what a browser does too.
+            if (!args.empty()) get_ctx()->image_smoothing_enabled = args[0].is_truthy();
+            return JsValue::make_undefined();
+        }),
+        kAccFlags
+    );
+
+    ctx.define_accessor(
+        "imageSmoothingQuality",
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
+            return JsValue::make_string(get_ctx()->image_smoothing_quality);
+        }),
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+            // An enumerated attribute: a value that is not one of the three is
+            // ignored and the old one stays, rather than being stored as-is.
+            if (args.empty()) return JsValue::make_undefined();
+            const std::string asked = args[0].to_string();
+            if (asked == "low" || asked == "medium" || asked == "high") {
+                get_ctx()->image_smoothing_quality = asked;
             }
             return JsValue::make_undefined();
         }),

@@ -33,9 +33,12 @@ TEST(latin_composition_asks_the_font_before_replacing_a_pair) {
     auto fallback = bare.shape_glyphs({'a', 0x0301});
     assert(fallback.size() == 2 && fallback[0].glyph == bare.glyph_index('a'));
     assert(fallback[1].glyph == bare.glyph_index(0x0301));
-    // No compatibility composition, skipping intervening marks, or mutation of input.
+    // No compatibility composition or mutation of input. Phase 266 allows
+    // composition across the lower-class dot while preserving that dot.
     assert(f.shape_glyphs({'f', 'i'}).size() == 2);
-    assert(f.shape_glyphs({'a', 0x0323, 0x0301}).size() == 3);
+    auto crossed = f.shape_glyphs({'a', 0x0323, 0x0301});
+    assert(crossed.size() == 2 && crossed[0].glyph == f.glyph_index(0x00E1));
+    assert(crossed[1].glyph == f.glyph_index(0x0323));
     assert(f.shape_glyphs({0x0301, 'a'}).size() == 2);
     const std::vector<uint32_t> input{'a', 0x0301};
     f.shape_glyphs(input);

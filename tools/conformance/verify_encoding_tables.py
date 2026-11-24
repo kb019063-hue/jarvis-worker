@@ -411,7 +411,7 @@ int main(int argc, char** argv) {
 # disagree with the index files finding 249 measured: koi8-u pointers 46 and
 # 62, and windows-1253 pointers 42 and 82. A disagreement on these is reported
 # and not counted, because the table is the standard and ICU is not.
-# Phase 282 adds a third: windows-1255 byte 0xCA is U+05BA in the index file,
+# Phase 283 adds a third: windows-1255 byte 0xCA is U+05BA in the index file,
 # and Node answers U+FFFD — ICU's table predates the code point, which sits in
 # the sequential run U+05B9 / U+05BA / U+05BB. The engine has the run and the
 # neighbours either side of the gap agree, so the table is the standard's.

@@ -7,7 +7,7 @@ a third and fourth such place, found the same way, and a measurement of what
 an index-table sweep can and cannot see.
 
 **Found by:** writing the sweep the row asked for
-(`tools/conformance/verify_encoding_tables.py`, Phase 282).
+(`tools/conformance/verify_encoding_tables.py`, Phase 283).
 
 ## What the row asked for
 

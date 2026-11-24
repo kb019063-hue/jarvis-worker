@@ -1,4 +1,4 @@
-# Phase 263 — a joiner is an invisible glyph, not an absent one
+# Phase 267 — a joiner is an invisible glyph, not an absent one
 
 The AGENTS.md row (L1049) lists what is still open around Latin composition.
 This phase took the join-control half of it, because the differential named the
@@ -86,7 +86,7 @@ looks intentional.
 
 ## Verification
 
-- `tests/suites/263-a-joiner-keeps-its-slot.cpp` — the slot, the invisible
+- `tests/suites/267-a-joiner-keeps-its-slot.cpp` — the slot, the invisible
   glyph, the zero advance, that ZWNJ still prevents Lam-Alef and ZWJ still
   joins, and that a mark after a joiner still lands on its own letter. With the
   fix reverted it fails on `zwnj.size() == 3`; with it, it passes.

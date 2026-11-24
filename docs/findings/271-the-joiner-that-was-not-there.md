@@ -1,4 +1,4 @@
-# Finding 267 — the joiner that was not there
+# Finding 271 — the joiner that was not there
 
 **Severity:** correctness, and a quiet one. `TrueTypeFont::shape_glyphs` deleted
 default-ignorable join controls from its own output. That made the glyph count

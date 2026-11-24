@@ -1,4 +1,4 @@
-// Phase 263, finding 267: a default-ignorable is an invisible glyph, not an
+// Phase 267, finding 271: a default-ignorable is an invisible glyph, not an
 // absent one.
 //
 // `shape_glyphs` used to erase `U+200C`/`U+200D` from the shaped run once GSUB

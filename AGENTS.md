@@ -778,9 +778,13 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   others is run once more by itself before it counts, and the job writes
   what failed as annotations like the sanitizer jobs do. **A check that
   measures time fails on a slow machine: give it the machine to itself
-  once before it says so.** A run on `main` saves the
-  objects for everybody else's runs, which is one more reason for the
-  last merge of a lot to start one. A job that cannot fetch ccache
+  once before it says so.** A lot's run saves its objects for the
+  lot after it (a watch's pull request is the one pull request whose
+  runs save any): the next lot is pushed a minute after the last one
+  landed, before `main`'s run has saved what landed, and at 04:13 that
+  cost 4 min 49 s of compiling in each sanitizer job. A run on `main`
+  saves the objects for everybody else's runs, which is one more reason
+  for the last merge of a lot to start one. A job that cannot fetch ccache
   compiles everything, as before. Three rules keep it the same checks:
   - `make asan-core` is nine parts in the Makefile and runs them in the
     order it always had; **a new check goes into the part it belongs

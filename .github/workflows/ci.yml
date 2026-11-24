@@ -67,10 +67,13 @@ jobs:
             echo "::notice title=ccache, plain build::$(ccache -s 2>/dev/null | grep -E 'Cacheable calls|Hits|Misses|Cache size' | tr -s ' ' | tr '\n' ';')"
           fi
       - name: Keep the objects for the runs that follow
-        # Only a run on main saves them: every pull request can read
-        # what such a run saved, and nobody else what a pull request's
-        # run did (.github/actions/ccache/action.yml).
-        if: github.event_name != 'pull_request'
+        # A run on main saves them: every pull request can read what
+        # such a run saved, and nobody else what a pull request's run
+        # did. A watch's own pull request saves them too, for itself:
+        # its next lot is pushed a minute after this one has landed,
+        # before main's run has saved anything, and holds the same
+        # carried pull requests again (.github/actions/ccache/action.yml).
+        if: github.event_name != 'pull_request' || startsWith(github.event.pull_request.title, 'WATCH:')
         uses: actions/cache/save@v4
         with:
           path: ~/.ccache
@@ -602,10 +605,13 @@ jobs:
             echo "::notice title=ccache, asan build::$(ccache -s 2>/dev/null | grep -E 'Cacheable calls|Hits|Misses|Cache size' | tr -s ' ' | tr '\n' ';')"
           fi
       - name: Keep the objects for the runs that follow
-        # Only a run on main saves them: every pull request can read
-        # what such a run saved, and nobody else what a pull request's
-        # run did (.github/actions/ccache/action.yml).
-        if: github.event_name != 'pull_request'
+        # A run on main saves them: every pull request can read what
+        # such a run saved, and nobody else what a pull request's run
+        # did. A watch's own pull request saves them too, for itself:
+        # its next lot is pushed a minute after this one has landed,
+        # before main's run has saved anything, and holds the same
+        # carried pull requests again (.github/actions/ccache/action.yml).
+        if: github.event_name != 'pull_request' || startsWith(github.event.pull_request.title, 'WATCH:')
         uses: actions/cache/save@v4
         with:
           path: ~/.ccache

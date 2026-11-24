@@ -39,6 +39,22 @@ public:
         bool include_credentials = false
     );
 
+    /// The text of the stylesheet a `<link rel="stylesheet">` points at, loaded
+    /// through the same request context, cache and `@import` expansion the
+    /// layout uses, so that a script asking `getComputedStyle` sees exactly the
+    /// rules that were painted. Answers false for anything that is not a
+    /// stylesheet link or could not be read; `css_out` is then empty.
+    static bool load_linked_stylesheet(
+        const Element& link,
+        const Document& doc,
+        StyleSheetCache* cache,
+        std::string& css_out
+    );
+
+    /// True when `rel` names a stylesheet (and not an alternate one), which is
+    /// the same test `build_resolver` makes before it loads a `<link>`.
+    static bool is_stylesheet_rel(std::string_view rel);
+
     /// Collects all `<style>`, `<link rel="stylesheet" href="...">`, and
     /// `<?xml-stylesheet ...?>` rules in exact document tree order (including
     /// `@import` rules up to depth 4) into a `StyleResolver`.

@@ -352,6 +352,10 @@ public:
     };
     static void set_environment_tracer(EnvironmentTracer tracer);
     void mark_environment(void* env);
+    /// Records `refs` heap-owned `shared_ptr<JsEnvironment>` references to `env`
+    /// during the counting pass (e.g. a generator frame owned solely by an
+    /// in-heap generator object). Ignored outside the counting pass.
+    void count_environment(void* env, size_t refs = 1);
 
 private:
     struct RootProviderEntry {

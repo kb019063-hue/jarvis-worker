@@ -182,6 +182,38 @@ def rows_named(tasks: list[str], lines: list[str]) -> set[int]:
     return held
 
 
+def rows_like(tasks: list[str], lines: list[str]) -> set[int]:
+    """Indexes of the rows a `Task:` line is most probably about when it
+    names none: for each line, the three rows that share the most of its
+    telling words with it, those of them that share two at least. A telling
+    word has five letters or more and stands in fewer than one row in five.
+    (`Task:
+    Finish label activation by forwarding a click on a <label> to its
+    associated control` is about the row **A click on a `<label>` activates
+    its labeled control.**) A wrong guess costs an empty row that is put in
+    at the next watch and not at this one; a row not guessed costs its pull
+    request a conflict."""
+    span = table_span(lines)
+    if span is None:
+        return set()
+
+    def words(text: str) -> set[str]:
+        return set(re.findall(r"[a-z0-9][a-z0-9-]{4,}", plain(text)))
+
+    rows = {i: words(lines[i]) for i in range(*span) if not is_empty_row(lines[i])}
+    seen: dict[str, int] = {}
+    for mine in rows.values():
+        for word in mine:
+            seen[word] = seen.get(word, 0) + 1
+    common = {word for word, count in seen.items() if count * 5 > max(len(rows), 5)}
+    held = set()
+    for task in tasks:
+        telling = words(task) - common
+        scored = sorted(((len(telling & mine), -i) for i, mine in rows.items()), reverse=True)
+        held |= {-i for shared, i in scored[:3] if shared >= 2}
+    return held
+
+
 def _git(*args: str) -> str:
     done = subprocess.run(["git", *args], cwd=ROOT, capture_output=True, text=True)
     if done.returncode != 0:
@@ -282,6 +314,10 @@ def self_test() -> int:
         ("however it quotes it", rows_named(["AGENTS.md row — 'the SECOND task of three' (ECMA-262)"], table), {9}),
         ("a line that names no row holds none", rows_named(["Implement PBKDF2 in SubtleCrypto"], table), set()),
         ("a short title names nothing", rows_named(["c", "**c**"], table), set()),
+        ("a line that names no row is about the one it shares words with",
+         rows_like(["Finish the longest first tasks: words about nothing"], head + ["| **A long first task.** words, nothing, longest, tasks | f | d | n |", EMPTY_ROW, b]), {8}),
+        ("one shared word is too few", rows_like(["Finish the longest ones"], head + ["| **A long first task.** words, nothing, longest, tasks | f | d | n |", EMPTY_ROW, b]), set()),
+        ("and about none when it shares too few", rows_like(["Implement PBKDF2 in SubtleCrypto"], table), set()),
         ("the Task line is read from a claim", _TASK.findall("Task: **A long first task.** In words\nFiles: x"), ["**A long first task.** In words"]),
         ("words only", plain("**`with`** 'statements'  are a ~~parse~~ error."), "with statements are a parse error"),
         ("a blank line with a row under it cuts the table", breaks(table + ["", c, a]), [11]),
@@ -325,7 +361,9 @@ def main(arguments: list[str]) -> int:
         for pr in open_pull_requests():
             ref = f"refs/remotes/origin/pr{pr['number']}"
             _git("fetch", "-q", "origin", f"+refs/pull/{pr['number']}/head:{ref}")
-            mine = rows_a_ref_holds(ref, lines) | rows_named(_TASK.findall(pr["body"] or ""), lines)
+            tasks = _TASK.findall(pr["body"] or "")
+            mine = rows_a_ref_holds(ref, lines) | rows_named(tasks, lines)
+            mine = mine or rows_like(tasks, lines)
             if mine:
                 print(f"  #{pr['number']} holds: " + "; ".join((title_of(lines[i]) or lines[i][2:40])[:44] for i in sorted(mine)))
             held |= mine

@@ -26,13 +26,15 @@ document cannot prevent. So:
 - **The two documents are frozen as append targets.** What is still in them
   stays exactly as it is: do not add to it, reorder it, re-wrap it or delete it
   in passing. Everything in them is in the repository's history besides.
-- **The two numbers come from `python3 tools/next_ids.py`**, not from reading
-  either document. It reads the documents, `docs/`, `docs/state.json` and the
-  open pull requests; `--pr-body` prints the block a pull request opens with,
-  `--sources` says where each number came from, and `--taken` lists every
-  number taken rather than only the next free one. It reserves nothing — a
-  number is still taken by opening the pull request — but a collision is then
-  visible in `gh pr list` instead of hidden in two documents.
+- **The two numbers are the pull request's own number** since 24 November
+  ("Before starting", point 2), not read from either document.
+  `python3 tools/next_ids.py` reads the documents, `docs/`,
+  `docs/state.json` and the open pull requests: `--pr-body` prints the block
+  a pull request opens with, `--sources` says where each number came from,
+  and `--taken` lists every number taken. Before that day it handed out the
+  next free pair, which reserved nothing: a number was taken by opening the
+  pull request, and two that took the same one could at least be seen in
+  `gh pr list` instead of being hidden in two documents.
 - **It is the only allocator.** `tools/ci/check_pr.py` asks it
   (`--taken --ref main --no-prs`) instead of parsing the two documents itself,
   which is what it did until the write-ups left them — after which it went on
@@ -382,17 +384,27 @@ without one, and leaves the board and a watch out of the claims.
    ```
    Task: <the row of the table>
    Files: <what it will change>
-   Phase P, finding F
+   Phase and finding: this pull request's number
    Agent: <the name you gave yourself; "Working together", above>
    ```
 
-   `P` and `F` come from `python3 tools/next_ids.py`, which reads the
-   documents, `docs/`, `docs/state.json` and the open pull requests and prints
-   the next free number of each; `--pr-body` prints the four lines above with
-   them filled in. It asks GitHub for `main` as well, so a tree that is hours
-   old gets the same answer as a new one. (They used to be read out of
-   ARCHITECTURE.md and AUDIT.md — see the notice at the top.) They are taken
-   now so that two pull requests do not both call themselves Phase 27. A change that is not engine work —
+   **Your phase and your finding are the number of the pull request
+   itself**, the one `gh pr create` prints when it has opened it: #360 is
+   Phase 360 and finding 360, `docs/phases/360-….md`,
+   `docs/findings/360-….md`, `tests/suites/360-….cpp`, and its title
+   says so when the `WIP:` comes off. Nobody has to be asked, because
+   GitHub gives no two pull requests the same number.
+   (`python3 tools/next_ids.py --pr-body` prints the four lines, and
+   `python3 tools/ci/check_pr.py claim N` says the numbers back.) Until
+   24 November 2026 the two came from `python3 tools/next_ids.py`, the
+   next free number of each, and two agents who asked in the same minute
+   took the same pair: in one hour of that morning five pull requests had
+   a number another had said first (#336 twice, #347, #354, #357) and
+   were renumbered after they were finished, files, rows, title and all,
+   one of them twice under a lot that was being tested. The numbers are
+   no longer one after another, and nothing needs them to be. A pull
+   request opened before that day keeps the numbers it has. A change that
+   is not engine work —
    documents, tooling, CI — takes neither: write `No phase, no finding` and
    say why instead.
 3. **One task at a time, inside its files.** If the work turns out to need a

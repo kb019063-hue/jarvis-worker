@@ -225,6 +225,13 @@ YOURS_AGAIN_RE = re.compile(r"^\w+: #(\d+) is yours again \(head ([0-9a-f]{7,40}
 # The line that says which pull requests a lot holds, each with its head:
 # "Lander: lot of 03:01 UTC: #305 (`52fe97d`), #310 (`0a0ffab`) with `main` …".
 LOT_RE = re.compile(r"^\w+: (?:\*\*)?(?:the last )?lot of ")
+# The third line of a claim since 24 November 2026: the pull request's own
+# number is its phase and its finding (AGENTS.md, "Before starting", point
+# 2). GitHub gives every pull request another number, so two agents who
+# start in the same minute cannot take the same one, which the next free
+# pair of `tools/next_ids.py` let them do: in one hour of that morning four
+# pull requests of twelve had to be renumbered after they were finished.
+OWN_NUMBER_RE = re.compile(r"^Phase and finding:\s*(?:this|the) pull request'?s?(?: own)? number\b", re.IGNORECASE)
 # The label that gives a pull request the short run of CI (.github/workflows/ci.yml).
 LOT_LABEL = "lot"
 WATCH_ON_TEXT = (
@@ -305,7 +312,10 @@ def claim_of(pr: dict) -> dict:
     numbers = next((m for m in (re.match(r"Phase (\d+), finding (\d+)\s*$", line) for line in head) if m), None)
     phase = int(numbers.group(1)) if numbers else None
     finding = int(numbers.group(2)) if numbers else None
-    if numbers is None:
+    own_number = numbers is None and any(OWN_NUMBER_RE.match(line) for line in head)
+    if own_number:
+        phase = finding = pr["number"]
+    elif numbers is None:
         # No claim line: what the title says is still a number somebody is using.
         in_title = re.search(r"\bPhase (\d+)\b", pr["title"])
         phase = int(in_title.group(1)) if in_title else None
@@ -321,7 +331,7 @@ def claim_of(pr: dict) -> dict:
             has_files_line = collecting = True
             line = line[len("Files:"):]
         elif collecting and (not line.strip() or line.startswith("Task:") or re.match(r"Phase \d+", line)
-                             or NO_NUMBERS_RE.search(line)):
+                             or OWN_NUMBER_RE.match(line) or NO_NUMBERS_RE.search(line)):
             # The third line of a claim ends the list whichever of its two forms
             # it has. `No phase, no finding: ...` used to be read on as more
             # files, so two pull requests without numbers shared one called
@@ -346,7 +356,7 @@ def claim_of(pr: dict) -> dict:
         "task": task[len("Task:"):].strip() if task else None,
         "agent": agent,
         "files": named | changed,       # what it says it will change, and what it has changed
-        "has_claim_lines": task is not None and has_files_line and (numbers is not None or no_numbers),
+        "has_claim_lines": task is not None and has_files_line and (numbers is not None or own_number or no_numbers),
         "phase": phase,
         "finding": finding,
         "head": pr.get("headRefOid", ""),
@@ -471,6 +481,14 @@ def hours_since(stamp: str) -> float:
 
 
 def next_pair() -> str:
+    """What a new pull request takes: its own number, for both. (Until 24
+    November 2026 this was 'Phase P, finding F', the next free pair, as the
+    allocator gave it; `old_next_pair` still asks for that.)"""
+    return ("a new pull request's phase and finding are its own number: open it, and use the number GitHub gives it "
+            "(AGENTS.md, \"Before starting\", point 2)")
+
+
+def old_next_pair() -> str:
     """'Phase P, finding F': the next free pair, as the allocator gives it.
 
     This file used to work the pair out from the claims it had read, and a
@@ -525,7 +543,8 @@ def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bo
     """What is wrong with a claim: (does this pull request have to change, what)."""
     problems: list[tuple[bool, str]] = []
     if not claim["has_claim_lines"]:
-        problems.append((True, "its text does not begin with the Task:, Files: and `Phase P, finding F` lines"))
+        problems.append((True, "its text does not begin with the Task: and Files: lines and the line of its numbers "
+                               "(`Phase and finding: this pull request's number`)"))
     if claim["has_claim_lines"] and not claim.get("agent"):
         problems.append((False, "no `Agent:` line: give yourself a name and put it under the three lines "
                                 "(AGENTS.md, \"Working together\")"))
@@ -602,7 +621,7 @@ def show_claims() -> int:
     for pr in sorted(prs, key=lambda pr: pr["number"]):
         if NOT_A_CLAIM_RE.match(pr["title"]):
             print(f"\n#{pr['number']}  not a claim: {pr['title'][:100]}")
-    print(f"\nnext free: {next_pair()}")
+    print(f"\nnumbers: {next_pair()}")
     return 0
 
 
@@ -679,7 +698,7 @@ def check_claim(number: int) -> int:
     if not report.failed:
         report.ok(f"#{number}: {numbers_of(mine)}; no earlier open pull request has its numbers or its files")
     else:
-        report.note(f"next free: {next_pair()}")
+        report.note(next_pair())
     return 1 if report.failed else 0
 
 
@@ -1334,7 +1353,8 @@ def check_merge(number: int, landing: bool = False) -> int:
     claim = claim_of(pr)
     main = on_main()
     if not claim["has_claim_lines"]:
-        report.no("the text does not begin with the Task:, Files: and `Phase P, finding F` lines")
+        report.no("the text does not begin with the Task: and Files: lines and the line of its numbers "
+                  "(`Phase and finding: this pull request's number`)")
     for kind, mine in (("Phase", claim["phase"]), ("finding", claim["finding"])):
         if mine is None:
             continue
@@ -1486,6 +1506,24 @@ def self_test() -> int:
     first = dict(claim("Task: a row\nFiles: `src/c.cpp`\nPhase 9, finding 10\nAgent: Heron\n"), number=1)
     second = dict(claim("Task: a row\nFiles: `src/d.cpp`\nPhase 9, finding 11\nAgent: Marten\n"), number=2)
     third = dict(claim("Task: a row\nFiles: `src/e.cpp`\nPhase 6, finding 12\nAgent: Kestrel\n"), number=3)
+    own = claim_of({"number": 360, "title": "WIP: a change", "files": [],
+                    "body": "Task: a row\nFiles: `src/f.cpp`,\n`src/g.cpp`\nPhase and finding: this pull request's number\nAgent: Heron\n\ntext"})
+    own_too = claim_of({"number": 361, "title": "WIP: another", "files": [],
+                        "body": "Task: a row\nFiles: `src/h.cpp`\nPhase and finding: this pull request's number\nAgent: Marten\n"})
+    cases += [
+        ("a claim whose numbers are the pull request's own number",
+         (own["phase"], own["finding"], own["has_claim_lines"], sorted(own["files"]), own["agent"]),
+         (360, 360, True, ["src/f.cpp", "src/g.cpp"], "Heron")),
+        ("it is called by them", numbers_of(own), "Phase 360, finding 360"),
+        ("two such claims have nothing to change, whenever they were opened", number_clashes([own, own_too], main), []),
+        ("and nothing is wrong with one", [text for blocking, text in claim_problems(own, [own, own_too], main) if blocking], []),
+        ("the line is read whatever its capitals, and with `the` for `this`",
+         [bool(OWN_NUMBER_RE.match(line)) for line in ("Phase and finding: this pull request's number",
+                                                       "phase and finding: the pull request's number (360)",
+                                                       "Phase and finding: this pull request's own number",
+                                                       "Phase 5, finding 7", "Phase and finding: 360")],
+         [True, True, True, False, False]),
+    ]
     cases += [
         ("the later of two that say one phase has a number to change, and so has one whose phase is on main; the first has not",
          number_clashes([first, second, third], main),

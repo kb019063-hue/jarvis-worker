@@ -96,7 +96,25 @@ bool starts_with_data_scheme(std::string_view s) {
     return lo(s[0]) == 'd' && lo(s[1]) == 'a' && lo(s[2]) == 't' && lo(s[3]) == 'a' && s[4] == ':';
 }
 
+// Whether a child takes a line of its own, in CSS 2.1 §9.2.1.1's terms: only a
+// block-level box interrupts an inline formatting context.
+//
+// `display: inline-block` is *not* one, though it is built as a block box --
+// §9.2.2.1 makes it an atomic **inline-level** box, which sits on its parent's
+// line exactly like a replaced element and wraps only at a soft wrap
+// opportunity beside it. Asking the box type alone therefore lifted every
+// inline-block out of its line and split the line in three, so `x <kbd
+// style="display:inline-block">Tab</kbd> y` became three lines. `LayoutBox`
+// already lays such a child out atomically and `establishes_ifc()` already
+// treats it as inline content; only this predicate disagreed.
+//
+// The guard names `inline-block` rather than deferring to
+// `ComputedStyle::is_block_level()`, because that predicate also leaves out
+// `table-caption`/`table-column`/`table-column-group`, which §17.4 does define
+// as block-level; sweeping them in would change how a caption interrupts a
+// line, which is not this phase's subject.
 bool is_block_level_box(const LayoutBox& box) {
+    if (box.style && box.style->is_inline_block()) return false;
     return box.box_type == BoxType::BlockNode || box.box_type == BoxType::FlexNode ||
            box.box_type == BoxType::GridNode || box.box_type == BoxType::AnonymousBlock ||
            box.box_type == BoxType::TableNode || box.box_type == BoxType::TableRowNode ||

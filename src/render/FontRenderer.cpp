@@ -2814,18 +2814,19 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         input.push_back(cp);
     }
 
-    // Canonical order for nonzero-class marks following a Latin starter.
+    // Canonical order for nonzero-class mark spans resolved to Latin, including
+    // leading marks and marks following Common characters.
     // Keep equal classes stable and do not cross a starter or script boundary.
     // This is font-aware Latin normalization, not full Unicode NFC.
     const auto input_scripts = itemize_codepoint_scripts(input);
     for (std::size_t i = 0; i < input.size();) {
-        if (classify_codepoint_script(input[i]) != kTagLatn || combining_class(input[i])) {
+        if (input_scripts[i] != kTagLatn || !combining_class(input[i])) {
             ++i;
             continue;
         }
         std::size_t end = i + 1;
         while (end < input.size() && input_scripts[end] == kTagLatn && combining_class(input[end])) ++end;
-        std::stable_sort(input.begin() + i + 1, input.begin() + end,
+        std::stable_sort(input.begin() + i, input.begin() + end,
             [&](uint32_t a, uint32_t b) { return combining_class(a) < combining_class(b); });
         i = end;
     }

@@ -1,8 +1,8 @@
-# Phase 277 — the poison pill is an object, not an answer
+# Phase 278 — the poison pill is an object, not an answer
 
 Task: `%Function.prototype%` does not carry the `caller`/`arguments` poison
 pill; this engine answered both questions out of two helpers instead. Build the
-pill as a real accessor pair and delete both fictions. Finding 273.
+pill as a real accessor pair and delete both fictions. Finding 282.
 
 ## 1. What was wrong
 
@@ -95,7 +95,7 @@ The eight `built-ins/Function` cases include the two this row named:
 `Function/StrictFunction_restricted-properties.js`. The fourteen `language`
 cases are the `13.2-*` family and the five `restricted-properties.js` files.
 
-The new suite is `tests/suites/277-the-poison-pill-is-an-object.cpp`. It took
+The new suite is `tests/suites/278-the-poison-pill-is-an-object.cpp`. It took
 three corrections to get right, each time because the *test* was wrong and the
 engine matched Node: the sloppy arrow/method pair, the sloppy function reading
 `null` rather than throwing, and the expected string in the first form.

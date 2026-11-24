@@ -8,7 +8,9 @@
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/render/Canvas2D.hpp"
 #include "litebird/render/ImageDecoder.hpp"
+#include "litebird/render/WebGL.hpp"
 #include "litebird/js/ImageBitmap.hpp"
+#include "litebird/js/TypedArray.hpp"
 
 #include <array>
 #include <cmath>
@@ -1537,6 +1539,1071 @@ void install_canvas_reset(Realm& r, JsValue context_object,
         }));
 }
 
+// --- WebGL 1.0 / 2.0 WebIDL bindings (Khronos WebGL 1.0 §5 / 2.0 §3) --------
+
+struct WebGLHandleState : JsExotic {
+    std::weak_ptr<WebGLContext> ctx;
+    uint32_t id = 0;
+};
+
+struct WebGLUniformLocationState : JsExotic {
+    std::weak_ptr<WebGLContext> ctx;
+    uint32_t program_id = 0;
+    int location = -1;
+};
+
+struct WebGLActiveInfoState : JsExotic {
+    WebGLActiveVar info;
+};
+
+struct WebGLPrecisionFormatState : JsExotic {
+    int range_min = 127;
+    int range_max = 127;
+    int precision = 23;
+};
+
+struct WebGLContextState : JsExotic {
+    std::shared_ptr<WebGLContext> ctx;
+};
+
+std::string normalize_canvas_context_type(const std::string& raw) {
+    const std::string t = ascii_lower(raw);
+    if (t == "experimental-webgl") return "webgl";
+    if (t == "2d" || t == "webgl" || t == "webgl2") return t;
+    return "";
+}
+
+JsValue make_webgl_handle(Realm& r, const char* iface, const std::shared_ptr<WebGLContext>& ctx, uint32_t id) {
+    if (id == 0) return null();
+    auto st = std::make_shared<WebGLHandleState>();
+    st->ctx = ctx;
+    st->id = id;
+    return r.make(iface, st);
+}
+
+uint32_t webgl_handle_id(const JsValue& v, const std::shared_ptr<WebGLContext>& ctx) {
+    if (v.is_nullish()) return 0;
+    if (auto* st = state_of<WebGLHandleState>(v)) {
+        if (st->ctx.lock() == ctx) return st->id;
+    }
+    return 0;
+}
+
+WebGLContext& this_webgl_context() {
+    auto* st = state_of<WebGLContextState>(JsValue::current_this());
+    if (!st || !st->ctx) {
+        js_throw_type_error("Illegal invocation on WebGLRenderingContext");
+    }
+    return *st->ctx;
+}
+
+std::shared_ptr<WebGLContext> this_webgl_context_ptr() {
+    auto* st = state_of<WebGLContextState>(JsValue::current_this());
+    if (!st || !st->ctx) {
+        js_throw_type_error("Illegal invocation on WebGLRenderingContext");
+    }
+    return st->ctx;
+}
+
+std::vector<float> webgl_read_float_array(const JsValue& v, std::size_t max_elems = 64) {
+    std::vector<float> out;
+    if (v.is_nullish()) return out;
+    const std::size_t len = static_cast<std::size_t>(std::max(0.0, to_double(v.get_property("length"))));
+    const std::size_t n = std::min(len, max_elems);
+    out.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        out.push_back(static_cast<float>(to_double(v.get_property(std::to_string(i)))));
+    }
+    return out;
+}
+
+std::vector<int> webgl_read_int_array(const JsValue& v, std::size_t max_elems = 64) {
+    std::vector<int> out;
+    if (v.is_nullish()) return out;
+    const std::size_t len = static_cast<std::size_t>(std::max(0.0, to_double(v.get_property("length"))));
+    const std::size_t n = std::min(len, max_elems);
+    out.reserve(n);
+    for (std::size_t i = 0; i < n; ++i) {
+        out.push_back(static_cast<int>(to_double(v.get_property(std::to_string(i)))));
+    }
+    return out;
+}
+
+void setup_webgl_active_info(Iface& I) {
+    I.getter("name", [](Realm&) { return str(this_state<WebGLActiveInfoState>("WebGLActiveInfo").info.name); });
+    I.getter("size", [](Realm&) { return num(static_cast<double>(this_state<WebGLActiveInfoState>("WebGLActiveInfo").info.size)); });
+    I.getter("type", [](Realm&) { return num(static_cast<double>(this_state<WebGLActiveInfoState>("WebGLActiveInfo").info.type)); });
+}
+
+void setup_webgl_precision_format(Iface& I) {
+    I.getter("rangeMin", [](Realm&) { return num(static_cast<double>(this_state<WebGLPrecisionFormatState>("WebGLShaderPrecisionFormat").range_min)); });
+    I.getter("rangeMax", [](Realm&) { return num(static_cast<double>(this_state<WebGLPrecisionFormatState>("WebGLShaderPrecisionFormat").range_max)); });
+    I.getter("precision", [](Realm&) { return num(static_cast<double>(this_state<WebGLPrecisionFormatState>("WebGLShaderPrecisionFormat").precision)); });
+}
+
+void install_webgl_constants(Iface& I, bool webgl2) {
+    using namespace litebird::webgl;
+    I.constant("DEPTH_BUFFER_BIT", DEPTH_BUFFER_BIT);
+    I.constant("STENCIL_BUFFER_BIT", STENCIL_BUFFER_BIT);
+    I.constant("COLOR_BUFFER_BIT", COLOR_BUFFER_BIT);
+    I.constant("POINTS", POINTS);
+    I.constant("LINES", LINES);
+    I.constant("LINE_LOOP", LINE_LOOP);
+    I.constant("LINE_STRIP", LINE_STRIP);
+    I.constant("TRIANGLES", TRIANGLES);
+    I.constant("TRIANGLE_STRIP", TRIANGLE_STRIP);
+    I.constant("TRIANGLE_FAN", TRIANGLE_FAN);
+    I.constant("ZERO", ZERO);
+    I.constant("ONE", ONE);
+    I.constant("SRC_COLOR", SRC_COLOR);
+    I.constant("ONE_MINUS_SRC_COLOR", ONE_MINUS_SRC_COLOR);
+    I.constant("SRC_ALPHA", SRC_ALPHA);
+    I.constant("ONE_MINUS_SRC_ALPHA", ONE_MINUS_SRC_ALPHA);
+    I.constant("DST_ALPHA", DST_ALPHA);
+    I.constant("ONE_MINUS_DST_ALPHA", ONE_MINUS_DST_ALPHA);
+    I.constant("DST_COLOR", DST_COLOR);
+    I.constant("ONE_MINUS_DST_COLOR", ONE_MINUS_DST_COLOR);
+    I.constant("SRC_ALPHA_SATURATE", SRC_ALPHA_SATURATE);
+    I.constant("CONSTANT_COLOR", CONSTANT_COLOR);
+    I.constant("ONE_MINUS_CONSTANT_COLOR", ONE_MINUS_CONSTANT_COLOR);
+    I.constant("CONSTANT_ALPHA", CONSTANT_ALPHA);
+    I.constant("ONE_MINUS_CONSTANT_ALPHA", ONE_MINUS_CONSTANT_ALPHA);
+    I.constant("FUNC_ADD", FUNC_ADD);
+    I.constant("FUNC_SUBTRACT", FUNC_SUBTRACT);
+    I.constant("FUNC_REVERSE_SUBTRACT", FUNC_REVERSE_SUBTRACT);
+    I.constant("ARRAY_BUFFER", ARRAY_BUFFER);
+    I.constant("ELEMENT_ARRAY_BUFFER", ELEMENT_ARRAY_BUFFER);
+    I.constant("ARRAY_BUFFER_BINDING", ARRAY_BUFFER_BINDING);
+    I.constant("ELEMENT_ARRAY_BUFFER_BINDING", ELEMENT_ARRAY_BUFFER_BINDING);
+    I.constant("STREAM_DRAW", STREAM_DRAW);
+    I.constant("STATIC_DRAW", STATIC_DRAW);
+    I.constant("DYNAMIC_DRAW", DYNAMIC_DRAW);
+    I.constant("BUFFER_SIZE", BUFFER_SIZE);
+    I.constant("BUFFER_USAGE", BUFFER_USAGE);
+    I.constant("CULL_FACE", CULL_FACE);
+    I.constant("BLEND", BLEND);
+    I.constant("DITHER", DITHER);
+    I.constant("STENCIL_TEST", STENCIL_TEST);
+    I.constant("DEPTH_TEST", DEPTH_TEST);
+    I.constant("SCISSOR_TEST", SCISSOR_TEST);
+    I.constant("POLYGON_OFFSET_FILL", POLYGON_OFFSET_FILL);
+    I.constant("FRONT", FRONT);
+    I.constant("BACK", BACK);
+    I.constant("FRONT_AND_BACK", FRONT_AND_BACK);
+    I.constant("CW", CW);
+    I.constant("CCW", CCW);
+    I.constant("NO_ERROR", NO_ERROR);
+    I.constant("INVALID_ENUM", INVALID_ENUM);
+    I.constant("INVALID_VALUE", INVALID_VALUE);
+    I.constant("INVALID_OPERATION", INVALID_OPERATION);
+    I.constant("OUT_OF_MEMORY", OUT_OF_MEMORY);
+    I.constant("INVALID_FRAMEBUFFER_OPERATION", INVALID_FRAMEBUFFER_OPERATION);
+    I.constant("NEVER", NEVER);
+    I.constant("LESS", LESS);
+    I.constant("EQUAL", EQUAL);
+    I.constant("LEQUAL", LEQUAL);
+    I.constant("GREATER", GREATER);
+    I.constant("NOTEQUAL", NOTEQUAL);
+    I.constant("GEQUAL", GEQUAL);
+    I.constant("ALWAYS", ALWAYS);
+    I.constant("BYTE", BYTE);
+    I.constant("UNSIGNED_BYTE", UNSIGNED_BYTE);
+    I.constant("SHORT", SHORT);
+    I.constant("UNSIGNED_SHORT", UNSIGNED_SHORT);
+    I.constant("INT", INT);
+    I.constant("UNSIGNED_INT", UNSIGNED_INT);
+    I.constant("FLOAT", FLOAT);
+    I.constant("DEPTH_COMPONENT", DEPTH_COMPONENT);
+    I.constant("ALPHA", ALPHA);
+    I.constant("RGB", RGB);
+    I.constant("RGBA", RGBA);
+    I.constant("LUMINANCE", LUMINANCE);
+    I.constant("LUMINANCE_ALPHA", LUMINANCE_ALPHA);
+    I.constant("RGBA4", RGBA4);
+    I.constant("RGB5_A1", RGB5_A1);
+    I.constant("RGB565", RGB565);
+    I.constant("DEPTH_COMPONENT16", DEPTH_COMPONENT16);
+    I.constant("STENCIL_INDEX8", STENCIL_INDEX8);
+    I.constant("DEPTH_STENCIL", DEPTH_STENCIL);
+    I.constant("FRAGMENT_SHADER", FRAGMENT_SHADER);
+    I.constant("VERTEX_SHADER", VERTEX_SHADER);
+    I.constant("SHADER_TYPE", SHADER_TYPE);
+    I.constant("DELETE_STATUS", DELETE_STATUS);
+    I.constant("COMPILE_STATUS", COMPILE_STATUS);
+    I.constant("LINK_STATUS", LINK_STATUS);
+    I.constant("VALIDATE_STATUS", VALIDATE_STATUS);
+    I.constant("ATTACHED_SHADERS", ATTACHED_SHADERS);
+    I.constant("ACTIVE_UNIFORMS", ACTIVE_UNIFORMS);
+    I.constant("ACTIVE_ATTRIBUTES", ACTIVE_ATTRIBUTES);
+    I.constant("CURRENT_PROGRAM", CURRENT_PROGRAM);
+    I.constant("FLOAT_VEC2", FLOAT_VEC2);
+    I.constant("FLOAT_VEC3", FLOAT_VEC3);
+    I.constant("FLOAT_VEC4", FLOAT_VEC4);
+    I.constant("INT_VEC2", INT_VEC2);
+    I.constant("INT_VEC3", INT_VEC3);
+    I.constant("INT_VEC4", INT_VEC4);
+    I.constant("BOOL", BOOL);
+    I.constant("BOOL_VEC2", BOOL_VEC2);
+    I.constant("BOOL_VEC3", BOOL_VEC3);
+    I.constant("BOOL_VEC4", BOOL_VEC4);
+    I.constant("FLOAT_MAT2", FLOAT_MAT2);
+    I.constant("FLOAT_MAT3", FLOAT_MAT3);
+    I.constant("FLOAT_MAT4", FLOAT_MAT4);
+    I.constant("SAMPLER_2D", SAMPLER_2D);
+    I.constant("TEXTURE_2D", TEXTURE_2D);
+    I.constant("TEXTURE_CUBE_MAP", TEXTURE_CUBE_MAP);
+    I.constant("TEXTURE_BINDING_2D", TEXTURE_BINDING_2D);
+    I.constant("ACTIVE_TEXTURE", ACTIVE_TEXTURE);
+    for (int u = 0; u < 16; ++u) {
+        static const char* kTexNames[16] = {
+            "TEXTURE0", "TEXTURE1", "TEXTURE2", "TEXTURE3",
+            "TEXTURE4", "TEXTURE5", "TEXTURE6", "TEXTURE7",
+            "TEXTURE8", "TEXTURE9", "TEXTURE10", "TEXTURE11",
+            "TEXTURE12", "TEXTURE13", "TEXTURE14", "TEXTURE15"
+        };
+        I.constant(kTexNames[u], TEXTURE0 + static_cast<uint32_t>(u));
+    }
+    I.constant("NEAREST", NEAREST);
+    I.constant("LINEAR", LINEAR);
+    I.constant("NEAREST_MIPMAP_NEAREST", NEAREST_MIPMAP_NEAREST);
+    I.constant("LINEAR_MIPMAP_NEAREST", LINEAR_MIPMAP_NEAREST);
+    I.constant("NEAREST_MIPMAP_LINEAR", NEAREST_MIPMAP_LINEAR);
+    I.constant("LINEAR_MIPMAP_LINEAR", LINEAR_MIPMAP_LINEAR);
+    I.constant("TEXTURE_MAG_FILTER", TEXTURE_MAG_FILTER);
+    I.constant("TEXTURE_MIN_FILTER", TEXTURE_MIN_FILTER);
+    I.constant("TEXTURE_WRAP_S", TEXTURE_WRAP_S);
+    I.constant("TEXTURE_WRAP_T", TEXTURE_WRAP_T);
+    I.constant("REPEAT", REPEAT);
+    I.constant("CLAMP_TO_EDGE", CLAMP_TO_EDGE);
+    I.constant("MIRRORED_REPEAT", MIRRORED_REPEAT);
+    I.constant("UNPACK_ALIGNMENT", UNPACK_ALIGNMENT);
+    I.constant("PACK_ALIGNMENT", PACK_ALIGNMENT);
+    I.constant("UNPACK_FLIP_Y_WEBGL", UNPACK_FLIP_Y_WEBGL);
+    I.constant("UNPACK_PREMULTIPLY_ALPHA_WEBGL", UNPACK_PREMULTIPLY_ALPHA_WEBGL);
+    I.constant("FRAMEBUFFER", FRAMEBUFFER);
+    I.constant("RENDERBUFFER", RENDERBUFFER);
+    I.constant("FRAMEBUFFER_BINDING", FRAMEBUFFER_BINDING);
+    I.constant("RENDERBUFFER_BINDING", RENDERBUFFER_BINDING);
+    I.constant("COLOR_ATTACHMENT0", COLOR_ATTACHMENT0);
+    I.constant("DEPTH_ATTACHMENT", DEPTH_ATTACHMENT);
+    I.constant("STENCIL_ATTACHMENT", STENCIL_ATTACHMENT);
+    I.constant("FRAMEBUFFER_COMPLETE", FRAMEBUFFER_COMPLETE);
+    I.constant("FRAMEBUFFER_INCOMPLETE_ATTACHMENT", FRAMEBUFFER_INCOMPLETE_ATTACHMENT);
+    I.constant("FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT", FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT);
+    I.constant("FRAMEBUFFER_INCOMPLETE_DIMENSIONS", FRAMEBUFFER_INCOMPLETE_DIMENSIONS);
+    I.constant("LINE_WIDTH", LINE_WIDTH);
+    I.constant("CULL_FACE_MODE", CULL_FACE_MODE);
+    I.constant("FRONT_FACE", FRONT_FACE);
+    I.constant("DEPTH_RANGE", DEPTH_RANGE);
+    I.constant("DEPTH_WRITEMASK", DEPTH_WRITEMASK);
+    I.constant("DEPTH_CLEAR_VALUE", DEPTH_CLEAR_VALUE);
+    I.constant("DEPTH_FUNC", DEPTH_FUNC);
+    I.constant("VIEWPORT", VIEWPORT);
+    I.constant("SCISSOR_BOX", SCISSOR_BOX);
+    I.constant("COLOR_CLEAR_VALUE", COLOR_CLEAR_VALUE);
+    I.constant("COLOR_WRITEMASK", COLOR_WRITEMASK);
+    I.constant("BLEND_EQUATION_RGB", BLEND_EQUATION_RGB);
+    I.constant("BLEND_EQUATION_ALPHA", BLEND_EQUATION_ALPHA);
+    I.constant("BLEND_DST_RGB", BLEND_DST_RGB);
+    I.constant("BLEND_SRC_RGB", BLEND_SRC_RGB);
+    I.constant("BLEND_DST_ALPHA", BLEND_DST_ALPHA);
+    I.constant("BLEND_SRC_ALPHA", BLEND_SRC_ALPHA);
+    I.constant("BLEND_COLOR", BLEND_COLOR);
+    I.constant("MAX_TEXTURE_SIZE", MAX_TEXTURE_SIZE);
+    I.constant("MAX_VIEWPORT_DIMS", MAX_VIEWPORT_DIMS);
+    I.constant("MAX_VERTEX_ATTRIBS", MAX_VERTEX_ATTRIBS);
+    I.constant("MAX_VERTEX_UNIFORM_VECTORS", MAX_VERTEX_UNIFORM_VECTORS);
+    I.constant("MAX_VARYING_VECTORS", MAX_VARYING_VECTORS);
+    I.constant("MAX_COMBINED_TEXTURE_IMAGE_UNITS", MAX_COMBINED_TEXTURE_IMAGE_UNITS);
+    I.constant("MAX_VERTEX_TEXTURE_IMAGE_UNITS", MAX_VERTEX_TEXTURE_IMAGE_UNITS);
+    I.constant("MAX_TEXTURE_IMAGE_UNITS", MAX_TEXTURE_IMAGE_UNITS);
+    I.constant("MAX_FRAGMENT_UNIFORM_VECTORS", MAX_FRAGMENT_UNIFORM_VECTORS);
+    I.constant("MAX_RENDERBUFFER_SIZE", MAX_RENDERBUFFER_SIZE);
+    I.constant("VENDOR", VENDOR);
+    I.constant("RENDERER", RENDERER);
+    I.constant("VERSION", VERSION);
+    I.constant("SHADING_LANGUAGE_VERSION", SHADING_LANGUAGE_VERSION);
+    I.constant("LOW_FLOAT", LOW_FLOAT);
+    I.constant("MEDIUM_FLOAT", MEDIUM_FLOAT);
+    I.constant("HIGH_FLOAT", HIGH_FLOAT);
+    I.constant("LOW_INT", LOW_INT);
+    I.constant("MEDIUM_INT", MEDIUM_INT);
+    I.constant("HIGH_INT", HIGH_INT);
+    if (webgl2) {
+        I.constant("MIN", MIN);
+        I.constant("MAX", MAX);
+        I.constant("RGB8", RGB8);
+        I.constant("RGBA8", RGBA8);
+        I.constant("DEPTH_COMPONENT24", DEPTH_COMPONENT24);
+        I.constant("VERTEX_ARRAY_BINDING", VERTEX_ARRAY_BINDING);
+    }
+}
+
+void install_webgl_common_members(Iface& I, bool webgl2) {
+    install_webgl_constants(I, webgl2);
+
+    I.getter("canvas", [](Realm&) {
+        if (const JsValue* c = slot(JsValue::current_this(), "canvas")) return *c;
+        return null();
+    });
+    I.getter("drawingBufferWidth", [](Realm&) {
+        return num(static_cast<double>(this_webgl_context().drawing_buffer_width()));
+    });
+    I.getter("drawingBufferHeight", [](Realm&) {
+        return num(static_cast<double>(this_webgl_context().drawing_buffer_height()));
+    });
+
+    I.method("getError", 0, [](Realm&, Args) {
+        return num(static_cast<double>(this_webgl_context().get_error()));
+    });
+    I.method("isContextLost", 0, [](Realm&, Args) { return boolean(false); });
+    I.method("flush", 0, [](Realm&, Args) { return undefined(); });
+    I.method("finish", 0, [](Realm&, Args) { return undefined(); });
+    I.method("getContextAttributes", 0, [](Realm&, Args) {
+        JsValue o = JsValue::make_object();
+        o.set_property("alpha", boolean(true));
+        o.set_property("antialias", boolean(false));
+        o.set_property("depth", boolean(true));
+        o.set_property("failIfMajorPerformanceCaveat", boolean(false));
+        o.set_property("powerPreference", str("default"));
+        o.set_property("premultipliedAlpha", boolean(true));
+        o.set_property("preserveDrawingBuffer", boolean(true));
+        o.set_property("stencil", boolean(false));
+        return o;
+    });
+    I.method("getSupportedExtensions", 0, [](Realm&, Args) { return JsValue::make_array(); });
+    I.method("getExtension", 1, [](Realm&, Args) { return null(); });
+
+    I.method("clearColor", 4, [](Realm&, Args a) {
+        this_webgl_context().clear_color(
+            static_cast<float>(to_double(js_arg(a, 0))), static_cast<float>(to_double(js_arg(a, 1))),
+            static_cast<float>(to_double(js_arg(a, 2))), static_cast<float>(to_double(js_arg(a, 3))));
+        return undefined();
+    });
+    I.method("clearDepth", 1, [](Realm&, Args a) {
+        this_webgl_context().clear_depth(static_cast<float>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("clearStencil", 1, [](Realm&, Args a) {
+        this_webgl_context().clear_stencil(static_cast<int>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("clear", 1, [](Realm&, Args a) {
+        this_webgl_context().clear(static_cast<uint32_t>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("viewport", 4, [](Realm&, Args a) {
+        this_webgl_context().viewport(
+            static_cast<int>(to_double(js_arg(a, 0))), static_cast<int>(to_double(js_arg(a, 1))),
+            static_cast<int>(to_double(js_arg(a, 2))), static_cast<int>(to_double(js_arg(a, 3))));
+        return undefined();
+    });
+    I.method("scissor", 4, [](Realm&, Args a) {
+        this_webgl_context().scissor(
+            static_cast<int>(to_double(js_arg(a, 0))), static_cast<int>(to_double(js_arg(a, 1))),
+            static_cast<int>(to_double(js_arg(a, 2))), static_cast<int>(to_double(js_arg(a, 3))));
+        return undefined();
+    });
+    I.method("enable", 1, [](Realm&, Args a) {
+        this_webgl_context().enable(static_cast<uint32_t>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("disable", 1, [](Realm&, Args a) {
+        this_webgl_context().disable(static_cast<uint32_t>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("isEnabled", 1, [](Realm&, Args a) {
+        return boolean(this_webgl_context().is_enabled(static_cast<uint32_t>(to_double(js_arg(a, 0)))));
+    });
+    I.method("colorMask", 4, [](Realm&, Args a) {
+        this_webgl_context().color_mask(to_bool(js_arg(a, 0)), to_bool(js_arg(a, 1)),
+                                        to_bool(js_arg(a, 2)), to_bool(js_arg(a, 3)));
+        return undefined();
+    });
+    I.method("depthMask", 1, [](Realm&, Args a) {
+        this_webgl_context().depth_mask(to_bool(js_arg(a, 0)));
+        return undefined();
+    });
+    I.method("depthFunc", 1, [](Realm&, Args a) {
+        this_webgl_context().depth_func(static_cast<uint32_t>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("depthRange", 2, [](Realm&, Args a) {
+        this_webgl_context().depth_range(static_cast<float>(to_double(js_arg(a, 0))),
+                                         static_cast<float>(to_double(js_arg(a, 1))));
+        return undefined();
+    });
+    I.method("cullFace", 1, [](Realm&, Args a) {
+        this_webgl_context().cull_face(static_cast<uint32_t>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("frontFace", 1, [](Realm&, Args a) {
+        this_webgl_context().front_face(static_cast<uint32_t>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("lineWidth", 1, [](Realm&, Args a) {
+        this_webgl_context().line_width(static_cast<float>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("blendFunc", 2, [](Realm&, Args a) {
+        this_webgl_context().blend_func(static_cast<uint32_t>(to_double(js_arg(a, 0))),
+                                        static_cast<uint32_t>(to_double(js_arg(a, 1))));
+        return undefined();
+    });
+    I.method("blendFuncSeparate", 4, [](Realm&, Args a) {
+        this_webgl_context().blend_func_separate(
+            static_cast<uint32_t>(to_double(js_arg(a, 0))), static_cast<uint32_t>(to_double(js_arg(a, 1))),
+            static_cast<uint32_t>(to_double(js_arg(a, 2))), static_cast<uint32_t>(to_double(js_arg(a, 3))));
+        return undefined();
+    });
+    I.method("blendEquation", 1, [](Realm&, Args a) {
+        this_webgl_context().blend_equation(static_cast<uint32_t>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("blendEquationSeparate", 2, [](Realm&, Args a) {
+        this_webgl_context().blend_equation_separate(static_cast<uint32_t>(to_double(js_arg(a, 0))),
+                                                     static_cast<uint32_t>(to_double(js_arg(a, 1))));
+        return undefined();
+    });
+    I.method("blendColor", 4, [](Realm&, Args a) {
+        this_webgl_context().blend_color(
+            static_cast<float>(to_double(js_arg(a, 0))), static_cast<float>(to_double(js_arg(a, 1))),
+            static_cast<float>(to_double(js_arg(a, 2))), static_cast<float>(to_double(js_arg(a, 3))));
+        return undefined();
+    });
+    I.method("pixelStorei", 2, [](Realm&, Args a) {
+        this_webgl_context().pixel_storei(static_cast<uint32_t>(to_double(js_arg(a, 0))),
+                                          static_cast<int>(to_double(js_arg(a, 1))));
+        return undefined();
+    });
+
+    // Shaders & Programs
+    I.method("createShader", 1, [](Realm& r, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        return make_webgl_handle(r, "WebGLShader", ctx, ctx->create_shader(static_cast<uint32_t>(to_double(js_arg(a, 0)))));
+    });
+    I.method("deleteShader", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->delete_shader(webgl_handle_id(js_arg(a, 0), ctx));
+        return undefined();
+    });
+    I.method("isShader", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        return boolean(ctx->is_shader(webgl_handle_id(js_arg(a, 0), ctx)));
+    });
+    I.method("shaderSource", 2, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->shader_source(webgl_handle_id(js_arg(a, 0), ctx), to_str(js_arg(a, 1)));
+        return undefined();
+    });
+    I.method("getShaderSource", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        return str(ctx->get_shader_source(webgl_handle_id(js_arg(a, 0), ctx)));
+    });
+    I.method("compileShader", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->compile_shader(webgl_handle_id(js_arg(a, 0), ctx));
+        return undefined();
+    });
+    I.method("getShaderParameter", 2, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        int out = 0; bool is_bool = false;
+        if (!ctx->get_shader_parameter(webgl_handle_id(js_arg(a, 0), ctx),
+                                       static_cast<uint32_t>(to_double(js_arg(a, 1))), out, is_bool)) {
+            return null();
+        }
+        return is_bool ? boolean(out != 0) : num(static_cast<double>(out));
+    });
+    I.method("getShaderInfoLog", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        return str(ctx->get_shader_info_log(webgl_handle_id(js_arg(a, 0), ctx)));
+    });
+    I.method("getShaderPrecisionFormat", 2, [](Realm& r, Args a) {
+        auto st = std::make_shared<WebGLPrecisionFormatState>();
+        const uint32_t prec = static_cast<uint32_t>(to_double(js_arg(a, 1)));
+        if (prec == webgl::LOW_INT || prec == webgl::MEDIUM_INT || prec == webgl::HIGH_INT) {
+            st->range_min = 31; st->range_max = 30; st->precision = 0;
+        }
+        return r.make("WebGLShaderPrecisionFormat", st);
+    });
+
+    I.method("createProgram", 0, [](Realm& r, Args) {
+        auto ctx = this_webgl_context_ptr();
+        return make_webgl_handle(r, "WebGLProgram", ctx, ctx->create_program());
+    });
+    I.method("deleteProgram", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->delete_program(webgl_handle_id(js_arg(a, 0), ctx));
+        return undefined();
+    });
+    I.method("isProgram", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        return boolean(ctx->is_program(webgl_handle_id(js_arg(a, 0), ctx)));
+    });
+    I.method("attachShader", 2, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->attach_shader(webgl_handle_id(js_arg(a, 0), ctx), webgl_handle_id(js_arg(a, 1), ctx));
+        return undefined();
+    });
+    I.method("detachShader", 2, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->detach_shader(webgl_handle_id(js_arg(a, 0), ctx), webgl_handle_id(js_arg(a, 1), ctx));
+        return undefined();
+    });
+    I.method("bindAttribLocation", 3, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->bind_attrib_location(webgl_handle_id(js_arg(a, 0), ctx),
+                                  static_cast<uint32_t>(to_double(js_arg(a, 1))), to_str(js_arg(a, 2)));
+        return undefined();
+    });
+    I.method("linkProgram", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->link_program(webgl_handle_id(js_arg(a, 0), ctx));
+        return undefined();
+    });
+    I.method("validateProgram", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->validate_program(webgl_handle_id(js_arg(a, 0), ctx));
+        return undefined();
+    });
+    I.method("useProgram", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->use_program(webgl_handle_id(js_arg(a, 0), ctx));
+        return undefined();
+    });
+    I.method("getProgramParameter", 2, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        int out = 0; bool is_bool = false;
+        if (!ctx->get_program_parameter(webgl_handle_id(js_arg(a, 0), ctx),
+                                        static_cast<uint32_t>(to_double(js_arg(a, 1))), out, is_bool)) {
+            return null();
+        }
+        return is_bool ? boolean(out != 0) : num(static_cast<double>(out));
+    });
+    I.method("getProgramInfoLog", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        return str(ctx->get_program_info_log(webgl_handle_id(js_arg(a, 0), ctx)));
+    });
+    I.method("getAttribLocation", 2, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        return num(static_cast<double>(ctx->get_attrib_location(webgl_handle_id(js_arg(a, 0), ctx), to_str(js_arg(a, 1)))));
+    });
+    I.method("getUniformLocation", 2, [](Realm& r, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        const uint32_t pid = webgl_handle_id(js_arg(a, 0), ctx);
+        const int loc = ctx->get_uniform_location(pid, to_str(js_arg(a, 1)));
+        if (loc < 0) return null();
+        auto st = std::make_shared<WebGLUniformLocationState>();
+        st->ctx = ctx;
+        st->program_id = pid;
+        st->location = loc;
+        return r.make("WebGLUniformLocation", st);
+    });
+    I.method("getActiveAttrib", 2, [](Realm& r, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        WebGLActiveVar info;
+        if (!ctx->get_active_attrib(webgl_handle_id(js_arg(a, 0), ctx),
+                                    static_cast<uint32_t>(to_double(js_arg(a, 1))), info)) return null();
+        auto st = std::make_shared<WebGLActiveInfoState>();
+        st->info = std::move(info);
+        return r.make("WebGLActiveInfo", st);
+    });
+    I.method("getActiveUniform", 2, [](Realm& r, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        WebGLActiveVar info;
+        if (!ctx->get_active_uniform(webgl_handle_id(js_arg(a, 0), ctx),
+                                     static_cast<uint32_t>(to_double(js_arg(a, 1))), info)) return null();
+        auto st = std::make_shared<WebGLActiveInfoState>();
+        st->info = std::move(info);
+        return r.make("WebGLActiveInfo", st);
+    });
+
+    auto uniform_loc_of = [](const JsValue& v, const std::shared_ptr<WebGLContext>& ctx) -> int {
+        if (v.is_nullish()) return -1;
+        if (auto* st = state_of<WebGLUniformLocationState>(v)) {
+            if (st->ctx.lock() == ctx && st->program_id == ctx->current_program_id()) return st->location;
+            ctx->set_error(webgl::INVALID_OPERATION);
+        }
+        return -1;
+    };
+
+    I.method("uniform1f", 2, [uniform_loc_of](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        float v = static_cast<float>(to_double(js_arg(a, 1)));
+        ctx->uniform_floats(uniform_loc_of(js_arg(a, 0), ctx), webgl::FLOAT, &v, 1, 1);
+        return undefined();
+    });
+    I.method("uniform2f", 3, [uniform_loc_of](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        float v[2] = {static_cast<float>(to_double(js_arg(a, 1))), static_cast<float>(to_double(js_arg(a, 2)))};
+        ctx->uniform_floats(uniform_loc_of(js_arg(a, 0), ctx), webgl::FLOAT_VEC2, v, 1, 2);
+        return undefined();
+    });
+    I.method("uniform3f", 4, [uniform_loc_of](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        float v[3] = {static_cast<float>(to_double(js_arg(a, 1))), static_cast<float>(to_double(js_arg(a, 2))),
+                      static_cast<float>(to_double(js_arg(a, 3)))};
+        ctx->uniform_floats(uniform_loc_of(js_arg(a, 0), ctx), webgl::FLOAT_VEC3, v, 1, 3);
+        return undefined();
+    });
+    I.method("uniform4f", 5, [uniform_loc_of](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        float v[4] = {static_cast<float>(to_double(js_arg(a, 1))), static_cast<float>(to_double(js_arg(a, 2))),
+                      static_cast<float>(to_double(js_arg(a, 3))), static_cast<float>(to_double(js_arg(a, 4)))};
+        ctx->uniform_floats(uniform_loc_of(js_arg(a, 0), ctx), webgl::FLOAT_VEC4, v, 1, 4);
+        return undefined();
+    });
+    I.method("uniform1i", 2, [uniform_loc_of](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        int v = static_cast<int>(to_double(js_arg(a, 1)));
+        ctx->uniform_ints(uniform_loc_of(js_arg(a, 0), ctx), webgl::INT, &v, 1, 1);
+        return undefined();
+    });
+    I.method("uniform2i", 3, [uniform_loc_of](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        int v[2] = {static_cast<int>(to_double(js_arg(a, 1))), static_cast<int>(to_double(js_arg(a, 2)))};
+        ctx->uniform_ints(uniform_loc_of(js_arg(a, 0), ctx), webgl::INT_VEC2, v, 1, 2);
+        return undefined();
+    });
+    I.method("uniform3i", 4, [uniform_loc_of](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        int v[3] = {static_cast<int>(to_double(js_arg(a, 1))), static_cast<int>(to_double(js_arg(a, 2))),
+                    static_cast<int>(to_double(js_arg(a, 3)))};
+        ctx->uniform_ints(uniform_loc_of(js_arg(a, 0), ctx), webgl::INT_VEC3, v, 1, 3);
+        return undefined();
+    });
+    I.method("uniform4i", 5, [uniform_loc_of](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        int v[4] = {static_cast<int>(to_double(js_arg(a, 1))), static_cast<int>(to_double(js_arg(a, 2))),
+                    static_cast<int>(to_double(js_arg(a, 3))), static_cast<int>(to_double(js_arg(a, 4)))};
+        ctx->uniform_ints(uniform_loc_of(js_arg(a, 0), ctx), webgl::INT_VEC4, v, 1, 4);
+        return undefined();
+    });
+    for (int comp = 1; comp <= 4; ++comp) {
+        static const char* kFNames[4] = {"uniform1fv", "uniform2fv", "uniform3fv", "uniform4fv"};
+        static const char* kINames[4] = {"uniform1iv", "uniform2iv", "uniform3iv", "uniform4iv"};
+        I.method(kFNames[comp - 1], 2, [uniform_loc_of, comp](Realm&, Args a) {
+            auto ctx = this_webgl_context_ptr();
+            auto vals = webgl_read_float_array(js_arg(a, 1));
+            if (static_cast<int>(vals.size()) >= comp) {
+                ctx->uniform_floats(uniform_loc_of(js_arg(a, 0), ctx), webgl::FLOAT,
+                                    vals.data(), static_cast<int>(vals.size()) / comp, comp);
+            }
+            return undefined();
+        });
+        I.method(kINames[comp - 1], 2, [uniform_loc_of, comp](Realm&, Args a) {
+            auto ctx = this_webgl_context_ptr();
+            auto vals = webgl_read_int_array(js_arg(a, 1));
+            if (static_cast<int>(vals.size()) >= comp) {
+                ctx->uniform_ints(uniform_loc_of(js_arg(a, 0), ctx), webgl::INT,
+                                  vals.data(), static_cast<int>(vals.size()) / comp, comp);
+            }
+            return undefined();
+        });
+    }
+    for (int dim = 2; dim <= 4; ++dim) {
+        static const char* kMNames[3] = {"uniformMatrix2fv", "uniformMatrix3fv", "uniformMatrix4fv"};
+        I.method(kMNames[dim - 2], 3, [uniform_loc_of, dim](Realm&, Args a) {
+            auto ctx = this_webgl_context_ptr();
+            auto vals = webgl_read_float_array(js_arg(a, 2));
+            if (static_cast<int>(vals.size()) >= dim * dim) {
+                ctx->uniform_matrix(uniform_loc_of(js_arg(a, 0), ctx), dim,
+                                    to_bool(js_arg(a, 1)), vals.data(), 1);
+            }
+            return undefined();
+        });
+    }
+
+    // Buffers & Vertex Attributes
+    I.method("createBuffer", 0, [](Realm& r, Args) {
+        auto ctx = this_webgl_context_ptr();
+        return make_webgl_handle(r, "WebGLBuffer", ctx, ctx->create_buffer());
+    });
+    I.method("deleteBuffer", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->delete_buffer(webgl_handle_id(js_arg(a, 0), ctx));
+        return undefined();
+    });
+    I.method("isBuffer", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        return boolean(ctx->is_buffer(webgl_handle_id(js_arg(a, 0), ctx)));
+    });
+    I.method("bindBuffer", 2, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->bind_buffer(static_cast<uint32_t>(to_double(js_arg(a, 0))), webgl_handle_id(js_arg(a, 1), ctx));
+        return undefined();
+    });
+    I.method("bufferData", 3, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        const uint32_t target = static_cast<uint32_t>(to_double(js_arg(a, 0)));
+        const JsValue src = js_arg(a, 1);
+        const uint32_t usage = static_cast<uint32_t>(to_double(js_arg(a, 2)));
+        if (src.type == JsType::Number) {
+            const double sz = to_double(src);
+            if (sz < 0.0) { ctx->set_error(webgl::INVALID_VALUE); return undefined(); }
+            ctx->buffer_data_size(target, static_cast<std::size_t>(sz), usage);
+        } else if (is_buffer_source(src)) {
+            std::string bytes;
+            if (typed_array_bytes(src, bytes)) {
+                ctx->buffer_data_bytes(target, reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size(), usage);
+            }
+        } else if (src.is_nullish()) {
+            ctx->buffer_data_size(target, 0, usage);
+        }
+        return undefined();
+    });
+    I.method("bufferSubData", 3, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        const uint32_t target = static_cast<uint32_t>(to_double(js_arg(a, 0)));
+        const double off = to_double(js_arg(a, 1));
+        if (off < 0.0) { ctx->set_error(webgl::INVALID_VALUE); return undefined(); }
+        std::string bytes;
+        if (typed_array_bytes(js_arg(a, 2), bytes)) {
+            ctx->buffer_sub_data(target, static_cast<std::size_t>(off),
+                                 reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+        }
+        return undefined();
+    });
+    I.method("getBufferParameter", 2, [](Realm&, Args a) {
+        return num(static_cast<double>(this_webgl_context().get_buffer_parameter(
+            static_cast<uint32_t>(to_double(js_arg(a, 0))), static_cast<uint32_t>(to_double(js_arg(a, 1))))));
+    });
+
+    I.method("enableVertexAttribArray", 1, [](Realm&, Args a) {
+        this_webgl_context().enable_vertex_attrib_array(static_cast<uint32_t>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("disableVertexAttribArray", 1, [](Realm&, Args a) {
+        this_webgl_context().disable_vertex_attrib_array(static_cast<uint32_t>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("vertexAttribPointer", 6, [](Realm&, Args a) {
+        this_webgl_context().vertex_attrib_pointer(
+            static_cast<uint32_t>(to_double(js_arg(a, 0))), static_cast<int>(to_double(js_arg(a, 1))),
+            static_cast<uint32_t>(to_double(js_arg(a, 2))), to_bool(js_arg(a, 3)),
+            static_cast<int>(to_double(js_arg(a, 4))),
+            static_cast<std::size_t>(std::max(0.0, to_double(js_arg(a, 5)))));
+        return undefined();
+    });
+    I.method("vertexAttrib1f", 2, [](Realm&, Args a) {
+        this_webgl_context().vertex_attrib_4f(static_cast<uint32_t>(to_double(js_arg(a, 0))),
+            static_cast<float>(to_double(js_arg(a, 1))), 0.0f, 0.0f, 1.0f);
+        return undefined();
+    });
+    I.method("vertexAttrib2f", 3, [](Realm&, Args a) {
+        this_webgl_context().vertex_attrib_4f(static_cast<uint32_t>(to_double(js_arg(a, 0))),
+            static_cast<float>(to_double(js_arg(a, 1))), static_cast<float>(to_double(js_arg(a, 2))), 0.0f, 1.0f);
+        return undefined();
+    });
+    I.method("vertexAttrib3f", 4, [](Realm&, Args a) {
+        this_webgl_context().vertex_attrib_4f(static_cast<uint32_t>(to_double(js_arg(a, 0))),
+            static_cast<float>(to_double(js_arg(a, 1))), static_cast<float>(to_double(js_arg(a, 2))),
+            static_cast<float>(to_double(js_arg(a, 3))), 1.0f);
+        return undefined();
+    });
+    I.method("vertexAttrib4f", 5, [](Realm&, Args a) {
+        this_webgl_context().vertex_attrib_4f(static_cast<uint32_t>(to_double(js_arg(a, 0))),
+            static_cast<float>(to_double(js_arg(a, 1))), static_cast<float>(to_double(js_arg(a, 2))),
+            static_cast<float>(to_double(js_arg(a, 3))), static_cast<float>(to_double(js_arg(a, 4))));
+        return undefined();
+    });
+
+    // Textures
+    I.method("createTexture", 0, [](Realm& r, Args) {
+        auto ctx = this_webgl_context_ptr();
+        return make_webgl_handle(r, "WebGLTexture", ctx, ctx->create_texture());
+    });
+    I.method("deleteTexture", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->delete_texture(webgl_handle_id(js_arg(a, 0), ctx));
+        return undefined();
+    });
+    I.method("isTexture", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        return boolean(ctx->is_texture(webgl_handle_id(js_arg(a, 0), ctx)));
+    });
+    I.method("activeTexture", 1, [](Realm&, Args a) {
+        this_webgl_context().active_texture(static_cast<uint32_t>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+    I.method("bindTexture", 2, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->bind_texture(static_cast<uint32_t>(to_double(js_arg(a, 0))), webgl_handle_id(js_arg(a, 1), ctx));
+        return undefined();
+    });
+    I.method("texParameteri", 3, [](Realm&, Args a) {
+        this_webgl_context().tex_parameteri(static_cast<uint32_t>(to_double(js_arg(a, 0))),
+            static_cast<uint32_t>(to_double(js_arg(a, 1))), static_cast<int>(to_double(js_arg(a, 2))));
+        return undefined();
+    });
+    I.method("texParameterf", 3, [](Realm&, Args a) {
+        this_webgl_context().tex_parameteri(static_cast<uint32_t>(to_double(js_arg(a, 0))),
+            static_cast<uint32_t>(to_double(js_arg(a, 1))), static_cast<int>(to_double(js_arg(a, 2))));
+        return undefined();
+    });
+    I.method("texImage2D", 6, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        if (a.size() >= 9) {
+            const uint32_t target = static_cast<uint32_t>(to_double(a[0]));
+            const int level = static_cast<int>(to_double(a[1]));
+            const uint32_t ifmt = static_cast<uint32_t>(to_double(a[2]));
+            const int w = static_cast<int>(to_double(a[3]));
+            const int h = static_cast<int>(to_double(a[4]));
+            const int border = static_cast<int>(to_double(a[5]));
+            const uint32_t fmt = static_cast<uint32_t>(to_double(a[6]));
+            const uint32_t type = static_cast<uint32_t>(to_double(a[7]));
+            std::string bytes;
+            if (!a[8].is_nullish() && typed_array_bytes(a[8], bytes)) {
+                ctx->tex_image_2d(target, level, ifmt, w, h, border, fmt, type,
+                                  reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+            } else {
+                ctx->tex_image_2d(target, level, ifmt, w, h, border, fmt, type, nullptr, 0);
+            }
+        } else if (a.size() >= 6) {
+            const uint32_t target = static_cast<uint32_t>(to_double(a[0]));
+            const int level = static_cast<int>(to_double(a[1]));
+            const uint32_t ifmt = static_cast<uint32_t>(to_double(a[2]));
+            const uint32_t fmt = static_cast<uint32_t>(to_double(a[3]));
+            const uint32_t type = static_cast<uint32_t>(to_double(a[4]));
+            if (auto* img = state_of<ImageDataState>(a[5])) {
+                std::string bytes;
+                if (typed_array_bytes(img->data, bytes)) {
+                    ctx->tex_image_2d(target, level, ifmt, img->width, img->height, 0, fmt, type,
+                                      reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+                }
+            } else if (auto el = element_of(a[5]); el && is_canvas(*el) && el->canvas_context() &&
+                       el->canvas_context()->image_data()) {
+                auto im = el->canvas_context()->image_data();
+                std::vector<uint8_t> rgba(static_cast<std::size_t>(im->width) * im->height * 4, 0);
+                for (std::size_t i = 0; i < im->pixels.size() && i * 4 + 3 < rgba.size(); ++i) {
+                    const uint32_t p = im->pixels[i];
+                    rgba[i * 4] = static_cast<uint8_t>((p >> 16) & 0xFF);
+                    rgba[i * 4 + 1] = static_cast<uint8_t>((p >> 8) & 0xFF);
+                    rgba[i * 4 + 2] = static_cast<uint8_t>(p & 0xFF);
+                    rgba[i * 4 + 3] = static_cast<uint8_t>((p >> 24) & 0xFF);
+                }
+                ctx->tex_image_2d(target, level, ifmt, im->width, im->height, 0, fmt, type,
+                                  rgba.data(), rgba.size());
+            }
+        }
+        return undefined();
+    });
+    I.method("texSubImage2D", 7, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        if (a.size() >= 9) {
+            std::string bytes;
+            if (typed_array_bytes(a[8], bytes)) {
+                ctx->tex_sub_image_2d(
+                    static_cast<uint32_t>(to_double(a[0])), static_cast<int>(to_double(a[1])),
+                    static_cast<int>(to_double(a[2])), static_cast<int>(to_double(a[3])),
+                    static_cast<int>(to_double(a[4])), static_cast<int>(to_double(a[5])),
+                    static_cast<uint32_t>(to_double(a[6])), static_cast<uint32_t>(to_double(a[7])),
+                    reinterpret_cast<const uint8_t*>(bytes.data()), bytes.size());
+            }
+        }
+        return undefined();
+    });
+    I.method("generateMipmap", 1, [](Realm&, Args a) {
+        this_webgl_context().generate_mipmap(static_cast<uint32_t>(to_double(js_arg(a, 0))));
+        return undefined();
+    });
+
+    // Framebuffers & Renderbuffers
+    I.method("createFramebuffer", 0, [](Realm& r, Args) {
+        auto ctx = this_webgl_context_ptr();
+        return make_webgl_handle(r, "WebGLFramebuffer", ctx, ctx->create_framebuffer());
+    });
+    I.method("deleteFramebuffer", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->delete_framebuffer(webgl_handle_id(js_arg(a, 0), ctx));
+        return undefined();
+    });
+    I.method("isFramebuffer", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        return boolean(ctx->is_framebuffer(webgl_handle_id(js_arg(a, 0), ctx)));
+    });
+    I.method("bindFramebuffer", 2, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->bind_framebuffer(static_cast<uint32_t>(to_double(js_arg(a, 0))), webgl_handle_id(js_arg(a, 1), ctx));
+        return undefined();
+    });
+    I.method("createRenderbuffer", 0, [](Realm& r, Args) {
+        auto ctx = this_webgl_context_ptr();
+        return make_webgl_handle(r, "WebGLRenderbuffer", ctx, ctx->create_renderbuffer());
+    });
+    I.method("deleteRenderbuffer", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->delete_renderbuffer(webgl_handle_id(js_arg(a, 0), ctx));
+        return undefined();
+    });
+    I.method("isRenderbuffer", 1, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        return boolean(ctx->is_renderbuffer(webgl_handle_id(js_arg(a, 0), ctx)));
+    });
+    I.method("bindRenderbuffer", 2, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->bind_renderbuffer(static_cast<uint32_t>(to_double(js_arg(a, 0))), webgl_handle_id(js_arg(a, 1), ctx));
+        return undefined();
+    });
+    I.method("renderbufferStorage", 4, [](Realm&, Args a) {
+        this_webgl_context().renderbuffer_storage(
+            static_cast<uint32_t>(to_double(js_arg(a, 0))), static_cast<uint32_t>(to_double(js_arg(a, 1))),
+            static_cast<int>(to_double(js_arg(a, 2))), static_cast<int>(to_double(js_arg(a, 3))));
+        return undefined();
+    });
+    I.method("framebufferTexture2D", 5, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->framebuffer_texture_2d(
+            static_cast<uint32_t>(to_double(js_arg(a, 0))), static_cast<uint32_t>(to_double(js_arg(a, 1))),
+            static_cast<uint32_t>(to_double(js_arg(a, 2))), webgl_handle_id(js_arg(a, 3), ctx),
+            static_cast<int>(to_double(js_arg(a, 4))));
+        return undefined();
+    });
+    I.method("framebufferRenderbuffer", 4, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        ctx->framebuffer_renderbuffer(
+            static_cast<uint32_t>(to_double(js_arg(a, 0))), static_cast<uint32_t>(to_double(js_arg(a, 1))),
+            static_cast<uint32_t>(to_double(js_arg(a, 2))), webgl_handle_id(js_arg(a, 3), ctx));
+        return undefined();
+    });
+    I.method("checkFramebufferStatus", 1, [](Realm&, Args a) {
+        return num(static_cast<double>(this_webgl_context().check_framebuffer_status(
+            static_cast<uint32_t>(to_double(js_arg(a, 0))))));
+    });
+
+    // Draw & Readback
+    I.method("drawArrays", 3, [](Realm&, Args a) {
+        this_webgl_context().draw_arrays(
+            static_cast<uint32_t>(to_double(js_arg(a, 0))),
+            static_cast<int>(to_double(js_arg(a, 1))),
+            static_cast<int>(to_double(js_arg(a, 2))));
+        return undefined();
+    });
+    I.method("drawElements", 4, [](Realm&, Args a) {
+        this_webgl_context().draw_elements(
+            static_cast<uint32_t>(to_double(js_arg(a, 0))),
+            static_cast<int>(to_double(js_arg(a, 1))),
+            static_cast<uint32_t>(to_double(js_arg(a, 2))),
+            static_cast<std::size_t>(std::max(0.0, to_double(js_arg(a, 3)))));
+        return undefined();
+    });
+    I.method("readPixels", 7, [](Realm&, Args a) {
+        auto ctx = this_webgl_context_ptr();
+        const int x = static_cast<int>(to_double(js_arg(a, 0)));
+        const int y = static_cast<int>(to_double(js_arg(a, 1)));
+        const int w = static_cast<int>(to_double(js_arg(a, 2)));
+        const int h = static_cast<int>(to_double(js_arg(a, 3)));
+        const uint32_t fmt = static_cast<uint32_t>(to_double(js_arg(a, 4)));
+        const uint32_t type = static_cast<uint32_t>(to_double(js_arg(a, 5)));
+        const JsValue dst = js_arg(a, 6);
+        std::vector<uint8_t> rgba;
+        if (!ctx->read_pixels(x, y, w, h, fmt, type, rgba)) return undefined();
+        if (!rgba.empty() && !typed_array_write(dst, rgba.data(), rgba.size())) {
+            ctx->set_error(webgl::INVALID_OPERATION);
+        }
+        return undefined();
+    });
+
+    I.method("getParameter", 1, [](Realm&, Args a) {
+        auto& ctx = this_webgl_context();
+        const uint32_t p = static_cast<uint32_t>(to_double(js_arg(a, 0)));
+        auto arr_f4 = [](const std::array<float, 4>& v) {
+            JsValue r = JsValue::make_array();
+            for (int i = 0; i < 4; ++i) r.set_property(std::to_string(i), num(v[i]));
+            return r;
+        };
+        auto arr_i4 = [](const std::array<int, 4>& v) {
+            JsValue r = JsValue::make_array();
+            for (int i = 0; i < 4; ++i) r.set_property(std::to_string(i), num(static_cast<double>(v[i])));
+            return r;
+        };
+        switch (p) {
+            case webgl::VENDOR: return str("Litebird");
+            case webgl::RENDERER: return str("Litebird Software WebGL");
+            case webgl::VERSION: return str(ctx.is_webgl2() ? "WebGL 2.0 (Litebird)" : "WebGL 1.0 (Litebird)");
+            case webgl::SHADING_LANGUAGE_VERSION:
+                return str(ctx.is_webgl2() ? "WebGL GLSL ES 3.00" : "WebGL GLSL ES 1.00");
+            case webgl::MAX_TEXTURE_SIZE:
+            case webgl::MAX_RENDERBUFFER_SIZE: return num(WebGLContext::kMaxTextureSize);
+            case webgl::MAX_VERTEX_ATTRIBS: return num(WebGLContext::kMaxAttribs);
+            case webgl::MAX_TEXTURE_IMAGE_UNITS:
+            case webgl::MAX_VERTEX_TEXTURE_IMAGE_UNITS:
+            case webgl::MAX_COMBINED_TEXTURE_IMAGE_UNITS: return num(WebGLContext::kMaxTextureUnits);
+            case webgl::MAX_VERTEX_UNIFORM_VECTORS:
+            case webgl::MAX_FRAGMENT_UNIFORM_VECTORS: return num(128);
+            case webgl::MAX_VARYING_VECTORS: return num(16);
+            case webgl::MAX_VIEWPORT_DIMS: {
+                JsValue r = JsValue::make_array();
+                r.set_property("0", num(WebGLContext::kMaxTextureSize));
+                r.set_property("1", num(WebGLContext::kMaxTextureSize));
+                return r;
+            }
+            case webgl::VIEWPORT: return arr_i4(ctx.viewport_box());
+            case webgl::SCISSOR_BOX: return arr_i4(ctx.scissor_box());
+            case webgl::COLOR_CLEAR_VALUE: return arr_f4(ctx.clear_color_value());
+            case webgl::BLEND_COLOR: return arr_f4(ctx.blend_color_value());
+            case webgl::DEPTH_CLEAR_VALUE: return num(ctx.clear_depth_value());
+            case webgl::DEPTH_FUNC: return num(static_cast<double>(ctx.depth_func_value()));
+            case webgl::DEPTH_WRITEMASK: return boolean(ctx.depth_mask_value());
+            case webgl::COLOR_WRITEMASK: {
+                auto m = ctx.color_mask_value();
+                JsValue r = JsValue::make_array();
+                for (int i = 0; i < 4; ++i) r.set_property(std::to_string(i), boolean(m[i]));
+                return r;
+            }
+            case webgl::CULL_FACE_MODE: return num(static_cast<double>(ctx.cull_face_value()));
+            case webgl::FRONT_FACE: return num(static_cast<double>(ctx.front_face_value()));
+            case webgl::LINE_WIDTH: return num(ctx.line_width_value());
+            case webgl::ACTIVE_TEXTURE: return num(static_cast<double>(ctx.active_texture_enum()));
+            case webgl::BLEND_SRC_RGB: return num(static_cast<double>(ctx.blend_src_rgb()));
+            case webgl::BLEND_DST_RGB: return num(static_cast<double>(ctx.blend_dst_rgb()));
+            case webgl::BLEND_SRC_ALPHA: return num(static_cast<double>(ctx.blend_src_alpha()));
+            case webgl::BLEND_DST_ALPHA: return num(static_cast<double>(ctx.blend_dst_alpha()));
+            case webgl::BLEND_EQUATION_RGB: return num(static_cast<double>(ctx.blend_eq_rgb()));
+            case webgl::BLEND_EQUATION_ALPHA: return num(static_cast<double>(ctx.blend_eq_alpha()));
+            case webgl::DEPTH_RANGE: {
+                auto dr = ctx.depth_range_value();
+                JsValue r = JsValue::make_array();
+                r.set_property("0", num(dr[0]));
+                r.set_property("1", num(dr[1]));
+                return r;
+            }
+            case webgl::DEPTH_TEST:
+            case webgl::SCISSOR_TEST:
+            case webgl::BLEND:
+            case webgl::CULL_FACE:
+            case webgl::DITHER:
+            case webgl::STENCIL_TEST:
+                return boolean(ctx.is_enabled(p));
+            default: return null();
+        }
+    });
+
+    if (webgl2) {
+        I.method("createVertexArray", 0, [](Realm& r, Args) {
+            auto ctx = this_webgl_context_ptr();
+            return make_webgl_handle(r, "WebGLVertexArrayObject", ctx, ctx->create_vertex_array());
+        });
+        I.method("deleteVertexArray", 1, [](Realm&, Args a) {
+            auto ctx = this_webgl_context_ptr();
+            ctx->delete_vertex_array(webgl_handle_id(js_arg(a, 0), ctx));
+            return undefined();
+        });
+        I.method("isVertexArray", 1, [](Realm&, Args a) {
+            auto ctx = this_webgl_context_ptr();
+            return boolean(ctx->is_vertex_array(webgl_handle_id(js_arg(a, 0), ctx)));
+        });
+        I.method("bindVertexArray", 1, [](Realm&, Args a) {
+            auto ctx = this_webgl_context_ptr();
+            ctx->bind_vertex_array(webgl_handle_id(js_arg(a, 0), ctx));
+            return undefined();
+        });
+    }
+}
+
+void setup_webgl_rendering_context(Iface& I) { install_webgl_common_members(I, false); }
+void setup_webgl2_rendering_context(Iface& I) { install_webgl_common_members(I, true); }
+
 void setup_canvas(Iface& I) {
     ElementMembers<&is_canvas> C(I);
     for (const char* name : {"width", "height"}) {
@@ -1563,19 +2630,36 @@ void setup_canvas(Iface& I) {
     }
     C.method("getContext", 1, [](Realm& r, Element& el, Args args) {
         require_args(args, 1, "HTMLCanvasElement.getContext");
-        const std::string type = ascii_lower(to_str(args[0]));
-        if (type != "2d") return null();
-        auto context = el.get_or_create_canvas_context_2d();
-        if (!context) return null();
-        return cached(wrap(r, el), "context2d", [&]() {
-            JsValue object = context->to_js_value(context);
-            // ImageData needs a realm, so the three methods that speak it are
-            // added here rather than in Canvas2D.cpp.
-            install_image_data_methods(r, object, context);
-            install_draw_image(r, object, context);
-            install_canvas_reset(r, object, context);
-            install_canvas_create_pattern(r, object, context);
-            return object;
+        const std::string type = normalize_canvas_context_type(to_str(args[0]));
+        if (type.empty()) return null();
+        JsValue wrapper = wrap(r, el);
+        if (const JsValue* locked = slot(wrapper, "contextKind")) {
+            if (to_str(*locked) != type) return null();
+        }
+        auto backing = el.get_or_create_canvas_context_2d();
+        if (!backing) return null();
+        set_slot(wrapper, "contextKind", str(type));
+        if (type == "2d") {
+            return cached(wrapper, "context2d", [&]() {
+                JsValue object = backing->to_js_value(backing);
+                // ImageData needs a realm, so the three methods that speak it are
+                // added here rather than in Canvas2D.cpp.
+                install_image_data_methods(r, object, backing);
+                install_draw_image(r, object, backing);
+                // Phase 280: `reset()` and `createPattern()` are object-level
+                // state, so they are installed here with the rest.
+                install_canvas_reset(r, object, backing);
+                install_canvas_create_pattern(r, object, backing);
+                return object;
+            });
+        }
+        const bool is_gl2 = (type == "webgl2");
+        return cached(wrapper, is_gl2 ? "contextWebGL2" : "contextWebGL", [&]() {
+            auto st = std::make_shared<WebGLContextState>();
+            st->ctx = std::make_shared<WebGLContext>(backing, is_gl2);
+            JsValue gl = r.make(is_gl2 ? "WebGL2RenderingContext" : "WebGLRenderingContext", st);
+            set_slot(gl, "canvas", wrapper);
+            return gl;
         });
     });
     C.method("toDataURL", 0, [](Realm&, Element& el, Args args) { return canvas_to_data_url(el, args); });
@@ -1660,8 +2744,10 @@ void setup_media(Iface& I) {
 struct OffscreenCanvasState : JsExotic {
     int width = 0;
     int height = 0;
+    std::string context_kind;
     decltype(std::declval<Element>().get_or_create_canvas_context_2d()) context;
     JsValue context_obj = JsValue::make_undefined();
+    void trace(Heap& heap) override { heap.mark_value(context_obj); }
 };
 
 int clamp_offscreen_dim(const JsValue& value) {
@@ -1695,14 +2781,26 @@ void setup_offscreen_canvas(Iface& I) {
     I.method("getContext", 1, [](Realm& r, Args args) {
         require_args(args, 1, "OffscreenCanvas.getContext");
         auto& st = this_state<OffscreenCanvasState>("OffscreenCanvas");
-        if (ascii_lower(to_str(args[0])) != "2d") return null();
+        const std::string type = normalize_canvas_context_type(to_str(args[0]));
+        if (type.empty()) return null();
+        if (!st.context_kind.empty() && st.context_kind != type) return null();
         if (!st.context) {
             using CtxPtr = decltype(st.context);
             st.context = std::make_shared<CtxPtr::element_type>(std::max(st.width, 1), std::max(st.height, 1));
-            JsValue object = st.context->to_js_value(st.context);
-            install_image_data_methods(r, object, st.context);
-            install_draw_image(r, object, st.context);
-            st.context_obj = object;
+            st.context_kind = type;
+            if (type == "2d") {
+                JsValue object = st.context->to_js_value(st.context);
+                install_image_data_methods(r, object, st.context);
+                install_draw_image(r, object, st.context);
+                st.context_obj = object;
+            } else {
+                const bool is_gl2 = (type == "webgl2");
+                auto gl_st = std::make_shared<WebGLContextState>();
+                gl_st->ctx = std::make_shared<WebGLContext>(st.context, is_gl2);
+                JsValue gl = r.make(is_gl2 ? "WebGL2RenderingContext" : "WebGLRenderingContext", gl_st);
+                set_slot(gl, "canvas", JsValue::current_this());
+                st.context_obj = gl;
+            }
         }
         return st.context_obj;
     });
@@ -2357,6 +3455,18 @@ void register_html_interfaces() {
     register_interface({"HTMLCanvasElement", "HTMLElement", setup_canvas, element_ctor, 0, nullptr});
     register_interface({"OffscreenCanvas", nullptr, setup_offscreen_canvas, construct_offscreen_canvas, 2, nullptr});
     register_interface({"ImageData", nullptr, setup_image_data, construct_image_data, 2, nullptr});
+    register_interface({"WebGLRenderingContext", nullptr, setup_webgl_rendering_context, nullptr, 0, nullptr});
+    register_interface({"WebGL2RenderingContext", nullptr, setup_webgl2_rendering_context, nullptr, 0, nullptr});
+    register_interface({"WebGLShader", nullptr, nullptr, nullptr, 0, nullptr});
+    register_interface({"WebGLProgram", nullptr, nullptr, nullptr, 0, nullptr});
+    register_interface({"WebGLBuffer", nullptr, nullptr, nullptr, 0, nullptr});
+    register_interface({"WebGLTexture", nullptr, nullptr, nullptr, 0, nullptr});
+    register_interface({"WebGLFramebuffer", nullptr, nullptr, nullptr, 0, nullptr});
+    register_interface({"WebGLRenderbuffer", nullptr, nullptr, nullptr, 0, nullptr});
+    register_interface({"WebGLUniformLocation", nullptr, nullptr, nullptr, 0, nullptr});
+    register_interface({"WebGLActiveInfo", nullptr, setup_webgl_active_info, nullptr, 0, nullptr});
+    register_interface({"WebGLShaderPrecisionFormat", nullptr, setup_webgl_precision_format, nullptr, 0, nullptr});
+    register_interface({"WebGLVertexArrayObject", nullptr, nullptr, nullptr, 0, nullptr});
     register_interface({"HTMLMediaElement", "HTMLElement", setup_media, element_ctor, 0, nullptr});
     register_interface({"HTMLAudioElement", "HTMLMediaElement", nullptr, element_ctor, 0, nullptr});
     register_interface({"HTMLVideoElement", "HTMLMediaElement", setup_video, element_ctor, 0, nullptr});

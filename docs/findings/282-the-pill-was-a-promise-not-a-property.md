@@ -1,4 +1,4 @@
-# Finding 273 — the pill was a promise, not a property
+# Finding 282 — the pill was a promise, not a property
 
 **Severity:** correctness of observable state. `Function.prototype` did not have
 the `caller`/`arguments` pair §10.2.6 puts there; the engine answered for it

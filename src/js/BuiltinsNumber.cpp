@@ -397,6 +397,25 @@ void install_number_builtins(JsIntrinsics& realm) {
     def("acosh", math_unary("acosh", [](double x) { return std::acosh(x); }));
     def("atanh", math_unary("atanh", [](double x) { return std::atanh(x); }));
     def("fround", math_unary("fround", [](double x) { return static_cast<double>(static_cast<float>(x)); }));
+    // Round directly from binary64 to binary16, avoiding a binary32
+    // intermediate (which can double-round a value just off a midpoint).
+    // Scaling by a power of two is exact; floor and the tie comparison are
+    // independent of the host floating-point rounding mode.
+    def("f16round", math_unary("f16round", [](double x) {
+        if (!std::isfinite(x) || x == 0.0) return x;
+        const double magnitude = std::fabs(x);
+        if (magnitude >= 65520.0) return std::copysign(kInfinity, x);
+        int exponent = 0;
+        std::frexp(magnitude, &exponent);
+        const int step_exponent = std::max(-24, exponent - 11);
+        const double units = std::ldexp(magnitude, -step_exponent);
+        double rounded = std::floor(units);
+        const double fraction = units - rounded;
+        if (fraction > 0.5 || (fraction == 0.5 && std::fmod(rounded, 2.0) != 0.0)) {
+            rounded += 1.0;
+        }
+        return std::copysign(std::ldexp(rounded, step_exponent), x);
+    }));
     def("clz32", math_unary("clz32", [](double x) {
         uint32_t v = js_to_uint32(x);
         int count = 0;

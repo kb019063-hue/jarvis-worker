@@ -1096,6 +1096,28 @@ void JsInterpreter::init_language_builtins() {
     });
     function_ctor.define_property("prototype", js_object_value(m_realm->function_proto), 0);
     js_define_hidden(m_realm->function_proto, "constructor", function_ctor);
+
+    // The poison pill: `caller` and `arguments` are a pair of throwing
+    // accessors on %Function.prototype% (§10.2.4/§10.2.6). Every function
+    // inherits them, which is why `'caller' in f` is true for an arrow and
+    // `f.caller` throws; a sloppy ordinary function shadows them with its own
+    // `null` data properties (§10.2.5), which `make_function` installs.
+    //
+    // They must be *inherited*, never own: `forbidden-ext` asserts
+    // `hasOwnProperty("caller") === false` on a strict function. So the
+    // attributes are `Configurable` only — a configurable, non-enumerable
+    // accessor that a script may delete or redefine, as the standard has it.
+    {
+        JsValue thrower = js_make_native("", 0, [](const std::vector<JsValue>&) -> JsValue {
+            js_throw_type_error("'caller', 'callee', and 'arguments' properties may not be accessed on strict "
+                                "mode functions or the arguments objects for calls to them");
+        });
+        js_mark_as_method(thrower);
+        JsValue function_proto = JsValue::make_object(m_realm->function_proto);
+        for (const char* key : {"caller", "arguments"}) {
+            function_proto.define_accessor(key, thrower, thrower, PropertyMap::Configurable);
+        }
+    }
     m_global_env->define("Function", function_ctor);
 
     // The global object. `window`, `self` and `globalThis` are the same object,

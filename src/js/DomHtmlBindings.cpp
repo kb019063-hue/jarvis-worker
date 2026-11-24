@@ -1287,11 +1287,11 @@ void install_draw_image(Realm& r, JsValue context_object,
 // support, and what this method answered for *every* type before it did
 // anything at all.
 //
-// Nothing here can taint a canvas yet: `drawImage`, `ImageBitmap` and
-// `Response.arrayBuffer()` are all still open, so every pixel a canvas holds
-// was put there by a script's own drawing. When one of them lands it has to set
-// the origin-clean flag this method must consult; until then there is no flag
-// to read.
+// `drawImage` draws from sources that carry the origin-clean bit
+// (Phase 237): an `<img>` whose fetch was not CORS-same-origin, a canvas or
+// an ImageBitmap that is itself not clean, clears the flag this method must
+// consult. A bitmap that never saw one of those holds only a script's own
+// drawing and is clean.
 
 std::string ascii_trimmed(std::string_view text) {
     const auto blank = [](char c) {
@@ -1394,6 +1394,63 @@ JsValue canvas_to_data_url(Element& el, Args args) {
     return str("data:" + canonical + ";base64," + base64_encode(png.data(), png.size()));
 }
 
+/// The same serialization as `canvas_to_data_url`, into a `Blob`, with the
+/// callback fired in a task of its own (WHATWG HTML §4.12.5.4). The engine
+/// encodes one type, `image/png`; anything else — a type with no encoder, a
+/// string that is not a MIME type, a bitmap there is nothing to put in a
+/// Blob — hands the callback `null`, the answer the encoding failure takes,
+/// rather than a promise the page can neither use nor detect. The quality
+/// argument is accepted and ignored: it selects between lossy encoders, of
+/// which there are none.
+JsValue canvas_to_blob(Realm& r, Element& el, Args args) {
+    require_args(args, 1, "HTMLCanvasElement.toBlob");
+    const JsValue callback = js_arg(args, 0);
+    if (!callback.is_callable()) {
+        js_throw_type_error(
+            "Failed to execute 'toBlob' on 'HTMLCanvasElement': parameter 1 is not of type 'Function'.");
+    }
+    // Only an omitted type means the default, exactly as `toDataURL` reads it:
+    // an explicit `null` is the string "null", which is not a MIME type.
+    std::string type = "image/png";
+    if (args.size() > 1 && !args[1].is_undefined()) type = to_str(args[1]);
+
+    // §4.12.5.1 and §4.12.5.4: an unclean bitmap is not handed back,
+    // whatever type was asked for. The check comes before the type is looked
+    // at, because the pixels are what is protected, not the encoding — the
+    // same rule `toDataURL()` enforces, and the reason this method is part
+    // of the origin-clean flag's contract rather than an inconvenience.
+    if (auto context = el.canvas_context(); context && !context->origin_clean()) {
+        throw_dom(r, "SecurityError",
+                  "Failed to execute 'toBlob' on 'HTMLCanvasElement': the canvas has been tainted by "
+                  "cross-origin data.");
+    }
+
+    std::string canonical;
+    std::string bytes;
+    if (png_mime_type(type, canonical)) {
+        if (const std::shared_ptr<ImageData> bitmap = canvas_bitmap_for_serialization(el);
+            bitmap && bitmap->is_valid()) {
+            std::vector<uint8_t> png;
+            if (ImageDecoder::encode_png(*bitmap, png)) {
+                bytes.assign(reinterpret_cast<const char*>(png.data()), png.size());
+            }
+        }
+    }
+    const bool produced = !bytes.empty();
+    // The callback runs in its own task, with the blob (or null when the
+    // encoding failed): a script that did not expect a synchronous call and
+    // a script that did both see the standard's shape.
+    Realm* realm = &r;
+    EventLoop::default_loop().post_task(
+        [realm, callback, bytes = std::move(bytes), canonical = std::move(canonical), produced]() {
+            if (!realm->alive) return;
+            JsValue argument = produced ? make_blob(*realm, bytes, canonical) : null();
+            js_call(callback, JsValue(), {argument});
+        },
+        {js_roots({callback})});
+    return undefined();
+}
+
 void setup_canvas(Iface& I) {
     ElementMembers<&is_canvas> C(I);
     for (const char* name : {"width", "height"}) {
@@ -1434,6 +1491,7 @@ void setup_canvas(Iface& I) {
         });
     });
     C.method("toDataURL", 0, [](Realm&, Element& el, Args args) { return canvas_to_data_url(el, args); });
+    C.method("toBlob", 1, [](Realm& r, Element& el, Args args) { return canvas_to_blob(r, el, args); });
 }
 
 void setup_media(Iface& I) {

@@ -733,7 +733,167 @@ bool svg_fits_to_view_box(const Node& node) {
     return tag == "svg" || tag == "symbol" || tag == "marker" || tag == "pattern" || tag == "view";
 }
 
+// `preserveAspectRatio`, the other half of SVGFitToViewBox (SVG 2 §8.14.4,
+// §8.14.5). The attribute's value is a keyword pair -- `xMidYMid meet` by
+// default -- and the DOM exposes it as an SVGPreserveAspectRatio whose `align`
+// and `meetOrSlice` are the constants below, living in an
+// SVGAnimatedPreserveAspectRatio whose baseVal and animVal disagree only while
+// an animation runs (none here, so animVal follows baseVal).
+//
+// The two halves are not symmetric: `align` is a required keyword, while
+// `<meetOrSlice>?` is optional and defaults to `meet`. An attribute the
+// grammar rejects falls back to the initial pair `xMidYMid meet`, as §8.14.4
+// says ("using the attribute's initial value if it is not present or invalid").
+struct SvgPreserveAspectRatioState : JsExotic {
+    std::shared_ptr<Element> element;
+    bool animated{false};
+    void trace(Heap& heap) override { trace_node(heap, element.get()); }
+};
+
+struct SvgAnimatedPreserveAspectRatioState : JsExotic {
+    std::shared_ptr<Element> element;
+    void trace(Heap& heap) override { trace_node(heap, element.get()); }
+};
+
+// The alignment keywords in constant order: index 0 is UNKNOWN, which no
+// keyword names, so the table starts at NONE.
+const char* const kPreserveAspectRatioAlignKeywords[] = {
+    nullptr, "none", "xMinYMin", "xMidYMin", "xMaxYMin", "xMinYMid", "xMidYMid", "xMaxYMid",
+    "xMinYMax", "xMidYMax", "xMaxYMax",
+};
+constexpr unsigned short kPreserveAspectRatioAlignInitial = 6;      // xMidYMid
+constexpr unsigned short kMeetOrSliceMeet = 1;
+constexpr unsigned short kMeetOrSliceSlice = 2;
+constexpr unsigned short kMeetOrSliceInitial = kMeetOrSliceMeet;
+
+// Parse the attribute's grammar into the two constants. `defer` is SVG 1.1
+// syntax the current specification no longer lists; a value carrying it is
+// invalid here and falls back with everything else.
+void parse_svg_preserve_aspect_ratio(const std::string& text, unsigned short& align, unsigned short& meet_or_slice) {
+    align = kPreserveAspectRatioAlignInitial;
+    meet_or_slice = kMeetOrSliceInitial;
+    std::size_t at = 0;
+    auto skip = [&]() { while (at < text.size() && svg_space(text[at])) ++at; };
+    skip();
+    const std::size_t start = at;
+    while (at < text.size() && !svg_space(text[at])) ++at;
+    if (start == at) return;
+    const std::string first = text.substr(start, at - start);
+    if (first == "none") {
+        align = 1;
+    } else {
+        for (unsigned short i = 2; i <= 10; ++i) {
+            if (first == kPreserveAspectRatioAlignKeywords[i]) { align = i; break; }
+        }
+        if (align == kPreserveAspectRatioAlignInitial && first != "xMidYMid") return;  // invalid
+    }
+    skip();
+    if (at == text.size()) return;
+    const std::size_t second = at;
+    while (at < text.size() && !svg_space(text[at])) ++at;
+    const std::string tail = text.substr(second, at - second);
+    if (tail == "meet") meet_or_slice = kMeetOrSliceMeet;
+    else if (tail == "slice") meet_or_slice = kMeetOrSliceSlice;
+    else return;                                                                    // invalid
+    skip();
+    if (at != text.size()) return;                                                  // trailing junk
+}
+
+void sync_svg_preserve_aspect_ratio(SvgPreserveAspectRatioState& state, unsigned short& align,
+                                    unsigned short& meet_or_slice) {
+    const std::string* attribute = state.element->attribute("preserveAspectRatio");
+    parse_svg_preserve_aspect_ratio(attribute ? *attribute : std::string(), align, meet_or_slice);
+}
+
+// Write the pair back as the attribute, in the order and spacing SVG gives it.
+void write_svg_preserve_aspect_ratio(Element& element, unsigned short align, unsigned short meet_or_slice) {
+    if (align == 0) return;                        // unreachable: the setter refuses UNKNOWN
+    // §8.14.4 writes both parts, always: align, one space, then the
+    // meet-or-slice keyword. It does not make an exception for `none`, even
+    // though the attribute grammar ignores `<meetOrSlice>` after it -- so
+    // `none slice` is written and reads back as (`NONE`, `SLICE`), which is
+    // what a browser writes too.
+    std::string text = kPreserveAspectRatioAlignKeywords[align];
+    text += ' ';
+    text += meet_or_slice == kMeetOrSliceSlice ? "slice" : "meet";
+    element.set_attribute("preserveAspectRatio", text);
+}
+
+bool is_svg_preserve_aspect_ratio_holder(const Node& node) {
+    return svg_fits_to_view_box(node);
+}
+
+void setup_svg_preserve_aspect_ratio(Iface& I) {
+    const std::pair<const char*, double> constants[] = {
+        {"SVG_PRESERVEASPECTRATIO_UNKNOWN", 0}, {"SVG_PRESERVEASPECTRATIO_NONE", 1},
+        {"SVG_PRESERVEASPECTRATIO_XMINYMIN", 2}, {"SVG_PRESERVEASPECTRATIO_XMIDYMIN", 3},
+        {"SVG_PRESERVEASPECTRATIO_XMAXYMIN", 4}, {"SVG_PRESERVEASPECTRATIO_XMINYMID", 5},
+        {"SVG_PRESERVEASPECTRATIO_XMIDYMID", 6}, {"SVG_PRESERVEASPECTRATIO_XMAXYMID", 7},
+        {"SVG_PRESERVEASPECTRATIO_XMINYMAX", 8}, {"SVG_PRESERVEASPECTRATIO_XMIDYMAX", 9},
+        {"SVG_PRESERVEASPECTRATIO_XMAXYMAX", 10},
+        {"SVG_MEETORSLICE_UNKNOWN", 0}, {"SVG_MEETORSLICE_MEET", 1}, {"SVG_MEETORSLICE_SLICE", 2},
+    };
+    for (const auto& entry : constants) I.constant(entry.first, entry.second);
+
+    for (const auto& member : {std::pair<const char*, bool>{"align", false}, {"meetOrSlice", true}}) {
+        const bool is_meet_or_slice = member.second;
+        I.accessor(member.first, [is_meet_or_slice](Realm&) {
+            auto& state = this_state<SvgPreserveAspectRatioState>("SVGPreserveAspectRatio");
+            unsigned short align = 0, meet_or_slice = 0;
+            sync_svg_preserve_aspect_ratio(state, align, meet_or_slice);
+            return num(static_cast<double>(is_meet_or_slice ? meet_or_slice : align));
+        }, [is_meet_or_slice](Realm& realm, const JsValue& value) {
+            auto& state = this_state<SvgPreserveAspectRatioState>("SVGPreserveAspectRatio");
+            // WebIDL converts to unsigned short before the read-only half refuses.
+            const unsigned long converted = to_ulong(value);
+            const unsigned short number = static_cast<unsigned short>(converted & 0xFFFF);
+            if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated value is read-only.");
+            unsigned short align = 0, meet_or_slice = 0;
+            sync_svg_preserve_aspect_ratio(state, align, meet_or_slice);
+            if (is_meet_or_slice) {
+                // §8.14.4: a value with no keyword (UNKNOWN, or past SLICE) throws.
+                if (number != kMeetOrSliceMeet && number != kMeetOrSliceSlice) {
+                    throw_dom(realm, "TypeError", "Not a meet-or-slice keyword.");
+                }
+                meet_or_slice = number;
+            } else {
+                // UNKNOWN (0) has no keyword, so it cannot be written either;
+                // §8.14.4 rejects anything without an entry in the keyword
+                // table, which is 0 and everything past XMAXYMAX.
+                if (number == 0 || number > 10) throw_dom(realm, "TypeError", "Not an alignment keyword.");
+                align = number;
+            }
+            write_svg_preserve_aspect_ratio(*state.element, align, meet_or_slice);
+        });
+    }
+}
+
+void setup_svg_animated_preserve_aspect_ratio(Iface& I) {
+    for (const auto& member : {std::pair<const char*, bool>{"baseVal", false}, {"animVal", true}}) {
+        const bool animated = member.second;
+        I.getter(member.first, [animated](Realm& realm) {
+            auto& state = this_state<SvgAnimatedPreserveAspectRatioState>("SVGAnimatedPreserveAspectRatio");
+            return cached(JsValue::current_this(), animated ? "svgParAnim" : "svgParBase", [&]() {
+                auto part = std::make_shared<SvgPreserveAspectRatioState>();
+                part->element = state.element;
+                part->animated = animated;
+                return realm.make("SVGPreserveAspectRatio", part);
+            });
+        });
+    }
+}
+
 void setup_svg_fit_to_view_box(Iface& I) {
+    // SVGFitToViewBox has two attributes, and both live here: `viewBox` and
+    // `preserveAspectRatio` (SVG 2 §4.6.9). The elements that include it are
+    // the same five, so one setup serves both.
+    I.node_getter(&is_svg_preserve_aspect_ratio_holder, "preserveAspectRatio", [](Realm& realm, Node& node) {
+        return cached(wrap(realm, node), "svgPAR", [&]() {
+            auto state = std::make_shared<SvgAnimatedPreserveAspectRatioState>();
+            state->element = shared(static_cast<Element&>(node));
+            return realm.make("SVGAnimatedPreserveAspectRatio", state);
+        });
+    });
     I.node_getter(&svg_fits_to_view_box, "viewBox", [](Realm& realm, Node& node) {
         return cached(wrap(realm, node), "svgViewBox", [&]() {
             auto state = std::make_shared<SvgAnimatedRectState>();
@@ -3687,6 +3847,8 @@ void register_html_interfaces() {
     register_interface({"SVGAnimatedString", nullptr, setup_svg_animated_string, nullptr, 0, nullptr});
     register_interface({"SVGAnimatedRect", nullptr, setup_svg_animated_rect, nullptr, 0, nullptr});
     register_interface({"SVGRect", nullptr, setup_svg_rect, nullptr, 0, nullptr});
+    register_interface({"SVGPreserveAspectRatio", nullptr, setup_svg_preserve_aspect_ratio, nullptr, 0, nullptr});
+    register_interface({"SVGAnimatedPreserveAspectRatio", nullptr, setup_svg_animated_preserve_aspect_ratio, nullptr, 0, nullptr});
     register_interface({"SVGElement", "Element", setup_svg_element, nullptr, 0, nullptr});
     register_interface({"SVGGraphicsElement", "SVGElement", setup_svg_graphics_element, nullptr, 0, nullptr});
     register_interface({"SVGSVGElement", "SVGGraphicsElement", setup_svg_svg_element, nullptr, 0, nullptr});

@@ -958,6 +958,20 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   script corpora of the sanitizer build, 5.2 minutes, of which 88
   seconds were its build.
 
+  The run after that one was 6.4 minutes (45475379777), and it is the
+  one to remember. Its machine was slower: the five stretches that can
+  be compared took 1.4 to 1.8 times as long. The suite that had failed
+  at 18:24
+  (`inner_html_is_parsed_as_the_content_of_its_element`, "under five
+  seconds") failed again, this time beside three ordinary stretches; its
+  stretch was run again by itself, passed in 69 seconds, and the job
+  passed with a warning that named the suite. **When that warning names
+  a suite, give the suite's bound room in the sanitizer build**
+  (`#if defined(__SANITIZE_ADDRESS__)`, as that suite now has, and as
+  the large XMLHttpRequest response had before it): a warning that comes
+  with every other run is one nobody reads, and the second run of the
+  stretch is a minute of every run it comes with.
+
 **The turn, and what a merge does to it**
 
 - **An agent works while its turn lasts, and not in between.** A turn begins

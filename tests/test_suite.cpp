@@ -16505,7 +16505,16 @@ TEST(inner_html_is_parsed_as_the_content_of_its_element) {
             at = std::static_pointer_cast<Element>(at->children().front()->children().front());
         }
         const auto took = std::chrono::steady_clock::now() - started;
+        // The sanitizer build is given more. Twice in one evening this loop
+        // took more than five seconds there, beside other processes of the
+        // suites on CI's machine (runs 45459129005 and 45475379777), and
+        // less when it was run again by itself. The square of its length,
+        // which is what the bound is for, is 44 seconds in the plain build.
+#if defined(__SANITIZE_ADDRESS__)
+        assert(took < std::chrono::seconds(30));
+#else
         assert(took < std::chrono::seconds(5));
+#endif
         std::size_t depth = 0;
         for (std::shared_ptr<Node> node = at; node; node = node->parent()) ++depth;
         assert(depth == 60001);

@@ -867,10 +867,13 @@ jobs:
         # where UNIT_SUITE_CUTS in the Makefile says: four side by side,
         # and the two that hold the deep suites when those have ended
         # (UNIT_SUITE_LATE), because beside them a suite that measures time
-        # ran out of it. That is 117 seconds of suites (run 45473629683).
+        # ran out of it. That was 117 seconds of suites in one run and 245
+        # in the next, on a slower machine (45473629683, 45475379777).
         # A stretch that fails beside the others and has no sanitizer's
         # report is run once more by itself; if it passes then, the job
-        # passes with a warning that names it.
+        # passes with a warning that names it. The second of those runs
+        # was the first to need that: a suite's bound of five seconds,
+        # which the sanitizer build has since been given more of.
         # The step ends with a notice on the job: the time and the memory
         # of each stretch, and the slowest suites of the slowest.
         run: |

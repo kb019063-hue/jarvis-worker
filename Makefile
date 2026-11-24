@@ -367,6 +367,10 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 ## beside 36. Twice the processes were not twice as fast: the four took 236
 ## seconds between them for what the two had done in 162, so a seventh
 ## stretch would buy little, and the deep ones are now the larger part.
+## The machine counts for as much as the cuts: in the next run (45475379777)
+## the same six took 89, 79, 69 and 75, then 87 beside 63, and one of the
+## four failed a bound of five seconds beside the others and passed when it
+## was run again by itself (run_stretches.py does that): 245 seconds.
 STRETCHES ?= 3
 UNIT_SUITE_CUTS ?= inner_html_of_an_xml_document_is_xml,deep_nesting_never_exhausts_the_native_stack,dom_trees_of_any_depth_can_be_walked_and_released,html_parser_void_element_with_a_slash_closes_nothing_else,svg_real_world_paths_arcs_gradients_use_clip_and_guards
 UNIT_SUITE_LATE ?= 2,3

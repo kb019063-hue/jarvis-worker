@@ -634,8 +634,31 @@ private:
         if (*inherited == ns) {
             // The element is in the default namespace in force: no prefix
             // (even if it has one), and a default declaration of its own is
-            // left out, whatever it says.
-            if (local_default) ignore_default_declaration = true;
+            // left out, whatever it says -- with two exceptions, both of them
+            // `xmlns=""`:
+            //
+            //  * it is not redundant when the default in force is *not* empty,
+            //    because then it is the declaration that keeps the element out
+            //    of it (`<root xmlns="u1"><child xmlns=""/></root>`);
+            //  * it is not redundant when the element also declares a prefix
+            //    (`<root xmlns="" xmlns:foo=""/>`), where both are one
+            //    statement about what this element puts in scope.
+            //
+            // Anywhere else it says nothing and is dropped, as the standard's
+            // redundant-`xmlns` rule asks -- and that is the half this row's
+            // `serializer-not-well-formed` neighbours would be wrong to lose.
+            // The declaration under test must *itself* be the empty one: a
+            // non-empty `xmlns="urn:a"` on an element that is in no namespace
+            // contradicts the element and must stay suppressed, or the element
+            // reads back as a member of `urn:a` it never was. (Getting this
+            // wrong is what `make diff-xml` caught: 19 of 400 trees stopped
+            // round-tripping.)
+            const bool empty_default_is_a_declaration =
+                local_default && local_default->empty() && ns.empty() &&
+                (!context_namespace.empty() || !declared.empty());
+            if (local_default && !empty_default_is_a_declaration) {
+                ignore_default_declaration = true;
+            }
             if (ns == kXmlNamespace) qualified = "xml:";
             qualified += local;
             m_out += qualified;

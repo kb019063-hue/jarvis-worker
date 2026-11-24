@@ -234,6 +234,14 @@ verify-cli-error-terminal-safety: $(TARGET)
 verify-page-text-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_page_text_terminal.py --binary $(TARGET)
 
+## Check CSS/paint dumps and the shared UTF-8 terminal boundary.
+.PHONY: verify-css-paint-terminal-safety
+verify-css-paint-terminal-safety: $(TARGET) $(BUILD_DIR)/terminal_text_probe
+	@python3 tools/security/verify_css_paint_terminal.py --binary $(TARGET) --probe $(BUILD_DIR)/terminal_text_probe
+
+$(BUILD_DIR)/terminal_text_probe: tools/security/terminal_text_probe.cpp $(BUILD_DIR)/common/TerminalText.o
+	$(CXX) $(CXXFLAGS) $^ -o $@
+
 $(BUILD_DIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@

@@ -2,7 +2,15 @@ CXX ?= g++
 CXXFLAGS ?= -std=c++20 -O2 -Wall -Wextra -Iinclude -MMD -MP
 BUILD_DIR ?= build
 
-ASAN_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP \
+## -fno-var-tracking: with -g and optimisation GCC works out, for a
+## debugger, where every variable lives at every instruction. Under the
+## sanitizers that one pass was more than half of the compile time: 54
+## seconds of src/layout/LayoutBox.cpp against 22 without it, 87 of
+## src/css/StyleResolver.cpp against 37 (24 November 2026, here). Nothing
+## a sanitizer reports comes from it: a report names functions, files and
+## lines, and those stay. A debugger on this build may say "optimized out"
+## of a variable where it used to show it.
+ASAN_FLAGS = -std=c++20 -O1 -g -fno-var-tracking -Wall -Wextra -Iinclude -MMD -MP \
              -fsanitize=address,undefined -fno-omit-frame-pointer
 
 SRCS = src/common/Color.cpp \

@@ -724,10 +724,11 @@ jobs:
   # if a part of `asan-core` is in no job or in two.
   #
   # Which part is in which job is decided by how long the parts take and by
-  # nothing else (AGENTS.md has the times): each job is the build and five to
-  # six minutes of checks. To add a check, put it in the part of the Makefile
-  # it belongs with. To move a part to another job, move its step; `asan-xml`
-  # and `asan-fuzz` stay in one job, in that order (the step says why).
+  # nothing else (AGENTS.md has the times): each job is the build and four
+  # to five minutes of checks. To add a check, put it in the part of the
+  # Makefile it belongs with. To move a part to another job, move its step;
+  # `asan-fuzz` needs the documents of the XML suite unpacked before it (the
+  # step of its job says why).
   sanitizers-unit:
     name: "Sanitizers: unit suites"
     runs-on: ubuntu-latest
@@ -801,8 +802,70 @@ jobs:
         if: failure()
         run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
 
-  sanitizers-xml-fuzz:
-    name: "Sanitizers: XML suite and fuzzing"
+  sanitizers-fuzz:
+    name: "Sanitizers: fuzzing"
+    runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: asan
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Address randomisation the sanitizers can live with
+        # See the string stress tests in the last of these jobs. Every
+        # sanitizer step has always run after this setting, so each job makes
+        # it before it builds.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
+      - name: The XML suite archive
+        # See the xml-and-wpt job: downloaded, checked against a pinned
+        # SHA-256, cached.
+        uses: actions/cache@v4
+        with:
+          path: build/xml-conformance/xmlts20130923.zip
+          key: xmlts20130923-f9510b3532926e1b4c2e54855b021e4b8a66ec98a5337dcf4ff07e8a41968deb
+      - name: The documents of the W3C XML suite, unpacked for the fuzzer
+        # tools/fuzz/fuzz_xml.py mutates the documents of the W3C suite.
+        # Without them it does not fail: it mutates the dozen documents
+        # written in the script instead and passes, having checked far less.
+        # Until 24 November 2026 the fuzzing was a step after the XML suite
+        # in one job, which unpacked them; that job was the longest of a
+        # run (12.0 minutes of a run of 12.1, run 45350008834). Now the
+        # suite is run beside the web-platform-tests and this job unpacks
+        # the documents for itself, and fails here if they are not there.
+        # tools/ci/check_ci_parts.py fails the run if this step is taken
+        # out or put after the fuzzing.
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          python3 tools/conformance/run_xml_conformance.py --unpack-only 2>&1 | tee "$RUNNER_TEMP/part-xml-unpack.log"
+          test -f build/xml-conformance/xmlconf/xmlconf.xml
+      - name: Sanitizer build
+        # As in the first of these jobs.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+      - name: Fuzz smoke run (pages, XML, media, colours, Brotli)
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-fuzz 2>&1 | tee "$RUNNER_TEMP/part-asan-fuzz.log"
+      - name: What failed, as annotations
+        # As in the first of these jobs.
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
+
+  sanitizers-wpt:
+    name: "Sanitizers: web-platform-tests and the XML suite"
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
@@ -835,62 +898,21 @@ jobs:
         run: |
           set -o pipefail
           make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
-      - name: W3C XML suite in the sanitizer build
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -o pipefail
-          make -j"$(nproc)" asan-xml 2>&1 | tee "$RUNNER_TEMP/part-asan-xml.log"
-      - name: Fuzz smoke run (pages, XML, media, colours, Brotli)
-        # This step has to come after the XML suite step, in the same job.
-        # tools/fuzz/fuzz_xml.py mutates the documents of the W3C suite, which
-        # that step unpacks under build/xml-conformance/. Without them it does
-        # not fail: it mutates the dozen documents written in the script instead
-        # and passes, having checked far less.
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-        run: |
-          set -o pipefail
-          make -j"$(nproc)" asan-fuzz 2>&1 | tee "$RUNNER_TEMP/part-asan-fuzz.log"
-      - name: What failed, as annotations
-        # As in the first of these jobs.
-        if: failure()
-        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
-
-  sanitizers-wpt:
-    name: "Sanitizers: web-platform-tests"
-    runs-on: ubuntu-latest
-    # Not in the short run of a pull request, nor after the last merge of a lot
-    # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
-    steps:
-      - uses: actions/checkout@v4
-      - name: Compile through ccache, with the objects of main's last run
-        uses: ./.github/actions/ccache
-        with:
-          objects: asan
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-      - name: Address randomisation the sanitizers can live with
-        # See the string stress tests in the last of these jobs. Every
-        # sanitizer step has always run after this setting, so each job makes
-        # it before it builds.
-        run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
-      - name: Sanitizer build
-        # As in the first of these jobs.
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-        run: |
-          set -o pipefail
-          make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
       - name: Web-platform-tests in the sanitizer build
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
           set -o pipefail
           make -j"$(nproc)" asan-wpt 2>&1 | tee "$RUNNER_TEMP/part-asan-wpt.log"
+      - name: W3C XML suite in the sanitizer build
+        # Here since 24 November 2026, from the job it shared with the
+        # fuzzing (that job says why).
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-xml 2>&1 | tee "$RUNNER_TEMP/part-asan-xml.log"
       - name: What failed, as annotations
         # As in the first of these jobs.
         if: failure()
@@ -940,7 +962,57 @@ jobs:
         run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
 
   sanitizers-corpora:
-    name: "Sanitizers: script corpora, verifiers, generated XML, string stress tests"
+    name: "Sanitizers: script corpora"
+    runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: asan
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Address randomisation the sanitizers can live with
+        # See the string stress tests in the last of these jobs. Every
+        # sanitizer step has always run after this setting, so each job makes
+        # it before it builds.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
+      - name: Sanitizer build
+        # As in the first of these jobs.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+      - name: JavaScript corpus in the sanitizer build
+        # Run for what the sanitizers see while the scripts execute, not for the
+        # score: a report makes a case fail, and the floor (JS_ASAN_FLOOR in the
+        # Makefile) turns a batch of those into a failed step.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-js 2>&1 | tee "$RUNNER_TEMP/part-asan-js.log"
+      - name: Script DOM corpus and URL cases in the sanitizer build
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-dom 2>&1 | tee "$RUNNER_TEMP/part-asan-dom.log"
+      - name: What failed, as annotations
+        # As in the first of these jobs.
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
+
+  # A job of their own since 24 November 2026: with the two script corpora
+  # in front of them these were the longest job of a run whose objects were
+  # all in ccache (8.0 minutes of 8.1, run 45351810983).
+  sanitizers-verifiers:
+    name: "Sanitizers: verifiers, generated XML, string stress tests"
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
@@ -972,21 +1044,6 @@ jobs:
         run: |
           set -o pipefail
           make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
-      - name: JavaScript corpus in the sanitizer build
-        # Run for what the sanitizers see while the scripts execute, not for the
-        # score: a report makes a case fail, and the floor (JS_ASAN_FLOOR in the
-        # Makefile) turns a batch of those into a failed step.
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-        run: |
-          set -o pipefail
-          make -j"$(nproc)" asan-js 2>&1 | tee "$RUNNER_TEMP/part-asan-js.log"
-      - name: Script DOM corpus and URL cases in the sanitizer build
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-        run: |
-          set -o pipefail
-          make -j"$(nproc)" asan-dom 2>&1 | tee "$RUNNER_TEMP/part-asan-dom.log"
       - name: Verifiers in the sanitizer build (media, colour, Brotli, RegExp, strings, HTTPS, workers, WebSocket)
         # The eight checks that have a verifier of their own, each with the
         # options `make asan-core` has always given it.

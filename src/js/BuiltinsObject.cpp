@@ -785,6 +785,71 @@ void install_object_builtins(JsIntrinsics& realm) {
     // ---- Object.prototype -------------------------------------------------
     JsObject* op = realm.object_proto;
 
+    // `__proto__` is Annex B.2.2.1: an accessor on `Object.prototype` whose
+    // getter answers the receiver's [[Prototype]] and whose setter changes it.
+    //
+    // It used to be nowhere. `JsValue::get_property` synthesised the name for
+    // every object before consulting a property table, and the assignment path
+    // did the same (`JsValue.cpp`, `sets_prototype`), so `({}).__proto__` and
+    // `o.__proto__ = p` worked while every reflection API said the property did
+    // not exist: no descriptor, `hasOwnProperty` false, `in` false, and
+    // `Object.getOwnPropertyNames(Object.prototype)` without it. Twenty test262
+    // cases read it through one of those, and `propertyHelper.js` reads the
+    // descriptor first, so the failure named neither the property nor the
+    // defect.
+    //
+    // The pair below spells out the same two behaviours the synthesis had, so
+    // that with the property installed nothing about the *behaviour* changes:
+    // only that the property can now be found, described, shadowed and
+    // replaced, which is what having a property means. The synthesis stays in
+    // `JsValue` as the answer for a receiver that has no such own accessor --
+    // an object whose prototype is not `Object.prototype` still reaches it
+    // through the chain, which is where the standard puts it.
+    JsValue proto_getter = js_make_native("get __proto__", 0, [](Args) {
+        const JsValue receiver = self();
+        // Annex B.2.2.1.1 step 1: `RequireObjectCoercible(this value)`.
+        if (receiver.is_undefined() || receiver.type == JsType::Null) {
+            js_throw_type_error("Object.prototype.__proto__ getter called on null or undefined");
+        }
+        if (receiver.is_object_like() || receiver.is_function()) {
+            JsObject* proto = receiver.prototype_object();
+            return proto ? JsValue::make_object(proto) : JsValue::make_null();
+        }
+        return JsValue::make_undefined();
+    });
+    JsValue proto_setter = js_make_native("set __proto__", 1, [](Args args) {
+        const JsValue receiver = self();
+        const JsValue value = js_arg(args, 0);
+        // Annex B.2.2.1.2 step 1: `RequireObjectCoercible(this value)`. A plain
+        // `return` here would answer undefined where the standard throws, and
+        // `set.call(undefined)` is a case test262 asks about by name.
+        if (receiver.is_undefined() || receiver.type == JsType::Null) {
+            js_throw_type_error("Object.prototype.__proto__ setter called on null or undefined");
+        }
+        // Step 3: anything but an object or null is ignored, and the prototype
+        // does not move.
+        if (!receiver.is_object_like() && !receiver.is_function()) return JsValue::make_undefined();
+        if (!value.is_object_like() && value.type != JsType::Null) return JsValue::make_undefined();
+        // js_set_prototype is the one place the engine changes [[Prototype]],
+        // and it is what the synthesis in `JsValue::set_property` calls. Going
+        // through it rather than assigning the property keeps this from
+        // re-entering the setter it is the body of.
+        JsObject* cell = receiver.property_cell(true);
+        if (!cell) cell = receiver.function_cell();
+        if (!cell) return JsValue::make_undefined();
+        JsObject* target = value.type == JsType::Null ? nullptr : value.as_prototype();
+        if (!js_set_prototype(cell, target)) {
+            js_throw_error(JsErrorKind::TypeError,
+                           cell->extensible ? "Cyclic __proto__ value" : "Object is not extensible");
+        }
+        return JsValue::make_undefined();
+    });
+    // A getter and a setter have [[Call]] and not [[Construct]].
+    proto_getter.function_cell()->not_constructor = true;
+    proto_setter.function_cell()->not_constructor = true;
+    JsValue::make_object(op).define_accessor("__proto__", proto_getter, proto_setter,
+                                             PropertyMap::Configurable);
+
     // Annex B.3.3's legacy accessor methods use ordinary property descriptors.
     // Keep the setter when a getter is added to an existing accessor (and
     // vice versa) by routing the update through the same validation path as

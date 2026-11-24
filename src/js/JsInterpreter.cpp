@@ -95,12 +95,16 @@ JsInterpreter::JsInterpreter(std::shared_ptr<Document> doc)
         roots.push_back(&m_global_object);
         for (auto& [k, v] : m_vm.globals()) roots.push_back(&v);
 
-        // A generator or async function parked mid-body keeps its local
-        // variables on a thread stack the collector cannot scan; its scope is
-        // reachable from here instead.
+        // A coroutine (async function) parked mid-body, or any frame currently
+        // executing on its thread, keeps its local variables on a thread stack
+        // the collector cannot scan; its scope is reachable from here instead.
+        // A suspended generator (`!is_coroutine && !is_running()`) is traced
+        // from its generator object's `trace_extra` so an unreachable generator
+        // can be collected and its thread joined.
         for (auto& weak : m_generators) {
             auto frame = weak.lock();
             if (!frame || frame->is_done || !frame->frame_env) continue;
+            if (!frame->is_coroutine && !frame->is_running()) continue;
             Heap::default_heap().mark_environment(frame->frame_env.get());
         }
     });

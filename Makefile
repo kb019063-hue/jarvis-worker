@@ -224,6 +224,11 @@ verify-worker-terminal-safety: $(TARGET)
 verify-js-error-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_js_error_terminal.py --binary $(TARGET)
 
+## Check CLI file and navigation error output without displaying attack bytes.
+.PHONY: verify-cli-error-terminal-safety
+verify-cli-error-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_cli_error_terminal.py --binary $(TARGET)
+
 ## Check that a page's own text cannot command the terminal through a dump.
 .PHONY: verify-page-text-terminal-safety
 verify-page-text-terminal-safety: $(TARGET)
@@ -499,6 +504,15 @@ diff-strings: $(TARGET)
 ## Node.js for the cross-check (`--no-node` skips it).
 verify-encoding-tables: $(TARGET)
 	@python3 tools/conformance/verify_encoding_tables.py --build
+
+## Every table held to the standard that publishes it, not to this engine.
+## The tool above asks each decoder whether it agrees with the table it reads,
+## and a decoder and its table can be wrong together. This one fetches
+## `whatwg/encoding`'s own index files at a pinned digest and compares all
+## 91,441 positions with `src/net/TextEncodingTables.cpp`. Needs the network
+## unless `build/whatwg-encoding-index/` is already populated (`--offline`).
+verify-encoding-index: $(TARGET)
+	@python3 tools/conformance/verify_encoding_index.py
 
 ## Differential + seeded fuzz verification of RegExp Unicode 17.0 properties,
 ## v (unicodeSets) set operations, d (hasIndices), and ES2025 modifiers,

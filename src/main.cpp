@@ -99,12 +99,23 @@ void print_help(const char* prog) {
     std::cout << "  --help, -h             Show this help message\n";
 }
 
+// File names and navigation errors can contain bytes from untrusted sources.
+// Match the shell's conservative diagnostic policy at the output boundary;
+// never change the path passed to the filesystem or the loader's response.
+static std::string terminal_diagnostic(std::string text) {
+    for (char& byte : text) {
+        const auto c = static_cast<unsigned char>(byte);
+        if (c < 0x20 || c > 0x7e) byte = '?';
+    }
+    return text;
+}
+
 /// False when the file cannot be opened. An empty file is a file: it is the
 /// page with nothing in it, and it has a tree like any other.
 bool read_file(const std::string& path, std::string& content) {
     std::ifstream in(path);
     if (!in) {
-        std::cerr << "Error: Could not open file '" << path << "'\n";
+        std::cerr << "Error: Could not open file '" << terminal_diagnostic(path) << "'\n";
         return false;
     }
     std::stringstream buffer;
@@ -384,7 +395,8 @@ int main(int argc, char* argv[]) {
     if (!dump_dom_webplatform && xml_dump.empty() && is_remote_or_scheme) {
         auto nav = litebird::ResourceLoader::load_navigation(input_file);
         if (!nav.success) {
-            std::cerr << "Error loading '" << input_file << "': " << nav.error_message << "\n";
+            std::cerr << "Error loading '" << terminal_diagnostic(input_file) << "': "
+                      << terminal_diagnostic(nav.error_message) << "\n";
             return 1;
         }
         html_content = std::move(nav.body);

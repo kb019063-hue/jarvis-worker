@@ -115,6 +115,8 @@ jobs:
         run: make verify-worker-terminal-safety
       - name: Uncaught JavaScript diagnostics cannot inject terminal controls
         run: make verify-js-error-terminal-safety
+      - name: CLI file and navigation errors cannot inject terminal controls
+        run: make verify-cli-error-terminal-safety
       - name: A page's own text cannot inject terminal controls through a dump
         run: make verify-page-text-terminal-safety
       - name: Pathless URL references agree with Node
@@ -131,6 +133,14 @@ jobs:
         run: make shaping-oracle-self-test
       - name: Bidi conformance (Unicode's own two suites)
         run: make bidi-conformance
+      - name: Encoding tables match whatwg/encoding's own index files
+        # The tool behind `verify-encoding-tables` asks each decoder whether it
+        # agrees with the table it reads, and a decoder and its table can be
+        # wrong together. This fetches the standard's index files at a pinned
+        # digest and compares all 91,441 positions. Shown to fail on three
+        # injected defects (a single-byte entry, a Big5 pointer, a gb18030
+        # range), each reported as one mismatch. Seconds once cached.
+        run: make verify-encoding-index
       - name: Sized-float index keeps placements fast
         # Full CLI parse + layout + dump of packed, mixed-side, and cleared
         # 1k/10k floats. The old repeated band sweep takes 5-12 seconds at

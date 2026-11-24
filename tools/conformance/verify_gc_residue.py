@@ -205,34 +205,44 @@ CASES: list[Case] = [
     ),
     # --- iterators, which hold a frame on another thread -----------------
     #
-    # A generator's frame is a real OS thread parked mid-body. The collector
-    # cannot scan that stack, so the frame's scope is rooted from
-    # `JsInterpreter`'s registry (`m_generators`) instead — and that registry
-    # is a list of `weak_ptr`, so it cannot keep the frame alive either. A
-    # generator that is never advanced, or advanced to its end, still owns its
-    # thread until `reap()` joins it; a generator that is simply dropped never
-    # reaches `reap()` at all. Four shapes, one per way a page makes one.
+    # A generator creates its OS thread lazily on the first resume() and is
+    # owned solely by its generator object (`cell->internal`, with its methods
+    # capturing the generator object via `Extra::captured`). When suspended,
+    # its frame scope and parked thread `ScopeStack` are traced from the
+    # generator object's `trace_extra` instead of unconditionally rooted, so an
+    # unreachable generator is collected and its thread joined in
+    # `~GeneratorData`. Completed/throwing generators clear `frame_env` in
+    # `reap()`.
     Case(
         "generator-never-advanced",
         step="function* g() { yield 1; } var it = g();",
-        known="7 cells an iteration: `spawn_frame` gives every generator a real OS thread and a `GeneratorData`; the frame is dropped without `reap()` joining it, so the thread's stack and the frame itself are never freed. A loop making generators therefore dies at about 15,700 with `RangeError: Too many suspended functions: out of threads`, and Node v22.22.3 makes 20,000 without trouble",
     ),
     Case(
         "generator-advanced-once",
         step="function* g() { yield 1; yield 2; } var it = g(); it.next();",
-        known="7 cells an iteration: `spawn_frame` gives every generator a real OS thread and a `GeneratorData`; the frame is dropped without `reap()` joining it, so the thread's stack and the frame itself are never freed. A loop making generators therefore dies at about 15,700 with `RangeError: Too many suspended functions: out of threads`, and Node v22.22.3 makes 20,000 without trouble",
     ),
     Case(
         "generator-finished",
         step="function* g() { yield 1; } var it = g(); it.next(); it.next();",
         report="var probe = (function* () { yield 42; })();"
                "console.log('observed value:', probe.next().value === 42);",
-        known="7 cells an iteration: `spawn_frame` gives every generator a real OS thread and a `GeneratorData`; the frame is dropped without `reap()` joining it, so the thread's stack and the frame itself are never freed. A loop making generators therefore dies at about 15,700 with `RangeError: Too many suspended functions: out of threads`, and Node v22.22.3 makes 20,000 without trouble",
     ),
     Case(
         "generator-holds-value",
         step="var o = { n: i }; function* g() { var x = o.n; yield x; } var it = g();",
-        known="8 cells an iteration: `spawn_frame` gives every generator a real OS thread and a `GeneratorData`; the frame is dropped without `reap()` joining it, so the thread's stack and the frame itself are never freed. A loop making generators therefore dies at about 15,700 with `RangeError: Too many suspended functions: out of threads`, and Node v22.22.3 makes 20,000 without trouble",
+    ),
+    Case(
+        "generator-suspended-in-for-let",
+        step="function* g() { try { for (let k = 0; k < 2; k++) { let b = { n: i + k }; yield b.n; } } finally {} }"
+             "var it = g(); it.next();",
+    ),
+    Case(
+        "generator-throws",
+        step="function* g() { throw new Error('e'); } var it = g(); try { it.next(); } catch (e) {}",
+    ),
+    Case(
+        "async-generator-dropped",
+        step="async function* g() { yield i; yield i + 1; } var it = g(); it.next();",
     ),
     # --- plain objects, as a control ------------------------------------
     Case(

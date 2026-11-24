@@ -401,6 +401,10 @@ void CanvasRenderingContext2D::save() {
     st.text_baseline = text_baseline;
     st.fill_gradient = fill_gradient;
     st.stroke_gradient = stroke_gradient;
+    st.fill_pattern = fill_pattern;
+    st.stroke_pattern = stroke_pattern;
+    st.fill_paint = fill_paint;
+    st.stroke_paint = stroke_paint;
     st.ctm = m_ctm;
     st.clip_mask = m_clip_mask;
     m_state_stack.push_back(std::move(st));
@@ -425,6 +429,10 @@ void CanvasRenderingContext2D::restore() {
     text_baseline = std::move(st.text_baseline);
     fill_gradient = std::move(st.fill_gradient);
     stroke_gradient = std::move(st.stroke_gradient);
+    fill_pattern = std::move(st.fill_pattern);
+    stroke_pattern = std::move(st.stroke_pattern);
+    fill_paint = std::move(st.fill_paint);
+    stroke_paint = std::move(st.stroke_paint);
     m_ctm = st.ctm;
     const size_t expected_mask_size = static_cast<size_t>(m_width) * static_cast<size_t>(m_height);
     if (st.clip_mask.size() == expected_mask_size) {
@@ -454,6 +462,10 @@ void CanvasRenderingContext2D::reset() {
     text_baseline = "alphabetic";
     fill_gradient.reset();
     stroke_gradient.reset();
+    fill_pattern.reset();
+    stroke_pattern.reset();
+    fill_paint = JsValue();
+    stroke_paint = JsValue();
     m_ctm = TransformMatrix2D::identity();
     m_clip_mask.clear();
     m_state_stack.clear();
@@ -1033,6 +1045,19 @@ std::shared_ptr<CanvasGradient> CanvasRenderingContext2D::create_conic_gradient(
     return grad;
 }
 
+Color CanvasPattern::sample_at_device(float x, float y) const {
+    if (!transform.is_identity()) {
+        // The matrix maps the tile's coordinates to the canvas', so a point on
+        // the canvas is taken back through the inverse to find the tile pixel.
+        const Point p = transform.inverse().map_point(x, y);
+        x = p.x;
+        y = p.y;
+    }
+    // A fractional point is the pixel it falls in, floored: the tile is an
+    // image, and `createPattern` samples it by nearest neighbour.
+    return sample_at(static_cast<int>(std::floor(x)), static_cast<int>(std::floor(y)));
+}
+
 Color CanvasPattern::sample_at(int px, int py) const {
     if (width <= 0 || height <= 0 ||
         pixels.size() < static_cast<std::size_t>(width) * static_cast<std::size_t>(height)) {
@@ -1052,8 +1077,11 @@ Color CanvasPattern::sample_at(int px, int py) const {
         if (v >= n) return n - 1;
         return v;
     };
-    const bool rx = repetition != "repeat-y";
-    const bool ry = repetition != "repeat-x";
+    // Which axis repeats. `no-repeat` repeats **neither**, so it clamps on
+    // both — "not repeat-y" was written here first and made it wrap on both,
+    // which no assertion could see until the pattern could paint at all.
+    const bool rx = (repetition == "repeat" || repetition == "repeat-x");
+    const bool ry = (repetition == "repeat" || repetition == "repeat-y");
     const int tx = rx ? wrap(px, width) : clamp(px, width);
     const int ty = ry ? wrap(py, height) : clamp(py, height);
     const std::uint32_t argb = pixels[static_cast<std::size_t>(ty) * static_cast<std::size_t>(width) +
@@ -1091,10 +1119,16 @@ void CanvasRenderingContext2D::fill_rect(float x, float y, float w, float h) {
         const int x1 = std::min(m_width, static_cast<int>(std::round(x + w)));
         const int y1 = std::min(m_height, static_cast<int>(std::round(y + h)));
 
-        if (fill_gradient) {
+        if (fill_gradient || fill_pattern) {
             for (int py = y0; py < y1; ++py) {
                 for (int px = x0; px < x1; ++px) {
-                    set_pixel_safe(px, py, fill_gradient->sample_at(static_cast<float>(px), static_cast<float>(py)));
+                    // A gradient is sampled at the pixel's own point (the fast
+                    // path has no CTM to undo); a pattern at the same point
+                    // through its own transform.
+                    const Color c = fill_gradient
+                        ? fill_gradient->sample_at(static_cast<float>(px), static_cast<float>(py))
+                        : fill_pattern->sample_at_device(static_cast<float>(px), static_cast<float>(py));
+                    set_pixel_safe(px, py, c);
                 }
             }
             return;
@@ -1124,7 +1158,7 @@ void CanvasRenderingContext2D::fill_rect(float x, float y, float w, float h) {
         m_ctm.map_point(x, y + h),
     };
     std::vector<SubPath> tmp{std::move(sp)};
-    rasterize_paths(tmp, FillRule::NonZero, fill_style, fill_gradient, m_ctm.inverse());
+    rasterize_paths(tmp, FillRule::NonZero, fill_style, fill_gradient, m_ctm.inverse(), fill_pattern);
 }
 
 void CanvasRenderingContext2D::clear_rect(float x, float y, float w, float h) {
@@ -1536,7 +1570,8 @@ void CanvasRenderingContext2D::rasterize_paths(
     FillRule rule,
     const Color& solid_color,
     const std::shared_ptr<CanvasGradient>& gradient,
-    const TransformMatrix2D& grad_inv_ctm
+    const TransformMatrix2D& grad_inv_ctm,
+    const std::shared_ptr<CanvasPattern>& pattern
 ) {
     if (!has_backing_store() || paths.empty()) return;
 
@@ -1562,6 +1597,9 @@ void CanvasRenderingContext2D::rasterize_paths(
     };
     std::vector<Crossing> crossings;
     std::vector<float> row_cov(static_cast<size_t>(m_width), 0.0f);
+    // A gradient is defined in user space and sampled through the inverse CTM;
+    // a pattern's tile is placed in device space and its own `setTransform` is
+    // the only transform it has, so `grad_inv_ctm` must not be applied to it.
     const bool use_inv_ctm = (gradient != nullptr && !grad_inv_ctm.is_identity());
 
     for (int y = start_y; y <= end_y; ++y) {
@@ -1629,10 +1667,12 @@ void CanvasRenderingContext2D::rasterize_paths(
                 if (cov > 0.0f) {
                     row_cov[px] = 0.0f;
                     const uint8_t cov_u8 = static_cast<uint8_t>(std::clamp(std::lround(cov * 255.0f), 0l, 255l));
-                    if (gradient) {
+                    if (gradient || pattern) {
                         Point sample_pt(static_cast<float>(px) + 0.5f, static_cast<float>(y) + 0.5f);
                         if (use_inv_ctm) sample_pt = grad_inv_ctm.map_point(sample_pt);
-                        set_pixel_safe(px, y, gradient->sample_at(sample_pt.x, sample_pt.y), cov_u8);
+                        const Color c = gradient ? gradient->sample_at(sample_pt.x, sample_pt.y)
+                                                 : pattern->sample_at_device(sample_pt.x, sample_pt.y);
+                        set_pixel_safe(px, y, c, cov_u8);
                     } else {
                         set_pixel_safe(px, y, solid_color, cov_u8);
                     }
@@ -1839,7 +1879,8 @@ void CanvasRenderingContext2D::stroke_paths(const std::vector<SubPath>& paths) {
     for (auto& poly : expanded) {
         stroke_subpaths.push_back({std::move(poly), true});
     }
-    rasterize_paths(stroke_subpaths, FillRule::NonZero, stroke_style, stroke_gradient, m_ctm.inverse());
+    rasterize_paths(stroke_subpaths, FillRule::NonZero, stroke_style, stroke_gradient,
+                    m_ctm.inverse(), stroke_pattern);
 }
 
 void CanvasRenderingContext2D::stroke() {
@@ -1847,7 +1888,7 @@ void CanvasRenderingContext2D::stroke() {
 }
 
 void CanvasRenderingContext2D::fill(FillRule rule) {
-    rasterize_paths(m_paths, rule, fill_style, fill_gradient, m_ctm.inverse());
+    rasterize_paths(m_paths, rule, fill_style, fill_gradient, m_ctm.inverse(), fill_pattern);
 }
 
 void CanvasRenderingContext2D::clip(FillRule rule) {

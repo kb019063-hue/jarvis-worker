@@ -1,13 +1,18 @@
 #pragma once
 
 #include <litebird/js/JsValue.hpp>
+#include <litebird/js/Heap.hpp>
 #include <mutex>
 #include <condition_variable>
 #include <thread>
 #include <memory>
 #include <exception>
+#include <functional>
+#include <system_error>
 
 namespace litebird {
+
+class JsEnvironment;
 
 /// Unwinds a suspended frame that will never be resumed. It is thrown on the
 /// frame's own thread, from the `yield` or `await` it was parked at.
@@ -108,8 +113,19 @@ struct GeneratorData {
     JsValue pending_return{JsValue::make_undefined()};
 
     /// The frame's scope (a JsEnvironment), kept so the collector can reach
-    /// the frame's local variables while it is suspended.
-    std::shared_ptr<void> frame_env;
+    /// the frame's local variables while it is suspended. Cleared once the
+    /// thread has finished or been terminated so a completed generator does
+    /// not pin its enclosing scope.
+    std::shared_ptr<JsEnvironment> frame_env;
+
+    /// Deferred worker body for generators: spawned lazily on the first
+    /// resume() so an unstarted generator owns no OS thread at all.
+    std::function<void()> start_thunk;
+
+    /// Pointer to the worker thread's `ScopeStack` while the worker is alive
+    /// (cleared before `finish()` notifies `cv_main`). Read only while the
+    /// worker is parked inside `cv_gen.wait` (`!running`).
+    void* active_scope_stack{nullptr};
 
     std::thread worker;
 
@@ -122,8 +138,11 @@ struct GeneratorData {
 
     /// Unwinds the frame if it is suspended and waits for its thread to end.
     void terminate(bool run_finalizers = false) {
+        std::function<void()> dropped_thunk;
         {
             std::unique_lock<std::mutex> lock(mtx);
+            dropped_thunk = std::move(start_thunk);
+            start_thunk = nullptr;
             if (!finished) {
                 should_terminate = true;
                 abort_runs_finalizers = run_finalizers;
@@ -132,16 +151,33 @@ struct GeneratorData {
             }
             is_done = true;
         }
+        dropped_thunk = nullptr;
         // A frame may close itself (a generator calling its own return()). It
         // cannot wait for its own thread; it unwinds at its next suspension.
         if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) {
             worker.join();
         }
+        if (!worker.joinable()) {
+            frame_env.reset();
+            send_value = JsValue::make_undefined();
+            yielded_value = JsValue::make_undefined();
+            error = JsValue::make_undefined();
+            pending_throw = JsValue::make_undefined();
+            pending_return = JsValue::make_undefined();
+        }
     }
 
-    /// Waits for the frame's thread once its body has ended.
+    /// Waits for the frame's thread once its body has ended, and drops the
+    /// frame's environment so a finished generator does not root its closure.
     void reap() {
         if (worker.joinable() && worker.get_id() != std::this_thread::get_id()) worker.join();
+        if (!worker.joinable()) {
+            start_thunk = nullptr;
+            frame_env.reset();
+            send_value = JsValue::make_undefined();
+            pending_throw = JsValue::make_undefined();
+            pending_return = JsValue::make_undefined();
+        }
     }
 
     /// Called on the frame's thread: parks it and hands `val` to the resumer.
@@ -207,6 +243,32 @@ struct GeneratorData {
         send_value = std::move(send_arg);
         if (!started) {
             started = true;
+            if (start_thunk) {
+                auto thunk = std::make_shared<std::function<void()>>(std::move(start_thunk));
+                start_thunk = nullptr;
+                lock.unlock();
+                auto launch = [&]() {
+                    worker = std::thread([thunk]() { (*thunk)(); });
+                };
+                try {
+                    launch();
+                } catch (const std::system_error&) {
+                    // Reclaim any unreachable suspended generators holding OS
+                    // threads and retry once before reporting thread exhaustion.
+                    Heap::default_heap().collect_garbage({});
+                    try {
+                        launch();
+                    } catch (const std::system_error&) {
+                        lock.lock();
+                        finished = true;
+                        is_done = true;
+                        running = false;
+                        frame_env.reset();
+                        throw;
+                    }
+                }
+                lock.lock();
+            }
         } else {
             waiting = false;
         }

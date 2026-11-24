@@ -1475,8 +1475,12 @@ std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable) {
 
 JsValue js_make_native(const char* name, int length, JsValue::NativeFn fn) {
     JsValue v = JsValue::make_native_function(std::move(fn));
-    v.define_property("name", JsValue::make_string(name), PropertyMap::Configurable);
+    // §10.2.4/§10.2.5 define `length` before `name`, and the order is
+    // observable: `Object.getOwnPropertyNames(Math.max)` is
+    // ["length","name"] in a browser. (A script function's order is set in
+    // JsEval.cpp and was already right.)
     v.define_property("length", JsValue::make_number(length), PropertyMap::Configurable);
+    v.define_property("name", JsValue::make_string(name), PropertyMap::Configurable);
     return v;
 }
 
@@ -1648,6 +1652,24 @@ JsIntrinsics::JsIntrinsics() {
         function_proto->set_function_value(function);
         function_proto->not_constructor = true;
     }
+    // The two function kinds (§27.3.3.2, §20.2.3.2). Each is a function
+    // itself — `typeof Object.getPrototypeOf(async function () {})` is
+    // "function" — and neither is a constructor: `new (async function () {})`
+    // is a TypeError because the function has no [[Construct]], and the
+    // prototype object must not be one either.
+    // Each kind's prototype is a *callable object*, not a language function:
+    // Node says `typeof Object.getPrototypeOf(async function () {})` is
+    // "object" while `typeof p.call` is "function", and it has no
+    // [[FunctionKind]] of its own. So it is an ordinary object here, and the
+    // callability is not modelled — nothing in the standard's own pages
+    // reaches for it.
+    auto make_function_kind = [&]() {
+        JsObject* obj = make(function_proto);
+        obj->klass = ObjectClass::Function;
+        return obj;
+    };
+    async_function_proto = make_function_kind();
+    generator_function_proto = make_function_kind();
     array_proto = make(object_proto);
     array_proto->is_array = true;
     array_proto->klass = ObjectClass::Array;

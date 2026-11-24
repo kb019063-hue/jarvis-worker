@@ -582,14 +582,22 @@ std::string object_tag(const JsValue& value) {
         case JsType::Number: return "Number";
         case JsType::String: return "String";
         case JsType::Symbol: return "Symbol";
+        // A function is *not* answered here (§20.1.3.6 step 15 asks for
+        // @@toStringTag before the built-in tag), because an async function
+        // and a generator function carry one on their own prototype and
+        // answer "AsyncFunction" and "GeneratorFunction". Falling through to
+        // the shared lookup is what lets the kind's tag be found.
         case JsType::Function:
-        case JsType::NativeFunction: return "Function";
+        case JsType::NativeFunction: break;
         default: break;
     }
     if (value.is_object_like()) {
         JsValue tag = value.get_property("@@toStringTag");
         if (tag.type == JsType::String) return tag.string_val.str();
     }
+    // Only now, when nothing along the chain named a tag. A native function
+    // that carries no tag still answers "Function", as it did before.
+    if (value.type == JsType::Function || value.type == JsType::NativeFunction) return "Function";
     if (JsObject* cell = value.object_val) {
         switch (cell->klass) {
             case ObjectClass::Array: return "Array";

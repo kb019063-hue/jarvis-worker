@@ -1097,6 +1097,39 @@ void JsInterpreter::init_language_builtins() {
     function_ctor.define_property("prototype", js_object_value(m_realm->function_proto), 0);
     js_define_hidden(m_realm->function_proto, "constructor", function_ctor);
 
+    // The two function kinds' prototypes carry their `@@toStringTag` and a
+    // `constructor` back-link to their own constructor function (§27.3.3,
+    // §20.2.3). The tag is what makes `Object.prototype.toString` answer
+    // `[object GeneratorFunction]` and `[object AsyncFunction]`; `object_tag`
+    // asks for @@toStringTag before its built-in "Function" now, because a
+    // function is not always an ordinary one.
+    struct Kind { JsObject* proto; const char* tag; };
+    for (const Kind& kind : {Kind{m_realm->generator_function_proto, "GeneratorFunction"},
+                             Kind{m_realm->async_function_proto, "AsyncFunction"}}) {
+        JsValue proto = JsValue::make_object(kind.proto);
+        // The tag is symbol-keyed and neither writable nor enumerable, but
+        // configurable — Node's descriptor exactly.
+        proto.define_property("@@toStringTag", JsValue::make_string(kind.tag), PropertyMap::Configurable);
+        proto.define_property("Symbol.toStringTag", JsValue::make_string(kind.tag), PropertyMap::Configurable);
+        // The constructor is not a global (Node: `typeof AsyncFunction` is
+        // "undefined"), but each prototype has one, with one parameter: the
+        // function's body.
+        JsValue ctor = js_make_native(kind.tag, 1, [](const std::vector<JsValue>&) {
+            return JsValue::make_undefined();
+        });
+        ctor.define_property("prototype", proto, 0);
+        proto.define_property("constructor", ctor, PropertyMap::Configurable | PropertyMap::Writable);
+        if (kind.proto == m_realm->generator_function_proto) {
+            // §27.3.3.2: the generator kind's prototype is itself a prototype
+            // for the objects a generator function makes, tagged "Generator".
+            JsObject* gen = Heap::default_heap().allocate_object();
+            gen->prototype = m_realm->object_proto;
+            JsValue instance = JsValue::make_object(gen);
+            instance.define_property("@@toStringTag", JsValue::make_string("Generator"), 0);
+            proto.define_property("prototype", instance, 0);
+        }
+    }
+
     // The poison pill: `caller` and `arguments` are a pair of throwing
     // accessors on %Function.prototype% (§10.2.4/§10.2.6). Every function
     // inherits them, which is why `'caller' in f` is true for an arrow and

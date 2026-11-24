@@ -224,6 +224,12 @@ jobs:
         # are the figures and shapes it is trusted for, and it asks the tree
         # nothing here.
         run: python3 tools/ci/check_numbers.py --self-test
+      - name: check_rows reads the table "Open tasks" the way a merge does
+        # Two rows of that table that touch are two changes git cannot
+        # merge. The tool that keeps an empty row between them is tested
+        # here on small tables of its own; the table itself is only
+        # reported on, by check_docs.py below.
+        run: python3 tools/ci/check_rows.py --self-test
       - name: The documents keep their shape and stay under their budgets
         # ARCHITECTURE.md is 84% phase write-ups and AUDIT.md is 53 resolved
         # findings of 61. Both are frozen as append targets; new write-ups go

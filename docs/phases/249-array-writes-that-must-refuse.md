@@ -119,8 +119,9 @@ a different question from any this phase asked.
 ## 4. How it was verified
 
 ```
-make test                     All 393 engine test suites passed successfully!
+make test                     All 394 engine test suites passed successfully!
                               Cross-origin suite: 114 checks, 0 failure(s)
+                              (393 before the merge of main; main added one)
 run_test262.py built-ins/Array   2767 pass / 3083  (was 2750)
                                  17 fixed, 0 broken, net +17
 make check-numbers            0 failure(s), 22 marked claims match the tree

@@ -26,7 +26,15 @@ A run passes when
     The output limit is generous on purpose: a tree dump indents by depth, so
     at the parser's nesting limit a line is a kilobyte long and the dumps of
     a page with 800,000 nodes come to 1.7 GB. That is linear. What the limit
-    is there to stop was 800 MB at 20,000 levels and growing with the square;
+    is there to stop was 800 MB at 20,000 levels and growing with the square.
+    A run that goes over the time limit while other runs share the machine
+    (`--jobs`) is run once more by itself when the others are done, with the
+    same limit, and fails when that goes over it too. CI's machines differ
+    by a factor of two (on 24 November the same 1,332 runs took 4 min 22 s
+    on one and 8 min 11 s on another, where a page that takes 33 of the 60
+    seconds on a quiet machine ran out of them and the job failed for a
+    change that had touched nothing of it); work that grows with the square
+    of the depth is hours over, beside others or by itself;
   * the text after the deep part is in the tree, laid out and painted, which
     shows that the engine went on working;
   * for a page the HTML parser builds: the text at the very bottom of the nest
@@ -758,6 +766,9 @@ def run(argv: list[str], *, timeout: float, memory_mb: int, output_mb: int, stac
     return outcome
 
 
+AGAIN = "\0again"      # what `one` answers for a run that is to be run again by itself
+
+
 def judge(page: Page, kind: str, outcome: Outcome, layout_check: bool) -> str:
     """What is wrong with this run; empty when nothing is."""
     if outcome.status != "ok":
@@ -849,7 +860,7 @@ def main() -> int:
     total_runs = 0
     print_lock = threading.Lock()
 
-    def one(job: tuple[int, Page, str]) -> tuple[str, float]:
+    def one(job: tuple[int, Page, str], alone: bool = False) -> tuple[str, float]:
         index, page, kind = job
         path = workdir / f"page{index:04d}.html"
         if not path.exists():
@@ -859,20 +870,25 @@ def main() -> int:
                       stack_mb=args.stack_mb, markers=markers,
                       measure_depth=kind == "html5lib" and page.max_depth is not None)
         problem = judge(page, kind, outcome, not args.no_layout_check)
-        line = (f"{'FAIL' if problem else 'ok  '} {page.name:52.52} {kind:9} {outcome.seconds:6.1f}s "
-                f"{outcome.peak_mb:6.0f}MB {outcome.out_bytes / 1e6:8.1f}MB out  {problem}")
+        again = problem == "timeout" and not alone and args.jobs > 1
+        line = (f"{'slow' if again else 'FAIL' if problem else 'ok  '} {page.name:52.52} {kind:9} {outcome.seconds:6.1f}s "
+                f"{outcome.peak_mb:6.0f}MB {outcome.out_bytes / 1e6:8.1f}MB out  "
+                f"{'out of time beside the other runs: run again by itself at the end' if again else problem}"
+                f"{' (by itself)' if alone else ''}")
         if problem:
             detail = outcome.stderr_tail.decode("utf-8", "replace").strip().split("\n")
             summary = next((l for l in detail if "ERROR: " in l or "SUMMARY: " in l or "runtime error" in l), "")
             if summary:
                 line += f"\n       {summary[:220]}"
-        if problem or not args.quiet:
+        if problem or alone or not args.quiet:
             with print_lock:
                 print(line, flush=True)
         try:
             os.remove(workdir / f"page{index:04d}.bmp")
         except OSError:
             pass
+        if again:
+            return (AGAIN, outcome.seconds)
         return (f"{page.name} [{kind}]: {problem}" if problem else "", outcome.seconds)
 
     try:
@@ -880,17 +896,33 @@ def main() -> int:
                 if not (kind == "html5lib" and page.has_script)]
         for index, page in enumerate(pages):
             (workdir / f"page{index:04d}.html").write_text(page.html, encoding="utf-8")
+        slow: list[tuple[int, Page, str]] = []
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
             for job, (failure, seconds) in zip(jobs, pool.map(one, jobs)):
                 total_runs += 1
+                if failure == AGAIN:
+                    slow.append(job)
+                    continue
                 if failure:
                     failures.append(failure)
                 if seconds > slowest[0]:
                     slowest = (seconds, f"{job[1].name} [{job[2]}]")
+        # The time limit is there for work that grows with the square of the
+        # input, which does not finish at all. A run that went over it while
+        # `--jobs` runs shared the machine has not shown that yet: it gets the
+        # machine to itself once, and the same limit.
+        for job in slow:
+            failure, seconds = one(job, alone=True)
+            if failure:
+                failures.append(failure)
+            if seconds > slowest[0]:
+                slowest = (seconds, f"{job[1].name} [{job[2]}]")
     finally:
         if not args.keep:
             shutil.rmtree(workdir, ignore_errors=True)
 
+    if slow:
+        print(f"deep pages: {len(slow)} run(s) went over {args.timeout:g} s beside the others and were run again by themselves")
     print(f"deep pages: {total_runs} runs over {len(pages)} pages at depth {args.depth} on a {args.stack_mb} MB stack, "
           f"{len(failures)} failed; slowest {slowest[0]:.1f} s ({slowest[1]})")
     return 1 if failures else 0

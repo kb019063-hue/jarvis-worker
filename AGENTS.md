@@ -765,8 +765,20 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   7 seconds where it had taken 85 to 158, the sanitizer build 10 to 31
   where it had taken 292 to 377, and the run 33 minutes of runner time
   where it had taken 75. When the runners are busy a run waits for them:
-  the first four lots of that night took 11.6, 13.0, 10.2 and 10.5
-  minutes from the push to the last job. A run on `main` saves the
+  the first six lots of that night took 11.6, 13.0, 10.2, 10.5, 14.5 and
+  14.7 minutes from the push to the last job, the last two beside the
+  runs of the pull requests in them and a run on `main`. And the runners
+  are not equally fast. The step that runs `make deep` took 4 min 22 s
+  on one and 8 min 11 s on another twenty minutes apart, and on the slow
+  one a page that takes 33 of its 60 seconds on a quiet machine ran out
+  of them: #317's run failed for a change that had touched nothing of
+  it, with `exit code 2` and no other word, and its agent pushed an
+  empty commit to have the run again. Since then a run of
+  `tools/fuzz/deep_pages.py` that goes over the time limit beside the
+  others is run once more by itself before it counts, and the job writes
+  what failed as annotations like the sanitizer jobs do. **A check that
+  measures time fails on a slow machine: give it the machine to itself
+  once before it says so.** A run on `main` saves the
   objects for everybody else's runs, which is one more reason for the
   last merge of a lot to start one. A job that cannot fetch ccache
   compiles everything, as before. Three rules keep it the same checks:

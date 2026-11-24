@@ -348,7 +348,14 @@ bool dense_path(const JsValue& object) {
     // Every one of these methods ends by setting `length`, and an array whose
     // length was made read-only has to refuse that write loudly.
     const auto entry = cell->properties.find("length");
-    return entry == cell->properties.end() || (entry->flags & PropertyMap::Writable) != 0;
+    if (entry != cell->properties.end() && !(entry->flags & PropertyMap::Writable)) return false;
+    // A place the prototype answers for — a setter on `Array.prototype[0]`,
+    // say — is a place every write goes through its chain to reach, and a
+    // setter there can make this array's length read-only halfway through the
+    // method (test262's `push/set-length-array-length-is-non-writable.js`).
+    // Such a receiver takes the standard's index-by-index path, where that
+    // second write finds the length and refuses it (finding 253).
+    return !prototype_holds_an_index(object);
 }
 
 /// Visit each index below `limit` whose place is there, in ascending order,
@@ -411,10 +418,61 @@ static bool walk_present_indices(const JsValue& object, size_t limit, bool chain
 /// that writes into an array a species constructor made needs it first.
 void set_place_or_throw(JsValue object, size_t index, const JsValue& value);
 
+/// CreateDataPropertyOrThrow(O, k, v) — §7.3.6. Not `[[Set]]`: a property the
+/// constructor made non-writable but *configurable* is replaced here, which is
+/// `map` on `target-array-with-non-writable-property`, while one it made
+/// non-configurable cannot be (`target-array-with-non-configurable-property`,
+/// a TypeError). `set_place_or_throw` is Set with Throw=true and refuses the
+/// first of those, so a method that *defines* its result's places cannot use
+/// it (finding 253).
+void create_data_property_or_throw(JsValue object, size_t index, const JsValue& value) {
+    const std::string key = std::to_string(index);
+    JsObject* cell = object.object_val.get();
+    if (cell && cell->is_array) {
+        // A place that exists as an element is replaced outright — its value
+        // and its three attributes, which is what a definition does — unless
+        // it was made non-configurable, the one thing a definition may not
+        // touch. Nothing is written to the property map: the map is what a
+        // *hole* reads through, and this place is not one afterwards.
+        const auto entry = cell->properties.find(key);
+        if (entry != cell->properties.end() && !(entry->flags & PropertyMap::Configurable) &&
+            !object.is_array_hole(index)) {
+            js_throw_type_error("Cannot redefine property: " + key);
+        }
+        // A place past the end is a new property, and an object that takes no
+        // new properties refuses it — `target-array-non-extensible` in each of
+        // the six methods that build their result this way.
+        const bool is_new_place = index >= cell->array_elements.size();
+        if (is_new_place && !cell->extensible) {
+            js_throw_type_error("Cannot define property " + key + ", object is not extensible");
+        }
+        if (is_new_place) {
+            // The places between the old end and this one are not properties:
+            // they are holes, and they must be marked as such or a later
+            // `hasOwnProperty` finds places no write ever made (finding 253).
+            const size_t previous = cell->array_elements.size();
+            cell->array_elements.resize(index + 1, JsValue::make_undefined());
+            if (!cell->array_holes) cell->array_holes = std::make_unique<JsObject::Holes>();
+            for (size_t i = previous; i < index; ++i) cell->array_holes->set(i);
+        }
+        cell->array_elements[index] = value;
+        object.clear_array_hole(index);
+        return;
+    }
+    // Not an array: the place is a property like any other, and defining a new
+    // one is what an object that takes no new properties refuses.
+    const bool exists = object.has_own_property(key);
+    if (!exists && cell && !cell->extensible) {
+        js_throw_type_error("Cannot define property " + key + ", object is not extensible");
+    }
+    object.define_property(key, value,
+                           static_cast<uint8_t>(PropertyMap::Enumerable | PropertyMap::Writable |
+                                                PropertyMap::Configurable));
+}
+
 /// The places `begin` up to `end` of `object`, written into `target` — the
 /// array `Array.prototype.slice` had made for it by ArraySpeciesCreate. A
 /// place the source has is its value; a place it does not have is a hole.
-
 static void copy_places_into(const JsValue& object, size_t begin, size_t end, const char* method,
                              JsValue target) {
     const size_t count = end - begin;
@@ -438,7 +496,7 @@ static void copy_places_into(const JsValue& object, size_t begin, size_t end, co
     }
     for (size_t index : walk.indices) {
         if (index < begin || index >= end) continue;
-        set_place_or_throw(target, index - begin, get_index(object, index));
+        create_data_property_or_throw(target, index - begin, get_index(object, index));
     }
 }
 
@@ -581,7 +639,7 @@ JsValue fill_species_result(JsValue target, const std::vector<JsValue>& values,
                             const std::vector<bool>& holes) {
     for (size_t i = 0; i < values.size(); ++i) {
         if (holes[i]) continue;
-        set_place_or_throw(target, i, values[i]);
+        create_data_property_or_throw(target, i, values[i]);
     }
     set_length_or_throw(target, values.size());
     return target;
@@ -1046,6 +1104,13 @@ void install_array_builtins(JsIntrinsics& realm) {
             return JsValue::make_number(static_cast<double>(length + args.size()));
         }
         if (array.object_val->frozen) js_throw_type_error("Cannot add property, object is not extensible");
+        // The elements go in at the end and the length follows them, so an
+        // array whose length cannot be raised takes nothing: `push` on a
+        // frozen length with places to add is the TypeError of the Set that
+        // `length` refuses (finding 253).
+        if (!args.empty() && read_only_own(array, "length")) {
+            js_throw_type_error("Cannot assign to read only property 'length' of object");
+        }
         auto& elements = elements_of(array);
         const size_t start = elements.size();
         elements.insert(elements.end(), args.begin(), args.end());
@@ -1143,6 +1208,12 @@ void install_array_builtins(JsIntrinsics& realm) {
             }
             set_length_or_throw(array, length + args.size());
             return JsValue::make_number(static_cast<double>(length + args.size()));
+        }
+        // Places at the front, and the length under them: an array whose
+        // length cannot grow takes nothing, for the same reason `push` does
+        // (finding 253).
+        if (!args.empty() && read_only_own(array, "length")) {
+            js_throw_type_error("Cannot assign to read only property 'length' of object");
         }
         auto& elements = elements_of(array);
         if (array.object_val->array_holes) {
@@ -1323,6 +1394,11 @@ void install_array_builtins(JsIntrinsics& realm) {
                 holes.push_back(false);
                 ++next;
             }
+            // The places after the last one there is are holes too, and the
+            // result has them: `[0].length = 3` concatenates to a length of 3
+            // whose last two places are the holes they were (§23.1.3.2 step
+            // 5.b.iii — no definition, so no own property).
+            for (; next < length; ++next) { values.push_back(JsValue::make_undefined()); holes.push_back(true); }
         };
         append_places(source);
         for (const auto& given : args) {
@@ -1909,7 +1985,7 @@ void install_array_builtins(JsIntrinsics& realm) {
         // source did not have stays a hole in it.
         JsValue mapped = array_species_create(array, length, "map");
         walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
-            set_place_or_throw(mapped, i, callback.call_with_this(this_arg, {get_index(array, i), JsValue::make_number(static_cast<double>(i)), array}));
+            create_data_property_or_throw(mapped, i, callback.call_with_this(this_arg, {get_index(array, i), JsValue::make_number(static_cast<double>(i)), array}));
             return true;
         });
         set_length_or_throw(mapped, length);
@@ -1926,7 +2002,7 @@ void install_array_builtins(JsIntrinsics& realm) {
         walk_present_indices(array, length, prototype_holds_an_index(array), [&](size_t i) {
             JsValue item = get_index(array, i);
             if (callback.call_with_this(this_arg, {item, JsValue::make_number(static_cast<double>(i)), array}).is_truthy()) {
-                set_place_or_throw(kept, count, item);
+                create_data_property_or_throw(kept, count, item);
                 ++count;
             }
             return true;

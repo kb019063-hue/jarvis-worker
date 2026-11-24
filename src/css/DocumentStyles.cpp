@@ -534,4 +534,68 @@ StyleResolver DocumentStyles::build_resolver(
     return resolver;
 }
 
+// --- The linked stylesheet, for the script-facing cascade --------------------
+//
+// `build_resolver` walks the tree and loads every `<style>` and
+// `<link rel=stylesheet>` into a StyleResolver, which is what the layout
+// paints. A script asking `getComputedStyle` reads a second cascade of its own
+// (DomStyleBindings.cpp), and that one only ever collected `<style>` elements:
+// a `<link>` has no text content, so the sheet a page actually links came out
+// empty and every rule in it was missing from what script was told. The two
+// cascades must agree, so this is the same fetch under the same rules.
+
+bool DocumentStyles::is_stylesheet_rel(std::string_view rel) {
+    bool has_stylesheet = false;
+    bool has_alternate = false;
+    std::size_t i = 0;
+    while (i < rel.size()) {
+        while (i < rel.size() && std::isspace(static_cast<unsigned char>(rel[i]))) ++i;
+        const std::size_t start = i;
+        while (i < rel.size() && !std::isspace(static_cast<unsigned char>(rel[i]))) ++i;
+        if (i > start) {
+            const std::string tok = ascii_lower_str(rel.substr(start, i - start));
+            if (tok == "stylesheet") has_stylesheet = true;
+            else if (tok == "alternate") has_alternate = true;
+        }
+    }
+    return has_stylesheet && !has_alternate;
+}
+
+bool DocumentStyles::load_linked_stylesheet(
+    const Element& link,
+    const Document& doc,
+    StyleSheetCache* cache,
+    std::string& css_out
+) {
+    css_out.clear();
+    if (link.tag_name() != "link") return false;
+    if (link.has_attribute("disabled")) return false;
+    if (!is_stylesheet_rel(link.get_attribute("rel"))) return false;
+    if (!is_css_type_attr(link.get_attribute("type"))) return false;
+    const std::string href = std::string(trim_ascii(link.get_attribute("href")));
+    if (href.empty()) return false;
+    std::string wrapped_media;
+    if (!media_matches_or_needs_wrapper(link.get_attribute("media"), wrapped_media)) return false;
+
+    ResourceRequestContext ctx = request_context(doc, RequestMode::NoCors, false);
+    if (link.has_attribute("crossorigin")) {
+        ctx.mode = RequestMode::Cors;
+        if (ascii_lower_str(trim_ascii(link.get_attribute("crossorigin"))) == "use-credentials") {
+            ctx.include_credentials = true;
+        }
+    }
+    std::string env_cs = encoding_name_for_label(link.get_attribute("charset"));
+    if (env_cs.empty()) env_cs = doc.character_set();
+
+    std::string css_text;
+    std::string final_url;
+    std::string sheet_cs;
+    if (!load_css_resource(href, ctx, env_cs, cache, css_text, final_url, sheet_cs)) return false;
+    std::unordered_set<std::string> visited{final_url};
+    std::string expanded = expand_css_imports(css_text, ctx.document_url, final_url, sheet_cs, cache, visited, 0);
+    if (!wrapped_media.empty()) expanded = "@media " + wrapped_media + " {\n" + expanded + "\n}";
+    css_out = std::move(expanded);
+    return true;
+}
+
 } // namespace litebird

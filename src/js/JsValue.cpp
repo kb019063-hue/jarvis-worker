@@ -1436,6 +1436,13 @@ JsValue JsValue::get_property(const std::string& name) const {
 
         if (obj->is_array) {
             if (name == "length") {
+                // `length` is the element count until a descriptor says
+                // otherwise: `Object.defineProperty(a, "length",
+                // { writable: false })` keeps the count and its attributes in
+                // the property map, with the value the count still is
+                // (finding 253).
+                auto length_entry = obj->properties.find("length");
+                if (length_entry != obj->properties.end()) return read_entry(*length_entry, *this);
                 return JsValue::make_number(static_cast<double>(obj->array_elements.size()));
             }
             size_t index = 0;

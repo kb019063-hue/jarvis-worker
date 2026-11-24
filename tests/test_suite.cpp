@@ -3485,8 +3485,8 @@ TEST(gpos_mark_to_base_and_mark_to_mark_anchoring) {
 
     // Synthetic SFNT: gid 1='a' (height 500), gid 2='A' (height 800),
     // gid 3=U+0301 acute (box [100..200, 520..620]), gid 4=U+0302 circumflex (box [100..200, 520..620]).
-    // Put `mkmk` (Type 6) at Lookup 0 and `mark` (Type 4) at Lookup 1 to verify
-    // MarkToMark resolves on top of MarkToBase even with inverted lookup order.
+    // Put mark before mkmk: the later lookup makes the stacked attachment.
+    // The opposite order is tested in tests/suites/250-gpos-lookup-order.cpp.
     const std::vector<TestGlyphSpec> glyphs = {
         {0, 500, false, 0, 0, 0, 0},
         {'a', 600, true, 50, 0, 550, 500},
@@ -3559,8 +3559,8 @@ TEST(gpos_mark_to_base_and_mark_to_mark_anchoring) {
     mkbase.u16(1); mkbase.i16(400); mkbase.i16(800);
 
     auto gpos_bytes = build_gpos_table({
-        {"mkmk", 6, 0x0000, -1, {mkmk.data}},
         {"mark", 4, 0x0000, -1, {mkbase.data}},
+        {"mkmk", 6, 0x0000, -1, {mkmk.data}},
     });
     auto sfnt = build_synthetic_sfnt(1000, 900, -200, glyphs,
                                      {{"GDEF", gdef.data}, {"GPOS", gpos_bytes}});
@@ -3605,8 +3605,9 @@ TEST(gpos_mark_to_base_and_mark_to_mark_anchoring) {
     assert(top_stacked < top_high - 15);
     fr.clear_webfonts();
 
-    // Use uncomposable x/X so this host-font probe still exercises mark attachment.
-    const std::string sans_path = fr.face_path("sans-serif");
+    // DejaVu Sans's later mark lookup reattaches both marks to the base.
+    // HarfBuzz 12.1.0 gives y=0 for both on x; do not assume every font stacks.
+    const std::string sans_path = fr.face_path("DejaVu Sans");
     if (!sans_path.empty()) {
         TrueTypeFont sans;
         if (sans.load_file(sans_path) && sans.has_mark_positioning()) {
@@ -3615,7 +3616,7 @@ TEST(gpos_mark_to_base_and_mark_to_mark_anchoring) {
             const auto a_stack = sans.shape_glyphs({'x', 0x0301, 0x0302}, true);
             assert(a_mark.size() == 2 && A_mark.size() == 2 && a_stack.size() == 3);
             assert(A_mark[1].y_offset > a_mark[1].y_offset);
-            assert(a_stack[2].y_offset > a_stack[1].y_offset);
+            assert(a_stack[1].y_offset == 0 && a_stack[2].y_offset == 0);
         }
     }
 }
@@ -6982,6 +6983,53 @@ TEST(subtle_crypto_export_and_generate_key) {
     assert(interp.eval("rawBuf instanceof ArrayBuffer && rawBuf.byteLength === 64").is_truthy());
     assert(interp.eval("verified === true").is_truthy());
     assert(interp.eval("rejNonExt === 'InvalidAccessError'").is_truthy());
+}
+
+TEST(subtle_crypto_pbkdf2_derive_bits_and_key) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // RFC 6070 / RFC 7914 PBKDF2-HMAC-SHA256("password", "salt", 1, 32)
+    // = 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
+    interp.eval(R"(
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var enc = new TextEncoder();
+        var bitsHex = null;
+        var derivedKey = null;
+        var derivedOk = null;
+        crypto.subtle.importKey('raw', enc.encode('password'), 'PBKDF2', false, ['deriveBits', 'deriveKey'])
+            .then(function(base) {
+                return crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode('salt'), iterations: 1, hash: 'SHA-256' }, base, 256)
+                    .then(function(bits) {
+                        bitsHex = toHex(bits);
+                        return crypto.subtle.deriveKey(
+                            { name: 'PBKDF2', salt: enc.encode('salt'), iterations: 1, hash: 'SHA-256' },
+                            base,
+                            { name: 'HMAC', hash: 'SHA-256', length: 256 },
+                            true,
+                            ['sign', 'verify']
+                        );
+                    });
+            })
+            .then(function(k) {
+                derivedKey = k;
+                return crypto.subtle.sign('HMAC', k, enc.encode('msg'));
+            })
+            .then(function(sig) {
+                return crypto.subtle.verify('HMAC', derivedKey, sig, enc.encode('msg'));
+            })
+            .then(function(v) {
+                derivedOk = v;
+            });
+    )");
+    assert(interp.eval("bitsHex === '120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b'").is_truthy());
+    assert(interp.eval("derivedKey instanceof CryptoKey && derivedOk === true").is_truthy());
 }
 
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
@@ -35910,6 +35958,7 @@ int main() {
     RUN_TEST(subtle_crypto_digest_sha1_sha384_sha512);
     RUN_TEST(subtle_crypto_hmac_sign_and_verify);
     RUN_TEST(subtle_crypto_export_and_generate_key);
+    RUN_TEST(subtle_crypto_pbkdf2_derive_bits_and_key);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

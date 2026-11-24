@@ -567,7 +567,8 @@ std::unique_ptr<Stmt> JsParser::parse_statement() {
         case JsTokenType::Export:
             fail("import and export are only valid in modules, which are not supported");
         case JsTokenType::With:
-            fail("'with' statements are not supported");
+            advance();
+            return parse_with_statement();
         default:
             break;
     }
@@ -675,6 +676,57 @@ std::unique_ptr<Stmt> JsParser::parse_while_statement() {
     DepthGuard loop_guard(m_functions, &FunctionContext::loop_depth);
     auto body = parse_declaration_or_statement();
     return std::make_unique<WhileStmt>(std::move(condition), std::move(body));
+}
+
+std::unique_ptr<Stmt> JsParser::parse_with_statement() {
+    if (is_strict()) {
+        fail("Strict mode code may not include a with statement");
+    }
+    consume(JsTokenType::OpenParen, "Expected '(' after with.");
+    auto object = parse_expression();
+    consume(JsTokenType::CloseParen, "Expected ')' after with expression.");
+    // ECMA-262 §14.11: WithStatement : with ( Expression ) Statement.
+    // Lexical, class, and function declarations are StatementListItems, not Statements.
+    auto is_let_decl_start = [&](size_t offset) {
+        const JsTokenType after = peek(offset + 1).type;
+        return after == JsTokenType::OpenBracket || after == JsTokenType::OpenBrace ||
+               after == JsTokenType::Identifier || after == JsTokenType::Yield ||
+               after == JsTokenType::Await || after == JsTokenType::Let;
+    };
+    const JsTokenType next = peek().type;
+    if (next == JsTokenType::Const || next == JsTokenType::Class || next == JsTokenType::Function) {
+        fail("Lexical or function declaration cannot appear in a single-statement context");
+    }
+    if (check_identifier("async") && peek(1).type == JsTokenType::Function && !peek(1).newline_before) {
+        fail("Async function declaration cannot appear in a single-statement context");
+    }
+    if (next == JsTokenType::Let) {
+        if (is_let_decl_start(0)) {
+            fail("Lexical declaration cannot appear in a single-statement context");
+        }
+        // `with ({}) let = 1;` is a valid ExpressionStatement in sloppy mode.
+        return std::make_unique<WithStmt>(std::move(object), parse_statement());
+    }
+    // Reject labelled declarations directly as the body (`with ({}) label: function f() {}`,
+    // `with ({}) label: let x = 1;`).
+    {
+        size_t look = 0;
+        while (peek(look).type == JsTokenType::Identifier && peek(look + 1).type == JsTokenType::Colon) {
+            look += 2;
+        }
+        if (look > 0) {
+            const JsTokenType target = peek(look).type;
+            if (target == JsTokenType::Function || target == JsTokenType::Const ||
+                target == JsTokenType::Class ||
+                (target == JsTokenType::Identifier && peek(look).text == "async" &&
+                 peek(look + 1).type == JsTokenType::Function && !peek(look + 1).newline_before) ||
+                (target == JsTokenType::Let && is_let_decl_start(look))) {
+                fail("Declaration cannot appear in a single-statement context");
+            }
+        }
+    }
+    auto body = parse_declaration_or_statement();
+    return std::make_unique<WithStmt>(std::move(object), std::move(body));
 }
 
 std::unique_ptr<Stmt> JsParser::parse_do_while_statement() {

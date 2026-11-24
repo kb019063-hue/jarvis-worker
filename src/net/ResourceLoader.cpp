@@ -126,6 +126,7 @@ struct OpenSslApi {
     int (*SSL_set1_host_fn)(SSL*, const char*) = nullptr;
     X509_VERIFY_PARAM* (*SSL_get0_param_fn)(SSL*) = nullptr;
     int (*X509_VERIFY_PARAM_set1_ip_asc_fn)(X509_VERIFY_PARAM*, const char*) = nullptr;
+    int (*X509_VERIFY_PARAM_set_flags_fn)(X509_VERIFY_PARAM*, unsigned long) = nullptr;
     int (*SSL_connect_fn)(SSL*) = nullptr;
     int (*SSL_read_fn)(SSL*, void*, int) = nullptr;
     int (*SSL_peek_fn)(SSL*, void*, int) = nullptr;
@@ -178,6 +179,7 @@ struct OpenSslApi {
                 load(out.SSL_set1_host_fn, "SSL_set1_host") &&
                 load(out.SSL_get0_param_fn, "SSL_get0_param") &&
                 load(out.X509_VERIFY_PARAM_set1_ip_asc_fn, "X509_VERIFY_PARAM_set1_ip_asc") &&
+                load(out.X509_VERIFY_PARAM_set_flags_fn, "X509_VERIFY_PARAM_set_flags") &&
                 load(out.SSL_connect_fn, "SSL_connect") &&
                 load(out.SSL_read_fn, "SSL_read") &&
                 load(out.SSL_write_fn, "SSL_write") &&
@@ -3291,6 +3293,17 @@ ResourceResponse ResourceLoader::load_http_single_hop(
         if (!out.ssl) {
             close_http_connection(out, false);
             err_out = "Failed to allocate TLS session";
+            return false;
+        }
+
+        // X509_V_FLAG_PARTIAL_CHAIN: an explicitly trusted certificate can
+        // terminate the chain without being self-signed. Verification of the
+        // chain, identity and validity still applies, including to the anchor.
+        constexpr unsigned long kPartialChain = 0x80000UL;
+        auto* verify_param = ssl_api.SSL_get0_param_fn(out.ssl);
+        if (!verify_param || ssl_api.X509_VERIFY_PARAM_set_flags_fn(verify_param, kPartialChain) != 1) {
+            close_http_connection(out, false);
+            err_out = "Failed to configure TLS certificate verification";
             return false;
         }
 

@@ -18,7 +18,7 @@ enum class NodeKind : uint8_t {
     OptionalChain, NewTarget, PrivateIn, ImportCall,
     // Statements
     ExprStmt, VarDecl, Block, If, While, DoWhile, For, ForEach, Return, Break,
-    Continue, Throw, Try, Switch, FunctionDecl, ClassDecl, Labeled, Empty,
+    Continue, Throw, Try, Switch, With, FunctionDecl, ClassDecl, Labeled, Empty,
     // Shared sub-trees
     FunctionNode, ClassNode
 };
@@ -569,6 +569,15 @@ public:
         : Stmt(NodeKind::While), condition(std::move(cond)), body(std::move(b)) {}
 };
 
+class WithStmt : public Stmt {
+public:
+    std::unique_ptr<Expr> object;
+    std::unique_ptr<Stmt> body;
+
+    WithStmt(std::unique_ptr<Expr> obj, std::unique_ptr<Stmt> b)
+        : Stmt(NodeKind::With), object(std::move(obj)), body(std::move(b)) {}
+};
+
 class DoWhileStmt : public Stmt {
 public:
     std::unique_ptr<Stmt> body;
@@ -786,6 +795,7 @@ private:
     std::unique_ptr<Stmt> parse_switch_statement();
     std::unique_ptr<Stmt> parse_while_statement();
     std::unique_ptr<Stmt> parse_do_while_statement();
+    std::unique_ptr<Stmt> parse_with_statement();
     std::unique_ptr<Stmt> parse_for_statement();
     std::unique_ptr<Stmt> parse_try_statement();
     std::unique_ptr<Stmt> parse_return_statement();

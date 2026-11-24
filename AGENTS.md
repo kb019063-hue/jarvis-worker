@@ -873,12 +873,12 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   With the compiling gone a run is as long as its longest job, and on 24
   November that was the unit suites in the sanitizer build: one process,
   8 min 52 s of a run of 10.4 minutes, on a machine with four cores. CI
-  now runs them as **three processes side by side**
-  (`make asan-unit ASAN_UNIT_STRETCHES=3`): told to, `tests/test_suite.cpp`
-  runs one of three equal stretches of its order, and
-  `tools/ci/run_stretches.py` passes when the three passed and add up to
-  every suite. `make asan-unit` here is one process, as it was: three of
-  them want more memory than 4 GB. The deep pages of the sanitizer build
+  now runs them as **several processes side by side**
+  (`make asan-unit ASAN_UNIT_STRETCHES=balanced`): told to,
+  `tests/test_suite.cpp` runs one stretch of its order, and
+  `tools/ci/run_stretches.py` passes when every stretch passed and they
+  add up to every suite. `make asan-unit` here is one process, as it was:
+  one stretch alone holds 4.8 GB. The deep pages of the sanitizer build
   are a job of their own ("Sanitizers: deep and oversized pages"), which
   with the web-platform-tests in front of them was 9 min 43 s. **A suite
   must not need a suite before it**: the first suite of a stretch has
@@ -915,6 +915,48 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   (45356130854, 9.2 minutes from the push) those took 5.8, 5.2, 5.0 and
   4.3 minutes, and the longest job was the unit suites again, 8.9
   minutes, of which the suites were 7.6.
+
+  That evening the unit suites were measured, and the time was not where
+  anybody had looked. Of the step's 466 seconds, 146 compiled the suites'
+  binary (one translation unit, one compiler) and 320 ran the suites; of
+  three equal stretches one took 320 seconds and the others 22 and 24,
+  because the suites that nest pages 200,000 deep stand together in the
+  middle of the order (79, 37 and 30 seconds). Since then:
+  - the job ends with **a notice that gives each stretch's time and
+    memory, its slowest suites, and the suite at which half of its time
+    was over** (the job's annotations, as for a failure);
+  - the stretches begin where `UNIT_SUITE_CUTS` in the Makefile says, and
+    the two that hold the deep suites start when the others have ended
+    (`UNIT_SUITE_LATE`);
+  - **a suite that measures time gives itself room.** Some fifty places
+    say "this takes a fifth of a second: fail above five". In the
+    sanitizer build, beside a process that was turning over 4.8 GB, one
+    of them took more than five (run 45459129005; it cost #376 nine
+    minutes, and the fault was the landing session's, which had put the
+    deep suites beside it). A stretch that fails beside the others, with
+    no sanitizer's report in what it wrote, is now run once more by
+    itself, and passes with a warning on the job if it passes then. A
+    bound that is a multiple of something the suite measured in the same
+    run needs no second chance;
+  - the suites' binary is an object of its own, compiled beside the
+    engine and not after it: `make -j2 test` here does the same;
+  - the sanitizer build is made without GCC's variable tracking
+    (`-fno-var-tracking`), a pass for debuggers that took more than half
+    of the compile time of the two files it was measured on here (in CI
+    an object then took 2.3 to 3.0 seconds where it had taken 3.5 to 4.3,
+    in runs that were not otherwise alike);
+  - the XML suite is a job of its own again, and the deep pages are two
+    jobs (the dumps; the terminal and html5lib): **sixteen jobs in a
+    run, seven in the short run**.
+
+  With all of it a run of every job, its objects in ccache, was 5.3
+  minutes from the push (run 45473629683), where the first of that
+  evening had been 8.5 (run 45451780819). The unit suites were 117
+  seconds, as six stretches: four side by side, then the two deep ones.
+  The four took 236 seconds between them for what two had done in 162, so
+  more processes than that buy little; and the longest job is now the
+  script corpora of the sanitizer build, 5.2 minutes, of which 88
+  seconds were its build.
 
 **The turn, and what a merge does to it**
 

@@ -629,6 +629,12 @@ public:
     /// evaluated (it nests more deeply than the parser follows).
     float evaluate_calc_expression(std::string_view expr, float reference_size = 0.0f, bool* valid = nullptr) const;
     std::string resolve_calc_functions(const std::string& value, float reference_size = 0.0f) const;
+    /// Evaluate a `content` declaration for a pseudo-element. Handles a list of
+    /// strings and `attr()` (with optional fallback), `open-quote` /
+    /// `close-quote`, and skips `url()` / `counter()` items rather than
+    /// treating the whole declaration as invalid (Phase 364).
+    std::string evaluate_content(const std::string& raw, const Element* element,
+                                 const std::unordered_map<std::string, std::string>& vars) const;
 
 private:
     struct IndexedSelector {

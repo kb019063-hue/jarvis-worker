@@ -2195,6 +2195,199 @@ bool parse_content_string(const std::string& raw, std::string& out) {
     return false;  // unterminated
 }
 
+namespace {
+
+static inline bool css_ident_start(char c) {
+    return std::isalpha(static_cast<unsigned char>(c)) || c == '_' || c == '-' ||
+           static_cast<unsigned char>(c) >= 0x80;
+}
+
+static inline bool css_ident_char(char c) {
+    return std::isalnum(static_cast<unsigned char>(c)) || c == '_' || c == '-' ||
+           static_cast<unsigned char>(c) >= 0x80;
+}
+
+static std::string css_to_lower(std::string s) {
+    for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return s;
+}
+
+static std::string css_trim_copy(const std::string& s) {
+    std::string t(s);
+    css_trim(t);
+    return t;
+}
+
+static bool css_decode_string_at(const std::string& raw, std::size_t& pos, std::string& out) {
+    const std::size_t n = raw.size();
+    if (pos >= n) return false;
+    char quote = raw[pos];
+    if (quote != '"' && quote != '\'') return false;
+    ++pos;
+    std::string text;
+    while (pos < n) {
+        char c = raw[pos];
+        if (c == quote) { ++pos; out = std::move(text); return true; }
+        if (c == '\\') {
+            ++pos;
+            if (pos >= n) return false;
+            char e = raw[pos];
+            if (e == '\n' || e == '\r' || e == '\f') {
+                ++pos;
+                if (e == '\r' && pos < n && raw[pos] == '\n') ++pos;
+                continue;
+            }
+            if (e == '"' || e == '\'' || e == '\\') { text.push_back(e); ++pos; continue; }
+            if (std::isxdigit(static_cast<unsigned char>(e))) {
+                std::uint32_t cp = 0;
+                int digits = 0;
+                while (pos < n && digits < 6 && std::isxdigit(static_cast<unsigned char>(raw[pos]))) {
+                    char h = raw[pos];
+                    cp = cp * 16u + static_cast<std::uint32_t>(
+                        h >= '0' && h <= '9' ? h - '0' : h >= 'a' && h <= 'f' ? h - 'a' + 10 : h - 'A' + 10);
+                    ++pos; ++digits;
+                }
+                if (pos < n && (raw[pos] == ' ' || raw[pos] == '\t')) ++pos;
+                if (cp == 0 || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) cp = 0xFFFDu;
+                if (cp < 0x80u) text.push_back(static_cast<char>(cp));
+                else if (cp < 0x800u) { text.push_back(static_cast<char>(0xC0u | (cp >> 6))); text.push_back(static_cast<char>(0x80u | (cp & 0x3Fu))); }
+                else if (cp < 0x10000u) { text.push_back(static_cast<char>(0xE0u | (cp >> 12))); text.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu))); text.push_back(static_cast<char>(0x80u | (cp & 0x3Fu))); }
+                else { text.push_back(static_cast<char>(0xF0u | (cp >> 18))); text.push_back(static_cast<char>(0x80u | ((cp >> 12) & 0x3Fu))); text.push_back(static_cast<char>(0x80u | ((cp >> 6) & 0x3Fu))); text.push_back(static_cast<char>(0x80u | (cp & 0x3Fu))); }
+                continue;
+            }
+            text.push_back(e); ++pos; continue;
+        }
+        text.push_back(c); ++pos;
+    }
+    return false;
+}
+
+static std::string eval_attr_function(const std::string& inner, const Element* element) {
+    if (!element) return std::string();
+    std::string trimmed = css_trim_copy(inner);
+    if (trimmed.empty()) return std::string();
+    std::size_t comma = std::string::npos;
+    int depth = 0;
+    char quote = '\0';
+    for (std::size_t i = 0; i < inner.size(); ++i) {
+        char c = inner[i];
+        if (quote) {
+            if (c == '\\' && i + 1 < inner.size()) { ++i; continue; }
+            if (c == quote) quote = '\0';
+            continue;
+        }
+        if (c == '"' || c == '\'') { quote = c; continue; }
+        if (c == '(') ++depth;
+        else if (c == ')') --depth;
+        else if (c == ',' && depth == 0) { comma = i; break; }
+    }
+    std::string before = (comma == std::string::npos) ? inner : inner.substr(0, comma);
+    std::string after = (comma == std::string::npos) ? std::string() : inner.substr(comma + 1);
+    before = css_trim_copy(before);
+    after = css_trim_copy(after);
+    if (before.empty()) return std::string();
+    std::size_t p = 0;
+    while (p < before.size() && std::isspace(static_cast<unsigned char>(before[p]))) ++p;
+    std::size_t start = p;
+    while (p < before.size() && css_ident_char(before[p])) ++p;
+    std::string attr_name = before.substr(start, p - start);
+    if (attr_name.empty()) return std::string();
+    std::string lower_name = css_to_lower(attr_name);
+    std::string value;
+    bool has = false;
+    if (element->has_attribute(lower_name)) { value = element->get_attribute(lower_name); has = true; }
+    else if (element->has_attribute(attr_name)) { value = element->get_attribute(attr_name); has = true; }
+    if (has) return value;
+    if (after.empty()) return std::string();
+    std::string fb = css_trim_copy(after);
+    if (fb.empty()) return std::string();
+    if (fb[0] == '"' || fb[0] == '\'') {
+        std::size_t qpos = 0;
+        std::string decoded;
+        if (css_decode_string_at(fb, qpos, decoded)) return decoded;
+        return fb;
+    }
+    return fb;
+}
+
+} // namespace
+
+std::string StyleResolver::evaluate_content(const std::string& raw_in,
+                                            const Element* element,
+                                            const std::unordered_map<std::string, std::string>& vars) const {
+    std::string raw = raw_in;
+    if (raw.find("var(") != std::string::npos && !vars.empty()) {
+        raw = resolve_var_functions(raw, vars);
+    }
+    std::string trimmed = css_trim_copy(raw);
+    std::string lower = css_to_lower(trimmed);
+    if (lower == "normal" || lower == "none" || lower == "inherit" || lower == "initial" || lower == "unset")
+        return std::string();
+    if (trimmed.empty()) return std::string();
+
+    std::string result;
+    const std::size_t n = raw.size();
+    std::size_t i = 0;
+    while (i < n) {
+        while (i < n && std::isspace(static_cast<unsigned char>(raw[i]))) ++i;
+        if (i >= n) break;
+        char c = raw[i];
+        if (c == '"' || c == '\'') {
+            std::string text;
+            if (css_decode_string_at(raw, i, text)) {
+                result += text;
+            } else {
+                ++i;
+            }
+            continue;
+        }
+        if (css_ident_start(c) || c == '-') {
+            std::size_t start = i;
+            while (i < n && css_ident_char(raw[i])) ++i;
+            std::string ident = raw.substr(start, i - start);
+            std::string lower_ident = css_to_lower(ident);
+            std::size_t j = i;
+            while (j < n && std::isspace(static_cast<unsigned char>(raw[j]))) ++j;
+            if (j < n && raw[j] == '(') {
+                int depth = 1;
+                std::size_t k = j + 1;
+                char q = '\0';
+                while (k < n && depth > 0) {
+                    char cc = raw[k];
+                    if (q) {
+                        if (cc == '\\' && k + 1 < n) { k += 2; continue; }
+                        if (cc == q) q = '\0';
+                        ++k; continue;
+                    }
+                    if (cc == '"' || cc == '\'') { q = cc; ++k; continue; }
+                    if (cc == '(') ++depth;
+                    else if (cc == ')') --depth;
+                    ++k;
+                }
+                std::size_t inner_start = j + 1;
+                std::size_t inner_end = (k > 0) ? k - 1 : k;
+                std::string inner = (inner_end > inner_start) ? raw.substr(inner_start, inner_end - inner_start) : std::string();
+                if (lower_ident == "attr") {
+                    result += eval_attr_function(inner, element);
+                } else if (lower_ident == "url" || lower_ident == "counter" || lower_ident == "counters") {
+                } else if (lower_ident == "var") {
+                } else {
+                }
+                i = k;
+                continue;
+            }
+            if (lower_ident == "open-quote") result += "\"";
+            else if (lower_ident == "close-quote") result += "\"";
+            else if (lower_ident == "no-open-quote" || lower_ident == "no-close-quote") { }
+            else if (lower_ident == "normal" || lower_ident == "none") { }
+            else { }
+            continue;
+        }
+        ++i;
+    }
+    return result;
+}
+
 void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& raw_val) const {
     if (prop.starts_with("--")) {
         style.custom_properties[prop] = raw_val;
@@ -2271,14 +2464,13 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             parse_visibility(val_lower, style.visibility);
         }
     } else if (prop == "content") {
-        // Phase 215. Only a string is represented: `content: "..."` with single
-        // or double quotes, and the CSS escapes inside it. `normal` and `none`
-        // leave `content` empty, which is what generates nothing; so does a
-        // value this parser does not represent (`counter()`, `attr()`,
-        // `url()`), rather than pretending to generate text it cannot mean.
-        std::string text;
-        if (parse_content_string(val, text)) style.content = text;
-        else style.content.clear();
+        // Phase 364. `content` is a list: strings plus `attr()` (with optional
+        // fallback), `open-quote` / `close-quote`, and ignored `url()` /
+        // `counter()` items. A declaration that was only ignored items leaves
+        // `content` empty and generates nothing, matching Phase 215 for
+        // `normal` / `none` (Phase 364).
+        std::string text = evaluate_content(val, nullptr, style.custom_properties);
+        style.content = std::move(text);
     } else if (prop == "float") {
         if (val == "left") style.float_type = FloatType::Left;
         else if (val == "right") style.float_type = FloatType::Right;
@@ -3583,7 +3775,12 @@ ComputedStyle StyleResolver::resolve_pseudo_element(const std::shared_ptr<Elemen
         return a.order < b.order;
     });
     for (const auto& m : matched) {
-        apply_declaration(style, m.decl->property, m.decl->value);
+        if (m.decl->property == "content") {
+            // Pseudo elements need the originating element for `attr()` (Phase 364).
+            style.content = evaluate_content(m.decl->value, element.get(), style.custom_properties);
+        } else {
+            apply_declaration(style, m.decl->property, m.decl->value);
+        }
     }
     return style;
 }

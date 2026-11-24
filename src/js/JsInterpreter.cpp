@@ -44,6 +44,7 @@ bool environment_enter(void* env, uint64_t epoch) {
 
 void* environment_trace(Heap& heap, void* env) {
     auto* scope = static_cast<JsEnvironment*>(env);
+    if (scope->is_with_scope()) heap.mark_value(scope->with_object());
     for (auto& binding : scope->bindings()) heap.mark_value(binding.value);
     return scope->parent_raw();
 }

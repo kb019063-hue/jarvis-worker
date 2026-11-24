@@ -1885,12 +1885,45 @@ std::string delete_refusal_message(const JsValue& base, const std::string& key) 
     return "Cannot delete property '" + key + "' of " + described;
 }
 
+/// ECMA-262 §9.1.1.2.1 Object Environment Record HasBinding(N) with
+/// `[[IsWithEnvironment]] = true`. Checks `HasProperty(O, N)` first and only
+/// consults `O[@@unscopables]` when the property exists.
+bool with_object_has_binding(const JsValue& obj, const std::string& name) {
+    // `this` and internal synthetic slots (`%fn`, `%home`, `%new.target`, `#...`)
+    // are never resolved against a `with` binding object.
+    if (name == "this" || (!name.empty() && (name[0] == '%' || name[0] == '#'))) return false;
+    if (!obj.has_property(name)) return false;
+    JsValue unscopables = obj.get_property("@@unscopables");
+    if (unscopables.is_object_like()) {
+        if (unscopables.get_property(name).is_truthy()) return false;
+    }
+    return true;
+}
+
 } // namespace
 
-JsValue JsInterpreter::lookup_identifier(const std::string& name, const EnvPtr& env) {
-    if (auto* binding = env->lookup(name)) {
+bool JsInterpreter::try_lookup_identifier(const std::string& name, const EnvPtr& env, JsValue& out_value,
+                                          JsValue* out_with_base) {
+    if (env->has_with_ancestor()) {
+        for (JsEnvironment* cur = env.get(); cur; cur = cur->parent_raw()) {
+            if (cur->is_with_scope()) {
+                if (with_object_has_binding(cur->with_object(), name)) {
+                    if (out_with_base) *out_with_base = cur->with_object();
+                    out_value = cur->with_object().get_property(name);
+                    return true;
+                }
+                continue;
+            }
+            if (auto* binding = cur->find_own(name)) {
+                if (!binding->is_initialized) throw_tdz_error(name);
+                out_value = binding->value;
+                return true;
+            }
+        }
+    } else if (auto* binding = env->lookup(name)) {
         if (!binding->is_initialized) throw_tdz_error(name);
-        return binding->value;
+        out_value = binding->value;
+        return true;
     }
 
     // Properties of the global object are global variables too: `window.x = 1`
@@ -1901,38 +1934,96 @@ JsValue JsInterpreter::lookup_identifier(const std::string& name, const EnvPtr& 
             auto it = obj->properties.find(name);
             if (it == obj->properties.end()) continue;
             if (it->flags & PropertyMap::Accessor) {
-                return it->second.is_function() ? it->second.call_with_this(m_global_object, {})
-                                                : JsValue::make_undefined();
+                out_value = it->second.is_function() ? it->second.call_with_this(m_global_object, {})
+                                                     : JsValue::make_undefined();
+                return true;
             }
-            return it->second;
+            out_value = it->second;
+            return true;
         }
         // What the global object computes: the elements of the page by id.
         if (global->exotic) {
             JsValue computed;
             if (global->exotic->get(global, name, computed) || global->exotic->get_last(global, name, computed)) {
-                return computed;
+                out_value = std::move(computed);
+                return true;
             }
         }
     }
+    return false;
+}
+
+JsInterpreter::Reference JsInterpreter::resolve_identifier_reference(const std::string& name, const EnvPtr& env) {
+    Reference ref;
+    ref.name = name;
+    if (!env->has_with_ancestor()) return ref;
+    for (JsEnvironment* cur = env.get(); cur; cur = cur->parent_raw()) {
+        if (cur->is_with_scope()) {
+            if (with_object_has_binding(cur->with_object(), name)) {
+                ref.is_property = true;
+                ref.is_with = true;
+                ref.base = cur->with_object();
+                return ref;
+            }
+            continue;
+        }
+        if (cur->find_own(name)) {
+            ref.resolved_env = cur;
+            return ref;
+        }
+    }
+    return ref;
+}
+
+JsValue JsInterpreter::lookup_identifier(const std::string& name, const EnvPtr& env) {
+    JsValue value;
+    if (try_lookup_identifier(name, env, value, nullptr)) return value;
     js_throw_error(JsErrorKind::ReferenceError, name + " is not defined");
 }
 
 void JsInterpreter::assign_identifier(const std::string& name, const JsValue& value, const EnvPtr& env) {
-    switch (env->try_assign(name, value)) {
-        case JsEnvironment::AssignResult::Ok:
-            return;
-        case JsEnvironment::AssignResult::Uninitialized:
-            throw_tdz_error(name);
-        case JsEnvironment::AssignResult::Const:
-            js_throw_type_error("Assignment to constant variable.");
-        case JsEnvironment::AssignResult::ReadOnly:
-            // `undefined = 1`: ignored in sloppy code, an error in strict code.
-            if (env->is_strict()) {
-                js_throw_type_error("Cannot assign to read only property '" + name + "' of object '#<Object>'");
+    if (env->has_with_ancestor()) {
+        for (JsEnvironment* cur = env.get(); cur; cur = cur->parent_raw()) {
+            if (cur->is_with_scope()) {
+                if (with_object_has_binding(cur->with_object(), name)) {
+                    JsValue target = cur->with_object();
+                    if (!target.set_property(name, value) && env->is_strict()) {
+                        js_throw_type_error("Cannot set property '" + name + "' of this object");
+                    }
+                    return;
+                }
+                continue;
             }
-            return;
-        case JsEnvironment::AssignResult::NotFound:
-            break;
+            if (auto* b = cur->find_own(name)) {
+                if (!b->is_initialized) throw_tdz_error(name);
+                if (b->is_const) js_throw_type_error("Assignment to constant variable.");
+                if (b->is_readonly) {
+                    if (env->is_strict()) {
+                        js_throw_type_error("Cannot assign to read only property '" + name + "' of object '#<Object>'");
+                    }
+                    return;
+                }
+                b->value = value;
+                return;
+            }
+        }
+    } else {
+        switch (env->try_assign(name, value)) {
+            case JsEnvironment::AssignResult::Ok:
+                return;
+            case JsEnvironment::AssignResult::Uninitialized:
+                throw_tdz_error(name);
+            case JsEnvironment::AssignResult::Const:
+                js_throw_type_error("Assignment to constant variable.");
+            case JsEnvironment::AssignResult::ReadOnly:
+                // `undefined = 1`: ignored in sloppy code, an error in strict code.
+                if (env->is_strict()) {
+                    js_throw_type_error("Cannot assign to read only property '" + name + "' of object '#<Object>'");
+                }
+                return;
+            case JsEnvironment::AssignResult::NotFound:
+                break;
+        }
     }
     if (JsObject* global = m_global_object.object_val) {
         if (global->properties.find(name) != global->properties.end()) {
@@ -1986,9 +2077,12 @@ JsInterpreter::Reference JsInterpreter::resolve_reference(const Expr* target, co
                                                             bool throw_on_nullish) {
     Reference ref;
     switch (target->kind) {
-        case NodeKind::Identifier:
-            ref.name = static_cast<const IdentifierExpr*>(target)->name;
+        case NodeKind::Identifier: {
+            const std::string& name = static_cast<const IdentifierExpr*>(target)->name;
+            if (env->has_with_ancestor()) return resolve_identifier_reference(name, env);
+            ref.name = name;
             return ref;
+        }
         case NodeKind::Member: {
             auto* member = static_cast<const MemberExpr*>(target);
             ref.is_property = true;
@@ -2038,6 +2132,12 @@ void JsInterpreter::check_reference_base(const Reference& ref) {
 JsValue JsInterpreter::read_reference(const Reference& ref, const EnvPtr& env) {
     if (ref.is_private) return ref.base.get_private(ref.private_key, ref.name);
     if (ref.is_property) return ref.base.get_property(ref.name);
+    if (ref.resolved_env) {
+        if (auto* b = ref.resolved_env->find_own(ref.name)) {
+            if (!b->is_initialized) throw_tdz_error(ref.name);
+            return b->value;
+        }
+    }
     return lookup_identifier(ref.name, env);
 }
 
@@ -2049,6 +2149,13 @@ void JsInterpreter::write_reference(const Reference& ref, const JsValue& value, 
     }
     if (ref.is_property) {
         JsValue target = ref.base;
+        // ECMA-262 §9.1.1.2.5 SetMutableBinding(N, V, S): if the property was
+        // deleted from the `with` binding object between ResolveBinding and
+        // PutValue, strict mode throws ReferenceError instead of recreating it.
+        if (ref.is_with && env->is_strict() && target.object_val && !target.object_val->exotic &&
+            !target.has_property(ref.name)) {
+            js_throw_error(JsErrorKind::ReferenceError, ref.name + " is not defined");
+        }
         // A write to a property this object does not take (a getter-only
         // index of a collection, say) is refused; strict mode throws, as
         // [[Set]]'s false requires.
@@ -2056,6 +2163,20 @@ void JsInterpreter::write_reference(const Reference& ref, const JsValue& value, 
             js_throw_type_error("Cannot set property '" + ref.name + "' of this object");
         }
         return;
+    }
+    if (ref.resolved_env) {
+        if (auto* b = ref.resolved_env->find_own(ref.name)) {
+            if (!b->is_initialized) throw_tdz_error(ref.name);
+            if (b->is_const) js_throw_type_error("Assignment to constant variable.");
+            if (b->is_readonly) {
+                if (env->is_strict()) {
+                    js_throw_type_error("Cannot assign to read only property '" + ref.name + "' of object '#<Object>'");
+                }
+                return;
+            }
+            b->value = value;
+            return;
+        }
     }
     assign_identifier(ref.name, value, env);
 }
@@ -2072,6 +2193,16 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
                     env->initialize_lexical(pattern.name, value, true);
                     return;
                 case BindMode::Var: {
+                    // Inside a `with` scope, `var x = v` / `var [x] = ...`
+                    // resolves through the `with` object environment record
+                    // before falling back to the hoisted variable binding.
+                    if (env->has_with_ancestor()) {
+                        Reference ref = resolve_identifier_reference(pattern.name, env);
+                        if (ref.is_with) {
+                            write_reference(ref, value, env);
+                            return;
+                        }
+                    }
                     // The binding was hoisted to the function scope on entry,
                     // or lives as a property on the global object.
                     if (auto* binding = env->lookup(pattern.name)) {
@@ -2204,6 +2335,17 @@ void JsInterpreter::exec_var_decl(const VarDeclStmt* stmt, const EnvPtr& env) {
         const bool is_name = decl.target->kind == Pattern::Kind::Identifier;
         if (stmt->kind == JsDeclKind::Var) {
             if (!decl.init) continue;        // `var x;` was hoisted and has no effect here
+            if (is_name && env->has_with_ancestor()) {
+                // ECMA-262 §14.3.2.1: ResolveBinding(bindingId) runs before the initializer.
+                Reference lhs = resolve_identifier_reference(decl.target->name, env);
+                JsValue value = evaluate_named(decl.init.get(), env, decl.target->name);
+                if (lhs.is_with) {
+                    write_reference(lhs, value, env);
+                } else {
+                    bind_pattern(*decl.target, value, env, BindMode::Var);
+                }
+                continue;
+            }
             JsValue value = is_name ? evaluate_named(decl.init.get(), env, decl.target->name)
                                     : evaluate(decl.init.get(), env);
             bind_pattern(*decl.target, value, env, BindMode::Var);
@@ -2281,6 +2423,8 @@ JsInterpreter::Flow JsInterpreter::exec(const Stmt* stmt, const EnvPtr& env, Fra
             return exec_try(static_cast<const TryStmt*>(stmt), env, frame);
         case NodeKind::Switch:
             return exec_switch(static_cast<const SwitchStmt*>(stmt), env, frame);
+        case NodeKind::With:
+            return exec_with(static_cast<const WithStmt*>(stmt), env, frame);
         case NodeKind::Labeled: {
             std::vector<const std::string*> labels;
             return exec_labeled(stmt, env, frame, labels);
@@ -2295,6 +2439,16 @@ JsInterpreter::Flow JsInterpreter::exec(const Stmt* stmt, const EnvPtr& env, Fra
         default:
             return Flow::Normal;
     }
+}
+
+JsInterpreter::Flow JsInterpreter::exec_with(const WithStmt* stmt, const EnvPtr& env, Frame& frame) {
+    // ECMA-262 §14.11.2: ToObject(GetValue(expr)) throws TypeError on null/undefined.
+    JsValue obj = js_to_object(evaluate(stmt->object.get(), env));
+    auto with_env = JsEnvironment::make_with_scope(env, std::move(obj));
+    EnvScope env_scope(with_env);
+    // UpdateEmpty(C, undefined): an empty body or `var` clears the prior completion.
+    if (frame.track_completion) frame.completion = JsValue::make_undefined();
+    return exec(stmt->body.get(), with_env, frame);
 }
 
 JsInterpreter::Flow JsInterpreter::exec_labeled(const Stmt* stmt, const EnvPtr& env, Frame& frame,
@@ -2838,6 +2992,13 @@ JsValue JsInterpreter::eval_unary(const UnaryExpr* expr, const EnvPtr& env) {
             // `typeof neverDeclared` is "undefined", not a ReferenceError.
             if (operand->kind == NodeKind::Identifier) {
                 const std::string& name = static_cast<const IdentifierExpr*>(operand)->name;
+                if (env->has_with_ancestor()) {
+                    JsValue val;
+                    if (!try_lookup_identifier(name, env, val, nullptr)) {
+                        return js_typeof_value(JsValue::make_undefined());
+                    }
+                    return js_typeof_value(val);
+                }
                 if (!env->lookup(name) && !m_global_object.has_property(name)) {
                     return js_typeof_value(JsValue::make_undefined());
                 }
@@ -2883,7 +3044,23 @@ JsValue JsInterpreter::eval_unary(const UnaryExpr* expr, const EnvPtr& env) {
                 // stays; and a name that resolves to nothing is deletable,
                 // which is what `delete notDeclared` answers rather than a
                 // ReferenceError.
-                if (JsEnvironment::Binding* b = env->lookup(name)) {
+                if (env->has_with_ancestor()) {
+                    for (JsEnvironment* e = env.get(); e; e = e->parent_raw()) {
+                        if (e->is_with_scope()) {
+                            if (with_object_has_binding(e->with_object(), name)) {
+                                return JsValue::make_boolean(e->with_object().delete_property(name));
+                            }
+                            continue;
+                        }
+                        if (JsEnvironment::Binding* own = e->find_own(name)) {
+                            if (own->is_deletable) {
+                                e->remove_own(name);
+                                return JsValue::make_boolean(true);
+                            }
+                            return JsValue::make_boolean(false);
+                        }
+                    }
+                } else if (JsEnvironment::Binding* b = env->lookup(name)) {
                     if (b->is_deletable) {
                         for (JsEnvironment* e = env.get(); e; e = e->parent_raw()) {
                             if (JsEnvironment::Binding* own = e->find_own(name)) {
@@ -2934,6 +3111,14 @@ JsValue JsInterpreter::eval_assign(const AssignExpr* expr, const EnvPtr& env) {
     if (expr->op == JsTokenType::Equal) {
         if (target->kind == NodeKind::Identifier) {
             const std::string& name = static_cast<const IdentifierExpr*>(target)->name;
+            if (env->has_with_ancestor()) {
+                // §13.15.2: ResolveBinding(name) runs before evaluating the RHS.
+                Reference ref = resolve_identifier_reference(name, env);
+                JsValue value = target->explicitly_grouped ? evaluate(expr->value.get(), env)
+                                                           : evaluate_named(expr->value.get(), env, name);
+                write_reference(ref, value, env);
+                return value;
+            }
             // `(f) = function () {}` leaves the function anonymous: the target
             // is a parenthesised expression, not an IdentifierReference, so
             // this is not a named evaluation (see evaluate_named).
@@ -3022,12 +3207,23 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
             callee_name = &computed_name;
             break;
         }
+        case NodeKind::Identifier: {
+            const std::string& name = static_cast<const IdentifierExpr*>(callee)->name;
+            callee_name = &name;
+            if (env->has_with_ancestor()) {
+                // ECMA-262 §13.3.6.1 step 4.b: calling a binding resolved on a
+                // `with` object environment record passes `WithBaseObject()` as `this`.
+                if (!try_lookup_identifier(name, env, fn, &this_val)) {
+                    js_throw_error(JsErrorKind::ReferenceError, name + " is not defined");
+                }
+            } else {
+                fn = lookup_identifier(name, env);
+            }
+            break;
+        }
         default:
             fn = evaluate(callee, env);
             if (m_chain_short_circuit) return JsValue::make_undefined();
-            if (callee->kind == NodeKind::Identifier) {
-                callee_name = &static_cast<const IdentifierExpr*>(callee)->name;
-            }
             break;
     }
 
@@ -3393,6 +3589,11 @@ JsValue JsInterpreter::eval_tagged_template(const TaggedTemplateExpr* expr, cons
         auto* member = static_cast<const MemberExpr*>(tag);
         this_val = evaluate(member->object.get(), env);
         fn = get_member(this_val, member->property);
+    } else if (tag->kind == NodeKind::Identifier && env->has_with_ancestor()) {
+        const std::string& name = static_cast<const IdentifierExpr*>(tag)->name;
+        if (!try_lookup_identifier(name, env, fn, &this_val)) {
+            js_throw_error(JsErrorKind::ReferenceError, name + " is not defined");
+        }
     } else {
         fn = evaluate(tag, env);
     }
@@ -3419,7 +3620,7 @@ JsValue JsInterpreter::eval_update(const UpdateExpr* update, const EnvPtr& env) 
     // again to write it. Here the walk happens once and the write lands on
     // the binding the walk found. The refusals keep the words the general
     // path's `assign_identifier` gives them.
-    if (update->target->kind == NodeKind::Identifier) {
+    if (update->target->kind == NodeKind::Identifier && !env->has_with_ancestor()) {
         const std::string& name = static_cast<const IdentifierExpr*>(update->target.get())->name;
         if (JsEnvironment::Binding* binding = env->lookup(name)) {
             if (!binding->is_initialized) throw_tdz_error(name);
@@ -3565,7 +3766,9 @@ JsValue JsInterpreter::evaluate(const Expr* expr, const EnvPtr& env) {
 
         case NodeKind::Identifier: {
             auto* id = static_cast<const IdentifierExpr*>(expr);
-            if (id->is_undefined && !JsEnvironment::undefined_shadowed()) return JsValue::make_undefined();
+            if (id->is_undefined && !JsEnvironment::undefined_shadowed() && !env->has_with_ancestor()) {
+                return JsValue::make_undefined();
+            }
             return lookup_identifier(id->name, env);
         }
 

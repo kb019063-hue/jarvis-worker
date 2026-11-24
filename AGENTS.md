@@ -289,6 +289,20 @@ within the hour, and the first lot was started again four times.
      lot's, and by the run on `main` after the lot. That last one now
      builds, keeps the objects and runs the plain unit suites, no more
      (`[objects only]` in the lot's last merge);
+   - **a pull request whose title begins with `WIP:` gets the short run
+     too, watch or no watch**, from its first push. The label comes with
+     the landing session's next look, which is after that push: at 18:10
+     on 24 November three pull requests that had just been opened each
+     started all fourteen jobs, and the lot of 18:12, which a finished
+     pull request was waiting for, had ten jobs without a runner two and
+     a half minutes after its push. Work in progress is merged on no run
+     at all. When the `WIP:` is off, every job runs before the merge: in
+     the lot while a watch is on, and with no watch because `merge N`
+     starts them on your head (it puts the label on and takes it off).
+     **With no watch, take the `WIP:` off before your last push**, and
+     that push's run is the whole one already. A sanitizer job you want
+     to see on work in progress: `make asan-build` and the part here
+     (`make help` lists them), or the push with the `WIP:` off;
    - **when a lot's run fails, every member that could be at fault stays
      out of the next lot until it is known which one it was.** The run
      names the job, not the pull request. On 24 November the lot of 08:38

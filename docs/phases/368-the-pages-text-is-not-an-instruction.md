@@ -51,7 +51,8 @@ is what the tools that read these dumps need: `#text: "` in
 `tools/fuzz/deep_pages.py`, and the WPT tree dump that `make wpt` and
 `make diff-trees` compare byte for byte against the corpus.
 
-It is applied at every sink a parsed document writes:
+It is applied in the dump a person reads — `Document::dump`, the
+`--dump-dom` report:
 
 - `Text::dump_open` (`src/dom/Node.cpp`) — the writer's own `\n` and `\t`
   escapes first, so a newline in a text node still prints as two characters,
@@ -60,17 +61,37 @@ It is applied at every sink a parsed document writes:
 - `Element::dump_open` (`src/dom/Node.cpp`) — attribute names and values.
 - `Document::dump_open` (`src/dom/Document.cpp`) — the title.
 - `Comment` and `ProcessingInstruction` (`src/dom/Comment.cpp`).
-- `dump_tree_webplatform` (`src/html/TreeDump.cpp`) — the same four fields,
-  plus the doctype's public and system identifiers.
+
+`dump_tree_webplatform` (`src/html/TreeDump.cpp`) is **not** filtered, and the
+first draft of this phase did filter it. That dump is not a report: it is the
+html5lib corpus's data format, and `make conformance`, `make wpt` and
+`make diff-trees` compare it byte for byte with
+`tests/html5lib/tree-construction/`. Filtering it broke
+`plain-text-unsafe.dat` case #0, whose input is a carriage return and whose
+expected tree is a text node of **two lines**:
+
+```
+|     "FOO
+| ZOO"
+```
+
+`make conformance` went 1973/1973 → 1972/1973, and the landing session's own
+run found it because that job is not part of a pull request's short run. A
+filter belongs where text goes to a terminal, not where text goes to a
+comparing tool — the same reason `#text: "` must keep matching for
+`tools/fuzz/deep_pages.py`.
 
 `make verify-page-text-terminal-safety` is the check, in the shape of the
 js-error one: the real CLI, a page carrying an introduction in each of the
-four fields, both dump formats, and the output searched for any byte a
-terminal acts on. It names the offset and the byte class and never prints the
+four fields in `--dump-dom`, and the output searched for any byte a terminal
+acts on. It names the offset and the byte class and never prints the
 bytes themselves — on a terminal that read this tool's output, the attack
 would be the output. The one control sequence `--dump-dom` writes itself, its
 yellow `--- [DOM Tree] ---` heading, is pinned by its exact bytes (as the
 shell's frame is) rather than exempted, so an SGR cannot hide inside it.
+
+It also pins the split in both directions: the corpus dump keeps its carriage
+return (`"FOO\rZOO"`), and the human dump does not.
 
 `src/main.cpp` — where `--dump-css` and `--dump-paint` print the page's own
 declaration values and `DrawText` strings — belonged to pull request #365, so
@@ -80,31 +101,32 @@ those two dumps are **not** fixed here and are recorded open below.
 
 `tests/suites/368-page-text-cannot-command-the-terminal.cpp`, a file of its
 own, parses one page carrying an instruction in the title, an attribute, a
-text node and a comment, dumps it in both formats, and asserts that no byte a
-terminal acts on survives; that each field's own text does; that an ordinary
-page's WPT dump is still in the corpus's form (`<!--  c  -->` with the source's
-own spaces, a text node in quotes); and that the same page without its
-instructions dumps identically once the U+FFFD marks are removed.
+text node and a comment, dumps it, and asserts that no byte a terminal acts on
+survives and that each field's own text does; that the same page without its
+instructions dumps identically once the U+FFFD marks are removed; and that the
+corpus dump keeps its carriage return while the human dump does not.
 
 ```bash
 make test                                        # All 433 engine test suites passed
-make verify-page-text-terminal-safety            # 31/31 checks pass
+make verify-page-text-terminal-safety            # 21/21 checks pass
 make verify-js-error-terminal-safety             # 6/6 still pass
 ```
 
-Negative control: with the four dump files as `main` has them and the checker
-in place, it fails **25/31** — the six "prints no control byte" checks are
-exactly the six that fail, one per field per dump format, and the twenty-five
-that pass are the ones that must: the page's text, the heading, the ordinary
-page.
+Negative control: with the dump files as `main` has them and the checker in
+place, every "prints no control byte" check fails — one per field — and the
+ones that pass are the ones that must: the page's text, the heading, the
+ordinary page, the corpus's carriage return. (When both dump formats were
+filtered, the control was 25/31 with three dump formats' worth of checks;
+the split above is what those runs became.)
 
 | Check | Result |
 | :--- | :--- |
 | `make test` | 433 suites, all pass |
-| `make verify-page-text-terminal-safety` | 31/31 |
+| `make verify-page-text-terminal-safety` | 21/21 |
+| `make conformance` | 1973/1973 |
+| `make dom-conformance` | 678/678 |
 | `make diff-trees` | 1500/1500 trees equal |
 | `make wpt` | 9570/9824, the same 254 listed (unchanged from main) |
-| `make dom-conformance` | 678/678 |
 | `make js-conformance` | 1150/1158 (99.3%) |
 
 ## 4. What is still open

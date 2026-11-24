@@ -5,13 +5,20 @@ The subprocess output is captured and never printed: on a terminal that read
 it, the bytes under test would be the attack, and this tool's job is to say
 whether they are there, not to hand them over.
 
-Each case is one field a tree dump shows — document title, attribute value,
-text node, comment — with an instruction in it, run through the real CLI in
-both dump formats. The output must contain none of the bytes a terminal acts
-on: ESC (0x1b), BEL (0x07), CR (0x0d), the other C0 controls, DEL, or the
-8-bit introductions 0x9b (CSI), 0x9d (OSC), 0x90 (DCS). A newline is the dump
-writer's own and is allowed. A page's own UTF-8 text must still be there, and a
-page with no instruction in it must dump exactly the bytes it always did.
+Each case is one field the human tree dump shows — document title, attribute
+value, text node, comment — with an instruction in it, run through the real
+CLI. `--dump-dom` must contain none of the bytes a terminal acts on: ESC
+(0x1b), BEL (0x07), CR (0x0d), the other C0 controls, DEL, or the 8-bit
+introductions 0x9b (CSI), 0x9d (OSC), 0x90 (DCS). A newline is the dump
+writer's own and is allowed. A page's own UTF-8 text must still be there.
+
+`--dump-dom-webplatform` is deliberately not filtered, and the last case is
+why: that dump is the html5lib corpus's data format, compared byte for byte
+against `tests/html5lib/tree-construction/`, whose own case for a carriage
+return expects the two lines it makes. It is a file bound for a comparing
+tool, not a report bound for a person, so it is left exactly as the corpus
+has it; the last case pins that, so this tool cannot be made to pass by
+filtering the data format.
 """
 import argparse
 import pathlib
@@ -75,7 +82,7 @@ def main():
         for field, template in FIELDS.items():
             page = directory / (field + '.html')
             page.write_text(template.format(ATTACKS[field]), encoding='utf-8')
-            for mode in ('--dump-dom', '--dump-dom-webplatform'):
+            for mode in ('--dump-dom',):
                 status, out = run(binary, page, mode)
                 check(f'{field} in {mode} runs', status == 0, f'exit {status}')
                 body = out
@@ -109,6 +116,15 @@ def main():
                 check('an ordinary page gets only the heading it always got',
                       out.partition(b'\n')[0] + b'\n' in HEADING and
                       not [b for b in out.partition(b'\n')[2] if b in FORBIDDEN])
+
+        # The data format keeps what it always kept, and the corpus is why.
+        cr = directory / 'cr.html'
+        cr.write_text('<!doctype html><body>FOO&#x000D;ZOO</body>', encoding='utf-8')
+        status, out = run(binary, cr, '--dump-dom-webplatform')
+        check('the corpus dump keeps a CR, as the corpus expects it',
+              status == 0 and b'|     "FOO\rZOO"\n' in out)
+        status, out = run(binary, cr, '--dump-dom')
+        check('the human dump does not keep it', status == 0 and b'\r' not in out)
 
     print(f'page text terminal safety: {passed}/{total} checks pass')
     return int(passed != total)

@@ -1,6 +1,5 @@
 #include "litebird/dom/ProcessingInstruction.hpp"
 #include "litebird/html/TreeDump.hpp"
-#include "litebird/common/TerminalText.hpp"
 #include "litebird/dom/Comment.hpp"
 #include "litebird/dom/Document.hpp"
 #include "litebird/dom/Element.hpp"
@@ -36,7 +35,7 @@ void dump_doctype(std::ostream& os, const Document& doc, int depth) {
     const auto& dt = doc.doctype();
     os << dt.name;
     if (!dt.public_id.empty() || !dt.system_id.empty()) {
-        os << " \"" << terminal_safe(dt.public_id) << "\" \"" << terminal_safe(dt.system_id) << "\"";
+        os << " \"" << dt.public_id << "\" \"" << dt.system_id << "\"";
     }
     os << ">\n";
 }
@@ -94,7 +93,7 @@ void dump_tree_webplatform(std::ostream& os, const Node& root) {
                 ;
                 for (const auto& [name, value] : attrs) {
                     write_indent(os, depth + 1);
-                    os << terminal_safe(name) << "=\"" << terminal_safe(value) << "\"\n";
+                    os << name << "=\"" << value << "\"\n";
                 }
 
                 // The element's own children come after its template contents,
@@ -110,13 +109,13 @@ void dump_tree_webplatform(std::ostream& os, const Node& root) {
             case NodeType::Text: {
                 const auto& text = static_cast<const Text&>(node);
                 write_indent(os, depth);
-                os << "\"" << terminal_safe(text.text()) << "\"\n";
+                os << "\"" << text.text() << "\"\n";
                 break;
             }
             case NodeType::Comment: {
                 const auto& comment = static_cast<const Comment&>(node);
                 write_indent(os, depth);
-                os << "<!-- " << terminal_safe(comment.data()) << " -->\n";
+                os << "<!-- " << comment.data() << " -->\n";
                 break;
             }
             case NodeType::DocumentFragment:
@@ -129,8 +128,7 @@ void dump_tree_webplatform(std::ostream& os, const Node& root) {
                 // space, the data, and `?>` (resources/README.md).
                 const auto& instruction = static_cast<const ProcessingInstruction&>(node);
                 write_indent(os, depth);
-                os << "<?" << terminal_safe(instruction.target()) << " "
-                   << terminal_safe(instruction.data()) << "?>\n";
+                os << "<?" << instruction.target() << " " << instruction.data() << "?>\n";
                 break;
             }
         }

@@ -30,18 +30,23 @@ test carried a page with an escape in it, so nothing failed.
 One filter, `terminal_safe` (`src/common/TerminalText.cpp`), replacing every
 byte a terminal acts on — `ESC`, `BEL`, `CR`, the other C0 controls, `DEL`, and
 the 8-bit CSI/OSC/DCS introductions — with U+FFFD, and leaving a tab, a newline
-and every byte of well-formed UTF-8 alone. Applied to the title, attributes,
-text nodes, comments, processing instructions and doctype identifiers of both
-tree dumps. A checker, `make verify-page-text-terminal-safety`, runs the real
+and every byte of well-formed UTF-8 alone. Applied in `--dump-dom`, the dump a
+person reads: the title, attribute names and values, text nodes, comments and
+processing instructions. **Not** applied to `--dump-dom-webplatform`, which is
+the html5lib corpus's data format compared byte for byte — filtering it broke
+`plain-text-unsafe.dat` case #0, whose expected tree keeps a carriage return
+(`"FOO\rZOO"` prints as two lines), and `make conformance` fell from
+1973/1973 to 1972/1973. A checker, `make verify-page-text-terminal-safety`, runs the real
 CLI over a page with an instruction in each field and fails on any control byte
 in the output.
 
 ## 3. Evidence
 
-`make test` **433/433**; `make verify-page-text-terminal-safety` **31/31**;
-`make diff-trees` 1500/1500 unchanged, because an ordinary page still dumps
-byte for byte as it did. With the dump files as `main` has them, the checker is
-25/31 — the six failures are the six fields it exists for.
+`make test` **433/433**; `make verify-page-text-terminal-safety` **21/21**;
+`make conformance` 1973/1973 and `make diff-trees` 1500/1500 unchanged, because
+an ordinary page still dumps byte for byte as it did. With the dump files as
+`main` has them, the checker is 17/21 — the four failures are the four fields
+it exists for.
 
 ## 4. What is still open
 

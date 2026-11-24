@@ -176,6 +176,7 @@ all: $(TARGET)
 
 ## Compare query/fragment-only resolution with Node's URL implementation.
 .PHONY: verify-relative-navigation
+.PHONY: verify-bytecode
 verify-relative-navigation: $(BUILD_DIR)/relative_navigation_fixture
 	@python3 tools/conformance/verify_relative_navigation.py --binary $(BUILD_DIR)/relative_navigation_fixture
 
@@ -186,6 +187,14 @@ verify-path-resolution: $(BUILD_DIR)/relative_navigation_fixture
 
 $(BUILD_DIR)/relative_navigation_fixture: $(OBJS) tools/conformance/relative_navigation_fixture.cpp
 	$(CXX) $(CXXFLAGS) $(OBJS) tools/conformance/relative_navigation_fixture.cpp -o $@
+
+## Compare the bytecode VM's answer with the tree-walker's, case by case.
+.PHONY: verify-bytecode
+verify-bytecode: $(BUILD_DIR)/bytecode_probe
+	@python3 tools/conformance/verify_bytecode_agreement.py $(BUILD_DIR)/bytecode_probe
+
+$(BUILD_DIR)/bytecode_probe: $(OBJS) tools/conformance/bytecode_probe.cpp
+	$(CXX) $(CXXFLAGS) $(OBJS) tools/conformance/bytecode_probe.cpp -o $@
 
 ## The original offline driver, for rechecking exposed holdout-02 tasks.
 $(BUILD_DIR)/holdout_02_driver: $(OBJS) tools/real_pages/holdout-02/drive.cpp

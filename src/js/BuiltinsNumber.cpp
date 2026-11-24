@@ -3,6 +3,9 @@
 #include "litebird/js/JsBuiltins.hpp"
 #include "litebird/js/Heap.hpp"
 #include <algorithm>
+#include <array>
+#include <bit>
+#include <cstdint>
 #include <cmath>
 #include <cstdio>
 #include <limits>
@@ -243,6 +246,102 @@ std::mt19937_64& random_engine() {
     return engine;
 }
 
+// Exact integer multiples of 2^-1074. Thirty-four limbs hold every finite
+// binary64 summed at most 2^53-1 times, including intermediate overflow.
+struct PreciseMagnitude {
+    std::array<uint64_t, 34> words{};
+
+    void add_word(size_t index, uint64_t value) {
+        while (value && index < words.size()) {
+            const uint64_t before = words[index];
+            words[index] += value;
+            value = words[index] < before ? 1 : 0;
+            ++index;
+        }
+    }
+
+    void add(double value) {
+        const uint64_t bits = std::bit_cast<uint64_t>(value);
+        const unsigned exponent = static_cast<unsigned>((bits >> 52) & 0x7ff);
+        uint64_t significand = bits & ((uint64_t{1} << 52) - 1);
+        const unsigned shift = exponent ? exponent - 1 : 0;
+        if (exponent) significand |= uint64_t{1} << 52;
+        const size_t word = shift / 64;
+        const unsigned offset = shift % 64;
+        add_word(word, significand << offset);
+        if (offset) add_word(word + 1, significand >> (64 - offset));
+    }
+
+    int compare(const PreciseMagnitude& other) const {
+        for (size_t i = words.size(); i-- > 0;) {
+            if (words[i] != other.words[i]) return words[i] < other.words[i] ? -1 : 1;
+        }
+        return 0;
+    }
+
+    void subtract(const PreciseMagnitude& other) { // *this >= other
+        uint64_t borrow = 0;
+        for (size_t i = 0; i < words.size(); ++i) {
+            const uint64_t a = words[i], b = other.words[i];
+            words[i] = a - b - borrow;
+            borrow = (a < b || (borrow && a == b)) ? 1 : 0;
+        }
+    }
+
+    bool bit(size_t n) const { return (words[n / 64] >> (n % 64)) & 1; }
+
+    double rounded() const {
+        size_t top = words.size();
+        while (top && !words[top - 1]) --top;
+        if (!top) return 0.0;
+        const size_t highest = (top - 1) * 64 + 63 - std::countl_zero(words[top - 1]);
+        const size_t shift = highest > 52 ? highest - 52 : 0;
+        // Read at most 53 leading bits. This avoids host rounding during the
+        // accumulation and also keeps the integer-to-double conversion exact.
+        uint64_t significand = 0;
+        for (size_t i = highest + 1; i-- > shift;) significand = (significand << 1) | bit(i);
+        if (shift) {
+            const bool guard = bit(shift - 1);
+            bool sticky = false;
+            for (size_t i = 0; i + 1 < shift && !sticky; ++i) sticky = bit(i);
+            if (guard && (sticky || (significand & 1))) ++significand;
+        }
+        return std::ldexp(static_cast<double>(significand), static_cast<int>(shift) - 1074);
+    }
+};
+
+JsValue math_sum_precise(Args args) {
+    PreciseMagnitude positive, negative;
+    bool any_non_negative_zero = false;
+    bool nan = false, positive_inf = false, negative_inf = false;
+    uint64_t count = 0;
+    js_iterate(js_arg(args, 0), [&](const JsValue& item) {
+        if (++count >= (uint64_t{1} << 53)) js_throw_range_error("Math.sumPrecise: too many values");
+        if (item.type != JsType::Number) js_throw_type_error("Math.sumPrecise requires numbers");
+        const double value = item.number_val;
+        if (std::isnan(value)) nan = true;
+        else if (std::isinf(value)) (std::signbit(value) ? negative_inf : positive_inf) = true;
+        else if (value == 0.0) {
+            if (!std::signbit(value)) any_non_negative_zero = true;
+        } else {
+            any_non_negative_zero = true;
+            (std::signbit(value) ? negative : positive).add(value);
+        }
+        return true; // Even NaN does not skip later values or iterator effects.
+    });
+    if (nan || (positive_inf && negative_inf)) return JsValue::make_number(kNaN);
+    if (positive_inf) return JsValue::make_number(kInfinity);
+    if (negative_inf) return JsValue::make_number(-kInfinity);
+    const int ordering = positive.compare(negative);
+    if (!ordering) return JsValue::make_number(any_non_negative_zero ? 0.0 : -0.0);
+    if (ordering > 0) {
+        positive.subtract(negative);
+        return JsValue::make_number(positive.rounded());
+    }
+    negative.subtract(positive);
+    return JsValue::make_number(-negative.rounded());
+}
+
 template <typename Fn>
 JsValue math_unary(const char* name, Fn fn) {
     return js_make_native(name, 1, [fn](Args args) {
@@ -433,6 +532,7 @@ void install_number_builtins(JsIntrinsics& realm) {
         uint32_t b = js_to_uint32(js_to_number(js_arg(args, 1)));
         return JsValue::make_number(static_cast<int32_t>(a * b));
     }));
+    def("sumPrecise", js_make_native("sumPrecise", 1, math_sum_precise));
     def("hypot", js_make_native("hypot", 2, [](Args args) {
         // Every argument is converted first (that can run script), then the
         // values are scaled by the largest so that squaring neither overflows

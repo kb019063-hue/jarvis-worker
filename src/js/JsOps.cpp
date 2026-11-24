@@ -1334,6 +1334,9 @@ void iterate_with(const JsValue& iterable, const JsValue& method, const std::fun
         bool keep_going;
         try {
             keep_going = visit(value);
+        } catch (const GeneratorAbortException& abort) {
+            if (abort.run_finalizers) close_iterator_quietly(iterator);
+            throw;
         } catch (...) {
             close_iterator_quietly(iterator);
             throw;

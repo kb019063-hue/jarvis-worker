@@ -138,6 +138,32 @@ AGREES: list[Case] = [
          "typeof an unresolvable reference is undefined, not a ReferenceError"),
     Case("function f() { return 1; } String(typeof f) + String(typeof f())",
          "typeof a function and of its return"),
+
+    # `switch`, which the compiler refused outright ("Switch compiled via AST
+    # interpreter"). The discriminant is evaluated once and kept on the stack;
+    # each clause test is a strict equality evaluated in source order until the
+    # first match (ECMA-262 14.13.4), and a plain `break` leaves the switch
+    # where a `continue` would reach the enclosing loop. Clause bodies share
+    # one block scope, as in the tree-walker.
+    Case("switch (1) { case 1: break; }", "the original refusal, and it takes the case"),
+    Case("var r = 0; switch (2) { case 1: r = 1; break; case 2: r = 2; break; default: r = 3; } String(r)",
+         "a middle clause is taken"),
+    Case("var r = 0; switch (9) { case 1: r = 1; break; default: r = 3; case 2: r = 2; break; } String(r)",
+         "default is taken when nothing matches, wherever the clause sits"),
+    Case("var r = 'x'; switch ('b') { case 'a': r = 'A'; case 'b': r = 'B'; case 'c': r = 'C'; } String(r)",
+         "fall-through: a matched clause runs to the end of the switch"),
+    Case("var r = 0; switch ('1') { case 1: r = 10; break; case '1': r = 11; break; } String(r)",
+         "the match is a strict equality, not a coercion ('1' is not 1)"),
+    Case("var r = 0; switch (1) { case 1: r = 1; } switch (2) { case 1: r = 2; } String(r)",
+         "a switch runs when nothing matches and one of no default exits cleanly"),
+    Case("var n = 0; for (var i = 0; i < 3; i++) { switch (i) { case 1: continue; default: n += 1; } } String(n)",
+         "continue inside a switch reaches the enclosing loop, not the switch"),
+    Case("var r = 0; switch (1) { default: r = 5; break; case 1: r = 7; } String(r)",
+         "fall-through from a matched clause into a default that sits after it"),
+    Case("var r = 0; switch (3) { case 1: r += 1; case 2: r += 2; case 3: r += 3; default: r += 100; } String(r)",
+         "fall-through chains from the only match to the end"),
+    Case("var d = 0; function side() { d += 1; return 2; } var r = 0; switch (side()) { case 1: r = 1; break; case 2: r = d; } String(r) + '/' + String(d)",
+         "the discriminant is evaluated exactly once"),
 ]
 
 # The compiler refuses these. Kept here so the count of what is left has a
@@ -145,7 +171,6 @@ AGREES: list[Case] = [
 # rather than as silence.
 REFUSES: list[Case] = [
     Case("var [a, b] = [1, 2]; String(a)", "Destructuring"),
-    Case("switch (1) { case 1: break; }", "Switch"),
     Case("try { 1; } catch (e) { 2; }", "Statement"),
     Case("var s = \"\"; for (var k of [1,2]) { s += k; } String(s)", "Statement"),
     Case("var o = {a: 1, ...{b: 2}}; String(o.b)", "object literal form"),

@@ -175,9 +175,6 @@ std::shared_ptr<BytecodeFunction> BytecodeCompiler::compile(const BlockStmt* pro
 void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
     if (!stmt) return;
     js_check_stack();
-    if (dynamic_cast<const SwitchStmt*>(stmt)) {
-        throw std::runtime_error("Switch compiled via AST interpreter");
-    }
 
     if (auto expr_stmt = dynamic_cast<const ExprStmt*>(stmt)) {
         compile_expr(expr_stmt->expression.get());
@@ -285,6 +282,8 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         patch_jump(exit_jump);
         emit_opcode(OpCode::OpPop);
         end_scope();
+    } else if (auto switch_stmt = dynamic_cast<const SwitchStmt*>(stmt)) {
+        compile_switch(switch_stmt);
     } else if (auto block_stmt = dynamic_cast<const BlockStmt*>(stmt)) {
         begin_scope();
         for (const auto& s : block_stmt->statements) {
@@ -371,7 +370,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             throw std::runtime_error("A labelled break is not supported by the bytecode compiler");
         }
         if (m_loops.empty()) {
-            throw std::runtime_error("`break` outside a loop is not supported by the bytecode compiler");
+            throw std::runtime_error("`break` outside a loop or a switch is not supported by the bytecode compiler");
         }
         // The jump's target is the loop's exit, which is not known yet; the
         // loop patches it when its body has been compiled.
@@ -380,17 +379,25 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         if (!continue_stmt->label.empty()) {
             throw std::runtime_error("A labelled continue is not supported by the bytecode compiler");
         }
-        if (m_loops.empty()) {
+        // The innermost loop, not the innermost loop-or-switch: a plain
+        // `continue` inside a `switch` reaches the enclosing loop (ECMA-262
+        // 14.13.4.1). A `switch` pushes a context so that a plain `break`
+        // can find the end of the switch, and it is skipped here.
+        size_t target = static_cast<size_t>(-1);
+        for (size_t i = m_loops.size(); i-- > 0;) {
+            if (!m_loops[i].is_switch) { target = i; break; }
+        }
+        if (target == static_cast<size_t>(-1)) {
             throw std::runtime_error("`continue` outside a loop is not supported by the bytecode compiler");
         }
         // To the loop's test (a `while`) or its update/test (a `for`, a
         // `do`/`while`). Which way that is decides the opcode: OpLoop carries
         // a distance backwards, OpJump one forwards, and the loop fills in
         // whichever it emitted when it knows its target.
-        if (m_loops.back().continue_is_forward) {
-            m_loops.back().continues.push_back(emit_jump(OpCode::OpJump));
+        if (m_loops[target].continue_is_forward) {
+            m_loops[target].continues.push_back(emit_jump(OpCode::OpJump));
         } else {
-            m_loops.back().continues.push_back(m_function->chunk.code.size());
+            m_loops[target].continues.push_back(m_function->chunk.code.size());
             emit_opcode(OpCode::OpLoop);
             emit_byte(0xFF);
             emit_byte(0xFF);
@@ -445,6 +452,63 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         // silently: the program would run with a hole in it.
         throw std::runtime_error("Statement is not supported by the bytecode compiler");
     }
+}
+
+void BytecodeCompiler::compile_switch(const SwitchStmt* stmt) {
+    // ECMA-262 14.13.4: the discriminant is evaluated exactly once, kept on
+    // the stack, and the clause tests run in source order until the first
+    // strict equality holds. A test that would never be reached is never
+    // evaluated, which matters: clause tests may have side effects. The
+    // matched clause's body then runs from that clause to the end of the
+    // switch (fall-through) unless a plain `break` leaves it.
+    compile_expr(stmt->discriminant.get());
+    begin_scope();
+
+    const std::size_t clause_count = stmt->cases.size();
+    int default_index = -1;
+    for (std::size_t i = 0; i < clause_count; ++i) {
+        if (!stmt->cases[i].test) default_index = static_cast<int>(i);
+    }
+
+    // Forward jumps that land on each clause's body, filled in when the body
+    // is emitted. SIZE_MAX marks a clause nobody jumps to (or an absent one).
+    std::vector<size_t> entry_jumps(clause_count, static_cast<size_t>(-1));
+    for (std::size_t i = 0; i < clause_count; ++i) {
+        const auto& clause = stmt->cases[i];
+        if (!clause.test) continue;
+        emit_opcode(OpCode::OpDup);            // [d, d]
+        compile_expr(clause.test.get());       // [d, d, t]
+        emit_opcode(OpCode::OpStrictEqual);    // [d, eq]
+        size_t no_match = emit_jump(OpCode::OpJumpIfFalse);
+        emit_opcode(OpCode::OpPop);            // the condition, matched path
+        emit_opcode(OpCode::OpPop);            // the discriminant
+        entry_jumps[i] = emit_jump(OpCode::OpJump);
+        patch_jump(no_match);                  // lands on the next test
+        emit_opcode(OpCode::OpPop);            // the condition, no-match path
+    }
+
+    // No clause matched.
+    emit_opcode(OpCode::OpPop);                // the discriminant
+    size_t no_clause_exit = static_cast<size_t>(-1);
+    if (default_index >= 0) {
+        entry_jumps[static_cast<size_t>(default_index)] = emit_jump(OpCode::OpJump);
+    } else {
+        no_clause_exit = emit_jump(OpCode::OpJump);
+    }
+
+    // A switch is not a loop: a plain `break` ends it, and an unlabelled
+    // `continue` inside it targets the enclosing loop (ECMA-262 14.13.4.1),
+    // so `continue` skips this context.
+    m_loops.push_back({0, false, {}, {}, true});
+    for (std::size_t i = 0; i < clause_count; ++i) {
+        if (entry_jumps[i] != static_cast<size_t>(-1)) patch_jump(entry_jumps[i]);
+        for (const auto& s : stmt->cases[i].statements) compile_stmt(s.get());
+    }
+    const std::vector<size_t> breaks = std::move(m_loops.back().breaks);
+    m_loops.pop_back();
+    for (size_t at : breaks) patch_jump(at);
+    if (no_clause_exit != static_cast<size_t>(-1)) patch_jump(no_clause_exit);
+    end_scope();
 }
 
 // The VM has no closures, default values, `this` or `arguments`; refuse anything

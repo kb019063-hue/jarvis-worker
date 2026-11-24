@@ -1,7 +1,7 @@
-# Phase 376 — two methods a typed array never had
+# Phase 380 — two methods a typed array never had
 
 Task row: "What is left of `DataView` and `%TypedArray%.prototype` after
-Phases 126, 157 and 177." Finding 376.
+Phases 126, 157 and 177." Finding 380.
 
 ## 1. What was wrong
 
@@ -39,7 +39,7 @@ standard's no-match answers: `undefined` and `-1`.
 
 ## 3. How it was verified
 
-`tests/suites/376-typed-array-findlast.cpp`, 21 assertions, every expected
+`tests/suites/380-typed-array-findlast.cpp`, 21 assertions, every expected
 value taken from **Node v22.22.3** by running the same expression there. It
 covers: both are functions with `length` 1 and their own `name`; the
 value/absent distinctions against `find`/`findIndex` on the same array; the

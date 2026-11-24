@@ -1,6 +1,6 @@
-# Finding 376 — two methods the typed array never had
+# Finding 380 — two methods the typed array never had
 
-Phase 376. Status: **fixed; `%TypedArray%.prototype.findLast` and
+Phase 380. Status: **fixed; `%TypedArray%.prototype.findLast` and
 `.findLastIndex` exist.**
 
 ## 1. What was wrong
@@ -30,7 +30,7 @@ nothing matches.
 
 ## 3. Evidence
 
-`tests/suites/376-typed-array-findlast.cpp` — 21 assertions, each expected
+`tests/suites/380-typed-array-findlast.cpp` — 21 assertions, each expected
 value taken from Node v22.22.3 by evaluating the same expression there. It
 separates `findLast` from `find` on the same array (`3`/`2` against `1`/`0`),
 pins the walk order and its short-circuit (`"3,2"`), checks `length` and

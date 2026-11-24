@@ -996,6 +996,218 @@ JsValue JsInterpreter::make_function(const std::shared_ptr<FunctionNode>& node, 
     return fn;
 }
 
+/// §10.4.4.2, the *mapped arguments object*: a sloppy function's `arguments`
+/// shares a place with each of its simple parameters, so `a = 1` shows through
+/// `arguments[0]` and `arguments[0] = 1` shows through `a`.
+///
+/// The two are one binding, not two values kept in step. `JsEnvironment` owns
+/// the binding (§9.1.1.1's mutable binding), so the object holds its *name* and
+/// looks it up in the environment that owns it: writing either side is the same
+/// write, and there is no second copy that can drift. A name is enough because
+/// the environment is the same one for the whole call and a parameter's binding
+/// is never removed from it — only `eval`'s var declarations are deletable, and
+/// a `delete a` of a parameter deletes the *mapping* below, not the binding.
+///
+/// §10.4.4.2 step 13 is the rest of it: `delete arguments[i]` removes that
+/// index's mapping and leaves every other one. `mapped` is indexed by place, so
+/// an index that is not below the count of simple parameters is never mapped.
+class MappedArguments : public JsExotic {
+public:
+    MappedArguments(std::shared_ptr<JsEnvironment> env, std::vector<std::string> parameter_names)
+        : m_env(std::move(env)), m_names(std::move(parameter_names)) {}
+
+
+    /// The binding `index` is mapped onto, or null when it is not mapped.
+    JsEnvironment::Binding* mapped_binding(size_t index) {
+        if (index >= m_names.size() || m_names[index].empty()) return nullptr;
+        return m_env->find_own(m_names[index]);
+    }
+
+    /// `arguments[i]` when the place is mapped: the parameter's value. False
+    /// when the index is not mapped, and then the element is the answer.
+    bool get(JsObject*, const std::string& name, JsValue& out) override {
+        const size_t index = mapped_index(name);
+        JsEnvironment::Binding* binding = mapped_binding(index);
+        if (binding == nullptr) return false;
+        out = binding->value;
+        return true;
+    }
+
+    /// `arguments[i] = v` when the place is mapped: the parameter is written.
+    /// The element is written too, so a place that is later unmapped still
+    /// reads back what was last put there.
+    SetResult set(JsObject* self, const std::string& name, const JsValue& value) override {
+        const size_t index = mapped_index(name);
+        JsEnvironment::Binding* binding = mapped_binding(index);
+        if (binding == nullptr) return SetResult::NotHandled;
+        binding->value = value;
+        if (self != nullptr && index < self->array_elements.size()) {
+            // A place a descriptor defined is a hole with a table entry (see
+            // `defining`), and that entry is what a key walk and the descriptor
+            // read see; and an element that is still there is written too, so a
+            // place later unmapped reads back what was last put in it.
+            if (self->has_accessors) {
+                if (auto it = self->properties.find(name); it != self->properties.end()) {
+                    it->second = value;
+                    return SetResult::Handled;
+                }
+            }
+            if (!self->array_holes || !self->array_holes->empty_slot(index)) {
+                self->array_elements[index] = value;
+            }
+        }
+        return SetResult::Handled;
+    }
+
+    /// `i in arguments` is true for a mapped place even if the element went.
+    bool has(JsObject*, const std::string& name) override {
+        return mapped_binding(mapped_index(name)) != nullptr;
+    }
+
+    /// `delete arguments[i]`: the mapping goes, the place stays an element, and
+    /// the answer is true because the element itself is configurable. §10.4.4.2
+    /// step 13.e. Every *other* index keeps its mapping — which is why this is
+    /// a per-place vector and not one flag.
+    bool remove(JsObject* self, const std::string& name, bool& result) override {
+        const size_t index = mapped_index(name);
+        if (index >= m_names.size() || m_names[index].empty()) return false;
+        m_names[index].clear();
+        // The place goes with the mapping. §10.4.4.2 step 13 deletes the index
+        // from the object after clearing the mapping, so afterwards
+        // `0 in arguments` is false, `Object.keys` leaves it out, and a read
+        // is the prototype's to answer — Node answers `undefined` and stays
+        // `undefined` however the parameter is written later. An element left
+        // behind would read the parameter's last value, which is what this
+        // engine did first: `delete arguments[0]; a = 7` answered 7.
+        if (self != nullptr) {
+            result = true;
+            return false;       // let the ordinary [[Delete]] take the element
+        }
+        result = true;
+        return true;
+    }
+
+    /// [[DefineOwnProperty]] on a mapped place. The place is one binding with
+    /// its parameter, so a descriptor is applied to the *binding*, and only
+    /// what cannot be said of a binding breaks the mapping:
+    ///
+    /// - an accessor descriptor (§10.6 step 5.a.i) always unmaps;
+    /// - `writable: false` (§10.6 step 4.c) always unmaps;
+    /// - a value in the descriptor is written into the parameter, and the
+    ///   place stays mapped (`{value: 5}` then `a = 9` reads 9);
+    /// - `enumerable` and `configurable` narrow the place's attributes, which
+    ///   live here because the dense elements carry none.
+    ///
+    /// Six test262 files (`15.2.3.6-4-291-1` and its relatives) define an
+    /// accessor here and failed while the mapping answered the read instead.
+    bool owns_place(JsObject*, const std::string& name) override {
+        // A place this mapping still answers for. `defining` is what gives one
+        // up, so it is never asked as a question: this is that question.
+        return mapped_binding(mapped_index(name)) != nullptr;
+    }
+
+    Definition defining(JsObject* self, const std::string& name, const PropertyDefinition& definition) override {
+        const size_t index = mapped_index(name);
+        if (index >= m_names.size() || m_names[index].empty()) return Definition::NotMine;
+        JsEnvironment::Binding* binding = mapped_binding(index);
+        if (binding == nullptr) return Definition::NotMine;
+        if (definition.accessor) {
+            // An accessor descriptor always unmaps the place (§10.6 step
+            // 5.a.i), and there is no value to leave behind: the table entry
+            // the accessor itself is about to be written into is what answers.
+            m_names[index].clear();
+            return Definition::Given;
+        }
+        if (definition.unwritable) {
+            // A place that cannot be written cannot follow its parameter any
+            // more, so defining it not-writable is what unmaps it — with or
+            // without a value in the descriptor (Node leaves the parameter's
+            // value behind for `{writable: false}` alone).
+            unmap(self, name, index, definition.value != nullptr ? *definition.value : binding->value);
+            return Definition::Given;
+        }
+        // Everything else leaves the place mapped, and a value in the
+        // descriptor is written *into the parameter*: `{value: 5}` on a place
+        // whose parameter is 1 makes both 5, and a later `a = 9` is still
+        // visible through `arguments[0]`. §10.6 step 5.b.i's SameValue rule,
+        // which unmapped when the two differed, is not what engines do — Node
+        // answers 9 for exactly that sequence.
+        if (definition.value != nullptr) binding->value = *definition.value;
+        // The place is still one binding with its parameter, and reads keep
+        // coming from it (`get`). What a descriptor asks for besides the value
+        // is an attribute, and the dense elements carry no attributes: so the
+        // place becomes a hole that the property table answers for, holding the
+        // descriptor's flags, and `set` mirrors every write of the parameter
+        // into that entry so the table never goes stale. The value in the entry
+        // is a placeholder — a read asks the binding — and the descriptor read
+        // back by `Object.getOwnPropertyDescriptor` takes the value from
+        // `computed_definition` below.
+        if (self != nullptr && index < self->array_elements.size() &&
+            (definition.enumerable.has_value() || definition.configurable.has_value())) {
+            JsValue::make_object(self).set_array_hole(index);
+            self->has_accessors = true;
+            uint8_t flags = PropertyMap::Writable;
+            if (!definition.enumerable.has_value() || *definition.enumerable) flags |= PropertyMap::Enumerable;
+            if (!definition.configurable.has_value() || *definition.configurable) flags |= PropertyMap::Configurable;
+            auto& entry = self->properties.entry(name);
+            entry.second = JsValue::make_undefined();      // a placeholder: `get` reads the binding
+            entry.setter.reset();
+            entry.flags = flags;
+        }
+        return Definition::Kept;
+    }
+
+    /// Gives the place up: the element becomes a hole, the table holds the
+    /// value left behind under the *index* (not the parameter's name — the
+    /// place's name is what a property read, a key walk and a descriptor look
+    /// up), and later writes to the parameter no longer reach it. Both halves
+    /// are needed: the elements are dense and carry no attributes, so a
+    /// defined descriptor lives in the table, and a hole is what makes the
+    /// table's entry the property.
+    void unmap(JsObject* self, const std::string& name, size_t index, const JsValue& kept) {
+        if (self != nullptr && index < self->array_elements.size()) {
+            JsValue::make_object(self).set_array_hole(index);
+            self->has_accessors = true;
+            self->properties.entry(name).second = kept;
+        }
+        m_names[index].clear();
+    }
+
+    /// The value of a mapped place, which is its parameter's and is in no
+    /// table. `Object.getOwnPropertyDescriptor` asks, because the entry a
+    /// defined place keeps holds a placeholder and not the value.
+    bool host_value(JsObject*, const std::string& name, JsValue& value) override {
+        JsEnvironment::Binding* binding = mapped_binding(mapped_index(name));
+        if (binding == nullptr) return false;
+        value = binding->value;
+        return true;
+    }
+
+    /// The mapping does not add or remove keys: the places are already elements
+    /// of the object, so `Object.keys` is answered by the object itself.
+    void keys(JsObject*, std::vector<std::string>&) override {}
+
+private:
+    /// "0", "1", … as an index; anything else is not a mapped place.
+    static size_t mapped_index(const std::string& name) {
+        if (name.empty() || name.size() > 10) return static_cast<size_t>(-1);
+        size_t index = 0;
+        for (const char c : name) {
+            if (c < '0' || c > '9') return static_cast<size_t>(-1);
+            index = index * 10 + static_cast<size_t>(c - '0');
+        }
+        // A leading zero is not an index key ("01" is a name, not a place).
+        if (name.size() > 1 && name[0] == '0') return static_cast<size_t>(-1);
+        return index;
+    }
+
+    std::shared_ptr<JsEnvironment> m_env;
+    /// The parameter name each place is mapped onto, or empty when it is not
+    /// mapped. Built from the formal parameters, so `arguments[2]` in
+    /// `function (a, b)` is not mapped — there is no third parameter.
+    std::vector<std::string> m_names;
+};
+
 void JsInterpreter::bind_parameters(const FunctionNode& node, const EnvPtr& env, const std::vector<JsValue>& args) {
     if (node.simple_params) {
         for (size_t i = 0; i < node.params.size(); ++i) {
@@ -1083,6 +1295,35 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
                     const auto found = array_proto->properties.find(key);
                     if (found == array_proto->properties.end()) continue;
                     arguments.define_property(key, found->second, PropertyMap::Writable | PropertyMap::Configurable);
+                }
+            }
+            // §10.4.4.6: an own `callee` holding the function being run. It is
+            // writable and configurable and does not enumerate, and in strict
+            // code the object does not have it at all — which the `else` below
+            // leaves alone, so `arguments.callee` there is `undefined` because
+            // nothing has the name, not because it was set to undefined.
+            //
+            // §10.4.4.2's mapping comes with it, for the sloppy case only: a
+            // strict function's parameters and its `arguments` are separate
+            // from the first line. It needs simple parameters (an identifier
+            // each) because §10.4.4 says so, and a function value to name.
+            if (!node->is_strict) {
+                if (callee.is_function()) {
+                    auto& callee_entry = arguments.object_val->properties.entry("callee");
+                    callee_entry.second = callee;
+                    callee_entry.flags = PropertyMap::Writable | PropertyMap::Configurable;
+                }
+                if (node->simple_params && !node->is_arrow && !node->is_method && !node->is_generator &&
+                    !node->is_async) {
+                    std::vector<std::string> parameter_names;
+                    parameter_names.reserve(node->params.size());
+                    for (const auto& param : node->params) {
+                        parameter_names.push_back(param.target && param.target->kind == Pattern::Kind::Identifier
+                                                      ? param.target->name
+                                                      : std::string());
+                    }
+                    arguments.object_val->exotic =
+                        std::make_shared<MappedArguments>(env, std::move(parameter_names));
                 }
             }
             env->define("arguments", arguments);
@@ -1630,13 +1871,13 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
     member_keys.reserve(cls->members.size());
     member_key_values.reserve(cls->members.size());
     for (const auto& member : cls->members) {
-        JsValue computed_value;
-        if (member.computed_key) computed_value = evaluate(member.computed_key.get(), class_env);
+        JsValue host_value;
+        if (member.computed_key) host_value = evaluate(member.computed_key.get(), class_env);
         member_keys.push_back(member.computed_key
-                                  ? js_to_property_key(computed_value)
+                                  ? js_to_property_key(host_value)
                                   : member.is_private ? private_prefix + member.key
                                                       : member.key);
-        member_key_values.push_back(std::move(computed_value));
+        member_key_values.push_back(std::move(host_value));
     }
 
     if (!cls->name.empty()) class_env->initialize_lexical(cls->name, ctor, true);
@@ -3876,7 +4117,12 @@ JsValue JsInterpreter::eval_index(const IndexExpr* index, const EnvPtr& env) {
     // so it is not an answer here: `[, ][0]` has to reach the prototype with
     // `get_member`, as `HasProperty` says it does. An element still answers
     // without the call, which is the case this path exists for.
-    if (key.type == JsType::Number && base.is_array()) {
+    // A host object is excluded: its `[[Get]]` is asked before its elements
+    // (JsValue::get_property says so), so an `arguments` with a mapped place
+    // must not be read past the mapping — `function (a) { a = 9; return
+    // arguments[0] }` reads the parameter through the hook, and this path
+    // answered the stale element instead.
+    if (key.type == JsType::Number && base.is_array() && !base.object_val->exotic) {
         double n = key.number_val;
         const auto& elements = base.object_val->array_elements;
         if (n >= 0 && n < static_cast<double>(elements.size()) && n == std::floor(n)) {

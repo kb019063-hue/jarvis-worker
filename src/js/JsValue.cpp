@@ -1281,6 +1281,41 @@ void JsValue::define_property(const std::string& name, JsValue value, uint8_t fl
     if (JsObject* cell = property_cell(true)) {
         map = &cell->properties;
         if (is_legacy_getter_key(name)) cell->has_legacy_getters = true;
+        if (cell->exotic) {
+            JsExotic::PropertyDefinition definition;
+            definition.value = &value;
+            definition.unwritable = !(flags & PropertyMap::Writable);
+            definition.enumerable = (flags & PropertyMap::Enumerable) != 0;
+            definition.configurable = (flags & PropertyMap::Configurable) != 0;
+            // The host keeps the name: the value and the attributes stay where
+            // the host holds them (an arguments place is its parameter's
+            // binding, and the flags the host narrowed are its own), so
+            // nothing is written into the dense elements or beside them.
+            const JsExotic::Definition outcome = cell->exotic->defining(cell, name, definition);
+            if (outcome == JsExotic::Definition::Given) {
+                // It has given the name up and left the value it held in the
+                // table for it, over a hole: the table is what answers now, so
+                // it must be asked before the elements (JsValue::get_property,
+                // has_own_property) and the descriptor must come from it.
+                cell->has_accessors = true;
+                uint8_t kept_flags = static_cast<uint8_t>(flags & ~PropertyMap::Accessor);
+                // `entry` answers a mutable reference to the entry for the
+                // name — null-iterator aside, the map is never indexed by a
+                // temporary, so this is the entry the table now holds.
+                PropertyMap::Entry& fresh = map->entry(name);
+                if (definition.value != nullptr) fresh.second = value;
+                fresh.setter.reset();
+                fresh.flags = kept_flags;
+                return;
+            }
+            if (outcome == JsExotic::Definition::Kept) {
+                // The host object keeps the name and has applied the whole
+                // descriptor itself — the value into its place and the
+                // attributes into a table entry of its own making — so nothing
+                // here is written for it.
+                return;
+            }
+        }
     } else {
         map = loose_properties(true);
         if (!map) {
@@ -1298,6 +1333,19 @@ void JsValue::define_accessor(const std::string& name, const JsValue& getter, co
     PropertyMap* map = nullptr;
     if (JsObject* cell = property_cell(true)) {
         map = &cell->properties;
+        // A host object is asked first: it may answer for the place, and for an
+        // arguments place an accessor descriptor unmaps it (§10.6
+        // [[DefineOwnProperty]] step 5.a.i) and leaves the accessor to be
+        // stored below like any other. Asking after storing it would let the
+        // mapping's own bookkeeping write over the accessor.
+        if (cell->exotic) {
+            JsExotic::PropertyDefinition definition;
+            definition.accessor = true;
+            definition.unwritable = !(flags & PropertyMap::Writable);
+            definition.enumerable = (flags & PropertyMap::Enumerable) != 0;
+            definition.configurable = (flags & PropertyMap::Configurable) != 0;
+            if (cell->exotic->defining(cell, name, definition) == JsExotic::Definition::Kept) return;
+        }
         cell->has_accessors = true;
         size_t index = 0;
         if (cell->is_array && parse_array_index(name, index)) {

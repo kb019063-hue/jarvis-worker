@@ -9,6 +9,7 @@
 #include <memory>
 #include <functional>
 #include <cstdint>
+#include <optional>
 #include <cstddef>
 #include <mutex>
 #include <atomic>
@@ -84,6 +85,61 @@ public:
         (void)name;
         (void)enumerable;
         (void)writable;
+        return false;
+    }
+    /// As much of a descriptor as a host object needs, for
+    /// [[DefineOwnProperty]]: `value` is null when the descriptor is an
+    /// accessor one, and `unwritable` is set when it asks for a property that
+    /// cannot be written.
+    struct PropertyDefinition {
+        const JsValue* value{nullptr};
+        bool unwritable{false};
+        /// True for a descriptor with a getter or a setter in it.
+        bool accessor{false};
+        /// `false` or `true` when the descriptor asks for that attribute, and
+        /// nullopt when it says nothing about it.
+        std::optional<bool> enumerable{};
+        std::optional<bool> configurable{};
+    };
+    /// What `defining` did with a name.
+    enum class Definition {
+        /// The name is none of the host object's business.
+        NotMine,
+        /// The host object keeps the name and applies the descriptor itself:
+        /// an arguments place that is still mapped lives in its parameter's
+        /// binding, so nothing goes into the property table and nothing beside
+        /// the elements.
+        Kept,
+        /// The host object has just given the name up and left the value it
+        /// held in the table for it (`[[DefineOwnProperty]]` step 5 writes the
+        /// map's value into the place before it unmaps). The table gets the
+        /// descriptor's attributes and keeps that value.
+        Given,
+    };
+    /// True when `name` is a property the host object answers for, so that a
+    /// definition has to go through `defining` and not into the dense elements
+    /// or beside them. Asked before the descriptor is applied, because asking
+    /// `defining` has consequences (it can unmap the place).
+    virtual bool owns_place(JsObject* self, const std::string& name) { (void)self; (void)name; return false; }
+    /// A property of the object is about to be defined by
+    /// `Object.defineProperty` (or anything else that goes through
+    /// [[DefineOwnProperty]]). A host object that computes a property keeps
+    /// its own state beside the table, and this is where it says whether the
+    /// name is still its own: an arguments object's `[[ParameterMap]]` gives an
+    /// index up here (§10.6 step 5.a.i for an accessor, step 4.c for
+    /// `writable: false`).
+    virtual Definition defining(JsObject* self, const std::string& name, const PropertyDefinition& definition) {
+        (void)self; (void)name; (void)definition;
+        return Definition::NotMine;
+    }
+    /// Defined `true` when `name` is a place whose *value* the host object
+    /// holds rather than the property table. `Object.getOwnPropertyDescriptor`
+    /// asks, because a mapped arguments place keeps a table entry for its
+    /// attributes once a descriptor touched it, and that entry's value is a
+    /// placeholder: the value is the parameter's, and only the host object can
+    /// read it.
+    virtual bool host_value(JsObject* self, const std::string& name, JsValue& value) {
+        (void)self; (void)name; (void)value;
         return false;
     }
     /// Reports every value held outside the property table to the collector.

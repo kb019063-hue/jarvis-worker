@@ -7319,6 +7319,55 @@ TEST(subtle_crypto_aes_cbc_encrypt_and_decrypt) {
     assert(interp.eval("rtHex === '6bc1bee22e409f96e93d7e117393172a'").is_truthy());
 }
 
+TEST(subtle_crypto_wrap_and_unwrap_key) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var wrapIv = new Uint8Array([1,2,3,4,5,6,7,8,9,10,11,12]);
+        var origHex = null;
+        var unwrappedHex = null;
+        var nonExtractErr = null;
+
+        Promise.all([
+            crypto.subtle.generateKey({ name: 'AES-GCM', length: 128 }, false, ['wrapKey', 'unwrapKey']),
+            crypto.subtle.generateKey({ name: 'AES-CBC', length: 128 }, true, ['encrypt', 'decrypt']),
+            crypto.subtle.generateKey({ name: 'AES-CBC', length: 128 }, false, ['encrypt'])
+        ]).then(function(keys) {
+            var kek = keys[0];
+            var target = keys[1];
+            var nonExtract = keys[2];
+            crypto.subtle.wrapKey('raw', nonExtract, kek, { name: 'AES-GCM', iv: wrapIv })
+                .catch(function(e) {
+                    nonExtractErr = e.name;
+                });
+            return crypto.subtle.exportKey('raw', target)
+                .then(function(raw) {
+                    origHex = toHex(raw);
+                    return crypto.subtle.wrapKey('raw', target, kek, { name: 'AES-GCM', iv: wrapIv });
+                })
+                .then(function(wrapped) {
+                    return crypto.subtle.unwrapKey('raw', wrapped, kek, { name: 'AES-GCM', iv: wrapIv }, 'AES-CBC', true, ['encrypt', 'decrypt']);
+                })
+                .then(function(unwrapped) {
+                    return crypto.subtle.exportKey('raw', unwrapped);
+                })
+                .then(function(raw2) {
+                    unwrappedHex = toHex(raw2);
+                });
+        });
+    )");
+    assert(interp.eval("origHex !== null && origHex === unwrappedHex").is_truthy());
+    assert(interp.eval("nonExtractErr !== null").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36258,6 +36307,7 @@ int main() {
     RUN_TEST(subtle_crypto_aes_ctr_encrypt_and_decrypt);
     RUN_TEST(subtle_crypto_aes_gcm_encrypt_and_decrypt);
     RUN_TEST(subtle_crypto_aes_cbc_encrypt_and_decrypt);
+    RUN_TEST(subtle_crypto_wrap_and_unwrap_key);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

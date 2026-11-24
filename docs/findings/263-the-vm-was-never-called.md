@@ -114,3 +114,13 @@ And the performance aspiration should not be copied forward unmeasured: Phase
 204 measured the tree-walker at **3–9× V8 on a loop, an array and a
 recursion**, and 18–27× on a property write and a call. "50–100×" was never
 true for loops in this engine.
+
+## A note for whoever lands this
+
+This change was sent back by the landing session twice, both times for the same
+line: a row appended to the list in `AUDIT.md`. That list is one place every
+pull request wants to write to, so two of them can never merge one after the
+other — which is the fault `tests/suites/README.md` describes for
+`tests/test_suite.cpp` and solved by giving each suite a file of its own. Here
+the entry *is* the file in `docs/findings/`: `AGENTS.md` says so since #309, no
+pull request adds a line to that list now, and this one should not have either.

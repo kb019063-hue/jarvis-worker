@@ -466,6 +466,14 @@ diff-xml: $(TARGET)
 diff-strings: $(TARGET)
 	@python3 tools/conformance/diff_strings.py --show 5 --max-differ $(STRING_DIFF_CEILING)
 
+## Every decoder held to the index table it reads: 27 single-byte tables both
+## ways, all 23,940 euc-kr / 19,782 big5 / 11,280 shift_jis pointers, and every
+## gb18030 range. Then the same tables against Node's TextDecoder, which is a
+## second implementation and is wrong on three encodings this tool names. Needs
+## Node.js for the cross-check (`--no-node` skips it).
+verify-encoding-tables: $(TARGET)
+	@python3 tools/conformance/verify_encoding_tables.py --build
+
 ## Differential + seeded fuzz verification of RegExp Unicode 17.0 properties,
 ## v (unicodeSets) set operations, d (hasIndices), and ES2025 modifiers,
 ## duplicate named capturing groups, and RegExp.escape().

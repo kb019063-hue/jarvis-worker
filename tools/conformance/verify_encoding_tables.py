@@ -115,12 +115,12 @@ bool g_json = false;
 void report(const char* check, int checked, int bad, const char* note = "") {
     g_checked += checked;
     g_bad += bad;
+    // The human line always goes out; the JSON one is what the driver reads.
+    std::printf("%-28s %6d positions  %4d mismatches%s%s\n",
+                check, checked, bad, *note ? "  " : "", note);
     if (g_json) {
         std::printf("{\"check\": \"%s\", \"positions\": %d, \"mismatches\": %d, \"note\": \"%s\"}\n",
                     check, checked, bad, note);
-    } else {
-        std::printf("%-28s %6d positions  %4d mismatches%s%s\n",
-                    check, checked, bad, *note ? "  " : "", note);
     }
 }
 
@@ -411,7 +411,7 @@ int main(int argc, char** argv) {
 # disagree with the index files finding 249 measured: koi8-u pointers 46 and
 # 62, and windows-1253 pointers 42 and 82. A disagreement on these is reported
 # and not counted, because the table is the standard and ICU is not.
-# Phase 279 adds a third: windows-1255 byte 0xCA is U+05BA in the index file,
+# Phase 282 adds a third: windows-1255 byte 0xCA is U+05BA in the index file,
 # and Node answers U+FFFD — ICU's table predates the code point, which sits in
 # the sequential run U+05B9 / U+05BA / U+05BB. The engine has the run and the
 # neighbours either side of the gap agree, so the table is the standard's.
@@ -504,7 +504,15 @@ def main() -> int:
     args = parser.parse_args()
 
     binary = Path(args.binary)
-    if args.build or not binary.exists():
+    # Rebuild when asked, when there is no binary, or when an object it links
+    # against is newer than it: a corrupt table rebuilt by `make` after the
+    # harness was last linked is invisible otherwise, which is exactly how an
+    # injected entry went unreported once while writing this tool.
+    objs = [ROOT / "build" / "net" / "TextEncoding.o",
+            ROOT / "build" / "net" / "TextEncodingTables.o"]
+    stale = binary.exists() and any(o.exists() and o.stat().st_mtime > binary.stat().st_mtime
+                                    for o in objs)
+    if args.build or not binary.exists() or stale:
         if build(binary, args.timeout) != 0:
             return 1
     # Always ask for the machine-readable form: the Node cross-check needs the
@@ -514,6 +522,11 @@ def main() -> int:
     if args.json:
         for line in proc.stdout.splitlines():
             if line.startswith("{"):
+                print(line)
+    else:
+        # One line per check, plus the total.
+        for line in proc.stdout.splitlines():
+            if not line.startswith("{"):
                 print(line)
     if proc.stderr:
         sys.stderr.write(proc.stderr)

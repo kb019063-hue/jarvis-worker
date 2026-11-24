@@ -7156,6 +7156,60 @@ TEST(subtle_crypto_aes_ctr_encrypt_and_decrypt) {
     assert(interp.eval("genKey instanceof CryptoKey && genOk === true").is_truthy());
 }
 
+TEST(subtle_crypto_aes_gcm_encrypt_and_decrypt) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // NIST GCM Test Case 3 (AES-128, 96-bit IV, 128-bit PT, no AAD)
+    // Key = feffe9928665731c6d6a8f9467308308
+    // IV  = cafebabefacedbaddecaf888
+    // PT  = d9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255
+    // CT  = 42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f5985
+    // Tag = 4d5c2af327cd64a62cf35abd2ba6fab4
+    interp.eval(R"(
+        function fromHex(h) {
+            var a = new Uint8Array(h.length / 2);
+            for (var i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16);
+            return a;
+        }
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var keyBytes = fromHex('feffe9928665731c6d6a8f9467308308');
+        var iv = fromHex('cafebabefacedbaddecaf888');
+        var ptHex = 'd9313225f88406e5a55909c5aff5269a86a7a9531534f7da2e4c303d8a318a721c3c0c95956809532fcf0e2449a6b525b16aedf5aa0de657ba637b391aafd255';
+        var pt = fromHex(ptHex);
+        var ctHex = null;
+        var rtHex = null;
+        var tamperErr = null;
+
+        crypto.subtle.importKey('raw', keyBytes, 'AES-GCM', false, ['encrypt', 'decrypt'])
+            .then(function(k) {
+                return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, k, pt)
+                    .then(function(ct) {
+                        ctHex = toHex(ct);
+                        return crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, k, ct)
+                            .then(function(rt) {
+                                rtHex = toHex(rt);
+                                var bad = new Uint8Array(ct);
+                                bad[0] ^= 1;
+                                return crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, k, bad);
+                            })
+                            .catch(function(e) {
+                                tamperErr = e.name;
+                            });
+                    });
+            });
+    )");
+    assert(interp.eval("ctHex === '42831ec2217774244b7221b784d0d49ce3aa212f2c02a4e035c17e2329aca12e21d514b25466931c7d8f6a5aac84aa051ba30b396a0aac973d58e091473f59854d5c2af327cd64a62cf35abd2ba6fab4'").is_truthy());
+    assert(interp.eval("rtHex === ptHex").is_truthy());
+    assert(interp.eval("tamperErr === 'OperationError'").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36087,6 +36141,7 @@ int main() {
     RUN_TEST(subtle_crypto_pbkdf2_derive_bits_and_key);
     RUN_TEST(subtle_crypto_hkdf_derive_bits_and_key);
     RUN_TEST(subtle_crypto_aes_ctr_encrypt_and_decrypt);
+    RUN_TEST(subtle_crypto_aes_gcm_encrypt_and_decrypt);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

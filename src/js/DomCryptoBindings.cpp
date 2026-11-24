@@ -404,6 +404,128 @@ std::vector<uint8_t> aes_ctr_crypt(const std::vector<uint8_t>& key, const std::v
     return out;
 }
 
+// NIST SP 800-38D AES-GCM: GF(2^128) multiply, GHASH, and GCTR.
+void gcm_gf_mul(const uint8_t x[16], const uint8_t y[16], uint8_t z[16]) {
+    uint8_t v[16];
+    for (int i = 0; i < 16; ++i) { z[i] = 0; v[i] = y[i]; }
+    for (int i = 0; i < 128; ++i) {
+        if ((x[i / 8] >> (7 - (i % 8))) & 1u) {
+            for (int j = 0; j < 16; ++j) z[j] ^= v[j];
+        }
+        const uint8_t lsb = v[15] & 1u;
+        for (int j = 15; j > 0; --j) v[j] = static_cast<uint8_t>((v[j] >> 1) | ((v[j - 1] & 1u) << 7));
+        v[0] = static_cast<uint8_t>(v[0] >> 1);
+        if (lsb) v[0] ^= 0xe1u;
+    }
+}
+
+void gcm_ghash_update(const uint8_t h[16], uint8_t y[16], const uint8_t* data, std::size_t len) {
+    for (std::size_t off = 0; off < len; off += 16u) {
+        const std::size_t n = std::min<std::size_t>(16u, len - off);
+        for (std::size_t i = 0; i < n; ++i) y[i] ^= data[off + i];
+        uint8_t next[16]{};
+        gcm_gf_mul(y, h, next);
+        for (int i = 0; i < 16; ++i) y[i] = next[i];
+    }
+}
+
+void gcm_ghash(const uint8_t h[16], const std::vector<uint8_t>& aad, const std::vector<uint8_t>& ct, uint8_t out[16]) {
+    for (int i = 0; i < 16; ++i) out[i] = 0;
+    gcm_ghash_update(h, out, aad.data(), aad.size());
+    gcm_ghash_update(h, out, ct.data(), ct.size());
+    uint8_t len_block[16]{};
+    const uint64_t aad_bits = static_cast<uint64_t>(aad.size()) * 8ull;
+    const uint64_t ct_bits = static_cast<uint64_t>(ct.size()) * 8ull;
+    for (int i = 0; i < 8; ++i) {
+        len_block[i] = static_cast<uint8_t>((aad_bits >> ((7 - i) * 8)) & 0xffu);
+        len_block[8 + i] = static_cast<uint8_t>((ct_bits >> ((7 - i) * 8)) & 0xffu);
+    }
+    gcm_ghash_update(h, out, len_block, 16u);
+}
+
+void gcm_inc32(uint8_t ctr[16]) {
+    for (int i = 15; i >= 12; --i) {
+        if (++ctr[i] != 0) break;
+    }
+}
+
+std::vector<uint8_t> aes_gcm_encrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& iv,
+                                     const std::vector<uint8_t>& aad, const std::vector<uint8_t>& pt,
+                                     std::size_t tag_bytes) {
+    uint8_t h[16]{};
+    const uint8_t zero[16]{};
+    aes_encrypt_block(key.data(), key.size(), zero, h);
+
+    uint8_t j0[16]{};
+    if (iv.size() == 12u) {
+        for (int i = 0; i < 12; ++i) j0[i] = iv[static_cast<std::size_t>(i)];
+        j0[15] = 1u;
+    } else {
+        gcm_ghash(h, {}, iv, j0);
+    }
+
+    uint8_t ctr[16];
+    for (int i = 0; i < 16; ++i) ctr[i] = j0[i];
+    std::vector<uint8_t> out(pt.size() + tag_bytes);
+    for (std::size_t off = 0; off < pt.size(); off += 16u) {
+        gcm_inc32(ctr);
+        uint8_t ks[16]{};
+        aes_encrypt_block(key.data(), key.size(), ctr, ks);
+        const std::size_t n = std::min<std::size_t>(16u, pt.size() - off);
+        for (std::size_t i = 0; i < n; ++i) out[off + i] = pt[off + i] ^ ks[i];
+    }
+
+    std::vector<uint8_t> ct_only(out.begin(), out.begin() + static_cast<std::ptrdiff_t>(pt.size()));
+    uint8_t s[16]{}, t_mask[16]{};
+    gcm_ghash(h, aad, ct_only, s);
+    aes_encrypt_block(key.data(), key.size(), j0, t_mask);
+    for (std::size_t i = 0; i < tag_bytes; ++i) {
+        out[pt.size() + i] = s[i] ^ t_mask[i];
+    }
+    return out;
+}
+
+bool aes_gcm_decrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>& iv,
+                     const std::vector<uint8_t>& aad, const std::vector<uint8_t>& ct_and_tag,
+                     std::size_t tag_bytes, std::vector<uint8_t>& pt_out) {
+    if (ct_and_tag.size() < tag_bytes) return false;
+    const std::size_t ct_len = ct_and_tag.size() - tag_bytes;
+    std::vector<uint8_t> ct(ct_and_tag.begin(), ct_and_tag.begin() + static_cast<std::ptrdiff_t>(ct_len));
+
+    uint8_t h[16]{};
+    const uint8_t zero[16]{};
+    aes_encrypt_block(key.data(), key.size(), zero, h);
+
+    uint8_t j0[16]{};
+    if (iv.size() == 12u) {
+        for (int i = 0; i < 12; ++i) j0[i] = iv[static_cast<std::size_t>(i)];
+        j0[15] = 1u;
+    } else {
+        gcm_ghash(h, {}, iv, j0);
+    }
+
+    uint8_t s[16]{}, t_mask[16]{};
+    gcm_ghash(h, aad, ct, s);
+    aes_encrypt_block(key.data(), key.size(), j0, t_mask);
+    uint8_t diff = 0;
+    for (std::size_t i = 0; i < tag_bytes; ++i) {
+        diff |= static_cast<uint8_t>((s[i] ^ t_mask[i]) ^ ct_and_tag[ct_len + i]);
+    }
+    if (diff != 0) return false;
+
+    uint8_t ctr[16];
+    for (int i = 0; i < 16; ++i) ctr[i] = j0[i];
+    pt_out.resize(ct_len);
+    for (std::size_t off = 0; off < ct_len; off += 16u) {
+        gcm_inc32(ctr);
+        uint8_t ks[16]{};
+        aes_encrypt_block(key.data(), key.size(), ctr, ks);
+        const std::size_t n = std::min<std::size_t>(16u, ct_len - off);
+        for (std::size_t i = 0; i < n; ++i) pt_out[off + i] = ct[off + i] ^ ks[i];
+    }
+    return true;
+}
+
 struct CryptoKeyState : JsExotic {
     std::string type = "secret";
     bool extractable = false;
@@ -520,20 +642,20 @@ void setup_subtle_crypto(Iface& I) {
             if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
             return undefined();
         }
-        if (alg_name == "aes-ctr") {
+        if (alg_name == "aes-ctr" || alg_name == "aes-gcm") {
             if (key_bytes.size() != 16u && key_bytes.size() != 24u && key_bytes.size() != 32u) {
                 return reject_with("DataError", "SubtleCrypto.importKey: AES key must be 128, 192, or 256 bits.");
             }
             auto state = std::make_shared<CryptoKeyState>();
             state->extractable = args[3].is_truthy();
-            state->hash_alg = "aes-ctr";
+            state->hash_alg = alg_name;
             state->key_bytes = std::move(key_bytes);
             JsValue key = r.make("CryptoKey", state);
             if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
             return undefined();
         }
         if (alg_name != "hmac" || !alg_val.is_object_like()) {
-            return reject_with("NotSupportedError", "SubtleCrypto.importKey: only HMAC, PBKDF2, HKDF, and AES-CTR are supported.");
+            return reject_with("NotSupportedError", "SubtleCrypto.importKey: only HMAC, PBKDF2, HKDF, AES-CTR, and AES-GCM are supported.");
         }
         JsValue hash_val = alg_val.get_property("hash");
         std::string hash_alg = hash_val.is_object_like() ? ascii_lower_str(to_str(hash_val.get_property("name")))
@@ -645,14 +767,14 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[0];
         std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
                                                         : ascii_lower_str(to_str(alg_val));
-        if (alg_name == "aes-ctr" && alg_val.is_object_like()) {
+        if ((alg_name == "aes-ctr" || alg_name == "aes-gcm") && alg_val.is_object_like()) {
             const int len_bits = static_cast<int>(to_double(alg_val.get_property("length")));
             if (len_bits != 128 && len_bits != 192 && len_bits != 256) {
                 return reject_with("OperationError", "SubtleCrypto.generateKey: AES length must be 128, 192, or 256.");
             }
             auto state = std::make_shared<CryptoKeyState>();
             state->extractable = args[1].is_truthy();
-            state->hash_alg = "aes-ctr";
+            state->hash_alg = alg_name;
             state->key_bytes.resize(static_cast<std::size_t>(len_bits / 8));
             fill_random_bytes(state->key_bytes.data(), state->key_bytes.size());
             JsValue key = r.make("CryptoKey", state);
@@ -660,7 +782,7 @@ void setup_subtle_crypto(Iface& I) {
             return undefined();
         }
         if (alg_name != "hmac" || !alg_val.is_object_like()) {
-            return reject_with("NotSupportedError", "SubtleCrypto.generateKey: only HMAC and AES-CTR are supported.");
+            return reject_with("NotSupportedError", "SubtleCrypto.generateKey: only HMAC, AES-CTR, and AES-GCM are supported.");
         }
         JsValue hash_val = alg_val.get_property("hash");
         std::string hash_alg = hash_val.is_object_like() ? ascii_lower_str(to_str(hash_val.get_property("name")))
@@ -806,7 +928,8 @@ void setup_subtle_crypto(Iface& I) {
         return undefined();
     });
 
-    auto aes_ctr_op = [](Realm& r, Args args, const char* op_name) -> JsValue {
+    auto aes_cipher_op = [](Realm& r, Args args, bool is_encrypt) -> JsValue {
+        const char* op_name = is_encrypt ? "encrypt" : "decrypt";
         JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
         auto reject_with = [&](const std::string& name, const std::string& msg) {
             JsValue err = make_dom_exception(r, name, msg);
@@ -815,25 +938,53 @@ void setup_subtle_crypto(Iface& I) {
         };
         if (args.size() < 3) return reject_with("TypeError", std::string("SubtleCrypto.") + op_name + ": 3 arguments required.");
         const JsValue& alg_val = args[0];
-        if (!alg_val.is_object_like() || ascii_lower_str(to_str(alg_val.get_property("name"))) != "aes-ctr") {
-            return reject_with("NotSupportedError", std::string("SubtleCrypto.") + op_name + ": only AES-CTR is supported.");
+        const std::string alg_name = alg_val.is_object_like()
+            ? ascii_lower_str(to_str(alg_val.get_property("name"))) : std::string();
+        if (alg_name != "aes-ctr" && alg_name != "aes-gcm") {
+            return reject_with("NotSupportedError", std::string("SubtleCrypto.") + op_name + ": only AES-CTR and AES-GCM are supported.");
         }
         CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
-        if (!key || key->hash_alg != "aes-ctr") {
-            return reject_with("InvalidAccessError", std::string("SubtleCrypto.") + op_name + ": key must be an AES-CTR CryptoKey.");
+        if (!key || key->hash_alg != alg_name) {
+            return reject_with("InvalidAccessError", std::string("SubtleCrypto.") + op_name + ": key algorithm mismatch.");
         }
-        std::vector<uint8_t> counter, data;
-        if (!read_buffer_source(r, alg_val.get_property("counter"), counter) || counter.size() != 16u) {
-            return reject_with("OperationError", std::string("SubtleCrypto.") + op_name + ": counter must be 16 bytes.");
-        }
-        const int length_bits = static_cast<int>(to_double(alg_val.get_property("length")));
-        if (length_bits < 1 || length_bits > 128) {
-            return reject_with("OperationError", std::string("SubtleCrypto.") + op_name + ": counter length must be 1..128.");
-        }
+        std::vector<uint8_t> data;
         if (!read_buffer_source(r, args[2], data)) {
             return reject_with("TypeError", std::string("SubtleCrypto.") + op_name + ": data must be a BufferSource.");
         }
-        std::vector<uint8_t> out = aes_ctr_crypt(key->key_bytes, counter, length_bits, data);
+        std::vector<uint8_t> out;
+        if (alg_name == "aes-ctr") {
+            std::vector<uint8_t> counter;
+            if (!read_buffer_source(r, alg_val.get_property("counter"), counter) || counter.size() != 16u) {
+                return reject_with("OperationError", std::string("SubtleCrypto.") + op_name + ": counter must be 16 bytes.");
+            }
+            const int length_bits = static_cast<int>(to_double(alg_val.get_property("length")));
+            if (length_bits < 1 || length_bits > 128) {
+                return reject_with("OperationError", std::string("SubtleCrypto.") + op_name + ": counter length must be 1..128.");
+            }
+            out = aes_ctr_crypt(key->key_bytes, counter, length_bits, data);
+        } else {
+            std::vector<uint8_t> iv, aad;
+            if (!read_buffer_source(r, alg_val.get_property("iv"), iv) || iv.empty()) {
+                return reject_with("OperationError", std::string("SubtleCrypto.") + op_name + ": iv must be a non-empty BufferSource.");
+            }
+            JsValue aad_val = alg_val.get_property("additionalData");
+            if (!aad_val.is_undefined() && !read_buffer_source(r, aad_val, aad)) {
+                return reject_with("TypeError", std::string("SubtleCrypto.") + op_name + ": additionalData must be a BufferSource.");
+            }
+            int tag_bits = 128;
+            JsValue tl_val = alg_val.get_property("tagLength");
+            if (!tl_val.is_undefined()) tag_bits = static_cast<int>(to_double(tl_val));
+            if (tag_bits != 32 && tag_bits != 64 && tag_bits != 96 && tag_bits != 104 &&
+                tag_bits != 112 && tag_bits != 120 && tag_bits != 128) {
+                return reject_with("OperationError", std::string("SubtleCrypto.") + op_name + ": invalid tagLength.");
+            }
+            const std::size_t tag_bytes = static_cast<std::size_t>(tag_bits / 8);
+            if (is_encrypt) {
+                out = aes_gcm_encrypt(key->key_bytes, iv, aad, data, tag_bytes);
+            } else if (!aes_gcm_decrypt(key->key_bytes, iv, aad, data, tag_bytes, out)) {
+                return reject_with("OperationError", "SubtleCrypto.decrypt: AES-GCM authentication tag mismatch.");
+            }
+        }
         JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
         JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
         JsValue out_ab = js_construct(ab_ctor, {num(static_cast<double>(out.size()))});
@@ -845,8 +996,8 @@ void setup_subtle_crypto(Iface& I) {
         return undefined();
     };
 
-    I.method("encrypt", 3, [aes_ctr_op](Realm& r, Args args) { return aes_ctr_op(r, args, "encrypt"); });
-    I.method("decrypt", 3, [aes_ctr_op](Realm& r, Args args) { return aes_ctr_op(r, args, "decrypt"); });
+    I.method("encrypt", 3, [aes_cipher_op](Realm& r, Args args) { return aes_cipher_op(r, args, true); });
+    I.method("decrypt", 3, [aes_cipher_op](Realm& r, Args args) { return aes_cipher_op(r, args, false); });
 }
 
 void setup_crypto(Iface& I) {

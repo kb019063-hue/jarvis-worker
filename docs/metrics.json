@@ -77,11 +77,11 @@
       "note": "the web-platform-tests url resources in tests/url: 904 parsing cases and 284 setter cases"
     },
     "wpt": {
-      "pass": 9569,
+      "pass": 9570,
       "of": 9824,
       "command": "make wpt",
       "date": "2026-11-15",
-      "note": "dom/nodes, domparsing, encoding, css-flexbox and css-grid subtests; the 255 that fail are listed with a reason in tests/wpt; the two that arrived in Phase 243 are css-grid grid-template resolution through a linked support sheet"
+      "note": "dom/nodes, domparsing, encoding, css-flexbox and css-grid subtests; the 254 that fail are listed with a reason in tests/wpt; css-grid track resolution through a linked support sheet remains the largest bucket, and Phase 290 took serializer-redundant-xmlns off the list"
     }
   }
 }

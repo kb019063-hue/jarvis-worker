@@ -522,10 +522,16 @@ void install_number_builtins(JsIntrinsics& realm) {
         return static_cast<double>(count);
     }));
     def("atan2", js_make_native("atan2", 2, [](Args args) {
-        return JsValue::make_number(std::atan2(js_to_number(js_arg(args, 0)), js_to_number(js_arg(args, 1))));
+        // ToNumber can invoke user code: C++ function arguments have no
+        // guaranteed left-to-right evaluation order, but ECMAScript does.
+        const double y = js_to_number(js_arg(args, 0));
+        const double x = js_to_number(js_arg(args, 1));
+        return JsValue::make_number(std::atan2(y, x));
     }));
     def("pow", js_make_native("pow", 2, [](Args args) {
-        return JsValue::make_number(js_pow(js_to_number(js_arg(args, 0)), js_to_number(js_arg(args, 1))));
+        const double base = js_to_number(js_arg(args, 0));
+        const double exponent = js_to_number(js_arg(args, 1));
+        return JsValue::make_number(js_pow(base, exponent));
     }));
     def("imul", js_make_native("imul", 2, [](Args args) {
         uint32_t a = js_to_uint32(js_to_number(js_arg(args, 0)));

@@ -2560,7 +2560,6 @@
           "describe": "below the 40px canvas remains white"
         }
       ],
-      "known_failure": "HTMLCanvasElement.getContext('webgl') returns null (no WebGL implementation yet), so the 40x40 canvas remains #ffffff instead of #00ff00.",
       "note": "Khronos WebGL 1.0 \u00a7\u00a72.2, 5.14.3: paired with canvas_2d_script_paints_canvas_green so the only variable under test is WebGL context creation and compositing."
     }
   ]

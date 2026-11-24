@@ -39,6 +39,7 @@ SRCS = src/common/Color.cpp \
        src/render/GifDecoder.cpp \
        src/render/Vp8Decoder.cpp src/render/Vp8Tables.cpp src/render/WebPDecoder.cpp \
        src/render/Canvas2D.cpp \
+       src/render/WebGL.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
        src/render/TerminalWidthTables.cpp \
@@ -187,6 +188,11 @@ verify-path-resolution: $(BUILD_DIR)/relative_navigation_fixture
 
 $(BUILD_DIR)/relative_navigation_fixture: $(OBJS) tools/conformance/relative_navigation_fixture.cpp
 	$(CXX) $(CXXFLAGS) $(OBJS) tools/conformance/relative_navigation_fixture.cpp -o $@
+
+## Compare TextDecoder and TextEncoder with Node, case by case.
+.PHONY: verify-text-codec
+verify-text-codec: $(TARGET)
+	@python3 tools/conformance/verify_text_codec.py $(TARGET)
 
 ## Compare the bytecode VM's answer with the tree-walker's, case by case.
 .PHONY: verify-bytecode

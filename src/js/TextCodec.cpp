@@ -9,10 +9,19 @@
 // list read out of a view in `TypedArray.cpp`, and the standard's error modes
 // mapped onto the C++ calls that already had them.
 //
+// One thing this comment used to say was wrong, and it misled a row of
+// AGENTS.md for a hundred phases: it claimed `TextDecoder` had no `stream`
+// option. It has had one since Phase 163 -- `read_stream_option` below reads
+// it and `DecoderState::stream_bytes` holds the partial bytes -- and a
+// three-byte character split across two chunks comes out exactly as Node
+// prints it. Phase 276 settled that with a harness rather than an argument.
+//
 // Two things are deliberately not here, and are rows of AGENTS.md:
 //   - the `<meta charset>` prescan is one pass over the first 1,024 bytes, with
-//     no streaming, and `TextDecoder` has no `stream` option either: an option
-//     that is accepted and ignored would be worse than one that is absent;
+//     no streaming across documents;
+//   - `TextDecoderStream`/`TextEncoderStream` are absent: they are built on
+//     `ReadableStream`/`WritableStream`/`TransformStream`, and this engine has
+//     no Streams at all. Half-building them would be worse than their absence;
 //   - `x-user-defined` and `replacement` are decodable but `replacement` cannot
 //     be encoded, and the standard says a `TextDecoder` may not have either as
 //     its encoding unless it was reached through a label that maps to it.
@@ -386,7 +395,12 @@ void setup_decoder(JsObject* proto, JsValue& constructor) {
         return JsValue::make_boolean(decoder_of("get ignoreBOM")->ignore_bom);
     });
 
-    js_define_method(proto, "decode", 1, [](Args args) {
+    // The Encoding Standard's table gives `TextDecoder.prototype.decode`
+    // **length 0**: its one argument is optional, and `length` counts the
+    // parameters before the first optional one. This said 1, and nothing was
+    // checking -- `new TextDecoder().decode.length` answered 1 where Node and
+    // the table both say 0.
+    js_define_method(proto, "decode", 0, [](Args args) {
         DecoderState* state = decoder_of("decode");
         const bool stream = read_stream_option(args.size() > 1 ? args[1] : JsValue::make_undefined());
         std::string bytes = bytes_from(args.empty() ? JsValue::make_undefined() : args[0]);

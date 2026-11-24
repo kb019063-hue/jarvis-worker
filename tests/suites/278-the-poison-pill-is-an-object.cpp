@@ -1,4 +1,4 @@
-// Phase 277, finding 273: the poison pill is a real accessor pair on
+// Phase 278, finding 282: the poison pill is a real accessor pair on
 // %Function.prototype%, not a fiction in the property lookups.
 TEST(the_poison_pill_is_a_pair_of_accessors_on_function_prototype) {
     // §10.2.4/§10.2.6 make `caller` and `arguments` a pair of throwing

@@ -21,6 +21,14 @@ whole CI run.
 
 A stretch that fails is printed last, so that the end of the output is the
 failure, which is where a person and tools/ci/annotate_failure.py look.
+
+It says at the end how long each stretch took and how much memory it used
+at most, and in CI it says so as a notice on the job as well, which can be
+read where the log cannot (`gh api repos/OWNER/REPO/check-runs/JOB_ID/
+annotations`). The stretches are equal in suites, not in time, and the step
+that runs this also compiles the test binary first: without these numbers
+nobody could say whether the step is long for the compiling, for one slow
+stretch, or for all of them.
 """
 
 from __future__ import annotations
@@ -58,6 +66,18 @@ def verdict(results: list[tuple[int, str]]) -> tuple[bool, str]:
     return True, f"All {total} engine test suites passed successfully, as {count} processes side by side!"
 
 
+def measured(results: list[tuple[int, str]], seconds: list[float], megabytes: list[int], whole: float) -> str:
+    """One line: how long each stretch took, its suites, and its most memory."""
+    parts = []
+    for index, (_, output) in enumerate(results):
+        said = SENTENCE.search(output)
+        suites = f"{said.group(3)} suites" if said else "no count"
+        parts.append(f"stretch {index}: {suites} in {seconds[index]:.0f} s, {megabytes[index]} MB at most")
+    slowest = max(range(len(seconds)), key=lambda index: seconds[index]) if seconds else 0
+    return (f"{len(results)} processes side by side, {whole:.0f} s in all (the slowest is stretch {slowest}); "
+            + "; ".join(parts))
+
+
 def run(binary: str, count: int) -> int:
     started = time.time()
     with tempfile.TemporaryDirectory(prefix="litebird-stretches-") as directory:
@@ -66,12 +86,30 @@ def run(binary: str, count: int) -> int:
             log = open(os.path.join(directory, f"stretch{index}.log"), "wb")
             environment = dict(os.environ, LITEBIRD_SUITE_SHARD=f"{index}/{count}")
             processes.append((subprocess.Popen([binary], stdout=log, stderr=subprocess.STDOUT, env=environment), log))
+        # Each is waited for by itself (`wait4`), for the moment it ended and
+        # the most memory it held: waiting for them in order would give the
+        # first one the time of the slowest.
+        statuses: list[int | None] = [None] * count
+        seconds = [0.0] * count
+        megabytes = [0] * count
+        while any(status is None for status in statuses):
+            for index, (process, _) in enumerate(processes):
+                if statuses[index] is not None:
+                    continue
+                pid, raw, usage = os.wait4(process.pid, os.WNOHANG)
+                if pid == 0:
+                    continue
+                statuses[index] = os.waitstatus_to_exitcode(raw)
+                process.returncode = statuses[index]   # so that Popen does not wait for it again
+                seconds[index] = time.time() - started
+                megabytes[index] = usage.ru_maxrss // 1024   # Linux counts in kilobytes
+            if any(status is None for status in statuses):
+                time.sleep(0.1)
         results: list[tuple[int, str]] = []
-        for process, log in processes:
-            status = process.wait()
+        for index, (_, log) in enumerate(processes):
             log.close()
             with open(log.name, "rb") as written:
-                results.append((status, written.read().decode("utf-8", "replace")))
+                results.append((statuses[index] or 0, written.read().decode("utf-8", "replace")))
     # What passed first, what failed last: the end of the output is the failure.
     order = sorted(range(count), key=lambda index: (results[index][0] != 0, index))
     for index in order:
@@ -79,8 +117,14 @@ def run(binary: str, count: int) -> int:
         if not results[index][1].endswith("\n"):
             sys.stdout.write("\n")
     passed, line = verdict(results)
+    whole = time.time() - started
+    times = measured(results, seconds, megabytes, whole)
+    print(f"\nThe unit suites as {times}")
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        # A notice on the job: read through the API where the log cannot be.
+        print(f"::notice title=the unit suites as {count} processes::{times}")
     colour = "\033[1;32m" if passed else "\033[1;31mFAILED\033[0m: "
-    print(f"\n{colour}{line}{'' if not passed else chr(27) + '[0m'} ({time.time() - started:.0f} s)\n", flush=True)
+    print(f"\n{colour}{line}{'' if not passed else chr(27) + '[0m'} ({whole:.0f} s)\n", flush=True)
     return 0 if passed else 1
 
 
@@ -105,6 +149,14 @@ def self_test() -> int:
          (False, "stretch 2 of 3 says it is stretch 1 of 3")),
         ("one process is a whole run", verdict([(0, said(0, 1, 420, 420))]),
          (True, "All 420 engine test suites passed successfully, as 1 processes side by side!")),
+        ("what each stretch took, and which was the slowest",
+         measured(three, [101.4, 240.6, 99.0], [900, 1500, 800], 241.2),
+         "3 processes side by side, 241 s in all (the slowest is stretch 1); "
+         "stretch 0: 140 suites in 101 s, 900 MB at most; stretch 1: 140 suites in 241 s, 1500 MB at most; "
+         "stretch 2: 140 suites in 99 s, 800 MB at most"),
+        ("a stretch that died says no count, and the line is still written",
+         measured([(134, "Running test: b... Assertion failed\n")], [12.0], [300], 12.0),
+         "1 processes side by side, 12 s in all (the slowest is stretch 0); stretch 0: no count in 12 s, 300 MB at most"),
     ]
     failed = 0
     for what, got, want in cases:

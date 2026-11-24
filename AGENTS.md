@@ -256,6 +256,27 @@ within the hour, and the first lot was started again four times.
      checks that, and the lot goes on with the new head. In the first
      quarter of an hour of 24 November's watch three heads moved under
      one lot (#305, #313, #321) and none of them cost a run;
+   - **while a watch is on, a pull request's own run is the short one.**
+     The landing session puts the label `lot` on it (`watch.sh look`), and
+     CI then runs "Build & unit tests" and "Documentation shape" on it
+     and skips the other ten jobs. The whole of CI runs on the lot it
+     lands in, on `main` as it will be, which its own run never saw. **Ten
+     jobs "skipped" on your pull request is that, and nothing to mend**;
+     `python3 tools/ci/check_pr.py merge N` says so. You still run the
+     checks of "What "done" means" here before the last push: a pull
+     request that fails a job in the lot takes the others in it back a
+     run. When no watch is on, `merge N` takes the label off, which
+     starts all twelve jobs, and says "not ready" until they have
+     passed: nobody merges on a short run. The reason is the queue: a
+     run is twelve jobs and no more than twenty were seen running at
+     once. At 04:57 on 24 November 19 were running and 25 waiting, in
+     six runs, and the lot that five finished pull requests were in had
+     eight jobs that had not started 4.7 minutes after its push; it took
+     17 minutes where the one at 05:24, alone on the runners, took 10.5.
+     A pull request was tested three times: by its own run, by the
+     lot's, and by the run on `main` after the lot. That last one now
+     builds, keeps the objects and runs the plain unit suites, no more
+     (`[objects only]` in the lot's last merge);
    - a pull request that becomes finished while a run is going waits for
      the next lot, unless the run is less than five minutes old: then it
      joins, and the run starts again. Twice for one lot at the most: on
@@ -275,10 +296,20 @@ within the hour, and the first lot was started again four times.
      landed and what went back, and then the landing session merges its
      own pull request, which holds what no other one does: the suite count
      (`make metrics-suites`) and whatever it carried or wrote. That merge
-     ends its access within minutes. Until then, what it writes itself is
-     kept out of the lot's tree: committed in a second worktree, merged
-     into the branch with `git merge -s ours` so that it is pushed, and
-     brought into the tree at the end with `git cherry-pick`;
+     ends its access within minutes. What it writes itself is committed
+     in a second worktree (`git worktree add -b own /tmp/own
+     origin/main`), and `watch.sh full N…` builds the lot with those
+     commits on top, so that the watch can end at any lot that has
+     passed without one more run. **Only the watch's tools, CI's
+     configuration and documents ride on a lot that way.** The members
+     are then merged as they are, and `main` has their tree, which
+     differs from the one the run passed on in those files alone. **A
+     carried pull request rides on the last lot only**, the one that
+     lands whole with the watch's own merge. On 24 November #331, #326
+     and #332 were merged as they were from two runs that had #317's and
+     #324's code on top: for forty minutes `main` had trees no run had
+     passed as they were, and nothing came of it only because nothing in
+     them leaned on those two;
    - **a watch can pause.** Merging its own pull request ends the landing
      session's turn, and need not end the watch. When it has something
      that should be on `main` now (a pull request it carried, a change to
@@ -499,7 +530,9 @@ asan`.
   (`docs/README.md` says where a write-up goes now, and what one says.)
 - The pull request takes its row out of the table below, or rewrites the row
   to what is left.
-- The `WIP:` comes off the title, and CI is green on the head commit. Then
+- The `WIP:` comes off the title, and CI is green on the head commit
+  (while a watch is on, that is the short run: "Working together",
+  point 4). Then
   `python3 tools/ci/check_pr.py merge N` says who merges ("Working
   together", point 3, above): the landing session while a watch is on, you
   when none is. When it is you: with a merge commit

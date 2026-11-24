@@ -2249,14 +2249,44 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
             try {
                 for (const auto& element : pattern.elements) {
                     if (element.rest) {
+                        // AssignmentRestEvaluation resolves a simple target
+                        // before draining the iterator. Nested array/object
+                        // patterns instead receive the collected rest array
+                        // and evaluate their own targets while binding it.
+                        Reference target_ref;
+                        const bool has_target_ref = mode == BindMode::Assign && element.target &&
+                                                    element.target->kind == Pattern::Kind::Target;
+                        if (has_target_ref) {
+                            target_ref = resolve_reference(element.target->target.get(), env,
+                                                           /*throw_on_nullish=*/false);
+                        }
                         std::vector<JsValue> rest;
                         while (true) {
                             JsValue item = cursor.pull();
                             if (cursor.done()) break;
                             rest.push_back(std::move(item));
                         }
-                        bind_pattern(*element.target, JsValue::make_array(rest), env, mode);
+                        JsValue rest_value = JsValue::make_array(rest);
+                        if (has_target_ref) {
+                            check_reference_base(target_ref);
+                            write_reference(target_ref, rest_value, env);
+                        } else {
+                            bind_pattern(*element.target, rest_value, env, mode);
+                        }
                         break;
+                    }
+                    // An assignment target is evaluated before IteratorStep:
+                    // `[object[yield]] = iterable` can suspend or throw
+                    // while resolving the reference, and IteratorClose must
+                    // see that completion before `next` is called. Defer the
+                    // nullish-base check until the value (and any default) is
+                    // ready, just as plain `=` does.
+                    Reference target_ref;
+                    const bool has_target_ref = mode == BindMode::Assign && element.target &&
+                                                element.target->kind == Pattern::Kind::Target;
+                    if (has_target_ref) {
+                        target_ref = resolve_reference(element.target->target.get(), env,
+                                                       /*throw_on_nullish=*/false);
                     }
                     JsValue item = cursor.pull();
                     if (!element.target) continue;       // hole: `[a, , b]`
@@ -2265,8 +2295,21 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
                             ? evaluate_named(element.default_value.get(), env, element.target->name)
                             : evaluate(element.default_value.get(), env);
                     }
-                    bind_pattern(*element.target, item, env, mode);
+                    if (has_target_ref) {
+                        check_reference_base(target_ref);
+                        write_reference(target_ref, item, env);
+                    } else {
+                        bind_pattern(*element.target, item, env, mode);
+                    }
                 }
+            } catch (const GeneratorReturnException&) {
+                // IteratorClose observes the original completion. A throwing
+                // `return` method, or a non-object result, replaces a Return
+                // completion (unlike a Throw completion, which wins over the
+                // close's result). `close_quietly()` is only correct for an
+                // existing throw, so let this close report its own failure.
+                if (!cursor.next_threw()) cursor.close();
+                throw;
             } catch (...) {
                 if (!cursor.next_threw()) cursor.close_quietly();
                 throw;

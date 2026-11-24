@@ -34498,13 +34498,15 @@ TEST(an_abrupt_completion_in_a_pattern_closes_the_iterator) {
         }
         var thrower = function () { throw new RangeError('stop'); };
 
-        // a target that throws while the pattern is being bound
+        // A target reference is evaluated before asking the iterator for this
+        // element: one next supplies `out`, then the second target throws
+        // before another next call. The open iterator is still closed.
         var a = iterableThatCounts(function () { return { done: false, value: undefined }; },
                                    function () { return {}; });
         throws('a throwing target', RangeError, function () {
             var out; [ out = 0, {}[thrower()] ] = a.source;
         });
-        same('the iterator was closed once', a.counts, { next: 2, ret: 1 });
+        same('the iterator was closed once', a.counts, { next: 1, ret: 1 });
 
         // a default value that throws
         var b = iterableThatCounts(function () { return { done: false, value: undefined }; },

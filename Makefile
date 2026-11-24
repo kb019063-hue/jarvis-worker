@@ -223,6 +223,11 @@ verify-worker-terminal-safety: $(TARGET)
 verify-js-error-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_js_error_terminal.py --binary $(TARGET)
 
+## Check CLI file and navigation error output without displaying attack bytes.
+.PHONY: verify-cli-error-terminal-safety
+verify-cli-error-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_cli_error_terminal.py --binary $(TARGET)
+
 $(BUILD_DIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@

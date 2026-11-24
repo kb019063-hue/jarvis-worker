@@ -115,6 +115,8 @@ jobs:
         run: make verify-worker-terminal-safety
       - name: Uncaught JavaScript diagnostics cannot inject terminal controls
         run: make verify-js-error-terminal-safety
+      - name: CLI file and navigation errors cannot inject terminal controls
+        run: make verify-cli-error-terminal-safety
       - name: Pathless URL references agree with Node
         run: make verify-relative-navigation
       - name: Path-bearing URL references agree with Node

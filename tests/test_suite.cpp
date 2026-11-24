@@ -7031,6 +7031,60 @@ TEST(subtle_crypto_pbkdf2_derive_bits_and_key) {
     assert(interp.eval("derivedKey instanceof CryptoKey && derivedOk === true").is_truthy());
 }
 
+TEST(subtle_crypto_hkdf_derive_bits_and_key) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // RFC 5869 Test Case 1 (SHA-256)
+    // IKM = 0x0b * 22, salt = 0x00..0x0c (13 bytes), info = 0xf0..0xf9 (10 bytes), L = 42 bytes
+    // OKM = 3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865
+    interp.eval(R"(
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var ikm = new Uint8Array(22);
+        for (var i = 0; i < 22; i++) ikm[i] = 0x0b;
+        var salt = new Uint8Array(13);
+        for (var i = 0; i < 13; i++) salt[i] = i;
+        var info = new Uint8Array(10);
+        for (var i = 0; i < 10; i++) info[i] = 0xf0 + i;
+
+        var okmHex = null;
+        var derivedKey = null;
+        var derivedOk = null;
+        crypto.subtle.importKey('raw', ikm, 'HKDF', false, ['deriveBits', 'deriveKey'])
+            .then(function(base) {
+                return crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: salt, info: info }, base, 42 * 8)
+                    .then(function(bits) {
+                        okmHex = toHex(bits);
+                        return crypto.subtle.deriveKey(
+                            { name: 'HKDF', hash: 'SHA-256', salt: salt, info: info },
+                            base,
+                            { name: 'HMAC', hash: 'SHA-256', length: 256 },
+                            true,
+                            ['sign', 'verify']
+                        );
+                    });
+            })
+            .then(function(k) {
+                derivedKey = k;
+                return crypto.subtle.sign('HMAC', k, new Uint8Array([1, 2, 3]));
+            })
+            .then(function(sig) {
+                return crypto.subtle.verify('HMAC', derivedKey, sig, new Uint8Array([1, 2, 3]));
+            })
+            .then(function(v) {
+                derivedOk = v;
+            });
+    )");
+    assert(interp.eval("okmHex === '3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865'").is_truthy());
+    assert(interp.eval("derivedKey instanceof CryptoKey && derivedOk === true").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -35958,6 +36012,7 @@ int main() {
     RUN_TEST(subtle_crypto_hmac_sign_and_verify);
     RUN_TEST(subtle_crypto_export_and_generate_key);
     RUN_TEST(subtle_crypto_pbkdf2_derive_bits_and_key);
+    RUN_TEST(subtle_crypto_hkdf_derive_bits_and_key);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

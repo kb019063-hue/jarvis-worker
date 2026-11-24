@@ -19,6 +19,13 @@ on:
 # A run that is not a pull request's (a push to `main`, one started by hand) is
 # alone in its group, which is its own run id: nothing stops it, and each commit
 # of `main` still gets its whole run.
+#
+# Every job starts at once. Until 24 November 2026 ten of the twelve waited for
+# "Build & unit tests" (`needs:`), five minutes in which a run did nothing
+# else: a run was those five minutes and then its longest job, 17.6 minutes
+# on `main` that night (run 45293924439) where the longest job took 12.5. The
+# wait saved runner time only when the build or a unit suite failed, and the
+# agents run both before they push.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
@@ -29,6 +36,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: plain
       - name: The published numbers are still true
         # README.md said 1124 / 1150 (97.6%) while the two integers divide to
         # 97.7, and ROADMAP.md's baseline quoted a corpus two phases old. This
@@ -49,6 +60,21 @@ jobs:
           python3 tools/ci/check_ci_parts.py
       - name: Build
         run: make -j"$(nproc)"
+      - name: What ccache had for it, as a notice on the run
+        if: always()
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            echo "::notice title=ccache, plain build::$(ccache -s 2>/dev/null | grep -E 'Cacheable calls|Hits|Misses|Cache size' | tr -s ' ' | tr '\n' ';')"
+          fi
+      - name: Keep the objects for the runs that follow
+        # Only a run on main saves them: every pull request can read
+        # what such a run saved, and nobody else what a pull request's
+        # run did (.github/actions/ccache/action.yml).
+        if: github.event_name != 'pull_request'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-plain-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Engine test suites
         run: make test
       - name: Shell labels cannot inject terminal controls
@@ -198,6 +224,12 @@ jobs:
         # are the figures and shapes it is trusted for, and it asks the tree
         # nothing here.
         run: python3 tools/ci/check_numbers.py --self-test
+      - name: check_rows reads the table "Open tasks" the way a merge does
+        # Two rows of that table that touch are two changes git cannot
+        # merge. The tool that keeps an empty row between them is tested
+        # here on small tables of its own; the table itself is only
+        # reported on, by check_docs.py below.
+        run: python3 tools/ci/check_rows.py --self-test
       - name: The documents keep their shape and stay under their budgets
         # ARCHITECTURE.md is 84% phase write-ups and AUDIT.md is 53 resolved
         # findings of 61. Both are frozen as append targets; new write-ups go
@@ -208,9 +240,12 @@ jobs:
   render-conformance:
     name: Render reftests (pixels)
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: plain
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -230,9 +265,12 @@ jobs:
   conformance:
     name: DOM conformance (html5lib corpus)
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: plain
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -278,9 +316,12 @@ jobs:
   js-conformance:
     name: JavaScript conformance (Node-verified corpus)
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: plain
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -377,9 +418,12 @@ jobs:
   dom-conformance:
     name: Script DOM conformance (jsdom-verified corpus) and URLs (web-platform-tests)
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: plain
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -416,9 +460,12 @@ jobs:
   xml-and-wpt:
     name: XML (W3C suite, Expat and libxml2) and web-platform-tests
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: plain
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -466,9 +513,12 @@ jobs:
   deep-pages:
     name: Deep and oversized pages (stack, memory and time limits)
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: plain
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -506,9 +556,12 @@ jobs:
   sanitizers-unit:
     name: "Sanitizers: unit suites"
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: asan
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -520,13 +573,29 @@ jobs:
       - name: Sanitizer build
         # Each of these jobs makes build-asan/litebird for itself: a job starts
         # on a clean machine, and passing the build between jobs would put it
-        # in front of all of them instead of beside them. It is five to six
-        # minutes, and it is what a job cannot go below.
+        # in front of all of them instead of beside them. From nothing it is
+        # five to six minutes; with the objects of main's last run (the
+        # ccache step above) it compiles what the pull request changed.
         env:
           ASAN_OPTIONS: detect_leaks=0
         run: |
           set -o pipefail
           make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+      - name: What ccache had for it, as a notice on the run
+        if: always()
+        run: |
+          if command -v ccache >/dev/null 2>&1; then
+            echo "::notice title=ccache, asan build::$(ccache -s 2>/dev/null | grep -E 'Cacheable calls|Hits|Misses|Cache size' | tr -s ' ' | tr '\n' ';')"
+          fi
+      - name: Keep the objects for the runs that follow
+        # Only a run on main saves them: every pull request can read
+        # what such a run saved, and nobody else what a pull request's
+        # run did (.github/actions/ccache/action.yml).
+        if: github.event_name != 'pull_request'
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-asan-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Unit suites in the sanitizer build
         # The longest part, and the reason the suites are run a second time: a
         # suite that passes in the normal build can fail in this one.
@@ -549,9 +618,12 @@ jobs:
   sanitizers-xml-fuzz:
     name: "Sanitizers: XML suite and fuzzing"
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: asan
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -600,9 +672,12 @@ jobs:
   sanitizers-wpt-deep:
     name: "Sanitizers: web-platform-tests, deep and oversized pages"
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: asan
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
@@ -641,9 +716,12 @@ jobs:
   sanitizers-corpora:
     name: "Sanitizers: script corpora, verifiers, generated XML, string stress tests"
     runs-on: ubuntu-latest
-    needs: build-and-test
     steps:
       - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: asan
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

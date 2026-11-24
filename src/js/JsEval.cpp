@@ -160,8 +160,15 @@ void copy_data_properties(JsValue& target, const JsValue& source,
 // because a suspended generator or async function keeps its scopes on the
 // stack of its own thread while other code runs.
 
+struct ScopeEntry {
+    JsEnvironment* env{nullptr};
+    bool owned_local_ref{true};
+};
+
 struct ScopeStack {
-    std::vector<JsEnvironment*> scopes;
+    uint32_t agent{0};
+    GeneratorData* owner_frame{nullptr};
+    std::vector<ScopeEntry> scopes;
     ScopeStack();
     ~ScopeStack();
 };
@@ -174,9 +181,21 @@ struct ScopeStackRegistry {
         Heap::default_heap().add_root_provider(this, [this](std::vector<JsValue*>&) {
             // Runs inside a collection. Script threads take turns, so every
             // other thread's list is at rest while this one reads it.
+            // A suspended generator's scope stack is traced from the generator
+            // object itself (`trace_extra`), not as an unconditional root —
+            // otherwise an unreachable suspended generator roots its own
+            // enclosing scope and can never be collected.
+            const uint32_t current = Heap::current_agent();
             std::lock_guard<std::mutex> lock(mutex);
             for (ScopeStack* stack : stacks) {
-                for (JsEnvironment* scope : stack->scopes) Heap::default_heap().mark_environment(scope);
+                if (stack->agent != current) continue;
+                if (stack->owner_frame && !stack->owner_frame->is_coroutine &&
+                    !stack->owner_frame->is_running()) {
+                    continue;
+                }
+                for (const ScopeEntry& entry : stack->scopes) {
+                    Heap::default_heap().mark_environment(entry.env);
+                }
             }
         });
     }
@@ -187,7 +206,7 @@ ScopeStackRegistry& scope_registry() {
     return *registry;
 }
 
-ScopeStack::ScopeStack() {
+ScopeStack::ScopeStack() : agent(Heap::current_agent()) {
     auto& registry = scope_registry();
     std::lock_guard<std::mutex> lock(registry.mutex);
     registry.stacks.push_back(this);
@@ -207,18 +226,39 @@ ScopeStack& active_scopes() {
 /// Lists `env` as active for the lifetime of this object. The caller keeps the
 /// scope alive; this only makes it visible to the collector. Passing nullptr
 /// is a no-op so callers can conditionally root lexical loop scopes.
+/// `owned_local_ref` records whether the enclosing C++ frame holds its own
+/// local `shared_ptr<JsEnvironment>` to `env` (used when counting references
+/// held on a suspended generator's parked stack).
 struct EnvScope {
     ScopeStack& stack;
     bool pushed{false};
-    explicit EnvScope(const std::shared_ptr<JsEnvironment>& env)
+    explicit EnvScope(const std::shared_ptr<JsEnvironment>& env, bool owned_local_ref = true)
         : stack(active_scopes()), pushed(env != nullptr) {
-        if (pushed) stack.scopes.push_back(env.get());
+        if (pushed) stack.scopes.push_back({env.get(), owned_local_ref});
     }
     ~EnvScope() {
         if (pushed) stack.scopes.pop_back();
     }
     EnvScope(const EnvScope&) = delete;
     EnvScope& operator=(const EnvScope&) = delete;
+};
+
+/// Associates a worker thread's ScopeStack with its GeneratorData for the
+/// lifetime of the worker body, clearing the link before finish() wakes the
+/// resumer.
+struct FrameScopeGuard {
+    GeneratorData* frame;
+    ScopeStack& stack;
+    FrameScopeGuard(GeneratorData* f, ScopeStack& s) : frame(f), stack(s) {
+        stack.owner_frame = f;
+        frame->active_scope_stack = &stack;
+    }
+    ~FrameScopeGuard() {
+        frame->active_scope_stack = nullptr;
+        stack.owner_frame = nullptr;
+    }
+    FrameScopeGuard(const FrameScopeGuard&) = delete;
+    FrameScopeGuard& operator=(const FrameScopeGuard&) = delete;
 };
 
 JsTokenType binary_operator_for(JsTokenType assign_op) {
@@ -1144,8 +1184,10 @@ JsValue JsInterpreter::run_function_body(const FunctionNode& node, const EnvPtr&
     return JsValue::make_undefined();
 }
 
-// Starts a thread that will run `node`'s body as a suspendable frame. The
-// thread parks immediately and runs only while someone is inside resume().
+// Prepares a suspendable frame for `node`'s body. The OS thread is started
+// lazily on the first resume() so an unstarted generator owns no thread at
+// all; once started, the thread parks at each suspension point and runs only
+// while someone is inside resume().
 std::shared_ptr<GeneratorData> JsInterpreter::spawn_frame(const std::shared_ptr<const FunctionNode>& node,
                                                           const EnvPtr& env, bool is_coroutine) {
     auto frame = std::make_shared<GeneratorData>();
@@ -1162,12 +1204,14 @@ std::shared_ptr<GeneratorData> JsInterpreter::spawn_frame(const std::shared_ptr<
 
     // The thread holds a raw pointer: GeneratorData joins the thread in its
     // destructor, so it always outlives the thread, and a shared_ptr here
-    // would keep a frame that is never resumed alive forever.
+    // would keep a frame that is never resumed alive forever. It also reads
+    // `raw->frame_env` by reference instead of capturing a second `EnvPtr`,
+    // so the frame's own `frame_env` is the single reference to `env`.
     GeneratorData* raw = frame.get();
     JsIntrinsics* realm = m_realm.get();
     EventLoop* loop = &EventLoop::default_loop();
     const uint32_t agent = Heap::current_agent();
-    auto body = [this, raw, realm, loop, agent, node = node, env = env]() mutable {
+    frame->start_thunk = [this, raw, realm, loop, agent, node = node]() mutable {
         // The frame is part of the agent that created it.
         GeneratorContext::set_active(raw);
         JsIntrinsics::set_current(realm);
@@ -1177,46 +1221,47 @@ std::shared_ptr<GeneratorData> JsInterpreter::spawn_frame(const std::shared_ptr<
         JsValue result;
         JsValue error;
         bool failed = false;
-        if (raw->wait_for_start()) {
-            try {
-                EnvScope env_scope(env);
-                result = run_function_body(*node, env);
-            } catch (const GeneratorAbortException&) {
-                // Discarded while suspended: nobody is waiting for a result.
-            } catch (const GeneratorReturnException& ret) {
-                // The consumer called .return(value): the frame completes with
-                // the value the completion carried (awaited at the resumption
-                // boundary if the generator is async).
-                result = ret.value;
-            } catch (const JsThrow& thrown) {
-                failed = true;
-                error = thrown.value;
-            } catch (const std::exception& ex) {
-                failed = true;
-                error = js_value_from_exception(ex);
+        {
+            FrameScopeGuard scope_guard(raw, active_scopes());
+            if (raw->wait_for_start()) {
+                try {
+                    const EnvPtr& frame_env = raw->frame_env;
+                    EnvScope env_scope(frame_env, /*owned_local_ref=*/false);
+                    result = run_function_body(*node, frame_env);
+                } catch (const GeneratorAbortException&) {
+                    // Discarded while suspended: nobody is waiting for a result.
+                } catch (const GeneratorReturnException& ret) {
+                    // The consumer called .return(value): the frame completes with
+                    // the value the completion carried (awaited at the resumption
+                    // boundary if the generator is async).
+                    result = ret.value;
+                } catch (const JsThrow& thrown) {
+                    failed = true;
+                    error = thrown.value;
+                } catch (const std::exception& ex) {
+                    failed = true;
+                    error = js_value_from_exception(ex);
+                }
             }
         }
-        // Let go of the scope before handing control back: after finish() this
-        // thread must not touch anything another thread can see.
+        // Let go of the AST node before handing control back: after finish()
+        // this thread must not touch anything another thread can see.
         node.reset();
-        env.reset();
         GeneratorContext::set_active(nullptr);
         raw->finish(std::move(result), failed, std::move(error));
     };
-
-    try {
-        frame->worker = std::thread(std::move(body));
-    } catch (const std::system_error&) {
-        // The system will not give us another thread. Each suspended function
-        // holds one, so this is the engine's limit on how many can be pending.
-        frame->finished = true;
-        frame->is_done = true;
-        js_throw_error(JsErrorKind::RangeError, "Too many suspended functions: out of threads");
-    }
     return frame;
 }
 
 namespace {
+
+bool resume_frame(GeneratorData& frame, JsValue sent) {
+    try {
+        return frame.resume(std::move(sent));
+    } catch (const std::system_error&) {
+        js_throw_error(JsErrorKind::RangeError, "Too many suspended functions: out of threads");
+    }
+}
 
 // Runs an async function's frame until its next `await` (or its end), then
 // arranges for itself to be called again when the awaited promise settles.
@@ -1224,20 +1269,28 @@ void drive_coroutine(const std::shared_ptr<GeneratorData>& frame, const std::sha
                      const JsValue& sent, bool is_throw) {
     if (frame->cancelled) return;       // the interpreter is gone
     if (is_throw) frame->inject_throw(sent);
-    frame->resume(is_throw ? JsValue::make_undefined() : sent);
+    resume_frame(*frame, is_throw ? JsValue::make_undefined() : sent);
     if (frame->cancelled) return;
 
     if (frame->is_done) {
         frame->reap();      // the body has ended; its thread exits now
         JsValue error;
-        if (frame->take_error(error)) Promise::reject(promise, error);
-        else Promise::resolve(promise, frame->yielded_value);
+        if (frame->take_error(error)) {
+            frame->yielded_value = JsValue::make_undefined();
+            Promise::reject(promise, error);
+        } else {
+            JsValue value = std::move(frame->yielded_value);
+            frame->yielded_value = JsValue::make_undefined();
+            Promise::resolve(promise, value);
+        }
         return;
     }
 
     // Parked at `await value`. Whatever it settles to is sent back in, from a
     // microtask: the code after an await never runs synchronously.
-    Promise::subscribe(Promise::to_promise(frame->yielded_value),
+    JsValue awaited = std::move(frame->yielded_value);
+    frame->yielded_value = JsValue::make_undefined();
+    Promise::subscribe(Promise::to_promise(awaited),
         [frame, promise](bool rejected, const JsValue& value) {
             drive_coroutine(frame, promise, value, rejected);
         });
@@ -1272,9 +1325,49 @@ JsValue JsInterpreter::make_generator(const std::shared_ptr<const FunctionNode>&
     auto gen = spawn_frame(node, env, /*is_coroutine=*/false);
     gen->is_async = node->is_async;    // an async generator: the result objects cross to the consumer
 
-    JsValue object = JsValue::make_object();
-    object.object_val->klass = ObjectClass::Generator;
-    object.set_generator_value(gen);
+    JsObject* cell = Heap::default_heap().allocate_object();
+    cell->klass = ObjectClass::Generator;
+    cell->internal = gen;
+    cell->trace_extra = [cell](Heap& heap) {
+        if (!cell->internal) return;
+        auto* frame = static_cast<GeneratorData*>(cell->internal.get());
+        const bool sole_owner = (cell->internal.use_count() == 1);
+        if (heap.counting()) {
+            // Only count the frame's references when this cell is the sole
+            // owner of the GeneratorData and the frame is not actively running
+            // on its worker thread. Otherwise native code (an in-progress
+            // resume() or interpreter teardown) holds it, so it stays rooted.
+            if (!sole_owner || frame->is_running()) return;
+            if (!heap.first_visit(frame)) return;
+            if (frame->frame_env) heap.count_environment(frame->frame_env.get(), 1);
+            if (frame->active_scope_stack) {
+                auto* stack = static_cast<ScopeStack*>(frame->active_scope_stack);
+                for (const ScopeEntry& entry : stack->scopes) {
+                    if (entry.owned_local_ref) heap.count_environment(entry.env, 1);
+                }
+            }
+            heap.mark_value(frame->send_value);
+            heap.mark_value(frame->yielded_value);
+            heap.mark_value(frame->error);
+            heap.mark_value(frame->pending_throw);
+            heap.mark_value(frame->pending_return);
+            return;
+        }
+        if (!heap.first_visit(frame)) return;
+        if (frame->frame_env) heap.mark_environment(frame->frame_env.get());
+        if (frame->active_scope_stack) {
+            auto* stack = static_cast<ScopeStack*>(frame->active_scope_stack);
+            for (const ScopeEntry& entry : stack->scopes) {
+                heap.mark_environment(entry.env);
+            }
+        }
+        heap.mark_value(frame->send_value);
+        heap.mark_value(frame->yielded_value);
+        heap.mark_value(frame->error);
+        heap.mark_value(frame->pending_throw);
+        heap.mark_value(frame->pending_return);
+    };
+    JsValue object = JsValue::make_object(cell);
 
     auto result_object = [](const JsValue& value, bool done) {
         JsValue result = JsValue::make_object();
@@ -1283,28 +1376,40 @@ JsValue JsInterpreter::make_generator(const std::shared_ptr<const FunctionNode>&
         return result;
     };
 
+    auto current_gen = []() -> std::shared_ptr<GeneratorData> {
+        const auto& cap = JsValue::current_captured();
+        if (cap.empty() || !cap[0].object_val) return nullptr;
+        return std::static_pointer_cast<GeneratorData>(cap[0].object_val->internal);
+    };
+
     // Runs the body to its next yield and reports what happened.
-    auto advance = [gen, result_object](const JsValue& sent) -> JsValue {
-        if (gen->is_done) return result_object(JsValue::make_undefined(), true);
-        if (!gen->resume(sent)) js_throw_type_error("Generator is already running");
+    auto advance = [result_object](const std::shared_ptr<GeneratorData>& frame, const JsValue& sent) -> JsValue {
+        if (!frame || frame->is_done) return result_object(JsValue::make_undefined(), true);
+        if (!resume_frame(*frame, sent)) js_throw_type_error("Generator is already running");
         JsValue error;
-        if (gen->take_error(error)) js_throw(error);        // the body threw: it surfaces in the caller of next()
-        if (gen->is_done) {
+        if (frame->take_error(error)) {
+            frame->yielded_value = JsValue::make_undefined();
+            frame->reap();
+            js_throw(error);        // the body threw: it surfaces in the caller of next()
+        }
+        if (frame->is_done) {
             // The return value is reported once; later calls see undefined.
-            JsValue returned = gen->yielded_value;
-            gen->yielded_value = JsValue::make_undefined();
-            gen->reap();
+            JsValue returned = std::move(frame->yielded_value);
+            frame->yielded_value = JsValue::make_undefined();
+            frame->reap();
             return result_object(returned, true);
         }
-        if (gen->yielded_raw) {
+        if (frame->yielded_raw) {
             // A sync generator's `yield*` passes the delegate's raw step
             // object out; the consumer reads value/done off it lazily.
-            gen->yielded_raw = false;
-            JsValue raw = std::move(gen->yielded_value);
-            gen->yielded_value = JsValue::make_undefined();
+            frame->yielded_raw = false;
+            JsValue raw = std::move(frame->yielded_value);
+            frame->yielded_value = JsValue::make_undefined();
             return raw;
         }
-        return result_object(gen->yielded_value, false);
+        JsValue yielded = std::move(frame->yielded_value);
+        frame->yielded_value = JsValue::make_undefined();
+        return result_object(yielded, false);
     };
 
     const bool is_async = node->is_async;
@@ -1340,21 +1445,33 @@ JsValue JsInterpreter::make_generator(const std::shared_ptr<const FunctionNode>&
         return Promise::make_resolved(result);
     };
 
-    js_define_method(object, "next", 1, [advance, deliver](const std::vector<JsValue>& args) {
+    // Methods keep the generator object in Extra::captured rather than
+    // capturing `shared_ptr<GeneratorData>` inside their std::function, so the
+    // collector accounts for the object <-> method cycle and `cell->internal`
+    // remains the sole owner of the frame.
+    auto define_gen_method = [&](const char* name, int length, JsValue::NativeFn fn) {
+        JsValue method = js_make_method(name, length, std::move(fn));
+        method.set_payload_captured({object});
+        object.define_property(name, std::move(method), PropertyMap::Hidden);
+    };
+
+    define_gen_method("next", 1, [current_gen, advance, deliver](const std::vector<JsValue>& args) {
         const JsValue sent = js_arg(args, 0);
-        return deliver([&] { return advance(sent); });
+        return deliver([&] { return advance(current_gen(), sent); });
     });
 
-    js_define_method(object, "return", 1, [gen, result_object, deliver, advance](const std::vector<JsValue>& args) {
+    define_gen_method("return", 1, [current_gen, result_object, deliver, advance](const std::vector<JsValue>& args) {
         const JsValue value = js_arg(args, 0);
         return deliver([&] {
-            if (gen->is_running()) js_throw_type_error("Generator is already running");
-            if (!gen->started || gen->is_done) {
+            auto frame = current_gen();
+            if (!frame) return result_object(value, true);
+            if (frame->is_running()) js_throw_type_error("Generator is already running");
+            if (!frame->started || frame->is_done) {
                 // Nothing is suspended: the return is answered without
                 // resuming the body. A yield already performed inside a
                 // `finally` while closing cannot have happened yet, so this
                 // settles immediately.
-                gen->terminate(false);
+                frame->terminate(false);
                 return result_object(value, true);
             }
             // Resume suspended at the yield with a return completion. The
@@ -1362,31 +1479,36 @@ JsValue JsInterpreter::make_generator(const std::shared_ptr<const FunctionNode>&
             // `yield*` in the way routes the completion into the delegate's
             // `return` method first. Whatever the frame completes with is
             // handed to the consumer as an iterator result.
-            gen->inject_return(value);
-            return advance(JsValue::make_undefined());
+            frame->inject_return(value);
+            return advance(frame, JsValue::make_undefined());
         });
     });
 
-    js_define_method(object, "throw", 1, [gen, advance, deliver](const std::vector<JsValue>& args) {
+    define_gen_method("throw", 1, [current_gen, advance, deliver](const std::vector<JsValue>& args) {
         const JsValue error = js_arg(args, 0);
         return deliver([&]() -> JsValue {
-            if (gen->is_running()) js_throw_type_error("Generator is already running");
-            if (!gen->started || gen->is_done) {
+            auto frame = current_gen();
+            if (!frame) js_throw(error);
+            if (frame->is_running()) js_throw_type_error("Generator is already running");
+            if (!frame->started || frame->is_done) {
                 // Nothing is suspended to receive it: the generator just ends.
-                gen->terminate(false);
+                frame->terminate(false);
                 js_throw(error);
             }
             // Raised inside the body at the suspended `yield`, where the
             // generator's own try/catch can handle it.
-            gen->inject_throw(error);
-            return advance(JsValue::make_undefined());
+            frame->inject_throw(error);
+            return advance(frame, JsValue::make_undefined());
         });
     });
 
-    JsObject* cell = object.object_val;
-    auto self = [cell](const std::vector<JsValue>&) { return JsValue::make_object(cell); };
-    js_define_method(object, is_async ? kAsyncIteratorKey : kIteratorKey, 0, self);
-    if (!is_async) js_define_method(object, "Symbol.iterator", 0, self);
+    auto self_fn = [](const std::vector<JsValue>&) {
+        const auto& cap = JsValue::current_captured();
+        if (cap.empty()) return JsValue::make_undefined();
+        return cap[0];
+    };
+    define_gen_method(is_async ? kAsyncIteratorKey : kIteratorKey, 0, self_fn);
+    if (!is_async) define_gen_method("Symbol.iterator", 0, self_fn);
     return object;
 }
 
@@ -2336,6 +2458,9 @@ void JsInterpreter::bind_pattern(const Pattern& pattern, const JsValue& value, c
                 // existing throw, so let this close report its own failure.
                 if (!cursor.next_threw()) cursor.close();
                 throw;
+            } catch (const GeneratorAbortException& abort) {
+                if (abort.run_finalizers && !cursor.next_threw()) cursor.close_quietly();
+                throw;
             } catch (...) {
                 if (!cursor.next_threw()) cursor.close_quietly();
                 throw;
@@ -2599,8 +2724,9 @@ JsInterpreter::Flow JsInterpreter::exec_do_while(const DoWhileStmt* stmt, const 
 
 JsInterpreter::Flow JsInterpreter::exec_for(const ForStmt* stmt, const EnvPtr& env, Frame& frame,
                                             const std::vector<const std::string*>& labels) {
-    EnvPtr loop_env = stmt->has_lexical_init ? std::make_shared<JsEnvironment>(env) : env;
-    EnvScope loop_scope(stmt->has_lexical_init ? loop_env : nullptr);
+    EnvPtr owned_loop_env = stmt->has_lexical_init ? std::make_shared<JsEnvironment>(env) : nullptr;
+    const EnvPtr& loop_env = owned_loop_env ? owned_loop_env : env;
+    EnvScope loop_scope(owned_loop_env);
     if (stmt->has_lexical_init && stmt->init && stmt->init->kind == NodeKind::VarDecl) {
         auto* var_decl = static_cast<const VarDeclStmt*>(stmt->init.get());
         const bool is_const = var_decl->kind == JsDeclKind::Const;
@@ -2616,11 +2742,12 @@ JsInterpreter::Flow JsInterpreter::exec_for(const ForStmt* stmt, const EnvPtr& e
     // `for (let i ...)` gives every iteration its own `i`, which is what makes
     // closures created in the body see the value from their own iteration.
     const bool per_iteration = !stmt->per_iteration_names.empty();
-    EnvPtr iter_env = per_iteration ? copy_scope(loop_env, env) : loop_env;
+    EnvPtr owned_iter_env = per_iteration ? copy_scope(loop_env, env) : nullptr;
 
     while (true) {
         {
-            EnvScope iter_scope(per_iteration ? iter_env : nullptr);
+            const EnvPtr& iter_env = owned_iter_env ? owned_iter_env : loop_env;
+            EnvScope iter_scope(owned_iter_env);
             if (stmt->test && !evaluate(stmt->test.get(), iter_env).is_truthy()) break;
             Flow flow = exec(stmt->body.get(), iter_env, frame);
             LoopAction action = loop_action(this, static_cast<int>(flow), frame.label, labels);
@@ -2628,12 +2755,12 @@ JsInterpreter::Flow JsInterpreter::exec_for(const ForStmt* stmt, const EnvPtr& e
             if (action == LoopAction::Propagate) return flow;
         }
         if (per_iteration) {
-            EnvPtr next_env = copy_scope(iter_env, env);
+            EnvPtr next_env = copy_scope(owned_iter_env, env);
             EnvScope next_scope(next_env);
             if (stmt->update) evaluate(stmt->update.get(), next_env);
-            iter_env = std::move(next_env);
+            owned_iter_env = std::move(next_env);
         } else if (stmt->update) {
-            evaluate(stmt->update.get(), iter_env);
+            evaluate(stmt->update.get(), loop_env);
         }
     }
     return Flow::Normal;
@@ -2655,16 +2782,16 @@ JsInterpreter::Flow JsInterpreter::exec_for_each(const ForEachStmt* stmt, const 
     }
     if (frame.track_completion) frame.completion = JsValue::make_undefined();
 
-    // Binds the loop variable for one iteration and returns the scope the body
-    // runs in.
+    // Binds the loop variable for one iteration and returns a newly allocated
+    // lexical scope if needed (or nullptr when the enclosing `env` is used).
     auto bind_iteration = [&](const JsValue& value) -> EnvPtr {
         if (!stmt->declares) {
             bind_pattern(*stmt->target, value, env, BindMode::Assign);
-            return env;
+            return nullptr;
         }
         if (stmt->decl_kind == JsDeclKind::Var) {
             bind_pattern(*stmt->target, value, env, BindMode::Var);
-            return env;
+            return nullptr;
         }
         auto iter_env = std::make_shared<JsEnvironment>(env);
         const bool is_const = stmt->decl_kind == JsDeclKind::Const;
@@ -2678,8 +2805,9 @@ JsInterpreter::Flow JsInterpreter::exec_for_each(const ForEachStmt* stmt, const 
     Flow result = Flow::Normal;
     // Returns true to keep iterating.
     auto run_body = [&](const JsValue& value) -> bool {
-        EnvPtr iter_env = bind_iteration(value);
-        EnvScope iter_scope(iter_env != env ? iter_env : nullptr);
+        EnvPtr owned_iter = bind_iteration(value);
+        const EnvPtr& iter_env = owned_iter ? owned_iter : env;
+        EnvScope iter_scope(owned_iter);
         Flow flow = exec(stmt->body.get(), iter_env, frame);
         LoopAction action = loop_action(this, static_cast<int>(flow), frame.label, labels);
         if (action == LoopAction::Next) return true;
@@ -2775,6 +2903,9 @@ JsInterpreter::Flow JsInterpreter::exec_try(const TryStmt* stmt, const EnvPtr& e
             } else {
                 flow = exec_list(stmt->handler->statements, env, frame);
             }
+        } catch (const GeneratorAbortException& abort) {
+            if (!abort.run_finalizers) throw;
+            pending = std::current_exception();
         } catch (...) {
             pending = std::current_exception();     // still has to pass through `finally`
         }
@@ -3605,8 +3736,8 @@ JsValue JsInterpreter::eval_yield(const YieldExpr* expr, const EnvPtr& env) {
                     sent = generator->yield_to_main(std::move(step), /*raw=*/true);
                 }
             }
-        } catch (const GeneratorAbortException&) {
-            close_inner();
+        } catch (const GeneratorAbortException& abort) {
+            if (abort.run_finalizers) close_inner();
             throw;
         }
     }

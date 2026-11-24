@@ -132,6 +132,11 @@ const std::shared_ptr<CanvasGradient>& JsValue::canvas_gradient_value() const {
     if (extra()) if (auto v = std::get_if<std::shared_ptr<CanvasGradient>>(&extra()->payload)) return *v;
     return empty;
 }
+const std::shared_ptr<CanvasPattern>& JsValue::canvas_pattern_value() const {
+    static const std::shared_ptr<CanvasPattern> empty;
+    if (extra()) if (auto v = std::get_if<std::shared_ptr<CanvasPattern>>(&extra()->payload)) return *v;
+    return empty;
+}
 const std::shared_ptr<PromiseData>& JsValue::promise_value() const {
     static const std::shared_ptr<PromiseData> empty;
     if (extra()) if (auto v = std::get_if<std::shared_ptr<PromiseData>>(&extra()->payload)) return *v;
@@ -165,6 +170,7 @@ void JsValue::set_native_function(NativeFn v) {
 }
 void JsValue::set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_canvas_gradient_value(std::shared_ptr<CanvasGradient> v) { mutable_extra().payload = std::move(v); }
+void JsValue::set_canvas_pattern_value(std::shared_ptr<CanvasPattern> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_promise_value(std::shared_ptr<PromiseData> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_generator_value(std::shared_ptr<GeneratorData> v) { mutable_extra().payload = std::move(v); }
 
@@ -1496,11 +1502,14 @@ JsValue JsValue::get_property(const std::string& name) const {
 
     if (canvas_context()) {
         if (name == "fillStyle") {
-            if (canvas_context()->fill_gradient) return JsValue::make_string("[CanvasGradient]");
+            // The object that was set, not a description of it: §4.12.5.1's
+            // getter answers what the setter took, and `ctx.fillStyle === g`
+            // has to hold for a gradient and a pattern as it does for a colour.
+            if (canvas_context()->fill_paint.type != JsType::Undefined) return canvas_context()->fill_paint;
             return JsValue::make_string(canvas_context()->fill_style.to_hex());
         }
         if (name == "strokeStyle") {
-            if (canvas_context()->stroke_gradient) return JsValue::make_string("[CanvasGradient]");
+            if (canvas_context()->stroke_paint.type != JsType::Undefined) return canvas_context()->stroke_paint;
             return JsValue::make_string(canvas_context()->stroke_style.to_hex());
         }
         if (name == "lineWidth") return JsValue::make_number(canvas_context()->line_width);
@@ -1598,17 +1607,36 @@ bool set_through_prototype(const JsValue& receiver, const std::string& name, con
 bool JsValue::set_property(const std::string& name, JsValue val) {
     if (canvas_context()) {
         if (name == "fillStyle") {
+            // A style is exactly one of the three: a colour, a gradient or a
+            // pattern. Setting any one clears the other two, so a `fillStyle`
+            // left over from the previous drawing cannot paint under this one.
             if (val.canvas_gradient_value()) {
                 canvas_context()->fill_gradient = val.canvas_gradient_value();
+                canvas_context()->fill_pattern = nullptr;
+                canvas_context()->fill_paint = val;
+            } else if (val.canvas_pattern_value()) {
+                canvas_context()->fill_pattern = val.canvas_pattern_value();
+                canvas_context()->fill_gradient = nullptr;
+                canvas_context()->fill_paint = val;
             } else {
                 canvas_context()->fill_gradient = nullptr;
+                canvas_context()->fill_pattern = nullptr;
+                canvas_context()->fill_paint = JsValue();
                 canvas_context()->fill_style = Color::parse(val.to_string());
             }
         } else if (name == "strokeStyle") {
             if (val.canvas_gradient_value()) {
                 canvas_context()->stroke_gradient = val.canvas_gradient_value();
-            } else {
+                canvas_context()->stroke_pattern = nullptr;
+                canvas_context()->stroke_paint = val;
+            } else if (val.canvas_pattern_value()) {
+                canvas_context()->stroke_pattern = val.canvas_pattern_value();
                 canvas_context()->stroke_gradient = nullptr;
+                canvas_context()->stroke_paint = val;
+            } else {
+                canvas_context()->stroke_pattern = nullptr;
+                canvas_context()->stroke_gradient = nullptr;
+                canvas_context()->stroke_paint = JsValue();
                 canvas_context()->stroke_style = Color::parse(val.to_string());
             }
         } else if (name == "lineWidth") {

@@ -46,6 +46,7 @@ enum class OpCode : uint8_t {
     OpLessEqual,
     OpNot,
     OpNegate,
+    OpTypeOf,
 
     // Control Flow
     OpJump,
@@ -91,6 +92,7 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpLessEqual:    return "OP_LESS_EQUAL";
         case OpCode::OpNot:          return "OP_NOT";
         case OpCode::OpNegate:       return "OP_NEGATE";
+        case OpCode::OpTypeOf:       return "OP_TYPE_OF";
         case OpCode::OpJump:         return "OP_JUMP";
         case OpCode::OpJumpIfFalse:  return "OP_JUMP_IF_FALSE";
         case OpCode::OpLoop:         return "OP_LOOP";

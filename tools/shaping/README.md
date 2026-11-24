@@ -351,3 +351,22 @@ If even one leaf is absent from the face, expansion is rejected and the original
 is kept. Standalone supported composites and class-zero boundaries remain intact.
 No full-NFC, other-script or browser-pixel claim: details and regression controls
 are in `docs/phases/270-supported-latin-composites.md`.
+
+## Leading Latin-resolved marks (Phase 279)
+
+`leading_marks_diagnostic.py` uses the same CLI as `compare.py`. It checks
+leading acute/dot-below and three-class spans, equal classes, a following Latin
+letter, and marks after a space, ZWNJ and explicit dotted circle. With the
+recorded DejaVu Sans and HarfBuzz 12.1.0, exact matches improve **2/8 → 8/8**;
+placement matches improve 7/8 → 8/8. DejaVu Serif also matches all eight after
+the change. HarfBuzz inserts no dotted circle for these Latin probes.
+
+```sh
+build/shaping-venv/bin/python tools/shaping/leading_marks_diagnostic.py \
+  --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf --output build/leading.json
+```
+
+Only spans resolved to Latin are affected. Class-zero and script boundaries
+still stop ordering, and equal classes stay stable. Other scripts, alternate
+partial decomposition and source clusters remain open. Details are in
+`docs/phases/279-leading-marks.md`.

@@ -137,8 +137,7 @@
       "domain": "webgl",
       "spec": "Khronos WebGL 1.0 §5 and WebGL 2.0 §3 (global rendering context and resource constructors)",
       "script": "return [typeof WebGLRenderingContext, typeof WebGL2RenderingContext, typeof WebGLShader, typeof WebGLProgram, typeof WebGLBuffer, typeof WebGLTexture, typeof WebGLFramebuffer];",
-      "expected": ["function", "function", "function", "function", "function", "function", "function"],
-      "known_failure": "WebGL 1/2 interface constructors are not implemented"
+      "expected": ["function", "function", "function", "function", "function", "function", "function"]
     },
     {
       "name": "canvas_get_context_unknown_returns_null",
@@ -159,40 +158,35 @@
       "domain": "webgl",
       "spec": "Khronos WebGL 1.0 §2.2 and WHATWG HTML §4.12.5.1 (getContext('webgl') returns a singleton WebGLRenderingContext and locks out 2d)",
       "script": "var c = document.createElement('canvas'); c.width = 40; c.height = 40; var gl = c.getContext('webgl'); if (!gl) return null; return [gl instanceof WebGLRenderingContext, gl.canvas === c, gl.drawingBufferWidth, gl.drawingBufferHeight, c.getContext('webgl') === gl, c.getContext('2d') === null];",
-      "expected": [true, true, 40, 40, true, true],
-      "known_failure": "HTMLCanvasElement.getContext('webgl') returns null (no WebGL 1 implementation)"
+      "expected": [true, true, 40, 40, true, true]
     },
     {
       "name": "canvas_get_context_webgl2_returns_context",
       "domain": "webgl",
       "spec": "Khronos WebGL 2.0 §2 (getContext('webgl2') returns a WebGL2RenderingContext)",
       "script": "var c = document.createElement('canvas'); c.width = 40; c.height = 40; var gl = c.getContext('webgl2'); if (!gl) return null; return [gl instanceof WebGL2RenderingContext, gl.drawingBufferWidth, gl.drawingBufferHeight];",
-      "expected": [true, 40, 40],
-      "known_failure": "HTMLCanvasElement.getContext('webgl2') returns null (no WebGL 2 implementation)"
+      "expected": [true, 40, 40]
     },
     {
       "name": "offscreen_canvas_get_context_webgl",
       "domain": "webgl",
       "spec": "Khronos WebGL 1.0 §2 and WHATWG HTML §4.12.5.9 (OffscreenCanvas.getContext('webgl'))",
       "script": "var oc = new OffscreenCanvas(32, 32); var gl = oc.getContext('webgl'); if (!gl) return null; return [gl instanceof WebGLRenderingContext, gl.drawingBufferWidth, gl.drawingBufferHeight];",
-      "expected": [true, 32, 32],
-      "known_failure": "OffscreenCanvas.getContext('webgl') returns null (only 2d is supported)"
+      "expected": [true, 32, 32]
     },
     {
       "name": "webgl_clear_color_and_read_pixels",
       "domain": "webgl",
       "spec": "Khronos WebGL 1.0 §§5.14.3 and 5.14.12 (clearColor + clear + readPixels green RGBA and NO_ERROR)",
       "script": "var c = document.createElement('canvas'); c.width = 16; c.height = 16; var gl = c.getContext('webgl'); if (!gl) return null; gl.clearColor(0, 1, 0, 1); gl.clear(gl.COLOR_BUFFER_BIT); var px = new Uint8Array(4); gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); return [px[0], px[1], px[2], px[3], gl.getError() === gl.NO_ERROR];",
-      "expected": [0, 255, 0, 255, true],
-      "known_failure": "WebGL rendering pipeline (clearColor/clear/readPixels) is not implemented"
+      "expected": [0, 255, 0, 255, true]
     },
     {
       "name": "webgl_shader_program_and_triangle_draw",
       "domain": "webgl",
       "spec": "Khronos WebGL 1.0 §§5.14.9 and 5.14.11 (GLSL ES 1.00 shader compile, program link, VBO quad draw, readPixels)",
       "script": "var c = document.createElement('canvas'); c.width = 16; c.height = 16; var gl = c.getContext('webgl'); if (!gl) return null; var vs = gl.createShader(gl.VERTEX_SHADER); gl.shaderSource(vs, 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }'); gl.compileShader(vs); var fs = gl.createShader(gl.FRAGMENT_SHADER); gl.shaderSource(fs, 'precision mediump float; void main(){ gl_FragColor = vec4(1.0, 0.0, 0.0, 1.0); }'); gl.compileShader(fs); var prog = gl.createProgram(); gl.attachShader(prog, vs); gl.attachShader(prog, fs); gl.linkProgram(prog); gl.useProgram(prog); var buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf); gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, -1,1, 1,-1, 1,1]), gl.STATIC_DRAW); var loc = gl.getAttribLocation(prog, 'p'); gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0); gl.viewport(0, 0, 16, 16); gl.drawArrays(gl.TRIANGLES, 0, 6); var px = new Uint8Array(4); gl.readPixels(8, 8, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px); return [gl.getProgramParameter(prog, gl.LINK_STATUS), px[0], px[1], px[2], px[3], gl.getError() === gl.NO_ERROR];",
-      "expected": [true, 255, 0, 0, 255, true],
-      "known_failure": "WebGL shader compiler, program linker, and triangle rasterizer are not implemented"
+      "expected": [true, 255, 0, 0, 255, true]
     }
   ]
 }

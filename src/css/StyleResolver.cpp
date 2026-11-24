@@ -521,6 +521,29 @@ std::size_t ComputedStyle::hash() const {
             hash_combine(h, hash_float(f.amount));
         }
     }
+    if (!content_raw.empty()) hash_combine(h, std::hash<std::string>{}(content_raw));
+    if (!content.empty()) hash_combine(h, std::hash<std::string>{}(content));
+    if (!counter_reset.empty()) {
+        hash_combine(h, counter_reset.size());
+        for (const auto& op : counter_reset) {
+            hash_combine(h, std::hash<std::string>{}(op.name));
+            hash_combine(h, static_cast<std::size_t>(op.value));
+        }
+    }
+    if (!counter_increment.empty()) {
+        hash_combine(h, counter_increment.size());
+        for (const auto& op : counter_increment) {
+            hash_combine(h, std::hash<std::string>{}(op.name));
+            hash_combine(h, static_cast<std::size_t>(op.value));
+        }
+    }
+    if (!counter_set.empty()) {
+        hash_combine(h, counter_set.size());
+        for (const auto& op : counter_set) {
+            hash_combine(h, std::hash<std::string>{}(op.name));
+            hash_combine(h, static_cast<std::size_t>(op.value));
+        }
+    }
     return h;
 }
 
@@ -2310,11 +2333,138 @@ static std::string eval_attr_function(const std::string& inner, const Element* e
     return fb;
 }
 
+static std::vector<std::string> split_counter_args(const std::string& inner) {
+    std::vector<std::string> out;
+    std::string cur;
+    char quote = '\0';
+    int depth = 0;
+    for (size_t idx = 0; idx < inner.size(); ++idx) {
+        char c = inner[idx];
+        if (quote) {
+            cur.push_back(c);
+            if (c == '\\' && idx + 1 < inner.size()) { cur.push_back(inner[++idx]); continue; }
+            if (c == quote) quote = '\0';
+            continue;
+        }
+        if (c == '"' || c == '\'') { quote = c; cur.push_back(c); continue; }
+        if (c == '(') { depth++; cur.push_back(c); continue; }
+        if (c == ')') { depth--; cur.push_back(c); continue; }
+        if (c == ',' && depth == 0) { out.push_back(css_trim_copy(cur)); cur.clear(); continue; }
+        cur.push_back(c);
+    }
+    if (!cur.empty() || !out.empty()) out.push_back(css_trim_copy(cur));
+    // Remove empty trailing from empty inner
+    if (out.size() == 1 && out[0].empty()) out.clear();
+    return out;
+}
+
+static std::string decode_counter_string_arg(const std::string& s) {
+    std::string t = css_trim_copy(s);
+    if (t.empty()) return std::string();
+    if (t[0] == '"' || t[0] == '\'') {
+        size_t pos = 0;
+        std::string decoded;
+        if (css_decode_string_at(t, pos, decoded)) return decoded;
+        return t;
+    }
+    return t;
+}
+
+static std::string format_counter_value(int v, const std::string& style) {
+    std::string sl = css_to_lower(css_trim_copy(style));
+    if (sl.empty() || sl == "decimal" || sl == "decimal-leading-zero") {
+        return std::to_string(v);
+    }
+    if (sl == "lower-roman" || sl == "upper-roman") {
+        if (v <= 0 || v > 3999) return std::to_string(v);
+        static const std::pair<int, const char*> romans[] = {
+            {1000, "M"}, {900, "CM"}, {500, "D"}, {400, "CD"},
+            {100, "C"}, {90, "XC"}, {50, "L"}, {40, "XL"},
+            {10, "X"}, {9, "IX"}, {5, "V"}, {4, "IV"}, {1, "I"}
+        };
+        std::string r;
+        int n = v;
+        for (auto [val, sym] : romans) {
+            while (n >= val) { r += sym; n -= val; }
+        }
+        if (sl == "lower-roman") for (char& c : r) c = static_cast<char>(std::tolower((unsigned char)c));
+        return r;
+    }
+    if (sl == "lower-alpha" || sl == "lower-latin" || sl == "upper-alpha" || sl == "upper-latin") {
+        if (v <= 0) return std::to_string(v);
+        std::string r;
+        int n = v;
+        while (n > 0) { n--; r.push_back(char('A' + (n % 26))); n /= 26; }
+        std::reverse(r.begin(), r.end());
+        if (sl.rfind("lower", 0) == 0) for (char& c : r) c = static_cast<char>(std::tolower((unsigned char)c));
+        return r;
+    }
+    if (sl == "none") return std::string();
+    // disc, circle, etc not numeric - fallback decimal
+    return std::to_string(v);
+}
+
+static std::string eval_counter_function(const std::string& inner, const std::unordered_map<std::string, std::vector<int>>* counters) {
+    if (!counters) return std::string();
+    auto args = split_counter_args(inner);
+    if (args.empty()) return std::string();
+    std::string name = css_trim_copy(args[0]);
+    // name is ident, take first token
+    {
+        size_t p=0; while(p<name.size() && std::isspace((unsigned char)name[p])) p++;
+        size_t s=p; while(s<name.size() && css_ident_char(name[s])) s++;
+        name = name.substr(p, s-p);
+    }
+    if (name.empty()) return std::string();
+    std::string lname = css_to_lower(name);
+    std::string style = args.size() >= 2 ? args[1] : std::string();
+    // counter() second arg is style, not separator
+    int val = 0;
+    auto it = counters->find(lname);
+    if (it == counters->end()) it = counters->find(name);
+    if (it != counters->end() && !it->second.empty()) val = it->second.back();
+    // If style is quoted string, it's not a style - but counter() shouldn't have quoted separator
+    return format_counter_value(val, style);
+}
+
+static std::string eval_counters_function(const std::string& inner, const std::unordered_map<std::string, std::vector<int>>* counters) {
+    if (!counters) return std::string();
+    auto args = split_counter_args(inner);
+    if (args.empty()) return std::string();
+    std::string name = css_trim_copy(args[0]);
+    {
+        size_t p=0; while(p<name.size() && std::isspace((unsigned char)name[p])) p++;
+        size_t s=p; while(s<name.size() && css_ident_char(name[s])) s++;
+        name = name.substr(p, s-p);
+    }
+    if (name.empty()) return std::string();
+    std::string lname = css_to_lower(name);
+    std::string sep = args.size() >= 2 ? decode_counter_string_arg(args[1]) : std::string();
+    std::string style = args.size() >= 3 ? args[2] : std::string();
+    auto it = counters->find(lname);
+    if (it == counters->end()) it = counters->find(name);
+    if (it == counters->end() || it->second.empty()) return std::string();
+    std::string out;
+    for (size_t i=0;i<it->second.size();++i) {
+        if (i) out += sep;
+        out += format_counter_value(it->second[i], style);
+    }
+    return out;
+}
+
 } // namespace
+
 
 std::string StyleResolver::evaluate_content(const std::string& raw_in,
                                             const Element* element,
                                             const std::unordered_map<std::string, std::string>& vars) const {
+    return evaluate_content(raw_in, element, vars, nullptr);
+}
+
+std::string StyleResolver::evaluate_content(const std::string& raw_in,
+                                            const Element* element,
+                                            const std::unordered_map<std::string, std::string>& vars,
+                                            const std::unordered_map<std::string, std::vector<int>>* counters) const {
     std::string raw = raw_in;
     if (raw.find("var(") != std::string::npos && !vars.empty()) {
         raw = resolve_var_functions(raw, vars);
@@ -2369,7 +2519,11 @@ std::string StyleResolver::evaluate_content(const std::string& raw_in,
                 std::string inner = (inner_end > inner_start) ? raw.substr(inner_start, inner_end - inner_start) : std::string();
                 if (lower_ident == "attr") {
                     result += eval_attr_function(inner, element);
-                } else if (lower_ident == "url" || lower_ident == "counter" || lower_ident == "counters") {
+                } else if (lower_ident == "counter") {
+                    result += eval_counter_function(inner, counters);
+                } else if (lower_ident == "counters") {
+                    result += eval_counters_function(inner, counters);
+                } else if (lower_ident == "url") {
                 } else if (lower_ident == "var") {
                 } else {
                 }
@@ -2387,6 +2541,58 @@ std::string StyleResolver::evaluate_content(const std::string& raw_in,
     }
     return result;
 }
+
+std::vector<CounterOp> StyleResolver::parse_counter_ops(const std::string& raw_in, int default_value) {
+    std::string raw = css_trim_copy(raw_in);
+    std::string lower = css_to_lower(raw);
+    if (lower == "none" || lower.empty()) return {};
+    std::vector<CounterOp> out;
+    std::string cur;
+    char quote = '\0';
+    std::vector<std::string> tokens;
+    std::string tok;
+    for (size_t idx=0; idx<raw.size(); ++idx) {
+        char c = raw[idx];
+        if (quote) {
+            tok.push_back(c);
+            if (c == '\\' && idx+1 < raw.size()) { tok.push_back(raw[++idx]); continue; }
+            if (c == quote) { quote='\0'; tokens.push_back(tok); tok.clear(); continue; }
+            continue;
+        }
+        if (c=='"' || c=='\'') { if (!tok.empty()) { tokens.push_back(tok); tok.clear(); } quote=c; tok.push_back(c); continue; }
+        if (std::isspace((unsigned char)c)) { if (!tok.empty()) { tokens.push_back(tok); tok.clear(); } continue; }
+        tok.push_back(c);
+    }
+    if (!tok.empty()) tokens.push_back(tok);
+    for (size_t i=0; i<tokens.size(); ) {
+        std::string name = tokens[i];
+        // Skip if name is quoted? shouldn't happen
+        if (name.empty()) { ++i; continue; }
+        // Normalize name to lower? Keep as given but also allow case-insensitive lookup later.
+        int val = 0;
+        bool has_val = false;
+        if (i+1 < tokens.size()) {
+            const std::string& nxt = tokens[i+1];
+            // Check if nxt is integer
+            bool is_int = true;
+            size_t p=0;
+            if (nxt[p]=='-'||nxt[p]=='+') p++;
+            if (p>=nxt.size()) is_int=false;
+            else for (;p<nxt.size();++p) if (!std::isdigit((unsigned char)nxt[p])) { is_int=false; break; }
+            if (is_int) { val = std::stoi(nxt); has_val=true; }
+        }
+        out.push_back({name, has_val ? val : default_value});
+        i += has_val ? 2 : 1;
+        // Store whether value was explicit via special? Use value field, and caller knows default.
+        // For now we store 0 if not explicit, but increment should default 1.
+        // To distinguish, we can store sentinel: if not has_val, value remains 0 but we need to know.
+        // We'll handle default in apply_longhand by checking if token was number.
+        // Simpler: if not has_val, keep value=0 and let caller replace with default.
+        (void)has_val;
+    }
+    return out;
+}
+
 
 void StyleResolver::apply_declaration(ComputedStyle& style, const std::string& prop, const std::string& raw_val) const {
     if (prop.starts_with("--")) {
@@ -2469,8 +2675,15 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         // `counter()` items. A declaration that was only ignored items leaves
         // `content` empty and generates nothing, matching Phase 215 for
         // `normal` / `none` (Phase 364).
+        style.content_raw = val;
         std::string text = evaluate_content(val, nullptr, style.custom_properties);
         style.content = std::move(text);
+    } else if (prop == "counter-reset") {
+        style.counter_reset = parse_counter_ops(val, 0);
+    } else if (prop == "counter-increment") {
+        style.counter_increment = parse_counter_ops(val, 1);
+    } else if (prop == "counter-set") {
+        style.counter_set = parse_counter_ops(val, 0);
     } else if (prop == "float") {
         if (val == "left") style.float_type = FloatType::Left;
         else if (val == "right") style.float_type = FloatType::Right;
@@ -3777,6 +3990,7 @@ ComputedStyle StyleResolver::resolve_pseudo_element(const std::shared_ptr<Elemen
     for (const auto& m : matched) {
         if (m.decl->property == "content") {
             // Pseudo elements need the originating element for `attr()` (Phase 364).
+            style.content_raw = m.decl->value;
             style.content = evaluate_content(m.decl->value, element.get(), style.custom_properties);
         } else {
             apply_declaration(style, m.decl->property, m.decl->value);

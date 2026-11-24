@@ -16,6 +16,51 @@ namespace litebird {
 
 namespace {
 
+struct CounterContext {
+    std::unordered_map<std::string, std::vector<int>> stacks;
+    // Apply reset: push new level for each name, return names pushed for later pop
+    std::vector<std::string> apply_reset(const std::vector<CounterOp>& ops) {
+        std::vector<std::string> pushed;
+        for (const auto& op : ops) {
+            std::string lname = op.name;
+            for (char& c : lname) c = static_cast<char>(std::tolower((unsigned char)c));
+            stacks[lname].push_back(op.value);
+            pushed.push_back(std::move(lname));
+        }
+        return pushed;
+    }
+    void apply_set(const std::vector<CounterOp>& ops) {
+        for (const auto& op : ops) {
+            std::string lname = op.name;
+            for (char& c : lname) c = static_cast<char>(std::tolower((unsigned char)c));
+            auto& st = stacks[lname];
+            if (st.empty()) st.push_back(op.value);
+            else st.back() = op.value;
+        }
+    }
+    void apply_increment(const std::vector<CounterOp>& ops) {
+        for (const auto& op : ops) {
+            std::string lname = op.name;
+            for (char& c : lname) c = static_cast<char>(std::tolower((unsigned char)c));
+            auto& st = stacks[lname];
+            if (st.empty()) st.push_back(op.value);
+            else st.back() += op.value;
+        }
+    }
+    void pop_resets(const std::vector<std::string>& pushed) {
+        for (const auto& lname : pushed) {
+            auto it = stacks.find(lname);
+            if (it != stacks.end() && !it->second.empty()) it->second.pop_back();
+        }
+    }
+};
+
+thread_local CounterContext* t_counter_ctx = nullptr;
+
+namespace CounterUtil {
+    // Helper to normalize name for lookup
+}
+
 bool is_all_whitespace(std::string_view s) {
     for (char c : s) {
         if (!std::isspace(static_cast<unsigned char>(c))) return false;
@@ -775,6 +820,15 @@ void LayoutTree::build_boxes(
         SharedComputedStyle style = resolve_element_style(element, resolver, parent_style, pool);
         if (!style) return;
 
+        // CSS Counter handling (Phase 379): each element may reset/set/increment
+        // counters. Resets push a new scope that is popped after the subtree.
+        std::vector<std::string> pushed_resets;
+        if (t_counter_ctx) {
+            pushed_resets = t_counter_ctx->apply_reset(style->counter_reset);
+            t_counter_ctx->apply_set(style->counter_set);
+            t_counter_ctx->apply_increment(style->counter_increment);
+        }
+
         // CSS Display 3 §2.7 `display: contents`: the element generates no box
         // of its own and its children take part in its parent's formatting
         // context, as if the element had been replaced by them. `None` would
@@ -792,6 +846,7 @@ void LayoutTree::build_boxes(
             for (const auto& ch : contents_children) {
                 build_boxes(ch, resolver, parent_style, pool, depth + 1, out, split_inline_blocks);
             }
+            if (t_counter_ctx) t_counter_ctx->pop_resets(pushed_resets);
             return;
         }
 
@@ -885,10 +940,20 @@ void LayoutTree::build_boxes(
             auto generated_run = [&](int which) -> std::shared_ptr<LayoutBox> {
                 const ComputedStyle pseudo =
                     resolver.resolve_pseudo_element(element, which, *style);
-                if (pseudo.content.empty()) return nullptr;
+                if (pseudo.content_raw.empty() && pseudo.content.empty()) return nullptr;
                 if (pseudo.is_none() || pseudo.is_contents()) return nullptr;
+                std::string final_content;
+                if (!pseudo.content_raw.empty()) {
+                    if (t_counter_ctx)
+                        final_content = resolver.evaluate_content(pseudo.content_raw, element.get(), pseudo.custom_properties, &t_counter_ctx->stacks);
+                    else
+                        final_content = resolver.evaluate_content(pseudo.content_raw, element.get(), pseudo.custom_properties);
+                } else {
+                    final_content = pseudo.content;
+                }
+                if (final_content.empty()) return nullptr;
                 SharedComputedStyle run_style = pool.intern(pseudo);
-                return LayoutBox::create_text(nullptr, collapse_whitespace(pseudo.content),
+                return LayoutBox::create_text(nullptr, collapse_whitespace(final_content),
                                               std::move(run_style));
             };
             if (auto before = generated_run(1)) box->append_child(std::move(before));
@@ -930,6 +995,7 @@ void LayoutTree::build_boxes(
             }
             if (auto after = generated_run(2)) box->append_child(std::move(after));
         }
+        if (t_counter_ctx) t_counter_ctx->pop_resets(pushed_resets);
 
         normalize_table_children(box, pool);
         normalize_block_children(box, box->style, pool);
@@ -970,7 +1036,11 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
 ) {
     std::vector<std::shared_ptr<LayoutBox>> boxes;
     std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>> split_inline_blocks;
+    CounterContext counter_ctx;
+    CounterContext* prev = t_counter_ctx;
+    if (!prev) t_counter_ctx = &counter_ctx;
     build_boxes(node, resolver, parent_style, pool, depth, boxes, split_inline_blocks);
+    if (!prev) t_counter_ctx = nullptr;
     if (boxes.empty()) return nullptr;
     if (boxes.size() == 1) return boxes.front();
 
@@ -1019,11 +1089,15 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
     ComputedStylePool pool;
     std::vector<std::shared_ptr<LayoutBox>> root_boxes;
     std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>> split_inline_blocks;
+    // CSS counters (Phase 379): fresh scope per layout.
+    CounterContext counter_ctx;
+    t_counter_ctx = &counter_ctx;
     // The tree normally starts at body, but a display:none HTML ancestor hides
     // that whole tree, including both candidates for canvas propagation.
     if (!html_style || !html_style->is_none()) {
         build_boxes(root_node, resolver, nullptr, pool, 0, root_boxes, split_inline_blocks);
     }
+    t_counter_ctx = nullptr;
 
     std::shared_ptr<LayoutBox> root_box;
     if (root_boxes.size() == 1 && is_block_level_box(*root_boxes.front())) {

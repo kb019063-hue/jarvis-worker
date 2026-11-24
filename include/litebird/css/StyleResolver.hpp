@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -37,6 +38,8 @@ enum class Display : uint8_t {
     TableRow,
     TableCell,
     TableRowGroup,
+    TableColumn,
+    TableColumnGroup,
     TableCaption,
     /// CSS Display 3 §2.7: the element generates no box of its own and its
     /// children take part in its parent's formatting context, as if the
@@ -214,6 +217,28 @@ enum class VerticalAlign : uint8_t {
     Super
 };
 
+enum class Visibility : uint8_t {
+    Visible,
+    Hidden,
+    Collapse
+};
+
+struct GradientStop {
+    Color color{Color::transparent()};
+    float position{-1.0f}; // Normalized 0..1 stop position, or -1 if unspecified
+
+    bool operator==(const GradientStop& other) const = default;
+};
+
+struct LinearGradient {
+    /// CSS gradient angle in degrees: 0deg = to top, 90deg = to right,
+    /// 180deg = to bottom (the CSS Images 3 default), 270deg = to left.
+    float angle_deg{180.0f};
+    std::vector<GradientStop> stops;
+
+    bool operator==(const LinearGradient& other) const = default;
+};
+
 enum class TextDecoration : uint8_t {
     None = 0,
     Underline = 1 << 0,
@@ -259,6 +284,8 @@ struct ComputedStyle {
     std::string content;
     Color color{Color::black()};
     Color background_color{Color::transparent()};
+    bool has_background_image{false};
+    std::optional<LinearGradient> background_gradient;
     bool dark_color_scheme{false};
     float width{-1.0f};  // -1 indicates auto
     float height{-1.0f}; // -1 indicates auto
@@ -333,6 +360,17 @@ struct ComputedStyle {
     TextDecoration text_decoration{TextDecoration::None};
     WhiteSpace white_space{WhiteSpace::Normal};
     VerticalAlign vertical_align{VerticalAlign::Baseline};
+    Visibility visibility{Visibility::Visible};
+
+    bool is_visible() const { return visibility == Visibility::Visible; }
+    bool preserves_newlines() const {
+        return white_space == WhiteSpace::Pre || white_space == WhiteSpace::PreWrap ||
+               white_space == WhiteSpace::PreLine || white_space == WhiteSpace::BreakSpaces;
+    }
+    bool preserves_spaces() const {
+        return white_space == WhiteSpace::Pre || white_space == WhiteSpace::PreWrap ||
+               white_space == WhiteSpace::BreakSpaces;
+    }
 
     bool has_underline() const {
         return (static_cast<uint8_t>(text_decoration) & static_cast<uint8_t>(TextDecoration::Underline)) != 0;
@@ -496,8 +534,11 @@ struct ComputedStyle {
     bool is_table_cell() const { return display == Display::TableCell; }
     bool is_table_caption() const { return display == Display::TableCaption; }
     bool is_table_row_group() const { return display == Display::TableRowGroup; }
+    bool is_table_column() const { return display == Display::TableColumn; }
+    bool is_table_column_group() const { return display == Display::TableColumnGroup; }
     bool is_table_internal() const {
-        return is_table_row() || is_table_cell() || is_table_row_group();
+        return is_table_row() || is_table_cell() || is_table_row_group() ||
+               is_table_column() || is_table_column_group();
     }
     /// True for boxes that participate as block-level boxes in normal flow.
     bool is_block_level() const {

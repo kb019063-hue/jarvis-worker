@@ -134,6 +134,182 @@ bool parse_text_decoration(std::string_view val_lower, TextDecoration& out) {
     return true;
 }
 
+bool parse_visibility(std::string_view val_lower, Visibility& out) {
+    if (ascii_iequals(val_lower, "visible")) { out = Visibility::Visible; return true; }
+    if (ascii_iequals(val_lower, "hidden")) { out = Visibility::Hidden; return true; }
+    if (ascii_iequals(val_lower, "collapse")) { out = Visibility::Collapse; return true; }
+    return false;
+}
+
+bool parse_gradient_angle_or_side(std::string_view part, float& out_deg) {
+    std::string_view s = css_trim_view(part);
+    if (s.empty()) return false;
+    std::string lower(s);
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    // Direction keywords: `to <side-or-corner>` (CSS Images 3 §3.4.1).
+    if (lower.rfind("to ", 0) == 0) {
+        std::vector<std::string> words;
+        std::size_t i = 3;
+        while (i < lower.size()) {
+            while (i < lower.size() && std::isspace(static_cast<unsigned char>(lower[i]))) ++i;
+            std::size_t start = i;
+            while (i < lower.size() && !std::isspace(static_cast<unsigned char>(lower[i]))) ++i;
+            if (i > start) words.push_back(lower.substr(start, i - start));
+        }
+        if (words.size() == 1) {
+            if (words[0] == "top") { out_deg = 0.0f; return true; }
+            if (words[0] == "right") { out_deg = 90.0f; return true; }
+            if (words[0] == "bottom") { out_deg = 180.0f; return true; }
+            if (words[0] == "left") { out_deg = 270.0f; return true; }
+            return false;
+        }
+        if (words.size() == 2) {
+            bool top = (words[0] == "top" || words[1] == "top");
+            bool bottom = (words[0] == "bottom" || words[1] == "bottom");
+            bool left = (words[0] == "left" || words[1] == "left");
+            bool right = (words[0] == "right" || words[1] == "right");
+            if ((top || bottom) && (left || right)) {
+                if (top && right) out_deg = 45.0f;
+                else if (bottom && right) out_deg = 135.0f;
+                else if (bottom && left) out_deg = 225.0f;
+                else out_deg = 315.0f;
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Angle units: deg, rad, grad, turn (and bare 0).
+    auto ends_with = [](const std::string& str, const char* suffix) {
+        const std::size_t slen = std::strlen(suffix);
+        return str.size() > slen && str.compare(str.size() - slen, slen, suffix) == 0;
+    };
+    float scale = 0.0f;
+    std::string num_str;
+    if (ends_with(lower, "deg")) { scale = 1.0f; num_str = lower.substr(0, lower.size() - 3); }
+    else if (ends_with(lower, "grad")) { scale = 0.9f; num_str = lower.substr(0, lower.size() - 4); }
+    else if (ends_with(lower, "rad")) { scale = 180.0f / 3.14159265358979323846f; num_str = lower.substr(0, lower.size() - 3); }
+    else if (ends_with(lower, "turn")) { scale = 360.0f; num_str = lower.substr(0, lower.size() - 4); }
+    else if (lower == "0") { out_deg = 0.0f; return true; }
+    else return false;
+
+    try {
+        std::size_t pos = 0;
+        float v = std::stof(num_str, &pos);
+        if (pos != num_str.size() || !std::isfinite(v)) return false;
+        out_deg = v * scale;
+        return true;
+    } catch (...) {
+        return false;
+    }
+}
+
+bool parse_linear_gradient(std::string_view raw, Color current_color, bool dark_scheme, LinearGradient& out) {
+    std::string_view s = css_trim_view(raw);
+    constexpr std::string_view prefix = "linear-gradient(";
+    if (s.size() <= prefix.size() + 1 || s.back() != ')') return false;
+    for (std::size_t i = 0; i < prefix.size(); ++i) {
+        if (static_cast<char>(std::tolower(static_cast<unsigned char>(s[i]))) != prefix[i]) return false;
+    }
+    std::string_view inner = s.substr(prefix.size(), s.size() - prefix.size() - 1);
+
+    // Split top-level comma-separated arguments (respecting parentheses in rgb()/rgba()).
+    std::vector<std::string_view> parts;
+    int depth = 0;
+    std::size_t start = 0;
+    for (std::size_t i = 0; i < inner.size(); ++i) {
+        char c = inner[i];
+        if (c == '(') ++depth;
+        else if (c == ')') --depth;
+        else if (c == ',' && depth == 0) {
+            parts.push_back(css_trim_view(inner.substr(start, i - start)));
+            start = i + 1;
+        }
+    }
+    if (depth != 0) return false;
+    parts.push_back(css_trim_view(inner.substr(start)));
+    if (parts.size() < 2) return false;
+
+    LinearGradient grad;
+    std::size_t stop_idx = 0;
+    float angle = 180.0f;
+    if (parse_gradient_angle_or_side(parts[0], angle)) {
+        grad.angle_deg = angle;
+        stop_idx = 1;
+    }
+    if (parts.size() - stop_idx < 2) return false;
+
+    for (std::size_t i = stop_idx; i < parts.size(); ++i) {
+        std::string_view p = parts[i];
+        if (p.empty()) return false;
+        // Split stop into color token (may contain parenthesized args) and optional percentage.
+        std::vector<std::string_view> toks;
+        int d = 0;
+        std::size_t ts = 0;
+        bool in_tok = false;
+        for (std::size_t k = 0; k < p.size(); ++k) {
+            char c = p[k];
+            if (c == '(') { ++d; if (!in_tok) { ts = k; in_tok = true; } }
+            else if (c == ')') { --d; }
+            else if (std::isspace(static_cast<unsigned char>(c)) && d == 0) {
+                if (in_tok) { toks.push_back(p.substr(ts, k - ts)); in_tok = false; }
+            } else if (!in_tok) {
+                ts = k;
+                in_tok = true;
+            }
+        }
+        if (in_tok) toks.push_back(p.substr(ts));
+        if (toks.empty() || toks.size() > 2) return false;
+
+        Color c;
+        if (!Color::try_parse(std::string(toks[0]), c, current_color, dark_scheme)) return false;
+        GradientStop stop;
+        stop.color = c;
+        if (toks.size() == 2) {
+            std::string_view pos_tok = toks[1];
+            if (pos_tok.empty() || pos_tok.back() != '%') return false;
+            try {
+                std::string num(pos_tok.substr(0, pos_tok.size() - 1));
+                std::size_t consumed = 0;
+                float pct = std::stof(num, &consumed);
+                if (consumed != num.size() || !std::isfinite(pct)) return false;
+                stop.position = pct / 100.0f;
+            } catch (...) {
+                return false;
+            }
+        }
+        grad.stops.push_back(stop);
+    }
+
+    // CSS Images 3 §3.4.3 color stop fixup.
+    if (grad.stops.front().position < 0.0f) grad.stops.front().position = 0.0f;
+    if (grad.stops.back().position < 0.0f) grad.stops.back().position = 1.0f;
+    float max_so_far = grad.stops.front().position;
+    for (std::size_t i = 1; i < grad.stops.size(); ++i) {
+        if (grad.stops[i].position >= 0.0f) {
+            if (grad.stops[i].position < max_so_far) grad.stops[i].position = max_so_far;
+            max_so_far = grad.stops[i].position;
+        }
+    }
+    std::size_t i = 0;
+    while (i < grad.stops.size()) {
+        if (grad.stops[i].position >= 0.0f) { ++i; continue; }
+        std::size_t start_missing = i;
+        while (i < grad.stops.size() && grad.stops[i].position < 0.0f) ++i;
+        const float p0 = grad.stops[start_missing - 1].position;
+        const float p1 = grad.stops[i].position;
+        const std::size_t count = i - start_missing + 1;
+        for (std::size_t k = 0; k < i - start_missing; ++k) {
+            grad.stops[start_missing + k].position =
+                p0 + (p1 - p0) * (static_cast<float>(k + 1) / static_cast<float>(count));
+        }
+    }
+
+    out = std::move(grad);
+    return true;
+}
+
 bool parse_timing_function(std::string_view val, TimingFunction& out) {
     std::string_view trimmed = css_trim_view(val);
     if (ascii_iequals(trimmed, "ease")) { out = TimingFunction::Ease; return true; }
@@ -206,8 +382,23 @@ std::size_t ComputedStyle::hash() const {
         (static_cast<uint32_t>(box_sizing) << 20) |
         (static_cast<uint32_t>(containment) << 21);
     hash_combine(h, flags);
-    hash_combine(h, (static_cast<std::size_t>(white_space) << 4) |
-                    static_cast<std::size_t>(vertical_align));
+    hash_combine(h, (static_cast<std::size_t>(white_space) << 8) |
+                    (static_cast<std::size_t>(vertical_align) << 4) |
+                    static_cast<std::size_t>(visibility));
+    if (has_background_image) {
+        hash_combine(h, 0x9e3779b9u);
+        if (background_gradient) {
+            hash_combine(h, hash_float(background_gradient->angle_deg));
+            hash_combine(h, background_gradient->stops.size());
+            for (const auto& stop : background_gradient->stops) {
+                hash_combine(h, (static_cast<std::size_t>(stop.color.r) << 24) |
+                                (static_cast<std::size_t>(stop.color.g) << 16) |
+                                (static_cast<std::size_t>(stop.color.b) << 8) |
+                                static_cast<std::size_t>(stop.color.a));
+                hash_combine(h, hash_float(stop.position));
+            }
+        }
+    }
     hash_combine(h, hash_float(border_spacing_x));
     hash_combine(h, hash_float(border_spacing_y));
     if (has_top || has_right || has_bottom || has_left || has_z_index) {
@@ -398,6 +589,7 @@ SharedComputedStyle ComputedStylePool::inherited_only(const SharedComputedStyle&
     s.text_align = key->text_align;
     s.text_decoration = key->text_decoration;
     s.white_space = key->white_space;
+    s.visibility = key->visibility;
     s.border_collapse = key->border_collapse;
     s.border_spacing_x = key->border_spacing_x;
     s.border_spacing_y = key->border_spacing_y;
@@ -424,7 +616,8 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
     const char* ua_css = R"(
         table { display: table; border-collapse: separate; }
         caption { display: table-caption; }
-        col, colgroup { display: none; }
+        colgroup { display: table-column-group; }
+        col { display: table-column; }
         thead, tbody, tfoot { display: table-row-group; }
         tr { display: table-row; }
         td, th { display: table-cell; }
@@ -1802,15 +1995,36 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
         return true;
     }
 
-    // background: only the colour component is honoured today.
+    // background shorthand (CSS Backgrounds 3 §3.10): extract color and image.
     if (prop == "background") {
+        std::string found_color;
+        std::string found_image;
         for (const auto& token : split_tokens(trim(val))) {
-            if (token.rfind("url(", 0) == 0 || token == "no-repeat" || token == "repeat" ||
-                token.rfind("linear-gradient(", 0) == 0) {
+            std::string lower(token);
+            for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if (lower == "none") {
+                found_image = "none";
                 continue;
             }
-            if (is_color_token(token)) { out.emplace_back("background-color", token); break; }
+            if (lower.rfind("linear-gradient(", 0) == 0 ||
+                lower.rfind("radial-gradient(", 0) == 0 ||
+                lower.rfind("conic-gradient(", 0) == 0 ||
+                lower.rfind("repeating-linear-gradient(", 0) == 0 ||
+                lower.rfind("url(", 0) == 0) {
+                found_image = token;
+                continue;
+            }
+            if (lower == "no-repeat" || lower == "repeat" || lower == "repeat-x" ||
+                lower == "repeat-y" || lower == "fixed" || lower == "scroll" ||
+                lower == "local" || lower == "cover" || lower == "contain") {
+                continue;
+            }
+            if (found_color.empty() && is_color_token(token)) {
+                found_color = token;
+            }
         }
+        out.emplace_back("background-color", found_color.empty() ? "transparent" : found_color);
+        out.emplace_back("background-image", found_image.empty() ? "none" : found_image);
         return true;
     }
 
@@ -2048,7 +2262,14 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
                  val_lower == "table-footer-group") style.display = Display::TableRowGroup;
         else if (val_lower == "table-caption") style.display = Display::TableCaption;
         else if (val_lower == "contents") style.display = Display::Contents;
-        else if (val_lower == "table-column" || val_lower == "table-column-group") style.display = Display::None;
+        else if (val_lower == "table-column") style.display = Display::TableColumn;
+        else if (val_lower == "table-column-group") style.display = Display::TableColumnGroup;
+    } else if (prop == "visibility") {
+        if (val_lower == "initial") {
+            style.visibility = Visibility::Visible;
+        } else if (val_lower != "inherit" && val_lower != "unset") {
+            parse_visibility(val_lower, style.visibility);
+        }
     } else if (prop == "content") {
         // Phase 215. Only a string is represented: `content: "..."` with single
         // or double quotes, and the CSS escapes inside it. `normal` and `none`
@@ -2268,6 +2489,23 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         Color parsed;
         if (Color::try_parse(val, parsed, style.color, style.dark_color_scheme)) {
             style.background_color = parsed;
+        }
+    } else if (prop == "background-image") {
+        if (val_lower == "none" || val_lower == "initial" || val_lower == "unset") {
+            style.has_background_image = false;
+            style.background_gradient.reset();
+        } else if (val_lower != "inherit") {
+            LinearGradient grad;
+            if (parse_linear_gradient(val, style.color, style.dark_color_scheme, grad)) {
+                style.has_background_image = true;
+                style.background_gradient = std::move(grad);
+            } else if (val_lower.rfind("url(", 0) == 0 ||
+                       val_lower.rfind("radial-gradient(", 0) == 0 ||
+                       val_lower.rfind("conic-gradient(", 0) == 0 ||
+                       val_lower.rfind("repeating-linear-gradient(", 0) == 0) {
+                style.has_background_image = true;
+                style.background_gradient.reset();
+            }
         }
     } else if (prop == "width" || prop == "height" || prop == "min-width" ||
                prop == "max-width" || prop == "min-height" || prop == "max-height") {
@@ -2667,7 +2905,20 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
             parse_vertical_align(val_lower, style.vertical_align);
         }
     } else if (prop == "opacity") {
-        try { style.opacity = std::clamp(std::stof(val), 0.0f, 1.0f); } catch (...) {}
+        if (val_lower == "initial" || val_lower == "unset") {
+            style.opacity = 1.0f;
+        } else if (val_lower != "inherit") {
+            try {
+                std::size_t consumed = 0;
+                const bool pct = !val.empty() && val.back() == '%';
+                const std::string num = pct ? val.substr(0, val.size() - 1) : val;
+                float parsed = std::stof(num, &consumed);
+                if (consumed == num.size() && std::isfinite(parsed)) {
+                    if (pct) parsed /= 100.0f;
+                    style.opacity = std::clamp(parsed, 0.0f, 1.0f);
+                }
+            } catch (...) {}
+        }
     } else if (prop == "animation-name") {
         style.animation_name = val;
     } else if (prop == "animation-duration") {
@@ -3386,6 +3637,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         if (!parent_style->font_family.empty()) style.font_family = parent_style->font_family;
         style.text_align = parent_style->text_align;
         style.white_space = parent_style->white_space;
+        style.visibility = parent_style->visibility;
         if (!parent_style->custom_properties.empty()) style.custom_properties = parent_style->custom_properties;
         // empty-cells and caption-side inherit per CSS 2.1 17.5.1.2 and 17.4.1.
         style.empty_cells = parent_style->empty_cells;

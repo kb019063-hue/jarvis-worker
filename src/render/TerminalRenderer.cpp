@@ -219,11 +219,28 @@ bool TerminalRenderer::inside_clip(int col, int row) const {
 void TerminalRenderer::execute_command(const PaintCommand& cmd) {
     std::visit([this](auto&& arg) {
         using T = std::decay_t<decltype(arg)>;
-        if constexpr (std::is_same_v<T, DrawCanvasCommand>) {
+        if constexpr (std::is_same_v<T, PushOpacityCommand>) {
+            const bool skip = (m_skip_depth > 0 || arg.opacity <= 0.0f);
+            m_opacity_skip_stack.push_back(skip);
+            if (skip) ++m_skip_depth;
+            return;
+        } else if constexpr (std::is_same_v<T, PopOpacityCommand>) {
+            if (!m_opacity_skip_stack.empty()) {
+                if (m_opacity_skip_stack.back() && m_skip_depth > 0) --m_skip_depth;
+                m_opacity_skip_stack.pop_back();
+            }
+            return;
+        } else if (m_skip_depth > 0) {
+            return;
+        } else if constexpr (std::is_same_v<T, DrawCanvasCommand>) {
             // A canvas covers the viewport even after terminal scrolling. Its
             // transparent channels composite over the ordinary white canvas,
             // just as they do in the bitmap/PNG renderer.
-            const Color background = over_opaque(arg.color, Color::white());
+            Color base = arg.color;
+            if (arg.gradient && !arg.gradient->stops.empty()) {
+                base = over_opaque(arg.gradient->stops.front().color, over_opaque(base, Color::white()));
+            }
+            const Color background = over_opaque(base, Color::white());
             for (int row = 0; row < m_rows; ++row) {
                 for (int col = 0; col < m_cols; ++col) {
                     if (inside_clip(col, row)) m_grid[row * m_cols + col].bg = background;
@@ -286,11 +303,15 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
             CellRange cells;
             if (!intersecting_cells(tr, m_scroll_x, m_scroll_y, m_cols, m_rows,
                                     m_cell_w, m_cell_h, cells)) return;
+            Color fill = arg.color;
+            if (arg.gradient && !arg.gradient->stops.empty()) {
+                fill = arg.gradient->stops.front().color;
+            }
             for (int r = cells.first_row; r <= cells.last_row; ++r) {
                 for (int c = cells.first_col; c <= cells.last_col; ++c) {
                     if (!inside_clip(c, r)) continue;
                     auto& cell = m_grid[r * m_cols + c];
-                    cell.bg = over_opaque(arg.color, cell.bg);
+                    cell.bg = over_opaque(fill, cell.bg);
                 }
             }
         } else if constexpr (std::is_same_v<T, DrawBorderCommand>) {
@@ -475,6 +496,8 @@ int TerminalRenderer::place_cluster(int col, int row, const std::string& cluster
 }
 
 void TerminalRenderer::render(const DisplayList& display_list, std::ostream& os) {
+    m_opacity_skip_stack.clear();
+    m_skip_depth = 0;
     for (const auto& cmd : display_list.commands()) {
         execute_command(cmd);
     }
@@ -503,6 +526,8 @@ void TerminalRenderer::render(const DisplayList& display_list, std::ostream& os)
 }
 
 std::string TerminalRenderer::to_ansi_string(const DisplayList& display_list) {
+    m_opacity_skip_stack.clear();
+    m_skip_depth = 0;
     for (const auto& cmd : display_list.commands()) {
         execute_command(cmd);
     }

@@ -47,7 +47,7 @@ enum class PaintRole { Block, AtomicBlock, Float, OutOfFlow, Inline };
 
 PaintRole paint_role(const LayoutBox& box) {
     const ComputedStyle& s = *box.style;
-    if (box_has_transform(box) || s.is_positioned()) return PaintRole::OutOfFlow;
+    if (box_has_transform(box) || s.is_positioned() || s.opacity < 1.0f) return PaintRole::OutOfFlow;
     if (s.is_floated()) return PaintRole::Float;
     if (box.box_type == BoxType::TextNode || box.box_type == BoxType::InlineNode) {
         return PaintRole::Inline;
@@ -117,6 +117,28 @@ void emit_text_decoration(const ComputedStyle& s, const Rect& rect, DisplayList&
 
 void emit_chrome(const std::shared_ptr<LayoutBox>& box, DisplayList& list) {
     const ComputedStyle& s = *box->style;
+    if (!s.is_visible()) return;
+
+    // CSS 2.1 §17.3: table columns and column groups contribute only
+    // backgrounds (and collapsed borders already resolved onto cells).
+    if (s.is_table_column() || s.is_table_column_group()) {
+        const Rect bg_rect = box->dimensions.padding_box();
+        if (bg_rect.width <= 0.0f || bg_rect.height <= 0.0f) return;
+        if (!box->background_propagated && !s.background_color.is_transparent()) {
+            DrawRectCommand cmd;
+            cmd.rect = bg_rect;
+            cmd.color = s.background_color;
+            list.add(cmd);
+        }
+        if (!box->background_propagated && s.background_gradient) {
+            DrawRectCommand cmd;
+            cmd.rect = bg_rect;
+            cmd.color = Color::transparent();
+            cmd.gradient = s.background_gradient;
+            list.add(cmd);
+        }
+        return;
+    }
 
     // An empty cell in the separated border model paints no background, shadow
     // or borders (CSS 2.1 17.5.1.2, `empty-cells: hide`). The collapsed model
@@ -138,12 +160,20 @@ if (!skip_cell_chrome && s.box_shadow.has_shadow &&
     list.add(shadow);
 }
 
-// 1. Background
+// 1. Background (solid color, then background-image gradient on top)
 if (!skip_cell_chrome && !box->background_propagated && !s.background_color.is_transparent()) {
     DrawRectCommand cmd;
     cmd.rect = box->dimensions.padding_box();
     cmd.color = s.background_color;
     cmd.border_radius = s.border_radius;
+    list.add(cmd);
+}
+if (!skip_cell_chrome && !box->background_propagated && s.background_gradient) {
+    DrawRectCommand cmd;
+    cmd.rect = box->dimensions.padding_box();
+    cmd.color = Color::transparent();
+    cmd.border_radius = s.border_radius;
+    cmd.gradient = s.background_gradient;
     list.add(cmd);
 }
 
@@ -208,12 +238,24 @@ if (!box->line_boxes.empty()) {
                 // Transparent margin/padding spacers carry empty text and paint nothing.
                 // Real word-separating spaces inside a styled inline box paint its
                 // background so the inline background stays continuous across words.
-                if (!frag.text.empty() && !frag.style->background_color.is_transparent()) {
-                    DrawRectCommand bg_cmd;
-                    bg_cmd.rect = frag.rect;
-                    bg_cmd.color = frag.style->background_color;
-                    bg_cmd.border_radius = frag.style->border_radius;
-                    list.add(bg_cmd);
+                if (frag.style->is_visible() && !frag.text.empty()) {
+                    for (auto it = frag.ancestor_backgrounds.rbegin();
+                         it != frag.ancestor_backgrounds.rend(); ++it) {
+                        if (!it->is_transparent()) {
+                            DrawRectCommand bg_cmd;
+                            bg_cmd.rect = frag.rect;
+                            bg_cmd.color = *it;
+                            bg_cmd.border_radius = frag.style->border_radius;
+                            list.add(bg_cmd);
+                        }
+                    }
+                    if (!frag.style->background_color.is_transparent()) {
+                        DrawRectCommand bg_cmd;
+                        bg_cmd.rect = frag.rect;
+                        bg_cmd.color = frag.style->background_color;
+                        bg_cmd.border_radius = frag.style->border_radius;
+                        list.add(bg_cmd);
+                    }
                 }
                 continue;
             }
@@ -222,6 +264,20 @@ if (!box->line_boxes.empty()) {
                 continue;
             }
             const ComputedStyle& fs = *frag.style;
+            if (!fs.is_visible()) continue;
+
+            // Enclosing inline ancestor backgrounds (outermost -> innermost)
+            // beneath this fragment's own background.
+            for (auto it = frag.ancestor_backgrounds.rbegin();
+                 it != frag.ancestor_backgrounds.rend(); ++it) {
+                if (!it->is_transparent()) {
+                    DrawRectCommand bg_cmd;
+                    bg_cmd.rect = frag.rect;
+                    bg_cmd.color = *it;
+                    bg_cmd.border_radius = fs.border_radius;
+                    list.add(bg_cmd);
+                }
+            }
 
             // Fragment background (e.g. <span style="background-color: yellow;">)
             if (!fs.background_color.is_transparent()) {
@@ -276,6 +332,8 @@ if (!box->line_boxes.empty()) {
 }
 
 // 4. Standalone Text Node (fallback if not in IFC)
+if (!s.is_visible()) return;
+
 if (box->box_type == BoxType::TextNode) {
     float line_h = s.font_size * 1.25f;
     if (!box->lines.empty()) {
@@ -332,8 +390,29 @@ void paint_block_backgrounds(const std::shared_ptr<LayoutBox>& box, DisplayList&
     // A box that established an inline formatting context painted its
     // children into its lines, so its subtree is not walked again.
     if (!box->line_boxes.empty()) return;
+
+    // CSS 2.1 §17.5.1: column groups (layer 2) and columns (layer 3) paint
+    // above the table background and below row groups, rows, and cells
+    // regardless of DOM order.
+    if (box->box_type == BoxType::TableNode) {
+        for (const auto& child : box->children) {
+            if (child->style->is_table_column_group()) {
+                emit_chrome(child, list);
+                for (const auto& col : child->children) {
+                    if (col->style->is_table_column()) emit_chrome(col, list);
+                }
+            } else if (child->style->is_table_column()) {
+                emit_chrome(child, list);
+            }
+        }
+    }
+
     for (const auto& child : box->children) {
         if (top.take(child)) continue;   // the modal dialog: painted last
+        if (box->box_type == BoxType::TableNode &&
+            (child->style->is_table_column() || child->style->is_table_column_group())) {
+            continue; // already painted in CSS 2.1 §17.5.1 column layers above
+        }
         switch (paint_role(*child)) {
             case PaintRole::Block:
                 emit_chrome(child, list);
@@ -445,6 +524,8 @@ void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLay
     if (stack_is_exhausted()) return;
 
     const ComputedStyle& s = *box->style;
+    const bool has_opacity = s.opacity < 1.0f;
+    if (has_opacity) list.add(PushOpacityCommand{s.opacity});
     const bool has_t = box_has_transform(*box);
     if (has_t) list.add(PushTransformCommand{s.transform_matrix});
 
@@ -470,18 +551,26 @@ void paint_atom(const std::shared_ptr<LayoutBox>& box, DisplayList& list, TopLay
 
     if (clips) list.add(PopClipCommand{});
     if (has_t) list.add(PopTransformCommand{});
+    if (has_opacity) list.add(PopOpacityCommand{});
 }
 } // namespace
 
 DisplayList DisplayList::build(const std::shared_ptr<LayoutBox>& root_box, const Node* top_layer) {
     DisplayList list;
     if (root_box) {
+        // CSS Color 4 §3.2: opacity on the root element (`<html>`) applies to
+        // the entire document paint, including its propagated canvas.
+        const bool has_root_opacity = root_box->has_document_canvas && root_box->root_opacity < 1.0f;
+        if (has_root_opacity) list.add(PushOpacityCommand{root_box->root_opacity});
+
         // The canvas is behind every box, including the body's shadow and
         // border, and is not subject to the body's transform or overflow.
         // Emit even a transparent document canvas: the terminal renderer must
         // distinguish it from an arbitrary subtree and use the white backdrop.
         if (root_box->has_document_canvas) {
-            list.add(DrawCanvasCommand{root_box->canvas_background});
+            DrawCanvasCommand canvas_cmd{root_box->canvas_background};
+            if (root_box->canvas_gradient) canvas_cmd.gradient = *root_box->canvas_gradient;
+            list.add(std::move(canvas_cmd));
         }
         TopLayer top{top_layer, nullptr};
         paint_atom(root_box, list, top);
@@ -494,6 +583,7 @@ DisplayList DisplayList::build(const std::shared_ptr<LayoutBox>& root_box, const
             TopLayer none;
             paint_atom(top.box, list, none);
         }
+        if (has_root_opacity) list.add(PopOpacityCommand{});
     }
     return list;
 }

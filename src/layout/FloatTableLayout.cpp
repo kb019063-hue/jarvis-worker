@@ -296,18 +296,64 @@ void LayoutBox::layout_table(float containing_width) {
     }
 
     // 1. Gather the row grid, flattening row groups and synthesising rows for
-    //    cells that are direct children of the table.
+    //    cells that are direct children of the table, plus table columns and
+    //    column groups (CSS 2.1 §17.2 / §17.5.1).
     struct RowGroupSpan {
         std::shared_ptr<LayoutBox> box;
         std::size_t first_row{0};
         std::size_t last_row{0}; // exclusive
     };
+    struct ColumnSpan {
+        std::shared_ptr<LayoutBox> box;
+        std::size_t first_col{0};
+        std::size_t span{1};
+    };
+    auto numeric_attribute = [](const std::shared_ptr<LayoutBox>& box, const char* name, int fallback) -> int {
+        if (!box->node || !box->node->is_element()) return fallback;
+        const std::string value = box->node->as_element()->get_attribute(name);
+        if (value.empty()) return fallback;
+        long long parsed = 0;
+        bool any = false;
+        for (char c : value) {
+            if (c < '0' || c > '9') break;
+            any = true;
+            parsed = std::min<long long>(parsed * 10 + (c - '0'), 1000);
+        }
+        return any ? static_cast<int>(parsed) : fallback;
+    };
+
     std::vector<std::vector<std::shared_ptr<LayoutBox>>> grid;
     std::vector<std::shared_ptr<LayoutBox>> row_boxes;
     std::vector<RowGroupSpan> row_groups;
+    std::vector<ColumnSpan> col_groups;
+    std::vector<ColumnSpan> cols;
+    std::size_t col_cursor = 0;
 
     for (const auto& child : children) {
         if (child->style->is_table_caption()) continue;
+        if (child->style->is_table_column_group()) {
+            const std::size_t group_start = col_cursor;
+            bool has_col_children = false;
+            for (const auto& col : child->children) {
+                if (!col->style->is_table_column()) continue;
+                has_col_children = true;
+                const auto span = static_cast<std::size_t>(std::max(1, numeric_attribute(col, "span", 1)));
+                cols.push_back(ColumnSpan{col, col_cursor, span});
+                col_cursor += span;
+            }
+            if (!has_col_children) {
+                const auto span = static_cast<std::size_t>(std::max(1, numeric_attribute(child, "span", 1)));
+                col_cursor += span;
+            }
+            col_groups.push_back(ColumnSpan{child, group_start, col_cursor - group_start});
+            continue;
+        }
+        if (child->style->is_table_column()) {
+            const auto span = static_cast<std::size_t>(std::max(1, numeric_attribute(child, "span", 1)));
+            cols.push_back(ColumnSpan{child, col_cursor, span});
+            col_cursor += span;
+            continue;
+        }
         if (child->box_type == BoxType::TableRowNode) {
             std::vector<std::shared_ptr<LayoutBox>> cells;
             for (const auto& cell : child->children) {
@@ -368,20 +414,6 @@ void LayoutBox::layout_table(float containing_width) {
     //    cells reserve the slots they cover (CSS 2.1 17.5).
     std::vector<PlacedCell> placed;
 
-    auto numeric_attribute = [](const std::shared_ptr<LayoutBox>& cell, const char* name, int fallback) -> int {
-        if (!cell->node || !cell->node->is_element()) return fallback;
-        const std::string value = cell->node->as_element()->get_attribute(name);
-        if (value.empty()) return fallback;
-        long long parsed = 0;
-        bool any = false;
-        for (char c : value) {
-            if (c < '0' || c > '9') break;
-            any = true;
-            parsed = std::min<long long>(parsed * 10 + (c - '0'), 1000);
-        }
-        return any ? static_cast<int>(parsed) : fallback;
-    };
-
     const std::size_t row_count = grid.size();
     std::vector<std::vector<bool>> occupied(row_count);
     std::size_t column_count = 0;
@@ -438,6 +470,19 @@ void LayoutBox::layout_table(float containing_width) {
             ? explicit_w
             : std::max(0.0f, containing_width - h_pb);
         std::vector<float> widths(column_count, -1.0f);
+        for (const auto& col_entry : cols) {
+            const ComputedStyle& cs = *col_entry.box->style;
+            float col_w = -1.0f;
+            if (cs.width >= 0.0f) col_w = cs.width;
+            else if (cs.width_percent >= 0.0f && explicit_w >= 0.0f) {
+                col_w = explicit_w * cs.width_percent / 100.0f;
+            }
+            if (col_w < 0.0f) continue;
+            for (std::size_t c = col_entry.first_col;
+                 c < col_entry.first_col + col_entry.span && c < column_count; ++c) {
+                widths[c] = std::max(widths[c], col_w);
+            }
+        }
         for (const auto& entry : placed) {
             if (entry.row != 0) continue;
             const ComputedStyle& es = *entry.box->style;
@@ -475,6 +520,15 @@ void LayoutBox::layout_table(float containing_width) {
         column_widths = std::move(widths);
     } else {
     column_widths.assign(column_count, 0.0f);
+    for (const auto& col_entry : cols) {
+        const ComputedStyle& cs = *col_entry.box->style;
+        if (cs.width >= 0.0f) {
+            for (std::size_t c = col_entry.first_col;
+                 c < col_entry.first_col + col_entry.span && c < column_count; ++c) {
+                column_widths[c] = std::max(column_widths[c], cs.width);
+            }
+        }
+    }
     for (const auto& entry : placed) {
         const auto& cell = entry.box;
         const ComputedStyle& cs = *cell->style;
@@ -685,6 +739,31 @@ void LayoutBox::layout_table(float containing_width) {
             gb->dimensions.content.height = 0.0f;
         }
     }
+
+    // CSS 2.1 §17.5.1: column groups and columns span the vertical rows region
+    // across their assigned columns so transparent cells/rows expose their
+    // backgrounds above the table background.
+    const float grid_top = row_count > 0 ? row_top.front() : caption_top;
+    const float grid_bottom = row_count > 0 ? (row_top.back() + row_heights.back()) : caption_top;
+    const float grid_height = std::max(0.0f, grid_bottom - grid_top);
+    auto place_column_box = [&](const ColumnSpan& entry) {
+        auto& cb = entry.box;
+        cb->dimensions.margin = EdgeSizes(0.0f);
+        cb->dimensions.padding = EdgeSizes(0.0f);
+        cb->dimensions.border = EdgeSizes(0.0f);
+        const std::size_t start = entry.first_col;
+        const std::size_t end = std::min(entry.first_col + entry.span, column_count);
+        if (start < end && grid_height > 0.0f) {
+            cb->dimensions.content.x = dimensions.content.x + column_left(start);
+            cb->dimensions.content.y = dimensions.content.y + grid_top;
+            cb->dimensions.content.width = span_width(start, end - start);
+            cb->dimensions.content.height = grid_height;
+        } else {
+            cb->dimensions.content = Rect(dimensions.content.x, dimensions.content.y, 0.0f, 0.0f);
+        }
+    };
+    for (const auto& cg : col_groups) place_column_box(cg);
+    for (const auto& col : cols) place_column_box(col);
 
     // 8. Height: explicit, or the grid's own height, plus the bottom
     //    captions. The rows region stays whatever it was; the captions sit

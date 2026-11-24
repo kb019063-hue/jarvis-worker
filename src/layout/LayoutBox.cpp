@@ -639,6 +639,10 @@ void LayoutBox::layout_block(float containing_width) {
         if (cs.is_out_of_flow()) {
             continue; // Handled in out-of-flow pass
         }
+        if (cs.is_table_column() || cs.is_table_column_group()) {
+            child->dimensions.content = Rect(dimensions.content.x, dimensions.content.y, 0.0f, 0.0f);
+            continue;
+        }
 
         // --- floated children are taken out of the normal flow -------------
         if (cs.is_floated()) {
@@ -1654,6 +1658,7 @@ struct InlineItem {
     bool preserve_space{false};
     SharedComputedStyle style;
     std::shared_ptr<LayoutBox> source_box;
+    std::vector<Color> ancestor_backgrounds;
 };
 
 using InlineOverrideCache = std::unordered_map<
@@ -1764,11 +1769,11 @@ static void collect_items(
             items.push_back(std::move(br));
             return;
         }
-        const bool has_bg = !bs.background_color.is_transparent();
+        const bool has_bg = bs.is_visible() && !bs.background_color.is_transparent();
         const bool has_rad = bs.border_radius > 0.0f;
-        const bool has_dec = bs.has_text_decoration();
-        const bool has_bdr = bs.border_width.left > 0.0f || bs.border_width.top > 0.0f ||
-                             bs.border_width.right > 0.0f || bs.border_width.bottom > 0.0f;
+        const bool has_dec = bs.is_visible() && bs.has_text_decoration();
+        const bool has_bdr = bs.is_visible() && (bs.border_width.left > 0.0f || bs.border_width.top > 0.0f ||
+                             bs.border_width.right > 0.0f || bs.border_width.bottom > 0.0f);
 
         const float margin_left = bs.margin.left;
         const float pad_bdr_left = bs.padding.left + bs.border_width.left;
@@ -1797,12 +1802,13 @@ static void collect_items(
         }
 
         if (items.size() > initial_count) {
-            // Chromium paints an inline body's background on its line
-            // fragments as well as propagating it to the canvas. Block bodies
-            // do not have this extra layer. Preserve a descendant's own
-            // background: fragments carry just one color, so this still loses
-            // the body layer under a translucent descendant (see the recorded
-            // inline_body_under_a_translucent_inline_child reftest).
+            // An enclosing inline box (including an inline `<body>`, whose
+            // background Chromium paints on its line fragments in addition to
+            // propagating it to the canvas) paints BEHIND any descendant inline
+            // box's own background. When a descendant already carries a
+            // translucent background, record this ancestor's background in
+            // `ancestor_backgrounds` so the painter composites every layer
+            // outermost-to-innermost instead of dropping or overwriting layers.
             if (has_bg || has_rad || has_dec || has_bdr) {
                 const ComputedStyle* inline_key = box->style.get();
                 auto& inner_cache = override_cache[inline_key];
@@ -1814,8 +1820,13 @@ static void collect_items(
                     }
                     const ComputedStyle* item_key = items[idx].style.get();
                     const ComputedStyle& cur = *item_key;
-                    const bool apply_bg = has_bg &&
-                        (!box->background_propagated || cur.background_color.is_transparent());
+                    const bool cur_has_bg = !cur.background_color.is_transparent();
+                    if (has_bg && cur_has_bg) {
+                        if (cur.background_color.a < 255) {
+                            items[idx].ancestor_backgrounds.push_back(bs.background_color);
+                        }
+                    }
+                    const bool apply_bg = has_bg && !cur_has_bg;
                     const bool already_matches =
                         (!apply_bg || cur.background_color == bs.background_color) &&
                         (!has_rad || cur.border_radius == bs.border_radius) &&
@@ -2067,6 +2078,7 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
         frag.text = std::move(item.text);
         frag.style = std::move(item.style);
         frag.box = std::move(item.source_box);
+        frag.ancestor_backgrounds = std::move(item.ancestor_backgrounds);
         frag.is_text = (item.type == InlineItem::Type::Text);
         frag.is_space = (item.type == InlineItem::Type::Space);
         frag.preserve_space = item.preserve_space;

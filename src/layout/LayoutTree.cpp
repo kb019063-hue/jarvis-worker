@@ -40,6 +40,50 @@ std::string collapse_whitespace(std::string_view s) {
     return res;
 }
 
+std::string normalize_preserved_newlines(std::string_view s) {
+    std::string res;
+    res.reserve(s.size());
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '\r') {
+            if (i + 1 < s.size() && s[i + 1] == '\n') ++i;
+            res += '\n';
+        } else {
+            res += s[i];
+        }
+    }
+    return res;
+}
+
+std::string collapse_spaces_preserve_newlines(std::string_view s) {
+    std::string norm = normalize_preserved_newlines(s);
+    std::string res;
+    res.reserve(norm.size());
+    bool in_space = false;
+    for (char c : norm) {
+        if (c == '\n') {
+            // CSS Text 3 §4.1.1: discard collapsible spaces immediately before a forced break.
+            while (!res.empty() && res.back() == ' ') res.pop_back();
+            res += '\n';
+            in_space = true; // also discard collapsible spaces immediately after a forced break
+        } else if (std::isspace(static_cast<unsigned char>(c))) {
+            if (!in_space) {
+                res += ' ';
+                in_space = true;
+            }
+        } else {
+            res += c;
+            in_space = false;
+        }
+    }
+    return res;
+}
+
+bool preserves_whitespace_text(const LayoutBox& box) {
+    if (!box.style) return false;
+    if (box.style->preserves_spaces()) return true;
+    return box.style->preserves_newlines() && box.text.find('\n') != std::string::npos;
+}
+
 std::string_view trim_ascii_sv(std::string_view s) {
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front()))) s.remove_prefix(1);
     while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.remove_suffix(1);
@@ -309,7 +353,8 @@ void normalize_block_children(
             current_anon = nullptr;
             normalized.push_back(ch);
         } else {
-            if (ch->box_type == BoxType::TextNode && is_all_whitespace(ch->text)) {
+            if (ch->box_type == BoxType::TextNode && is_all_whitespace(ch->text) &&
+                !preserves_whitespace_text(*ch)) {
                 continue;
             }
             if (!current_anon) {
@@ -341,7 +386,8 @@ void normalize_table_children(const std::shared_ptr<LayoutBox>& box, ComputedSty
     std::shared_ptr<LayoutBox> implicit_row, implicit_cell;
     for (const auto& child : children) {
         if (!row && (child->style->is_table_row() ||
-                (table && (child->style->is_table_caption() || child->style->is_table_row_group())))) {
+                (table && (child->style->is_table_caption() || child->style->is_table_row_group() ||
+                           child->style->is_table_column() || child->style->is_table_column_group())))) {
             implicit_row.reset();
             implicit_cell.reset();
             box->append_child(child);
@@ -574,7 +620,8 @@ void split_inline_box_around_blocks(
             out.push_back(ch);
             split_inline_blocks.emplace_back(element, ch);
         } else {
-            if (ch->box_type == BoxType::TextNode && is_all_whitespace(ch->text) && !current_inline) {
+            if (ch->box_type == BoxType::TextNode && is_all_whitespace(ch->text) &&
+                !preserves_whitespace_text(*ch) && !current_inline) {
                 continue;
             }
             if (!current_inline) {
@@ -663,6 +710,19 @@ void LayoutTree::build_boxes(
     if (node->is_text()) {
         auto text_node = std::static_pointer_cast<Text>(node);
         std::string raw = text_node->text();
+        const bool preserve_sp = parent_style && parent_style->preserves_spaces();
+        const bool preserve_nl = parent_style && parent_style->preserves_newlines();
+        if (preserve_sp) {
+            if (raw.empty()) return;
+            SharedComputedStyle text_style = pool.inherited_only(parent_style, Display::Inline);
+            out.push_back(LayoutBox::create_text(node, normalize_preserved_newlines(raw), std::move(text_style)));
+            return;
+        }
+        if (preserve_nl && (raw.find('\n') != std::string::npos || raw.find('\r') != std::string::npos)) {
+            SharedComputedStyle text_style = pool.inherited_only(parent_style, Display::Inline);
+            out.push_back(LayoutBox::create_text(node, collapse_spaces_preserve_newlines(raw), std::move(text_style)));
+            return;
+        }
         if (is_all_whitespace(raw)) {
             if (parent_style && parent_style->is_inline()) {
                 SharedComputedStyle text_style = pool.inherited_only(parent_style, Display::Inline);
@@ -729,7 +789,8 @@ void LayoutTree::build_boxes(
         } else if (style->is_grid()) {
             box = LayoutBox::create_grid(element, style);
         } else if (style->is_block() || style->is_block_level() || style->is_inline_block() ||
-                   style->is_table_caption()) {
+                   style->is_table_caption() || style->is_table_column() ||
+                   style->is_table_column_group()) {
             box = LayoutBox::create_block(element, style);
         } else {
             box = LayoutBox::create_inline(element, style);
@@ -967,15 +1028,22 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
     // dark grid. Subtree and non-HTML layout roots do not own one.
     root_box->has_document_canvas = html_style.has_value();
 
-    // CSS Backgrounds: the HTML root supplies the canvas unless its color is
-    // transparent, in which case the first HTML body child supplies it. The
-    // color's *used* value is then transparent on the source box; keep the
-    // computed style intact and mark its boxes instead. Background images are
-    // not represented by ComputedStyle yet (see the phase's remaining work).
+    // CSS Backgrounds 3 §2.11.2: the HTML root supplies the canvas unless its
+    // background-color is transparent AND its background-image is none, in
+    // which case the first HTML body child supplies it. The used background on
+    // the source box is then transparent; keep the computed style intact and
+    // mark its boxes instead. Root opacity applies to the entire document
+    // paint including the canvas (CSS Color 4 §3.2).
     std::shared_ptr<Element> canvas_source;
     if (html_style && !html_style->is_none()) {
-        if (!html_style->background_color.is_transparent()) {
+        root_box->root_opacity = html_style->opacity;
+        const bool html_has_bg = !html_style->background_color.is_transparent() ||
+                                 html_style->has_background_image;
+        if (html_has_bg) {
             root_box->canvas_background = html_style->background_color;
+            if (html_style->background_gradient) {
+                root_box->canvas_gradient = std::make_shared<LinearGradient>(*html_style->background_gradient);
+            }
             canvas_source = html;
         } else if (auto body = document->body();
                    body && !body->is_foreign() && body->parent() == html) {
@@ -986,9 +1054,13 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
             // Chromium leaves the canvas white for a boxless body; before this
             // check the resolver had no `contents` value at all, so the body
             // stayed `block` and red leaked onto the canvas (finding 194).
-            if (!body_style.is_none() && !body_style.is_contents() &&
-                !body_style.background_color.is_transparent()) {
+            const bool body_has_bg = !body_style.background_color.is_transparent() ||
+                                     body_style.has_background_image;
+            if (!body_style.is_none() && !body_style.is_contents() && body_has_bg) {
                 root_box->canvas_background = body_style.background_color;
+                if (body_style.background_gradient) {
+                    root_box->canvas_gradient = std::make_shared<LinearGradient>(*body_style.background_gradient);
+                }
                 canvas_source = body;
             }
         }

@@ -53,6 +53,21 @@ struct CounterContext {
             if (it != stacks.end() && !it->second.empty()) it->second.pop_back();
         }
     }
+    std::unordered_map<std::string, size_t> snapshot() const {
+        std::unordered_map<std::string, size_t> s;
+        s.reserve(stacks.size());
+        for (const auto& kv : stacks) s[kv.first] = kv.second.size();
+        return s;
+    }
+    void restore(const std::unordered_map<std::string, size_t>& snap) {
+        for (auto it = stacks.begin(); it != stacks.end(); ) {
+            auto f = snap.find(it->first);
+            size_t target = (f == snap.end() ? 0 : f->second);
+            if (it->second.size() > target) it->second.resize(target);
+            if (it->second.empty()) it = stacks.erase(it);
+            else ++it;
+        }
+    }
 };
 
 thread_local CounterContext* t_counter_ctx = nullptr;
@@ -820,11 +835,13 @@ void LayoutTree::build_boxes(
         SharedComputedStyle style = resolve_element_style(element, resolver, parent_style, pool);
         if (!style) return;
 
-        // CSS Counter handling (Phase 379): each element may reset/set/increment
-        // counters. Resets push a new scope that is popped after the subtree.
-        std::vector<std::string> pushed_resets;
+        // CSS Counter handling (Phase 385): each element may reset/set/increment
+        // counters. Resets push a new instance that scopes to the element and
+        // its following siblings (CSS Lists 3). Increments modify the nearest
+        // instance. Pushing is not popped at element exit but when leaving the
+        // parent — implemented via snapshot/restore around the children loop.
         if (t_counter_ctx) {
-            pushed_resets = t_counter_ctx->apply_reset(style->counter_reset);
+            t_counter_ctx->apply_reset(style->counter_reset);
             t_counter_ctx->apply_set(style->counter_set);
             t_counter_ctx->apply_increment(style->counter_increment);
         }
@@ -843,10 +860,11 @@ void LayoutTree::build_boxes(
         if (style->is_contents()) {
             const auto& contents_children =
                 element->shadow_root() ? element->shadow_root()->children() : element->children();
+            auto snap = t_counter_ctx ? t_counter_ctx->snapshot() : std::unordered_map<std::string, size_t>{};
             for (const auto& ch : contents_children) {
                 build_boxes(ch, resolver, parent_style, pool, depth + 1, out, split_inline_blocks);
             }
-            if (t_counter_ctx) t_counter_ctx->pop_resets(pushed_resets);
+            if (t_counter_ctx) t_counter_ctx->restore(snap);
             return;
         }
 
@@ -960,6 +978,7 @@ void LayoutTree::build_boxes(
             const auto& children_to_process =
                 element->shadow_root() ? element->shadow_root()->children() : element->children();
             std::vector<std::shared_ptr<LayoutBox>> child_boxes;
+            auto snap = t_counter_ctx ? t_counter_ctx->snapshot() : std::unordered_map<std::string, size_t>{};
             // With an explicit summary, a closed disclosure lays out only
             // its first summary child. The DOM and its listeners stay intact.
             const Node* closed_summary = nullptr;
@@ -993,9 +1012,9 @@ void LayoutTree::build_boxes(
                     if (cb) box->append_child(cb);
                 }
             }
+            if (t_counter_ctx) t_counter_ctx->restore(snap);
             if (auto after = generated_run(2)) box->append_child(std::move(after));
         }
-        if (t_counter_ctx) t_counter_ctx->pop_resets(pushed_resets);
 
         normalize_table_children(box, pool);
         normalize_block_children(box, box->style, pool);

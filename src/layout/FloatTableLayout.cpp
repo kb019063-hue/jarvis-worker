@@ -1,8 +1,12 @@
 #include "litebird/layout/LayoutBox.hpp"
 #include "litebird/common/StackLimit.hpp"
+#include "litebird/render/FontRenderer.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <functional>
+#include <string_view>
 
 namespace litebird {
 
@@ -248,6 +252,178 @@ float LayoutBox::min_content_width(const LayoutBox& box, float fallback) {
     return constrained_outer_width(widest + edges);
 }
 
+float LayoutBox::max_content_width(const LayoutBox& box, float fallback) {
+    if (stack_is_exhausted()) return fallback;
+    const ComputedStyle& bs = *box.style;
+
+    float line_width = 0.0f;
+    float widest_line = 0.0f;
+    bool line_has_content = false;
+    bool pending_collapsed_space = false;
+    float pending_space_width = 0.0f;
+
+    auto finish_line = [&] {
+        widest_line = std::max(widest_line, line_width);
+        line_width = 0.0f;
+        line_has_content = false;
+        pending_collapsed_space = false;
+        pending_space_width = 0.0f;
+    };
+    auto add_atomic_width = [&](float width) {
+        if (width == 0.0f) return;
+        if (pending_collapsed_space && line_has_content) line_width += pending_space_width;
+        pending_collapsed_space = false;
+        pending_space_width = 0.0f;
+        line_width += width;
+        line_has_content = true;
+    };
+    auto add_text = [&](std::string_view text, const ComputedStyle& style) {
+        FontRenderer& font = FontRenderer::instance();
+        const bool italic = style.font_style != FontStyle::Normal;
+        const bool kerning = style.kerning_enabled();
+        const float space_width = font.measure_text(" ", style.font_size, style.font_weight,
+                                                    style.font_family, italic, kerning);
+        const WhiteSpace white_space = style.white_space;
+        const bool preserve_newlines = white_space == WhiteSpace::Pre ||
+                                       white_space == WhiteSpace::PreWrap ||
+                                       white_space == WhiteSpace::PreLine ||
+                                       white_space == WhiteSpace::BreakSpaces;
+        const bool preserve_spaces = white_space == WhiteSpace::Pre ||
+                                     white_space == WhiteSpace::PreWrap ||
+                                     white_space == WhiteSpace::BreakSpaces;
+        std::string word;
+        auto finish_word = [&] {
+            if (word.empty()) return;
+            if (pending_collapsed_space && line_has_content) line_width += pending_space_width;
+            pending_collapsed_space = false;
+            pending_space_width = 0.0f;
+            line_width += font.measure_text(word, style.font_size, style.font_weight,
+                                            style.font_family, italic, kerning);
+            line_has_content = true;
+            word.clear();
+        };
+
+        for (std::size_t i = 0; i < text.size();) {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
+            if (preserve_newlines && (c == '\n' || c == '\r')) {
+                finish_word();
+                if (c == '\r' && i + 1 < text.size() && text[i + 1] == '\n') i += 2;
+                else ++i;
+                finish_line();
+                continue;
+            }
+            if (std::isspace(c)) {
+                finish_word();
+                if (preserve_spaces) {
+                    if (pending_collapsed_space && line_has_content) line_width += pending_space_width;
+                    pending_collapsed_space = false;
+                    pending_space_width = 0.0f;
+                    std::size_t count = 0;
+                    while (i < text.size() &&
+                           std::isspace(static_cast<unsigned char>(text[i])) &&
+                           text[i] != '\n' && text[i] != '\r') {
+                        ++count;
+                        ++i;
+                    }
+                    line_width += space_width * static_cast<float>(count);
+                    line_has_content = line_has_content || count != 0;
+                } else {
+                    ++i;
+                    if (line_has_content) {
+                        pending_collapsed_space = true;
+                        pending_space_width = space_width;
+                    }
+                }
+                continue;
+            }
+            word.push_back(static_cast<char>(c));
+            ++i;
+        }
+        finish_word();
+    };
+
+    if (box.box_type == BoxType::TextNode) {
+        add_text(box.text, bs);
+        finish_line();
+        return widest_line;
+    }
+
+    const float edges = horizontal_spacing(box);
+    const float adjustment = bs.box_sizing == BoxSizing::BorderBox ? 0.0f : edges;
+    auto constrained_outer_width = [&](float outer) {
+        if (bs.min_width >= 0.0f) {
+            outer = std::max(outer, bs.min_width + adjustment);
+        }
+        if (bs.max_width >= 0.0f) {
+            outer = std::min(outer, bs.max_width + adjustment);
+        }
+        return std::max(edges, outer);
+    };
+
+    if (box.box_type == BoxType::ImageNode) {
+        float content = box.image ? static_cast<float>(box.image->width)
+                                  : box.dimensions.content.width;
+        if (bs.width >= 0.0f) {
+            content = (bs.box_sizing == BoxSizing::BorderBox)
+                          ? std::max(0.0f, bs.width - edges)
+                          : bs.width;
+        }
+        return constrained_outer_width(content + edges);
+    }
+
+    if (bs.width >= 0.0f) {
+        return constrained_outer_width(bs.width + adjustment);
+    }
+
+    std::function<void(const LayoutBox&)> append_inline;
+    std::function<void(const LayoutBox&)> measure_children;
+    append_inline = [&](const LayoutBox& child) {
+        if (child.style->is_out_of_flow() || child.style->is_floated()) return;
+        if (child.box_type == BoxType::TextNode) {
+            add_text(child.text, *child.style);
+            return;
+        }
+        if (child.box_type == BoxType::InlineNode && child.node &&
+            child.node->is_element() && child.node->as_element()->tag_name() == "br") {
+            finish_line();
+            return;
+        }
+        if (child.box_type == BoxType::ImageNode || child.style->is_inline_block()) {
+            add_atomic_width(max_content_width(child, 0.0f) +
+                             child.style->margin.left + child.style->margin.right);
+            return;
+        }
+
+        const ComputedStyle& child_style = *child.style;
+        const EdgeSizes& border = child.border_override
+                                      ? *child.border_override
+                                      : child_style.border_width;
+        const float border_left = scaled_border(border.left, child.border_scale);
+        const float border_right = scaled_border(border.right, child.border_scale);
+        add_atomic_width(child_style.margin.left + child_style.padding.left + border_left);
+        measure_children(child);
+        add_atomic_width(child_style.padding.right + border_right + child_style.margin.right);
+    };
+    measure_children = [&](const LayoutBox& container) {
+        for (const auto& child : container.children) {
+            if (!child || child->style->is_out_of_flow() || child->style->is_floated()) continue;
+            if (child->style->is_block_level() && !child->style->is_inline_block()) {
+                finish_line();
+                widest_line = std::max(
+                    widest_line,
+                    max_content_width(*child, 0.0f) +
+                        child->style->margin.left + child->style->margin.right);
+                continue;
+            }
+            append_inline(*child);
+        }
+    };
+
+    measure_children(box);
+    finish_line();
+    return constrained_outer_width(widest_line + edges);
+}
+
 void LayoutBox::layout_float(float containing_width) {
     // Floats bypass layout() (a floated inline keeps BoxType::InlineNode), so
     // percentages and the style edges have to be resolved here instead.
@@ -262,11 +438,19 @@ void LayoutBox::layout_float(float containing_width) {
         return;
     }
 
-    // Shrink-to-fit: the widest unbreakable run, capped by the available width.
+    // CSS 2.1 §10.3.5 shrink-to-fit is the same clamp used by `fit-content`:
+    // min(max-content, max(min-content, available)).
     const float horizontal = s.margin.left + s.margin.right + h_pb;
-    float natural = min_content_width(*this, 0.0f);
-    if (natural <= 0.0f) natural = std::min(available, 120.0f);
-    const float content_width = std::min(natural, std::max(0.0f, available - h_pb));
+    const float min_content = std::max(
+        0.0f, min_content_width(*this, 0.0f) - h_pb);
+    float max_content = std::max(
+        min_content, max_content_width(*this, 0.0f) - h_pb);
+    const float available_content = std::max(0.0f, available - h_pb);
+    if (max_content <= 0.0f) {
+        max_content = std::min(available_content, 120.0f);
+    }
+    const float content_width =
+        std::min(max_content, std::max(min_content, available_content));
     layout_block(content_width + horizontal);
 }
 

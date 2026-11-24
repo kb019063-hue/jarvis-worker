@@ -63,6 +63,8 @@ bool is_listed(const Element& element);
 bool is_submittable(const Element& element);
 /// What a <label> can label.
 bool is_labelable(const Element& element);
+/// Whether an HTML element is in the interactive-content category.
+bool is_interactive_content(const Element& element);
 /// An input's type: one of the known keywords in lower case, "text" for
 /// anything else or nothing.
 std::string input_type(const Element& input);

@@ -39,6 +39,7 @@ SRCS = src/common/Color.cpp \
        src/render/GifDecoder.cpp \
        src/render/Vp8Decoder.cpp src/render/Vp8Tables.cpp src/render/WebPDecoder.cpp \
        src/render/Canvas2D.cpp \
+       src/render/MediaAudioCodecs.cpp \
        src/render/WebGL.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
@@ -82,6 +83,7 @@ SRCS = src/common/Color.cpp \
        src/js/DomDocumentBindings.cpp \
        src/js/DomTraversalBindings.cpp \
        src/js/DomHtmlBindings.cpp \
+       src/js/DomMediaBindings.cpp \
        src/js/DomFormBindings.cpp \
        src/js/DomFileBindings.cpp \
        src/js/DomCryptoBindings.cpp \

@@ -9,7 +9,6 @@ domparsing/XMLSerializer-serializeToString.html	Check if an attribute with names
 domparsing/XMLSerializer-serializeToString.html	Check if the prefix of an attribute is NOT preserved in a case where neither its prefix nor its namespace URI is not already used.	serializer-standard-moved
 domparsing/XMLSerializer-serializeToString.html	Check if attribute serialization takes into account of the same prefix declared in an ancestor element	serializer-standard-moved
 domparsing/XMLSerializer-serializeToString.html	Check if "ns1" is generated even if the element already has xmlns:ns1.	serializer-not-well-formed
-domparsing/XMLSerializer-serializeToString.html	Check if a prefix bound to an empty namespace URI ("no namespace") serialize	serializer-redundant-xmlns
 domparsing/innerhtml-05.xhtml	innerHTML in XHTML	test-checks-parent-global
 domparsing/xml-serialization.xhtml	DocumentType: 'QUOTATION MARK' (U+0022)	serializer-not-well-formed
 domparsing/xml-serialization.xhtml	DocumentType: 'APOSTROPHE' (U+0027) and 'QUOTATION MARK' (U+0022)	serializer-not-well-formed

@@ -2009,26 +2009,6 @@ bool buffer_view_info(const JsValue& value, BufferViewInfo& out) {
     return false;
 }
 
-JsValue typed_array_view_from_bytes(int element_type, const std::string& bytes) {
-    auto data = std::make_shared<TypedArrayData>();
-    data->buffer = make_fixed_buffer(bytes.size());
-    data->type = static_cast<ElementType>(element_type);
-    data->length = bytes.size() / static_cast<std::size_t>(element_size(data->type));
-    if (!bytes.empty()) std::memcpy(data->buffer->bytes.data(), bytes.data(), bytes.size());
-    return make_view_object(std::move(data), realm().protos[element_type]);
-}
-
-JsValue data_view_from_bytes(const std::string& bytes) {
-    auto data = std::make_shared<DataViewData>();
-    data->buffer = make_fixed_buffer(bytes.size());
-    data->byte_length = bytes.size();
-    if (!bytes.empty()) std::memcpy(data->buffer->bytes.data(), bytes.data(), bytes.size());
-    JsObject* cell = Heap::default_heap().allocate_object();
-    cell->prototype = realm().dataview_proto;
-    cell->exotic = std::make_shared<DataViewHolder>(data);
-    return JsValue::make_object(cell);
-}
-
 JsValue typed_array_view_over(int element_type, const JsValue& buffer,
                               std::size_t byte_offset, std::size_t byte_length,
                               bool length_tracking) {

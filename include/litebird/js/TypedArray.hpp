@@ -78,13 +78,6 @@ struct BufferViewInfo {
 };
 bool buffer_view_info(const JsValue& value, BufferViewInfo& out);
 
-/// A view of a given element type over `bytes`, copied into the current realm,
-/// with the constructor's own prototype — the object a structured clone gives
-/// back. `element_type` is `BufferViewInfo::element_type`.
-JsValue typed_array_view_from_bytes(int element_type, const std::string& bytes);
-/// A `DataView` over a copy of `bytes`: the object `new DataView(buffer)` makes.
-JsValue data_view_from_bytes(const std::string& bytes);
-
 /// `new <element_type>Array(buffer, byte_offset, length)`, and
 /// `new DataView(buffer, byte_offset, byte_length)`, for a buffer that is
 /// already an object of this realm. A structured clone uses these so that a

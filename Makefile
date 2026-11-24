@@ -279,9 +279,27 @@ $(SUITE_LIST): FORCE
 	   done; } > $@.new
 	@cmp -s $@.new $@ && rm -f $@.new || mv $@.new $@
 
-$(TEST_TARGET): $(OBJS) tests/test_suite.cpp tests/js_string_stress.hpp $(SUITE_FILES) $(SUITE_LIST)
+## The suites are one translation unit: tests/test_suite.cpp and, through
+## the list above, every file of tests/suites/, 43,000 lines in all. One
+## compiler takes 64 seconds for it here and 147 in the sanitizer build in
+## CI, which is most of `make test` after any change. It is compiled to an
+## object of its own and linked afterwards. Until 24 November 2026 one
+## command did both with the engine's objects on its line, so it could only
+## begin when the last of them was there; now `make -j` compiles it beside
+## the engine (`make -j2 test` from nothing is the longer of the two, not
+## their sum). ccache is told to leave this one alone: nearly every change
+## adds a suite or touches a header it includes, so the object would be kept
+## and almost never asked for again, in a cache that is full of the engine's.
+TEST_OBJ := $(BUILD_DIR)/test_suite.o
+$(TEST_OBJ): tests/test_suite.cpp tests/js_string_stress.hpp $(SUITE_FILES) $(SUITE_LIST)
 	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) -iquote . -iquote $(BUILD_DIR) $(OBJS) tests/test_suite.cpp -o $@
+	CCACHE_DISABLE=1 $(CXX) $(CXXFLAGS) -iquote . -iquote $(BUILD_DIR) -c tests/test_suite.cpp -o $@
+
+-include $(TEST_OBJ:.o=.d)
+
+$(TEST_TARGET): $(OBJS) $(TEST_OBJ)
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(OBJS) $(TEST_OBJ) -o $@
 
 $(CROSS_ORIGIN_TARGET): $(OBJS) tests/cross_origin_windows.cpp
 	@mkdir -p $(BUILD_DIR)
@@ -587,8 +605,16 @@ fuzz:
 ## after the deep part is missing from the tree, the layout or the paint list.
 ## Then random pages that keep the parser at its nesting limit. About ten
 ## minutes on two cores.
+##
+## CI runs it as two jobs side by side, `make deep DEEP_KINDS="--runs dumps"`
+## and `make deep DEEP_KINDS="--not-runs dumps"`: every page is given to the
+## engine three ways (dumps, terminal, html5lib), each a run of its own, and
+## the dumps were 530 of 1,270 seconds of work on 24 November 2026, when the
+## one job was the third longest of a run. "Every kind but the dumps" and not
+## the two names, so that a kind added to tools/fuzz/deep_pages.py is run.
+DEEP_KINDS ?=
 deep: $(TARGET)
-	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM)
+	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM) $(DEEP_KINDS)
 
 ## Address + UB sanitizer build, then the test suite, the JavaScript, DOM and
 ## URL corpora, the XML suite, the web-platform-tests, generated XML, a fuzz
@@ -629,8 +655,14 @@ asan-core:
 
 ## The sanitizer build itself: build-asan/litebird, which every other part and
 ## asan-deep run.
+##
+## ASAN_BUILD_ALSO names more to build in the same `make`, beside the engine:
+## CI's job for the unit suites gives it build-asan/test_suite, so that the
+## one compiler the suites need (147 seconds) works while the others build
+## the engine, where it used to start when they had finished.
+ASAN_BUILD_ALSO ?=
 asan-build:
-	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" all $(ASAN_BUILD_ALSO)
 
 ## The unit suites, built and run with the sanitizers. ASAN_UNIT_STRETCHES=3
 ## runs them as three processes side by side (tests/test_suite.cpp,

@@ -314,10 +314,22 @@ static void suite_ended(const char* name) {
     g_suite_seconds.push_back({took.count(), name});
 }
 static void say_the_slowest_suites() {
-    std::sort(g_suite_seconds.begin(), g_suite_seconds.end(),
-              [](const auto& a, const auto& b) { return a.first > b.first; });
     double all = 0;
     for (const auto& suite : g_suite_seconds) all += suite.first;
+    // Where the middle of the time is, in the order of the run: the suite to
+    // name in UNIT_SUITE_CUTS (the Makefile) to make two stretches of this
+    // one that take as long as each other.
+    double before = 0;
+    const char* middle = nullptr;
+    for (const auto& suite : g_suite_seconds) {
+        if (before >= all / 2) { middle = suite.second; break; }
+        before += suite.first;
+    }
+    if (middle != nullptr)
+        std::cout << "\nHalf of the time of these suites was over when "
+                  << middle << " began.";
+    std::sort(g_suite_seconds.begin(), g_suite_seconds.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
     std::cout << "\nThe slowest suites of " << g_suite_seconds.size() << " ("
               << static_cast<long>(all + 0.5) << " s in all):";
     for (std::size_t i = 0; i < g_suite_seconds.size() && i < 5; ++i) {

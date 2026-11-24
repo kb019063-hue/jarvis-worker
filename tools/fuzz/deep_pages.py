@@ -812,6 +812,8 @@ def main() -> int:
     parser.add_argument("--depth", type=int, default=200_000, help="levels of nesting (default 200000)")
     parser.add_argument("--only", default="", help="only pages whose name contains this text")
     parser.add_argument("--runs", default="", help="comma-separated kinds of run (dumps, terminal, html5lib); default: all")
+    parser.add_argument("--not-runs", default="", help="every kind of run but these: with `--runs` of the same kinds in "
+                                                         "another process, the two are every kind there is, whatever is added")
     parser.add_argument("--random", type=int, default=0, metavar="N", help="also run N random pages at the nesting limit")
     parser.add_argument("--seed", type=int, default=20261110, help="seed of the random pages")
     parser.add_argument("--random-only", action="store_true", help="run only the random pages")
@@ -846,10 +848,18 @@ def main() -> int:
         print(f"error: {args.binary} not found (run `make`)", file=sys.stderr)
         return 2
     kinds = [kind for kind in (args.runs.split(",") if args.runs else RUNS) if kind]
-    for kind in kinds:
+    left_out = [kind for kind in args.not_runs.split(",") if kind]
+    for kind in kinds + left_out:
         if kind not in RUNS:
             print(f"error: no such kind of run: {kind} (there are: {', '.join(RUNS)})", file=sys.stderr)
             return 2
+    if args.runs and args.not_runs:
+        print("error: --runs and --not-runs are two ways to say the same thing: give one", file=sys.stderr)
+        return 2
+    kinds = [kind for kind in kinds if kind not in left_out]
+    if not kinds:
+        print("error: no kind of run is left", file=sys.stderr)
+        return 2
 
     workdir = Path(args.keep) if args.keep else Path(tempfile.mkdtemp(prefix="litebird-deep-"))
     workdir.mkdir(parents=True, exist_ok=True)

@@ -67,6 +67,7 @@ import time
 
 SENTENCE = re.compile(r"Stretch (\d+) of (\d+): its (\d+) of the (\d+) engine test suites passed\.")
 SLOWEST = re.compile(r"The slowest suites of \d+ \(\d+ s in all\): (.+)")
+HALF = re.compile(r"Half of the time of these suites was over when (\w+) began\.")
 SANITIZER = re.compile(r"ERROR: \w*Sanitizer|SUMMARY: \w*Sanitizer|runtime error: |ERROR: libFuzzer")
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
@@ -102,7 +103,9 @@ def measured(results: list[tuple[int, str]], seconds: list[float], megabytes: li
         said = SENTENCE.search(output)
         suites = f"{said.group(3)} suites" if said else "no count"
         after = " (after the others)" if index in late else ""
-        parts.append(f"stretch {index}{after}: {suites} in {seconds[index]:.0f} s, {megabytes[index]} MB at most")
+        half = HALF.search(output)
+        middle = f", half of it over when {half.group(1)} began" if half else ""
+        parts.append(f"stretch {index}{after}: {suites} in {seconds[index]:.0f} s, {megabytes[index]} MB at most{middle}")
     slowest = max(range(len(seconds)), key=lambda index: seconds[index]) if seconds else 0
     named = SLOWEST.search(results[slowest][1]) if results else None
     return (f"{len(results)} processes side by side, {whole:.0f} s in all (the slowest is stretch {slowest}); "
@@ -304,6 +307,11 @@ def self_test() -> int:
         ("the last words of a stretch, without colours",
          last_words("Running test: a... \x1b[32mPASSED\x1b[0m\nRunning test: b... x.cpp:9: Assertion `took < 5' failed.\n\n"),
          "Running test: b... x.cpp:9: Assertion `took < 5' failed."),
+        ("where the middle of a stretch's time is, when the binary says it",
+         measured([(0, "\nHalf of the time of these suites was over when wide_two began.\n" + said(0, 1, 420, 420))],
+                  [50.0], [900], 50.0),
+         "1 processes side by side, 50 s in all (the slowest is stretch 0); "
+         "stretch 0: 420 suites in 50 s, 900 MB at most, half of it over when wide_two began"),
         ("a stretch that died says no count, and the line is still written",
          measured([(134, "Running test: b... Assertion failed\n")], [12.0], [300], 12.0),
          "1 processes side by side, 12 s in all (the slowest is stretch 0); stretch 0: no count in 12 s, 300 MB at most"),

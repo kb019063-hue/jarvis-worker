@@ -6985,6 +6985,53 @@ TEST(subtle_crypto_export_and_generate_key) {
     assert(interp.eval("rejNonExt === 'InvalidAccessError'").is_truthy());
 }
 
+TEST(subtle_crypto_pbkdf2_derive_bits_and_key) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // RFC 6070 / RFC 7914 PBKDF2-HMAC-SHA256("password", "salt", 1, 32)
+    // = 120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b
+    interp.eval(R"(
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var enc = new TextEncoder();
+        var bitsHex = null;
+        var derivedKey = null;
+        var derivedOk = null;
+        crypto.subtle.importKey('raw', enc.encode('password'), 'PBKDF2', false, ['deriveBits', 'deriveKey'])
+            .then(function(base) {
+                return crypto.subtle.deriveBits({ name: 'PBKDF2', salt: enc.encode('salt'), iterations: 1, hash: 'SHA-256' }, base, 256)
+                    .then(function(bits) {
+                        bitsHex = toHex(bits);
+                        return crypto.subtle.deriveKey(
+                            { name: 'PBKDF2', salt: enc.encode('salt'), iterations: 1, hash: 'SHA-256' },
+                            base,
+                            { name: 'HMAC', hash: 'SHA-256', length: 256 },
+                            true,
+                            ['sign', 'verify']
+                        );
+                    });
+            })
+            .then(function(k) {
+                derivedKey = k;
+                return crypto.subtle.sign('HMAC', k, enc.encode('msg'));
+            })
+            .then(function(sig) {
+                return crypto.subtle.verify('HMAC', derivedKey, sig, enc.encode('msg'));
+            })
+            .then(function(v) {
+                derivedOk = v;
+            });
+    )");
+    assert(interp.eval("bitsHex === '120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b'").is_truthy());
+    assert(interp.eval("derivedKey instanceof CryptoKey && derivedOk === true").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -35911,6 +35958,7 @@ int main() {
     RUN_TEST(subtle_crypto_digest_sha1_sha384_sha512);
     RUN_TEST(subtle_crypto_hmac_sign_and_verify);
     RUN_TEST(subtle_crypto_export_and_generate_key);
+    RUN_TEST(subtle_crypto_pbkdf2_derive_bits_and_key);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

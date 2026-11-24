@@ -649,6 +649,49 @@ bool aes_gcm_decrypt(const std::vector<uint8_t>& key, const std::vector<uint8_t>
     return true;
 }
 
+std::string base64url_encode(const std::vector<uint8_t>& data) {
+    static constexpr char kTab[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    std::string out;
+    out.reserve(((data.size() + 2u) / 3u) * 4u);
+    for (std::size_t i = 0; i < data.size(); i += 3u) {
+        const uint32_t b0 = data[i];
+        const uint32_t b1 = (i + 1u < data.size()) ? data[i + 1u] : 0u;
+        const uint32_t b2 = (i + 2u < data.size()) ? data[i + 2u] : 0u;
+        const uint32_t v = (b0 << 16) | (b1 << 8) | b2;
+        out.push_back(kTab[(v >> 18) & 63u]);
+        out.push_back(kTab[(v >> 12) & 63u]);
+        if (i + 1u < data.size()) out.push_back(kTab[(v >> 6) & 63u]);
+        if (i + 2u < data.size()) out.push_back(kTab[v & 63u]);
+    }
+    return out;
+}
+
+bool base64url_decode(const std::string& s, std::vector<uint8_t>& out) {
+    auto val = [](char c) -> int {
+        if (c >= 'A' && c <= 'Z') return c - 'A';
+        if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+        if (c >= '0' && c <= '9') return c - '0' + 52;
+        if (c == '-' || c == '+') return 62;
+        if (c == '_' || c == '/') return 63;
+        return -1;
+    };
+    out.clear();
+    uint32_t acc = 0;
+    int bits = 0;
+    for (char c : s) {
+        if (c == '=') break;
+        int v = val(c);
+        if (v < 0) return false;
+        acc = (acc << 6) | static_cast<uint32_t>(v);
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back(static_cast<uint8_t>((acc >> bits) & 0xffu));
+        }
+    }
+    return true;
+}
+
 struct CryptoKeyState : JsExotic {
     std::string type = "secret";
     bool extractable = false;
@@ -746,11 +789,23 @@ void setup_subtle_crypto(Iface& I) {
             return undefined();
         };
         if (args.size() < 5) return reject_with("TypeError", "SubtleCrypto.importKey: 5 arguments required.");
-        if (to_str(args[0]) != "raw") {
-            return reject_with("NotSupportedError", "SubtleCrypto.importKey: only 'raw' format is supported.");
+        std::string fmt = to_str(args[0]);
+        if (fmt != "raw" && fmt != "jwk") {
+            return reject_with("NotSupportedError", "SubtleCrypto.importKey: only 'raw' and 'jwk' formats are supported.");
         }
         std::vector<uint8_t> key_bytes;
-        if (!read_buffer_source(r, args[1], key_bytes)) {
+        if (fmt == "jwk") {
+            if (!args[1].is_object_like()) {
+                return reject_with("TypeError", "SubtleCrypto.importKey: jwk keyData must be an object.");
+            }
+            if (to_str(args[1].get_property("kty")) != "oct") {
+                return reject_with("DataError", "SubtleCrypto.importKey: only kty 'oct' JWK is supported.");
+            }
+            std::string k_str = to_str(args[1].get_property("k"));
+            if (k_str.empty() || !base64url_decode(k_str, key_bytes)) {
+                return reject_with("DataError", "SubtleCrypto.importKey: invalid JWK 'k' field.");
+            }
+        } else if (!read_buffer_source(r, args[1], key_bytes)) {
             return reject_with("TypeError", "SubtleCrypto.importKey: keyData must be a BufferSource.");
         }
         const JsValue& alg_val = args[2];
@@ -860,13 +915,33 @@ void setup_subtle_crypto(Iface& I) {
             return undefined();
         };
         if (args.size() < 2) return reject_with("TypeError", "SubtleCrypto.exportKey: 2 arguments required.");
-        if (to_str(args[0]) != "raw") {
-            return reject_with("NotSupportedError", "SubtleCrypto.exportKey: only 'raw' format is supported.");
+        std::string fmt = to_str(args[0]);
+        if (fmt != "raw" && fmt != "jwk") {
+            return reject_with("NotSupportedError", "SubtleCrypto.exportKey: only 'raw' and 'jwk' formats are supported.");
         }
         CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
         if (!key) return reject_with("TypeError", "SubtleCrypto.exportKey: key must be a CryptoKey.");
         if (!key->extractable) {
             return reject_with("InvalidAccessError", "SubtleCrypto.exportKey: key is not extractable.");
+        }
+        if (fmt == "jwk") {
+            JsValue obj_ctor = r.window.is_object() ? r.window.get_property("Object") : JsValue();
+            JsValue jwk = js_construct(obj_ctor, {});
+            jwk.set_property("kty", str("oct"));
+            jwk.set_property("k", str(base64url_encode(key->key_bytes)));
+            jwk.set_property("ext", boolean(key->extractable));
+            if (key->hash_alg == "sha-256") jwk.set_property("alg", str("HS256"));
+            else if (key->hash_alg == "sha-384") jwk.set_property("alg", str("HS384"));
+            else if (key->hash_alg == "sha-512") jwk.set_property("alg", str("HS512"));
+            else if (key->hash_alg == "aes-gcm") {
+                jwk.set_property("alg", str(key->key_bytes.size() == 16u ? "A128GCM" : key->key_bytes.size() == 24u ? "A192GCM" : "A256GCM"));
+            } else if (key->hash_alg == "aes-cbc") {
+                jwk.set_property("alg", str(key->key_bytes.size() == 16u ? "A128CBC" : key->key_bytes.size() == 24u ? "A192CBC" : "A256CBC"));
+            } else if (key->hash_alg == "aes-ctr") {
+                jwk.set_property("alg", str(key->key_bytes.size() == 16u ? "A128CTR" : key->key_bytes.size() == 24u ? "A192CTR" : "A256CTR"));
+            }
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {jwk});
+            return undefined();
         }
         JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
         JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
@@ -1131,6 +1206,129 @@ void setup_subtle_crypto(Iface& I) {
 
     I.method("encrypt", 3, [aes_cipher_op](Realm& r, Args args) { return aes_cipher_op(r, args, true); });
     I.method("decrypt", 3, [aes_cipher_op](Realm& r, Args args) { return aes_cipher_op(r, args, false); });
+
+    I.method("wrapKey", 4, [aes_cipher_op](Realm& r, Args args) {
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const char* name, const std::string& msg) -> JsValue {
+            JsValue err = make_dom_exception(r, msg, name);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        if (args.size() < 4) return reject_with("TypeError", "SubtleCrypto.wrapKey: 4 arguments required.");
+        if (ascii_lower(to_str(args[0])) != "raw") {
+            return reject_with("NotSupportedError", "SubtleCrypto.wrapKey: only 'raw' format is supported.");
+        }
+        auto* key = state_of<CryptoKeyState>(args[1]);
+        auto* wrap_key = state_of<CryptoKeyState>(args[2]);
+        if (!key || !wrap_key) return reject_with("TypeError", "SubtleCrypto.wrapKey: CryptoKey required.");
+        if (!key->extractable) return reject_with("InvalidAccessError", "SubtleCrypto.wrapKey: key is not extractable.");
+
+        JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
+        JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
+        JsValue raw_ab = js_construct(ab_ctor, {num(static_cast<double>(key->key_bytes.size()))});
+        JsValue raw_u8 = js_construct(u8_ctor, {raw_ab});
+        for (std::size_t i = 0; i < key->key_bytes.size(); ++i) {
+            raw_u8.set_property(std::to_string(i), num(static_cast<double>(key->key_bytes[i])));
+        }
+        std::vector<JsValue> enc_args = {args[3], args[2], raw_ab};
+        return aes_cipher_op(r, enc_args, true);
+    });
+
+    I.method("unwrapKey", 7, [](Realm& r, Args args) {
+        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        auto reject_with = [&](const char* name, const std::string& msg) -> JsValue {
+            JsValue err = make_dom_exception(r, msg, name);
+            if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
+            return undefined();
+        };
+        if (args.size() < 7) return reject_with("TypeError", "SubtleCrypto.unwrapKey: 7 arguments required.");
+        if (ascii_lower(to_str(args[0])) != "raw") {
+            return reject_with("NotSupportedError", "SubtleCrypto.unwrapKey: only 'raw' format is supported.");
+        }
+        std::vector<uint8_t> wrapped;
+        if (!read_buffer_source(r, args[1], wrapped)) {
+            return reject_with("TypeError", "SubtleCrypto.unwrapKey: wrappedKey must be a BufferSource.");
+        }
+        auto* unwrap_key = state_of<CryptoKeyState>(args[2]);
+        if (!unwrap_key) return reject_with("TypeError", "SubtleCrypto.unwrapKey: unwrappingKey must be a CryptoKey.");
+
+        JsValue wrap_alg = args[3];
+        std::string wrap_name = ascii_lower(wrap_alg.is_object_like() ? to_str(wrap_alg.get_property("name")) : to_str(wrap_alg));
+
+        std::vector<uint8_t> raw_bytes;
+        if (wrap_name == "aes-ctr") {
+            std::vector<uint8_t> counter;
+            if (!read_buffer_source(r, wrap_alg.get_property("counter"), counter) || counter.size() != 16u) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-CTR counter must be 16 bytes.");
+            }
+            JsValue len_val = wrap_alg.get_property("length");
+            double len_d = !len_val.is_undefined() ? len_val.to_number() : 0.0;
+            std::size_t length_bits = (len_d >= 1.0 && len_d <= 128.0) ? static_cast<std::size_t>(len_d) : 0u;
+            if (length_bits == 0u) return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-CTR length must be 1..128.");
+            raw_bytes = aes_ctr_crypt(unwrap_key->key_bytes, counter, length_bits, wrapped);
+        } else if (wrap_name == "aes-cbc") {
+            std::vector<uint8_t> iv;
+            if (!read_buffer_source(r, wrap_alg.get_property("iv"), iv) || iv.size() != 16u) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-CBC iv must be 16 bytes.");
+            }
+            if (!aes_cbc_decrypt(unwrap_key->key_bytes, iv, wrapped, raw_bytes)) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-CBC invalid padding or ciphertext.");
+            }
+        } else if (wrap_name == "aes-gcm") {
+            std::vector<uint8_t> iv;
+            if (!read_buffer_source(r, wrap_alg.get_property("iv"), iv) || iv.empty()) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-GCM iv must be non-empty.");
+            }
+            std::vector<uint8_t> aad;
+            JsValue aad_val = wrap_alg.get_property("additionalData");
+            if (!aad_val.is_nullish()) {
+                if (!read_buffer_source(r, aad_val, aad)) {
+                    return reject_with("TypeError", "SubtleCrypto.unwrapKey: additionalData must be a BufferSource.");
+                }
+            }
+            std::size_t tag_bits = 128u;
+            JsValue tl_val = wrap_alg.get_property("tagLength");
+            if (!tl_val.is_undefined()) tag_bits = static_cast<std::size_t>(tl_val.to_number());
+            if (tag_bits != 32u && tag_bits != 64u && tag_bits != 96u && tag_bits != 104u &&
+                tag_bits != 112u && tag_bits != 120u && tag_bits != 128u) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: invalid AES-GCM tagLength.");
+            }
+            if (!aes_gcm_decrypt(unwrap_key->key_bytes, iv, aad, wrapped, tag_bits / 8u, raw_bytes)) {
+                return reject_with("OperationError", "SubtleCrypto.unwrapKey: AES-GCM authentication tag mismatch.");
+            }
+        } else {
+            return reject_with("NotSupportedError", "SubtleCrypto.unwrapKey: unsupported wrapping algorithm.");
+        }
+
+        JsValue target_alg = args[4];
+        std::string target_name = ascii_lower(target_alg.is_object_like() ? to_str(target_alg.get_property("name")) : to_str(target_alg));
+        std::string canonical_alg;
+        if (target_name == "aes-gcm") canonical_alg = "AES-GCM";
+        else if (target_name == "aes-cbc") canonical_alg = "AES-CBC";
+        else if (target_name == "aes-ctr") canonical_alg = "AES-CTR";
+        else if (target_name == "hmac") canonical_alg = "HMAC";
+        else return reject_with("NotSupportedError", "SubtleCrypto.unwrapKey: unsupported unwrappedKeyAlgorithm.");
+
+        if (canonical_alg != "HMAC" && raw_bytes.size() != 16u && raw_bytes.size() != 24u && raw_bytes.size() != 32u) {
+            return reject_with("DataError", "SubtleCrypto.unwrapKey: AES key must be 128, 192, or 256 bits.");
+        }
+
+        auto state = std::make_shared<CryptoKeyState>();
+        state->type = "secret";
+        state->extractable = args[5].is_truthy();
+        state->key_bytes = std::move(raw_bytes);
+        if (canonical_alg == "HMAC" && target_alg.is_object_like()) {
+            JsValue hash_val = target_alg.get_property("hash");
+            std::string h = ascii_lower(hash_val.is_object_like() ? to_str(hash_val.get_property("name")) : to_str(hash_val));
+            if (h == "sha-1") state->hash_alg = "SHA-1";
+            else if (h == "sha-384") state->hash_alg = "SHA-384";
+            else if (h == "sha-512") state->hash_alg = "SHA-512";
+            else state->hash_alg = "SHA-256";
+        }
+        JsValue key_obj = r.make("CryptoKey", state);
+        if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key_obj});
+        return key_obj;
+    });
 }
 
 void setup_crypto(Iface& I) {

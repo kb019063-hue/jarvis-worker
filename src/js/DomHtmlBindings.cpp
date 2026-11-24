@@ -545,9 +545,13 @@ struct SvgAnimatedRectState : JsExotic {
 };
 
 struct SvgRectState : JsExotic {
+    // A rectangle either reflects an element's `viewBox` (`box` set) or stands
+    // on its own: `getBBox()` and `createSVGRect()` make one with no attribute
+    // behind it, whose members a script may still write.
     std::shared_ptr<SvgViewBoxState> box;
+    std::array<float, 4> values{};
     bool animated{false};
-    void trace(Heap& heap) override { trace_node(heap, box->element.get()); }
+    void trace(Heap& heap) override { if (box) trace_node(heap, box->element.get()); }
 };
 
 bool svg_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f'; }
@@ -669,6 +673,7 @@ void setup_svg_rect(Iface& I) {
     for (std::size_t i = 0; i < 4; ++i) {
         I.accessor(names[i], [i](Realm&) {
             auto& state = this_state<SvgRectState>("SVGRect");
+            if (!state.box) return num(state.values[i]);
             sync_svg_view_box(*state.box);
             return num(state.box->values[i]);
         }, [i](Realm& realm, const JsValue& value) {
@@ -679,6 +684,10 @@ void setup_svg_rect(Iface& I) {
                 ? std::copysign(std::numeric_limits<float>::infinity(), number)
                 : static_cast<float>(number);
             if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated rectangle is read-only.");
+            if (!state.box) {
+                state.values[i] = converted;
+                return;
+            }
             sync_svg_view_box(*state.box);
             state.box->values[i] = converted;
             std::string text;
@@ -713,8 +722,179 @@ bool is_svg_svg(const Node& node) {
     return is_svg_node(node) && static_cast<const Element&>(node).tag_name() == "svg";
 }
 
-void setup_svg_svg_element(Iface& I) {
-    I.node_getter(&is_svg_svg, "viewBox", [](Realm& realm, Node& node) {
+// Which SVG elements carry `viewBox`. SVG 2 §7.7: "All elements that establish a
+// new viewport ... plus the marker, pattern and view elements have attribute
+// viewBox", and each of those interfaces includes SVGFitToViewBox (§4.6.9), the
+// mixin whose one attribute is `viewBox`. `g`, `rect` and the rest have none:
+// asking them for it is `undefined`, which is what a browser answers.
+bool svg_fits_to_view_box(const Node& node) {
+    if (!is_svg_node(node)) return false;
+    const std::string& tag = static_cast<const Element&>(node).tag_name();
+    return tag == "svg" || tag == "symbol" || tag == "marker" || tag == "pattern" || tag == "view";
+}
+
+// `preserveAspectRatio`, the other half of SVGFitToViewBox (SVG 2 §8.14.4,
+// §8.14.5). The attribute's value is a keyword pair -- `xMidYMid meet` by
+// default -- and the DOM exposes it as an SVGPreserveAspectRatio whose `align`
+// and `meetOrSlice` are the constants below, living in an
+// SVGAnimatedPreserveAspectRatio whose baseVal and animVal disagree only while
+// an animation runs (none here, so animVal follows baseVal).
+//
+// The two halves are not symmetric: `align` is a required keyword, while
+// `<meetOrSlice>?` is optional and defaults to `meet`. An attribute the
+// grammar rejects falls back to the initial pair `xMidYMid meet`, as §8.14.4
+// says ("using the attribute's initial value if it is not present or invalid").
+struct SvgPreserveAspectRatioState : JsExotic {
+    std::shared_ptr<Element> element;
+    bool animated{false};
+    void trace(Heap& heap) override { trace_node(heap, element.get()); }
+};
+
+struct SvgAnimatedPreserveAspectRatioState : JsExotic {
+    std::shared_ptr<Element> element;
+    void trace(Heap& heap) override { trace_node(heap, element.get()); }
+};
+
+// The alignment keywords in constant order: index 0 is UNKNOWN, which no
+// keyword names, so the table starts at NONE.
+const char* const kPreserveAspectRatioAlignKeywords[] = {
+    nullptr, "none", "xMinYMin", "xMidYMin", "xMaxYMin", "xMinYMid", "xMidYMid", "xMaxYMid",
+    "xMinYMax", "xMidYMax", "xMaxYMax",
+};
+constexpr unsigned short kPreserveAspectRatioAlignInitial = 6;      // xMidYMid
+constexpr unsigned short kMeetOrSliceMeet = 1;
+constexpr unsigned short kMeetOrSliceSlice = 2;
+constexpr unsigned short kMeetOrSliceInitial = kMeetOrSliceMeet;
+
+// Parse the attribute's grammar into the two constants. `defer` is SVG 1.1
+// syntax the current specification no longer lists; a value carrying it is
+// invalid here and falls back with everything else.
+void parse_svg_preserve_aspect_ratio(const std::string& text, unsigned short& align, unsigned short& meet_or_slice) {
+    align = kPreserveAspectRatioAlignInitial;
+    meet_or_slice = kMeetOrSliceInitial;
+    std::size_t at = 0;
+    auto skip = [&]() { while (at < text.size() && svg_space(text[at])) ++at; };
+    skip();
+    const std::size_t start = at;
+    while (at < text.size() && !svg_space(text[at])) ++at;
+    if (start == at) return;
+    const std::string first = text.substr(start, at - start);
+    if (first == "none") {
+        align = 1;
+    } else {
+        for (unsigned short i = 2; i <= 10; ++i) {
+            if (first == kPreserveAspectRatioAlignKeywords[i]) { align = i; break; }
+        }
+        if (align == kPreserveAspectRatioAlignInitial && first != "xMidYMid") return;  // invalid
+    }
+    skip();
+    if (at == text.size()) return;
+    const std::size_t second = at;
+    while (at < text.size() && !svg_space(text[at])) ++at;
+    const std::string tail = text.substr(second, at - second);
+    if (tail == "meet") meet_or_slice = kMeetOrSliceMeet;
+    else if (tail == "slice") meet_or_slice = kMeetOrSliceSlice;
+    else return;                                                                    // invalid
+    skip();
+    if (at != text.size()) return;                                                  // trailing junk
+}
+
+void sync_svg_preserve_aspect_ratio(SvgPreserveAspectRatioState& state, unsigned short& align,
+                                    unsigned short& meet_or_slice) {
+    const std::string* attribute = state.element->attribute("preserveAspectRatio");
+    parse_svg_preserve_aspect_ratio(attribute ? *attribute : std::string(), align, meet_or_slice);
+}
+
+// Write the pair back as the attribute, in the order and spacing SVG gives it.
+void write_svg_preserve_aspect_ratio(Element& element, unsigned short align, unsigned short meet_or_slice) {
+    if (align == 0) return;                        // unreachable: the setter refuses UNKNOWN
+    // §8.14.4 writes both parts, always: align, one space, then the
+    // meet-or-slice keyword. It does not make an exception for `none`, even
+    // though the attribute grammar ignores `<meetOrSlice>` after it -- so
+    // `none slice` is written and reads back as (`NONE`, `SLICE`), which is
+    // what a browser writes too.
+    std::string text = kPreserveAspectRatioAlignKeywords[align];
+    text += ' ';
+    text += meet_or_slice == kMeetOrSliceSlice ? "slice" : "meet";
+    element.set_attribute("preserveAspectRatio", text);
+}
+
+bool is_svg_preserve_aspect_ratio_holder(const Node& node) {
+    return svg_fits_to_view_box(node);
+}
+
+void setup_svg_preserve_aspect_ratio(Iface& I) {
+    const std::pair<const char*, double> constants[] = {
+        {"SVG_PRESERVEASPECTRATIO_UNKNOWN", 0}, {"SVG_PRESERVEASPECTRATIO_NONE", 1},
+        {"SVG_PRESERVEASPECTRATIO_XMINYMIN", 2}, {"SVG_PRESERVEASPECTRATIO_XMIDYMIN", 3},
+        {"SVG_PRESERVEASPECTRATIO_XMAXYMIN", 4}, {"SVG_PRESERVEASPECTRATIO_XMINYMID", 5},
+        {"SVG_PRESERVEASPECTRATIO_XMIDYMID", 6}, {"SVG_PRESERVEASPECTRATIO_XMAXYMID", 7},
+        {"SVG_PRESERVEASPECTRATIO_XMINYMAX", 8}, {"SVG_PRESERVEASPECTRATIO_XMIDYMAX", 9},
+        {"SVG_PRESERVEASPECTRATIO_XMAXYMAX", 10},
+        {"SVG_MEETORSLICE_UNKNOWN", 0}, {"SVG_MEETORSLICE_MEET", 1}, {"SVG_MEETORSLICE_SLICE", 2},
+    };
+    for (const auto& entry : constants) I.constant(entry.first, entry.second);
+
+    for (const auto& member : {std::pair<const char*, bool>{"align", false}, {"meetOrSlice", true}}) {
+        const bool is_meet_or_slice = member.second;
+        I.accessor(member.first, [is_meet_or_slice](Realm&) {
+            auto& state = this_state<SvgPreserveAspectRatioState>("SVGPreserveAspectRatio");
+            unsigned short align = 0, meet_or_slice = 0;
+            sync_svg_preserve_aspect_ratio(state, align, meet_or_slice);
+            return num(static_cast<double>(is_meet_or_slice ? meet_or_slice : align));
+        }, [is_meet_or_slice](Realm& realm, const JsValue& value) {
+            auto& state = this_state<SvgPreserveAspectRatioState>("SVGPreserveAspectRatio");
+            // WebIDL converts to unsigned short before the read-only half refuses.
+            const unsigned long converted = to_ulong(value);
+            const unsigned short number = static_cast<unsigned short>(converted & 0xFFFF);
+            if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated value is read-only.");
+            unsigned short align = 0, meet_or_slice = 0;
+            sync_svg_preserve_aspect_ratio(state, align, meet_or_slice);
+            if (is_meet_or_slice) {
+                // §8.14.4: a value with no keyword (UNKNOWN, or past SLICE) throws.
+                if (number != kMeetOrSliceMeet && number != kMeetOrSliceSlice) {
+                    throw_dom(realm, "TypeError", "Not a meet-or-slice keyword.");
+                }
+                meet_or_slice = number;
+            } else {
+                // UNKNOWN (0) has no keyword, so it cannot be written either;
+                // §8.14.4 rejects anything without an entry in the keyword
+                // table, which is 0 and everything past XMAXYMAX.
+                if (number == 0 || number > 10) throw_dom(realm, "TypeError", "Not an alignment keyword.");
+                align = number;
+            }
+            write_svg_preserve_aspect_ratio(*state.element, align, meet_or_slice);
+        });
+    }
+}
+
+void setup_svg_animated_preserve_aspect_ratio(Iface& I) {
+    for (const auto& member : {std::pair<const char*, bool>{"baseVal", false}, {"animVal", true}}) {
+        const bool animated = member.second;
+        I.getter(member.first, [animated](Realm& realm) {
+            auto& state = this_state<SvgAnimatedPreserveAspectRatioState>("SVGAnimatedPreserveAspectRatio");
+            return cached(JsValue::current_this(), animated ? "svgParAnim" : "svgParBase", [&]() {
+                auto part = std::make_shared<SvgPreserveAspectRatioState>();
+                part->element = state.element;
+                part->animated = animated;
+                return realm.make("SVGPreserveAspectRatio", part);
+            });
+        });
+    }
+}
+
+void setup_svg_fit_to_view_box(Iface& I) {
+    // SVGFitToViewBox has two attributes, and both live here: `viewBox` and
+    // `preserveAspectRatio` (SVG 2 §4.6.9). The elements that include it are
+    // the same five, so one setup serves both.
+    I.node_getter(&is_svg_preserve_aspect_ratio_holder, "preserveAspectRatio", [](Realm& realm, Node& node) {
+        return cached(wrap(realm, node), "svgPAR", [&]() {
+            auto state = std::make_shared<SvgAnimatedPreserveAspectRatioState>();
+            state->element = shared(static_cast<Element&>(node));
+            return realm.make("SVGAnimatedPreserveAspectRatio", state);
+        });
+    });
+    I.node_getter(&svg_fits_to_view_box, "viewBox", [](Realm& realm, Node& node) {
         return cached(wrap(realm, node), "svgViewBox", [&]() {
             auto state = std::make_shared<SvgAnimatedRectState>();
             state->box = std::make_shared<SvgViewBoxState>();
@@ -723,6 +903,38 @@ void setup_svg_svg_element(Iface& I) {
         });
     });
 }
+
+// A graphics element's bounding box: the geometry the layout gave it, as an
+// SVGRect of its own. SVG 2 §4.4.2 defines it in current user space; with no
+// transforms implemented that is the painted border box, which is what the
+// layout already computes for getBoundingClientRect.
+bool is_svg_graphics_element(const Node& node) {
+    if (!is_svg_node(node)) return false;
+    const std::string& tag = static_cast<const Element&>(node).tag_name();
+    return tag == "svg" || tag == "symbol" || tag == "marker" || tag == "pattern" || tag == "view" ||
+           tag == "g" || tag == "rect" || tag == "circle" || tag == "ellipse" || tag == "line" ||
+           tag == "path" || tag == "polygon" || tag == "polyline" || tag == "text" || tag == "tspan" ||
+           tag == "textPath" || tag == "use" || tag == "image" || tag == "foreignObject" || tag == "a";
+}
+
+void setup_svg_graphics_element(Iface& I) {
+    I.node_method(&is_svg_graphics_element, "getBBox", 0, [](Realm& realm, Node& node, Args) {
+        auto rect = std::make_shared<SvgRectState>();
+        const Rect box = static_cast<Element&>(node).bounding_box();
+        rect->values = {static_cast<float>(box.x), static_cast<float>(box.y),
+                        static_cast<float>(box.width), static_cast<float>(box.height)};
+        return realm.make("SVGRect", rect);
+    });
+}
+
+// `createSVGRect()` is SVGSVGElement's, SVG 2 §5.13.2: a fresh empty rect.
+void setup_svg_svg_element(Iface& I) {
+    setup_svg_fit_to_view_box(I);
+    I.method("createSVGRect", 0, [](Realm& realm, Args) {
+        return realm.make("SVGRect", std::make_shared<SvgRectState>());
+    });
+}
+
 
 void setup_svg_element(Iface& I) {
     I.node_getter(&is_svg_node, "className", [](Realm& r, Node& self) {
@@ -1543,6 +1755,149 @@ JsValue canvas_to_blob(Realm& r, Element& el, Args args) {
         },
         {js_roots({callback})});
     return undefined();
+}
+
+/// §4.12.5.1's `createPattern(image, repetition)`, bound here because the
+/// `CanvasPattern` it answers is a script object and only this file makes
+/// those.
+///
+/// **What this phase answers, and what it does not.** The method exists, takes
+/// the two arguments, and answers `null` in each of the two cases the standard
+/// makes `null`: an unrecognised `repetition`, which is step 2 (the step's
+/// wording is "throw" in older drafts and "return null" in HTML's current
+/// text), and an image this engine cannot read. It does **not** yet paint the
+/// tile when it is assigned to `fillStyle`: a pattern colour is sampled through
+/// the paint the rasteriser keeps, and a `CanvasPattern` value has no slot
+/// there — `fillStyle` accepts a `CanvasGradient` and a colour, and a pattern
+/// needs a third kind. That is a separate change to `JsValue`'s canvas paint
+/// and to `rasterize_paths`, and it is named in the finding rather than
+/// half-done here. A page that gets a `CanvasPattern` from this method and
+/// assigns it gets the same silent no-op it got from the method being
+/// `undefined`, and now a pattern object to inspect — which is the smaller
+/// lie, but it is still not the whole method.
+void install_canvas_create_pattern(Realm& r, JsValue context_object,
+                                   const std::shared_ptr<CanvasRenderingContext2D>& context) {
+    auto get_ctx = [context]() -> CanvasRenderingContext2D* { return context.get(); };
+    context_object.set_property("createPattern", make_function(r, "createPattern", 2,
+        [get_ctx, &r](Realm&, Args args) {
+            require_args(args, 2, "CanvasRenderingContext2D.createPattern");
+            // A source this engine cannot read is `null`, which is what a
+            // source that is not an image is: §4.12.5.1's "check the
+            // usability of the image argument" failing takes this branch.
+            DrawSource source;
+            if (!draw_source_from(args[0], source) || !source.pixels) return null();
+            const std::string repetition = args[1].to_string();
+            auto pattern = get_ctx()->create_pattern(source.pixels, repetition);
+            if (!pattern) return null();
+            JsValue object = JsValue::make_object();
+            // The object carries the pattern as its payload, which is how
+            // `fillStyle` recognises it: `JsValue::set_property` looks for
+            // `canvas_pattern_value()` beside `canvas_gradient_value()`.
+            object.set_canvas_pattern_value(pattern);
+            object.set_property("setTransform", make_function(r, "setTransform", 0,
+                [pattern, &r](Realm&, Args set_args) {
+                    // §4.12.5.1: no argument (or null) clears it; six numbers
+                    // are the matrix in column order, which is the same order
+                    // `setTransform` on the context takes.
+                    if (set_args.empty() || set_args[0].is_nullish()) {
+                        pattern->transform = TransformMatrix2D::identity();
+                    } else if (set_args.size() >= 6) {
+                        pattern->transform = TransformMatrix2D{
+                            static_cast<float>(set_args[0].to_number()),
+                            static_cast<float>(set_args[1].to_number()),
+                            static_cast<float>(set_args[2].to_number()),
+                            static_cast<float>(set_args[3].to_number()),
+                            static_cast<float>(set_args[4].to_number()),
+                            static_cast<float>(set_args[5].to_number())};
+                    }
+                    return undefined();
+                }));
+            return object;
+        }));
+}
+
+/// Removes an **own data property** from `object`, so that a live read falls
+/// through to `JsValue::get_property`'s canvas fast-path. `clear_slot` is not
+/// this: it erases the hidden `%name` slot, and the property the context object
+/// shadows the fast-path with is an ordinary one called `name`.
+void drop_own(JsValue& object, const std::string& name) {
+    if (JsObject* cell = object.property_cell()) cell->properties.erase(name);
+}
+
+/// §4.12.5.1's `reset()`, bound here rather than in `Canvas2D.cpp` because
+/// four of the properties it resets were copied onto **this object** by
+/// `CanvasRenderingContext2D::to_js_value` — `fillStyle`, `strokeStyle`,
+/// `lineWidth` and `globalCompositeOperation` are own data properties, and an
+/// own property shadows the live read in `JsValue::get_property`. The
+/// renderer's `reset()` puts its fields back and this writes the same four
+/// back to the object, so that the object and the renderer agree afterwards.
+/// Without the second half the context keeps answering with the colour it had
+/// before the reset, which is what a test that only checks `.lineWidth` catches
+/// and one that only checks that `reset` exists does not.
+void install_canvas_reset(Realm& r, JsValue context_object,
+                          const std::shared_ptr<CanvasRenderingContext2D>& context) {
+    auto get_ctx = [context]() -> CanvasRenderingContext2D* { return context.get(); };
+    // The object is captured through a shared_ptr because a native function's
+    // body must be callable when it is const, and writing these four
+    // properties is a write to the object.
+    auto self = std::make_shared<JsValue>(context_object);
+    context_object.set_property("reset", make_function(r, "reset", 0,
+        [get_ctx, self](Realm&, Args) {
+            get_ctx()->reset();
+            // The four `to_js_value` copies, from the state reset left.
+            const CanvasRenderingContext2D* c = get_ctx();
+            // `reset()` leaves a colour, never a paint, so both are colours here;
+            // a slot left from before is cleared so the read cannot find one.
+            drop_own(*self, "fillStyle");
+            drop_own(*self, "strokeStyle");
+            self->set_property("fillStyle", JsValue::make_string(c->fill_style.to_hex()));
+            self->set_property("strokeStyle", JsValue::make_string(c->stroke_style.to_hex()));
+            self->set_property("lineWidth", JsValue::make_number(c->line_width));
+            self->set_property("globalCompositeOperation",
+                              JsValue::make_string(c->global_composite_operation));
+            return undefined();
+        }));
+}
+
+/// `save()` and `restore()`, wrapped here for the same reason `reset()` is:
+/// `to_js_value` copied `fillStyle` and `strokeStyle` onto **this object** as
+/// own data properties, and an own property shadows the live read. The renderer
+/// puts the saved styles back; without writing them to the object afterwards the
+/// context keeps answering with the colour it had inside the `save()` — measured
+/// with a gradient too, so this was wrong before patterns existed: a gradient set
+/// before `save()`, a colour inside it, and `restore()` left `g.fillStyle` as
+/// the colour while the renderer painted the gradient.
+void install_canvas_save_restore(Realm& r, JsValue context_object,
+                                 const std::shared_ptr<CanvasRenderingContext2D>& context) {
+    auto get_ctx = [context]() -> CanvasRenderingContext2D* { return context.get(); };
+    auto self = std::make_shared<JsValue>(context_object);
+    // The two styles are the only state `to_js_value` copies that `save()` can
+    // change; `lineWidth` and `globalCompositeOperation` are here for the day a
+    // saved state carries them, and cost two writes.
+    auto sync = [get_ctx, self]() {
+        const CanvasRenderingContext2D* c = get_ctx();
+        // A style is a colour, a gradient or a pattern, and only the first has a
+        // string form here. Writing `to_hex()` over a restored gradient or
+        // pattern would replace the paint with the colour it happens to have
+        // beside it, which is a wrong drawing and not a wrong string: measured
+        // as `save()`, `fillStyle = pattern`, `restore()` leaving the canvas
+        // black. So a style that is not a colour has its own property **removed**
+        // and the live read in `JsValue::get_property` answers it, which is what
+        // answers a gradient set by `createLinearGradient` today.
+        const bool fill_is_colour = !c->fill_gradient && !c->fill_pattern;
+        const bool stroke_is_colour = !c->stroke_gradient && !c->stroke_pattern;
+        if (fill_is_colour) self->set_property("fillStyle", JsValue::make_string(c->fill_style.to_hex()));
+        else drop_own(*self, "fillStyle");
+        if (stroke_is_colour) self->set_property("strokeStyle", JsValue::make_string(c->stroke_style.to_hex()));
+        else drop_own(*self, "strokeStyle");
+        self->set_property("lineWidth", JsValue::make_number(c->line_width));
+        self->set_property("globalCompositeOperation",
+                           JsValue::make_string(c->global_composite_operation));
+    };
+    context_object.set_property("save", make_function(r, "save", 0,
+        [get_ctx, sync](Realm&, Args) { get_ctx()->save(); (void)sync; return undefined(); }));
+    context_object.set_property("restore", make_function(r, "restore", 0,
+        [get_ctx, sync](Realm&, Args) { get_ctx()->restore(); sync(); return undefined(); }));
 }
 
 // --- WebGL 1.0 / 2.0 WebIDL bindings (Khronos WebGL 1.0 §5 / 2.0 §3) --------
@@ -2652,6 +3007,11 @@ void setup_canvas(Iface& I) {
                 // added here rather than in Canvas2D.cpp.
                 install_image_data_methods(r, object, backing);
                 install_draw_image(r, object, backing);
+                // Phase 280: `reset()` and `createPattern()` are object-level
+                // state, so they are installed here with the rest.
+                install_canvas_reset(r, object, backing);
+                install_canvas_save_restore(r, object, backing);
+                install_canvas_create_pattern(r, object, backing);
                 return object;
             });
         }
@@ -3487,9 +3847,35 @@ void register_html_interfaces() {
     register_interface({"SVGAnimatedString", nullptr, setup_svg_animated_string, nullptr, 0, nullptr});
     register_interface({"SVGAnimatedRect", nullptr, setup_svg_animated_rect, nullptr, 0, nullptr});
     register_interface({"SVGRect", nullptr, setup_svg_rect, nullptr, 0, nullptr});
+    register_interface({"SVGPreserveAspectRatio", nullptr, setup_svg_preserve_aspect_ratio, nullptr, 0, nullptr});
+    register_interface({"SVGAnimatedPreserveAspectRatio", nullptr, setup_svg_animated_preserve_aspect_ratio, nullptr, 0, nullptr});
     register_interface({"SVGElement", "Element", setup_svg_element, nullptr, 0, nullptr});
-    register_interface({"SVGGraphicsElement", "SVGElement", nullptr, nullptr, 0, nullptr});
+    register_interface({"SVGGraphicsElement", "SVGElement", setup_svg_graphics_element, nullptr, 0, nullptr});
     register_interface({"SVGSVGElement", "SVGGraphicsElement", setup_svg_svg_element, nullptr, 0, nullptr});
+    register_interface({"SVGSymbolElement", "SVGGraphicsElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
+    register_interface({"SVGMarkerElement", "SVGElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
+    register_interface({"SVGPatternElement", "SVGElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
+    register_interface({"SVGViewElement", "SVGElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
+    // The graphics elements: place in the chain is all that is set here, because
+    // `getBBox` is SVGGraphicsElement's and is reached through the parent.
+    for (const char* name : {"SVGGElement", "SVGRectElement", "SVGCircleElement", "SVGEllipseElement",
+                             "SVGLineElement", "SVGPathElement", "SVGPolygonElement", "SVGPolylineElement",
+                             "SVGTextElement", "SVGTSpanElement", "SVGTextPathElement", "SVGImageElement",
+                             "SVGForeignObjectElement", "SVGUseElement", "SVGAElement", "SVGSwitchElement"}) {
+        register_interface({name, "SVGGraphicsElement", nullptr, nullptr, 0, nullptr});
+    }
+    // Interfaces of their own, but not graphics elements: they inherit
+    // SVGElement, so none of them has `getBBox()`.
+    for (const char* name : {"SVGDefsElement", "SVGDescElement", "SVGMetadataElement", "SVGStyleElement",
+                             "SVGScriptElement", "SVGStopElement", "SVGLinearGradientElement",
+                             "SVGRadialGradientElement", "SVGClipPathElement", "SVGMaskElement",
+                             "SVGFilterElement", "SVGFEGaussianBlurElement", "SVGFEOffsetElement",
+                             "SVGFEBlendElement", "SVGFEColorMatrixElement", "SVGFEFloodElement",
+                             "SVGFECompositeElement", "SVGFEMergeElement", "SVGFEImageElement",
+                             "SVGFETileElement", "SVGFETurbulenceElement", "SVGFEDropShadowElement",
+                             "SVGAnimateElement", "SVGSetElement", "SVGAnimateTransformElement"}) {
+        register_interface({name, "SVGElement", nullptr, nullptr, 0, nullptr});
+    }
     register_interface({"SVGTitleElement", "SVGElement", nullptr, nullptr, 0, nullptr});
 
     for (const auto& simple : kSimple) {

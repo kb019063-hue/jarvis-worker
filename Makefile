@@ -6,6 +6,7 @@ ASAN_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP \
              -fsanitize=address,undefined -fno-omit-frame-pointer
 
 SRCS = src/common/Color.cpp \
+       src/common/TerminalText.cpp \
        src/dom/Node.cpp \
        src/dom/Selector.cpp \
        src/dom/FormState.cpp \
@@ -129,7 +130,7 @@ XML_FLOOR ?= 1718
 # Subtests of the web-platform-tests in tests/wpt that must pass. Each of the
 # others is listed with its reason in tests/wpt/expected-failures.txt; the
 # runner also fails on one that fails and is not listed.
-WPT_FLOOR ?= 9569
+WPT_FLOOR ?= 9570
 # Generated documents for `make diff-xml`, and trees for its round trip; the
 # sanitizer build runs fewer of each.
 XML_DIFF_COUNT ?= 4000
@@ -222,6 +223,24 @@ verify-worker-terminal-safety: $(TARGET)
 .PHONY: verify-js-error-terminal-safety
 verify-js-error-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_js_error_terminal.py --binary $(TARGET)
+
+## Check CLI file and navigation error output without displaying attack bytes.
+.PHONY: verify-cli-error-terminal-safety
+verify-cli-error-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_cli_error_terminal.py --binary $(TARGET)
+
+## Check that a page's own text cannot command the terminal through a dump.
+.PHONY: verify-page-text-terminal-safety
+verify-page-text-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_page_text_terminal.py --binary $(TARGET)
+
+## Check CSS/paint dumps and the shared UTF-8 terminal boundary.
+.PHONY: verify-css-paint-terminal-safety
+verify-css-paint-terminal-safety: $(TARGET) $(BUILD_DIR)/terminal_text_probe
+	@python3 tools/security/verify_css_paint_terminal.py --binary $(TARGET) --probe $(BUILD_DIR)/terminal_text_probe
+
+$(BUILD_DIR)/terminal_text_probe: tools/security/terminal_text_probe.cpp $(BUILD_DIR)/common/TerminalText.o
+	$(CXX) $(CXXFLAGS) $^ -o $@
 
 $(BUILD_DIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
@@ -493,6 +512,15 @@ diff-strings: $(TARGET)
 ## Node.js for the cross-check (`--no-node` skips it).
 verify-encoding-tables: $(TARGET)
 	@python3 tools/conformance/verify_encoding_tables.py --build
+
+## Every table held to the standard that publishes it, not to this engine.
+## The tool above asks each decoder whether it agrees with the table it reads,
+## and a decoder and its table can be wrong together. This one fetches
+## `whatwg/encoding`'s own index files at a pinned digest and compares all
+## 91,441 positions with `src/net/TextEncodingTables.cpp`. Needs the network
+## unless `build/whatwg-encoding-index/` is already populated (`--offline`).
+verify-encoding-index: $(TARGET)
+	@python3 tools/conformance/verify_encoding_index.py
 
 ## Differential + seeded fuzz verification of RegExp Unicode 17.0 properties,
 ## v (unicodeSets) set operations, d (hasIndices), and ES2025 modifiers,

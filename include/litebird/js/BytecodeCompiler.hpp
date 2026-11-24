@@ -22,6 +22,12 @@ public:
 private:
     void compile_stmt(const Stmt* stmt);
     void compile_expr(const Expr* expr);
+    /// `switch (d) { … }` (ECMA-262 14.13): the discriminant is evaluated
+    /// once, each clause's test is evaluated in source order until the first
+    /// strict equality holds, and the body then runs from that clause to the
+    /// end (fall-through), with a plain `break` leaving the switch. One block
+    /// scope surrounds the whole switch, as in the tree-walker.
+    void compile_switch(const SwitchStmt* stmt);
     static void require_simple_function(const FunctionNode& node);
 
     void begin_scope();
@@ -64,6 +70,11 @@ private:
         bool continue_is_forward{false};
         std::vector<size_t> breaks;        ///< jumps out, patched when the loop ends
         std::vector<size_t> continues;     ///< jumps to the test/update
+        /// A `switch` pushes a context so that a plain `break` jumps to the
+        /// end of the switch. It is not a loop: an unlabelled `continue`
+        /// inside a switch (ECMA-262 14.13.4.1) targets the enclosing loop,
+        /// so a `continue` skips over this context.
+        bool is_switch{false};
     };
 
     std::shared_ptr<BytecodeFunction> m_function;

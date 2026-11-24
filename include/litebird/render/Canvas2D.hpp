@@ -29,10 +29,14 @@ struct ColorStop {
 
 class CanvasGradient {
 public:
-    enum class Type { Linear, Radial } type{Type::Linear};
+    enum class Type { Linear, Radial, Conic } type{Type::Linear};
     // Linear coordinates: (x0, y0) -> (x1, y1)
     // Radial coordinates: start circle (x0, y0, r0) -> end circle (x1, y1, r1)
+    // Conic: the centre is (x0, y0) and `start_angle` (radians, from the
+    // positive x axis, clockwise as the canvas' y axis grows down) is where
+    // `t` is 0. §4.12.5.1's `createConicGradient` is the only way to make one.
     float x0{0.0f}, y0{0.0f}, x1{0.0f}, y1{0.0f};
+    float start_angle{0.0f};
     float r0{0.0f}, r1{0.0f};
     GradientSpread spread{GradientSpread::Pad};
     TransformMatrix2D transform{TransformMatrix2D::identity()};
@@ -47,6 +51,46 @@ public:
 
     Color sample_at(float px, float py) const;
     JsValue to_js_value(std::shared_ptr<CanvasGradient> self);
+};
+
+/// §4.12.5.1's `CanvasPattern`: a tile drawn from an image or a canvas, with
+/// a repetition rule. It is not a `CanvasGradient`, so `fillStyle` needs a
+/// second kind of paint; `sample_at` answers a device-space point's colour
+/// the same way so that the rasteriser need not know which it has.
+class CanvasPattern {
+public:
+    /// "repeat" | "repeat-x" | "repeat-y" | "no-repeat". The empty string is
+    /// the `null` a `createPattern` with an unknown repetition returns.
+    std::string repetition{"repeat"};
+    int width{0};
+    int height{0};
+    std::vector<uint32_t> pixels; // 0xAARRGGBB, the tile
+    /// Whether the source the tile came from was origin-clean; a pattern made
+    /// from a tainted canvas taints what it paints.
+    bool origin_clean{true};
+    /// §4.12.5.1's `CanvasPattern.setTransform`, applied to the tile before it
+    /// is sampled. Identity until a page sets one.
+    TransformMatrix2D transform{TransformMatrix2D::identity()};
+    /// The colour of the tile at a **device-space** point, through the
+    /// pattern's own `setTransform` and its repetition rule. The caller has not
+    /// applied the context's CTM: a pattern is placed in device space.
+    /// `smooth` is the context's `imageSmoothingEnabled` when the pattern is
+    /// drawn; it does not live on the pattern because one pattern may be drawn
+    /// through two contexts with different settings, and the standard puts the
+    /// setting on the context.
+    /// `scale` is how much one tile pixel is magnified on the canvas — 1 at a
+    /// 1:1 draw, which is the only case that must be exact whatever `smooth`
+    /// says.
+    Color sample_at_device(float x, float y, bool smooth = false, float scale = 1.0f) const;
+    Color sample_at(int px, int py) const;
+    /// The tile's colour at a **tile-space** point, taken bilinearly from the
+    /// four pixels around it when `smooth` is set and by the nearest pixel when
+    /// it is not. Below 1:1 a filtered column is what keeps a shrunken tile from
+    /// dropping whole rows; above it, the pixels are blended rather than
+    /// repeated in blocks. The weight is the fraction of the point's position
+    /// inside the four-pixel cell, and an edge pixel is clamped to itself so the
+    /// tile does not bleed from the far side.
+    Color sample_filtered(float x, float y, bool smooth) const;
 };
 
 class CanvasRenderingContext2D {
@@ -109,13 +153,44 @@ public:
     // Gradients
     std::shared_ptr<CanvasGradient> fill_gradient{nullptr};
     std::shared_ptr<CanvasGradient> stroke_gradient{nullptr};
+    // Patterns. A style is one or the other; setting `fillStyle` to a colour
+    // clears both, and the rasteriser prefers the gradient when both are set.
+    std::shared_ptr<CanvasPattern> fill_pattern{nullptr};
+    std::shared_ptr<CanvasPattern> stroke_pattern{nullptr};
+    /// §4.12.5.1's `imageSmoothingEnabled` and `imageSmoothingQuality`. True and
+    /// `"low"` are the initial values. They are the whole difference between an
+    /// image sampled by its nearest pixel and one interpolated, and before
+    /// Phase 382 neither property existed and every sample was nearest.
+    bool image_smoothing_enabled{true};
+    std::string image_smoothing_quality{"low"};
+    /// The script object of the gradient or pattern a style was set to, so that
+    /// reading `fillStyle` back answers **that object** — §4.12.5.1 says the
+    /// getter returns the object that was set — and not a marker or a colour.
+    /// Undefined when the style is a colour. `save()`/`restore()` carry it, and
+    /// `reset()` clears it.
+    JsValue fill_paint;
+    JsValue stroke_paint;
 
     std::shared_ptr<CanvasGradient> create_linear_gradient(float x0, float y0, float x1, float y1);
     std::shared_ptr<CanvasGradient> create_radial_gradient(float x0, float y0, float r0, float x1, float y1, float r1);
+    /// §4.12.5.1's `createConicGradient(startAngle, x, y)`.
+    std::shared_ptr<CanvasGradient> create_conic_gradient(float start_angle, float x, float y);
+    /// §4.12.5.1's `createPattern(image, repetition)`. Null when the image is
+    /// one this engine cannot read, or when `repetition` is not one of the
+    /// four strings — which the binding turns into the `null` a page sees.
+    std::shared_ptr<CanvasPattern> create_pattern(const std::shared_ptr<ImageData>& image,
+                                                 const std::string& repetition);
+    size_t dbg_stack() const { return m_state_stack.size(); }
 
     // State stack
     void save();
     void restore();
+    /// HTML §4.12.5.1's `reset()`: the drawing state back to its initial
+    /// values, the current default path emptied, the transformation matrix
+    /// identity, the clip region empty, and the state stack emptied. It is
+    /// not `restore()`, which puts back the state that `save()` recorded:
+    /// `reset()` ignores what was saved.
+    void reset();
 
     // Current Transformation Matrix (CTM)
     void translate(float tx, float ty);
@@ -134,6 +209,11 @@ public:
     // Rectangles
     void fill_rect(float x, float y, float w, float h);
     void stroke_rect(float x, float y, float w, float h);
+    /// Whether `(x, y)` is on the stroke of the current default path: within
+    /// half the line width of one of its segments, which is the region
+    /// `stroke()` would ink. The same device-space geometry `is_point_in_path`
+    /// walks, so the two answer consistently for one path.
+    bool is_point_in_stroke(float x, float y) const;
     void clear_rect(float x, float y, float w, float h);
 
     // Paths
@@ -216,6 +296,12 @@ private:
         std::string text_baseline;
         std::shared_ptr<CanvasGradient> fill_gradient;
         std::shared_ptr<CanvasGradient> stroke_gradient;
+        std::shared_ptr<CanvasPattern> fill_pattern;
+        std::shared_ptr<CanvasPattern> stroke_pattern;
+        JsValue fill_paint;
+        JsValue stroke_paint;
+        bool image_smoothing_enabled{true};
+        std::string image_smoothing_quality;
         TransformMatrix2D ctm;
         std::vector<uint8_t> clip_mask;
     };
@@ -261,7 +347,11 @@ private:
         FillRule rule,
         const Color& solid_color,
         const std::shared_ptr<CanvasGradient>& gradient,
-        const TransformMatrix2D& grad_inv_ctm
+        const TransformMatrix2D& grad_inv_ctm,
+        /// §4.12.5.1's pattern paint, when the style is a `CanvasPattern`. It is
+        /// given the same device-space point the gradient is, so the rasteriser
+        /// need not know which of the three the style is.
+        const std::shared_ptr<CanvasPattern>& pattern = nullptr
     );
     void rasterize_paths_to_mask(
         const std::vector<SubPath>& paths,

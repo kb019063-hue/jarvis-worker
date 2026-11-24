@@ -370,3 +370,26 @@ Only spans resolved to Latin are affected. Class-zero and script boundaries
 still stop ordering, and equal classes stay stable. Other scripts, alternate
 partial decomposition and source clusters remain open. Details are in
 `docs/phases/279-leading-marks.md`.
+
+## Arabic mark placement and composite targets (Phase 292)
+
+`arabic_marks_diagnostic.py` extends the ordinary strict comparator with 23
+Arabic probes: mark ligatures, joining, lam-alef, controls and decomposed or
+precomposed Arabic starters. `--matrix` instead runs all 486 pairs of nine
+marks on six bases. It retains raw and placement reports and exits 1 for any
+raw mismatch or unsupported case. For DejaVu Sans and HarfBuzz 12.1.0, the
+repair improves same-placement results **18/23 → 23/23** and **360/486 →
+484/486**; exact raw selected results move 4/23 → 5/23. Remaining raw
+mismatches cannot be called exact conformance.
+
+```sh
+build/shaping-venv/bin/python tools/shaping/arabic_marks_diagnostic.py \
+  --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf --output build/arabic.json
+build/shaping-venv/bin/python tools/shaping/arabic_marks_diagnostic.py --matrix \
+  --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf --output build/arabic-matrix.json
+```
+
+Sans Bold also reaches 23/23 placements; Sans Mono remains 18/23 different,
+including nonzero mark advances. The two remaining Sans matrix differences
+expose Arabic modified-class ordering. See `docs/phases/292-arabic-mark-placement.md`
+for exact hashes, before/after data, synthetic tests and limitations.

@@ -793,6 +793,71 @@ void install_object_builtins(JsIntrinsics& realm) {
     // ---- Object.prototype -------------------------------------------------
     JsObject* op = realm.object_proto;
 
+    // `__proto__` is Annex B.2.2.1: an accessor on `Object.prototype` whose
+    // getter answers the receiver's [[Prototype]] and whose setter changes it.
+    //
+    // It used to be nowhere. `JsValue::get_property` synthesised the name for
+    // every object before consulting a property table, and the assignment path
+    // did the same (`JsValue.cpp`, `sets_prototype`), so `({}).__proto__` and
+    // `o.__proto__ = p` worked while every reflection API said the property did
+    // not exist: no descriptor, `hasOwnProperty` false, `in` false, and
+    // `Object.getOwnPropertyNames(Object.prototype)` without it. Twenty test262
+    // cases read it through one of those, and `propertyHelper.js` reads the
+    // descriptor first, so the failure named neither the property nor the
+    // defect.
+    //
+    // The pair below spells out the same two behaviours the synthesis had, so
+    // that with the property installed nothing about the *behaviour* changes:
+    // only that the property can now be found, described, shadowed and
+    // replaced, which is what having a property means. The synthesis stays in
+    // `JsValue` as the answer for a receiver that has no such own accessor --
+    // an object whose prototype is not `Object.prototype` still reaches it
+    // through the chain, which is where the standard puts it.
+    JsValue proto_getter = js_make_native("get __proto__", 0, [](Args) {
+        const JsValue receiver = self();
+        // Annex B.2.2.1.1 step 1: `RequireObjectCoercible(this value)`.
+        if (receiver.is_undefined() || receiver.type == JsType::Null) {
+            js_throw_type_error("Object.prototype.__proto__ getter called on null or undefined");
+        }
+        if (receiver.is_object_like() || receiver.is_function()) {
+            JsObject* proto = receiver.prototype_object();
+            return proto ? JsValue::make_object(proto) : JsValue::make_null();
+        }
+        return JsValue::make_undefined();
+    });
+    JsValue proto_setter = js_make_native("set __proto__", 1, [](Args args) {
+        const JsValue receiver = self();
+        const JsValue value = js_arg(args, 0);
+        // Annex B.2.2.1.2 step 1: `RequireObjectCoercible(this value)`. A plain
+        // `return` here would answer undefined where the standard throws, and
+        // `set.call(undefined)` is a case test262 asks about by name.
+        if (receiver.is_undefined() || receiver.type == JsType::Null) {
+            js_throw_type_error("Object.prototype.__proto__ setter called on null or undefined");
+        }
+        // Step 3: anything but an object or null is ignored, and the prototype
+        // does not move.
+        if (!receiver.is_object_like() && !receiver.is_function()) return JsValue::make_undefined();
+        if (!value.is_object_like() && value.type != JsType::Null) return JsValue::make_undefined();
+        // js_set_prototype is the one place the engine changes [[Prototype]],
+        // and it is what the synthesis in `JsValue::set_property` calls. Going
+        // through it rather than assigning the property keeps this from
+        // re-entering the setter it is the body of.
+        JsObject* cell = receiver.property_cell(true);
+        if (!cell) cell = receiver.function_cell();
+        if (!cell) return JsValue::make_undefined();
+        JsObject* target = value.type == JsType::Null ? nullptr : value.as_prototype();
+        if (!js_set_prototype(cell, target)) {
+            js_throw_error(JsErrorKind::TypeError,
+                           cell->extensible ? "Cyclic __proto__ value" : "Object is not extensible");
+        }
+        return JsValue::make_undefined();
+    });
+    // A getter and a setter have [[Call]] and not [[Construct]].
+    proto_getter.function_cell()->not_constructor = true;
+    proto_setter.function_cell()->not_constructor = true;
+    JsValue::make_object(op).define_accessor("__proto__", proto_getter, proto_setter,
+                                             PropertyMap::Configurable);
+
     // Annex B.3.3's legacy accessor methods use ordinary property descriptors.
     // Keep the setter when a getter is added to an existing accessor (and
     // vice versa) by routing the update through the same validation path as
@@ -1450,6 +1515,18 @@ void install_object_builtins(JsIntrinsics& realm) {
 // Error and its subclasses
 // ---------------------------------------------------------------------------
 
+JsObject* JsIntrinsics::aggregate_error_prototype() {
+    if (aggregate_error_proto) return aggregate_error_proto;
+    JsObject* proto = Heap::default_heap().allocate_object();
+    // `[[Prototype]]` is `Error.prototype`, and it is filled in by
+    // install_error_builtins(): that is where `Error.prototype` is complete,
+    // and §20.5.7.3 leaves `name` and `message` to the constructor's install.
+    proto->prototype = error_protos[static_cast<int>(JsErrorKind::Error)];
+    m_roots.push_back(JsValue::make_object(proto));
+    aggregate_error_proto = proto;
+    return proto;
+}
+
 void install_error_builtins(JsIntrinsics& realm) {
     JsValue error_ctor;     // `Error`, the prototype of the other six constructors
     for (int i = 0; i < 7; ++i) {
@@ -1506,6 +1583,55 @@ void install_error_builtins(JsIntrinsics& realm) {
         else js_set_prototype(ctor.function_cell(), error_ctor.as_prototype());
         realm.add_global(name, ctor);
     }
+
+    // ---- AggregateError -----------------------------------------------------
+    // §20.5.7.1. The eighth error type, and the only one that is not a kind
+    // in `JsErrorKind`: its own value is a list, which the others have no
+    // place for, and it is made by this file rather than by the realm's
+    // constructor (see JsIntrinsics::aggregate_error_prototype).
+    JsObject* proto = realm.aggregate_error_prototype();
+    JsValue aggregate_ctor = js_make_native("AggregateError", 2, [](Args args) {
+        // 2. Let message be ? ToString(message), when it is present: before
+        //    the errors are iterated, as the standard orders the steps.
+        const JsValue& message = js_arg(args, 1);
+        const bool has_message = !message.is_undefined();
+        std::string message_text;
+        if (has_message) message_text = js_to_string(message);
+        // 3. IterableToList(errors): a TypeError when it has no iterator, and
+        //    the iterator is closed if reading it throws.
+        std::vector<JsValue> list = js_iterable_to_vector(js_arg(args, 0));
+        // 4-5. The object, with [[AggregateErrors]] and [[ErrorData]]. The
+        //      prototype is the constructor's, so `new sub()` is an instance
+        //      of sub and of AggregateError.
+        // The cell is made here rather than by js_make_error, which always
+        // defines `message`: §20.5.7.1 step 4 gives one only when the
+        // argument was not undefined, and the harness of test262 checks it.
+        JsObject* cell = Heap::default_heap().allocate_object();
+        cell->klass = ObjectClass::Error;
+        cell->prototype = JsIntrinsics::get().aggregate_error_prototype();
+        const JsValue* target = JsValue::current_new_target();
+        if (target && target->is_object_like()) {
+            JsValue prototype = target->get_property("prototype");
+            if (prototype.is_object_like()) cell->prototype = prototype.object_val.get();
+        }
+        JsValue error = JsValue::make_object(cell);
+        if (has_message) error.define_property("message", JsValue::make_string(message_text), PropertyMap::Hidden);
+        // 6. InstallErrorCause(options).
+        const JsValue& options = js_arg(args, 2);
+        if (options.is_object_like() && options.has_property("cause")) {
+            error.define_property("cause", options.get_property("cause"), PropertyMap::Hidden);
+        }
+        // 7. CreateNonEnumerableDataPropertyOrThrow(O, "errors", errorsList).
+        error.define_property("errors", JsValue::make_array(std::move(list)), PropertyMap::Hidden);
+        return error;
+    });
+    aggregate_ctor.define_property("prototype", js_object_value(proto), 0);
+    js_define_hidden(proto, "constructor", aggregate_ctor);
+    js_define_hidden(proto, "name", JsValue::make_string("AggregateError"));
+    js_define_hidden(proto, "message", JsValue::make_string(""));
+    // `Object.getPrototypeOf(AggregateError) === Error`, as for the other six.
+    js_set_prototype(aggregate_ctor.function_cell(), error_ctor.as_prototype());
+    realm.add_global("AggregateError", aggregate_ctor);
 }
 
 } // namespace litebird

@@ -35,6 +35,29 @@ struct FloatBand {
     float right{0.0f};
 };
 
+/// Collapsing vertical margin set per CSS 2.1 §8.3.1: keeps the largest
+/// positive margin and most negative margin separately so repeated merges
+/// across siblings, parents, and self-collapsing chains are associative.
+struct MarginStrut {
+    float positive{0.0f};
+    float negative{0.0f};
+
+    void append(float m) {
+        if (m >= 0.0f) {
+            if (m > positive) positive = m;
+        } else {
+            if (m < negative) negative = m;
+        }
+    }
+
+    void append(const MarginStrut& other) {
+        if (other.positive > positive) positive = other.positive;
+        if (other.negative < negative) negative = other.negative;
+    }
+
+    float value() const { return positive + negative; }
+};
+
 class LayoutBox;
 
 struct InlineFragment {
@@ -134,11 +157,6 @@ public:
     /// it contains its own floats (CSS 2.1 section 9.4.1).
     bool establishes_bfc() const;
 
-    /// Table cells in a collapsed-border table share their borders with their
-    /// neighbours, so each one only paints half. Layout scales the used border
-    /// width by this factor (always recomputed from the style, so relayout is
-    /// idempotent).
-    float border_scale{1.0f};
     /// Used border widths for one box, or empty to use style.border_width.
     /// Collapsed tables resolve the shared edges once (widest wins) and hand
     /// the winner to every cell it touches; the half-paint model stays.
@@ -146,29 +164,7 @@ public:
     /// Winning border colours per edge (collapsed border resolution hands the
     /// winner its colour along with its width).
     std::optional<EdgeColors> border_color_override{};
-    /// Force the used width from layout() to fill the containing width,
-    /// ignoring style.width. Fixed table layout: a cell's own width must
-    /// not resize its column after the first row was read.
-    bool ignore_own_width{false};
-
-    /// Only the root box of an HTML document owns a canvas. The color can be
-    /// transparent (notably in iframes), so ownership is tracked separately.
-    /// The canvas is independent of box geometry and viewport scrolling.
-    bool has_document_canvas{false};
-    Color canvas_background{Color::transparent()};
     std::shared_ptr<const LinearGradient> canvas_gradient;
-    /// Document root (`<html>`) opacity applied to the entire document paint
-    /// including its propagated canvas background (CSS Color 4 §3.2).
-    float root_opacity{1.0f};
-    /// The selected root/body background is painted on the canvas instead of
-    /// as this box's chrome. Computed styles remain unchanged and shareable;
-    /// inline-body line fragments follow the separately observed browser rule.
-    bool background_propagated{false};
-
-    /// A table cell resolves percentage lengths against the *table's* width,
-    /// not against the column width it happens to be laid out with (CSS 2.1
-    /// 17.5.2). Negative means "use the containing block".
-    float width_basis_override{-1.0f};
 
     // --- float context -----------------------------------------------------
     // Floats declared inside this box, in this box's content coordinates.
@@ -177,7 +173,28 @@ public:
     // Bands inherited from the nearest ancestor that owns floats, plus this
     // box's content origin relative to that ancestor.
     const std::vector<FloatBand>* inherited_bands{nullptr};
+
+    // --- vertical margin collapse (CSS 2.1 §8.3.1) -------------------------
+    // Computed by `layout()` for in-flow block-level boxes. `collapsed_margin_top`
+    // and `collapsed_margin_bottom` carry the effective top/bottom struts
+    // presented to this box's parent and adjacent siblings.
+    MarginStrut collapsed_margin_top{};
+    MarginStrut collapsed_margin_bottom{};
+
+    /// Table cells in a collapsed-border table share their borders with their
+    /// neighbours, so each one only paints half. Layout scales the used border
+    /// width by this factor (always recomputed from the style, so relayout is
+    /// idempotent).
+    float border_scale{1.0f};
+    /// Document root (`<html>`) opacity applied to the entire document paint
+    /// including its propagated canvas background (CSS Color 4 §3.2).
+    float root_opacity{1.0f};
+    /// A table cell resolves percentage lengths against the *table's* width,
+    /// not against the column width it happens to be laid out with (CSS 2.1
+    /// 17.5.2). Negative means "use the containing block".
+    float width_basis_override{-1.0f};
     float inherited_bands_offset_y{0.0f};
+    Color canvas_background{Color::transparent()};
 
     /// Horizontal intrusions at content-relative `y`.
     static void band_at(const std::vector<FloatBand>& bands, float y, float& left, float& right);
@@ -185,8 +202,23 @@ public:
     void dump(std::ostream& os, int indent = 0) const;
     void shift_position(float dx, float dy);
 
+    /// Force the used width from layout() to fill the containing width,
+    /// ignoring style.width. Fixed table layout: a cell's own width must
+    /// not resize its column after the first row was read.
+    bool ignore_own_width{false};
+    /// Only the root box of an HTML document owns a canvas. The color can be
+    /// transparent (notably in iframes), so ownership is tracked separately.
+    /// The canvas is independent of box geometry and viewport scrolling.
+    bool has_document_canvas{false};
+    /// The selected root/body background is painted on the canvas instead of
+    /// as this box's chrome. Computed styles remain unchanged and shareable;
+    /// inline-body line fragments follow the separately observed browser rule.
+    bool background_propagated{false};
     bool needs_layout{true};
     bool child_needs_layout{true};
+    bool has_collapsed_margins{false};
+    bool margin_self_collapsing{false};
+    bool bottom_margin_has_clearance{false};
 
     void mark_needs_layout() {
         needs_layout = true;
@@ -229,6 +261,8 @@ private:
     void layout_float(float containing_width);
     /// Largest unbreakable inline content width, used as a table column floor.
     static float min_content_width(const LayoutBox& box, float fallback);
+    /// Unwrapped preferred width, used by fit-content and shrink-to-fit sizing.
+    static float max_content_width(const LayoutBox& box, float fallback);
     void layout_flex(float containing_width);
     void layout_grid(float containing_width);
     void layout_image(float containing_width);

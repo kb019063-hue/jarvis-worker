@@ -400,6 +400,10 @@ public:
 void LayoutBox::apply_style_edges() {
     const ComputedStyle& s = *style;
     dimensions.margin = s.margin;
+    if (!s.is_out_of_flow()) {
+        if (s.margin_top_auto) dimensions.margin.top = 0.0f;
+        if (s.margin_bottom_auto) dimensions.margin.bottom = 0.0f;
+    }
     dimensions.padding = s.padding;
     dimensions.border = border_override ? *border_override : s.border_width;
     if (border_scale != 1.0f) {
@@ -468,6 +472,11 @@ void LayoutBox::layout(float containing_width, float containing_height) {
 
     resolve_percentages(containing_width, containing_height);
     apply_style_edges();
+    collapsed_margin_top = MarginStrut{};
+    collapsed_margin_bottom = MarginStrut{};
+    has_collapsed_margins = false;
+    margin_self_collapsing = false;
+    bottom_margin_has_clearance = false;
 
     switch (box_type) {
         case BoxType::FlexNode:
@@ -498,6 +507,12 @@ void LayoutBox::layout(float containing_width, float containing_height) {
         case BoxType::TableCellNode:
             layout_table_cell(containing_width);
             break;
+    }
+
+    if (!has_collapsed_margins) {
+        collapsed_margin_top.append(dimensions.margin.top);
+        collapsed_margin_bottom.append(dimensions.margin.bottom);
+        has_collapsed_margins = true;
     }
 
     clear_layout_flags();
@@ -538,12 +553,47 @@ bool LayoutBox::establishes_ifc() const {
 }
 
 void LayoutBox::layout_block(float containing_width) {
+    const ComputedStyle& s = *style;
+    const bool parent_is_flex_or_grid = [&]() {
+        if (auto p = parent.lock()) {
+            return p->box_type == BoxType::FlexNode || p->box_type == BoxType::GridNode;
+        }
+        return false;
+    }();
+    // A box blocks margin collapse across its own boundary when it establishes
+    // an independent formatting context (float, out-of-flow, inline-block,
+    // non-visible overflow, layout/paint containment, flex/grid/table, or
+    // flex/grid item). Note that `<body>` is Litebird's layout root (`!parent`)
+    // rather than `<html>`, so `!parent` alone must NOT block body/first-child
+    // margin collapse.
+    const bool blocks_collapse =
+        (box_type != BoxType::BlockNode && box_type != BoxType::AnonymousBlock) ||
+        parent_is_flex_or_grid ||
+        s.is_out_of_flow() || s.is_floated() || s.is_inline_block() ||
+        s.overflow != Overflow::Visible || s.contains_layout() || s.contains_paint() ||
+        s.is_flex() || s.is_grid() || s.is_table() || s.is_table_cell();
+
+    const bool can_self_collapse_base =
+        !blocks_collapse && dimensions.border.top == 0.0f && dimensions.border.bottom == 0.0f &&
+        dimensions.padding.top == 0.0f && dimensions.padding.bottom == 0.0f &&
+        s.height <= 0.0f && s.min_height <= 0.0f;
+
     if (establishes_ifc()) {
         layout_inline_formatting_context(containing_width);
+        // An element with only empty inline children that produce no line boxes
+        // (e.g. `<div><span></span></div>`) still self-collapses per CSS 2.1 §8.3.1.
+        if (can_self_collapse_base && line_boxes.empty() && dimensions.content.height <= 0.0f) {
+            collapsed_margin_top = MarginStrut{};
+            collapsed_margin_top.append(dimensions.margin.top);
+            collapsed_margin_bottom = collapsed_margin_top;
+            collapsed_margin_bottom.append(dimensions.margin.bottom);
+            has_collapsed_margins = true;
+            margin_self_collapsing = true;
+            bottom_margin_has_clearance = false;
+        }
         return;
     }
 
-    const ComputedStyle& s = *style;
     float h_padding_border = dimensions.border.left + dimensions.border.right +
                             dimensions.padding.left + dimensions.padding.right;
     float v_padding_border = dimensions.border.top + dimensions.border.bottom +
@@ -562,16 +612,16 @@ void LayoutBox::layout_block(float containing_width) {
     }
 
     // `width: fit-content` (and shrink-to-fit for `inline-block` with `width: auto`,
-    // CSS 2.1 §10.3.9): as wide as the content wants, and no wider than the
-    // space offered. Measured before the children are placed, because it is the
-    // width they are placed in. Placed before the min/max clamps so that those
-    // still win, as they outrank the keyword.
+    // CSS 2.1 §10.3.9) is min(max-content, max(min-content, available)). Measure
+    // before placing the children, because this is the width they are placed in.
+    // The min/max-width constraints below still win over the keyword.
     if (s.width_fit_content || (s.is_inline_block() && s.width < 0.0f && !ignore_own_width)) {
-        const float natural = children.empty()
-            ? 0.0f
-            : std::max(0.0f, min_content_width(*this, 0.0f) - h_padding_border);
+        const float min_content = std::max(
+            0.0f, min_content_width(*this, 0.0f) - h_padding_border);
+        const float max_content = std::max(
+            min_content, max_content_width(*this, 0.0f) - h_padding_border);
         const float available = std::max(0.0f, containing_width - total_horizontal_spacing);
-        dimensions.content.width = std::min(natural, available);
+        dimensions.content.width = std::min(max_content, std::max(min_content, available));
     }
 
     if (s.min_width >= 0.0f) {
@@ -606,8 +656,24 @@ void LayoutBox::layout_block(float containing_width) {
                    : s.height)
             : -1.0f;
 
-    // 2. Layout Children, placing floats and propagating the float context
+    // 2. Layout Children, placing floats and propagating the float context,
+    //    collapsing vertical margins per CSS 2.1 §8.3.1.
+    const bool has_positive_min_height =
+        s.min_height > 0.0f &&
+        ((s.box_sizing == BoxSizing::BorderBox) ? (s.min_height - v_padding_border > 0.0f) : true);
+    const bool can_collapse_top =
+        !blocks_collapse && dimensions.border.top == 0.0f && dimensions.padding.top == 0.0f;
+    const bool bottom_edge_is_open =
+        !blocks_collapse && dimensions.border.bottom == 0.0f && dimensions.padding.bottom == 0.0f;
+    const bool can_collapse_bottom_base =
+        bottom_edge_is_open && s.height < 0.0f && !has_positive_min_height;
+
     float y_cursor = 0.0f;
+    bool has_non_empty_child = false;
+    bool top_collapse_broken = false;
+    bool pending_has_clearance = false;
+    MarginStrut pending_margin{};
+    MarginStrut top_collapsed_through{};
     float_bands.clear();
     std::optional<FloatPlacementIndex> placement_index;
 
@@ -653,9 +719,14 @@ void LayoutBox::layout_block(float containing_width) {
             const float inset_x = child->dimensions.margin.left + child->dimensions.border.left +
                                   child->dimensions.padding.left;
 
-            // Place at the first fitting band edge (CSS 2.1 9.5.1).
+            // Place at the first fitting band edge (CSS 2.1 9.5.1). Between two
+            // collapsing margins, the float sits at the hypothetical empty
+            // block's top border edge.
             if (!placement_index) placement_index.emplace(dimensions.content.width);
-            const FloatPlacement placement = placement_index->place(y_cursor, margin_box_w);
+            const float float_y0 = (!has_non_empty_child && can_collapse_top && !top_collapse_broken)
+                                       ? 0.0f
+                                       : (y_cursor + pending_margin.value());
+            const FloatPlacement placement = placement_index->place(float_y0, margin_box_w);
             const float float_top = placement.top;
             const float left_intrusion = placement.left_intrusion;
             const float right_intrusion = placement.right_intrusion;
@@ -680,31 +751,66 @@ void LayoutBox::layout_block(float containing_width) {
             continue;  // floats never advance the flow cursor
         }
 
-        // --- clearance ------------------------------------------------------
-        if (cs.clear_type != ClearType::None) {
-            // What clearance_y() computes over the bands, kept as they came.
-            const float clear_to = cs.clear_type == ClearType::Both ? lowest_float
-                                 : cs.clear_type == ClearType::Left ? lowest_left_float
-                                                                    : lowest_right_float;
-            if (clear_to > y_cursor) y_cursor = clear_to;
-        }
+        const bool at_parent_top = !has_non_empty_child && can_collapse_top && !top_collapse_broken;
+        const float clear_to = cs.clear_type == ClearType::Both  ? lowest_float
+                             : cs.clear_type == ClearType::Left  ? lowest_left_float
+                             : cs.clear_type == ClearType::Right ? lowest_right_float
+                                                                 : -1.0f;
 
         // --- inline content wraps around this box's floats ------------------
         const std::vector<FloatBand>* child_bands = has_floats ? &float_bands : inherited_bands;
         child->inherited_bands = child_bands;
+        float est_border_top = 0.0f;
+        if (!at_parent_top) {
+            MarginStrut est = pending_margin;
+            est.append(cs.margin_top_auto ? 0.0f : cs.margin.top);
+            est_border_top = y_cursor + est.value();
+        }
+        if (cs.clear_type != ClearType::None && clear_to > est_border_top) {
+            est_border_top = clear_to;
+        }
         child->inherited_bands_offset_y =
-            (has_floats ? 0.0f : inherited_bands_offset_y) + y_cursor +
-            cs.margin.top + cs.border_width.top + cs.padding.top;
+            (has_floats ? 0.0f : inherited_bands_offset_y) + est_border_top +
+            cs.border_width.top + cs.padding.top;
 
         child->layout(dimensions.content.width, definite_height);
+
+        MarginStrut combined = pending_margin;
+        combined.append(child->collapsed_margin_top);
+        const float hypothetical_border_top = at_parent_top ? 0.0f : (y_cursor + combined.value());
+        const bool has_clearance =
+            (cs.clear_type != ClearType::None) && (clear_to > hypothetical_border_top);
+
+        float child_border_top = 0.0f;
+        if (child->margin_self_collapsing) {
+            if (has_clearance) {
+                child_border_top = clear_to;
+            } else {
+                // CSS 2.1 §8.3.1: when a self-collapsing block's margins collapse
+                // with its parent's top margin, its top border edge matches the
+                // parent's; otherwise it sits where it would if it had a non-zero
+                // bottom border (using `collapsed_margin_top`, before merging its
+                // own bottom margin into `pending_margin`).
+                child_border_top = at_parent_top ? 0.0f : (y_cursor + combined.value());
+                pending_margin.append(child->collapsed_margin_bottom);
+            }
+        } else {
+            if (has_clearance) {
+                child_border_top = clear_to;
+            } else if (at_parent_top) {
+                top_collapsed_through = combined;
+                child_border_top = 0.0f;
+            } else {
+                child_border_top = y_cursor + combined.value();
+            }
+        }
 
         float new_x = dimensions.content.x +
                       child->dimensions.margin.left +
                       child->dimensions.border.left +
                       child->dimensions.padding.left;
 
-        float new_y = dimensions.content.y + y_cursor +
-                      child->dimensions.margin.top +
+        float new_y = dimensions.content.y + child_border_top +
                       child->dimensions.border.top +
                       child->dimensions.padding.top;
 
@@ -722,10 +828,102 @@ void LayoutBox::layout_block(float containing_width) {
         float dy = new_y - child->dimensions.content.y;
         child->shift_position(dx, dy);
 
-        y_cursor += child->dimensions.margin_box().height;
+        if (child->margin_self_collapsing) {
+            if (has_clearance) {
+                // CSS 2.1 §9.5.2: clearance is placed above the clearing element's
+                // top margin, so its self-collapsed margin starts at
+                // `clear_to - collapsed_margin_top` rather than `clear_to`.
+                y_cursor = child_border_top - child->collapsed_margin_top.value();
+                has_non_empty_child = true;
+                top_collapse_broken = true;
+                pending_margin = child->collapsed_margin_bottom;
+                pending_has_clearance = true;
+            }
+        } else {
+            if (has_clearance) top_collapse_broken = true;
+            y_cursor = child_border_top + child->dimensions.border_box().height;
+            has_non_empty_child = true;
+            pending_margin = child->collapsed_margin_bottom;
+            pending_has_clearance = child->bottom_margin_has_clearance;
+        }
     }
 
-    // 3. Content Height with BoxSizing & Min/Max constraints
+    // 3. Self-collapsing block check (CSS 2.1 §8.3.1): top and bottom margins
+    //    are adjoining when the block establishes no BFC, has no vertical
+    //    border/padding, height is auto or 0, min-height is 0, and every
+    //    in-flow child is itself self-collapsing with no clearance.
+    //    `collapsed_margin_top` holds the top-only strut (as if a non-zero
+    //    bottom border existed) for CSS 2.1 §8.3.1 border-edge placement;
+    //    `collapsed_margin_bottom` holds the full self-collapsed strut.
+    if (!has_non_empty_child && can_self_collapse_base) {
+        dimensions.content.height = 0.0f;
+        MarginStrut top_only{};
+        top_only.append(dimensions.margin.top);
+        top_only.append(pending_margin);
+        MarginStrut full_strut = top_only;
+        full_strut.append(dimensions.margin.bottom);
+        collapsed_margin_top = top_only;
+        collapsed_margin_bottom = full_strut;
+        has_collapsed_margins = true;
+        margin_self_collapsing = true;
+        bottom_margin_has_clearance = false;
+        return;
+    }
+
+    margin_self_collapsing = false;
+    collapsed_margin_top = MarginStrut{};
+    collapsed_margin_top.append(dimensions.margin.top);
+    if (can_collapse_top && !top_collapse_broken) {
+        if (has_non_empty_child) {
+            collapsed_margin_top.append(top_collapsed_through);
+        } else {
+            collapsed_margin_top.append(pending_margin);
+        }
+    }
+
+    bool bottom_collapses_with_child = false;
+    if (can_collapse_bottom_base && !pending_has_clearance) {
+        if (has_non_empty_child) {
+            bool max_h_clamps = false;
+            if (s.max_height >= 0.0f) {
+                float max_h = (s.box_sizing == BoxSizing::BorderBox)
+                                  ? std::max(0.0f, s.max_height - v_padding_border)
+                                  : s.max_height;
+                max_h_clamps = (y_cursor > max_h);
+            }
+            bottom_collapses_with_child = !max_h_clamps;
+        } else if (!can_collapse_top || top_collapse_broken) {
+            bottom_collapses_with_child = true;
+        }
+    }
+
+    // CSS 2.1 §10.6.3: when the bottom edge is open (non-BFC, zero bottom
+    // border/padding, no trailing clearance), auto height ends at the last
+    // child's bottom border edge (`y_cursor`) even if `min-height`/`max-height`
+    // later clamps the box or stops bottom margin collapse.
+    const bool include_bottom_margin_in_auto_height =
+        !bottom_edge_is_open || pending_has_clearance;
+    float auto_height = 0.0f;
+    if (has_non_empty_child) {
+        auto_height = include_bottom_margin_in_auto_height
+                          ? (y_cursor + pending_margin.value())
+                          : y_cursor;
+    } else if ((can_collapse_top && !top_collapse_broken) || !include_bottom_margin_in_auto_height) {
+        auto_height = 0.0f;
+    } else {
+        auto_height = pending_margin.value();
+    }
+    auto_height = std::max(0.0f, auto_height);
+
+    collapsed_margin_bottom = MarginStrut{};
+    collapsed_margin_bottom.append(dimensions.margin.bottom);
+    if (bottom_collapses_with_child) {
+        collapsed_margin_bottom.append(pending_margin);
+    }
+    has_collapsed_margins = true;
+    bottom_margin_has_clearance = false;
+
+    // 4. Content Height with BoxSizing & Min/Max constraints
     if (s.height >= 0.0f) {
         if (s.box_sizing == BoxSizing::BorderBox) {
             dimensions.content.height = std::max(0.0f, s.height - v_padding_border);
@@ -733,7 +931,7 @@ void LayoutBox::layout_block(float containing_width) {
             dimensions.content.height = s.height;
         }
     } else {
-        dimensions.content.height = y_cursor;
+        dimensions.content.height = auto_height;
     }
 
     // A block formatting context contains its floats: grow to the lowest one.
@@ -1899,13 +2097,16 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
     } else {
         dimensions.content.width = std::max(0.0f, containing_width - total_horizontal_spacing);
     }
-    // `width: fit-content`: this entry point is the one a box whose children are
-    // all inline takes, and a dialog's usual content is exactly that. See the
-    // same block in `layout_block` for where it sits and why.
+    // This is the inline-content counterpart to the fit-content sizing in
+    // `layout_block`; both use CSS Sizing's min(max-content,
+    // max(min-content, available)) formula before laying out their children.
     if (s.width_fit_content) {
-        const float natural = std::max(0.0f, min_content_width(*this, 0.0f) - h_padding_border);
+        const float min_content = std::max(
+            0.0f, min_content_width(*this, 0.0f) - h_padding_border);
+        const float max_content = std::max(
+            min_content, max_content_width(*this, 0.0f) - h_padding_border);
         const float available = std::max(0.0f, containing_width - total_horizontal_spacing);
-        dimensions.content.width = std::min(natural, available);
+        dimensions.content.width = std::min(max_content, std::max(min_content, available));
     }
     if (s.min_width >= 0.0f) {
         float min_w = (s.box_sizing == BoxSizing::BorderBox)

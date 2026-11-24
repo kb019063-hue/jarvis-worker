@@ -401,6 +401,12 @@ void Heap::mark_environment(void* env) {
     if (g_environment_tracer.enter(env, m_epoch)) m_gray_environments.push_back(env);
 }
 
+void Heap::count_environment(void* env, size_t refs) {
+    if (!m_counting || !env || refs == 0) return;
+    auto scope = m_scopes.find(env);
+    if (scope != m_scopes.end()) scope->second.seen += static_cast<long>(refs);
+}
+
 void Heap::mark_object(HeapObject* obj) {
     // A prototype link is a plain pointer, not a handle: nothing to count.
     if (m_counting) return;

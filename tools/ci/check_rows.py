@@ -100,19 +100,25 @@ def table_span(lines: list[str]) -> tuple[int, int] | None:
 
 
 def breaks(lines: list[str]) -> list[int]:
-    """Indexes of the blank lines that cut the table in two: a blank line
-    under the last row with a row under it. Markdown ends a table at a blank
-    line, so the rows under one are shown as a paragraph of pipes, and no
-    tool that reads the table sees them. (One had stood in the middle of this
-    table, with 23 rows under it, until 24 November 2026.)"""
+    """Indexes of the blank lines that cut the table in two: blank lines
+    under the last row with a row under them. Markdown ends a table at a
+    blank line, so the rows under one are shown as a paragraph of pipes, and
+    no tool that reads the table sees them. (One had stood in the middle of
+    this table, with 23 rows under it, until 24 November 2026. The same day
+    two stood there together, with 29 rows under them, and this function,
+    which looked for one blank line with a row right under it, saw neither
+    and said nothing: it counted 43 rows where there were 72.)"""
     span = table_span(lines)
     found = []
     while span is not None:
         end = span[1]
-        if end + 1 < len(lines) and lines[end].strip() == "" and lines[end + 1].startswith("|") \
-                and not (end + 2 < len(lines) and _DELIMITER.match(lines[end + 2])):
-            found.append(end + len(found))
-            lines = lines[:end] + lines[end + 1:]
+        under = end
+        while under < len(lines) and lines[under].strip() == "":
+            under += 1
+        if under > end and under < len(lines) and lines[under].startswith("|") \
+                and not (under + 1 < len(lines) and _DELIMITER.match(lines[under + 1])):
+            found.extend(range(end + len(found), under + len(found)))
+            lines = lines[:end] + lines[under:]
             span = table_span(lines)
         else:
             break
@@ -332,6 +338,11 @@ def self_test() -> int:
         ("a blank line with a row under it cuts the table", breaks(table + ["", c, a]), [11]),
         ("two of them are two", breaks(table + ["", c, "", a]), [11, 13]),
         ("a blank line with another table under it does not", breaks(table + ["", "| x | y |", "| :--- | :--- |", "| z | w |"]), []),
+        ("two blank lines with a row under them cut it too, and both are found", breaks(table + ["", "", c, a]), [11, 12]),
+        ("blank lines in two places are all found", breaks(table + ["", c, "", "", "", a]), [11, 13, 14, 15]),
+        ("blank lines at the end of the table, with text under them, are not a cut", breaks(table + ["", "", "Text."]), []),
+        ("two blank lines with another table under them are not a cut",
+         breaks(table + ["", "", "| x | y |", "| :--- | :--- |", "| z | w |"]), []),
         ("nor one with words under it", breaks(table + ["", "Words."]), []),
         ("mending takes it out", mended(table + ["", c, a]), (table + [c, a], 1)),
         ("a cut table is a note", "cuts the table" in (report(done + ["", a]) or ""), True),

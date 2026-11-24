@@ -289,11 +289,11 @@ struct ComputedStyle {
     bool dark_color_scheme{false};
     float width{-1.0f};  // -1 indicates auto
     float height{-1.0f}; // -1 indicates auto
-    /// `width: fit-content`. CSS Sizing 3 calls this the content-based size
-    /// clamped by the available space, which is a width the box cannot know
-    /// until its content is measured -- so `width` itself stays auto and the
-    /// two layout entry points shrink the box to `min_content_width`. Added for
-    /// the dialog UA rule (Phase 223), which is where the standard uses it.
+    /// `width: fit-content`. CSS Sizing 3 clamps the max-content size between
+    /// the min-content size and the available width. This cannot be computed in
+    /// the cascade, so `width` itself stays auto and layout measures both
+    /// intrinsic bounds. Added for the dialog UA rule (Phase 223), where the
+    /// standard uses this sizing keyword.
     bool width_fit_content{false};
     /// `height: fit-content`: the box is as tall as its content, and does not
     /// stretch between `top` and `bottom`. The two together are how the HTML
@@ -629,6 +629,12 @@ public:
     /// evaluated (it nests more deeply than the parser follows).
     float evaluate_calc_expression(std::string_view expr, float reference_size = 0.0f, bool* valid = nullptr) const;
     std::string resolve_calc_functions(const std::string& value, float reference_size = 0.0f) const;
+    /// Evaluate a `content` declaration for a pseudo-element. Handles a list of
+    /// strings and `attr()` (with optional fallback), `open-quote` /
+    /// `close-quote`, and skips `url()` / `counter()` items rather than
+    /// treating the whole declaration as invalid (Phase 364).
+    std::string evaluate_content(const std::string& raw, const Element* element,
+                                 const std::unordered_map<std::string, std::string>& vars) const;
 
 private:
     struct IndexedSelector {

@@ -10,6 +10,7 @@
 #include "litebird/js/Heap.hpp"
 #include "litebird/common/ReleaseQueue.hpp"
 #include <algorithm>
+#include <cstdio>
 #include <mutex>
 
 namespace litebird {
@@ -456,6 +457,153 @@ JsValue combine(Args args, const JsValue& default_constructor, OnItem on_item, O
     return answer;
 }
 
+
+/// The realm's own `AggregateError`, which Promise.any rejects with (§27.2.4.7
+/// step 9 makes it with the intrinsic, not through the `AggregateError` a
+/// script may have put on the global). Undefined in a realm that has none,
+/// and then a plain error is made instead, as this engine did before the
+/// constructor existed at all.
+JsValue aggregate_error_constructor() {
+    JsIntrinsics& realm = JsIntrinsics::get();
+    // A realm is installed once, so this is the constructor the library put
+    // there unless the script replaced it. `structuredClone` and
+    // `queueMicrotask` are read the same way, and `Promise` is a global too.
+    if (const JsValue* found = realm.find_global("AggregateError")) return *found;
+    return JsValue::make_undefined();
+}
+
+// §27.2.4.7, Promise.any. It is not `combine`: that one settles as soon as a
+// slot decides the answer, and the whole list of reasons is needed when every
+// promise rejects. A reason can also be `undefined`, which a value slot cannot
+// tell from a promise that has not rejected at all -- the slot starts as
+// undefined -- so the state is kept apart from it. Counting decides: while
+// anything is still pending the answer waits, and the last rejection makes the
+// error, in the order the promises were given.
+struct AnyState {
+    std::shared_ptr<std::vector<JsValue>> values;    // the reason at each index
+    std::shared_ptr<std::vector<bool>> rejected;     // whether it has one
+    std::shared_ptr<size_t> counted;                 // promises seen so far
+    std::shared_ptr<size_t> settled;                 // how many have settled
+    std::shared_ptr<bool> ended;                     // the iterator has ended
+    std::shared_ptr<bool> decided;
+
+    void finish(const std::shared_ptr<PromiseData>& result, size_t index, bool was_rejected,
+                const JsValue& value) {
+        if (*decided) return;
+        if (!was_rejected) {
+            *decided = true;
+            Promise::resolve(result, value);         // the first fulfilment wins
+            return;
+        }
+        // The reason, which can be `undefined` itself: the slot starts as
+        // undefined and cannot tell that apart from "not rejected".
+        if (index < values->size()) {
+            (*values)[index] = value;
+            (*rejected)[index] = true;
+        }
+        ++*settled;
+        // Everything has rejected only when the list is complete too: the
+        // last promise may settle before the iterator has ended, and a
+        // custom `then` may settle one while it is still being built.
+        if (!*ended || *settled < *counted) return;
+        *decided = true;
+        std::vector<JsValue> reasons;
+        reasons.reserve(values->size());
+        for (size_t i = 0; i < values->size(); ++i) {
+            if ((*rejected)[i]) reasons.push_back((*values)[i]);
+        }
+        JsValue aggregate = JsValue::make_undefined();
+        JsValue thrown;
+        const bool built = js_capture_throw([&] {
+            const JsValue ctor = aggregate_error_constructor();
+            if (!ctor.is_function()) {
+                // A realm without the constructor (before Phase 285 there was
+                // none anywhere): the shape it had, a plain error named so.
+                aggregate = js_make_error(JsErrorKind::Error, "All promises were rejected");
+                aggregate.define_property("name", JsValue::make_string("AggregateError"), PropertyMap::Hidden);
+                aggregate.define_property("errors", JsValue::make_array(std::move(reasons)), PropertyMap::Hidden);
+                return;
+            }
+            aggregate = js_construct(ctor, {JsValue::make_array(std::move(reasons)),
+                                            JsValue::make_string("All promises were rejected")});
+        }, thrown);
+        Promise::reject(result, built ? aggregate : thrown);
+    }
+
+    /// The iterator has ended: finish if everything settled while it ran.
+    void complete(const std::shared_ptr<PromiseData>& result) {
+        *ended = true;
+        if (*decided || *settled < *counted) return;
+        if (*counted == 0) {
+            finish(result, 0, true, JsValue::make_undefined());   // nothing to fulfil with
+        } else {
+            // Every promise settled, each one through finish().
+            *decided = true;
+        }
+    }
+};
+
+JsValue promise_any(Args& args) {
+    // §27.2.4.7 steps 1-3: the receiver's capability, and `C.resolve`.
+    JsValue constructor = JsValue::current_this();
+    if (!constructor.is_object_like()) constructor = Promise::create_constructor();
+    PromiseCapability capability = Promise::new_capability(constructor);
+    auto result = Promise::state_of(capability.promise);
+    if (!result) result = std::make_shared<PromiseData>();
+    const bool through_capability = Promise::state_of(capability.promise) != result;
+    auto settle_answer = [capability, result, through_capability](bool rejected, const JsValue& value) {
+        if (through_capability) (rejected ? capability.reject : capability.resolve).call({value});
+        else if (rejected) Promise::reject(result, value);
+        else Promise::resolve(result, value);
+    };
+
+    auto state = std::make_shared<AnyState>();
+    state->values = std::make_shared<std::vector<JsValue>>();
+    state->rejected = std::make_shared<std::vector<bool>>();
+    state->counted = std::make_shared<size_t>(0);
+    state->settled = std::make_shared<size_t>(0);
+    state->ended = std::make_shared<bool>(false);
+    state->decided = std::make_shared<bool>(false);
+    // The promise the engine settles. The subscription is given it as well,
+    // which is what keeps the cell alive while the promises settle.
+    const auto engine_result = result;
+
+    JsValue thrown;
+    const bool ok = js_capture_throw([&] {
+        JsValue resolve = constructor.get_property("resolve");
+        if (!resolve.is_function()) js_throw_type_error("Promise resolve is not a function");
+        size_t index = 0;
+        js_iterate(js_arg(args, 0), [&](const JsValue& item) {
+            // An index is taken before the promise is made: a custom `then`
+            // can settle it inside `subscribe_combinator_item`.
+            const size_t i = index++;
+            JsValue next_promise = resolve.call_with_this(constructor, {item});
+            state->values->push_back(JsValue::make_undefined());
+            state->rejected->push_back(false);
+            ++*state->counted;
+            subscribe_combinator_item(next_promise,
+                [state, engine_result, i, settle_answer](bool rejected, const JsValue& value) {
+                    if (*state->decided) return;
+                    state->finish(engine_result, i, rejected, value);
+                    // A subclass's promise is a stand-in: it takes the answer.
+                    if (*state->decided && engine_result->state != PromiseState::Pending) {
+                        settle_answer(engine_result->state == PromiseState::Rejected, engine_result->result);
+                    }
+                }, result, state->values);
+            return true;
+        });
+    }, thrown);
+    if (!ok) {
+        settle_answer(true, thrown);
+        return capability.promise;
+    }
+    state->complete(engine_result);
+    if (*state->decided && engine_result->state == PromiseState::Rejected) {
+        settle_answer(true, engine_result->result);
+    }
+    return capability.promise;
+}
+
 } // namespace
 
 void Promise::resolve(const std::shared_ptr<PromiseData>& data, JsValue val) {
@@ -822,22 +970,7 @@ void install_promise_builtins(JsIntrinsics& realm) {
     });
 
     js_define_method(ctor, "any", 1, [](Args args) {
-        return combine(args, Promise::create_constructor(),
-            [](const std::shared_ptr<PromiseData>& result, std::vector<JsValue>& values, size_t i,
-               bool rejected, const JsValue& value) {
-                if (!rejected) {
-                    Promise::resolve(result, value);    // the first fulfilment wins
-                    return false;
-                }
-                values[i] = value;
-                return true;
-            },
-            [](const std::shared_ptr<PromiseData>& result, std::vector<JsValue>& values) {
-                JsValue error = js_make_error(JsErrorKind::Error, "All promises were rejected");
-                error.define_property("name", JsValue::make_string("AggregateError"), PropertyMap::Hidden);
-                error.define_property("errors", JsValue::make_array(values), PropertyMap::Hidden);
-                Promise::reject(result, error);
-            });
+        return promise_any(args);
     });
 
     js_define_method(ctor, "race", 1, [](Args args) {

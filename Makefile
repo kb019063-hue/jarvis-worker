@@ -6,6 +6,7 @@ ASAN_FLAGS = -std=c++20 -O1 -g -Wall -Wextra -Iinclude -MMD -MP \
              -fsanitize=address,undefined -fno-omit-frame-pointer
 
 SRCS = src/common/Color.cpp \
+       src/common/TerminalText.cpp \
        src/dom/Node.cpp \
        src/dom/Selector.cpp \
        src/dom/FormState.cpp \
@@ -222,6 +223,11 @@ verify-worker-terminal-safety: $(TARGET)
 .PHONY: verify-js-error-terminal-safety
 verify-js-error-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_js_error_terminal.py --binary $(TARGET)
+
+## Check that a page's own text cannot command the terminal through a dump.
+.PHONY: verify-page-text-terminal-safety
+verify-page-text-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_page_text_terminal.py --binary $(TARGET)
 
 $(BUILD_DIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)

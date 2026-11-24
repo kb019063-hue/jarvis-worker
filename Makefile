@@ -39,6 +39,7 @@ SRCS = src/common/Color.cpp \
        src/render/GifDecoder.cpp \
        src/render/Vp8Decoder.cpp src/render/Vp8Tables.cpp src/render/WebPDecoder.cpp \
        src/render/Canvas2D.cpp \
+       src/render/WebGL.cpp \
        src/render/SvgRenderer.cpp \
        src/render/TerminalRenderer.cpp \
        src/render/TerminalWidthTables.cpp \

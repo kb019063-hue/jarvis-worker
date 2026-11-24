@@ -3127,6 +3127,22 @@ JsValue js_regexp_create(const std::string& pattern, const std::string& flags) {
     return make_regexp(compile(pattern, flags));
 }
 
+bool js_regexp_source_and_flags(const JsValue& value, std::string& source, std::string& flags) {
+    if (!has_regexp_slot(value)) return false;
+    const auto program = program_of(value, "RegExp");
+    source = program->source;
+    flags.clear();
+    if (program->has_indices) flags += 'd';
+    if (program->global) flags += 'g';
+    if (program->ignore_case) flags += 'i';
+    if (program->multiline) flags += 'm';
+    if (program->dot_all) flags += 's';
+    if (program->unicode) flags += 'u';
+    if (program->unicode_sets) flags += 'v';
+    if (program->sticky) flags += 'y';
+    return true;
+}
+
 JsValue js_regexp_match(const JsValue& regex, const JsString& subject_string) {
     return regexp_symbol_match(regex, subject_string);
 }

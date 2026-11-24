@@ -62,7 +62,7 @@ iterated, a subclass's prototype, and six `Promise.any` cases run on a timer —
 fulfilment that wins, and the identity of a reason object.
 
 ```bash
-make test      # All 425 engine test suites passed successfully!
+make test      # All 426 engine test suites passed successfully!
 ```
 
 | Check | Result |

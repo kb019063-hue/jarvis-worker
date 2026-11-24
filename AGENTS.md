@@ -259,17 +259,17 @@ within the hour, and the first lot was started again four times.
    - **while a watch is on, a pull request's own run is the short one.**
      The landing session puts the label `lot` on it (`watch.sh look`), and
      CI then runs "Build & unit tests" and "Documentation shape" on it
-     and skips the other ten jobs. The whole of CI runs on the lot it
-     lands in, on `main` as it will be, which its own run never saw. **Ten
-     jobs "skipped" on your pull request is that, and nothing to mend**;
+     and skips every other job. The whole of CI runs on the lot it
+     lands in, on `main` as it will be, which its own run never saw.
+     **Jobs "skipped" on your pull request are that, and nothing to mend**;
      `python3 tools/ci/check_pr.py merge N` says so. You still run the
      checks of "What "done" means" here before the last push: a pull
      request that fails a job in the lot takes the others in it back a
      run. When no watch is on, `merge N` takes the label off, which
-     starts all twelve jobs, and says "not ready" until they have
-     passed: nobody merges on a short run. The reason is the queue: a
-     run is twelve jobs and no more than twenty were seen running at
-     once. At 04:57 on 24 November 19 were running and 25 waiting, in
+     starts every job, and says "not ready" until they have passed:
+     nobody merges on a short run. The reason is the queue: a run was
+     twelve jobs and no more than twenty were seen running at once. At
+     04:57 on 24 November 19 were running and 25 waiting, in
      six runs, and the lot that five finished pull requests were in had
      eight jobs that had not started 4.7 minutes after its push; it took
      17 minutes where the one at 05:24, alone on the runners, took 10.5.
@@ -818,7 +818,21 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   cost 4 min 49 s of compiling in each sanitizer job. A run on `main`
   saves the objects for everybody else's runs, which is one more reason
   for the last merge of a lot to start one. A job that cannot fetch ccache
-  compiles everything, as before. Three rules keep it the same checks:
+  compiles everything, as before.
+
+  With the compiling gone a run is as long as its longest job, and on 24
+  November that was the unit suites in the sanitizer build: one process,
+  8 min 52 s of a run of 10.4 minutes, on a machine with four cores. CI
+  now runs them as **three processes side by side**
+  (`make asan-unit ASAN_UNIT_STRETCHES=3`): told to, `tests/test_suite.cpp`
+  runs one of three equal stretches of its order, and
+  `tools/ci/run_stretches.py` passes when the three passed and add up to
+  every suite. `make asan-unit` here is one process, as it was: three of
+  them want more memory than 4 GB. The deep pages of the sanitizer build
+  are a job of their own ("Sanitizers: deep and oversized pages"), which
+  with the web-platform-tests in front of them was 9 min 43 s. **A suite
+  must not need a suite before it**: the first suite of a stretch has
+  none. Three rules keep it the same checks:
   - `make asan-core` is nine parts in the Makefile and runs them in the
     order it always had; **a new check goes into the part it belongs
     with**, and then both `make asan` and CI run it.

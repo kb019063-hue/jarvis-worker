@@ -689,7 +689,7 @@ def state_of(latest: list[tuple[str, str, str]]) -> tuple[str, list[str]]:
 
     'short' is the run a pull request with the label `lot` gets while a watch
     is on (.github/workflows/ci.yml): the build, the unit suites and the
-    documents passed, and the other ten jobs were skipped, because the whole
+    documents passed, and every other job was skipped, because the whole
     of CI runs on the lot the pull request lands in. It is enough to be taken
     into a lot. It is not enough for anybody to merge on.
     """
@@ -717,10 +717,10 @@ def check_runs(sha: str) -> tuple[str, list[str]]:
 def short_run_note(head: str, number: int | None = None) -> str:
     """What to say of a short run to somebody who is about to merge on it."""
     return (f"only the short run of CI passed on {head[:7]} (build, unit suites, documents): the pull request has "
-            "the label `lot`, which the landing session puts on while a watch is on, and the other ten jobs "
-            "were skipped. Nobody merges on that"
+            "the label `lot`, which the landing session puts on while a watch is on, and every other job "
+            "was skipped. Nobody merges on that"
             + ("" if number is None else
-               f". The label is off now, which starts all twelve jobs on {head[:7]}: ask again when they have ended"))
+               f". The label is off now, which starts every job on {head[:7]}: ask again when they have ended"))
 
 
 def delta(base: str, tip: str) -> tuple[int, list[str] | None]:
@@ -1309,15 +1309,15 @@ def check_merge(number: int, landing: bool = False) -> int:
     for ok, text in lines:
         (report.ok if ok else report.no)(text)
     if "short" in (head_state, ran_state) and not watch_on and not landing:
-        # No watch is on, so this agent merges, and all twelve jobs have not
+        # No watch is on, so this agent merges, and the whole of CI has not
         # run on what it would merge. Taking the label off starts them.
         if any(label.get("name") == LOT_LABEL for label in pr.get("labels") or []):
             gh("api", "-X", "DELETE", f"{REPO}/issues/{number}/labels/{LOT_LABEL}", check=False)
-            report.note(f"the label `{LOT_LABEL}` is off #{number} now, which starts all twelve jobs on {head[:7]}: "
+            report.note(f"the label `{LOT_LABEL}` is off #{number} now, which starts every job of CI on {head[:7]}: "
                         f"ask again when they have ended (`gh pr checks {number}`). If none has started in a minute, "
                         "push an empty commit")
         else:
-            report.note(f"#{number} has no label `{LOT_LABEL}` any more: all twelve jobs run on its next push "
+            report.note(f"#{number} has no label `{LOT_LABEL}` any more: every job of CI runs on its next push "
                         "(an empty commit will do), if they are not running already")
     if quick:
         tree, called, why_not = tree_to_merge(number, head, main_sha, behind)

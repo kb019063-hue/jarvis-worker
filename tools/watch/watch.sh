@@ -66,7 +66,7 @@ whole() {  # whole FULLSHA: every check run of it has ended in success, and ther
 }
 green() {  # green FULLSHA: `whole`, or the short run of a pull request with the label `lot` passed:
            # two jobs or more in success and the rest skipped (.github/workflows/ci.yml). Enough for
-           # a pull request to be taken into a lot, whose own run is all twelve; never for the lot.
+           # a pull request to be taken into a lot, whose own run is every job; never for the lot.
   local runs; runs="$(runs_of "$1")"
   [[ "$runs" =~ ^completed/success\ x([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -ge 10 ] && return 0
   [[ "$runs" =~ ^completed/skipped\ x([0-9]+),\ completed/success\ x([0-9]+)$ ]] && [ "${BASH_REMATCH[2]}" -ge 2 ]
@@ -153,7 +153,7 @@ look)
   timeout 60 python3 tools/ci/check_pr.py watch --beat "$end" >/dev/null 2>&1 || echo "the beat failed"
   # The label `lot` gives a pull request the short run of CI while a watch is
   # on (.github/workflows/ci.yml). It is put on once, so that an agent who
-  # took it off to have all twelve jobs is not given it back, and only where
+  # took it off to have every job run is not given it back, and only where
   # the branch has the check_pr.py that knows a short run from a whole one:
   # an older one says "ready" to a merge on two jobs when no watch is on.
   timeout 40 gh pr list --state open --limit 100 --json number,title,labels,headRefOid \
@@ -328,7 +328,7 @@ Agent: $NAME"
   python3 tools/ci/check_docs.py --base origin/main > "$STATE/land/docs.log" 2>&1 || { bad=1; echo "check_docs failed"; grep -i 'fail' "$STATE/land/docs.log" | head -5; }
   python3 tools/ci/check_numbers.py > "$STATE/land/numbers.log" 2>&1 || { bad=1; echo "check_numbers failed"; tail -3 "$STATE/land/numbers.log"; }
   python3 tools/ci/check_suites.py > "$STATE/land/suites.log" 2>&1 || { bad=1; echo "check_suites failed"; tail -3 "$STATE/land/suites.log"; }
-  for t in tools/ci/check_rows.py tools/ci/check_pr.py tools/ci/check_numbers.py tools/ci/check_suites.py tools/ci/check_ci_parts.py tools/watch/carry_rows.py; do
+  for t in tools/ci/check_rows.py tools/ci/check_pr.py tools/ci/check_numbers.py tools/ci/check_suites.py tools/ci/check_ci_parts.py tools/watch/carry_rows.py tools/ci/run_stretches.py; do
     python3 "$t" --self-test > "$STATE/land/self.log" 2>&1 || { bad=1; echo "$t --self-test failed"; tail -2 "$STATE/land/self.log"; }
   done
   [ "$(git log -1 --format=%B | grep -c 'skip ci')" = "0" ] || { bad=1; echo "the head commit's message holds the mark: no run would start"; }

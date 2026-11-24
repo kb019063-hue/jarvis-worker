@@ -35,6 +35,7 @@ Options:
     --suite PATH      The archive, if you have it already (default: downloaded
                       to build/xml-conformance/xmlts20130923.zip)
     --fetch-only      Download and check the archive, run nothing
+    --unpack-only     Download, check and unpack it, run nothing
     --filter SUBSTR   Only tests whose ID or path contains SUBSTR
     --show N          Print up to N failing tests
     --jobs N          Parallel processes (default: os.cpu_count())
@@ -246,6 +247,9 @@ def main():
     parser.add_argument("--binary", default=os.path.join(REPO, "build", "litebird"))
     parser.add_argument("--suite")
     parser.add_argument("--fetch-only", action="store_true")
+    parser.add_argument("--unpack-only", action="store_true",
+                        help="download and unpack the suite, run nothing: for a job that needs "
+                             "its documents and does not run it (the fuzzing job of CI)")
     parser.add_argument("--filter", default="")
     parser.add_argument("--show", type=int, default=0)
     parser.add_argument("--jobs", type=int, default=os.cpu_count() or 2)
@@ -271,6 +275,13 @@ def main():
             return 2
     if args.fetch_only:
         print("%s  %s" % (SUITE_SHA256, archive))
+        return 0
+    if args.unpack_only:
+        root = unpack(archive, work)
+        if not os.path.exists(os.path.join(root, "xmlconf.xml")):
+            sys.stderr.write("%s: unpacked, and there is no xmlconf.xml in it\n" % root)
+            return 2
+        print("unpacked: %s" % root)
         return 0
     if not args.reference and not os.path.exists(args.binary):
         sys.stderr.write("%s: no such file (run `make` first)\n" % args.binary)

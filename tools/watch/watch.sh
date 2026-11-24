@@ -211,7 +211,15 @@ plan)
     if out="$(git merge-tree --write-tree --name-only "$prev" "$full" 2>/dev/null)"; then
       prev="$(git commit-tree "$(echo "$out" | head -1)" -p "$prev" -p "$full" -m "chain $n")"; ok="$ok$n "
     else
-      echo "CONFLICT #$n (after ${ok:-nothing}): $(echo "$out" | sed -n '2,/^$/p' | tr '\n' ' ')" >&2
+      files="$(echo "$out" | sed -n '2,/^$/p' | tr '\n' ' ')"
+      # With `main` alone, or only after the ones before it? And when the
+      # table "Open tasks" is all of it: can it be carried? (On 24 November
+      # working that out by hand for #358 held a lot of four back for two
+      # minutes: an empty row had been put in above the row it rewrote.)
+      if git merge-tree --write-tree "$(git rev-parse origin/main)" "$full" > /dev/null 2>&1; then with="with the ones before it, not with main"; else with="with main alone too"; fi
+      rowsay=""
+      [ "$(echo $files)" = "AGENTS.md" ] && rowsay="; $(python3 tools/watch/carry_rows.py --check "$prev" "$full" 2>&1 | head -1 | cut -c1-200)"
+      echo "CONFLICT #$n (after ${ok:-nothing}): $files: $with$rowsay" >&2
     fi
   done
   echo "$ok" ;;

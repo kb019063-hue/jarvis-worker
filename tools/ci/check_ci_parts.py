@@ -23,9 +23,10 @@ It fails when
   - a job runs a part before it has run `asan-build`;
   - a job runs the whole of `asan-core` or `asan`, which would run every part
     a second time;
-  - `asan-fuzz` is in a job that has not run `asan-xml` before it:
-    tools/fuzz/fuzz_xml.py mutates the documents of the W3C suite, which
-    `asan-xml` unpacks under build/xml-conformance/, and without them it
+  - `asan-fuzz` is in a job that has neither run `asan-xml` nor unpacked
+    the W3C suite (`run_xml_conformance.py --unpack-only`) before it:
+    tools/fuzz/fuzz_xml.py mutates the documents of that suite, which
+    are unpacked under build/xml-conformance/, and without them it
     mutates the dozen written in the script and reports no failure.
 """
 
@@ -45,6 +46,8 @@ ALSO = ("asan-deep", "tsan")        # what the old job ran besides asan-core
 PART_LINE = re.compile(r"^\$\(MAKE\) (asan-[a-z0-9-]+)$")
 JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
 MAKE_CALL = re.compile(r"(?<![\w./-])make(?![\w./-])([^|;&\n]*)")
+UNPACK_CALL = re.compile(r"run_xml_conformance\.py\b[^|;&\n]*--unpack-only\b")
+UNPACKED = "the-xml-suite-unpacked"   # not a target: what a step that unpacks the suite counts as
 
 
 def recipe_of(makefile: str, target: str) -> list[str] | None:
@@ -79,6 +82,8 @@ def jobs_of(workflow: str) -> dict[str, list[str]]:
             continue
         if job is None:
             continue
+        if UNPACK_CALL.search(line):
+            found[job].append(UNPACKED)
         for call in MAKE_CALL.finditer(line):
             for word in call.group(1).split():
                 if word in (WHOLE, "asan", "tsan") or word.startswith("asan-"):
@@ -113,8 +118,9 @@ def problems(makefile: str, workflow: str) -> tuple[list[str], list[str]]:
         for whole in (WHOLE, "asan"):
             if whole in targets:
                 wrong.append(f"job `{job}` runs `make {whole}`, the whole of it: every part would be run twice")
-        if "asan-fuzz" in targets and "asan-xml" not in targets[:targets.index("asan-fuzz")]:
-            wrong.append(f"job `{job}` runs `asan-fuzz` without `asan-xml` before it: fuzz_xml.py would have "
+        if "asan-fuzz" in targets and not {"asan-xml", UNPACKED} & set(targets[:targets.index("asan-fuzz")]):
+            wrong.append(f"job `{job}` runs `asan-fuzz` without `asan-xml` before it, and without having unpacked "
+                         f"the suite (`run_xml_conformance.py --unpack-only`): fuzz_xml.py would have "
                          f"only the documents written in it to mutate, and would not say so by failing")
         needing = [t for t in targets if t.startswith("asan-") and t not in (BUILD, WHOLE)]
         if needing and (BUILD not in targets or targets.index(BUILD) > targets.index(needing[0])):
@@ -125,7 +131,7 @@ def problems(makefile: str, workflow: str) -> tuple[list[str], list[str]]:
             wrong.append(f"no job of CI runs `{required}`: it is in the Makefile and would not be checked")
         elif len(where) > 1 and required != BUILD:
             wrong.append(f"`{required}` is run by {len(where)} jobs ({', '.join(where)}): once is enough")
-    known = set(parts) | set(ALSO) | {WHOLE, "asan"}
+    known = set(parts) | set(ALSO) | {WHOLE, "asan", UNPACKED}
     for job, targets in jobs.items():
         for target in targets:
             if target not in known:
@@ -156,6 +162,27 @@ def self_test() -> int:
         ("tsan dropped", make, flow.replace("      - run: make tsan\n", ""), ["no job of CI runs `tsan`"]),
         ("fuzz moved away from the XML suite", make,
          flow.replace("      - run: make asan-fuzz\n", "").replace("make asan-deep", "make asan-deep && make asan-fuzz"),
+         ["runs `asan-fuzz` without `asan-xml` before it"]),
+        ("fuzz in a job of its own that unpacks the suite first", make,
+         flow.replace("      - run: make asan-fuzz\n", "").replace(
+             "      - run: make asan-build && make asan-deep\n",
+             "      - run: make asan-build && make asan-deep\n  three:\n    steps:\n"
+             "      - run: python3 tools/conformance/run_xml_conformance.py --unpack-only\n"
+             "      - run: make asan-build\n      - run: make asan-fuzz\n"),
+         []),
+        ("fuzz in a job of its own that unpacks the suite after it", make,
+         flow.replace("      - run: make asan-fuzz\n", "").replace(
+             "      - run: make asan-build && make asan-deep\n",
+             "      - run: make asan-build && make asan-deep\n  three:\n    steps:\n"
+             "      - run: make asan-build\n      - run: make asan-fuzz\n"
+             "      - run: python3 tools/conformance/run_xml_conformance.py --unpack-only\n"),
+         ["runs `asan-fuzz` without `asan-xml` before it"]),
+        ("the archive fetched and not unpacked is not the suite", make,
+         flow.replace("      - run: make asan-fuzz\n", "").replace(
+             "      - run: make asan-build && make asan-deep\n",
+             "      - run: make asan-build && make asan-deep\n  three:\n    steps:\n"
+             "      - run: python3 tools/conformance/run_xml_conformance.py --fetch-only\n"
+             "      - run: make asan-build\n      - run: make asan-fuzz\n"),
          ["runs `asan-fuzz` without `asan-xml` before it"]),
         ("fuzz before the XML suite", make,
          flow.replace("          make asan-xml | tee asan-core.log\n      - run: make asan-fuzz\n",

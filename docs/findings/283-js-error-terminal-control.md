@@ -1,4 +1,4 @@
-# Finding 273 — an uncaught error could command the terminal
+# Finding 283 — an uncaught error could command the terminal
 
 An uncaught JavaScript value or unhandled promise rejection was printed to
 stderr without filtering. A page-controlled ESC, BEL, CR or C1 character could

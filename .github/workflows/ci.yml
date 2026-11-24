@@ -67,10 +67,13 @@ jobs:
             echo "::notice title=ccache, plain build::$(ccache -s 2>/dev/null | grep -E 'Cacheable calls|Hits|Misses|Cache size' | tr -s ' ' | tr '\n' ';')"
           fi
       - name: Keep the objects for the runs that follow
-        # Only a run on main saves them: every pull request can read
-        # what such a run saved, and nobody else what a pull request's
-        # run did (.github/actions/ccache/action.yml).
-        if: github.event_name != 'pull_request'
+        # A run on main saves them: every pull request can read what
+        # such a run saved, and nobody else what a pull request's run
+        # did. A watch's own pull request saves them too, for itself:
+        # its next lot is pushed a minute after this one has landed,
+        # before main's run has saved anything, and holds the same
+        # carried pull requests again (.github/actions/ccache/action.yml).
+        if: github.event_name != 'pull_request' || startsWith(github.event.pull_request.title, 'WATCH:')
         uses: actions/cache/save@v4
         with:
           path: ~/.ccache
@@ -535,9 +538,19 @@ jobs:
         # what a recursive walk or a quadratic loop survives, then 300 random
         # pages that keep the parser at its nesting limit. Every run is a child
         # process with an 8 MB stack, 2 GB of memory and 60 seconds. The
-        # slowest takes about 20 seconds on a two-core machine; what this is
-        # here to catch does not finish at all.
-        run: make deep
+        # slowest takes 20 to 33 seconds on a quiet two-core machine; what
+        # this is here to catch does not finish at all. The machines this job
+        # gets differ by a factor of two, so a run that goes over the limit
+        # beside the others is run once more by itself before it counts
+        # (tools/fuzz/deep_pages.py).
+        run: |
+          set -o pipefail
+          make deep 2>&1 | tee "$RUNNER_TEMP/part-deep.log"
+      - name: What failed, as annotations
+        # Without this a failure here said `exit code 2` and nothing else
+        # where the log could not be fetched (#317, 24 November).
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
 
   # The sanitizer run, as jobs side by side.
   #
@@ -594,10 +607,13 @@ jobs:
             echo "::notice title=ccache, asan build::$(ccache -s 2>/dev/null | grep -E 'Cacheable calls|Hits|Misses|Cache size' | tr -s ' ' | tr '\n' ';')"
           fi
       - name: Keep the objects for the runs that follow
-        # Only a run on main saves them: every pull request can read
-        # what such a run saved, and nobody else what a pull request's
-        # run did (.github/actions/ccache/action.yml).
-        if: github.event_name != 'pull_request'
+        # A run on main saves them: every pull request can read what
+        # such a run saved, and nobody else what a pull request's run
+        # did. A watch's own pull request saves them too, for itself:
+        # its next lot is pushed a minute after this one has landed,
+        # before main's run has saved anything, and holds the same
+        # carried pull requests again (.github/actions/ccache/action.yml).
+        if: github.event_name != 'pull_request' || startsWith(github.event.pull_request.title, 'WATCH:')
         uses: actions/cache/save@v4
         with:
           path: ~/.ccache

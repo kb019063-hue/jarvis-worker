@@ -4399,13 +4399,23 @@ TEST(arabic_joining_zwnj_zwj_lam_alef_and_mark_anchoring) {
     assert(lfa[1].y_offset == 760 - 500);
     assert(lfa[1].x_offset == (520 - 110) - 700);
 
-    // 5. ZWNJ breaks joining & prevents Lam-Alef; ZWJ forces joining; neither leaves a glyph!
+    // 5. ZWNJ breaks joining & prevents Lam-Alef; ZWJ forces joining. Neither
+    // joiner disappears: OpenType makes a default-ignorable an *invisible
+    // glyph*, so it keeps its slot in the stream (zero advance, nothing
+    // painted) and the glyph count is the codepoint count. Dropping it instead
+    // shifted every later mark onto the wrong base, because `mark_base` is an
+    // index into the shaped run. This is what HarfBuzz answers for the same
+    // text, and `make shaping-oracle`'s arabic-zwnj / arabic-zwj cases are the
+    // differential that holds it. The glyph *id* is the font's to choose: this
+    // synthetic face has no cmap entry for a joiner, so it draws `.notdef` in
+    // that slot, and only the slot and the zero advance are asserted.
     const auto zwnj = f.shape_glyphs({0x0644, 0x200C, 0x0627}, false);
     const auto zwj_pre = f.shape_glyphs({0x0645, 0x200D}, false);
     const auto zwj_post = f.shape_glyphs({0x200D, 0x0645}, false);
-    assert(zwnj.size() == 2 && zwnj[0].glyph == 3 && zwnj[1].glyph == 1);
-    assert(zwj_pre.size() == 1 && zwj_pre[0].glyph == 15);
-    assert(zwj_post.size() == 1 && zwj_post[0].glyph == 17);
+    assert(zwnj.size() == 3 && zwnj[0].glyph == 3 && zwnj[2].glyph == 1);
+    assert(zwnj[1].x_advance == 0 && zwnj[1].x_offset == 0 && zwnj[1].y_offset == 0);
+    assert(zwj_pre.size() == 2 && zwj_pre[0].glyph == 15 && zwj_pre[1].x_advance == 0);
+    assert(zwj_post.size() == 2 && zwj_post[1].glyph == 17 && zwj_post[0].x_advance == 0);
 
     // 6. Optional host DejaVuSans.ttf Arabic shaping ("سلام" + "لا" + "ل\u200cا" + "م\u200d" + shadda+fatha)!
     FontRenderer& fr = FontRenderer::instance();
@@ -4429,8 +4439,11 @@ TEST(arabic_joining_zwnj_zwj_lam_alef_and_mark_anchoring) {
                 const auto d_salam = dejavu.shape_glyphs({0x0633, 0x0644, 0x0627, 0x0645}, true, true);
                 const auto d_shadda = dejavu.shape_glyphs({0x0628, 0x0651, 0x064E}, false);
                 assert(d_la.size() == 1 && d_la[0].glyph != lam_iso && d_la[0].glyph != alef_iso);
-                assert(d_zwnj.size() == 2 && d_zwnj[0].glyph == lam_iso && d_zwnj[1].glyph == alef_iso);
-                assert(d_zwj.size() == 1 && d_zwj[0].glyph != meem_iso);
+                // The joiner holds its slot between the two forms (see case 5).
+                assert(d_zwnj.size() == 3 && d_zwnj[0].glyph == lam_iso &&
+                       d_zwnj[1].x_advance == 0 && d_zwnj[2].glyph == alef_iso);
+                assert(d_zwj.size() == 2 && d_zwj[0].glyph != meem_iso &&
+                       d_zwj[1].x_advance == 0);
                 // "سلام" logical: [س_init, لا_fina, م_isol]; visually RTL: [م_isol, لا_fina, س_init]
                 assert(d_salam_log.size() == 3 && d_salam.size() == 3);
                 assert(d_salam_log[2].glyph == meem_iso);
@@ -7085,6 +7098,62 @@ TEST(subtle_crypto_hkdf_derive_bits_and_key) {
     )");
     assert(interp.eval("okmHex === '3cb25f25faacd57a90434f64d0362f2a2d2d0a90cf1a5a4c5db02d56ecc4c5bf34007208d5b887185865'").is_truthy());
     assert(interp.eval("derivedKey instanceof CryptoKey && derivedOk === true").is_truthy());
+}
+
+TEST(subtle_crypto_aes_ctr_encrypt_and_decrypt) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // NIST SP 800-38A F.5.1 CTR-AES128.Encrypt (first 16 bytes)
+    // Key = 2b7e151628aed2a6abf7158809cf4f3c
+    // Init. Counter = f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff
+    // Plaintext = 6bc1bee22e409f96e93d7e117393172a
+    // Ciphertext = 874d6191b620e3261bef6864990db6ce
+    interp.eval(R"(
+        function fromHex(h) {
+            var a = new Uint8Array(h.length / 2);
+            for (var i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16);
+            return a;
+        }
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var keyBytes = fromHex('2b7e151628aed2a6abf7158809cf4f3c');
+        var ctr = fromHex('f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff');
+        var pt = fromHex('6bc1bee22e409f96e93d7e117393172a');
+        var ctHex = null;
+        var rtHex = null;
+        var genKey = null;
+        var genOk = null;
+
+        crypto.subtle.importKey('raw', keyBytes, 'AES-CTR', false, ['encrypt', 'decrypt'])
+            .then(function(k) {
+                return crypto.subtle.encrypt({ name: 'AES-CTR', counter: ctr, length: 64 }, k, pt)
+                    .then(function(ct) {
+                        ctHex = toHex(ct);
+                        return crypto.subtle.decrypt({ name: 'AES-CTR', counter: ctr, length: 64 }, k, ct);
+                    });
+            })
+            .then(function(rt) {
+                rtHex = toHex(rt);
+            });
+
+        crypto.subtle.generateKey({ name: 'AES-CTR', length: 256 }, true, ['encrypt', 'decrypt'])
+            .then(function(k) {
+                genKey = k;
+                return crypto.subtle.exportKey('raw', k);
+            })
+            .then(function(raw) {
+                genOk = (raw instanceof ArrayBuffer && raw.byteLength === 32);
+            });
+    )");
+    assert(interp.eval("ctHex === '874d6191b620e3261bef6864990db6ce'").is_truthy());
+    assert(interp.eval("rtHex === '6bc1bee22e409f96e93d7e117393172a'").is_truthy());
+    assert(interp.eval("genKey instanceof CryptoKey && genOk === true").is_truthy());
 }
 
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
@@ -36015,6 +36084,7 @@ int main() {
     RUN_TEST(subtle_crypto_export_and_generate_key);
     RUN_TEST(subtle_crypto_pbkdf2_derive_bits_and_key);
     RUN_TEST(subtle_crypto_hkdf_derive_bits_and_key);
+    RUN_TEST(subtle_crypto_aes_ctr_encrypt_and_decrypt);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

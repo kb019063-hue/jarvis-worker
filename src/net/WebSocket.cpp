@@ -101,6 +101,7 @@ struct WsOpenSslApi {
     int (*SSL_set1_host_fn)(SSL*, const char*) = nullptr;
     X509_VERIFY_PARAM* (*SSL_get0_param_fn)(SSL*) = nullptr;
     int (*X509_VERIFY_PARAM_set1_ip_asc_fn)(X509_VERIFY_PARAM*, const char*) = nullptr;
+    int (*X509_VERIFY_PARAM_set_flags_fn)(X509_VERIFY_PARAM*, unsigned long) = nullptr;
     int (*SSL_connect_fn)(SSL*) = nullptr;
     int (*SSL_read_fn)(SSL*, void*, int) = nullptr;
     int (*SSL_write_fn)(SSL*, const void*, int) = nullptr;
@@ -164,6 +165,7 @@ struct WsOpenSslApi {
                 load_ssl(out->SSL_set1_host_fn, "SSL_set1_host") &&
                 load_ssl(out->SSL_get0_param_fn, "SSL_get0_param") &&
                 load_ssl(out->X509_VERIFY_PARAM_set1_ip_asc_fn, "X509_VERIFY_PARAM_set1_ip_asc") &&
+                load_ssl(out->X509_VERIFY_PARAM_set_flags_fn, "X509_VERIFY_PARAM_set_flags") &&
                 load_ssl(out->SSL_connect_fn, "SSL_connect") &&
                 load_ssl(out->SSL_read_fn, "SSL_read") &&
                 load_ssl(out->SSL_write_fn, "SSL_write") &&
@@ -1958,6 +1960,16 @@ void WebSocketObject::receiver_thread_loop() {
         if (!ssl || ssl_api.SSL_set_fd_fn(ssl, sock) != 1) {
             cleanup_transport();
             finish_abnormal("Failed to create TLS session");
+            return;
+        }
+
+        // Match the HTTPS loader: an explicitly trusted intermediate or leaf
+        // may terminate the chain. Identity and validity remain mandatory.
+        constexpr unsigned long kPartialChain = 0x80000UL; // X509_V_FLAG_PARTIAL_CHAIN
+        auto* verify_param = ssl_api.SSL_get0_param_fn(ssl);
+        if (!verify_param || ssl_api.X509_VERIFY_PARAM_set_flags_fn(verify_param, kPartialChain) != 1) {
+            cleanup_transport();
+            finish_abnormal("Failed to configure TLS certificate verification");
             return;
         }
 

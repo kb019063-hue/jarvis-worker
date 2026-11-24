@@ -13,6 +13,21 @@ void install_array_builtins(JsIntrinsics& realm);       // Array, Array.prototyp
 void install_string_builtins(JsIntrinsics& realm);      // String, String.prototype
 void install_number_builtins(JsIntrinsics& realm);      // Number, Math, parseInt and friends
 void install_collection_builtins(JsIntrinsics& realm);  // Map, Set, WeakMap, WeakSet
+
+/// What a `Map` or a `Set` holds, in insertion order, for a structured clone:
+/// `entries` is true for a Map. False, with `out` empty, for anything else —
+/// a WeakMap is not cloneable and a clone has no business reading one.
+bool collection_entries(const JsValue& value, bool& entries,
+                        std::vector<std::pair<JsValue, JsValue>>& out);
+/// A new `Map` or `Set` in the current realm holding what a clone read. The
+/// values are the clone's own, not shared with the source.
+JsValue make_collection_copy(bool entries, const std::vector<std::pair<JsValue, JsValue>>& items);
+/// Add one entry to a copy `make_collection_copy` made: what a clone needs to
+/// build a collection in place, so an identity already handed out stays the
+/// object the entries end up in.
+void add_collection_copy_entry(const JsValue& collection, const JsValue& key, const JsValue& value);
+/// A `Map` is true and a `Set` false, for an object that is one of the two.
+bool is_keyed_collection(const JsValue& value, bool& entries);
 void install_regexp_builtins(JsIntrinsics& realm);      // RegExp
 void install_date_builtins(JsIntrinsics& realm);        // Date
 void install_json_builtins(JsIntrinsics& realm);        // JSON
@@ -59,6 +74,10 @@ inline constexpr const char* kSymbolSpeciesKey  = "@@species";
 JsValue species_constructor(const JsValue& obj, const JsValue& default_ctor);
 
 bool js_is_regexp(const JsValue& value);
+/// The pattern and flags a clone rebuilds a RegExp from: the compiled source
+/// as the engine holds it, and the canonical `dgimsuvy` order. False for
+/// anything that is not a RegExp.
+bool js_regexp_source_and_flags(const JsValue& value, std::string& source, std::string& flags);
 /// Validates a RegExp pattern and flags at parse time (no JS heap allocation).
 /// Validates a RegExp pattern and flags at parse time (no JS heap allocation).
 /// Returns true if valid; otherwise writes the SyntaxError reason into `error_out`.

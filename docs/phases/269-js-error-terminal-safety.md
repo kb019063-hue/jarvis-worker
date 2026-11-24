@@ -1,7 +1,7 @@
 # Phase 269 — uncaught JavaScript errors are not terminal commands
 
 Task row: terminal viewport clipping and ink; uncaught JavaScript exceptions
-and unhandled rejection diagnostics. Finding 273.
+and unhandled rejection diagnostics. Finding 283.
 
 ## What was wrong
 

@@ -8,14 +8,20 @@
 #   tools/watch/watch.sh look            the beat, and what changed since the look before
 #   tools/watch/watch.sh st              a look, the lot, and the CI state of every open pull request
 #   tools/watch/watch.sh cands           the pull requests that can be taken now, one line of numbers
-#   tools/watch/watch.sh build N [N...]  this branch = main + an empty commit + those heads in number
-#                                        order (not pushed). 0 built; 5 built without one that
+#   tools/watch/watch.sh plan N [N...]   which of them merge after one another onto main (one line of
+#                                        numbers); the others, and the files, on stderr. Changes nothing
+#   tools/watch/watch.sh build N [N...]  this branch = main + an empty commit + those heads in the
+#                                        order given (not pushed). 0 built; 5 built without one that
 #                                        conflicts (it says which, in which files); 6 one is not
 #                                        finished and green; 7 the tree is not the one a chain of
 #                                        merges gives
 #   tools/watch/watch.sh push            push the lot (forced, with lease); its run starts
 #   tools/watch/watch.sh lot             0 READY; 2 main moved or a job failed; 3 a head moved or a
-#                                        pull request is not open; 4 running
+#                                        pull request is not open; 4 running; 5 the own run of one
+#                                        that was taken while it was still going has failed
+#   tools/watch/watch.sh rehead          after `lot` said 3: go on with the heads as they are now, when
+#                                        main and they still give the lot's tree (an agent that only
+#                                        merged main into its branch)
 #   tools/watch/watch.sh wait [SECONDS]  `lot` every 20 s, until it is not 4 or the time is up; a look
 #   tools/watch/watch.sh land [last]     merge each pull request of the lot as it is, in number order.
 #                                        `last`: the watch's own merge follows, so no merge starts a
@@ -70,8 +76,49 @@ came_back_without_a_run() {  # came_back_without_a_run N FULLSHA
   [ -n "$auto" ] || return 1
   [ -z "$(git diff --name-only "$auto" "$head^{tree}" | grep -vE '\.md$')" ]
 }
-takeable() {  # takeable N FULLSHA
-  green "$2" || came_back_without_a_run "$1" "$2"
+code_was_green() {  # code_was_green FULLSHA
+  # A head whose code is code that was green: a commit of the branch before
+  # it has a green run, and the head is that commit, merged with `main` by
+  # git alone where `main` was merged since, with changes to documents only
+  # on top (a conflict in AGENTS.md resolved, a write-up finished). Its own
+  # run, if it has one, need not be waited for: the lot is `main` with this
+  # head merged in, the same tree, and the lot's run is the test. On 24
+  # November #313 lay finished for 25 minutes with such a head: its agent
+  # had merged `main` with the mark that skips CI, and the commit that was to
+  # start a run again carried the mark in its message too.
+  local head="$1" c g="" m auto changed runs
+  for c in $(git rev-list --first-parent -8 "$head" | tail -n +2); do
+    git merge-base --is-ancestor "$c" origin/main && return 1   # nothing of its own was ever tested
+    runs="$(runs_of "$c")"
+    case "$runs" in *failure*|*timed_out*) return 1 ;; esac
+    if green "$c"; then g="$c"; break; fi   # a run the next push cancelled says nothing
+  done
+  [ -n "$g" ] || return 1
+  m="$(git merge-base "$head" origin/main)"
+  if git merge-base --is-ancestor "$m" "$g"; then auto="$(git rev-parse "$g^{tree}")"
+  else auto="$(git merge-tree --write-tree "$g" "$m" 2>/dev/null | head -1)"; fi
+  [ -n "$auto" ] || return 1
+  changed="$(git diff --name-only "$auto" "$head^{tree}" | grep -vE '^([^/]+\.md|docs/.+|tests/[^/]+/README\.md)$')"
+  [ -z "$changed" ]
+}
+takeable() {  # takeable N FULLSHA; says why in $WHY
+  local runs
+  WHY="green"; green "$2" && return 0
+  runs="$(runs_of "$2")"
+  case "$runs" in *failure*|*timed_out*) WHY="its own run failed"; return 1 ;; esac
+  WHY="its code was green"; came_back_without_a_run "$1" "$2" && return 0
+  code_was_green "$2" && return 0
+  # A finished pull request whose own run is still going is taken as well
+  # (WATCH_EAGER=0 turns that off): its run and the lot's go side by side, and
+  # it lands when the lot's has passed. Waiting for its own run first cost
+  # every pull request one run's length, 8 to 12 minutes, before the lot's
+  # run began. If its own run fails, `lot` says so (5) and the lot is built
+  # again without it; main still gets only a tree a whole run passed on.
+  # A head with no run at all is not taken this way: a claim's empty commit
+  # under a title that has lost its WIP: would be merged as the pull request.
+  WHY="eager: its own run is still going"
+  [ "${WATCH_EAGER:-1}" = "1" ] && [ -n "$runs" ] && return 0
+  WHY="no run on its head, and its code was never green"; return 1
 }
 note() {  # note N FILE -> "#N COMMENTID"
   local url; url="$(timeout 40 gh pr comment "$1" --body-file "$2" 2>&1 | tail -1)"
@@ -113,12 +160,32 @@ cands)
     grep -q "^$n ${full:0:7}$" "$STATE/sentback" 2>/dev/null && continue   # sent back, and has not moved
     grep -qx "$n" "$STATE/ignore" 2>/dev/null && continue                     # nobody's: left alone
     fetch_pr "$n" || continue
-    takeable "$n" "$full" && printf '%s ' "$n"
+    if takeable "$n" "$full"; then printf '%s ' "$n"; [ "$WHY" = "green" ] || echo "#$n ${full:0:7}: $WHY" >&2; fi
   done; echo ;;
+
+plan)
+  # Which of these merge after one another onto main, in the order given:
+  # their numbers on one line; the ones that do not, and the files, on stderr.
+  # Nothing is changed. Ask this before `build` when a lot is in test, with
+  # the lot's own numbers first: a newcomer that conflicts must not start the
+  # lot's run again for nothing, and must not put out one that was taken
+  # (both happened on 24 November, the second to #325 for two minutes).
+  timeout 60 git fetch -q origin main || { echo "could not fetch main" >&2; exit 9; }
+  prev="$(git rev-parse origin/main)"; ok=""
+  for n in "$@"; do   # in the order given: the ones a lot in test holds first, so that no newcomer puts one of them out
+    fetch_pr "$n" || { echo "could not fetch #$n" >&2; continue; }
+    full="$(git rev-parse "origin/pr$n")"
+    if out="$(git merge-tree --write-tree --name-only "$prev" "$full" 2>/dev/null)"; then
+      prev="$(git commit-tree "$(echo "$out" | head -1)" -p "$prev" -p "$full" -m "chain $n")"; ok="$ok$n "
+    else
+      echo "CONFLICT #$n (after ${ok:-nothing}): $(echo "$out" | sed -n '2,/^$/p' | tr '\n' ' ')" >&2
+    fi
+  done
+  echo "$ok" ;;
 
 build)
   timeout 60 git fetch -q origin main || { echo "could not fetch main"; exit 9; }
-  nums="$(printf '%s\n' "$@" | sort -n | tr '\n' ' ')"
+  nums="$*"   # in the order given (`plan` says which order merges)
   : > "$STATE/lot.heads.new"
   for n in $nums; do
     fetch_pr "$n" || { echo "could not fetch #$n"; exit 9; }
@@ -169,6 +236,11 @@ lot)
     st="$(timeout 30 gh pr view "$n" --json state,headRefOid --jq '"\(.state) \(.headRefOid[0:7])"')"
     if [ "$st" != "OPEN $sha" ]; then echo "lot: #$n is '$st', the lot holds $sha"; exit 3; fi
   done < "$STATE/lot.heads"
+  while read -r n sha; do   # a member that was taken while its own run was going: has that run failed?
+    [ -n "$n" ] || continue
+    own="$(runs_of "$(git rev-parse "origin/pr$n")")"
+    case "$own" in *failure*|*timed_out*) echo "lot: #$n's own run failed ($own): build the lot again without it"; exit 5 ;; esac
+  done < "$STATE/lot.heads"
   runs="$(runs_of "$head")"
   echo "lot $(date -u '+%H:%M:%S') ${head:0:7} main $main_now: ${runs:-no check runs yet}"
   if green "$head"; then echo READY; exit 0; fi
@@ -178,10 +250,40 @@ lot)
     *) exit 4 ;;
   esac ;;
 
+rehead)
+  # A head moved under the lot (exit 3 of `lot`). When its agent only merged
+  # `main` into it, `main` and the heads as they are now still give the tree
+  # the lot holds: the run that is going is a run on them, and the lot goes
+  # on with the new head. 0 it does; 2 main moved; 3 a head that is not
+  # takeable, or a conflict; 7 another tree.
+  timeout 60 git fetch -q origin main || exit 9
+  [ "$(git rev-parse --short=7 origin/main)" = "$(cat "$STATE/lot.main")" ] || { echo "main moved"; exit 2; }
+  prev="$(git rev-parse origin/main)"; : > "$STATE/lot.heads.new"; moved=""
+  while read -r n sha; do
+    fetch_pr "$n" || exit 9
+    full="$(git rev-parse "origin/pr$n")"
+    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title --jq '"\(.state) \(.headRefOid) \(if (.title | test("^WIP")) then "WIP" else "finished" end)"')"
+    [ "$st" = "OPEN $full finished" ] || { echo "#$n: '$st' is not OPEN and finished at ${full:0:7}"; exit 3; }
+    if [ "${full:0:7}" != "$sha" ]; then
+      takeable "$n" "$full" || { echo "#$n moved to ${full:0:7}, and that head cannot be taken: $(runs_of "$full")"; exit 3; }
+      moved="$moved #$n $sha->${full:0:7}"
+    fi
+    tree="$(git merge-tree --write-tree "$prev" "$full" | head -1)"
+    git merge-tree --write-tree "$prev" "$full" >/dev/null 2>&1 || { echo "#$n at ${full:0:7} does not merge after the ones before it"; exit 3; }
+    prev="$(git commit-tree "$tree" -p "$prev" -p "$full" -m "chain $n")"
+    echo "$n ${full:0:7}" >> "$STATE/lot.heads.new"
+  done < "$STATE/lot.heads"
+  if [ "$(git rev-parse "$prev^{tree}")" = "$(git rev-parse "$(cat "$STATE/lot.asis")^{tree}")" ]; then
+    mv "$STATE/lot.heads.new" "$STATE/lot.heads"; echo "the lot goes on, on the same tree:${moved:- no head had moved}"
+  else
+    echo "main and the heads as they are now give another tree than the lot's:$moved"; exit 7
+  fi ;;
+
 wait)
   limit="${1:-240}"; start="$(date +%s)"; rc=4
   while :; do
     "$0" lot > "$STATE/lot.out" 2>&1; rc=$?
+    if [ $rc -eq 3 ] && "$0" rehead > "$STATE/rehead.out" 2>&1; then cat "$STATE/rehead.out"; continue; fi
     [ $rc -ne 4 ] && break
     [ $(( $(date +%s) - start + 20 )) -ge "$limit" ] && break
     sleep 20
@@ -192,7 +294,9 @@ wait)
 
 land)
   last="${1:-}"
-  "$0" lot > "$STATE/lot.out" 2>&1 || { cat "$STATE/lot.out"; echo "STOP: the lot is not READY"; exit 1; }
+  "$0" lot > "$STATE/lot.out" 2>&1; rc=$?
+  if [ $rc -eq 3 ] && "$0" rehead; then "$0" lot > "$STATE/lot.out" 2>&1; rc=$?; fi
+  [ $rc -eq 0 ] || { cat "$STATE/lot.out"; echo "STOP: the lot is not READY"; exit 1; }
   head="$(cat "$STATE/lot.head")"; main7="$(cat "$STATE/lot.main")"
   want="$(git rev-parse "$(cat "$STATE/lot.asis")^{tree}")"
   nums="$(cut -d' ' -f1 "$STATE/lot.heads" | tr '\n' ' ')"; final="$(tail -1 "$STATE/lot.heads" | cut -d' ' -f1)"

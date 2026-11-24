@@ -358,30 +358,6 @@ bool function_implicit_property(const JsValue& fn, JsObject* cell, const std::st
     return false;
 }
 
-/// True for the one function that stores `caller` and `arguments` as `null`
-/// data properties: a sloppy ordinary function (§10.2.4).
-bool function_stores_poison_pair(const JsValue& fn) {
-    const JsValue::FunctionData* fd = fn.function_data();
-    return fd && !fd->is_arrow && !fd->is_generator && !fd->is_async && !fd->is_class_constructor &&
-           !fd->is_strict && fd->is_constructor;
-}
-
-/// §10.2.4/§10.2.6: reading `caller` or `arguments` of a function that is not
-/// a sloppy ordinary one throws a TypeError. The ordinary set is the one the
-/// standard builds the pair for; arrows, methods, generators, async functions
-/// and class constructors must not have own properties of either name at all,
-/// so the refusal has to happen on the lookup rather than by storing a getter.
-void throw_if_forbidden_property(const JsValue& fn, const std::string& name) {
-    if (name != "caller" && name != "arguments") return;
-    const JsValue::FunctionData* fd = fn.function_data();
-    if (!fd) return;
-    // A sloppy ordinary function stores these, so the lookup never gets here.
-    if (function_stores_poison_pair(fn)) return;
-    if (fd->name == "thrower") return;          // the pill must not recurse
-    js_throw_type_error("'caller', 'callee', and 'arguments' properties may not be accessed on strict "
-                        "mode functions or the arguments objects for calls to them");
-}
-
 /// True when function_implicit_property would answer `name` for `fn`.
 bool function_has_implicit_property(const JsValue& fn, const std::string& name) {
     if (fn.type != JsType::Function) return false;
@@ -1095,10 +1071,9 @@ bool JsValue::has_property(const std::string& name) const {
         default: proto = prototype_object(); break;
     }
     int guard = 0;
-    // `caller` and `arguments` are on the prototype for every function that
-    // does not store them itself (§10.2.4), so `'caller' in f` is true even
-    // though `f` has no own property of that name — and reading it throws.
-    if (type == JsType::Function && (name == "caller" || name == "arguments")) return true;
+    // `caller` and `arguments` answer `true` for every function that does not
+    // store them itself because %Function.prototype% carries the pair as real
+    // accessors (Phase 269), not because of anything here.
     for (JsObject* obj = proto; obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
         if (obj->properties.find(name) != obj->properties.end()) return true;
         if (obj->is_array) {
@@ -1482,14 +1457,6 @@ JsValue JsValue::get_property(const std::string& name) const {
         // starts at the parent's cell, which is how static members are
         // inherited, with this function as the receiver of a static getter.
         JsValue found;
-        if (type == JsType::Function) {
-            throw_if_forbidden_property(*this, name);
-            // And a function that is *not* sloppy does not get the pair from
-            // Object.prototype either: HasProperty is true, the value is not.
-            if ((name == "caller" || name == "arguments") && !function_stores_poison_pair(*this)) {
-                return JsValue::make_undefined();
-            }
-        }
         if (type == JsType::Function && function_implicit_property(*this, obj, name, found)) return found;
         if (lookup_chain(obj->prototype, name, *this, found)) return found;
 
@@ -1524,7 +1491,6 @@ JsValue JsValue::get_property(const std::string& name) const {
         // Function.prototype.
         JsValue found;
         if (name == "__proto__") return JsValue::make_object(JsIntrinsics::get().function_proto);
-        throw_if_forbidden_property(*this, name);
         if (function_implicit_property(*this, nullptr, name, found)) return found;
         if (lookup_chain(JsIntrinsics::get().function_proto, name, *this, found)) return found;
     }

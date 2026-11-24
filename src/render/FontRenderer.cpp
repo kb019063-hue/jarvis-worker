@@ -2769,28 +2769,44 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
     std::vector<PositionedGlyph> result;
     if (!m_loaded || original.empty()) return result;
 
+    auto combining_class = [](uint32_t cp) -> uint8_t {
+        using namespace unicode::tables;
+        const auto* r = std::lower_bound(kCccRanges, kCccRanges + kCccRangesCount,
+            cp, [](const CccRange& range, uint32_t c) { return range.hi < c; });
+        return r != kCccRanges + kCccRangesCount && r->lo <= cp ? r->ccc : 0;
+    };
+    const auto original_scripts = itemize_codepoint_scripts(original);
     // A missing Latin composite can use canonical parts in this same face.
-    // Keep an existing glyph, and never substitute a partly covered expansion.
+    // Preserve standalone glyphs. Before a following Latin combining mark,
+    // expose canonical components even for a supported composite so ordering
+    // can interleave that mark. Never substitute a partly covered expansion.
     // Recursion follows only the generated canonical table, not compatibility
     // mappings. Bounds are defensive; Unicode's decomposition depth is small.
     std::vector<uint32_t> input;
     input.reserve(original.size());
-    auto expand = [&](auto& self, uint32_t cp, std::vector<uint32_t>& parts, unsigned depth) -> bool {
+    auto expand = [&](auto& self, uint32_t cp, std::vector<uint32_t>& parts, unsigned depth, bool fully) -> bool {
         if (parts.size() >= 32 || depth > 16) return false;
-        if (glyph_index(cp) != 0) { parts.push_back(cp); return true; }
+        if (!fully && glyph_index(cp) != 0) { parts.push_back(cp); return true; }
         using namespace unicode::tables;
         const auto* entry = std::lower_bound(kCanonDecomp, kCanonDecomp + kCanonDecompCount,
             cp, [](const DecompEntry& d, uint32_t c) { return d.cp < c; });
-        if (entry == kCanonDecomp + kCanonDecompCount || entry->cp != cp) return false;
+        if (entry == kCanonDecomp + kCanonDecompCount || entry->cp != cp) {
+            if (glyph_index(cp) == 0) return false;
+            parts.push_back(cp);
+            return true;
+        }
         for (unsigned j = 0; j < entry->len; ++j) {
-            if (!self(self, kDecompPool[entry->offset + j], parts, depth + 1)) return false;
+            if (!self(self, kDecompPool[entry->offset + j], parts, depth + 1, fully)) return false;
         }
         return true;
     };
-    for (uint32_t cp : original) {
-        if (classify_codepoint_script(cp) == kTagLatn && glyph_index(cp) == 0) {
+    for (std::size_t i = 0; i < original.size(); ++i) {
+        const uint32_t cp = original[i];
+        const bool before_mark = i + 1 < original.size() && combining_class(original[i + 1]) != 0 &&
+                                 original_scripts[i + 1] == kTagLatn;
+        if (classify_codepoint_script(cp) == kTagLatn && (before_mark || glyph_index(cp) == 0)) {
             std::vector<uint32_t> parts;
-            if (expand(expand, cp, parts, 0)) {
+            if (expand(expand, cp, parts, 0, before_mark)) {
                 input.insert(input.end(), parts.begin(), parts.end());
                 continue;
             }
@@ -2800,13 +2816,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
 
     // Canonical order for nonzero-class marks following a Latin starter.
     // Keep equal classes stable and do not cross a starter or script boundary.
-    // Existing composites are not decomposed here: this is not full NFC.
-    auto combining_class = [](uint32_t cp) -> uint8_t {
-        using namespace unicode::tables;
-        const auto* r = std::lower_bound(kCccRanges, kCccRanges + kCccRangesCount,
-            cp, [](const CccRange& range, uint32_t c) { return range.hi < c; });
-        return r != kCccRanges + kCccRangesCount && r->lo <= cp ? r->ccc : 0;
-    };
+    // This is font-aware Latin normalization, not full Unicode NFC.
     const auto input_scripts = itemize_codepoint_scripts(input);
     for (std::size_t i = 0; i < input.size();) {
         if (classify_codepoint_script(input[i]) != kTagLatn || combining_class(input[i])) {
@@ -2919,19 +2929,38 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             apply_gsub_plan(gsub_plan, run, next_lig_id);
         }
 
-        // Strip surviving default-ignorable join controls (`U+200C`/`U+200D`) so
-        // they never paint `.notdef` boxes or interfere with `GPOS` adjacency.
-        run.erase(std::remove_if(run.begin(), run.end(),
-                                 [](const ShapingGlyph& sg) {
-                                     return (sg.feature_mask & (1u << 31)) != 0u;
-                                 }),
-                  run.end());
-
         const std::size_t n = run.size();
         for (std::size_t i = 0; i < n; ++i) {
             const uint16_t g = run[i].glyph;
             const uint16_t adv = (g < m_advance_widths.size()) ? m_advance_widths[g] : m_advance_widths[0];
             run[i].x_advance = static_cast<int32_t>(adv);
+        }
+
+        // A surviving default-ignorable join control (`U+200C`/`U+200D`) paints
+        // nothing and advances nothing -- but it stays in the stream, with the
+        // glyph its font maps it to and a zero advance, the way HarfBuzz emits
+        // it. It used to be erased here instead, which was wrong twice over:
+        // the glyph count then differed from the reference for any text holding
+        // one, and `mark_base` is an *index into this vector*, so erasing an
+        // element slid every later mark onto the base before its own.
+        for (ShapingGlyph& sg : run) {
+            if ((sg.feature_mask & (1u << 31)) == 0u) continue;
+            // OpenType makes a default-ignorable an *invisible glyph*: it keeps
+            // its slot in the stream so that `mark_base` indices and the glyph
+            // count stay right, and it reports the space glyph rather than the
+            // font's own `cmap` entry for the control. Nothing paints and
+            // nothing advances.
+            sg.glyph = glyph_index(0x0020u);
+            sg.x_advance = 0;
+            sg.y_advance = 0;
+            sg.x_offset = 0;
+            sg.y_offset = 0;
+            sg.mark_base = -1;
+            sg.lig_id = 0;
+            sg.lig_comp = 0;
+            sg.cursive_chain = -1;
+            sg.cursive_dx = 0;
+            sg.cursive_dy = 0;
         }
 
         const GposScriptPlan* gpos_plan = find_gpos_script(script_tag);

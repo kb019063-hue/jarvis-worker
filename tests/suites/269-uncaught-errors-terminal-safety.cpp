@@ -1,4 +1,4 @@
-// Phase 269, finding 273: diagnostic text, not thrown values, is filtered.
+// Phase 269, finding 283: diagnostic text, not thrown values, is filtered.
 TEST(uncaught_js_diagnostics_cannot_inject_terminal_controls) {
     JsInterpreter js(nullptr);
     JsValue text = js.eval("var s=''; for (var i=0;i<256;i++) s+=String.fromCharCode(i); s;");

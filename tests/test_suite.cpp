@@ -254,6 +254,34 @@ static void give_memory_back() {
 static void give_memory_back() {}
 #endif
 
+/// How long each suite took, for the one line at the end that names the
+/// slowest. The run of the sanitizer build was the longest job of CI on 24
+/// November 2026, and the time was not where anybody had looked: of three
+/// stretches of 147 suites each, two took 22 and 24 seconds and the third
+/// 320 (and 5 GB), and nothing the run printed said which suite that was.
+/// tools/ci/run_stretches.py reads the line and CI shows it as a notice.
+static std::vector<std::pair<double, const char*>> g_suite_seconds;
+static std::chrono::steady_clock::time_point g_suite_began;
+static void suite_begins() { g_suite_began = std::chrono::steady_clock::now(); }
+static void suite_ended(const char* name) {
+    const std::chrono::duration<double> took =
+        std::chrono::steady_clock::now() - g_suite_began;
+    g_suite_seconds.push_back({took.count(), name});
+}
+static void say_the_slowest_suites() {
+    std::sort(g_suite_seconds.begin(), g_suite_seconds.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    double all = 0;
+    for (const auto& suite : g_suite_seconds) all += suite.first;
+    std::cout << "\nThe slowest suites of " << g_suite_seconds.size() << " ("
+              << static_cast<long>(all + 0.5) << " s in all):";
+    for (std::size_t i = 0; i < g_suite_seconds.size() && i < 5; ++i) {
+        std::cout << (i == 0 ? " " : ", ") << g_suite_seconds[i].second << " "
+                  << static_cast<long>(g_suite_seconds[i].first + 0.5) << " s";
+    }
+    std::cout << "\n";
+}
+
 #define RUN_TEST(name) do { \
     if (!this_process_runs_the_next_suite()) { \
         note_suite_is_elsewhere(&test_##name); \
@@ -261,8 +289,10 @@ static void give_memory_back() {}
     } \
     ++g_tests_run; \
     std::cout << "Running test: " #name "... " << std::flush; \
+    suite_begins(); \
     test_##name(); \
     give_memory_back(); \
+    suite_ended(#name); \
     note_suite_run(&test_##name); \
     std::cout << "\033[32mPASSED\033[0m\n"; \
 } while(0)
@@ -284,8 +314,10 @@ static void run_the_suites_in_files_of_their_own() {
         ++g_tests_run;
         std::cout << "Running test: " << suite_list()[i].name << "... "
                   << std::flush;
+        suite_begins();
         suite_list()[i].run();
         give_memory_back();
+        suite_ended(suite_list()[i].name);
         ++suite_list()[i].runs;
         std::cout << "\033[32mPASSED\033[0m\n";
     }
@@ -36837,6 +36869,7 @@ int main() {
 
     }  // the second time down the list, or the only one
 
+    say_the_slowest_suites();
     if (g_divided) {
         // Not the sentence of a whole run: a count of suites that is a third
         // of them must not be read as the number of suites there are.

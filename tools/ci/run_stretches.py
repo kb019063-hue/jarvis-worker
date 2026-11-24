@@ -41,6 +41,7 @@ import tempfile
 import time
 
 SENTENCE = re.compile(r"Stretch (\d+) of (\d+): its (\d+) of the (\d+) engine test suites passed\.")
+SLOWEST = re.compile(r"The slowest suites of \d+ \(\d+ s in all\): (.+)")
 
 
 def verdict(results: list[tuple[int, str]]) -> tuple[bool, str]:
@@ -74,8 +75,10 @@ def measured(results: list[tuple[int, str]], seconds: list[float], megabytes: li
         suites = f"{said.group(3)} suites" if said else "no count"
         parts.append(f"stretch {index}: {suites} in {seconds[index]:.0f} s, {megabytes[index]} MB at most")
     slowest = max(range(len(seconds)), key=lambda index: seconds[index]) if seconds else 0
+    named = SLOWEST.search(results[slowest][1]) if results else None
     return (f"{len(results)} processes side by side, {whole:.0f} s in all (the slowest is stretch {slowest}); "
-            + "; ".join(parts))
+            + "; ".join(parts)
+            + (f". The slowest suites of stretch {slowest}: {named.group(1).strip()}" if named else ""))
 
 
 def run(binary: str, count: int) -> int:
@@ -154,6 +157,13 @@ def self_test() -> int:
          "3 processes side by side, 241 s in all (the slowest is stretch 1); "
          "stretch 0: 140 suites in 101 s, 900 MB at most; stretch 1: 140 suites in 241 s, 1500 MB at most; "
          "stretch 2: 140 suites in 99 s, 800 MB at most"),
+        ("the slowest suites of the slowest stretch are named, when the binary says them",
+         measured([(0, said(0, 2, 210, 420)),
+                   (0, "\nThe slowest suites of 210 (300 s in all): deep 250 s, wide 30 s\n" + said(1, 2, 210, 420))],
+                  [20.0, 300.0], [700, 5000], 300.0),
+         "2 processes side by side, 300 s in all (the slowest is stretch 1); "
+         "stretch 0: 210 suites in 20 s, 700 MB at most; stretch 1: 210 suites in 300 s, 5000 MB at most. "
+         "The slowest suites of stretch 1: deep 250 s, wide 30 s"),
         ("a stretch that died says no count, and the line is still written",
          measured([(134, "Running test: b... Assertion failed\n")], [12.0], [300], 12.0),
          "1 processes side by side, 12 s in all (the slowest is stretch 0); stretch 0: no count in 12 s, 300 MB at most"),

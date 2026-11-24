@@ -1,5 +1,6 @@
 #include "litebird/js/BytecodeCompiler.hpp"
 #include <stdexcept>
+#include <algorithm>
 
 namespace litebird {
 
@@ -769,17 +770,48 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         emit_opcode(OpCode::OpNewArray);
         emit_byte(static_cast<uint8_t>(arr->elements.size()));
     } else if (auto obj_lit = dynamic_cast<const ObjectLiteralExpr*>(expr)) {
-        if (!obj_lit->is_simple()) {
-            throw std::runtime_error("This object literal form is not supported by the bytecode compiler");
+        const bool has_spread = std::any_of(obj_lit->properties.begin(), obj_lit->properties.end(),
+            [](const ObjectProperty& p) { return p.kind == ObjectProperty::Kind::Spread; });
+        if (has_spread) {
+            // ECMA-262 13.2.5: the object is built in source order, with each
+            // spread evaluated at its position. One empty object is pushed and
+            // every property defines onto it, which is why a spread may call a
+            // function and see the keys written so far. Only plain `key: value`
+            // pairs and spreads are supported here; computed keys, methods,
+            // accessors and `__proto__` are refused as in the simple form.
+            // Spreading null or undefined copies nothing (§8.6.9 via
+            // CopyDataProperties), which is why it needs no branch of its own.
+            emit_opcode(OpCode::OpNewObject);
+            emit_byte(0);
+            for (const auto& prop : obj_lit->properties) {
+                if (prop.kind == ObjectProperty::Kind::Spread) {
+                    compile_expr(prop.value.get());
+                    emit_opcode(OpCode::OpObjectSpread);
+                    continue;
+                }
+                if (prop.kind != ObjectProperty::Kind::Init || prop.computed_key ||
+                    prop.is_method) {
+                    throw std::runtime_error("This object literal form is not supported by the bytecode compiler");
+                }
+                size_t key_idx = m_function->chunk.add_constant(JsValue::make_string(prop.key));
+                emit_opcode(OpCode::OpConstant);
+                emit_byte(static_cast<uint8_t>(key_idx));
+                compile_expr(prop.value.get());
+                emit_opcode(OpCode::OpObjectDefine);
+            }
+        } else {
+            if (!obj_lit->is_simple()) {
+                throw std::runtime_error("This object literal form is not supported by the bytecode compiler");
+            }
+            for (const auto& prop : obj_lit->properties) {
+                size_t key_idx = m_function->chunk.add_constant(JsValue::make_string(prop.key));
+                emit_opcode(OpCode::OpConstant);
+                emit_byte(static_cast<uint8_t>(key_idx));
+                compile_expr(prop.value.get());
+            }
+            emit_opcode(OpCode::OpNewObject);
+            emit_byte(static_cast<uint8_t>(obj_lit->properties.size()));
         }
-        for (const auto& prop : obj_lit->properties) {
-            size_t key_idx = m_function->chunk.add_constant(JsValue::make_string(prop.key));
-            emit_opcode(OpCode::OpConstant);
-            emit_byte(static_cast<uint8_t>(key_idx));
-            compile_expr(prop.value.get());
-        }
-        emit_opcode(OpCode::OpNewObject);
-        emit_byte(static_cast<uint8_t>(obj_lit->properties.size()));
     } else if (auto call = dynamic_cast<const CallExpr*>(expr)) {
         if (call->optional) throw std::runtime_error("Optional calls are not supported by the bytecode compiler");
         compile_expr(call->callee.get());

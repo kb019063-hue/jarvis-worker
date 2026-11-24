@@ -105,6 +105,11 @@ bool is_own_enumerable_for_copy(const JsValue& source, const std::string& key) {
     return false;
 }
 
+// The helpers above stay in the anonymous namespace; this function does not:
+// the bytecode VM's object-literal spread calls it, and it must keep the one
+// §7.3.24 the tree-walker already ships.
+} // namespace (anonymous helpers)
+
 /// ECMA-262 §7.3.24 `CopyDataProperties(target, source, excludedItems)` — used
 /// by both object spread (`{...source}`) and object rest destructuring
 /// (`{...rest} = source`). Snapshots `[[OwnPropertyKeys]]` (string keys in
@@ -149,6 +154,8 @@ void copy_data_properties(JsValue& target, const JsValue& source,
         target.define_property(key, std::move(prop_val), PropertyMap::Default);
     }
 }
+
+namespace {
 
 // ---------------------------------------------------------------------------
 // Active scopes

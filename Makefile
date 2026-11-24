@@ -196,6 +196,11 @@ $(BUILD_DIR)/holdout_02_driver: $(OBJS) tools/real_pages/holdout-02/drive.cpp
 verify-terminal-shell-safety: $(TARGET)
 	@python3 tools/conformance/verify_terminal_shell_safety.py --binary $(TARGET)
 
+## Check unhandled worker diagnostics without printing attack bytes.
+.PHONY: verify-worker-terminal-safety
+verify-worker-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_worker_error_terminal.py --binary $(TARGET)
+
 $(BUILD_DIR)/%.o: src/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -c $< -o $@

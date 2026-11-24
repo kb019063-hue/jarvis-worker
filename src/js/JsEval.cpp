@@ -1012,6 +1012,32 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
         if (node->uses_arguments) {
             JsValue arguments = JsValue::make_array(args);
             arguments.object_val->klass = ObjectClass::Arguments;
+            // §10.4.4: an arguments object's [[Prototype]] is
+            // %Object.prototype%, not %Array.prototype% — it is an ordinary
+            // object that happens to have index properties and a `length`,
+            // not an Array exotic object. `make_array` installed
+            // Array.prototype, so `Object.getPrototypeOf(arguments)` was
+            // wrong and every inherited name came out of the wrong place:
+            // `arguments.push` was a function, `Array.isArray(arguments)` was
+            // refused only by the class check above, and the `#<Array>` in a
+            // delete refusal's message where V8 says `#<Object>` (Phase 123's
+            // row, finding 286).
+            //
+            // §10.4.4.7 gives the object its own `@@iterator` — *the same
+            // function object* as %Array.prototype.values% — because it no
+            // longer inherits one. Without it `[...arguments]`, `for…of` over
+            // `arguments` and `yield* arguments` all stop working, which is
+            // what 75 test262 cases said when the prototype alone was changed.
+            JsObject* object_proto = JsIntrinsics::get().object_proto;
+            JsObject* array_proto = JsIntrinsics::get().array_proto;
+            arguments.object_val->prototype = object_proto;
+            if (array_proto != nullptr) {
+                for (const char* key : {"@@iterator", "Symbol.iterator"}) {
+                    const auto found = array_proto->properties.find(key);
+                    if (found == array_proto->properties.end()) continue;
+                    arguments.define_property(key, found->second, PropertyMap::Writable | PropertyMap::Configurable);
+                }
+            }
             env->define("arguments", arguments);
         }
         if (node->is_class_constructor || node->uses_new_target) {

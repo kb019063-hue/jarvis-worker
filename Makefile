@@ -4,12 +4,16 @@ BUILD_DIR ?= build
 
 ## -fno-var-tracking: with -g and optimisation GCC works out, for a
 ## debugger, where every variable lives at every instruction. Under the
-## sanitizers that one pass was more than half of the compile time: 54
-## seconds of src/layout/LayoutBox.cpp against 22 without it, 87 of
-## src/css/StyleResolver.cpp against 37 (24 November 2026, here). Nothing
-## a sanitizer reports comes from it: a report names functions, files and
-## lines, and those stay. A debugger on this build may say "optimized out"
-## of a variable where it used to show it.
+## sanitizers that one pass was more than half of the compile time of the
+## two files it was measured on here: 54 seconds of src/layout/LayoutBox.cpp
+## against 22 without it, 87 of src/css/StyleResolver.cpp against 37 (24
+## November 2026, g++ 12, one core). In CI, where the whole engine was
+## compiled without it once (run 45471158220), a job's build took 2.3 to
+## 3.0 seconds for each object it had to compile, against 3.5 and 4.3 in
+## the two lots measured with it (other objects, so the two are not the
+## same work). Nothing a sanitizer reports comes from the pass: a report
+## names functions, files and lines, and those stay. A debugger on this
+## build may say "optimized out" of a variable where it used to show it.
 ASAN_FLAGS = -std=c++20 -O1 -g -fno-var-tracking -Wall -Wextra -Iinclude -MMD -MP \
              -fsanitize=address,undefined -fno-omit-frame-pointer
 
@@ -351,9 +355,16 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 ## on the job, give the time of each and name the slowest suites), move a
 ## cut: a name here must be a suite of tests/test_suite.cpp's own list, in
 ## the order of that list, or every stretch fails.
+##
+## The five names make six stretches. The second and the fourth cut out the
+## deep suites (stretches 2 and 3, the late ones); the first and the last
+## halve what stands before and after them, at the suites a run named as
+## the middle of each ("half of it over when ... began", run 45471158220):
+## four stretches of some forty seconds side by side on the four cores of
+## CI's machines, then the two deep ones.
 STRETCHES ?= 3
-UNIT_SUITE_CUTS ?= deep_nesting_never_exhausts_the_native_stack,dom_trees_of_any_depth_can_be_walked_and_released,html_parser_void_element_with_a_slash_closes_nothing_else
-UNIT_SUITE_LATE ?= 1,2
+UNIT_SUITE_CUTS ?= inner_html_of_an_xml_document_is_xml,deep_nesting_never_exhausts_the_native_stack,dom_trees_of_any_depth_can_be_walked_and_released,html_parser_void_element_with_a_slash_closes_nothing_else,svg_real_world_paths_arcs_gradients_use_clip_and_guards
+UNIT_SUITE_LATE ?= 2,3
 test-in-stretches: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(if $(filter balanced,$(STRETCHES)),$(UNIT_SUITE_CUTS) $(UNIT_SUITE_LATE),$(STRETCHES))
 	@./$(CROSS_ORIGIN_TARGET)

@@ -3624,11 +3624,12 @@ TEST(gpos_mark_to_base_and_mark_to_mark_anchoring) {
 TEST(gpos_mark_to_ligature_and_lookup_flag_filtering) {
     using namespace litebird;
 
-    // Synthetic SFNT:
+    // Synthetic SFNT. The excluded mark uses grave (CCC 230), so canonical
+    // ordering leaves it between the other two marks and filtering must skip it.
     // gid 1='f'(adv 400), 2='i'(adv 300), 3=fi_lig(adv 700),
     // gid 4=U+0301 above(adv 0, MarkAttachClass=1, in MarkGlyphSet 0),
     // gid 5=U+0302 circumflex above(adv 0, MarkAttachClass=1, in MarkGlyphSet 0),
-    // gid 6=U+0323 below dot(adv 0, MarkAttachClass=2, NOT in MarkGlyphSet 0).
+    // gid 6=U+0300 synthetic below mark(adv 0, MarkAttachClass=2, NOT in MarkGlyphSet 0).
     const std::vector<TestGlyphSpec> glyphs = {
         {0, 500, false, 0, 0, 0, 0},
         {'f', 400, true, 40, 0, 360, 700},
@@ -3636,7 +3637,7 @@ TEST(gpos_mark_to_ligature_and_lookup_flag_filtering) {
         {0, 700, true, 40, 0, 660, 700}, // fi_lig
         {0x0301, 0, true, 20, 520, 80, 600},
         {0x0302, 0, true, 20, 520, 80, 600},
-        {0x0323, 0, true, 20, -150, 80, -80},
+        {0x0300, 0, true, 20, -150, 80, -80},
     };
 
     // GDEF v1.2
@@ -3751,7 +3752,7 @@ TEST(gpos_mark_to_ligature_and_lookup_flag_filtering) {
     mkl.u16(1); mkl.i16(550); mkl.i16(700);
 
     // Lookup 2: Type 6 MarkToMark with UseMarkFilteringSet (0x0010, set 0 = {4,5}):
-    // circ(5) onto acute(4): mark1=(50,500), mark2=(50,750) -> +250 lift even across below dot(6)!
+    // circ(5) onto acute(4): mark1=(50,500), mark2=(50,750) -> +250 lift even across excluded mark(6)!
     SfntByteBuf mkm;
     mkm.u16(1); mkm.u16(0); mkm.u16(0); mkm.u16(1); mkm.u16(0); mkm.u16(0);
     mkm.patch_u16(2, static_cast<uint16_t>(mkm.data.size()));
@@ -3794,12 +3795,12 @@ TEST(gpos_mark_to_ligature_and_lookup_flag_filtering) {
     assert(comp1[1].x_offset == (550 - 50) - 700);
     assert(comp1[1].x_offset - comp0[1].x_offset == 350);
 
-    // "f\u0301\u0323\u0302" -> skipping below dot(6) via UseMarkFilteringSet 0 stacks \u0302 onto \u0301 (+250)!
-    const auto filtered = font.shape_glyphs({'f', 0x0301, 0x0323, 0x0302}, true);
+    // "f\u0301\u0300\u0302" -> skipping excluded mark(6) via UseMarkFilteringSet 0 stacks \u0302 onto \u0301 (+250)!
+    const auto filtered = font.shape_glyphs({'f', 0x0301, 0x0300, 0x0302}, true);
     assert(filtered.size() == 4);
     assert(filtered[1].y_offset == 200);          // \u0301 on f (700 - 500)
-    assert(filtered[3].y_offset == 200 + 250);    // \u0302 stacked onto \u0301 across \u0323!
-    assert(filtered[2].y_offset == 700 - (-100)); // \u0323 anchored directly on f
+    assert(filtered[3].y_offset == 200 + 250);    // \u0302 stacked onto \u0301 across \u0300!
+    assert(filtered[2].y_offset == 700 - (-100)); // \u0300 anchored directly on f
 
     std::printf("      [gpos] MarkToLig comp0=%d vs comp1=%d, UseMarkFilteringSet y_offset=%d\n",
                 comp0[1].x_offset, comp1[1].x_offset, filtered[3].y_offset);

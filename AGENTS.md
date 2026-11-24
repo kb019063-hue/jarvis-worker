@@ -72,10 +72,12 @@ three pull requests it landed: three times an agent's own merge moved
 So since 23 November, **while a watch is on, one session merges and nobody
 else does**. It takes every pull request that is finished and green,
 without being asked, tests those that are waiting together in one run, and
-merges each as it is. No test is given up for that: a pull request still
-passes its own CI run before it is taken, and `main` still only ever gets a
-tree that a whole run passed on, file for file. What is given up is the
-runs that tested a tree nobody was going to merge.
+merges each as it is. No test is given up for that: `main` still only ever
+gets a tree that a whole run passed on, file for file, and a pull request
+whose own run fails is not merged. What is given up is the runs that
+tested a tree nobody was going to merge. (Until 24 November a pull request
+also had to pass its own run before it was taken; since then the two runs
+go side by side: point 4.)
 
 The first watch under that rule began at 05:28 on 23 November. In its
 first 67 minutes eight pull requests landed, on two CI runs: six together
@@ -137,10 +139,16 @@ within the hour, and the first lot was started again four times.
    title, and CI is green on the head commit (wait for it with
    `gh pr checks N`, once a minute; not with `gh run watch`). Then run
    `python3 tools/ci/check_pr.py merge N` and do what its last lines say.
+   **Take `WIP:` off with your last push, and not before.** While a watch
+   is on, the pull request can be taken from that moment, while its own
+   run is still going; a title that loses `WIP:` before the work is all
+   pushed gets half the work merged.
    - **`do not merge: a watch is on …`** The landing session takes #N as it
      is. Push nothing more to it and do not merge `main` into it, however
      far `main` has moved: either would start a run of your own and move
-     the head under the one that is testing it. Wait with
+     the head under the one that is testing it. That goes for an empty
+     commit "to start CI" as well: when the last comment on #N says it is
+     taken, it is, run or no run. Wait with
      `python3 tools/ci/check_pr.py landed N`, which looks for up to four
      minutes and says one of four things:
      - it has landed: tell the person, and end the turn. Your next task
@@ -224,6 +232,30 @@ within the hour, and the first lot was started again four times.
      23 November four pull requests went back for one row or one line
      each and landed 46 to 80 minutes later, most of that a CI run on a
      merge that had changed no code of theirs;
+   - **a finished pull request is taken while its own run is still
+     going.** Until 24 November it had to be green on its own head first,
+     which put a run's length, 10 to 13 minutes that night, in front of
+     the run on the lot. Now the two go side by side, and it lands when
+     the lot's has passed. If its own run fails, `watch.sh lot` says so
+     and the lot is built again without it: the innocent ones in that lot
+     lose the minutes it had run, and that is the price. A head with no
+     run at all is not taken this way (a claim's empty commit under a
+     title without `WIP:` would be merged as the pull request);
+   - **a head whose code was green is taken without waiting for its own
+     run**, the same rule made general (`code_was_green` in
+     `tools/watch/watch.sh`): a commit of the branch before it has a green
+     run, and the head is that commit merged with `main` by git alone,
+     with changes to documents only on top. That is an agent that merged
+     `main` itself, or finished a write-up, or took a line out of
+     `AUDIT.md`. The lot is `main` with that head merged in, the same
+     tree whether its own run has ended or not. A head with a failed run
+     is not taken;
+   - **a head that moves under a lot does not always end the lot.** When
+     its agent only merged `main` into it, `main` and the heads as they
+     are now still give the tree the run is testing; `watch.sh rehead`
+     checks that, and the lot goes on with the new head. In the first
+     quarter of an hour of 24 November's watch three heads moved under
+     one lot (#305, #313, #321) and none of them cost a run;
    - a pull request that becomes finished while a run is going waits for
      the next lot, unless the run is less than five minutes old: then it
      joins, and the run starts again. Twice for one lot at the most: on
@@ -270,6 +302,15 @@ within the hour, and the first lot was started again four times.
    never the landing session's: #226 and #211 had changed the same four
    files of the JS engine, and which of the two stays was not for it to
    say.
+
+   A conflict in the table "Open tasks" is carried by
+   `tools/watch/carry_rows.py`: it reads from the pull request's own diff
+   which row it rewrote and which it added, does that again to the table
+   as it is in the lot, and refuses anything else. And since a watch can
+   pause, a pull request is carried too when its agent is there and it
+   has gone back twice for a document: on 24 November #317 went back
+   three times in half an hour for empty rows it had put in by hand, each
+   time against a table that had moved on.
 
    **Two pull requests that each pass can fail together**, which is what
    the run on the lot is for. On 22 November #176 filled the answer of
@@ -375,10 +416,13 @@ own now, "Working together", point 2.) So:
      under your row then stands under the new one, between it and the
      next task;
    - `python3 tools/ci/check_rows.py` has the picture, and
-     `python3 tools/ci/check_docs.py` notes two rows that touch. The
-     landing session puts in a missing one at the end of a watch
-     (`check_rows.py --write --open`, which stays clear of the rows that
-     open pull requests hold).
+     `python3 tools/ci/check_docs.py` notes two rows that touch. **That
+     note asks nothing of you.** The landing session puts in a missing
+     empty row at the end of a watch (`check_rows.py --write`, which
+     stays clear of the rows that open pull requests hold). One put in by
+     hand beside another task's row is a change that touches that row: on
+     24 November #317 put in eleven, and was in conflict with three
+     other pull requests for it.
 
 ### The numbers are generated, not copied
 
@@ -669,8 +713,15 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
 - **A push starts no CI run while the pull request conflicts with `main`.**
   It looks like a run that has not started yet. `gh pr view N --json
   mergeable` after `git fetch`, before spending a commit on CI.
-- **A run is twelve jobs and about an hour of runner time** (how long it
+- **A run is twelve jobs, and half an hour to an hour and a quarter of
+  runner time**, by how much of the engine it has to compile (how long it
   takes is two points down).
+  **The mark works wherever it stands in the message**, in a sentence
+  about it too. On 24 November #313's commit "re-run CI on the merged
+  head" explained in its message why the commit before it had carried
+  `[skip ci]`, so it carried it too, started nothing, and the pull request
+  lay finished for 25 minutes; the landing session's own push had done
+  the same two hours earlier. Write "the mark" when you write about it.
   `[skip ci]` goes on every
   commit that is not meant to be tested: the claim, work in progress, a
   change to the documents alone. The commit that is merged has a green run,
@@ -709,7 +760,13 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   (`.github/actions/ccache`): an object is taken from there only when
   compiling would have made the same one, so a job compiles what its pull
   request changed. The first run without the wait, with nothing to take
-  yet, was 13.8 minutes (run 45307390078). A run on `main` saves the
+  yet, was 13.8 minutes (run 45307390078). The first with the objects was
+  8.2 (run 45310301051), its longest job 6.7: the step "Build" took 3 to
+  7 seconds where it had taken 85 to 158, the sanitizer build 10 to 31
+  where it had taken 292 to 377, and the run 33 minutes of runner time
+  where it had taken 75. When the runners are busy a run waits for them:
+  the first four lots of that night took 11.6, 13.0, 10.2 and 10.5
+  minutes from the push to the last job. A run on `main` saves the
   objects for everybody else's runs, which is one more reason for the
   last merge of a lot to start one. A job that cannot fetch ccache
   compiles everything, as before. Three rules keep it the same checks:

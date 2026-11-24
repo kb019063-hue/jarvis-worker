@@ -31,18 +31,26 @@ That place belongs to one pull request, as its task does, and the empty row
 that was there still stands between the new row and the next task.
 
     check_rows.py                  rows that touch, as a note (exit 0)
-    check_rows.py --write          put an empty row where two rows touch
+    check_rows.py --write          put an empty row where two rows touch, but
+                                   not beside a row that an open pull request
+                                   holds: one it changed or put something
+                                   next to, or one its `Task:` line names. An
+                                   empty row put there would be a change that
+                                   touches theirs, and would put that pull
+                                   request in conflict once. (`--write --open`
+                                   is the same.) The landing session runs
+                                   this at the end of a watch; nobody else
+                                   needs to. On 24 November a pull request
+                                   that had put eleven empty rows in by hand
+                                   was in conflict with two others for it.
+    check_rows.py --write --except N[,N...]
+                                   the same, but those pull requests hold
+                                   nothing: the ones the landing session's
+                                   branch has merged already, whose rows are
+                                   in the tree it writes to
     check_rows.py --write --keep-clear-of REF [REF ...]
-                                   the same, but not beside a row that one of
-                                   the REFs changed or put something next to:
-                                   an empty row put there would be a change
-                                   that touches theirs, and would put that
-                                   pull request in conflict once
-    check_rows.py --write --open   the same, with the heads of the open pull
-                                   requests as the REFs, and the rows their
-                                   `Task:` lines name kept clear as well. The
-                                   landing session runs this at the end of a
-                                   watch.
+                                   the same, with the REFs in place of the
+                                   open pull requests
     check_rows.py --self-test
 """
 
@@ -278,8 +286,9 @@ def report(lines: list[str]) -> str | None:
         return f"  ok    {DOCUMENT}: an empty row stands between the {rows} rows of \"Open tasks\""
     names = "; ".join(f"line {i + 1} ({(title_of(lines[i]) or lines[i][2:40])[:40]})" for i in bad[:3])
     return (f"  note  {DOCUMENT}: {len(bad)} of the {rows} rows of \"Open tasks\" have a row directly under "
-            f"them: {names}. Put `{EMPTY_ROW}` above a row you add; the landing session puts in the "
-            f"others at the end of a watch (tools/ci/check_rows.py)")
+            f"them: {names}. Nothing for you to do but this: put `{EMPTY_ROW}` above a row you add. "
+            f"The others are beside rows that open pull requests hold, and the landing session puts "
+            f"them in at the end of a watch; one put in by hand conflicts with those pull requests")
 
 
 def self_test() -> int:
@@ -357,8 +366,11 @@ def main(arguments: list[str]) -> int:
     if joined:
         print(f"check_rows: {joined} blank line(s) that cut the table in two taken out")
     held: set[int] = set()
-    if rest == ["--open"]:
+    if rest in ([], ["--open"]) or (len(rest) == 2 and rest[0] == "--except"):
+        merged = {int(n) for n in rest[1].split(",")} if rest[:1] == ["--except"] else set()
         for pr in open_pull_requests():
+            if pr["number"] in merged:
+                continue
             ref = f"refs/remotes/origin/pr{pr['number']}"
             _git("fetch", "-q", "origin", f"+refs/pull/{pr['number']}/head:{ref}")
             tasks = _TASK.findall(pr["body"] or "")
@@ -370,7 +382,7 @@ def main(arguments: list[str]) -> int:
     elif rest[:1] == ["--keep-clear-of"] and len(rest) > 1:
         for ref in rest[1:]:
             held |= rows_a_ref_holds(ref, lines)
-    elif rest:
+    else:
         sys.exit(__doc__)
     out, added, left = separated(lines, held)
     if added or joined:

@@ -494,6 +494,15 @@ diff-strings: $(TARGET)
 verify-encoding-tables: $(TARGET)
 	@python3 tools/conformance/verify_encoding_tables.py --build
 
+## Every table held to the standard that publishes it, not to this engine.
+## The tool above asks each decoder whether it agrees with the table it reads,
+## and a decoder and its table can be wrong together. This one fetches
+## `whatwg/encoding`'s own index files at a pinned digest and compares all
+## 91,441 positions with `src/net/TextEncodingTables.cpp`. Needs the network
+## unless `build/whatwg-encoding-index/` is already populated (`--offline`).
+verify-encoding-index: $(TARGET)
+	@python3 tools/conformance/verify_encoding_index.py
+
 ## Differential + seeded fuzz verification of RegExp Unicode 17.0 properties,
 ## v (unicodeSets) set operations, d (hasIndices), and ES2025 modifiers,
 ## duplicate named capturing groups, and RegExp.escape().

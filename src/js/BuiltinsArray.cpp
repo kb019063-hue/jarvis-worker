@@ -355,7 +355,16 @@ bool dense_path(const JsValue& object) {
     // method (test262's `push/set-length-array-length-is-non-writable.js`).
     // Such a receiver takes the standard's index-by-index path, where that
     // second write finds the length and refuses it (finding 253).
-    return !prototype_holds_an_index(object);
+    if (prototype_holds_an_index(object)) return false;
+    // The elements have to *be* the array. A length that names places nothing
+    // was written to holds no elements at all (Phase 288: `[].length = 1e8`
+    // used to allocate them and now does not), and a dense method that took
+    // such a receiver would be working from `array_elements.size()` as though
+    // it were the length — `push` wrote to index 0 of a length-10 array and
+    // answered 1, where Node answers 11. Three of the six callers were already
+    // adding this test by hand, which is what a rule that belongs to the
+    // helper looks like when it lives at the call sites instead.
+    return elements_of(object).size() == to_length(object.get_property("length"));
 }
 
 /// Visit each index below `limit` whose place is there, in ascending order,
@@ -960,10 +969,19 @@ void install_array_builtins(JsIntrinsics& realm) {
             if (!(length >= 0) || length != std::floor(length) || length > 4294967295.0) {
                 js_throw_range_error("Invalid array length");
             }
-            if (length > (1u << 26)) js_throw_range_error("Array length exceeds the supported maximum");
-            // `new Array(3)` makes three holes, not three elements that hold undefined.
-            JsValue created = JsValue::make_array(std::vector<JsValue>(static_cast<size_t>(length)));
-            for (size_t i = 0; i < static_cast<size_t>(length); ++i) created.set_array_hole(i);
+            // `new Array(3)` makes three holes, not three elements that hold
+            // undefined -- so it does not allocate them, and a length that
+            // names places nothing will be written to costs nothing. This used
+            // to refuse anything past 2^26 with a limit the language does not
+            // have: Node answers `new Array(100000000).length` with
+            // 100000000 and allocates nothing, because a hole is not storage.
+            //
+            JsValue created = JsValue::make_array();
+            if (length > 0) {
+                PropertyMap::Entry& entry = created.object_val->properties.entry("length");
+                entry.second = JsValue::make_number(length);
+                entry.flags = PropertyMap::Writable;
+            }
             return created;
         }
         return JsValue::make_array(args);

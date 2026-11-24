@@ -1,5 +1,6 @@
 #include "litebird/js/Json.hpp"
 #include "litebird/js/Heap.hpp"
+#include "litebird/js/JsOps.hpp"
 #include <sstream>
 #include <cctype>
 #include <stdexcept>
@@ -255,13 +256,20 @@ std::string Json::stringify(const JsValue& value) {
             return escape_string(value.string_val.str());
         case JsType::Object: {
             if (value.object_val && value.object_val->is_array) {
+                // The length, not the storage: places past the last element are
+                // holes, and a hole is written `null` (Phase 288).
+                const size_t length = static_cast<size_t>(
+                    js_to_number(value.get_property("length")));
                 std::string res = "[";
-                for (size_t i = 0; i < value.object_val->array_elements.size(); ++i) {
+                for (size_t i = 0; i < length; ++i) {
                     // A hole is not an element with a value to write: JSON has
                     // no way to leave a place out of an array, so it writes
                     // null, exactly as it does for undefined.
-                    res += value.is_array_hole(i) ? "null" : stringify(value.object_val->array_elements[i]);
-                    if (i + 1 < value.object_val->array_elements.size()) res += ",";
+                    const bool hole = value.is_array_hole(i) ||
+                                      !value.object_val ||
+                                      i >= value.object_val->array_elements.size();
+                    res += hole ? "null" : stringify(value.object_val->array_elements[i]);
+                    if (i + 1 < length) res += ",";
                 }
                 res += "]";
                 return res;

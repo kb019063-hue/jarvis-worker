@@ -2908,12 +2908,13 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         const GposScriptPlan* gpos_plan = find_gpos_script(script_tag);
         bool script_has_kern = false;
         if (gpos_plan) {
-            // Stage 1: SinglePos (1), PairPos (2), Cursive (3), Contextual (7/8)
+            // Execute the active LookupList sequence, not batches grouped by type.
+            // A later mark-to-base lookup can replace an earlier mark-to-mark
+            // attachment; reversing them changes the resulting glyph origins.
             for (const auto& [li, feat] : gpos_plan->lookups) {
                 if (li >= m_gpos_lookups.size()) continue;
                 const GposLookup& lk = m_gpos_lookups[li];
                 if (feat == GposLookup::Feature::Kern) script_has_kern = true;
-                if (lk.type == 4 || lk.type == 5 || lk.type == 6) continue;
                 if (lk.type == 2 && !kerning && feat == GposLookup::Feature::Kern) continue;
                 std::size_t pos = 0;
                 while (pos < n) {
@@ -2922,28 +2923,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                     pos = (next_pos > pos) ? next_pos : (pos + 1u);
                 }
             }
-            // Stage 2: MarkToBase (4) and MarkToLig (5)
-            for (const auto& [li, feat] : gpos_plan->lookups) {
-                (void)feat;
-                if (li >= m_gpos_lookups.size()) continue;
-                const GposLookup& lk = m_gpos_lookups[li];
-                if (lk.type != 4 && lk.type != 5) continue;
-                for (std::size_t pos = 0; pos < n; ++pos) {
-                    std::size_t dummy_next = pos + 1u;
-                    apply_gpos_lookup_at(li, run, pos, is_rtl, kerning, 0, dummy_next);
-                }
-            }
-            // Stage 3: MarkToMark (6)
-            for (const auto& [li, feat] : gpos_plan->lookups) {
-                (void)feat;
-                if (li >= m_gpos_lookups.size()) continue;
-                const GposLookup& lk = m_gpos_lookups[li];
-                if (lk.type != 6) continue;
-                for (std::size_t pos = 0; pos < n; ++pos) {
-                    std::size_t dummy_next = pos + 1u;
-                    apply_gpos_lookup_at(li, run, pos, is_rtl, kerning, 0, dummy_next);
-                }
-            }
+
         }
 
         // Legacy `kern` fallback when this script has no `GPOS` `kern` lookup.

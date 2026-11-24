@@ -7100,6 +7100,62 @@ TEST(subtle_crypto_hkdf_derive_bits_and_key) {
     assert(interp.eval("derivedKey instanceof CryptoKey && derivedOk === true").is_truthy());
 }
 
+TEST(subtle_crypto_aes_ctr_encrypt_and_decrypt) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // NIST SP 800-38A F.5.1 CTR-AES128.Encrypt (first 16 bytes)
+    // Key = 2b7e151628aed2a6abf7158809cf4f3c
+    // Init. Counter = f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff
+    // Plaintext = 6bc1bee22e409f96e93d7e117393172a
+    // Ciphertext = 874d6191b620e3261bef6864990db6ce
+    interp.eval(R"(
+        function fromHex(h) {
+            var a = new Uint8Array(h.length / 2);
+            for (var i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16);
+            return a;
+        }
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var keyBytes = fromHex('2b7e151628aed2a6abf7158809cf4f3c');
+        var ctr = fromHex('f0f1f2f3f4f5f6f7f8f9fafbfcfdfeff');
+        var pt = fromHex('6bc1bee22e409f96e93d7e117393172a');
+        var ctHex = null;
+        var rtHex = null;
+        var genKey = null;
+        var genOk = null;
+
+        crypto.subtle.importKey('raw', keyBytes, 'AES-CTR', false, ['encrypt', 'decrypt'])
+            .then(function(k) {
+                return crypto.subtle.encrypt({ name: 'AES-CTR', counter: ctr, length: 64 }, k, pt)
+                    .then(function(ct) {
+                        ctHex = toHex(ct);
+                        return crypto.subtle.decrypt({ name: 'AES-CTR', counter: ctr, length: 64 }, k, ct);
+                    });
+            })
+            .then(function(rt) {
+                rtHex = toHex(rt);
+            });
+
+        crypto.subtle.generateKey({ name: 'AES-CTR', length: 256 }, true, ['encrypt', 'decrypt'])
+            .then(function(k) {
+                genKey = k;
+                return crypto.subtle.exportKey('raw', k);
+            })
+            .then(function(raw) {
+                genOk = (raw instanceof ArrayBuffer && raw.byteLength === 32);
+            });
+    )");
+    assert(interp.eval("ctHex === '874d6191b620e3261bef6864990db6ce'").is_truthy());
+    assert(interp.eval("rtHex === '6bc1bee22e409f96e93d7e117393172a'").is_truthy());
+    assert(interp.eval("genKey instanceof CryptoKey && genOk === true").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36030,6 +36086,7 @@ int main() {
     RUN_TEST(subtle_crypto_export_and_generate_key);
     RUN_TEST(subtle_crypto_pbkdf2_derive_bits_and_key);
     RUN_TEST(subtle_crypto_hkdf_derive_bits_and_key);
+    RUN_TEST(subtle_crypto_aes_ctr_encrypt_and_decrypt);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

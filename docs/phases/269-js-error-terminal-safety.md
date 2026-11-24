@@ -29,7 +29,7 @@ filtered even when stderr is redirected.
 
 ## Verification
 
-- `make test`: 408 engine suites and 114 cross-origin checks pass. The new
+- `make test`: 414 engine suites and 114 cross-origin checks pass. The new
   suite compares complete outputs for every U+0000..U+00FF thrown value and
   rejection, the `JsThrow` exception path, and bytes 0x01..0xff in native
   and syntax exceptions; it also checks the original value is unchanged.

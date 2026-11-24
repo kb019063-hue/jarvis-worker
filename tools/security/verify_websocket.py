@@ -1499,6 +1499,13 @@ setTimeout(pump, 1);
             wss_expired.stop()
             plain_srv.stop()
 
+    # Exercise trust anchors that terminate before a self-signed root. Keep
+    # these end-to-end checks in the same normal and sanitizer CI path.
+    from verify_wss_partial_chain import run as check_partial_chain
+    extra_checks, extra_failures = check_partial_chain(str(binary), args.timeout)
+    checks += extra_checks
+    failures += extra_failures
+
     print(f"\n{checks} checks; {failures} failure(s).")
     return 1 if failures else 0
 

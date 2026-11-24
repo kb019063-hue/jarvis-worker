@@ -289,6 +289,15 @@ within the hour, and the first lot was started again four times.
      lot's, and by the run on `main` after the lot. That last one now
      builds, keeps the objects and runs the plain unit suites, no more
      (`[objects only]` in the lot's last merge);
+   - **when a lot's run fails, every member that could be at fault stays
+     out of the next lot until it is known which one it was.** The run
+     names the job, not the pull request. On 24 November the lot of 08:38
+     failed in the unit suites and in the web-platform-tests; the landing
+     session took out the one member whose suite had crashed and kept
+     the other two, and the lot of 08:44 failed again, which cost three
+     newcomers six minutes. Which member it was is found by building each
+     alone with `main` and running the target that failed (three to four
+     minutes each in the sandbox) while the lot of the others is in test;
    - a pull request that becomes finished while a run is going waits for
      the next lot, unless the run is less than five minutes old: then it
      joins, and the run starts again. Twice for one lot at the most: on

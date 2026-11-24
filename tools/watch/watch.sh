@@ -15,6 +15,10 @@
 #                                        conflicts (it says which, in which files); 6 one is not
 #                                        finished and green; 7 the tree is not the one a chain of
 #                                        merges gives
+#   tools/watch/watch.sh full [N...]     `build`, and on the lot what only this branch brings to main:
+#                                        the commits of the branch `own`, the carried pull requests
+#                                        ($STATE/carry), the empty rows, README's count; the checks
+#                                        that read them; `push`. 9 when anything said no (not pushed)
 #   tools/watch/watch.sh push            push the lot (forced, with lease); its run starts
 #   tools/watch/watch.sh lot             0 READY; 2 main moved or a job failed; 3 a head moved or a
 #                                        pull request is not open; 4 running; 5 the own run of one
@@ -55,9 +59,16 @@ runs_of() {  # runs_of FULLSHA -> "completed/success x12" and the like
   timeout 30 gh api "repos/$R/commits/$1/check-runs?per_page=100" \
     --jq '[.check_runs[] | "\(.status)/\(.conclusion)"] | group_by(.) | map("\(.[0]) x\(length)") | join(", ")'
 }
-green() {  # green FULLSHA: every check run of it has ended in success, and there are ten or more
+whole() {  # whole FULLSHA: every check run of it has ended in success, and there are ten or more
   local runs; runs="$(runs_of "$1")"
   [[ "$runs" =~ ^completed/success\ x([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -ge 10 ]
+}
+green() {  # green FULLSHA: `whole`, or the short run of a pull request with the label `lot` passed:
+           # two jobs or more in success and the rest skipped (.github/workflows/ci.yml). Enough for
+           # a pull request to be taken into a lot, whose own run is all twelve; never for the lot.
+  local runs; runs="$(runs_of "$1")"
+  [[ "$runs" =~ ^completed/success\ x([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -ge 10 ] && return 0
+  [[ "$runs" =~ ^completed/skipped\ x([0-9]+),\ completed/success\ x([0-9]+)$ ]] && [ "${BASH_REMATCH[2]}" -ge 2 ]
 }
 came_back_without_a_run() {  # came_back_without_a_run N FULLSHA
   # AGENTS.md, "Working together", point 4: a pull request that went back for
@@ -139,6 +150,19 @@ start)
 look)
   end="$(cat "$STATE/end" 2>/dev/null)"; [ -n "$end" ] || { echo "no hour: tools/watch/watch.sh start \"YYYY-MM-DD HH:MM\" first"; exit 9; }
   timeout 60 python3 tools/ci/check_pr.py watch --beat "$end" >/dev/null 2>&1 || echo "the beat failed"
+  # The label `lot` gives a pull request the short run of CI while a watch is
+  # on (.github/workflows/ci.yml). It is put on once, so that an agent who
+  # took it off to have all twelve jobs is not given it back, and only where
+  # the branch has the check_pr.py that knows a short run from a whole one:
+  # an older one says "ready" to a merge on two jobs when no watch is on.
+  timeout 40 gh pr list --state open --limit 100 --json number,title,labels,headRefOid \
+      --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | select(([.labels[].name] | index("lot")) | not) | "\(.number) \(.headRefOid)"' 2>/dev/null \
+    | while read -r n full; do
+        grep -qx "$n" "$STATE/labelled" 2>/dev/null && continue
+        fetch_pr "$n" 2>/dev/null || continue
+        git grep -q 'def short_run_note' "$full" -- tools/ci/check_pr.py 2>/dev/null || continue
+        timeout 20 gh api -X POST "repos/$R/issues/$n/labels" -f 'labels[]=lot' > /dev/null 2>&1 && echo "$n" >> "$STATE/labelled" && echo "label lot: #$n"
+      done
   if [ -f "$STATE/watch.now" ]; then cp "$STATE/watch.now" "$STATE/watch.before"; else : > "$STATE/watch.before"; fi
   timeout 90 python3 tools/ci/check_pr.py watch > "$STATE/watch.now" 2>&1
   echo "look $(date -u '+%H:%M:%S')  main $(timeout 20 git ls-remote origin refs/heads/main | cut -c1-7)"
@@ -221,6 +245,89 @@ Agent: $NAME" "origin/pr$n" > "$STATE/merge.$n.log" 2>&1; then
   echo "lot built: head $(git rev-parse --short=7 HEAD) on main $(cat "$STATE/lot.main"): $(tr '\n' ' ' < "$STATE/lot.heads")"
   exit $bad ;;
 
+full)
+  # The lot (the numbers given, as they are; there may be none), and on it
+  # what only this branch brings to main when the watch's own pull request
+  # is merged: the commits of the branch `own` (the watch's changes to its
+  # tools, written in a worktree beside the lot: `git worktree add -b own
+  # /tmp/own origin/main`), the carried pull requests ($STATE/carry, lines
+  # "N SHORTSHA"), the empty rows of "Open tasks", README's count of suites.
+  # Then the checks that read them, and the push. Nothing is pushed when
+  # one of those says no.
+  "$0" build "$@"; rc=$?
+  [ $rc -eq 0 ] || { echo "full: build said $rc; nothing more done"; exit 9; }
+  asis="$(cut -d' ' -f1 "$STATE/lot.heads" | tr '\n' ',' | sed 's/,$//')"
+  if git rev-parse -q --verify own > /dev/null; then
+    base="$(git merge-base origin/main own)"
+    if [ "$(git rev-parse own)" != "$base" ]; then
+      git cherry-pick -x "$base..own" > "$STATE/land/pick.log" 2>&1 \
+        || { echo "full: own's commits do not apply:"; tail -5 "$STATE/land/pick.log"; git cherry-pick --abort; exit 9; }
+      echo "own: $(git rev-list --count "$base..own") commit(s)"
+    fi
+  fi
+  carried=""
+  if [ -s "$STATE/carry" ]; then
+    while read -r n want; do
+      [ -n "$n" ] || continue
+      fetch_pr "$n" || { echo "full: could not fetch #$n"; exit 9; }
+      h="$(git rev-parse --short=7 "origin/pr$n")"
+      st="$(timeout 30 gh pr view "$n" --json state --jq .state)"
+      [ "$st" = "OPEN" ] || { echo "full: #$n is $st: not carried"; continue; }
+      [ "$h" = "$want" ] || echo "full: #$n is at $h, it was at $want when it was first carried"
+      if git merge --no-ff --no-commit "origin/pr$n" > /dev/null 2>&1; then
+        git commit -q -m "Carry #$n (head $h): it merges as it is now
+
+Agent: $NAME" || echo "full: #$n: nothing to commit"
+        echo "carried #$n $h: merged as it is"
+      else
+        u="$(git diff --name-only --diff-filter=U | tr '\n' ' ')"
+        if [ "$u" != "AGENTS.md " ]; then echo "full: #$n conflicts in: $u; left out"; git merge --abort; continue; fi
+        if ! python3 tools/watch/carry_rows.py "origin/pr$n" > "$STATE/land/carry$n.txt" 2>&1; then
+          echo "full: #$n: carry_rows refused: $(tail -1 "$STATE/land/carry$n.txt")"; git merge --abort; continue
+        fi
+        git add AGENTS.md
+        git commit -q -m "Carry #$n (head $h) with its rows of \"Open tasks\" put into the table as it is now
+
+#$n does not merge with main: the conflict is in AGENTS.md alone, in the
+table \"Open tasks\". Every other file is its own, as it is at $h. What it
+did to the table was read from its own diff and done again to the table
+as it is here (tools/watch/carry_rows.py):
+
+$(sed 's/^/  /' "$STATE/land/carry$n.txt" | cut -c1-76)
+
+Agent: $NAME"
+        echo "carried #$n $h: $(tail -1 "$STATE/land/carry$n.txt")"
+      fi
+      carried="$carried$n,"
+    done < "$STATE/carry"
+  fi
+  except="$(echo "$carried$asis" | sed 's/,$//')"
+  # shellcheck disable=SC2086
+  python3 tools/ci/check_rows.py --write ${except:+--except "$except"} > "$STATE/land/rows.log" 2>&1; tail -1 "$STATE/land/rows.log"
+  make metrics-suites > "$STATE/land/metrics.log" 2>&1 || { echo "full: make metrics-suites failed"; tail -3 "$STATE/land/metrics.log"; exit 9; }
+  if ! git diff --quiet; then
+    git add -A
+    git commit -q -m "Empty rows in \"Open tasks\" where no open pull request holds a row; README's count of suites
+
+$(tail -1 "$STATE/land/rows.log" | cut -c1-76)
+README's count of suites is the one make metrics-suites writes: $(ls tests/suites/*.cpp | wc -l) files
+in tests/suites and the suites of tests/test_suite.cpp.
+
+Agent: $NAME"
+  fi
+  bad=0
+  python3 tools/ci/check_docs.py --base origin/main > "$STATE/land/docs.log" 2>&1 || { bad=1; echo "check_docs failed"; grep -i 'fail' "$STATE/land/docs.log" | head -5; }
+  python3 tools/ci/check_numbers.py > "$STATE/land/numbers.log" 2>&1 || { bad=1; echo "check_numbers failed"; tail -3 "$STATE/land/numbers.log"; }
+  python3 tools/ci/check_suites.py > "$STATE/land/suites.log" 2>&1 || { bad=1; echo "check_suites failed"; tail -3 "$STATE/land/suites.log"; }
+  for t in tools/ci/check_rows.py tools/ci/check_pr.py tools/ci/check_numbers.py tools/ci/check_suites.py tools/ci/check_ci_parts.py tools/watch/carry_rows.py; do
+    python3 "$t" --self-test > "$STATE/land/self.log" 2>&1 || { bad=1; echo "$t --self-test failed"; tail -2 "$STATE/land/self.log"; }
+  done
+  [ "$(git log -1 --format=%B | grep -c 'skip ci')" = "0" ] || { bad=1; echo "the head commit's message holds the mark: no run would start"; }
+  [ $bad -eq 0 ] || { echo "full: not pushed"; exit 9; }
+  "$0" push | tail -1
+  git log --format='  %h %s' "$(cat "$STATE/lot.asis")..HEAD" --first-parent | cut -c1-110
+  echo "full: as is: ${asis:-none}; carried: ${carried:-none}; head $(git rev-parse --short=7 HEAD) on main $(cat "$STATE/lot.main")" ;;
+
 push)
   git rev-parse HEAD > "$STATE/lot.head"
   git push -q --force-with-lease origin "$BRANCH" 2>&1 | tail -1; date -u '+pushed %H:%M:%S' ;;
@@ -243,7 +350,7 @@ lot)
   done < "$STATE/lot.heads"
   runs="$(runs_of "$head")"
   echo "lot $(date -u '+%H:%M:%S') ${head:0:7} main $main_now: ${runs:-no check runs yet}"
-  if green "$head"; then echo READY; exit 0; fi
+  if whole "$head"; then echo READY; exit 0; fi
   case "$runs" in
     *failure*|*cancelled*|*timed_out*)
       timeout 30 gh api "repos/$R/commits/$head/check-runs?per_page=100" --jq '.check_runs[] | select(.conclusion != "success" and .conclusion != null) | "   \(.name): \(.conclusion) (job \(.id))"'; exit 2 ;;
@@ -308,7 +415,7 @@ land)
     takeable "$n" "$full" || { echo "STOP: #$n is not green on ${full:0:7}: $(runs_of "$full")"; exit 3; }
     title="$(timeout 30 gh pr view "$n" --json title --jq .title)"
     if [ "$n" = "$final" ] && [ "$last" != "last" ]; then
-      printf '%s\n\nLanded by the landing session (%s) as it is at %s: the last of this lot (%s), tested together with main %s in one CI run on %s, every job passed. With this merge main has the tree that run passed on, and its own run saves the compiled objects for the runs that follow.\n' "$title" "$NAME" "${full:0:7}" "$all" "$main7" "${head:0:7}" > "$STATE/land/body$n.txt"
+      printf '%s\n\nLanded by the landing session (%s) as it is at %s: the last of this lot (%s), tested together with main %s in one CI run on %s, every job passed. With this merge main has the tree that run passed on, and its own run is there to save the compiled objects for the runs that follow: [objects only] (.github/workflows/ci.yml).\n' "$title" "$NAME" "${full:0:7}" "$all" "$main7" "${head:0:7}" > "$STATE/land/body$n.txt"
     else
       printf '%s\n\n[skip ci] Landed by the landing session (%s) as it is at %s: one of this lot (%s), tested together with main %s in one CI run on %s, every job passed. CI runs on main once for the lot, with the last of its merges.\n' "$title" "$NAME" "${full:0:7}" "$all" "$main7" "${head:0:7}" > "$STATE/land/body$n.txt"
     fi

@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+    # `unlabeled` is here for one label, `lot` (below): taking it off a pull
+    # request starts the whole of CI on its head.
+    types: [opened, synchronize, reopened, unlabeled]
   # Lets anyone with a token that can read the repository start this workflow
   # by hand (Actions UI or `gh workflow run ci.yml --ref main`), e.g. to
   # re-check main after a flaky job, instead of pushing an empty commit.
@@ -26,6 +29,32 @@ on:
 # on `main` that night (run 45293924439) where the longest job took 12.5. The
 # wait saved runner time only when the build or a unit suite failed, and the
 # agents run both before they push.
+#
+# Two kinds of run leave jobs out, since 24 November 2026. A run is twelve
+# jobs, and no more than twenty were seen running at once: at 04:57 that
+# night 19 were running and 25 were waiting for a runner, in six runs, and
+# the lot every finished pull request was waiting for had eight jobs that
+# had not started 4.7 minutes after its push. A pull request was being tested
+# three times over: by its own run, by the lot's, and by the run on `main`
+# after the lot.
+#
+# - **The short run of a pull request that has the label `lot`**: "Build &
+#   unit tests" and "Documentation shape", and the other ten are skipped.
+#   The landing session puts the label on while a watch is on
+#   (`tools/watch/watch.sh look`), because the whole of CI then runs on the
+#   lot the pull request lands in, on `main` as it will be, which its own
+#   run never saw. A watch's own pull request (`WATCH:`) always gets all
+#   twelve. With no watch, `python3 tools/ci/check_pr.py merge N` takes the
+#   label off before it says "ready", which starts all twelve (`unlabeled`,
+#   above): nothing is merged by its own agent on a short run.
+# - **The run on `main` after the last merge of a lot** (`[objects only]` in
+#   that merge's message, written by `tools/watch/watch.sh land`): the lot's
+#   run passed every job on that very tree minutes before. What this run is
+#   for is the compiled objects every pull request's runs start from, so it
+#   builds twice, keeps them, and runs the unit suites of the plain build.
+#
+# Every other run is all twelve: a push to `main` that is not that merge, a
+# run started by hand, a pull request without the label.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
@@ -196,6 +225,9 @@ jobs:
   docs:
     name: Documentation shape
     runs-on: ubuntu-latest
+    # Not after the last merge of a lot (the top of this file). It is part of
+    # the short run.
+    if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -247,6 +279,9 @@ jobs:
   render-conformance:
     name: Render reftests (pixels)
     runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -272,6 +307,9 @@ jobs:
   conformance:
     name: DOM conformance (html5lib corpus)
     runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -323,6 +361,9 @@ jobs:
   js-conformance:
     name: JavaScript conformance (Node-verified corpus)
     runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -427,6 +468,9 @@ jobs:
   dom-conformance:
     name: Script DOM conformance (jsdom-verified corpus) and URLs (web-platform-tests)
     runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -469,6 +513,9 @@ jobs:
   xml-and-wpt:
     name: XML (W3C suite, Expat and libxml2) and web-platform-tests
     runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -522,6 +569,9 @@ jobs:
   deep-pages:
     name: Deep and oversized pages (stack, memory and time limits)
     runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -575,6 +625,10 @@ jobs:
   sanitizers-unit:
     name: "Sanitizers: unit suites"
     runs-on: ubuntu-latest
+    # Not in the short run of a pull request. After the last merge of a lot it
+    # builds and keeps the objects, and leaves the suites out (the top of this
+    # file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -619,6 +673,7 @@ jobs:
           path: ~/.ccache
           key: ccache-asan-${{ github.run_id }}-${{ github.run_attempt }}
       - name: Unit suites in the sanitizer build
+        if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
         # The longest part, and the reason the suites are run a second time: a
         # suite that passes in the normal build can fail in this one.
         env:
@@ -640,6 +695,9 @@ jobs:
   sanitizers-xml-fuzz:
     name: "Sanitizers: XML suite and fuzzing"
     runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -694,6 +752,9 @@ jobs:
   sanitizers-wpt-deep:
     name: "Sanitizers: web-platform-tests, deep and oversized pages"
     runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -738,6 +799,9 @@ jobs:
   sanitizers-corpora:
     name: "Sanitizers: script corpora, verifiers, generated XML, string stress tests"
     runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run

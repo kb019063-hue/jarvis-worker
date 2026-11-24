@@ -224,6 +224,8 @@ YOURS_AGAIN_RE = re.compile(r"^\w+: #(\d+) is yours again \(head ([0-9a-f]{7,40}
 # The line that says which pull requests a lot holds, each with its head:
 # "Lander: lot of 03:01 UTC: #305 (`52fe97d`), #310 (`0a0ffab`) with `main` …".
 LOT_RE = re.compile(r"^\w+: (?:\*\*)?(?:the last )?lot of ")
+# The label that gives a pull request the short run of CI (.github/workflows/ci.yml).
+LOT_LABEL = "lot"
 WATCH_ON_TEXT = (
     "While this line says ON and its last look is less than {quiet} minutes old, only the landing session "
     "merges. A pull request that is finished (no `WIP:` in its title), green on its head commit and "
@@ -654,22 +656,44 @@ def check_claim(number: int) -> int:
     return 1 if report.failed else 0
 
 
-def check_runs(sha: str) -> tuple[str, list[str]]:
-    """'passed', 'failed', 'running' or 'none' for a commit, and the checks that are not green."""
-    runs = gh_json("api", f"{REPO}/commits/{sha}/check-runs?per_page=100").get("check_runs", [])
-    if not runs:
+def state_of(latest: list[tuple[str, str, str]]) -> tuple[str, list[str]]:
+    """'passed', 'short', 'failed', 'running' or 'none' for the jobs of a commit,
+    each (name, status, conclusion) in lower case, and the ones that are not green.
+
+    'short' is the run a pull request with the label `lot` gets while a watch
+    is on (.github/workflows/ci.yml): the build, the unit suites and the
+    documents passed, and the other ten jobs were skipped, because the whole
+    of CI runs on the lot the pull request lands in. It is enough to be taken
+    into a lot. It is not enough for anybody to merge on.
+    """
+    if not latest:
         return "none", []
+    bad = [f"{name}: {conclusion or status}" for name, status, conclusion in latest
+           if conclusion not in ("success", "skipped", "neutral")]
+    if not bad:
+        return ("short" if any(conclusion == "skipped" for _n, _s, conclusion in latest) else "passed"), []
+    if any(status != "completed" for _n, status, _c in latest):
+        return "running", bad
+    return "failed", bad
+
+
+def check_runs(sha: str) -> tuple[str, list[str]]:
+    """`state_of` for a commit."""
+    runs = gh_json("api", f"{REPO}/commits/{sha}/check-runs?per_page=100").get("check_runs", [])
     # A job that was run again leaves both attempts: the last one of a name counts.
     latest: dict[str, dict] = {}
     for entry in sorted(runs, key=lambda r: r.get("started_at") or ""):
         latest[entry["name"]] = entry
-    bad = [f"{r['name']}: {r['conclusion'] or r['status']}" for r in latest.values()
-           if r["conclusion"] not in ("success", "skipped", "neutral")]
-    if not bad:
-        return "passed", []
-    if any(r["status"] != "completed" for r in latest.values()):
-        return "running", bad
-    return "failed", bad
+    return state_of([(r["name"], (r["status"] or "").lower(), (r["conclusion"] or "").lower()) for r in latest.values()])
+
+
+def short_run_note(head: str, number: int | None = None) -> str:
+    """What to say of a short run to somebody who is about to merge on it."""
+    return (f"only the short run of CI passed on {head[:7]} (build, unit suites, documents): the pull request has "
+            "the label `lot`, which the landing session puts on while a watch is on, and the other ten jobs "
+            "were skipped. Nobody merges on that"
+            + ("" if number is None else
+               f". The label is off now, which starts all twelve jobs on {head[:7]}: ask again when they have ended"))
 
 
 def delta(base: str, tip: str) -> tuple[int, list[str] | None]:
@@ -768,11 +792,19 @@ def ci_verdict(e: Evidence, watch_on: bool = False) -> tuple[list[tuple[bool, st
         lines.append((True, f"it changes documents only ({some(e.pr_files)}): it needs no CI run of its own"))
     elif e.head_state == "passed":
         lines.append((True, f"CI passed on the head commit {head}"))
+    elif e.head_state == "short":
+        if watch_on:
+            lines.append((True, f"the short run of CI passed on the head commit {head} (build, unit suites, documents); "
+                                "the whole of CI runs on the lot it lands in"))
+        else:
+            lines.append((False, short_run_note(e.head)))
     elif e.head_state == "running":
         lines.append((False, f"CI on {head}: " + "; ".join(e.head_bad)))
     elif e.ran_on is None:
         lines.append((False, f"no CI run on {head} or on the 30 commits before it"))
-    elif e.ran_state != "passed":
+    elif e.ran_state == "short" and not watch_on:
+        lines.append((False, f"no CI run on {head}, and " + short_run_note(e.ran_on)))
+    elif e.ran_state not in ("passed", "short"):
         lines.append((False, f"no CI run on {head}; the last one, on {e.ran_on[:7]}, {e.ran_state}"))
     elif all_of(DOCUMENT, e.since):
         quick = True
@@ -971,8 +1003,8 @@ def taken_at(comments: list[dict], number: int) -> str | None:
 
 
 def rollup(checks: list[dict] | None) -> tuple[str, list[str]]:
-    """'passed', 'failed', 'running' or 'none' for the checks GitHub lists for a
-    pull request's head (`statusCheckRollup`), and the ones that are not green.
+    """'passed', 'short', 'failed', 'running' or 'none' for the checks GitHub lists
+    for a pull request's head (`statusCheckRollup`), and the ones that are not green.
 
     The same answer as `check_runs`, from the other API: `gh pr view --json`
     asks GraphQL, whose limit is not the one `gh run view` and `gh api repos/…`
@@ -983,17 +1015,10 @@ def rollup(checks: list[dict] | None) -> tuple[str, list[str]]:
         latest[entry.get("name") or entry.get("context") or "?"] = entry    # a job run again: its last attempt
 
     def verdict(check: dict) -> str:
-        return (check.get("conclusion") or check.get("state") or "").upper()
+        return (check.get("conclusion") or check.get("state") or "").lower()
 
-    if not latest:
-        return "none", []
-    bad = [f"{name}: {(verdict(check) or check.get('status') or 'unknown').lower()}"
-           for name, check in latest.items() if verdict(check) not in ("SUCCESS", "SKIPPED", "NEUTRAL")]
-    if not bad:
-        return "passed", []
-    if any((check.get("status") or "COMPLETED").upper() != "COMPLETED" for check in latest.values()):
-        return "running", bad
-    return "failed", bad
+    return state_of([(name, (check.get("status") or "completed").lower(), verdict(check))
+                     for name, check in latest.items()])
 
 
 def why_not_taken(pr: dict, comments: list[dict]) -> str:
@@ -1198,7 +1223,7 @@ def check_merge(number: int, landing: bool = False) -> int:
     """`landing` is the landing session asking, about a pull request it is about
     to merge during its own watch: the answer is then the one given when no
     watch is on."""
-    pr = gh_json("pr", "view", str(number), "--json", "number,title,body,state,mergeable,headRefOid,files")
+    pr = gh_json("pr", "view", str(number), "--json", "number,title,body,state,mergeable,headRefOid,files,labels")
     report = Report()
     if pr["state"] != "OPEN":
         sys.exit(f"#{number} is {pr['state'].lower()}")
@@ -1256,6 +1281,17 @@ def check_merge(number: int, landing: bool = False) -> int:
                                        ran_on, ran_state, since, same_tree), watch_on)
     for ok, text in lines:
         (report.ok if ok else report.no)(text)
+    if "short" in (head_state, ran_state) and not watch_on and not landing:
+        # No watch is on, so this agent merges, and all twelve jobs have not
+        # run on what it would merge. Taking the label off starts them.
+        if any(label.get("name") == LOT_LABEL for label in pr.get("labels") or []):
+            gh("api", "-X", "DELETE", f"{REPO}/issues/{number}/labels/{LOT_LABEL}", check=False)
+            report.note(f"the label `{LOT_LABEL}` is off #{number} now, which starts all twelve jobs on {head[:7]}: "
+                        f"ask again when they have ended (`gh pr checks {number}`). If none has started in a minute, "
+                        "push an empty commit")
+        else:
+            report.note(f"#{number} has no label `{LOT_LABEL}` any more: all twelve jobs run on its next push "
+                        "(an empty commit will do), if they are not running already")
     if quick:
         tree, called, why_not = tree_to_merge(number, head, main_sha, behind)
         if tree is None:
@@ -1559,8 +1595,28 @@ def self_test() -> int:
     cases += [
         ("no check on the head: none", rollup([]), ("none", [])),
         ("twelve green jobs: passed", rollup(green), ("passed", [])),
-        ("a skipped job and a neutral one are green",
-         rollup(green + [check("extra", "SKIPPED"), check("other", "NEUTRAL")]), ("passed", [])),
+        ("a neutral job is green",
+         rollup(green + [check("other", "NEUTRAL")]), ("passed", [])),
+        ("two jobs passed and ten were skipped: the short run, not a whole one",
+         rollup(green[:2] + [check(f"heavy {n}", "SKIPPED") for n in range(10)]), ("short", [])),
+        ("a short run that is still going is running",
+         rollup([check("job 0", "SUCCESS"), check("job 1", None, "IN_PROGRESS")] + [check(f"heavy {n}", "SKIPPED") for n in range(10)])[0],
+         "running"),
+        ("a short run whose build failed has failed",
+         rollup([check("job 0", "FAILURE"), check("job 1", "SUCCESS")] + [check(f"heavy {n}", "SKIPPED") for n in range(10)])[0],
+         "failed"),
+        ("the same from the other API",
+         [state_of(jobs)[0] for jobs in ([], [("a", "completed", "success")] * 12,
+                                         [("a", "completed", "success"), ("b", "completed", "skipped")],
+                                         [("a", "in_progress", ""), ("b", "completed", "skipped")],
+                                         [("a", "completed", "failure"), ("b", "completed", "skipped")])],
+         ["none", "passed", "short", "running", "failed"]),
+        ("a short run on the head while a watch is on: that is what the landing session takes",
+         verdict(head_state="short", ran_state="short", watch_on=True), ([True, True], False)),
+        ("a short run on the head and no watch: nobody merges on two jobs",
+         verdict(head_state="short", ran_state="short"), ([True, False], False)),
+        ("no run on the head, the one before it was short, no watch: the same",
+         verdict(head_state="none", ran_on="b" * 40, ran_state="short", since=["README.md"]), ([True, False], False)),
         ("one job still running: running, and it is named",
          rollup(green[:11] + [check("job 11", None, "IN_PROGRESS")]), ("running", ["job 11: in_progress"])),
         ("one job failed and all are done: failed",
@@ -1604,6 +1660,8 @@ def self_test() -> int:
          taken_at([said("Lander: **the last lot of this watch**, 23:41 UTC: #7 (`abcdef0`) as it is")], 7), None if not LOT_RE.match("Lander: **the last lot of this watch**, 23:41 UTC: #7 (`abcdef0`) as it is") else "abcdef0"),
         ("no run on the head of a change to documents only: taken, the lot's run is its run",
          why_not_taken(waiting(checks=[], files=("AGENTS.md", "docs/phases/5-a.md")), board), ""),
+        ("a pull request with a short run is taken: the lot's run is the whole one",
+         why_not_taken(waiting(checks=green[:2] + [check(f"heavy {n}", "SKIPPED") for n in range(10)]), board), ""),
         ("in conflict with main: not taken",
          why_not_taken(waiting(mergeable="CONFLICTING"), board), "it conflicts with main"),
         ("sent back at this very head: left alone until the head is another one",

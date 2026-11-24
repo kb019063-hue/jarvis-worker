@@ -77,11 +77,11 @@
       "note": "the web-platform-tests url resources in tests/url: 904 parsing cases and 284 setter cases"
     },
     "wpt": {
-      "pass": 9567,
+      "pass": 9569,
       "of": 9824,
       "command": "make wpt",
-      "date": "2026-11-20",
-      "note": "dom/nodes, domparsing, encoding, css-flexbox and css-grid subtests; the 257 that fail are listed with a reason in tests/wpt"
+      "date": "2026-11-15",
+      "note": "dom/nodes, domparsing, encoding, css-flexbox and css-grid subtests; the 255 that fail are listed with a reason in tests/wpt; the two that arrived in Phase 243 are css-grid grid-template resolution through a linked support sheet"
     }
   }
 }

@@ -302,3 +302,14 @@ of .notdef as correct positioning. A build of the parent can be selected with
 Scope: missing Latin codepoints only, canonical mappings only, complete
 same-face coverage required. No changes to fallback-face selection, existing
 composite glyphs, other scripts, normalization ordering or stacked-mark GPOS.
+
+### Phase 250: the two stacked-mark mismatches are repaired
+
+The Phase 240 before/after figures above are historical. The engine had grouped
+GPOS by lookup type, forcing mark-to-mark last regardless of the font's order.
+Executing the active lookup sequence in order changes the seven-case missing-
+composite diagnostic from **5/7 to 7/7 exact matches** with HarfBuzz 12.1.0.
+For both ring/acute spellings the acute y-offset is now 0 rather than 649.
+The font construction and diagnostic commands are unchanged; there is no
+allowed-failure baseline. The broader 14-case corpus and 12 Hebrew placement
+controls are unchanged. Details: `docs/phases/250-gpos-lookup-order.md`.

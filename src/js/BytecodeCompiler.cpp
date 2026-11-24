@@ -55,6 +55,57 @@ void BytecodeCompiler::patch_jump(size_t offset) {
     m_function->chunk.code[offset + 1] = static_cast<uint8_t>(jump & 0xFF);
 }
 
+/// Fills in a jump that has already been emitted and goes *backwards* to
+/// `target`. `patch_jump` is the forward case and cannot do this: its operand
+/// is measured from the end of the jump to the code after it, and a backward
+/// jump's operand is measured from the end of the jump back to the target (see
+/// `VM::run`'s OpLoop, which subtracts it).
+void BytecodeCompiler::patch_back_jump(size_t at, size_t target) {
+    // `at` is the offset of the OpLoop opcode; its two operand bytes follow.
+    const size_t end = at + 3;
+    if (target > end) {
+        throw std::runtime_error("A backward jump cannot point forwards");
+    }
+    const size_t distance = end - target;
+    if (distance > 65535) {
+        throw std::runtime_error("Too much code to jump back over (>65535 bytes)");
+    }
+    m_function->chunk.code[at + 1] = static_cast<uint8_t>((distance >> 8) & 0xFF);
+    m_function->chunk.code[at + 2] = static_cast<uint8_t>(distance & 0xFF);
+}
+
+/// Fills in an already-emitted *forward* jump so that it lands exactly on
+/// `target`, which may be earlier than the code written since.
+///
+/// `patch_jump` cannot do this: it targets wherever the code cursor is when it
+/// is called, which is right for jumping *over* a branch and wrong for jumping
+/// *into* code already written. A `continue` in a `for` needs the second: it
+/// jumps forward to the update, which is emitted before the patch but is not
+/// the current position. Using `patch_jump` there made `continue` skip the
+/// update and land on the loop's back edge -- `for (var i = 0; i < 3; i++)
+/// { continue; }` never terminated, and nothing reported it.
+void BytecodeCompiler::patch_forward_jump(size_t at, size_t target) {
+    // `at` comes from `emit_jump`, which answers the offset of the jump's two
+    // *operand* bytes -- not of its opcode. The distance is measured from the
+    // end of the operand, so `at + 2` rather than `at + 3`; `patch_jump` uses
+    // the same convention and `patch_back_jump` does not, because its `at` is
+    // taken before the opcode is written.
+    const size_t end = at + 2;
+    if (target < end) {
+        throw std::runtime_error("A forward jump cannot point backwards");
+    }
+    const size_t distance = target - end;
+    if (distance > 65535) {
+        throw std::runtime_error("Too much code to jump over (>65535 bytes)");
+    }
+    // The operand bytes *are* `at` and `at + 1`, because `at` is where they
+    // start. Writing at `at + 1`/`at + 2` (as `patch_back_jump` does, whose
+    // `at` is the opcode) put the high byte in the following instruction and
+    // wrapped the distance to 65297 -- a jump into nowhere.
+    m_function->chunk.code[at]     = static_cast<uint8_t>((distance >> 8) & 0xFF);
+    m_function->chunk.code[at + 1] = static_cast<uint8_t>(distance & 0xFF);
+}
+
 void BytecodeCompiler::emit_loop(size_t loop_start) {
     emit_opcode(OpCode::OpLoop);
     size_t jump = m_function->chunk.code.size() - loop_start + 2;
@@ -78,10 +129,17 @@ void BytecodeCompiler::end_scope() {
 }
 
 void BytecodeCompiler::add_local(const std::string& name) {
+    add_local_at(name, m_scope_depth);
+}
+
+/// Records a local as belonging to `depth` rather than to the scope being
+/// compiled. A `var` nested in a block is a local of the enclosing function,
+/// so it is recorded at that function's depth and survives the block.
+void BytecodeCompiler::add_local_at(const std::string& name, int depth) {
     if (m_locals.size() >= 256) {
         throw std::runtime_error("Too many local variables in scope (>256)");
     }
-    m_locals.push_back({name, m_scope_depth});
+    m_locals.push_back({name, depth});
 }
 
 int BytecodeCompiler::resolve_local(const std::string& name) {
@@ -117,8 +175,8 @@ std::shared_ptr<BytecodeFunction> BytecodeCompiler::compile(const BlockStmt* pro
 void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
     if (!stmt) return;
     js_check_stack();
-    if (dynamic_cast<const SwitchStmt*>(stmt) || dynamic_cast<const BreakStmt*>(stmt)) {
-        throw std::runtime_error("Switch/break compiled via AST interpreter");
+    if (dynamic_cast<const SwitchStmt*>(stmt)) {
+        throw std::runtime_error("Switch compiled via AST interpreter");
     }
 
     if (auto expr_stmt = dynamic_cast<const ExprStmt*>(stmt)) {
@@ -127,26 +185,65 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
     } else if (dynamic_cast<const EmptyStmt*>(stmt)) {
         // nothing to emit
     } else if (auto var_decl = dynamic_cast<const VarDeclStmt*>(stmt)) {
-        if (var_decl->kind == JsDeclKind::Var) {
-            throw std::runtime_error("Function-scoped var is not supported by the bytecode compiler");
-        }
-        const std::string* name = var_decl->simple_name();
-        if (!name) {
-            throw std::runtime_error("Destructuring and multiple declarators are not supported by the bytecode compiler");
-        }
-        if (var_decl->decls[0].init) {
-            compile_expr(var_decl->decls[0].init.get());
-        } else {
-            emit_opcode(OpCode::OpUndefined);
-        }
+        // `var a = 1, b = 2` is one statement declaring two bindings, each
+        // initialized in the order written (ECMA-262 14.3.2). Each declarator
+        // is compiled exactly as a single one is, which is also what the
+        // tree-walker does for them, so a pair of declarators cannot disagree
+        // with the single form.
+        for (const auto& declarator : var_decl->decls) {
+            // Only a plain name is a binding this compiler can place. `var
+            // [a, b] = ...` is ECMA-262's BindingPattern, which the tree-walker
+            // destructures; there is no opcode here that does that, so it is
+            // still refused rather than half-done.
+            if (!declarator.target || declarator.target->kind != Pattern::Kind::Identifier) {
+                throw std::runtime_error(
+                    "Destructuring declarations are not supported by the bytecode compiler");
+            }
+            const std::string& name = declarator.target->name;
+            if (declarator.init) {
+                compile_expr(declarator.init.get());
+            } else {
+                emit_opcode(OpCode::OpUndefined);
+            }
 
-        if (m_scope_depth > 0) {
-            add_local(*name);
-        } else {
-            size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(*name));
-            emit_opcode(OpCode::OpSetGlobal);
-            emit_byte(static_cast<uint8_t>(name_idx));
-            emit_opcode(OpCode::OpPop);
+            // ECMA-262 14.3.2: a `let`/`const` belongs to the block it is
+            // declared in, and `end_scope` pops it when that block ends. A
+            // `var` belongs to the enclosing *function*, however deeply it is
+            // nested, so it is not a local of the inner block and must not be
+            // popped with it.
+            //
+            // Where a `var` can live depends on what this compiler has a place
+            // for. A function's own body has var slots -- its parameters are
+            // the first of them. The script body has none: its bindings are
+            // properties of the global object, which is what `OpSetGlobal`
+            // writes. So a `var` goes to a local only when the enclosing
+            // function has already given that name a slot (a parameter, or a
+            // `var` at the function's top level); otherwise it goes where a
+            // top-level `var` goes, and the VM keeps it for the rest of the
+            // script.
+            //
+            // Recording the name with `add_local_at` instead was tried and is
+            // wrong: the slot is a position on the VM stack, and leaving the
+            // block pops it, so the binding was gone by the time anything read
+            // it -- `var a = 1; { var b = 2; } a + b` answered 1 where the
+            // tree-walker answers 3.
+            const int slot = resolve_local(name);
+            if (var_decl->kind == JsDeclKind::Var && slot == -1) {
+                size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(name));
+                emit_opcode(OpCode::OpSetGlobal);
+                emit_byte(static_cast<uint8_t>(name_idx));
+                emit_opcode(OpCode::OpPop);
+            } else if (m_scope_depth > 0 && var_decl->kind != JsDeclKind::Var) {
+                add_local(name);
+            } else if (m_scope_depth > 0) {
+                // A block-nested `var` whose function already has the slot.
+                add_local_at(name, 0);
+            } else {
+                size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(name));
+                emit_opcode(OpCode::OpSetGlobal);
+                emit_byte(static_cast<uint8_t>(name_idx));
+                emit_opcode(OpCode::OpPop);
+            }
         }
     } else if (auto for_stmt = dynamic_cast<const ForStmt*>(stmt)) {
         if (!for_stmt->per_iteration_names.empty()) {
@@ -156,18 +253,35 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         begin_scope();
         if (for_stmt->init) compile_stmt(for_stmt->init.get());
         size_t loop_start = m_function->chunk.code.size();
+        m_loops.push_back({loop_start, true, {}, {}});
         if (for_stmt->test) compile_expr(for_stmt->test.get());
         else emit_opcode(OpCode::OpTrue);
         size_t exit_jump = emit_jump(OpCode::OpJumpIfFalse);
         emit_opcode(OpCode::OpPop);
         begin_scope();
         compile_stmt(for_stmt->body.get());
+        // `continue` in a `for` runs the update before the test, so its jumps
+        // point at the update's first instruction -- which is where the code
+        // cursor is now, before the update is emitted. The patch can only be
+        // written once the update *is* emitted, because `patch_back_jump`
+        // measures backwards from the jump's own end: a jump whose target is
+        // still in the future is the error it refuses.
+        const std::vector<size_t> continues = m_loops.back().continues;
+        const size_t update_start = m_function->chunk.code.size();
         if (for_stmt->update) {
             compile_expr(for_stmt->update.get());
             emit_opcode(OpCode::OpPop);
         }
+        // To the update's first instruction, not to wherever the cursor is
+        // now: `continue` runs the update before the next test.
+        for (size_t at : continues) patch_forward_jump(at, update_start);
         end_scope();
+        // The same order as in `while`: `break` must jump past the back edge,
+        // not to it.
+        const std::vector<size_t> breaks = std::move(m_loops.back().breaks);
+        m_loops.pop_back();
         emit_loop(loop_start);
+        for (size_t at : breaks) patch_jump(at);
         patch_jump(exit_jump);
         emit_opcode(OpCode::OpPop);
         end_scope();
@@ -194,16 +308,93 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         patch_jump(else_jump);
     } else if (auto while_stmt = dynamic_cast<const WhileStmt*>(stmt)) {
         size_t loop_start = m_function->chunk.code.size();
+        m_loops.push_back({loop_start, false, {}, {}});
         compile_expr(while_stmt->condition.get());
 
         size_t exit_jump = emit_jump(OpCode::OpJumpIfFalse);
         emit_opcode(OpCode::OpPop);
 
         compile_stmt(while_stmt->body.get());
+        // A `continue` goes back to the test, which is `loop_start`, so those
+        // jumps are resolved against it first. The `break`s are patched only
+        // *after* `emit_loop`: patching them before it pointed them at the
+        // back edge itself, so `while (true) { ... break; }` jumped into
+        // `OpLoop` and went round for ever.
+        for (size_t at : m_loops.back().continues) patch_back_jump(at, loop_start);
+        const std::vector<size_t> breaks = std::move(m_loops.back().breaks);
+        m_loops.pop_back();
         emit_loop(loop_start);
+        for (size_t at : breaks) patch_jump(at);
 
         patch_jump(exit_jump);
         emit_opcode(OpCode::OpPop);
+    } else if (auto do_stmt = dynamic_cast<const DoWhileStmt*>(stmt)) {
+        // `do body while (test)` (ECMA-262 14.6.2): the body runs first, then
+        // the test decides whether to go round again. Two jumps are patched
+        // backwards here, which `emit_loop` does not do -- it emits OpLoop for
+        // a known start, and both the test and the exit sit after the body.
+        //
+        //   start: body; test; JumpIfFalse exit; Pop; Jump start; exit: Pop
+        //
+        // The test's value is popped on both paths: by the OpPop before the
+        // loop jump when it is true, and by the OpPop after `exit` when it is
+        // false. `OpJumpIfFalse` leaves it on the stack, so the exit path has
+        // to discard it.
+        size_t loop_start = m_function->chunk.code.size();
+        m_loops.push_back({loop_start, true, {}, {}});
+        compile_stmt(do_stmt->body.get());
+        // `continue` in a `do`/`while` goes to the test, which follows.
+        const std::vector<size_t> do_continues = m_loops.back().continues;
+        const size_t test_start = m_function->chunk.code.size();
+        for (size_t at : do_continues) patch_forward_jump(at, test_start);
+        compile_expr(do_stmt->condition.get());
+        size_t exit_jump = emit_jump(OpCode::OpJumpIfFalse);
+        emit_opcode(OpCode::OpPop);
+        // Back to the top: distance from here to `loop_start`, which is what
+        // the OpLoop operand means (see `run`, where the offset is *added*).
+        emit_opcode(OpCode::OpLoop);
+        size_t back = m_function->chunk.code.size() - loop_start + 2;
+        if (back > 65535) throw std::runtime_error("Loop body too large (>65535 bytes)");
+        emit_byte(static_cast<uint8_t>((back >> 8) & 0xFF));
+        emit_byte(static_cast<uint8_t>(back & 0xFF));
+        const std::vector<size_t> do_breaks = std::move(m_loops.back().breaks);
+        m_loops.pop_back();
+        for (size_t at : do_breaks) patch_jump(at);
+        patch_jump(exit_jump);
+        emit_opcode(OpCode::OpPop);
+    } else if (auto break_stmt = dynamic_cast<const BreakStmt*>(stmt)) {
+        // ECMA-262 13.8. A labelled `break` is left to the tree-walker: labels
+        // reach across statements, which this compiler has no table for, and
+        // compiling an unlabelled jump for a labelled `break` would jump to
+        // the wrong place -- silently, which is worse than refusing.
+        if (!break_stmt->label.empty()) {
+            throw std::runtime_error("A labelled break is not supported by the bytecode compiler");
+        }
+        if (m_loops.empty()) {
+            throw std::runtime_error("`break` outside a loop is not supported by the bytecode compiler");
+        }
+        // The jump's target is the loop's exit, which is not known yet; the
+        // loop patches it when its body has been compiled.
+        m_loops.back().breaks.push_back(emit_jump(OpCode::OpJump));
+    } else if (auto continue_stmt = dynamic_cast<const ContinueStmt*>(stmt)) {
+        if (!continue_stmt->label.empty()) {
+            throw std::runtime_error("A labelled continue is not supported by the bytecode compiler");
+        }
+        if (m_loops.empty()) {
+            throw std::runtime_error("`continue` outside a loop is not supported by the bytecode compiler");
+        }
+        // To the loop's test (a `while`) or its update/test (a `for`, a
+        // `do`/`while`). Which way that is decides the opcode: OpLoop carries
+        // a distance backwards, OpJump one forwards, and the loop fills in
+        // whichever it emitted when it knows its target.
+        if (m_loops.back().continue_is_forward) {
+            m_loops.back().continues.push_back(emit_jump(OpCode::OpJump));
+        } else {
+            m_loops.back().continues.push_back(m_function->chunk.code.size());
+            emit_opcode(OpCode::OpLoop);
+            emit_byte(0xFF);
+            emit_byte(0xFF);
+        }
     } else if (auto ret_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
         if (ret_stmt->value) {
             compile_expr(ret_stmt->value.get());
@@ -356,6 +547,21 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
             compile_expr(idx_target->index.get());
             emit_opcode(OpCode::OpSetIndex);
         }
+    } else if (auto conditional = dynamic_cast<const ConditionalExpr*>(expr)) {
+        // `test ? consequent : alternate` (ECMA-262 13.14). The value of the
+        // chosen branch is the value of the expression, so neither branch is
+        // popped: `OpJumpIfFalse` leaves the test on the stack, and the
+        // OpPop under it discards that test on both paths before a branch
+        // pushes its own value.
+        compile_expr(conditional->test.get());
+        size_t alternate_jump = emit_jump(OpCode::OpJumpIfFalse);
+        emit_opcode(OpCode::OpPop);
+        compile_expr(conditional->consequent.get());
+        size_t end_jump = emit_jump(OpCode::OpJump);
+        patch_jump(alternate_jump);
+        emit_opcode(OpCode::OpPop);
+        compile_expr(conditional->alternate.get());
+        patch_jump(end_jump);
     } else if (auto update = dynamic_cast<const UpdateExpr*>(expr)) {
         // `++i` / `i++` (ECMA-262 13.4). The lvalue expression is evaluated a
         // single time; only the resulting value is duplicated, so `a[f()]++`

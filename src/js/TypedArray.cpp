@@ -1973,6 +1973,88 @@ JsValue typed_array_from_bytes(const std::string& bytes) {
     return make_view_object(std::move(data), realm().protos[static_cast<int>(ElementType::Uint8)]);
 }
 
+// ---------------------------------------------------------------------------
+// What a structured clone needs
+// ---------------------------------------------------------------------------
+// The bytes, the element type and the window are all private to this file, so
+// the clone asks here rather than reaching into the exotics. Nothing about the
+// objects themselves changes: these read, and the two makers make new objects
+// of the same shape a constructor would.
+
+bool buffer_view_info(const JsValue& value, BufferViewInfo& out) {
+    out = BufferViewInfo{};
+    if (auto view = view_of(value)) {
+        if (is_out_of_bounds(*view)) return false;
+        out.kind = 2;
+        out.element_type = static_cast<int>(view->type);
+        out.byte_offset = effective_byte_offset(*view);
+        out.byte_length = effective_byte_length(*view);
+        out.length_tracking = view->length_tracking;
+        return true;
+    }
+    if (auto dv = dataview_of(value)) {
+        if (is_out_of_bounds(*dv)) return false;
+        out.kind = 3;
+        out.byte_offset = dv->byte_offset;
+        out.byte_length = effective_byte_length(*dv);
+        out.length_tracking = dv->length_tracking;
+        return true;
+    }
+    if (auto buffer = buffer_of(value)) {
+        if (buffer->detached) return false;
+        out.kind = 1;
+        out.byte_length = buffer->bytes.size();
+        return true;
+    }
+    return false;
+}
+
+JsValue typed_array_view_over(int element_type, const JsValue& buffer,
+                              std::size_t byte_offset, std::size_t byte_length,
+                              bool length_tracking) {
+    auto target = buffer_of(buffer);
+    if (!target) js_throw_type_error("TypedArray: the buffer is not an ArrayBuffer");
+    auto data = std::make_shared<TypedArrayData>();
+    data->buffer = target;
+    data->type = static_cast<ElementType>(element_type);
+    data->byte_offset = byte_offset;
+    data->length_tracking = length_tracking;
+    const std::size_t size = static_cast<std::size_t>(element_size(data->type));
+    data->length = length_tracking ? 0 : (size ? byte_length / size : 0);
+    return make_view_object(std::move(data), realm().protos[element_type]);
+}
+
+JsValue data_view_over(const JsValue& buffer, std::size_t byte_offset, std::size_t byte_length) {
+    auto target = buffer_of(buffer);
+    if (!target) js_throw_type_error("DataView: the buffer is not an ArrayBuffer");
+    auto data = std::make_shared<DataViewData>();
+    data->buffer = target;
+    data->byte_offset = byte_offset;
+    data->byte_length = byte_length;
+    JsObject* cell = Heap::default_heap().allocate_object();
+    cell->prototype = realm().dataview_proto;
+    cell->exotic = std::make_shared<DataViewHolder>(data);
+    return JsValue::make_object(cell);
+}
+
+JsObject* typed_array_prototype_for(int element_type) {
+    if (element_type < 0 || element_type >= kElementTypeCount) return realm().typed_array_proto;
+    return realm().protos[element_type];
+}
+
+bool array_buffer_transfer(const JsValue& value, JsValue& out) {
+    auto buffer = buffer_of(value);
+    if (!buffer || buffer->detached) return false;
+    auto next = std::make_shared<ArrayBufferData>();
+    next->bytes = std::move(buffer->bytes);
+    next->max_byte_length = next->bytes.size();
+    buffer->bytes.clear();
+    buffer->bytes.shrink_to_fit();
+    buffer->detached = true;
+    out = make_buffer_object(next);
+    return true;
+}
+
 void install_typed_array_builtins(JsEnvironment& global) {
     JsIntrinsics& intrinsics = JsIntrinsics::get();
     install_array_buffer(intrinsics, global);

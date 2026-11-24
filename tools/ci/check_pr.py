@@ -221,6 +221,9 @@ WATCH_OFF_RE = re.compile(r"^(\w+): WATCH OFF\b")
 # land. The head commit is part of it: the pull request is left alone until
 # its head is another one, and nothing is compared by its time.
 YOURS_AGAIN_RE = re.compile(r"^\w+: #(\d+) is yours again \(head ([0-9a-f]{7,40})\)")
+# The line that says which pull requests a lot holds, each with its head:
+# "Lander: lot of 03:01 UTC: #305 (`52fe97d`), #310 (`0a0ffab`) with `main` …".
+LOT_RE = re.compile(r"^\w+: (?:\*\*)?(?:the last )?lot of ")
 WATCH_ON_TEXT = (
     "While this line says ON and its last look is less than {quiet} minutes old, only the landing session "
     "merges. A pull request that is finished (no `WIP:` in its title), green on its head commit and "
@@ -943,6 +946,30 @@ def sent_back(comments: list[dict], number: int) -> tuple[str, str] | None:
     return None
 
 
+def taken_at(comments: list[dict], number: int) -> str | None:
+    """The head commit at which the landing session last said it had taken
+    #number into a lot, or None when it has not, or has sent it back since.
+
+    The landing session takes some heads that have no green run of their own:
+    one whose code is code that was green, merged with `main` by git alone
+    and changed since in documents only (tools/watch/watch.sh,
+    `code_was_green`). The run on the lot is the test of such a head. Its
+    agent, asking `landed N`, was told "the landing session does not take #N
+    as it is: no CI run on its head commit", and the natural answer to that
+    is a push, which moves the head out from under the lot."""
+    listed = re.compile(rf"#{number} \(`([0-9a-f]{{7,40}})`\)")
+    for comment in reversed(comments):
+        line = first_line(comment)
+        back = YOURS_AGAIN_RE.match(line)
+        if back and int(back.group(1)) == number:
+            return None
+        if LOT_RE.match(line):
+            found = listed.search(line)
+            if found:
+                return found.group(1)
+    return None
+
+
 def rollup(checks: list[dict] | None) -> tuple[str, list[str]]:
     """'passed', 'failed', 'running' or 'none' for the checks GitHub lists for a
     pull request's head (`statusCheckRollup`), and the ones that are not green.
@@ -982,13 +1009,20 @@ def why_not_taken(pr: dict, comments: list[dict]) -> str:
         return "it is the board or a watch"
     if pr.get("isDraft") or pr["title"].startswith("WIP"):
         return "its title still begins with WIP:"
+    taken = taken_at(comments, pr["number"])
+    if taken and pr["headRefOid"].startswith(taken):
+        return ""       # the landing session has said so, of this very head
     state, bad = rollup(pr.get("statusCheckRollup"))
     if state == "none":
         files = [entry["path"] for entry in pr.get("files") or []]
         if not (files and all_of(DOCUMENT, files)):     # documents only: the lot's run is its run
             return "no CI run on its head commit"
     elif state == "running":
-        return "CI is still running on its head commit"
+        # Taken all the same, since 24 November 2026: its own run and the
+        # lot's go side by side, and it lands when the lot's has passed.
+        # Waiting for its own first put a run's length in front of every
+        # lot. If its own run fails it leaves the lot.
+        pass
     elif state == "failed":
         return "CI failed on its head commit (" + "; ".join(bad[:3]) + ")"
     if pr.get("mergeable") == "CONFLICTING":
@@ -1070,8 +1104,9 @@ def show_watch() -> int:
                 how = ("main is in the head: it can be merged as it is, at once" if behind == 0
                        else f"{behind} commit(s) behind main, and it merges: into the lot")
         (left if why else taken).append((pr, why or how))
-    print("\nfinished, green and mergeable" + (": the landing session takes these" if watch.on else
-                                              ": theirs to merge, or the next watch's") + ("" if taken else "\n    (none)"))
+    print("\nfinished and mergeable, CI green or still going" + (": the landing session takes these" if watch.on else
+                                                                ": theirs to merge, or the next watch's")
+          + ("" if taken else "\n    (none)"))
     for pr, text in taken:
         print(f"    #{pr['number']} [{claim_of(pr).get('agent') or '-'}] {pr['headRefOid'][:7]}  {text}")
     print("\nnot now" + ("" if left else "\n    (none)"))
@@ -1549,14 +1584,24 @@ def self_test() -> int:
          why_not_taken(waiting(mergeable="UNKNOWN"), board), ""),
         ("a title that begins with WIP: is not finished",
          why_not_taken(waiting(title="WIP: a change"), board), "its title still begins with WIP:"),
-        ("CI still running: not yet",
-         why_not_taken(waiting(checks=green[:11] + [check("job 11", None, "QUEUED")]), board),
-         "CI is still running on its head commit"),
+        ("CI still running on a finished pull request: taken, its run and the lot's go side by side",
+         why_not_taken(waiting(checks=green[:11] + [check("job 11", None, "QUEUED")]), board), ""),
         ("CI failed: not taken, and the job is named",
          why_not_taken(waiting(checks=green[:11] + [check("job 11", "FAILURE")]), board),
          "CI failed on its head commit (job 11: failure)"),
         ("no run on the head of an engine change: not taken",
          why_not_taken(waiting(checks=[]), board), "no CI run on its head commit"),
+        ("...unless the landing session has said it took that very head: its code was green, and the lot's run is its run",
+         why_not_taken(waiting(checks=[]), board + [said("Lander: lot of 03:01 UTC: #5 (`aaaaaaa`), #7 (`fffffff`) with `main` `1234567`, one CI run.")]), ""),
+        ("taken at another head than the one it has now: the rule as before",
+         why_not_taken(waiting(checks=[]), board + [said("Lander: lot of 03:01 UTC: #7 (`eeeeeee`) with `main` `1234567`, one CI run.")]),
+         "no CI run on its head commit"),
+        ("taken, and sent back since: not taken",
+         taken_at([said("Lander: lot of 03:01 UTC: #7 (`fffffff`) with `main` `1234567`."), said("Lander: #7 is yours again (head fffffff): a row")], 7), None),
+        ("a lot line that names other pull requests says nothing of this one",
+         taken_at([said("Lander: lot of 03:01 UTC: #17 (`fffffff`), #70 (`fffffff`) with `main` `1234567`.")], 7), None),
+        ("the last lot of a watch is a lot",
+         taken_at([said("Lander: **the last lot of this watch**, 23:41 UTC: #7 (`abcdef0`) as it is")], 7), None if not LOT_RE.match("Lander: **the last lot of this watch**, 23:41 UTC: #7 (`abcdef0`) as it is") else "abcdef0"),
         ("no run on the head of a change to documents only: taken, the lot's run is its run",
          why_not_taken(waiting(checks=[], files=("AGENTS.md", "docs/phases/5-a.md")), board), ""),
         ("in conflict with main: not taken",

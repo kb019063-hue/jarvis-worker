@@ -1871,10 +1871,54 @@ void setup_window(Iface& I) {
             if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});
             return undefined();
         };
+        auto arg = [&](std::size_t i) { return i < args.size() ? args[i] : undefined(); };
         if (args.empty()) {
             return reject_with("TypeError", "createImageBitmap: 1 argument required.");
         }
         const JsValue& src = args[0];
+
+        // HTML §8.11.2: the arguments are `(image, options)` or
+        // `(image, sx, sy, sw, sh, options)`. Until this phase the method took
+        // one argument and read none of the rest, so every crop, every resize
+        // and both of the zero-size checks were skipped — and because the
+        // promise still resolved, a page could not tell. The two shapes are
+        // told apart by count, as the overloads are: five or more is the
+        // rectangle form, and a sixth may follow either as the options.
+        const bool has_rect = args.size() >= 5;
+        int sx = 0, sy = 0, sw = 0, sh = 0;
+        JsValue options;
+        if (has_rect) {
+            sx = static_cast<int>(to_double(arg(1)));
+            sy = static_cast<int>(to_double(arg(2)));
+            sw = static_cast<int>(to_double(arg(3)));
+            sh = static_cast<int>(to_double(arg(4)));
+            options = arg(5);
+        } else {
+            options = arg(1);
+        }
+
+        // Step 1: a source rectangle with a zero side is a RangeError, not an
+        // InvalidStateError — it is checked before the image is.
+        if (has_rect && (sw == 0 || sh == 0)) {
+            return reject_with("RangeError", "createImageBitmap: the source width and height must not be zero.");
+        }
+        // Step 2: a zero resize dimension is InvalidStateError.
+        int resize_w = -1, resize_h = -1;
+        bool flip_y = false;
+        if (options.is_object_like()) {
+            const JsValue rw = options.get_property("resizeWidth");
+            const JsValue rh = options.get_property("resizeHeight");
+            if (rw.type == JsType::Number) resize_w = static_cast<int>(to_double(rw));
+            if (rh.type == JsType::Number) resize_h = static_cast<int>(to_double(rh));
+            const JsValue fy = options.get_property("flipY");
+            if (fy.type == JsType::Boolean && to_bool(fy)) flip_y = true;
+            if ((rw.type == JsType::Number && resize_w == 0) ||
+                (rh.type == JsType::Number && resize_h == 0)) {
+                return reject_with("InvalidStateError",
+                                   "createImageBitmap: the resize width and height must not be zero.");
+            }
+        }
+
         auto state = std::make_shared<ImageBitmapState>();
         if (ImageBitmapState* bm = state_of<ImageBitmapState>(src)) {
             if (bm->closed) {
@@ -1915,6 +1959,36 @@ void setup_window(Iface& I) {
                 // one, clean.
                 state->origin_clean = ctx->origin_clean();
             }
+        } else if (std::shared_ptr<Element> el = element_of(src); el && el->tag_name() == "img") {
+            // An <img>: whatever the layout pass decoded for it, which is the
+            // same pixels `drawImage` reads. An image that has not loaded is
+            // step 3's "unusable" case, an InvalidStateError.
+            std::shared_ptr<ImageData> decoded = load_image_for_element(*el);
+            if (!decoded || !decoded->is_valid()) {
+                return reject_with("InvalidStateError",
+                                   "createImageBitmap: the image element has no decoded image.");
+            }
+            state->width = decoded->width;
+            state->height = decoded->height;
+            state->pixels = decoded->pixels;
+            state->origin_clean = !el->image_source_cross_origin();
+        } else if (is_blob(src)) {
+            // A Blob is decoded from its bytes, and bytes that are not an
+            // image are an InvalidStateError rather than a TypeError: the
+            // source was the right kind of thing and its data was not.
+            std::string bytes;
+            if (!blob_bytes(src, bytes)) {
+                return reject_with("InvalidStateError", "createImageBitmap: the blob could not be read.");
+            }
+            std::shared_ptr<ImageData> decoded = ImageDecoder::decode_bytes(
+                reinterpret_cast<const std::uint8_t*>(bytes.data()), bytes.size());
+            if (!decoded || !decoded->is_valid()) {
+                return reject_with("InvalidStateError",
+                                   "createImageBitmap: the blob's data is not an image this engine can decode.");
+            }
+            state->width = decoded->width;
+            state->height = decoded->height;
+            state->pixels = decoded->pixels;
         } else if (src.is_object_like() && src.get_property("width").type == JsType::Number &&
                    src.get_property("height").type == JsType::Number && src.get_property("data").is_object_like()) {
             int w = static_cast<int>(to_double(src.get_property("width")));
@@ -1925,9 +1999,113 @@ void setup_window(Iface& I) {
             state->width = w;
             state->height = h;
             state->pixels.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(h), 0);
+            // Copy the pixels too: the bitmap is a copy, so a later write to
+            // the ImageData must not be visible through it.
+            const JsValue data = src.get_property("data");
+            {
+                const std::size_t need = static_cast<std::size_t>(w) * static_cast<std::size_t>(h) * 4u;
+                std::string raw;
+                // `data` is a Uint8ClampedArray by the interface; a value that
+                // is not a view of bytes answers false here and the bitmap
+                // stays transparent black, which is what an ImageData with no
+                // readable data holds.
+                if (typed_array_bytes(data, raw) && raw.size() >= need) {
+                    for (std::size_t i = 0; i < need / 4u; ++i) {
+                        const unsigned char cr = static_cast<unsigned char>(raw[i * 4 + 0]);
+                        const unsigned char cg = static_cast<unsigned char>(raw[i * 4 + 1]);
+                        const unsigned char cb = static_cast<unsigned char>(raw[i * 4 + 2]);
+                        const unsigned char ca = static_cast<unsigned char>(raw[i * 4 + 3]);
+                        state->pixels[i] = (static_cast<std::uint32_t>(ca) << 24) |
+                                           (static_cast<std::uint32_t>(cr) << 16) |
+                                           (static_cast<std::uint32_t>(cg) << 8) |
+                                           static_cast<std::uint32_t>(cb);
+                    }
+                }
+            }
         } else {
             return reject_with("TypeError", "createImageBitmap: unsupported image source.");
         }
+
+        // The source rectangle, and then the resize. Step 1's crop is
+        // "cropped to the source rectangle with formatting": pixels outside
+        // the source are transparent black, so a rectangle that reaches past
+        // the image pads rather than shrinking.
+        const int src_w = state->width;
+        const int src_h = state->height;
+        if (has_rect) {
+            std::vector<std::uint32_t> cropped(static_cast<std::size_t>(sw) * static_cast<std::size_t>(sh), 0);
+            for (int y = 0; y < sh; ++y) {
+                const int ty = sy + y;
+                if (ty < 0 || ty >= src_h) continue;
+                for (int x = 0; x < sw; ++x) {
+                    const int tx = sx + x;
+                    if (tx < 0 || tx >= src_w) continue;
+                    cropped[static_cast<std::size_t>(y) * static_cast<std::size_t>(sw) +
+                            static_cast<std::size_t>(x)] =
+                        state->pixels[static_cast<std::size_t>(ty) * static_cast<std::size_t>(src_w) +
+                                      static_cast<std::size_t>(tx)];
+                }
+            }
+            state->pixels = std::move(cropped);
+            state->width = sw;
+            state->height = sh;
+        }
+
+        // `resizeWidth`/`resizeHeight`: one alone preserves the aspect ratio
+        // (CSS Images' "natural dimensions"), both are taken as given.
+        if (resize_w > 0 || resize_h > 0) {
+            int out_w = resize_w;
+            int out_h = resize_h;
+            // A source of zero height (a padded crop cannot be one, but a
+            // Bitmap that arrived empty could) would divide by zero here; the
+            // ratio is then undefined and the requested dimension stands.
+            if (out_w <= 0) {
+                out_w = state->height > 0
+                    ? static_cast<int>(static_cast<double>(state->width) * out_h / state->height + 0.5)
+                    : out_h;
+            }
+            if (out_h <= 0) {
+                out_h = state->width > 0
+                    ? static_cast<int>(static_cast<double>(state->height) * out_w / state->width + 0.5)
+                    : out_w;
+            }
+            if (out_w <= 0) out_w = 1;
+            if (out_h <= 0) out_h = 1;
+            std::vector<std::uint32_t> scaled(static_cast<std::size_t>(out_w) * static_cast<std::size_t>(out_h), 0);
+            const int in_w = state->width;
+            const int in_h = state->height;
+            for (int y = 0; y < out_h; ++y) {
+                // Nearest neighbour: this is a geometry fact about which pixel
+                // a coordinate names, not a resampling claim, and the suite
+                // asserts colours that a nearest sample reproduces exactly.
+                int ty = static_cast<int>(static_cast<long long>(y) * in_h / out_h);
+                if (ty >= in_h) ty = in_h - 1;
+                for (int x = 0; x < out_w; ++x) {
+                    int tx = static_cast<int>(static_cast<long long>(x) * in_w / out_w);
+                    if (tx >= in_w) tx = in_w - 1;
+                    scaled[static_cast<std::size_t>(y) * static_cast<std::size_t>(out_w) +
+                           static_cast<std::size_t>(x)] =
+                        state->pixels[static_cast<std::size_t>(ty) * static_cast<std::size_t>(in_w) +
+                                      static_cast<std::size_t>(tx)];
+                }
+            }
+            state->pixels = std::move(scaled);
+            state->width = out_w;
+            state->height = out_h;
+        }
+
+        // `flipY`, off by default: the rows are reversed, which is what a
+        // texture upload from a GL-style bottom-left origin needs.
+        if (flip_y && state->height > 1) {
+            const std::size_t row = static_cast<std::size_t>(state->width);
+            for (int y = 0; y < state->height / 2; ++y) {
+                std::uint32_t* top = state->pixels.data() + static_cast<std::size_t>(y) * row;
+                std::uint32_t* bottom =
+                    state->pixels.data() + static_cast<std::size_t>(state->height - 1 - y) * row;
+                std::swap_ranges(top, top + row, bottom);
+            }
+        }
+
         JsValue bitmap = r.make("ImageBitmap", state);
         if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {bitmap});
         return undefined();

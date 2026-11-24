@@ -208,6 +208,59 @@ struct CollectionData {
     }
 };
 
+// ---------------------------------------------------------------------------
+// What a structured clone needs
+// ---------------------------------------------------------------------------
+//
+// The anonymous namespace ends here so that these three can be declared in
+// JsBuiltins.hpp; the rest of the file's helpers stay private.
+
+} // namespace
+
+bool is_keyed_collection(const JsValue& value, bool& entries) {
+    if (value.type != JsType::Object || !value.object_val || !value.object_val->internal) return false;
+    const ObjectClass klass = value.object_val->klass;
+    // A WeakMap and a WeakSet are deliberately not here: the standard refuses
+    // to clone one, and reading its entries would be the one thing they exist
+    // to prevent.
+    if (klass == ObjectClass::Map) { entries = true; return true; }
+    if (klass == ObjectClass::Set) { entries = false; return true; }
+    return false;
+}
+
+bool collection_entries(const JsValue& value, bool& entries,
+                        std::vector<std::pair<JsValue, JsValue>>& out) {
+    out.clear();
+    if (!is_keyed_collection(value, entries)) return false;
+    auto data = std::static_pointer_cast<CollectionData>(value.object_val->internal);
+    for (const auto& entry : data->entries) {
+        if (entry.deleted) continue;
+        out.emplace_back(entry.key, entries ? entry.value : entry.key);
+    }
+    return true;
+}
+
+JsValue make_collection_copy(bool entries, const std::vector<std::pair<JsValue, JsValue>>& items) {
+    JsIntrinsics& realm = JsIntrinsics::get();
+    JsObject* cell = Heap::default_heap().allocate_object();
+    cell->prototype = entries ? realm.map_proto : realm.set_proto;
+    cell->klass = entries ? ObjectClass::Map : ObjectClass::Set;
+    auto data = std::make_shared<CollectionData>();
+    cell->internal = data;
+    JsValue copy = JsValue::make_object(cell);
+    for (const auto& [key, value] : items) data->set(key, value);
+    return copy;
+}
+
+void add_collection_copy_entry(const JsValue& collection, const JsValue& key, const JsValue& value) {
+    bool entries = false;
+    if (!is_keyed_collection(collection, entries)) return;
+    auto data = std::static_pointer_cast<CollectionData>(collection.object_val->internal);
+    data->set(key, entries ? value : key);
+}
+
+namespace {
+
 std::shared_ptr<CollectionData> data_of(const JsValue& value, ObjectClass klass, const char* name) {
     if (!value.object_val || value.object_val->klass != klass || !value.object_val->internal) {
         js_throw_type_error(std::string("Method ") + name + " called on incompatible receiver " +

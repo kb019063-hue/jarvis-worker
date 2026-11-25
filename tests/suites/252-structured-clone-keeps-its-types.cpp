@@ -109,7 +109,7 @@ TEST(structured_clone_keeps_the_type_of_what_it_copies) {
         // StructuredSerializeInternal step 6 is "If value is a Symbol, then
         // throw a DataCloneError DOMException", in its own step before any
         // object is looked at, and Node answers exactly that — `e.name` is
-        // DataCloneError, `e.code` 25. Corrected in Phase 413.
+        // DataCloneError, `e.code` 25. Corrected in Phase 414.
         okThrows('a Symbol', function () { structuredClone(Symbol('x')); }, 'DataCloneError');
 
         // ---- what stays as it was -------------------------------------------

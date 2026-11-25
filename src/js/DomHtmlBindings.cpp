@@ -3758,6 +3758,9 @@ void setup_canvas(Iface& I) {
         set_slot(wrapper, "contextKind", str(type));
         if (type == "2d") {
             return cached(wrapper, "context2d", [&]() {
+                // `direction: "inherit"` walks the element's ancestors for a
+                // `dir`, so the context is told which element it belongs to.
+                backing->set_owner_element(el.shared_from_this());
                 JsValue object = backing->to_js_value(backing);
                 // ImageData needs a realm, so the three methods that speak it are
                 // added here rather than in Canvas2D.cpp.

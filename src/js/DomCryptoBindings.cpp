@@ -1032,6 +1032,7 @@ void setup_crypto_key(Iface& I) {
                            : st.hash_alg == "sha-512" ? "SHA-512" : "SHA-256";
             h.set_property("name", str(hn));
             alg.set_property("hash", h);
+            alg.set_property("length", num(static_cast<double>(st.key_bytes.size() * 8u)));
         }
         return alg;
     });

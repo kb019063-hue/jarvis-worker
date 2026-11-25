@@ -196,8 +196,8 @@ within the hour, and the first lot was started again four times.
      in, in the order of their numbers, and nothing else: `git merge-tree`
      of `main` and the heads, one after the other, gives the same tree.
      One push, one CI run. `make -j2 all && make -j2 test` in the sandbox
-     says in about six minutes what the run will say in twenty about the
-     unit suites;
+     says in two to four minutes what the run will say in five about the
+     unit suites of the plain build;
    - **the run passes and `main` has not moved:** each of them is merged as
      it is, in that order, and `main` has, file for file, the tree the run
      passed on. The command is `gh pr merge N --merge --match-head-commit
@@ -258,13 +258,12 @@ within the hour, and the first lot was started again four times.
      checks that, and the lot goes on with the new head. In the first
      quarter of an hour of 24 November's watch three heads moved under
      one lot (#305, #313, #321) and none of them cost a run;
-   - **while a watch is on, a pull request's own run is the short one.**
-     The landing session puts the label `lot` on it (`watch.sh look`), and
-     CI then runs on it the jobs of the plain build that take a minute or
-     two: "Build & unit tests", "Documentation shape", the reftests and
-     the four corpus jobs (html5lib, JavaScript, script DOM and URLs, XML
-     and web-platform-tests). The six sanitizer jobs and the deep pages
-     are skipped. The whole of CI runs on the lot it
+   - **a pull request's own run is the short one, watch or no watch.**
+     Every push to it runs the jobs of the plain build that take a
+     minute or two: "Build & unit tests", "Documentation shape", the
+     reftests and the four corpus jobs (html5lib, JavaScript, script DOM
+     and URLs, XML and web-platform-tests). The eight sanitizer jobs and
+     the deep pages are skipped. The whole of CI runs on the lot it
      lands in, on `main` as it will be, which its own run never saw.
      **Jobs "skipped" on your pull request are that, and nothing to mend**;
      `python3 tools/ci/check_pr.py merge N` says so. You still run the
@@ -277,9 +276,10 @@ within the hour, and the first lot was started again four times.
      was not in it, and which member of the lot it was had to be found by
      building each alone, while five others waited. With the corpus jobs in its
      own run, such a pull request fails by itself two minutes after its push.
-     When no watch is on, `merge N` takes the label off, which starts every
-     job, and says "not ready" until they have passed:
-     nobody merges on a short run. The reason is the queue: a run was
+     When no watch is on, `merge N` starts every job on your head (it
+     puts the label `lot` on and takes it off: a run that taking a label
+     off started is the whole one) and says "not ready" until they have
+     passed: nobody merges on a short run. The reason is the queue: a run was
      twelve jobs and no more than twenty were seen running at once. At
      04:57 on 24 November 19 were running and 25 waiting, in
      six runs, and the lot that five finished pull requests were in had
@@ -289,20 +289,25 @@ within the hour, and the first lot was started again four times.
      lot's, and by the run on `main` after the lot. That last one now
      builds, keeps the objects and runs the plain unit suites, no more
      (`[objects only]` in the lot's last merge);
-   - **a pull request whose title begins with `WIP:` gets the short run
-     too, watch or no watch**, from its first push. The label comes with
-     the landing session's next look, which is after that push: at 18:10
-     on 24 November three pull requests that had just been opened each
-     started all fourteen jobs, and the lot of 18:12, which a finished
-     pull request was waiting for, had ten jobs without a runner two and
-     a half minutes after its push. Work in progress is merged on no run
-     at all. When the `WIP:` is off, every job runs before the merge: in
-     the lot while a watch is on, and with no watch because `merge N`
-     starts them on your head (it puts the label on and takes it off).
-     **With no watch, take the `WIP:` off before your last push**, and
-     that push's run is the whole one already. A sanitizer job you want
-     to see on work in progress: `make asan-build` and the part here
-     (`make help` lists them), or the push with the `WIP:` off;
+   - **it was not always every push.** Until 25 November a run was
+     short only under the label `lot`, which the landing session put on
+     at its next look, or under a title that began with `WIP:`; any
+     other push started every job. At 18:10 on 24 November three pull
+     requests that had just been opened each started all fourteen jobs,
+     and the lot of 18:12, which a finished pull request was waiting
+     for, had ten jobs without a runner two and a half minutes after its
+     push: that brought the `WIP:` rule. On 25 November #431 was opened
+     finished, with no `WIP:` to its name, and began all sixteen jobs
+     of a run at 06:53; the lot it went into was pushed at 06:57, and
+     at 06:58 twenty jobs had a machine and eleven waited, five of them
+     the lot's. In the lot before, eleven of eighteen jobs had waited
+     37 to 95 seconds. Nobody reads the long jobs of a pull request's own
+     run, so no push starts them now. Work in progress is merged on no
+     run at all. When the `WIP:` is off, every job runs before the
+     merge: in the lot while a watch is on, and with no watch because
+     `merge N` starts them on your head. A sanitizer job you want to see
+     on work in progress: `make asan-build` and the part here (`make
+     help` lists them);
    - **when a lot's run fails, every member that could be at fault stays
      out of the next lot until it is known which one it was.** The run
      names the job, not the pull request. On 24 November the lot of 08:38
@@ -408,8 +413,11 @@ without one, and leaves the board and a watch out of the claims.
 
 1. **An open pull request is a claim.** Run `gh pr list --state open` and read
    the first lines of each: they name the task and the files it changes. (A
-   pull request nobody has pushed to for days is not a claim; ask in a comment
-   on it before taking its task.)
+   `WIP:` pull request with no push for two hours, and no comment in its
+   agent's name anywhere in that time, is marked `QUIET` by `python3
+   tools/ci/check_pr.py`. It is still a claim, and not yours to take or
+   to close: ask in a comment on it, and tell the person you work for,
+   who can continue its chat or say that it is given up.)
 2. **Claim before doing the work.** Pick a row of the table below that nobody
    has, push a first commit (an empty one will do) and open a pull request
    whose title begins with `WIP:` and whose text begins:
@@ -461,6 +469,24 @@ without one, and leaves the board and a watch out of the claims.
    A pull request holds the files it has changed as well as the ones it
    names. Put `[skip ci]` in the message of the first commit: an empty
    commit needs no run, and a run is an hour of runner time.
+5. **Push the work as you go.** Commit and push what you have every time
+   it builds and its suite passes here, and at least every twenty
+   minutes, with `[skip ci]` in the message: such a push starts no run
+   and costs nobody anything, and the work is then on GitHub whatever
+   happens to the chat. A sandbox can end without warning, and what was
+   not pushed ends with it; and from outside, work that is only in a
+   sandbox cannot be told from no work at all ("What has gone wrong",
+   Claims: #367, #389). What is pushed, the same chat or another agent
+   can go on from. **The last push, the one `WIP:` comes off after, has
+   no `[skip ci]`**: a head commit without a run is finished for nobody.
+   **When a push fails, the work is still only in the sandbox.** Try
+   again, then try `gh`, which talks to another host than `git push`
+   does: `git diff origin/main > /tmp/p.diff`, and the diff as a comment
+   on your pull request (`gh pr comment N --body-file`, the diff inside
+   a code block). If that fails too, your reply begins by saying so, and
+   carries the diff if it is small: the reply is the one thing that
+   outlives the sandbox for certain, and the next turn can read it
+   ("What has gone wrong", the sandbox: #419).
 
 ## The files every pull request changes
 
@@ -590,8 +616,7 @@ asan`.
 - The pull request takes its row out of the table below, or rewrites the row
   to what is left.
 - The `WIP:` comes off the title, and CI is green on the head commit
-  (while a watch is on, that is the short run: "Working together",
-  point 4). Then
+  (a push's run is the short one: "Working together", point 4). Then
   `python3 tools/ci/check_pr.py merge N` says who merges ("Working
   together", point 3, above): the landing session while a watch is on, you
   when none is. When it is you: with a merge commit
@@ -749,8 +774,22 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   its phase, its finding and its suite first, and to stay out of them.
   Those three directories are where every pull request adds a file of
   its own; named bare they claim nothing now, and the pull request that
-  named them is told so. **Name your own files** (`docs/phases/N-….md`).
-  A directory that is yours alone is still claimed whole.
+  named them is told so. A directory that is yours alone is still
+  claimed whole.
+
+  The advice that stood here then, "name your own files
+  (`docs/phases/N-….md`)", made the next one. The `Files:` line is
+  written when the pull request is opened, before its number is known,
+  so #415 and #421 both wrote `docs/phases/N-*.md`, `docs/findings/N-*.md`
+  and `tests/suites/N-*.cpp`, letter for letter, and at 06:09 the same
+  morning `claim 421` said #415 had the three first and that two pull
+  requests cannot both make them. #421's agent wrote on the board that
+  it would add no phase, finding or suite while they were held. Nothing
+  was held: a name there that is written before its number is no file's
+  name, and claims nothing now. **Your own phase, finding and suite need
+  not be in the `Files:` line at all**: they begin with your number, and
+  nobody else has it. The line is for the files of the engine and the
+  tools, which somebody else may want too.
 - **A file under another pull request's number.** #393 was written as
   Phase 387 while #387 to #392 were being opened, and was finished with
   a phase, a finding and a suite called `387-…`. The landing session
@@ -761,6 +800,16 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   any other, and the landing session takes no pull request that has
   one. The title carries the number into the merge commit: #393's still
   said 387 when its lot had passed.
+- **A claim that did not say it was one.** #423 was opened on 25
+  November at 06:19 as "Claim: full `<html>` root layout box …": one
+  empty commit, no `WIP:` in its title, none of the four lines. To
+  every tool that is a finished pull request, and four minutes later
+  the landing session's list had it as "can be merged as it is, at
+  once". Merged, it would have ended its agent's branch before the work
+  began. The landing session put the `WIP:` on and said so on it; and
+  `check_pr.py` now takes no pull request that changes no file, whatever
+  its title says. **`WIP:` is what says "not yet", and nothing else
+  is.**
 - **A finished pull request, closed for a file.** #390 was finished and
   measured in its agent's sandbox (two more test262 cases, two more of
   the JavaScript corpus, nothing lost). It needed one function of
@@ -776,6 +825,26 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   the one that lands second merges `main`. A file both would make is
   still the first one's. And nothing finished stays in a sandbox: push
   it under `WIP:`, whatever is in the way.
+- **A claim nobody pushed to, and what the landing session did to one.**
+  #367 was opened on 24 November at 07:58 with a commit that claims and
+  nothing else, and was not pushed to again. When the person we work for
+  went to continue its chat the next day, its sandbox and its tools no
+  longer worked, and whatever it had done was gone with them. #389 was
+  opened on the 25th at 02:37 in the same way. At 05:16 the landing
+  session, asked to take care of the claims that were still quiet,
+  closed it: nothing had been pushed for 2 hours 40 minutes, in which
+  21 pull requests had gone from opened to landed in 9 to 76 minutes
+  each. It had read #389's own page and nothing else. #389's agent had
+  written a comment on #416 thirteen minutes before. #389 was opened
+  again at 05:30; nobody had taken its row in between. Two things,
+  then. **Push as you go** ("Before starting", point 5): work in a
+  sandbox is lost with the sandbox, and until it is pushed nobody else
+  can tell it from no work. And **no push is not no agent**: the list
+  that `check_pr.py` prints now says beside each claim when its agent
+  last wrote anywhere, and marks `QUIET` only a `WIP:` pull request
+  with neither a push nor such a comment for two hours. That one is
+  still a claim: to ask about, not to take, and not to close on the
+  strength of its own page.
 
 **`main`**
 
@@ -839,9 +908,11 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
 - **A push starts no CI run while the pull request conflicts with `main`.**
   It looks like a run that has not started yet. `gh pr view N --json
   mergeable` after `git fetch`, before spending a commit on CI.
-- **A run is twelve jobs, and half an hour to an hour and a quarter of
-  runner time**, by how much of the engine it has to compile (how long it
-  takes is two points down).
+- **A run of every job is eighteen jobs and 36 to 41 minutes of runner
+  time; the short run of a pull request is seven jobs and six minutes**
+  (25 November, with the objects in ccache: runs 45557484052,
+  45558414164 and 45552164646), and more by how much of the engine it
+  has to compile (how long it takes is two points down).
   **The mark works wherever it stands in the message**, in a sentence
   about it too. On 24 November #313's commit "re-run CI on the merged
   head" explained in its message why the commit before it had carried
@@ -989,8 +1060,9 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
     an object then took 2.3 to 3.0 seconds where it had taken 3.5 to 4.3,
     in runs that were not otherwise alike);
   - the XML suite is a job of its own again, and the deep pages are two
-    jobs (the dumps; the terminal and html5lib): **sixteen jobs in a
-    run, seven in the short run**.
+    jobs (the dumps; the terminal and html5lib): sixteen jobs in a
+    run then, seven in the short run (eighteen since the next
+    morning, below).
 
   With all of it a run of every job, its objects in ccache, was 5.3
   minutes from the push (run 45473629683), where the first of that
@@ -1037,6 +1109,32 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
     to, and nobody read warnings. The binary now comes with the saved
     objects.
 
+  The same morning the three longest jobs of a run were taken one
+  after another, each found by the times of its steps and nothing else:
+  - **the fuzz run's six parts were six lines of one recipe**, one
+    after another on a machine with four cores: 237 and 245 seconds.
+    They are six targets now, and `make -j` runs them side by side:
+    138 and 129 seconds. `make fuzz` alone does what it did;
+  - **the two deep stretches of the unit suites waited for the other
+    four**: 72 and 85 seconds, begun when those had taken 102 and 127.
+    They have a job of their own, "Sanitizers: unit suites, the deep
+    ones" (`UNIT_SUITE_ONLY`, the Makefile), and took 54 to 93 seconds
+    there with the machine to themselves;
+  - **the deep pages' second job gave every page to the engine twice**
+    (the terminal, html5lib): 244 to 247 seconds, the longest job of
+    the run that landed #407. They are three jobs, one for each way,
+    and took 116, 110 and 74 seconds (run 45558414164).
+
+  **Eighteen jobs in a run, seven in the short run.** A run with its
+  objects in ccache was 5.9 minutes before the three (45554494852),
+  then 4.7, 4.8, 4.5 and, with all three, 4.8 (45555583953,
+  45556761844, 45557484052, 45558414164). In three of those four the
+  longest job was the web-platform-tests of the sanitizer build, 267
+  to 270 seconds; in the 4.5 they took 154, on another machine, and
+  the deep pages were the longest. What is left is the machine. A job
+  cut in two would cost a build more and a place among the twenty
+  that run at once, which a lot and two pull requests' runs now fill.
+
   `python3 tools/ci/run_report.py N --times` prints every job of #N's
   newest run with its long steps, its notices and its warnings, and how
   long the jobs waited for a machine. **When a run is longer than the
@@ -1053,6 +1151,17 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   day. So what has to happen is done before the reply, and the reply, which
   is all that reaches the person, says which pull request is merged, which
   is still open and why, and what they have to do before you can go on.
+- **A watch that stopped without saying so.** On 25 November the landing
+  session's turn ended at 07:22 with a lot in test and the status line
+  promising a watch until 08:15. #433 had been told at 07:22 that it would
+  land when the run passed; the run passed at 07:26 and nobody was there.
+  `merge N` went on saying "a watch is on" until 07:52, thirty minutes
+  after the last look, and #433 was merged by its own agent at 08:26.
+  Three more pull requests were finished by 09:05 and stood until 12:40.
+  **The landing session ends its watch itself** (`check_pr.py watch
+  --off`, then its own merge) **while it still has the turn to do it
+  in**: a watch of two hours is long, and the hour it names on the board
+  is a promise that somebody is looking.
 - **The merge is the last thing an agent does with GitHub.** Minutes after
   `gh pr merge` the platform cuts the branch off, in the middle of the
   turn. #175 was merged on 21 November at 03:50:48. `gh` answered until
@@ -1195,6 +1304,15 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   of #221 and is on `main` (`git log --first-parent origin/main`). When
   `main` looks rewritten, look at `git rev-parse --is-shallow-repository`
   first.
+- **What is committed and not pushed is gone with it.** On 25 November
+  the agent of #419 measured six places where an array's `length` was
+  written through its "not writable", wrote the fix, saw it pass, and
+  committed it. `git push` could not reach GitHub from that sandbox
+  (`curl https://github.com` failed its TLS handshake, while two other
+  hosts answered in the same shell), the turn ended, and the sandbox
+  with it. The next turn found a branch with one commit, the claim, and
+  did the work a second time as #428. A commit is not kept until it is
+  pushed; "Before starting", point 5, says what to do when it cannot be.
 - **It can be suspended, and its clock is not.** When a turn ends, what was
   running stops where it was and goes on when the next turn begins, hours
   later by the clock. A check that measures time then reports nonsense:
@@ -1317,6 +1435,7 @@ files every pull request changes", point 4).
 | **What a function is, in small**: ~~nothing tells a built-in that is a constructor from one that is not (`new Math.max()` makes an object)~~ **No longer true — fixed by Phase 158 (finding 163, `docs/phases/158-a-method-is-not-a-constructor.md`).** `js_define_method` now makes every built-in method (and `Math.max`'s own installer, which builds its values first) with `js_make_method`, so a method has no `[[Construct]]`: the 51 test262 `not-a-constructor` cases that ask `isConstructor(f)` passed, and `new Object.keys([])` is a `TypeError`. Both of the examples that named a *method* went with it: `class X extends Math.max {}` and `Reflect.construct(F, [], Date.now)` now throw the language's `TypeError`. Phase 284 adds non-constructible `Math.f16round` with direct binary16 rounding (263,955 Node/Python comparisons and test262 0/5 → 5/5; [phase](docs/phases/284-a-number-rounded-to-binary16.md), [finding](docs/findings/289-no-binary16-rounding-in-math.md)); `Float16Array` and DataView float16 methods remain separate. Phase 369 adds `Math.sumPrecise` with exact accumulation and one rounding (10,013 Python/Node numeric comparisons and 8 iterator comparisons; test262 0/10 → 9/10, the remaining case needs BigInt syntax; [phase](docs/phases/369-an-exact-sum-rounded-once.md), [finding](docs/findings/369-a-sum-that-rounded-every-step.md)). Phase 429 preserves the sign when a negative nonzero value rounds to zero in `toFixed`, while actual negative zero stays unsigned (115/144 → 144/144 Node cases; [phase](docs/phases/429-to-fixed-zero-sign.md), [finding](docs/findings/429-to-fixed-zero-sign.md)). Phase 407 makes `Number` exponential and precision formatting return non-finite receivers after argument conversion but before the range check (104/138 → 138/138 Node comparisons; [phase](docs/phases/407-number-format-special.md), [finding](docs/findings/407-number-format-special.md)). Phase 392 prevents `Math.cbrt` overflow on finite extremes (4,112/4,115 → 4,115/4,115 Decimal/Node probes; [phase](docs/phases/392-math-cbrt-extremes.md), [finding](docs/findings/392-math-cbrt-extremes.md)). Phase 383 sequences `Math.atan2` and `Math.pow` argument conversions left-to-right (22/22 Node probes, 8/22 before; [phase](docs/phases/383-math-converts-left-before-right.md), [finding](docs/findings/383-math-converted-the-second-argument-first.md)); other built-ins are not broadly audited. **Not open any more (Phase 208): a bound function reached only as a prototype keeps its target.** `Object.create(f.bind(target))` went on calling `f` with the wrong `this` after a collection: the collector counts a payload's captures and bound target, so a payload one handle holds is no root, and `Heap::mark_value` marked the payload's cell and closure but not the two vectors' contents, so the target was freed under a live function. `prototypes.dat`'s "reachable only as a prototype" case (recorded from Node.js) had answered `undefined` since it was written and now answers `bound kept`: js-conformance **1,146 → 1,147 / 1,158**, `prototypes.dat` 70/76 → 71/76, `make test` 355/355. Still open in this row: ~~`class X extends f.bind(null) {}` is accepted where the language refuses it — a bound function is a constructor but has no `prototype` to extend~~ **Fixed in Phase 403** ([`docs/phases/403-a-bound-function-has-no-prototype-to-extend.md`](docs/phases/403-a-bound-function-has-no-prototype-to-extend.md), [finding 403](docs/findings/403-the-extends-clause-ignored-a-missing-prototype.md)): the class evaluation read the parent's `prototype` and had two outcomes where §15.7.14 step 5 has three — the missing `else` is a `TypeError`, so a parent whose `prototype` is neither an object nor `null` (a bound function has no such property at all) is refused. The check sits after `IsConstructor`, as the spec's order has it, so a parent that is not a constructor keeps its own message. `language/statements/class/subclass/superclass-bound-function.js` passes; test262 +3 with 0 broken, `make test` 461/461, js-conformance 1,153/1,158; ~~`Object.getOwnPropertyNames(f)` lacks `length` and `name`, and `f.name = 'x'` takes effect~~ **also no longer true — Phase 146 (`docs/phases/146-a-functions-name-and-length-are-its-own.md`) made both own non-writable properties**; async and generator functions have `Function.prototype` itself as their prototype, where the language has an object for each kind between the two (three test262 tests, `AsyncFunctionPrototype-is-not-callable.js` and its relatives, passed while `Function.prototype` was not callable and fail since Phase 34); a property of a prototype that cannot be written does not stop an assignment to the object that inherits it | `src/js/JsOps.cpp`, `src/js/JsValue.cpp`, `src/js/BuiltinsObject.cpp` (`bind`), `include/litebird/js/Heap.hpp` (`JsObject::not_constructor` is the bit to set) | ARCHITECTURE.md, Phase 34, section 9; four failing cases of `prototypes.dat` | Phase 114 made `instanceof` ask `Symbol.hasInstance` and made a script function with no object `prototype` throw the language's `TypeError`, which is what `x instanceof` a bound function could not be asked before (a bound function delegates to its target now). Four host constructors still have no `prototype` (`Worker`, `WebSocket`, `IntersectionObserver`, `ResizeObserver`; `Headers`, `Response`, and `Request` gained per-realm `.prototype` objects in Phase 173, finding 177): a *native* function with no `prototype` is left answering `false`, so `1 instanceof Math.max` is `false` too. Give those four a `prototype` and the operator can throw for every function that has none |
 | | | | |
 | **A `JSON.parse` reviver is told the text it read, since Phase 405** ([`docs/phases/405-the-reviver-was-never-told-what-it-read.md`](docs/phases/405-the-reviver-was-never-told-what-it-read.md), [finding 405](docs/findings/405-the-text-was-there-and-the-reviver-could-not-see-it.md)): §25.5.1/§25.5.5 give a reviver a third argument, a context Record `{source}` holding the text the value was written as, and this engine called it with two. That is the half that makes Phase 393's `JSON.rawJSON` useful — a number too large for a `double` parses to `Infinity`, and only the original text can write it back out: `JSON.stringify(JSON.parse('{"a":1e1000}', function (k, v, c) { return typeof v === "number" ? JSON.rawJSON(c.source) : v; }))` is `{"a":1e1000}`, where before `c` was `undefined`. **The asymmetry is the trap:** §25.5.1 makes the Record only for a value that is not an Object, so a nested object and array get `{}` with no `source` while a nested primitive gets one — and the root gets the whole text trimmed, so `JSON.parse(' 1 ')` gives `"1"`. The source is a `std::map` keyed by the **holder and the key** the value was put under, because a primitive has no identity to key on; the parser records each span as it goes and `internalize` looks the pair up. Red on three engines — no third argument (fails `arguments.length` is 2), `source` on every value including containers (fails `'source' in c` for `[]`'s element), and an untrimmed root (fails `" 1 "`); two of the first three assertions written for it were themselves wrong and Node corrected them (`[1]`'s element 0 *does* have a source; the root is visited, so `[true,false]` yields three entries). **Still open:** the map is rebuilt per call with a `std::string` per primitive (unmeasured), a duplicate key's span wins by insertion order (unasserted), and `Array.fromAsync`/`Promise.try` are still absent. | `src/js/BuiltinsJson.cpp` | [Phase 393](docs/phases/393-a-number-the-double-could-not-hold.md), [finding 393](docs/findings/393-the-number-was-a-double-and-the-text-was-lost.md); ECMA-262 §25.5.1, §25.5.3.1, §25.5.5 | **A reviver's `source` is the value's own span, not the document's** — `JSON.parse('  1  ')` gives `"1"`. Key the map by `(holder, key)`, never by value identity: a primitive has none |
+| | | | |
 | **`Reflect.get` and `Reflect.set` use the receiver they are given, since Phase 414** ([`docs/phases/414-the-receiver-nobody-passed.md`](docs/phases/414-the-receiver-nobody-passed.md), [finding 414](docs/findings/414-the-receiver-was-an-argument-and-a-return-value.md)): §28.1.6/§28.1.13 are `[[Get]]`/`[[Set]]` **with a receiver**, and both methods dropped it — `Reflect.get({get x(){return this.y;}}, "x", {y: 9})` answered `undefined` where Node says 9. `Reflect.set` dropped the fourth argument *and* the answer: it returned `true` unconditionally, so `Reflect.set(Object.freeze({}), "x", 1)` was `true` where §28.1.13 step 2 and Node say `false`. `get` now goes through `js_get_from_chain`, the lookup `super.name` uses; `set` keeps `set_property` for the ordinary case and passes any other receiver through a thread-local `SetterReceiverScope` that the accessor call sites read through `setter_receiver(*)`, defaulting to the object — a second `set_property` would have restated 300 lines of array, accessor and prototype rules. **The same differential run also found `structuredClone(Symbol())` throwing `TypeError`:** HTML 2.7.4 step 6 is a `DataCloneError` DOMException in its own step before any object is looked at, `e.code` 25, for a nested symbol and a `Map` key too. **A comment beside the branch claimed that `TypeError` was the standard's answer and the phase-252 suite asserted it — two records of one wrong belief, each making the other look measured, neither citing the spec.** That is the lesson to carry: a passing test that documents its own deviation is a red flag, and it had stood for 162 phases. **Still open:** defining a *new* property on a receiver that lacks it (OrdinarySetWithOwnDescriptor step 5) is not done, `Proxy` is absent and is where this boolean earns its keep, and `Symbol.dispose`/`asyncDispose` are deliberately not added (Node's are registered symbols with the wrong description, and nothing parses `using`). | `src/js/BuiltinsObject.cpp` (`Reflect.get`, `Reflect.set`, `structured_clone`), `src/js/JsValue.cpp` (`setter_receiver`, `SetterReceiverScope`, the accessor call sites), `include/litebird/js/JsValue.hpp` | ECMA-262 §28.1.6, §28.1.13, §10.1.9.2; HTML 2.7.4 StructuredSerializeInternal step 6; `tests/suites/414-reflect-receiver.cpp`, `414-clone-symbol.cpp` | **The receiver is not the target** — a getter must see it as `this`, and a setter's write must land on it. Found by diffing ~50 expressions against Node at once, not by reading the source: three defects came out of one run. Red on three engines for `Reflect` (get ignoring, set ignoring, result always true), each failing a different assertion |
 | **A `JSON.parse` reviver is told the text it read, since Phase 405** ([`docs/phases/405-the-reviver-was-never-told-what-it-read.md`](docs/phases/405-the-reviver-was-never-told-what-it-read.md), [finding 405](docs/findings/405-the-text-was-there-and-the-reviver-could-not-see-it.md)): §25.5.1/§25.5.5 give a reviver a third argument, a context Record `{source}` holding the text the value was written as, and this engine called it with two. That is the half that makes Phase 393's `JSON.rawJSON` useful — a number too large for a `double` parses to `Infinity`, and only the original text can write it back out: `JSON.stringify(JSON.parse('{"a":1e1000}', function (k, v, c) { return typeof v === "number" ? JSON.rawJSON(c.source) : v; }))` is `{"a":1e1000}`, where before `c` was `undefined`. **The asymmetry is the trap:** §25.5.1 makes the Record only for a value that is not an Object, so a nested object and array get `{}` with no `source` while a nested primitive gets one — and the root gets the whole text trimmed, so `JSON.parse(' 1 ')` gives `"1"`. The source is a `std::map` keyed by the **holder and the key** the value was put under, because a primitive has no identity to key on; the parser records each span as it goes and `internalize` looks the pair up. Red on three engines — no third argument (fails `arguments.length` is 2), `source` on every value including containers (fails `'source' in c` for `[]`'s element), and an untrimmed root (fails `" 1 "`); two of the first three assertions written for it were themselves wrong and Node corrected them (`[1]`'s element 0 *does* have a source; the root is visited, so `[true,false]` yields three entries). **Still open:** the map is rebuilt per call with a `std::string` per primitive (unmeasured), a duplicate key's span wins by insertion order (unasserted), and ~~`Array.fromAsync`/`Promise.try` are still absent~~ **`Array.fromAsync` is done in Phase 412** ([`docs/phases/412-array-from-async.md`](docs/phases/412-array-from-async.md), [finding 412](docs/findings/412-from-async-was-only-ever-a-promise-away.md)): §23.1.3.1 awaits every value and the mapper's result, prefers `@@asyncIterator` to `@@iterator`, falls back to the array-like path, and rejects rather than throwing — with the one throw step 2 has for a `this` that is not a constructor. A built-in has no frame to park, so the await is the blocking loop `eval_await` runs off the interpreter, written out in `BuiltinsArray.cpp`. Fourteen probes compared line for line with Node v22.22.3, identical; `make test` 465/465. **test262 does not move and that is expected: the pinned commit predates the method, so it has no `Array.fromAsync` cases.** `Promise.try` is `undefined` in Node v22.22.3 too, so it cannot be compared against the oracle and was left alone. | `src/js/BuiltinsJson.cpp` | [Phase 393](docs/phases/393-a-number-the-double-could-not-hold.md), [finding 393](docs/findings/393-the-number-was-a-double-and-the-text-was-lost.md); ECMA-262 §25.5.1, §25.5.3.1, §25.5.5 | **A reviver's `source` is the value's own span, not the document's** — `JSON.parse('  1  ')` gives `"1"`. Key the map by `(holder, key)`, never by value identity: a primitive has none |
 | **The global object's `[[Delete]]` agrees with its own `[[GetOwnProperty]]`, since Phase 431** ([`docs/phases/431-two-answers-from-one-object.md`](docs/phases/431-two-answers-from-one-object.md), [finding 431](docs/findings/431-the-descriptor-and-the-delete-disagreed.md)): §9.1.1.4 makes exactly two things non-configurable — `undefined`/`NaN`/`Infinity` (§18.1.1-§18.1.3) and a `var`/function **a script** declares at the top level — and every library global §17-§26 defines is `{writable: true, enumerable: false, configurable: true}`. This engine had it backwards: it marked every engine-declared binding non-configurable and refused all of them in `[[Delete]]`, while `[[GetOwnProperty]]` derived `configurable` from **`!is_readonly`** — right for `undefined`, wrong for every function, and right by coincidence for one name out of three. So `Object.getOwnPropertyDescriptor(globalThis, "Object").configurable` was `true` and `delete globalThis.Object` was `false`, two answers from one object. `JsEnvironment::is_configurable_binding` is now the one table (`is_permanent` for the three values and for `hoist_var`'s declarations, `is_builtin` for the library, neither for an implicit global), asked by both paths, and a configurable delete calls **`remove_own`** — Node makes the bare name a `ReferenceError` afterwards, so a boolean alone would have traded one disagreement for a worse one. **The lesson, and it is Phase 414's again:** the Phase 404 suite asserted *both* halves of the contradiction twenty lines apart, under a header saying every expectation was measured against Node — which answers `true` to both. One line was measured and the other written from what the engine did, and the header's credibility covered for it. **A test asserting two things that cannot both be true is a red flag in the shape of a green tick.** Red on three engines, each a different assertion: as it was (`:49`), descriptor fixed but `[[Delete]]` still refusing (`:49`), and `true` without removing the binding (`:50`). **Still open:** a sloppy implicit global (`zz = 3`) still reports `configurable: false`, because the name is created at `src/js/JsEval.cpp:2439` through the same `define` a built-in uses — `define_script_global` is written and waiting for that one call site, which the open #421 owns. | `include/litebird/js/JsInterpreter.hpp` (`Binding::is_permanent`, `is_configurable_binding`, `define_script_global`, `hoist_var`), `include/litebird/js/Heap.hpp` (`own_property_hook`), `src/js/JsInterpreter.cpp` (`install_global_object_hooks`), `src/js/BuiltinsObject.cpp` (`descriptor_for`'s global branch) | ECMA-262 §9.1.1.4, §18.1.1-§18.1.3, the Note under §18.1; `tests/suites/431-global-configurable.cpp`, `404-global-object-owns-its-globals.cpp` | **`configurable` is not `writable`.** Answering one attribute from another is how a wrong answer looks measured. Ask the binding, in one function, and make `[[Delete]]` remove what it says it removed |

@@ -35,8 +35,8 @@ for the root-cause breakdown. The short version:
 
 ## Checks
 
-- `make test` — **All 477 engine test suites passed successfully!** Cross-origin Window/Location and MessageChannel suite: **114 checks, 0 failure(s)**.
-- `LITEBIRD_SUITE_SHARD=92/477 build/test_suite` — `a_promise_reaction_is_rooted_not_guessed` passed; stretch 92 of 477, 1 of 477 engine test suites passed.
+- `make test` — **All 485 engine test suites passed successfully!** Cross-origin Window/Location and MessageChannel suite: **114 checks, 0 failure(s)**.
+- `LITEBIRD_SUITE_SHARD=96/485 build/test_suite` — `a_promise_reaction_is_rooted_not_guessed` passed; stretch 96 of 485, 1 of 485 engine test suites passed.
 - `python3 tools/conformance/verify_gc_residue.py` — **flat: 22 of 22 cases** (drift 0; `listener-pair` prints 1/1 with drift 0).
 - `python3 tools/conformance/verify_gc_residue.py --filter promise --jobs 6 --timeout 30` — **flat: 6 of 6 cases**, all promise shapes 0 → 0.
 

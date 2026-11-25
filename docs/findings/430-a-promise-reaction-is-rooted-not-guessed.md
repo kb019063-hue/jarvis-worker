@@ -79,8 +79,8 @@ On this branch, with `build/litebird` built from the changed tree:
 
 | command | result |
 |---|---|
-| `make test` | All **477** engine test suites passed; cross-origin suite **114 checks, 0 failures**. |
-| `LITEBIRD_SUITE_SHARD=92/477 build/test_suite` | `a_promise_reaction_is_rooted_not_guessed` passed (stretch 92 of 477). |
+| `make test` | All **485** engine test suites passed; cross-origin suite **114 checks, 0 failures**. |
+| `LITEBIRD_SUITE_SHARD=96/485 build/test_suite` | `a_promise_reaction_is_rooted_not_guessed` passed (stretch 96 of 485). |
 | `python3 tools/conformance/verify_gc_residue.py` | **flat: 22 of 22 cases**, drift 0. |
 | `python3 tools/conformance/verify_gc_residue.py --filter promise` | **flat: 6 of 6 cases**, 0 cells at 200 and 2,000 iterations. |
 

@@ -24,14 +24,17 @@ background pixels survive, an overflowing child is visible inside the dialog,
 and the area beyond its right and bottom edges shows the dimmed backdrop.
 
 Before the fix, the focused suite failed because the modal style was
-`Overflow::Visible`. After it:
+`Overflow::Visible`. After it, on the branch rebased onto `main` at
+`8603d64e`:
 
-- `make test` passed **451/451** engine suites;
-- `make wpt` passed its **9570/9824** floor, with 254 listed failures and 0
-  unlisted failures;
-- `make conformance`, `make dom-conformance`, `make url-conformance`, and
-  `make xml-conformance` passed **1973/1973**, **678/678**, **1188/1188**, and
-  **1718/1718**, respectively.
+- `make test` passed **471/471** engine suites and **114/114** cross-origin
+  checks;
+- `make wpt` reported **9570/9824**, with 254 listed failures and 0 unlisted
+  failures;
+- `make conformance`, `make js-conformance`, `make dom-conformance`,
+  `make url-conformance`, and `make xml-conformance` reported
+  **1973/1973**, **1153/1158**, **678/678**, **1188/1188**, and **1718/1718**,
+  respectively;
 
 ## What remains
 

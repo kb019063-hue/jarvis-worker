@@ -36,12 +36,18 @@ import time
 from pathlib import Path
 
 
-# Every case is a function, so that what is measured is a call and not a global
-# object lookup: a top-level `var` in a script is a property of `window` here,
-# and a loop over globals measures the global object instead of the evaluator.
-# That distinction is real and is the first finding of the row this bench is
-# for -- see docs/phases/204-*.md.
+# The `global` case is deliberately top-level: a script's `var` is a property
+# of `window` here. The other cases are functions so they measure evaluator
+# work rather than the global-object path. Node runs the `global` source with
+# `-e`, where top-level `var` is a global (running a file would wrap it in a
+# CommonJS function). See docs/phases/204-*.md and the current phase row.
 CASES: dict[str, str] = {
+    # Global var declaration, assignment and postfix update through Window.
+    "global": """
+var s = 0;
+for (var i = 0; i < 1500000; i++) { s = (s + i) % 1000003; }
+console.log(String(s));
+""",
     # One loop, arithmetic and one call per iteration.
     "loop": """
 function main() {
@@ -136,8 +142,16 @@ def paired_runs(binary: str, baseline: str | None, page: Path, script: Path,
     return statistics.median(own), (statistics.median(old) if old else -1.0)
 
 
-def reference_seconds(command: str, script: Path, reps: int, timeout: float) -> float:
-    argv = command.split() + [str(script)]
+def reference_seconds(command: str, script: Path, reps: int, timeout: float,
+                      *, global_context: bool = False) -> float:
+    argv = command.split()
+    if global_context and Path(argv[0]).name in {"node", "nodejs"}:
+        # A .js file gets CommonJS's function wrapper in Node, where top-level
+        # `var` is local. `-e` gives the global case the same global binding
+        # that the engine's deferred script has.
+        argv += ["-e", script.read_text()]
+    else:
+        argv.append(str(script))
     times = [timed(argv, timeout) for _ in range(reps)]
     if any(t < 0 for t in times):
         return -1.0
@@ -182,7 +196,9 @@ def main() -> int:
         if own < 0:
             failures.append(f"{name}: the engine failed to run the case")
             continue
-        ref = reference_seconds(args.reference, script, args.reps, args.timeout) if has_reference else -1.0
+        ref = (reference_seconds(args.reference, script, args.reps, args.timeout,
+                                 global_context=(name == "global"))
+               if has_reference else -1.0)
         speedup = (old / own) if old > 0 else None
         ratio = (own / ref) if ref > 0 else None
         rows.append({"case": name, "seconds": own, "baseline_seconds": old if old > 0 else None,

@@ -568,13 +568,18 @@ def quiet_note(title: str, changed: int, hours: float, agent: str | None, wrote:
     own page showed: its agent had written on #416 thirteen minutes before.
     It was reopened a quarter of an hour later. #367, 21 hours after its only
     push, had no word from its agent anywhere: that chat could not go on.
+    The person retired that agent and gave its task to another, which landed
+    it as #432 and left #367 open, as the note then told it to: it was closed
+    ten hours later, when the person asked. The note now says who closes it.
     """
     if hours < QUIET_HOURS or wrote or not title.startswith("WIP"):
         return None
     what = "nothing in it but its claim" if changed == 0 else "work in progress"
     whose = f"no comment in {agent}'s name anywhere" if agent else "it names no agent whose comments could be looked for"
     return (f"QUIET: no push for {hours:.1f} h ({what}), and {whose} in the last {QUIET_HOURS:g} h. It is still a claim, "
-            "and not yours to take or to close: ask in a comment on it, and tell the person you work for")
+            "and not yours to take or to close: ask in a comment on it, and tell the person you work for. "
+            "(Only when the person has told you that its agent is retired and its task is yours: say so on it, "
+            + ("" if changed == 0 else "take its commits, ") + "and close it. AGENTS.md, \"Before starting\", point 1)")
 
 
 def next_pair() -> str:
@@ -1675,6 +1680,12 @@ def self_test() -> int:
         ("a claim with no push and no word from its agent for two hours is called quiet",
          (quiet_note("WIP: a row", 0, 21.3, "Rowan", False) or "")[:112],
          "QUIET: no push for 21.3 h (nothing in it but its claim), and no comment in Rowan's name anywhere in the last 2 h"),
+        ("...and it says who may close it: the agent the person has given its task to, a retired agent's successor (#367)",
+         [(quiet_note("WIP: a row", changed, 21.3, "Rowan", False) or "").split("(Only when ")[-1] for changed in (0, 3)],
+         ["the person has told you that its agent is retired and its task is yours: say so on it, and close it. "
+          "AGENTS.md, \"Before starting\", point 1)",
+          "the person has told you that its agent is retired and its task is yours: say so on it, take its commits, and close it. "
+          "AGENTS.md, \"Before starting\", point 1)"]),
         ("...not one whose agent wrote somewhere in that time: #389, which was closed for its silence and was not silent",
          quiet_note("WIP: a row", 0, 2.6, "Vireo", True), None),
         ("...not one pushed to an hour ago, and not one that is finished and waits to land",

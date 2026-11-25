@@ -21,7 +21,7 @@ public:
 
 private:
     void compile_stmt(const Stmt* stmt);
-    void compile_expr(const Expr* expr);
+    void compile_expr(const Expr* expr, const std::string* name_hint = nullptr);
     /// `switch (d) { … }` (ECMA-262 14.13): the discriminant is evaluated
     /// once, each clause's test is evaluated in source order until the first
     /// strict equality holds, and the body then runs from that clause to the
@@ -93,6 +93,7 @@ private:
     std::shared_ptr<BytecodeFunction> m_function;
     std::vector<Local> m_locals;
     int m_scope_depth{0};
+    bool m_is_function{false};
     std::vector<Loop> m_loops;
 };
 

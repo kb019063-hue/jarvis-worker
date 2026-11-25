@@ -207,13 +207,30 @@ AGREES: list[Case] = [
          "the raw property is not enumerable on the strings array"),
     Case("var o = {f: function(s) { return s[0] + s.raw[0]; }}; String(o.f`xy`)",
          "a member-expression tag is bound to its receiver"),
+    # Array binding patterns (Phase 421): original refusal first.
+    Case("var [a, b] = [1, 2]; String(a)", "the original refusal"),
+    Case("var [a,,b]=[1,2,3]; String(a+','+b)", "elisions still pull"),
+    Case("var [a=5,b=4,c=9]=[undefined,null,0]; String(a+','+b+','+c)", "defaults only for undefined"),
+    Case("var [[a,b],...c]=[[1,2],3,4]; String(a+','+b+','+c)", "nested patterns and rest"),
+    Case("var [a,...b]='abc'; String(a+'/'+b.length+'/'+b)", "string iteration and rest"),
+    Case("var src={}; var n=0; src['@@iterator']=function(){return {n:40,next:function(){n++;this.n++;return {value:this.n,done:false};},return:function(){n+=10;return {};}}}; var [a,b]=src; String(a+','+b+'/'+n)", "lazy protocol, receiver, and close"),
+    Case("var a=42; function f(){var [a]=[1]; return a;} String(f()+'/'+a)", "function var does not overwrite global"),
+    Case("function f(a){var [a,b]=[3,4]; return String(a)+','+b;} String(f(8))", "parameter redeclaration"),
+    Case("var out=''; {let [a,b]=[1,2];out=String(a)+String(b);} String(out)", "block lexical bindings"),
+    Case("var [a=function(){}]=[]; String(a.name)", "inferred default function name"),
+    Case("var [a=3,b=a+2]=[]; String(a+','+b)", "defaults observe earlier bindings"),
+    Case("var n=0; var src={}; src['@@iterator']=function(){return {next:function(){n++;return {value:n,done:n>3};}}}; var [a,...b]=src; String(a+'/'+b+'/'+n)", "rest drains the iterator"),
+    Case("var a=[1,2]; a['@@iterator']=function(){return {next:function(){return {value:9,done:false};}}}; var [x]=a; String(x)", "array iterator override"),
+    Case("var a=[1,2]; a[Symbol.iterator]=function(){return {next:function(){return {value:9,done:false};}}}; var [x]=a; String(x)", "symbol iterator override"),
+    Case("var a=42; function f(){let [a]=[1]; return a;} String(f()+'/'+a)", "function lexical scope"),
+    Case("function f(a){var [b]=[3]; return String(a)+','+b;} String(f(1,2,3))", "extra call arguments do not shift slots"),
+
 ]
 
 # The compiler refuses these. Kept here so the count of what is left has a
 # number, and so the day one of them starts working shows up as a failure
 # rather than as silence.
 REFUSES: list[Case] = [
-    Case("var [a, b] = [1, 2]; String(a)", "Destructuring"),
     Case("try { 1; } catch (e) { 2; }", "Statement"),
     Case("var s = \"\"; for (var k of [1,2]) { s += k; } String(s)", "Statement"),
 ]
@@ -253,7 +270,6 @@ def is_refusal(answer: str) -> bool:
             "in bytecode compiler",
             "via AST interpreter",
             "Function-scoped var",
-            "Destructuring",
         )
     )
 

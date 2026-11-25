@@ -23,6 +23,9 @@ public:
     explicit VM(std::shared_ptr<Document> doc = nullptr);
 
     JsValue interpret(std::shared_ptr<BytecodeFunction> function);
+    bool running() const { return !m_frames.empty(); }
+    JsValue call_compiled(const JsValue& function, const std::vector<JsValue>& args,
+                          const JsValue* this_val);
 
     void set_global(const std::string& name, JsValue value);
     JsValue get_global(const std::string& name) const;
@@ -38,7 +41,7 @@ public:
 
 private:
     void init_builtins();
-    JsValue run();
+    JsValue run(size_t stop_depth = 0);
 
     std::vector<CallFrame> m_frames;
     std::vector<JsValue> m_stack;

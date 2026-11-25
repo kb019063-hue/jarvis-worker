@@ -34,7 +34,7 @@ void BytecodeCompiler::compile_binding(const std::string& name, JsDeclKind kind)
         emit_opcode(OpCode::OpSetGlobal);
         emit_byte(static_cast<uint8_t>(name_idx));
         emit_opcode(OpCode::OpPop);
-    } else if (m_scope_depth > 0 && kind != JsDeclKind::Var) {
+    } else if ((m_scope_depth > 0 || m_is_function) && kind != JsDeclKind::Var) {
         add_local(name);
     } else if (kind == JsDeclKind::Var && slot != -1) {
         // A var redeclaration updates the existing slot, including a
@@ -100,7 +100,9 @@ void BytecodeCompiler::compile_array_binding(const Pattern& pattern, JsDeclKind 
             size_t keep = emit_jump(OpCode::OpJumpIfFalse);  // not undefined: keep it
             emit_opcode(OpCode::OpPop);                      // drop the condition
             emit_opcode(OpCode::OpPop);                      // drop the undefined
-            compile_expr(element.default_value.get());       // [default]
+            const std::string* hint = element.target->kind == Pattern::Kind::Identifier
+                ? &element.target->name : nullptr;
+            compile_expr(element.default_value.get(), hint); // [default]
             size_t joined = emit_jump(OpCode::OpJump);
             patch_jump(keep);                                // [pulled, condition]
             emit_opcode(OpCode::OpPop);                      // drop the condition [pulled]
@@ -490,10 +492,18 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         const std::vector<std::string> params = node.simple_param_names();
         auto sub_fn = std::make_shared<BytecodeFunction>(node.name, static_cast<int>(params.size()));
         BytecodeCompiler sub_compiler(sub_fn);
+        sub_compiler.m_is_function = true;
 
         // Parameters are local variables in the function scope
         for (const auto& p : params) {
             sub_compiler.add_local(p);
+        }
+        // The parser collects function-scoped vars, including pattern names.
+        // Reserve them on entry, not conditionally as declarations execute.
+        for (const auto& name : node.var_names) {
+            if (sub_compiler.resolve_local(name) != -1) continue;
+            sub_compiler.emit_opcode(OpCode::OpUndefined);
+            sub_compiler.add_local(name);
         }
 
         sub_compiler.compile(node.body.get());
@@ -597,7 +607,7 @@ void BytecodeCompiler::require_simple_function(const FunctionNode& node) {
     }
 }
 
-void BytecodeCompiler::compile_expr(const Expr* expr) {
+void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hint) {
     if (!expr) {
         emit_opcode(OpCode::OpUndefined);
         return;
@@ -912,9 +922,17 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         const std::vector<std::string> params = node.simple_param_names();
         auto sub_fn = std::make_shared<BytecodeFunction>(node.name.empty() ? "__anon__" : node.name, static_cast<int>(params.size()));
         BytecodeCompiler sub_compiler(sub_fn);
+        sub_compiler.m_is_function = true;
 
         for (const auto& p : params) {
             sub_compiler.add_local(p);
+        }
+        // The parser collects function-scoped vars, including pattern names.
+        // Reserve them on entry, not conditionally as declarations execute.
+        for (const auto& name : node.var_names) {
+            if (sub_compiler.resolve_local(name) != -1) continue;
+            sub_compiler.emit_opcode(OpCode::OpUndefined);
+            sub_compiler.add_local(name);
         }
 
         sub_compiler.compile(node.body.get());
@@ -927,6 +945,10 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         m_function->sub_functions.push_back(sub_fn);
         fn_obj.set_property("__fn_ptr__", JsValue::make_number(reinterpret_cast<uintptr_t>(sub_fn.get())));
         fn_obj.set_property("__fn_name__", JsValue::make_string(node.name));
+        if (name_hint && node.name.empty()) {
+            fn_obj.ensure_function_data().name = *name_hint;
+            fn_obj.define_property("name", JsValue::make_string(*name_hint), PropertyMap::Configurable);
+        }
 
         size_t const_idx = m_function->chunk.add_constant(fn_obj);
         emit_opcode(OpCode::OpConstant);

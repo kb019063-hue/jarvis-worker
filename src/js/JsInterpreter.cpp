@@ -893,6 +893,7 @@ void JsInterpreter::init_builtins() {
     // Function values produced by the bytecode compiler have no native entry
     // point; this runs their body on the tree-walker.
     JsValue::set_function_caller([this](const JsValue& fn, const std::vector<JsValue>& args, const JsValue* this_val) {
+        if (m_vm.running() && fn.function_bytecode()) return m_vm.call_compiled(fn, args, this_val);
         return call_legacy_function(fn, args, this_val);
     });
 

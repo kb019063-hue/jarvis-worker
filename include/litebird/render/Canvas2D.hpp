@@ -1,10 +1,12 @@
 #pragma once
 
 #include "litebird/render/ImageDecoder.hpp"
+#include "litebird/render/ImageFilter.hpp"
 #include "litebird/common/Color.hpp"
 #include "litebird/common/Geometry.hpp"
 #include "litebird/js/JsValue.hpp"
 #include <vector>
+#include <string>
 #include <memory>
 #include <string>
 #include <algorithm>
@@ -171,6 +173,14 @@ public:
     Color shadow_color{0, 0, 0, 0};
     float shadow_offset_x{0.0f};
     float shadow_offset_y{0.0f};
+    /// §4.12.5.1's `filter`: the CSS filter list as the page wrote it, and the
+    /// parsed form it is applied as. `"none"` is the initial value and means no
+    /// filter, which is the case every primitive takes when a page sets nothing.
+    /// A string that does not parse leaves the list empty — the specification's
+    /// "ignore the value" — rather than silently filtering with what it could
+    /// read, which would put a partly-parsed effect on the canvas.
+    std::string filter_source{"none"};
+    std::vector<FilterFunction> filter_list;
     /// The script object of the gradient or pattern a style was set to, so that
     /// reading `fillStyle` back answers **that object** — §4.12.5.1 says the
     /// getter returns the object that was set — and not a marker or a colour.
@@ -314,6 +324,8 @@ private:
         Color shadow_color{0, 0, 0, 0};
         float shadow_offset_x{0.0f};
         float shadow_offset_y{0.0f};
+        std::string filter_source;
+        std::vector<FilterFunction> filter_list;
         TransformMatrix2D ctm;
         std::vector<uint8_t> clip_mask;
     };
@@ -325,6 +337,10 @@ private:
     std::vector<uint32_t> m_captured_pixels;
     std::vector<uint8_t> m_captured_coverage;
     void replay_captured();
+    /// True when a `filter` is set, which is what makes a primitive capture its
+    /// own pixels: a filter is applied to the drawing **as a whole**, so it
+    /// cannot be a per-pixel tint in `set_pixel_safe`.
+    [[nodiscard]] bool filter_is_active() const { return !filter_list.empty(); }
 
     /// A glyph run rasterised into a tight coverage buffer, in CSS pixels at
     /// the uncondensed size. `condense` is <= 1 when `max_width` requested it.

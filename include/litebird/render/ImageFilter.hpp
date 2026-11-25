@@ -17,7 +17,11 @@ enum class FilterType {
     Sepia,
     Invert,
     Opacity,
-    DropShadow
+    DropShadow,
+    // §4.12.5.1's remaining two functions. `HueRotate` keeps `amount` in whole
+    // degrees, not a fraction, because the CSS value is an angle.
+    HueRotate,
+    Saturate
 };
 
 struct FilterFunction {
@@ -43,6 +47,8 @@ public:
     static void sepia(std::vector<Color>& pixels, float amount);
     static void invert(std::vector<Color>& pixels, float amount);
     static void opacity(std::vector<Color>& pixels, float amount);
+    static void hue_rotate(std::vector<Color>& pixels, float degrees);
+    static void saturate(std::vector<Color>& pixels, float amount);
     static void drop_shadow(std::vector<Color>& pixels, int width, int height, float dx, float dy, float blur_r, Color color);
 };
 

@@ -14,7 +14,11 @@ void ImageFilter::blur(std::vector<Color>& pixels, int width, int height, float 
     if (radius <= 0.0f || width <= 0 || height <= 0 || pixels.size() != static_cast<size_t>(width * height)) {
         return;
     }
-    int r = std::clamp(static_cast<int>(std::round(radius)), 1, 50);
+    // The radius may be as wide as the canvas; clamping it to 50 pixels made
+    // `blur(60)` on a 200-pixel box hard-edged beyond the clamp, which is a
+    // visible lie about what was asked for. The window is still bounded by the
+    // bitmap, so it cannot walk off either end.
+    int r = std::clamp(static_cast<int>(std::round(radius)), 1, std::max(width, height));
 
     std::vector<Color> temp(pixels.size());
 
@@ -121,10 +125,52 @@ void ImageFilter::opacity(std::vector<Color>& pixels, float amount) {
     }
 }
 
+// The CSS Filter Effects matrices, used verbatim. `s` and `c` are the sine and
+// cosine of the angle for `hue-rotate`; for `saturate` they are 0 and the
+// saturation amount. Keeping one matrix routine for both is what the
+// specification does, and it is the only way `saturate(1)` and
+// `hue-rotate(0deg)` are exactly the identity rather than near it.
+static void apply_color_matrix(std::vector<Color>& pixels, const float m[9]) {
+    for (auto& c : pixels) {
+        const float r = c.r, g = c.g, b = c.b;
+        c.r = clamp_u8(m[0] * r + m[1] * g + m[2] * b);
+        c.g = clamp_u8(m[3] * r + m[4] * g + m[5] * b);
+        c.b = clamp_u8(m[6] * r + m[7] * g + m[8] * b);
+    }
+}
+
+void ImageFilter::hue_rotate(std::vector<Color>& pixels, float degrees) {
+    // The CSS value wraps, so 360deg is the identity and -90deg equals 270deg.
+    degrees = std::fmod(degrees, 360.0f);
+    if (degrees < 0.0f) degrees += 360.0f;
+    const float a = degrees * 3.14159265358979323846f / 180.0f;
+    const float s = std::sin(a), c = std::cos(a);
+    const float m[9] = {
+        0.213f + c * 0.787f - s * 0.213f, 0.715f - c * 0.715f - s * 0.715f, 0.072f - c * 0.072f + s * 0.928f,
+        0.213f - c * 0.213f + s * 0.143f, 0.715f + c * 0.285f + s * 0.140f, 0.072f - c * 0.072f - s * 0.283f,
+        0.213f - c * 0.213f - s * 0.787f, 0.715f - c * 0.715f + s * 0.715f, 0.072f + c * 0.928f + s * 0.072f};
+    apply_color_matrix(pixels, m);
+}
+
+void ImageFilter::saturate(std::vector<Color>& pixels, float amount) {
+    // No clamp to 1: CSS allows saturation above it, and `saturate(2)` is a
+    // legal, stronger colour. The matrix clamps the result per channel instead.
+    const float s = amount;
+    const float m[9] = {
+        0.213f + 0.787f * s, 0.715f - 0.715f * s, 0.072f - 0.072f * s,
+        0.213f - 0.213f * s, 0.715f + 0.285f * s, 0.072f - 0.072f * s,
+        0.213f - 0.213f * s, 0.715f - 0.715f * s, 0.072f + 0.928f * s};
+    apply_color_matrix(pixels, m);
+}
+
 void ImageFilter::drop_shadow(std::vector<Color>& pixels, int width, int height, float dx, float dy, float blur_r, Color color) {
     if (width <= 0 || height <= 0 || pixels.size() != static_cast<size_t>(width * height)) {
         return;
     }
+
+    // Nothing to cast: a transparent shadow colour would copy the input back
+    // unchanged, so return before allocating a second buffer per filter.
+    if (color.a == 0) return;
 
     std::vector<Color> shadow(pixels.size(), Color::transparent());
     int idx_x = static_cast<int>(std::round(dx));
@@ -201,6 +247,12 @@ void ImageFilter::apply_filter(std::vector<Color>& pixels, int width, int height
             break;
         case FilterType::DropShadow:
             drop_shadow(pixels, width, height, filter.dx, filter.dy, filter.blur_radius, filter.color);
+            break;
+        case FilterType::HueRotate:
+            hue_rotate(pixels, filter.amount);
+            break;
+        case FilterType::Saturate:
+            saturate(pixels, filter.amount);
             break;
         default:
             break;

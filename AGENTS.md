@@ -904,6 +904,29 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   tree that fails CI. `check_pr.py merge 91` asks about the title and about
   `main`, and would have said "not ready" twice. #76, #77 and #84 were
   merged behind `main` as well, and were lucky.
+- **Merged 59 seconds after it was opened, with no CI run.** #449 was
+  opened on 25 November at 21:31:52 and merged at 21:32:51, with `WIP:`
+  in its title, while a watch was on. Both of its commits carried
+  `[skip ci]`, so no job had run on it, and `check_pr.py merge 449` was
+  never asked: it would have said "not ready" for the title alone. The
+  first run of any job on it was `main`'s own, after the merge: the
+  first job failed 49 seconds later, 7 of 18 in the end. Its suite was
+  `tests/suites/tmp-unforgeable.cpp`, two suites in a file not named by
+  a number. A cross-origin window said it had an own `document`. And a
+  top-level `var top` no longer hid the Window's `top`, which is what a
+  browser does, but one case of the JavaScript corpus and every chain
+  page of `tools/fuzz/deep_pages.py` said `var top`. Its phase and
+  finding were called 436, another pull request's number. `main` was
+  broken for nine minutes: the landing session reverted the merge with
+  its own pull request (#448, 21:41), which ended that watch after one
+  lot, since what the landing session itself changes reaches `main` no
+  other way. A pull request finished in those minutes (#450) had a run
+  that failed for none of its own lines and was in no list afterwards,
+  and one begun in them (#451) was branched from the broken tree.
+  **`gh pr merge` is never run before `check_pr.py merge N` has said
+  "ready"**, and a pull request whose last commit carries `[skip ci]`
+  has not been tested by anything. Nothing in this repository can stop
+  a merge; only that rule, or a rule of GitHub's that the person sets.
 - **A line of README.md cost 28 minutes.** Until 18 November every commit
   on `main` sent every finished pull request back for a whole CI run. That
   morning `main` moved eight times in three hours and twenty minutes, with

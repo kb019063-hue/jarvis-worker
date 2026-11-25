@@ -266,6 +266,19 @@ void PropertyMap::clear() {
 // Call context: how `this` reaches a native function
 // ---------------------------------------------------------------------------
 
+thread_local const JsValue* t_setter_receiver = nullptr;
+
+SetterReceiverScope::SetterReceiverScope(const JsValue* receiver)
+    : m_previous(t_setter_receiver) {
+    t_setter_receiver = receiver;
+}
+
+SetterReceiverScope::~SetterReceiverScope() { t_setter_receiver = m_previous; }
+
+const JsValue& setter_receiver(const JsValue& on) {
+    return t_setter_receiver ? *t_setter_receiver : on;
+}
+
 namespace {
 
 struct CallContext {
@@ -1112,6 +1125,18 @@ bool JsValue::has_own_property(const std::string& name) const {
         }
         if (is_wrapped_string_index(cell, name)) return true;
         if (cell->properties.find(name) != cell->properties.end()) return true;
+        // A name this object owns outside the table -- the global object's
+        // declarations. The same hook `[[Delete]]` asks below, so the two
+        // agree about what is owned. A cross-origin Window reports only its
+        // exposed table (§7.2.3.5), so the environment is not asked for it.
+        if (cell->own_property_hook) {
+            std::vector<std::string> exposed;
+            const bool cross_origin = dom::cross_origin_own_keys(*this, true, exposed);
+            if (!cross_origin) {
+                bool owned = false;
+                if ((*cell->own_property_hook)(name, /*remove=*/false, owned) && owned) return true;
+            }
+        }
     }
     if (const PropertyMap* map = loose_properties()) {
         if (map->find(name) != map->end()) return true;
@@ -1196,7 +1221,21 @@ bool JsValue::delete_property(const std::string& name) {
             return true;
         }
         auto it = cell->properties.find(name);
-        if (it == cell->properties.end()) return true;
+        if (it == cell->properties.end()) {
+            // Not in the table, but this object may own the name anyway: the
+            // global object's declarations live in the global environment.
+            // Answering `true` without asking is what made
+            // `delete globalThis.Error` report a removal it never made.
+            bool result = true;
+            if (cell->own_property_hook) {
+                std::vector<std::string> exposed;
+                const bool cross_origin = dom::cross_origin_own_keys(*this, true, exposed);
+                if (!cross_origin && (*cell->own_property_hook)(name, /*remove=*/true, result)) {
+                    return result;
+                }
+            }
+            return true;
+        }
         if (!(it->flags & PropertyMap::Configurable)) return false;
         cell->properties.erase(name);
         return true;
@@ -1224,6 +1263,23 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
         if (include_non_enumerable) cell->exotic->own_keys(cell, keys);
         else cell->exotic->keys(cell, keys);
     }
+    // Names this object owns outside the property table -- the global object's
+    // declarations. Collected here and merged below, so a name that is in both
+    // is reported once.
+    //
+    // Not for a cross-origin Window or Location: HTML §7.2.3.5 says such an
+    // object reports exactly the exposed table and nothing else, and the
+    // environment's declarations are not in it. `reflected_own_keys` filters
+    // before calling here, but `has_own_property` and `[[Delete]]` ask the
+    // hook direct, so the test has to be here as well.
+    std::vector<std::string> hooked_keys;
+    bool cross_origin = false;
+    if (cell && cell->own_keys_hook) {
+        std::vector<std::string> exposed;
+        cross_origin = dom::cross_origin_own_keys(*this, true, exposed);
+    }
+    const bool has_hooked_keys = cell && cell->own_keys_hook && !cross_origin &&
+        (*cell->own_keys_hook)(!include_non_enumerable, hooked_keys);
     // The keys of the property map: the ones that are an index in ascending
     // order, then the rest in the order they were made.
     const PropertyMap* map = cell ? &cell->properties : loose_properties();
@@ -1279,6 +1335,16 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
         // `order-after-define-property` catches.
         if (cell && cell->is_array && include_non_enumerable && *key == "length") continue;
         keys.push_back(*key);
+    }
+    if (has_hooked_keys) {
+        for (const std::string& name : hooked_keys) {
+            if (is_hidden_key(name)) continue;
+            bool already = false;
+            for (const std::string& have : keys) {
+                if (have == name) { already = true; break; }
+            }
+            if (!already) keys.push_back(name);
+        }
     }
     return keys;
 }
@@ -1718,7 +1784,7 @@ bool set_through_prototype(const JsValue& receiver, const std::string& name, con
         if (found->flags & PropertyMap::Accessor) {
             handled = true;
             if (found->setter && found->setter->is_function()) {
-                found->setter->call_with_this(receiver, {val});
+                found->setter->call_with_this(setter_receiver(receiver), {val});
                 return true;
             }
             return false;      // an accessor with no setter: refused
@@ -1920,7 +1986,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                             // Held here: the setter may delete the property it is.
                             const std::shared_ptr<JsValue> setter = mapped->setter;
                             if (!setter || !setter->is_function()) return false;
-                            setter->call_with_this(*this, {val});
+                            setter->call_with_this(setter_receiver(*this), {val});
                             return true;
                         }
                         if (!(mapped->flags & PropertyMap::Writable)) return false;
@@ -2007,7 +2073,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
         auto it = obj->properties.find(name);
         if (it != obj->properties.end()) {
             if (it->flags & PropertyMap::Accessor) {
-                if (it->setter && it->setter->is_function()) { it->setter->call_with_this(*this, {val}); return true; }
+                if (it->setter && it->setter->is_function()) { it->setter->call_with_this(setter_receiver(*this), {val}); return true; }
                 return false;
             }
             if (obj->frozen || !(it->flags & PropertyMap::Writable)) return false;
@@ -2036,7 +2102,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
             auto pit = proto->properties.find(name);
             if (pit == proto->properties.end()) continue;
             if (pit->flags & PropertyMap::Accessor) {
-                if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(*this, {val}); return true; }
+                if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(setter_receiver(*this), {val}); return true; }
                 return false;
             }
             break;
@@ -2056,7 +2122,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
     auto it = map->find(name);
     if (it != map->end()) {
         if (it->flags & PropertyMap::Accessor) {
-            if (it->setter && it->setter->is_function()) { it->setter->call_with_this(*this, {val}); return true; }
+            if (it->setter && it->setter->is_function()) { it->setter->call_with_this(setter_receiver(*this), {val}); return true; }
             return false;
         }
         if (!(it->flags & PropertyMap::Writable)) return false;

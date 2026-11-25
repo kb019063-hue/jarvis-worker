@@ -1055,6 +1055,50 @@ void JsInterpreter::init_builtins() {
             if (alive->load()) eval_ast(source);
         });
     }
+
+    // Everything declared up to here came from the engine: the library, the
+    // host globals, `undefined`/`NaN`/`Infinity`, and a page's `document`.
+    // §9.1.1.4 makes those non-enumerable, non-configurable properties of the
+    // global object, and a `var` or function declaration a script makes
+    // afterwards is neither. Marking them once, here, is what lets the global
+    // object answer both key lists.
+    m_global_env->mark_all_builtin();
+    install_global_object_hooks();
+}
+
+void JsInterpreter::install_global_object_hooks() {
+    // The global object does not own the global scope: `lookup_fallback` and
+    // `assign_hook` find and write one name at a time. These two answer the
+    // questions those cannot -- which names it owns, and what deleting one
+    // does -- and without them `Object.getOwnPropertyNames(globalThis)`
+    // reported the five names that happened to be table entries, and
+    // `delete globalThis.Error` erased nothing while answering `true`.
+    std::weak_ptr<JsEnvironment> global_scope = m_global_env;
+    m_global_object.object_val->own_keys_hook =
+        std::make_shared<std::function<bool(bool, std::vector<std::string>&)>>(
+            [global_scope](bool enumerable_only, std::vector<std::string>& out) {
+                auto scope = global_scope.lock();
+                if (!scope) return false;
+                out = scope->own_names(/*properties_only=*/true, enumerable_only);
+                return true;
+            });
+    m_global_object.object_val->own_property_hook =
+        std::make_shared<std::function<bool(const std::string&, bool, bool&)>>(
+            [global_scope](const std::string& name, bool remove, bool& result) {
+                auto scope = global_scope.lock();
+                if (!scope) return false;
+                // Only the names the keys hook reports: a lexical binding is
+                // not an own property of the global object at all, so the
+                // ordinary path must answer for it.
+                auto* binding = scope->find_own(name);
+                if (!binding || binding->is_lexical) return false;
+                if (!remove) { result = true; return true; }
+                // §9.1.1.4: a declaration a script's direct `eval` made is
+                // configurable; anything the engine declared, and a script's
+                // own top-level declaration, is not.
+                result = binding->is_builtin ? false : binding->is_deletable;
+                return true;
+            });
 }
 
 void JsInterpreter::init_language_builtins() {

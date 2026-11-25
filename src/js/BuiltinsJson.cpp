@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 
 namespace litebird {
 
@@ -20,6 +21,35 @@ using Args = const std::vector<JsValue>&;
 // Parsing
 // ---------------------------------------------------------------------------
 
+/// The text a value was written as, for §25.5.1's reviver context.
+///
+/// It is the slice of the source between the value's first and last character,
+/// so a number keeps `1.0` and `-0` and a string keeps its escapes. An object
+/// or an array has no `source` at all: §25.5.1's Record is only made for a
+/// value that is not an Object, which is what `primitive` records.
+struct ParsedSource {
+    std::string text;        ///< empty when the value is an object or an array
+    bool primitive{false};
+};
+
+/// Where a value was written, keyed by the holder it is read from and the key
+/// it is read under — which is the pair `InternalizeJSONProperty` walks by, and
+/// is what a primitive needs: it has no identity of its own to key on, and the
+/// property that holds it does.
+///
+/// A side table rather than a slot on each value: the parser makes ordinary
+/// objects and arrays, and a field on every `JsObject` for a feature only
+/// `JSON.parse` uses would be paid for by the whole engine. The entries live
+/// until the call returns.
+using SourceKey = std::pair<const void*, std::string>;
+using SourceMap = std::map<SourceKey, ParsedSource>;
+
+/// §25.5.2's InternalizeJSONProperty, with the context of §25.5.1.
+///
+/// `source` is the text this value was written as, or null for an object or an
+/// array. §25.5.1 makes the context a Record with one field, `source`, and
+/// §25.5.5 step 9 builds it as `OrdinaryObjectCreate(%Object.prototype%)` with
+/// `CreateDataPropertyOrThrow`, which is what the descriptor below is.
 class JsonParser {
 public:
     explicit JsonParser(const std::string& text) : m_text(text) {}
@@ -27,10 +57,14 @@ public:
     JsValue parse() {
         skip_space();
         JsValue value = parse_value();
+        m_root_source = last_source;        // the root's, before `skip_space` moves m_pos
         skip_space();
         if (m_pos != m_text.size()) fail();
         return value;
     }
+
+    /// The source of the root value, read after `parse()`.
+    const ParsedSource& root_source() const { return m_root_source; }
 
 private:
     [[noreturn]] void fail() const {
@@ -60,11 +94,28 @@ private:
         return true;
     }
 
+    /// Reads one value and remembers the span of text it was written as.
     JsValue parse_value() {
         // Hostile input can nest arbitrarily deep; stop before the native stack does.
         if (stack_is_exhausted()) js_throw_range_error("JSON is nested too deeply");
         if (m_pos >= m_text.size()) fail();
-        switch (m_text[m_pos]) {
+        const size_t start = m_pos;
+        const char first = m_text[m_pos];
+        JsValue value = parse_one(first);
+        // An object or an array is not a primitive, so it has no `source`:
+        // `JSON.parse('{"a":1}', ...)` gives the reviver `{}` for it and the
+        // `{"a":1}` only for the root, which §25.5.1 makes separately. This
+        // engine's parser is the one place that knows which is which.
+        if (first == '{' || first == '[') {
+            last_source = ParsedSource{{}, false};
+        } else {
+            last_source = ParsedSource{m_text.substr(start, m_pos - start), true};
+        }
+        return value;
+    }
+
+    JsValue parse_one(char first) {
+        switch (first) {
             case '{': return parse_object();
             case '[': return parse_array();
             case '"': return JsValue::make_string(parse_string());
@@ -174,7 +225,10 @@ private:
         }
         while (true) {
             skip_space();
-            array.object_val->array_elements.push_back(parse_value());
+            JsValue element = parse_value();
+            const size_t index = array.object_val->array_elements.size();
+            array.object_val->array_elements.push_back(element);
+            remember(array, std::to_string(index));
             skip_space();
             if (m_pos >= m_text.size()) fail();
             if (m_text[m_pos] == ',') { ++m_pos; continue; }
@@ -201,6 +255,7 @@ private:
             skip_space();
             // define, not set: "__proto__" must become an ordinary own property.
             object.define_property(key, parse_value(), PropertyMap::Default);
+            remember(object, key);
             skip_space();
             if (m_pos >= m_text.size()) fail();
             if (m_text[m_pos] == ',') { ++m_pos; continue; }
@@ -211,22 +266,46 @@ private:
 
     const std::string& m_text;
     size_t m_pos{0};
+public:
+    /// The span of the value `parse_value` last returned; `parse_into` reads it
+    /// immediately, before the next value overwrites it.
+    ParsedSource last_source;
+    /// The spans recorded so far, keyed by the holder and key each value was
+    /// found under. Handed to the reviver walk by `take_sources`.
+    SourceMap take_sources() { return std::move(m_sources); }
+private:
+    /// Records the value just parsed under the holder it has been put into.
+    void remember(const JsValue& holder, const std::string& key) {
+        if (const void* id = holder.identity()) m_sources[SourceKey{id, key}] = last_source;
+    }
+
+    SourceMap m_sources;
+    ParsedSource m_root_source;
 };
 
-/// Applies a reviver bottom-up, as JSON.parse(text, reviver) requires.
-JsValue internalize(JsValue holder, const std::string& key, const JsValue& reviver) {
+JsValue internalize(JsValue holder, const std::string& key, const JsValue& reviver,
+                    const SourceMap& sources) {
     if (stack_is_exhausted()) js_throw_range_error("JSON is nested too deeply");
     JsValue value = holder.get_property(key);
+    const ParsedSource* source = nullptr;
+    if (const void* holder_id = holder.identity()) {
+        const auto found = sources.find(SourceKey{holder_id, key});
+        if (found != sources.end()) source = &found->second;
+    }
     if (value.is_object_like() && !value.is_function()) {
         std::vector<std::string> keys;
         if (!litebird::dom::cross_origin_own_keys(value, false, keys)) keys = value.own_keys();
         for (const auto& child : keys) {
-            JsValue revived = internalize(value, child, reviver);
+            JsValue revived = internalize(value, child, reviver, sources);
             if (revived.is_undefined()) value.delete_property(child);
             else value.set_property(child, revived);
         }
     }
-    return reviver.call_with_this(holder, {JsValue::make_string(key), value});
+    JsValue context = JsValue::make_object();
+    if (source && source->primitive) {
+        context.define_property("source", JsValue::make_string(source->text), PropertyMap::Default);
+    }
+    return reviver.call_with_this(holder, {JsValue::make_string(key), value, context});
 }
 
 // ---------------------------------------------------------------------------
@@ -499,9 +578,15 @@ void install_json_builtins(JsIntrinsics& realm) {
         JsValue value = parser.parse();
         const JsValue& reviver = js_arg(args, 1);
         if (reviver.is_function()) {
+            // The root's context is built here, from the text the whole call
+            // was given; every other value's is remembered by the parser as it
+            // went. `parse_value` recorded the root before `parse` skipped the
+            // trailing space, so `JSON.parse(' 1 ')` gives the reviver `"1"`.
+            SourceMap sources = parser.take_sources();
             JsValue root = JsValue::make_object();
+            if (const void* id = root.identity()) sources[SourceKey{id, ""}] = parser.root_source();
             root.define_property("", value, PropertyMap::Default);
-            return internalize(root, "", reviver);
+            return internalize(root, "", reviver, sources);
         }
         return value;
     });

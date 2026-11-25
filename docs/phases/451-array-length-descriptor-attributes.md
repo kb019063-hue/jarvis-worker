@@ -23,7 +23,7 @@ Compared the engine with Node using fresh, read-only, frozen, and sealed arrays.
 - `make wpt`: 9,570 / 9,824 subtests, with the reported Grid, XML serializer, and parent-global failures. `make xml-conformance`: 1,718 / 1,718.
 - `make diff-trees`: all four runs pass with 0 differing trees. `PATH="$PWD/build/venv/bin:$PATH" make diff-xml` (with `lxml` installed in a local venv): 4,000 XML differential inputs with 0 differences and 3,000/3,000 round trips.
 - `make deep`: 1,332 / 1,332 runs pass. `python3 tools/ci/check_suites.py`, `python3 tools/ci/check_docs.py`, `make check-numbers`, `python3 tools/next_ids.py --self-test`, and `git diff --check` pass.
-- A local `make asan` attempt exceeded the 30-minute tool limit and was killed during its deep-nesting unit suite. The full merged-head CI run on `96c37749` passed all jobs, including sanitizer and deep-page jobs; the local fuzz run was not completed.
+- A local `make asan` attempt exceeded the 30-minute tool limit and was killed during its deep-nesting unit suite. The full merged-head CI run on `96c37749` passed all jobs, including sanitizer and deep-page jobs. A later full run on `c8755412` passed every other job, but the jsdom reference step reported 677/678; this did not reproduce locally with `python3 tools/conformance/run_dom_conformance.py --reference --show 10` (678/678). A further CI result is pending; the local fuzz run was not completed.
 
 ## Remaining scope
 

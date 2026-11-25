@@ -16,6 +16,66 @@ namespace litebird {
 
 namespace {
 
+struct CounterContext {
+    std::unordered_map<std::string, std::vector<int>> stacks;
+    // Apply reset: push new level for each name, return names pushed for later pop
+    std::vector<std::string> apply_reset(const std::vector<CounterOp>& ops) {
+        std::vector<std::string> pushed;
+        for (const auto& op : ops) {
+            std::string lname = op.name;
+            for (char& c : lname) c = static_cast<char>(std::tolower((unsigned char)c));
+            stacks[lname].push_back(op.value);
+            pushed.push_back(std::move(lname));
+        }
+        return pushed;
+    }
+    void apply_set(const std::vector<CounterOp>& ops) {
+        for (const auto& op : ops) {
+            std::string lname = op.name;
+            for (char& c : lname) c = static_cast<char>(std::tolower((unsigned char)c));
+            auto& st = stacks[lname];
+            if (st.empty()) st.push_back(op.value);
+            else st.back() = op.value;
+        }
+    }
+    void apply_increment(const std::vector<CounterOp>& ops) {
+        for (const auto& op : ops) {
+            std::string lname = op.name;
+            for (char& c : lname) c = static_cast<char>(std::tolower((unsigned char)c));
+            auto& st = stacks[lname];
+            if (st.empty()) st.push_back(op.value);
+            else st.back() += op.value;
+        }
+    }
+    void pop_resets(const std::vector<std::string>& pushed) {
+        for (const auto& lname : pushed) {
+            auto it = stacks.find(lname);
+            if (it != stacks.end() && !it->second.empty()) it->second.pop_back();
+        }
+    }
+    std::unordered_map<std::string, size_t> snapshot() const {
+        std::unordered_map<std::string, size_t> s;
+        s.reserve(stacks.size());
+        for (const auto& kv : stacks) s[kv.first] = kv.second.size();
+        return s;
+    }
+    void restore(const std::unordered_map<std::string, size_t>& snap) {
+        for (auto it = stacks.begin(); it != stacks.end(); ) {
+            auto f = snap.find(it->first);
+            size_t target = (f == snap.end() ? 0 : f->second);
+            if (it->second.size() > target) it->second.resize(target);
+            if (it->second.empty()) it = stacks.erase(it);
+            else ++it;
+        }
+    }
+};
+
+thread_local CounterContext* t_counter_ctx = nullptr;
+
+namespace CounterUtil {
+    // Helper to normalize name for lookup
+}
+
 bool is_all_whitespace(std::string_view s) {
     for (char c : s) {
         if (!std::isspace(static_cast<unsigned char>(c))) return false;
@@ -710,6 +770,17 @@ void LayoutTree::build_boxes(
         SharedComputedStyle style = resolve_element_style(element, resolver, parent_style, pool);
         if (!style) return;
 
+        // CSS Counter handling (Phase 385): each element may reset/set/increment
+        // counters. Resets push a new instance that scopes to the element and
+        // its following siblings (CSS Lists 3). Increments modify the nearest
+        // instance. Pushing is not popped at element exit but when leaving the
+        // parent — implemented via snapshot/restore around the children loop.
+        if (t_counter_ctx) {
+            t_counter_ctx->apply_reset(style->counter_reset);
+            t_counter_ctx->apply_set(style->counter_set);
+            t_counter_ctx->apply_increment(style->counter_increment);
+        }
+
         // CSS Display 3 §2.7 `display: contents`: the element generates no box
         // of its own and its children take part in its parent's formatting
         // context, as if the element had been replaced by them. `None` would
@@ -724,9 +795,11 @@ void LayoutTree::build_boxes(
         if (style->is_contents()) {
             const auto& contents_children =
                 element->shadow_root() ? element->shadow_root()->children() : element->children();
+            auto snap = t_counter_ctx ? t_counter_ctx->snapshot() : std::unordered_map<std::string, size_t>{};
             for (const auto& ch : contents_children) {
                 build_boxes(ch, resolver, parent_style, pool, depth + 1, out, split_inline_blocks);
             }
+            if (t_counter_ctx) t_counter_ctx->restore(snap);
             return;
         }
 
@@ -820,16 +893,27 @@ void LayoutTree::build_boxes(
             auto generated_run = [&](int which) -> std::shared_ptr<LayoutBox> {
                 const ComputedStyle pseudo =
                     resolver.resolve_pseudo_element(element, which, *style);
-                if (pseudo.content.empty()) return nullptr;
+                if (pseudo.content_raw.empty() && pseudo.content.empty()) return nullptr;
                 if (pseudo.is_none() || pseudo.is_contents()) return nullptr;
+                std::string final_content;
+                if (!pseudo.content_raw.empty()) {
+                    if (t_counter_ctx)
+                        final_content = resolver.evaluate_content(pseudo.content_raw, element.get(), pseudo.custom_properties, &t_counter_ctx->stacks);
+                    else
+                        final_content = resolver.evaluate_content(pseudo.content_raw, element.get(), pseudo.custom_properties);
+                } else {
+                    final_content = pseudo.content;
+                }
+                if (final_content.empty()) return nullptr;
                 SharedComputedStyle run_style = pool.intern(pseudo);
-                return LayoutBox::create_text(nullptr, collapse_whitespace(pseudo.content),
+                return LayoutBox::create_text(nullptr, collapse_whitespace(final_content),
                                               std::move(run_style));
             };
             if (auto before = generated_run(1)) box->append_child(std::move(before));
             const auto& children_to_process =
                 element->shadow_root() ? element->shadow_root()->children() : element->children();
             std::vector<std::shared_ptr<LayoutBox>> child_boxes;
+            auto snap = t_counter_ctx ? t_counter_ctx->snapshot() : std::unordered_map<std::string, size_t>{};
             // With an explicit summary, a closed disclosure lays out only
             // its first summary child. The DOM and its listeners stay intact.
             const Node* closed_summary = nullptr;
@@ -863,6 +947,7 @@ void LayoutTree::build_boxes(
                     if (cb) box->append_child(cb);
                 }
             }
+            if (t_counter_ctx) t_counter_ctx->restore(snap);
             if (auto after = generated_run(2)) box->append_child(std::move(after));
         }
 
@@ -905,7 +990,11 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
 ) {
     std::vector<std::shared_ptr<LayoutBox>> boxes;
     std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>> split_inline_blocks;
+    CounterContext counter_ctx;
+    CounterContext* prev = t_counter_ctx;
+    if (!prev) t_counter_ctx = &counter_ctx;
     build_boxes(node, resolver, parent_style, pool, depth, boxes, split_inline_blocks);
+    if (!prev) t_counter_ctx = nullptr;
     if (boxes.empty()) return nullptr;
     if (boxes.size() == 1) return boxes.front();
 
@@ -954,11 +1043,15 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
     ComputedStylePool pool;
     std::vector<std::shared_ptr<LayoutBox>> root_boxes;
     std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>> split_inline_blocks;
+    // CSS counters (Phase 379): fresh scope per layout.
+    CounterContext counter_ctx;
+    t_counter_ctx = &counter_ctx;
     // The tree normally starts at body, but a display:none HTML ancestor hides
     // that whole tree, including both candidates for canvas propagation.
     if (!html_style || !html_style->is_none()) {
         build_boxes(root_node, resolver, nullptr, pool, 0, root_boxes, split_inline_blocks);
     }
+    t_counter_ctx = nullptr;
 
     std::shared_ptr<LayoutBox> root_box;
     if (root_boxes.size() == 1 && is_block_level_box(*root_boxes.front())) {

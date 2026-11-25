@@ -54,3 +54,8 @@ not prevented. Other direct output and terminal input are outside this fix.
   test passes. The remaining four deep-nesting suites were not run locally:
   they have previously exceeded this sandbox's memory; CI runs them on a
   larger machine. Thus this is not a full local `make asan` pass.
+- After merging the then-current `main`, `make test` passes 498 engine suites
+  and 114 cross-origin checks. Normal conformance, differential, fuzz and deep
+  checks pass again, as do the sanitizer build, layout verifier, verifier and
+  conformance parts, generated XML, fuzz and deep checks. The sanitizer unit
+  stretches quoted above were run before that merge.

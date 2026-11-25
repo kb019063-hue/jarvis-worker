@@ -408,8 +408,11 @@ without one, and leaves the board and a watch out of the claims.
 
 1. **An open pull request is a claim.** Run `gh pr list --state open` and read
    the first lines of each: they name the task and the files it changes. (A
-   pull request nobody has pushed to for days is not a claim; ask in a comment
-   on it before taking its task.)
+   `WIP:` pull request with no push for two hours, and no comment in its
+   agent's name anywhere in that time, is marked `QUIET` by `python3
+   tools/ci/check_pr.py`. It is still a claim, and not yours to take or
+   to close: ask in a comment on it, and tell the person you work for,
+   who can continue its chat or say that it is given up.)
 2. **Claim before doing the work.** Pick a row of the table below that nobody
    has, push a first commit (an empty one will do) and open a pull request
    whose title begins with `WIP:` and whose text begins:
@@ -461,6 +464,16 @@ without one, and leaves the board and a watch out of the claims.
    A pull request holds the files it has changed as well as the ones it
    names. Put `[skip ci]` in the message of the first commit: an empty
    commit needs no run, and a run is an hour of runner time.
+5. **Push the work as you go.** Commit and push what you have every time
+   it builds and its suite passes here, and at least every twenty
+   minutes, with `[skip ci]` in the message: such a push starts no run
+   and costs nobody anything, and the work is then on GitHub whatever
+   happens to the chat. A sandbox can end without warning, and what was
+   not pushed ends with it; and from outside, work that is only in a
+   sandbox cannot be told from no work at all ("What has gone wrong",
+   Claims: #367, #389). What is pushed, the same chat or another agent
+   can go on from. **The last push, the one `WIP:` comes off after, has
+   no `[skip ci]`**: a head commit without a run is finished for nobody.
 
 ## The files every pull request changes
 
@@ -776,6 +789,26 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   the one that lands second merges `main`. A file both would make is
   still the first one's. And nothing finished stays in a sandbox: push
   it under `WIP:`, whatever is in the way.
+- **A claim nobody pushed to, and what the landing session did to one.**
+  #367 was opened on 24 November at 07:58 with a commit that claims and
+  nothing else, and was not pushed to again. When the person we work for
+  went to continue its chat the next day, its sandbox and its tools no
+  longer worked, and whatever it had done was gone with them. #389 was
+  opened on the 25th at 02:37 in the same way. At 05:16 the landing
+  session, asked to take care of the claims that were still quiet,
+  closed it: nothing had been pushed for 2 hours 40 minutes, in which
+  21 pull requests had gone from opened to landed in 9 to 76 minutes
+  each. It had read #389's own page and nothing else. #389's agent had
+  written a comment on #416 thirteen minutes before. #389 was opened
+  again at 05:30; nobody had taken its row in between. Two things,
+  then. **Push as you go** ("Before starting", point 5): work in a
+  sandbox is lost with the sandbox, and until it is pushed nobody else
+  can tell it from no work. And **no push is not no agent**: the list
+  that `check_pr.py` prints now says beside each claim when its agent
+  last wrote anywhere, and marks `QUIET` only a `WIP:` pull request
+  with neither a push nor such a comment for two hours. That one is
+  still a claim: to ask about, not to take, and not to close on the
+  strength of its own page.
 
 **`main`**
 

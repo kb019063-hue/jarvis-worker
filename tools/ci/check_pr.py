@@ -499,6 +499,68 @@ def hours_since(stamp: str) -> float:
     return (datetime.now(timezone.utc) - then).total_seconds() / 3600
 
 
+# Of the 22 pull requests that landed in the watch of the night of 25
+# November 2026, 21 went from opened to merged in 9 to 76 minutes. A claim
+# with no push and no word from its agent for this long is worth asking about.
+QUIET_HOURS = 2.0
+
+# Agents sign a comment in its first word: "Vireo: the claim check reports...",
+# "**Merlin — claim: PR #414".
+FIRST_WORD_RE = re.compile(r"^[\s*_>#`]*([A-Za-z][A-Za-z0-9]*)")
+
+
+def last_words(comments: list[dict]) -> dict[str, tuple[str, int]]:
+    """For each name that a comment begins with: (when its newest was made, on which pull request)."""
+    newest: dict[str, tuple[str, int]] = {}
+    for comment in comments:
+        match = FIRST_WORD_RE.match(comment.get("body") or "")
+        if match and (match.group(1) not in newest or comment["created_at"] > newest[match.group(1)][0]):
+            newest[match.group(1)] = (comment["created_at"], int(comment["issue_url"].rsplit("/", 1)[1]))
+    return newest
+
+
+def recent_comments(hours: float) -> list[dict]:
+    """The comments made on any pull request in the last `hours` hours: three calls at most.
+
+    An answer that cannot be read is no comments: the list of claims is then
+    shown without them, and says so, rather than not at all.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    found: list[dict] = []
+    for page in (1, 2, 3):
+        answer = gh("api", f"{REPO}/issues/comments?since={since}&sort=created&direction=desc&per_page=100&page={page}",
+                    check=False)
+        try:
+            comments = json.loads(answer)
+        except ValueError:
+            return found
+        if not isinstance(comments, list):
+            return found
+        found += [comment for comment in comments if comment["created_at"] >= since]   # `since` goes by the last edit
+        if len(comments) < 100:
+            break
+    return found
+
+
+def quiet_note(title: str, changed: int, hours: float, agent: str | None, wrote: bool) -> str | None:
+    """What to say of a pull request with no push for a long time and no word from its agent.
+
+    `changed` is how many files it changes (none: a claim and nothing else);
+    `wrote` is whether a comment in its agent's name was made anywhere in the
+    last QUIET_HOURS. Both are needed. On 25 November the landing session
+    closed #389 as given up, 2 h 40 min after its only push, from what #389's
+    own page showed: its agent had written on #416 thirteen minutes before.
+    It was reopened a quarter of an hour later. #367, 21 hours after its only
+    push, had no word from its agent anywhere: that chat could not go on.
+    """
+    if hours < QUIET_HOURS or wrote or not title.startswith("WIP"):
+        return None
+    what = "nothing in it but its claim" if changed == 0 else "work in progress"
+    whose = f"no comment in {agent}'s name anywhere" if agent else "it names no agent whose comments could be looked for"
+    return (f"QUIET: no push for {hours:.1f} h ({what}), and {whose} in the last {QUIET_HOURS:g} h. It is still a claim, "
+            "and not yours to take or to close: ask in a comment on it, and tell the person you work for")
+
+
 def next_pair() -> str:
     """What a new pull request takes: its own number, for both. (Until 24
     November 2026 this was 'Phase P, finding F', the next free pair, as the
@@ -675,13 +737,20 @@ def show_claims() -> int:
     claims = open_claims(prs)
     main = on_main()
     print(f"main: phases up to {max(main.phases)}, findings up to {max(main.findings)}")
+    changed = {pr["number"]: len(pr.get("files") or []) for pr in prs}
+    words = last_words(recent_comments(QUIET_HOURS))
     for claim in claims:
         pushed = hours_since(commit(claim["head"])["commit"]["committer"]["date"])
         name = f"  [{claim['agent']}]" if claim.get("agent") else ""
-        print(f"\n#{claim['number']}{name}  {numbers_of(claim)}  (last commit {pushed:.1f} h ago)")
+        wrote = words.get(claim.get("agent") or "")
+        said = f"; {claim['agent']} wrote {hours_since(wrote[0]):.1f} h ago in #{wrote[1]}" if wrote else ""
+        print(f"\n#{claim['number']}{name}  {numbers_of(claim)}  (last commit {pushed:.1f} h ago{said})")
         print(f"    {claim['title'][:110]}")
         own = sorted(name for name in claim["files"] if not claims_nothing(name))
         print("    files: " + (", ".join(own) if own else "(none)"))
+        quiet = quiet_note(claim["title"], changed.get(claim["number"], 0), pushed, claim.get("agent"), bool(wrote))
+        if quiet:
+            print(f"    !! {quiet}")
         for blocking, problem in claim_problems(claim, claims, main):
             print(f"    {'!!' if blocking else '  '} {problem}")
     for pr in sorted(prs, key=lambda pr: pr["number"]):
@@ -1565,6 +1634,28 @@ def self_test() -> int:
                         "Phase and finding: this pull request's number\nAgent: Merlin\n"), number=393, phase=393, finding=393),
              [], Main({1}, {1}, {1}, {1}, 1, 1)) if blocking],
          ["`docs/phases/387-a-number.md` is called by 387, and this pull request's number is 393: rename it (`docs/phases/393-...`)"]),
+        ("a claim with no push and no word from its agent for two hours is called quiet",
+         (quiet_note("WIP: a row", 0, 21.3, "Rowan", False) or "")[:112],
+         "QUIET: no push for 21.3 h (nothing in it but its claim), and no comment in Rowan's name anywhere in the last 2 h"),
+        ("...not one whose agent wrote somewhere in that time: #389, which was closed for its silence and was not silent",
+         quiet_note("WIP: a row", 0, 2.6, "Vireo", True), None),
+        ("...not one pushed to an hour ago, and not one that is finished and waits to land",
+         (quiet_note("WIP: a row", 0, 1.9, "Vireo", False), quiet_note("Phase 5: a row", 4, 30.0, "Vireo", False)),
+         (None, None)),
+        ("...one with files in it is work in progress, and one that names no agent says so",
+         (quiet_note("WIP: a row", 3, 5.0, None, False) or "")[:103],
+         "QUIET: no push for 5.0 h (work in progress), and it names no agent whose comments could be looked for i"),
+        ("whose a comment is, is its first word, and the newest of each name is kept",
+         last_words([
+             {"body": "Vireo: The #389 claim check reports overlap", "created_at": "2026-11-25T05:02:57Z",
+              "issue_url": "https://api.github.com/repos/o/r/issues/416"},
+             {"body": "**Merlin — claim: PR #414", "created_at": "2026-11-25T05:00:02Z",
+              "issue_url": "https://api.github.com/repos/o/r/issues/219"},
+             {"body": "Vireo: claiming the row", "created_at": "2026-11-25T02:40:00Z",
+              "issue_url": "https://api.github.com/repos/o/r/issues/389"},
+             {"body": "", "created_at": "2026-11-25T05:10:00Z", "issue_url": "https://api.github.com/repos/o/r/issues/1"},
+         ]),
+         {"Vireo": ("2026-11-25T05:02:57Z", 416), "Merlin": ("2026-11-25T05:00:02Z", 219)}),
         ("a file main has, which an earlier pull request changes too, is a note and no refusal",
          [(blocking, text[:60]) for blocking, text in claim_problems(
              dict(claim("Task: a row\nFiles: `src/js/JsInterpreter.cpp`, `tools/new.py`\nPhase and finding: this pull request's number\nAgent: Vega\n"), number=390, phase=390, finding=390),

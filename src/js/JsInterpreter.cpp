@@ -1093,10 +1093,21 @@ void JsInterpreter::install_global_object_hooks() {
                 auto* binding = scope->find_own(name);
                 if (!binding || binding->is_lexical) return false;
                 if (!remove) { result = true; return true; }
-                // §9.1.1.4: a declaration a script's direct `eval` made is
-                // configurable; anything the engine declared, and a script's
-                // own top-level declaration, is not.
-                result = binding->is_builtin ? false : binding->is_deletable;
+                // §9.1.1.4: `undefined`, `NaN` and `Infinity`, and a `var` or
+                // function a script declared at the top level, are not
+                // configurable; the library globals §17-§26 define are, and a
+                // name a sloppy direct `eval` made is too.
+                //
+                // This used to refuse every name the engine had declared,
+                // which is not what §9.1.1.4 says and not what it did either:
+                // the object reported `{configurable: true}` for all of them,
+                // so `delete globalThis.Object` answered `false` for a
+                // property the engine itself said could go. Node removes it
+                // and the bare name is a ReferenceError afterwards, so the
+                // binding goes with the property (Phase 425).
+                const bool configurable = scope->is_configurable_binding(*binding);
+                if (configurable) scope->remove_own(name);
+                result = configurable;
                 return true;
             });
 }
@@ -1107,10 +1118,15 @@ void JsInterpreter::init_language_builtins() {
     for (const auto& [name, value] : m_realm->globals) {
         m_global_env->define(name, value);
     }
-    // The three value properties of the global object are not writable.
+    // The three value properties of the global object are neither writable nor
+    // configurable (§18.1.1-§18.1.3) — of the engine's globals they are the
+    // only ones that are not configurable.
     m_global_env->define_readonly("undefined", JsValue::make_undefined());
     m_global_env->define_readonly("NaN", JsValue::make_number(std::numeric_limits<double>::quiet_NaN()));
     m_global_env->define_readonly("Infinity", JsValue::make_number(std::numeric_limits<double>::infinity()));
+    m_global_env->mark_permanent("undefined");
+    m_global_env->mark_permanent("NaN");
+    m_global_env->mark_permanent("Infinity");
 
     // eval(source): a direct call runs in the caller's scope, an indirect one
     // in the global scope (ECMA-262 §19.2.1; see eval_source). The function is
@@ -1217,6 +1233,13 @@ void JsInterpreter::init_language_builtins() {
     }
     m_global_env->define("globalThis", m_global_object);
     m_global_env->define("self", m_global_object);
+    // `globalThis` is *not* one of the permanent ones: §18.1.5 gives it
+    // `{writable: true, enumerable: false, configurable: true}`, and Node
+    // answers `true` to `delete globalThis.globalThis`. (`window` and `self`
+    // are configurable too.) It was marked permanent in the first draft of
+    // this phase, on the assumption that an engine-defined global would
+    // follow `undefined`; the Node probe said otherwise and the mark came
+    // back out.
 
     // The global object does not own the global scope: it looks it up each
     // time, and finds nothing once the interpreter and its scope are gone.

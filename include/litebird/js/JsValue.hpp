@@ -195,6 +195,13 @@ public:
         /// functions). Lives here, not in the value, so every copy of the
         /// function sees a property set through any other copy.
         std::shared_ptr<PropertyMap> props;
+        /// A symbol's description (§20.4.1.1). It is *not* an own property:
+        /// `Object.prototype.hasOwnProperty.call(Symbol('x'), 'description')`
+        /// has to be false, and a key in the property table would make it true.
+        std::string symbol_description;
+        /// Set on a symbol made with no description, which is not the same as
+        /// one described by the empty string — both print as `Symbol()`.
+        bool symbol_has_no_description{false};
         /// The heap cell of a function, once it has one: its own properties
         /// (`prototype`, statics, expandos) and its prototype link. A script
         /// function gets it when a property is first set on it. A native
@@ -253,6 +260,28 @@ public:
     /// before the value is copied.
     bool forwards_construct() const { return m_extra && m_extra->forwards_construct; }
     void set_forwards_construct() { mutable_extra().forwards_construct = true; }
+    /// §20.4.1.1: `Symbol()` with no description makes a symbol whose
+    /// `description` is `undefined`, which is not the same thing as
+    /// `Symbol("")` — that one's description is the empty string, and both
+    /// print as `Symbol()`. The flag lives in the value's extra block, not in
+    /// its property table: a key in the table would be an own property, and
+    /// `Object.prototype.hasOwnProperty.call(Symbol(), "description")` has to
+    /// stay false.
+    void mark_symbol_without_description() { mutable_extra().symbol_has_no_description = true; }
+    bool symbol_without_description() const { return m_extra && m_extra->symbol_has_no_description; }
+    void set_symbol_description(std::string description) {
+        mutable_extra().symbol_description = std::move(description);
+    }
+    /// `undefined` when there is none (§20.4.3.2).
+    JsValue symbol_description() const {
+        if (!m_extra || m_extra->symbol_has_no_description) return JsValue::make_undefined();
+        return JsValue::make_string(m_extra->symbol_description);
+    }
+    /// The text a symbol prints with, and the one a hint uses: `Symbol()` for
+    /// both kinds of no-name, `Symbol(x)` for a named one.
+    std::string symbol_description_text() const {
+        return (m_extra && !m_extra->symbol_has_no_description) ? m_extra->symbol_description : std::string();
+    }
     /// The function a bound function was made from; empty for anything else.
     const JsValue& bound_target() const;
     void set_bound_target(const JsValue& target);

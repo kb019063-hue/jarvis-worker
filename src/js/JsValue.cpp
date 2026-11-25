@@ -716,9 +716,13 @@ JsValue JsValue::make_symbol(std::string key, std::string description) {
     JsValue v;
     v.type = JsType::Symbol;
     v.string_val = JsString(key);
-    // The description rides in the property table so the value stays small.
-    v.properties = std::make_shared<PropertyMap>();
-    (*v.properties)["description"] = JsValue::make_string(std::move(description));
+    // In the extra block, not the property table: a description stored as a
+    // property would be an own property of the symbol, and the standard's is
+    // not — `hasOwnProperty(Symbol('x'), 'description')` is false in a
+    // browser. Nothing in the table is invisible to `ownKeys`. The empty
+    // string is a real description (`Symbol('')`), so it is stored like any
+    // other; `mark_symbol_without_description` is what says "there is none".
+    v.set_symbol_description(std::move(description));
     return v;
 }
 
@@ -963,8 +967,7 @@ std::string JsValue::to_string() const {
         case JsType::Number: return js_number_to_string(number_val);
         case JsType::String: return string_val.str();
         case JsType::Symbol: {
-            std::string desc = properties ? (*properties)["description"].string_val.str() : std::string();
-            return "Symbol(" + desc + ")";
+            return "Symbol(" + symbol_description_text() + ")";
         }
         case JsType::Object: {
             if (object_val && object_val->is_array) {

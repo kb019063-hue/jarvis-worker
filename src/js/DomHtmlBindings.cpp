@@ -733,6 +733,153 @@ bool svg_fits_to_view_box(const Node& node) {
     return tag == "svg" || tag == "symbol" || tag == "marker" || tag == "pattern" || tag == "view";
 }
 
+// ---------------------------------------------------------------------------
+// SVGLength: a length that remembers the unit it was written in
+// ---------------------------------------------------------------------------
+//
+// The renderer has a length parser already (`SvgRenderer::parse_float_value`),
+// but it resolves to pixels on the way in, which is exactly what SVGLength must
+// not do: `unitType` and `valueInSpecifiedUnits` are separate observations of
+// the same attribute, and `value` is the one that converts. So the length type
+// keeps a unit and a numeric factor, and converts only when asked.
+//
+// The unit table is the CSS one, in SVG 2 §4.5.2's constant order. UNKNOWN (0)
+// is not a unit a value can *have*: it is what `unitType` answers for a value
+// the grammar knows and the constants do not (`ch`, `calc(...)`, `auto`).
+enum class SvgLengthUnit : unsigned short {
+    Unknown = 0, Number = 1, Percentage = 2, Ems = 3, Exs = 4, Px = 5,
+    Cm = 6, Mm = 7, In = 8, Pt = 9, Pc = 10,
+};
+
+// CSS px in one of this unit; the same table `SvgRenderer` uses to paint.
+double svg_length_unit_in_px(SvgLengthUnit unit) {
+    switch (unit) {
+        case SvgLengthUnit::Number: return 1.0;
+        case SvgLengthUnit::Ems: return 16.0;         // the initial font size
+        case SvgLengthUnit::Exs: return 8.0;          // half an em
+        case SvgLengthUnit::Px: return 1.0;
+        case SvgLengthUnit::Cm: return 96.0 / 2.54;
+        case SvgLengthUnit::Mm: return 96.0 / 25.4;
+        case SvgLengthUnit::In: return 96.0;
+        case SvgLengthUnit::Pt: return 96.0 / 72.0;
+        case SvgLengthUnit::Pc: return 96.0 / 6.0;
+        default: return 1.0;
+    }
+}
+
+const char* svg_length_unit_suffix(SvgLengthUnit unit) {
+    switch (unit) {
+        case SvgLengthUnit::Percentage: return "%";
+        case SvgLengthUnit::Ems: return "em";
+        case SvgLengthUnit::Exs: return "ex";
+        case SvgLengthUnit::Px: return "px";
+        case SvgLengthUnit::Cm: return "cm";
+        case SvgLengthUnit::Mm: return "mm";
+        case SvgLengthUnit::In: return "in";
+        case SvgLengthUnit::Pt: return "pt";
+        case SvgLengthUnit::Pc: return "pc";
+        default: return "";
+    }
+}
+
+// A parsed length: the number, and the unit it came with. `scalar` is false for
+// a value the SVGLength can read but not express as (unit, number) -- `calc()`
+// and anything else the grammar has grown; those report unitType UNKNOWN and
+// valueInSpecifiedUnits 0, which is what §4.5.2 says of a non-scalar value.
+struct SvgLengthValue {
+    SvgLengthUnit unit{SvgLengthUnit::Number};
+    float number{0.0f};
+    bool scalar{true};
+    // The text a non-scalar value came from (`3ch`, `calc(...)`). §4.5.2 says
+    // such a value reads unitType UNKNOWN and valueInSpecifiedUnits 0, but the
+    // attribute still holds what the page wrote, so it has to survive a round
+    // trip through this type rather than being flattened to "".
+    std::string source;
+};
+
+bool svg_length_unit_from_suffix(const std::string& suffix, SvgLengthUnit& out) {
+    static const std::unordered_map<std::string, SvgLengthUnit> s_table = {
+        {"", SvgLengthUnit::Number}, {"%", SvgLengthUnit::Percentage},
+        {"em", SvgLengthUnit::Ems}, {"ex", SvgLengthUnit::Exs}, {"px", SvgLengthUnit::Px},
+        {"cm", SvgLengthUnit::Cm}, {"mm", SvgLengthUnit::Mm}, {"in", SvgLengthUnit::In},
+        {"pt", SvgLengthUnit::Pt}, {"pc", SvgLengthUnit::Pc},
+    };
+    const auto found = s_table.find(suffix);
+    if (found == s_table.end()) return false;
+    out = found->second;
+    return true;
+}
+
+// Parse a `<length>` or `<percentage>` the way §4.5.2 describes: one number
+// followed by an optional unit. Returns false when the text is not one.
+bool parse_svg_length(const std::string& text, SvgLengthValue& out) {
+    std::size_t at = 0;
+    auto skip = [&]() { while (at < text.size() && svg_space(text[at])) ++at; };
+    skip();
+    const std::size_t start = at;
+    if (at < text.size() && (text[at] == '+' || text[at] == '-')) ++at;
+    bool digits = false;
+    while (at < text.size() && svg_digit(text[at])) { ++at; digits = true; }
+    if (at < text.size() && text[at] == '.') {
+        ++at;
+        const std::size_t fraction = at;
+        while (at < text.size() && svg_digit(text[at])) { ++at; digits = true; }
+        if (at == fraction) return false;
+    }
+    if (!digits) return false;
+    if (at < text.size() && (text[at] == 'e' || text[at] == 'E')) {
+        // `e` starts an exponent only when digits follow it. In `7em` it is the
+        // first letter of the unit, and taking it as an exponent marker makes
+        // every `em`/`ex` length unparseable -- the same shape of bug as a
+        // greedy `-` in a number list.
+        std::size_t look = at + 1;
+        if (look < text.size() && (text[look] == '+' || text[look] == '-')) ++look;
+        const std::size_t first_digit = look;
+        while (look < text.size() && svg_digit(text[look])) ++look;
+        if (look > first_digit) at = look;
+    }
+    const std::string number = text.substr(start, at - start);
+    std::string unit;
+    while (at < text.size() && !svg_space(text[at])) unit += text[at++];
+    skip();
+    if (at != text.size()) return false;            // trailing junk
+    SvgLengthUnit parsed_unit = SvgLengthUnit::Number;
+    if (!svg_length_unit_from_suffix(unit, parsed_unit)) {
+        // A unit the constants do not name: readable, but not scalar.
+        out.unit = SvgLengthUnit::Unknown;
+        out.number = 0.0f;
+        out.scalar = false;
+        out.source = text;
+        return true;
+    }
+    out.unit = parsed_unit;
+    out.number = svg_decimal_float(number);
+    out.scalar = true;
+    return true;
+}
+
+std::string serialize_svg_length(const SvgLengthValue& value) {
+    // A non-scalar has no (unit, number) spelling, so the text it was read
+    // from is what the attribute keeps. Flattening it to "" would delete a
+    // value the DOM can read but not express, which is a loss, not a no-op.
+    if (!value.scalar) return value.source;
+    return serialize_svg_float(value.number) + svg_length_unit_suffix(value.unit);
+}
+
+// The unit a length is read in: a number has no unit to convert, so it is
+// already in user units. Percentages resolve against 100 when the object has no
+// associated element (§4.5.2: "size is 100").
+constexpr double kSvgLengthUnassociatedPercentageBasis = 100.0;
+
+double svg_length_in_user_units(const SvgLengthValue& value) {
+    if (!value.scalar) return 0.0;
+    if (value.unit == SvgLengthUnit::Percentage) {
+        return static_cast<double>(value.number) * 0.01 * kSvgLengthUnassociatedPercentageBasis;
+    }
+    if (value.unit == SvgLengthUnit::Unknown) return value.number;
+    return static_cast<double>(value.number) * svg_length_unit_in_px(value.unit);
+}
+
 // `preserveAspectRatio`, the other half of SVGFitToViewBox (SVG 2 §8.14.4,
 // §8.14.5). The attribute's value is a keyword pair -- `xMidYMid meet` by
 // default -- and the DOM exposes it as an SVGPreserveAspectRatio whose `align`
@@ -821,6 +968,168 @@ void write_svg_preserve_aspect_ratio(Element& element, unsigned short align, uns
 
 bool is_svg_preserve_aspect_ratio_holder(const Node& node) {
     return svg_fits_to_view_box(node);
+}
+
+// An SVGLength either reflects an element's attribute (`element` and
+// `attribute_name` set) or stands on its own, as `createSVGLength()` and
+// `new SVGLength(...)` make one. The reflected kind reads and writes the
+// attribute; the standalone kind owns its value.
+struct SvgLengthState : JsExotic {
+    std::shared_ptr<Element> element;
+    std::string attribute_name;
+    SvgLengthValue standalone;
+    bool animated{false};
+    void trace(Heap& heap) override { if (element) trace_node(heap, element.get()); }
+};
+
+struct SvgAnimatedLengthState : JsExotic {
+    std::shared_ptr<Element> element;
+    std::string attribute_name;
+    void trace(Heap& heap) override { trace_node(heap, element.get()); }
+};
+
+SvgLengthValue read_svg_length(const SvgLengthState& state) {
+    if (!state.element || state.attribute_name.empty()) return state.standalone;
+    SvgLengthValue value;
+    const std::string* text = state.element->attribute(state.attribute_name);
+    // An attribute that is absent or unparseable reads as 0 user units, which
+    // is the initial value §A.1.1 gives every SVGLength.
+    if (!text || !parse_svg_length(*text, value)) {
+        value = SvgLengthValue{};
+    }
+    return value;
+}
+
+void write_svg_length(const SvgLengthState& state, const SvgLengthValue& value) {
+    if (!state.element || state.attribute_name.empty()) return;
+    state.element->set_attribute(state.attribute_name, serialize_svg_length(value));
+}
+
+void setup_svg_length(Iface& I) {
+    const std::pair<const char*, double> constants[] = {
+        {"SVG_LENGTHTYPE_UNKNOWN", 0}, {"SVG_LENGTHTYPE_NUMBER", 1}, {"SVG_LENGTHTYPE_PERCENTAGE", 2},
+        {"SVG_LENGTHTYPE_EMS", 3}, {"SVG_LENGTHTYPE_EXS", 4}, {"SVG_LENGTHTYPE_PX", 5},
+        {"SVG_LENGTHTYPE_CM", 6}, {"SVG_LENGTHTYPE_MM", 7}, {"SVG_LENGTHTYPE_IN", 8},
+        {"SVG_LENGTHTYPE_PT", 9}, {"SVG_LENGTHTYPE_PC", 10},
+    };
+    for (const auto& entry : constants) I.constant(entry.first, entry.second);
+
+    I.getter("unitType", [](Realm&) {
+        auto& state = this_state<SvgLengthState>("SVGLength");
+        return num(static_cast<double>(read_svg_length(state).unit));
+    });
+    // `value` is in user units; `valueInSpecifiedUnits` is the number as
+    // written. They differ for every unit but NUMBER (§4.5.2).
+    I.accessor("value",
+        [](Realm&) {
+            auto& state = this_state<SvgLengthState>("SVGLength");
+            const SvgLengthValue value = read_svg_length(state);
+            if (!value.scalar) return num(0.0);
+            return num(svg_length_in_user_units(value));
+        },
+        [](Realm& realm, const JsValue& assigned) {
+            auto& state = this_state<SvgLengthState>("SVGLength");
+            const double converted = to_double(assigned);
+            const float number = std::isfinite(converted) ? static_cast<float>(converted)
+                                                          : (converted > 0 ? std::numeric_limits<float>::infinity()
+                                                                           : (converted < 0 ? -std::numeric_limits<float>::infinity() : 0.0f));
+            if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated length is read-only.");
+            SvgLengthValue value = read_svg_length(state);
+            // §4.5.2: a scalar keeps its unit and takes the new number; a
+            // non-scalar value becomes a plain number in user units.
+            if (value.scalar) value.number = number;
+            else value = SvgLengthValue{SvgLengthUnit::Number, number, true};
+            if (!state.element || state.attribute_name.empty()) state.standalone = value;
+            else write_svg_length(state, value);
+        });
+    I.accessor("valueInSpecifiedUnits",
+        [](Realm&) {
+            auto& state = this_state<SvgLengthState>("SVGLength");
+            const SvgLengthValue value = read_svg_length(state);
+            return num(value.scalar ? static_cast<double>(value.number) : 0.0);
+        },
+        [](Realm& realm, const JsValue& assigned) {
+            auto& state = this_state<SvgLengthState>("SVGLength");
+            const double converted = to_double(assigned);
+            const float number = std::isfinite(converted) ? static_cast<float>(converted)
+                                                          : (converted > 0 ? std::numeric_limits<float>::infinity()
+                                                                           : (converted < 0 ? -std::numeric_limits<float>::infinity() : 0.0f));
+            if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated length is read-only.");
+            SvgLengthValue value = read_svg_length(state);
+            if (value.scalar) value.number = number;
+            else value = SvgLengthValue{SvgLengthUnit::Number, number, true};
+            if (!state.element || state.attribute_name.empty()) state.standalone = value;
+            else write_svg_length(state, value);
+        });
+    I.accessor("valueAsString",
+        [](Realm&) {
+            auto& state = this_state<SvgLengthState>("SVGLength");
+            return str(serialize_svg_length(read_svg_length(state)));
+        },
+        [](Realm& realm, const JsValue& assigned) {
+            auto& state = this_state<SvgLengthState>("SVGLength");
+            const std::string text = to_str(assigned);
+            if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated length is read-only.");
+            SvgLengthValue value;
+            if (!parse_svg_length(text, value)) {
+                throw_dom(realm, "SyntaxError", "The value is not a length.");
+                return;
+            }
+            if (!state.element || state.attribute_name.empty()) state.standalone = value;
+            else write_svg_length(state, value);
+        });
+    // §4.5.2: UNKNOWN and values past PC are not supported unit types.
+    I.method("newValueSpecifiedUnits", 2, [](Realm& realm, Args args) {
+        auto& state = this_state<SvgLengthState>("SVGLength");
+        const unsigned long unit = to_ulong(args[0]);
+        const float number = static_cast<float>(to_double(args[1]));
+        if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated length is read-only.");
+        if (unit == 0 || unit > 10) throw_dom(realm, "NotSupportedError", "Not a length unit type.");
+        SvgLengthValue value;
+        value.unit = static_cast<SvgLengthUnit>(unit);
+        value.number = number;
+        value.scalar = true;
+        if (!state.element || state.attribute_name.empty()) state.standalone = value;
+        else write_svg_length(state, value);
+        return undefined();
+    });
+    // The same absolute length in another unit. A percentage has no absolute
+    // length to convert, so it goes through the unassociated basis of 100.
+    I.method("convertToSpecifiedUnits", 1, [](Realm& realm, Args args) {
+        auto& state = this_state<SvgLengthState>("SVGLength");
+        const unsigned long unit = to_ulong(args[0]);
+        if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated length is read-only.");
+        if (unit == 0 || unit > 10) throw_dom(realm, "NotSupportedError", "Not a length unit type.");
+        SvgLengthValue value = read_svg_length(state);
+        if (!value.scalar) { value = SvgLengthValue{}; }
+        else {
+            const double user_units = svg_length_in_user_units(value);
+            const auto target = static_cast<SvgLengthUnit>(unit);
+            value.unit = target;
+            value.number = target == SvgLengthUnit::Percentage
+                ? static_cast<float>(user_units / (0.01 * kSvgLengthUnassociatedPercentageBasis))
+                : static_cast<float>(user_units / svg_length_unit_in_px(target));
+        }
+        if (!state.element || state.attribute_name.empty()) state.standalone = value;
+        else write_svg_length(state, value);
+        return undefined();
+    });
+}
+
+void setup_svg_animated_length(Iface& I) {
+    for (const auto& member : {std::pair<const char*, bool>{"baseVal", false}, {"animVal", true}}) {
+        const bool animated = member.second;
+        I.getter(member.first, [animated](Realm& realm) {
+            auto& state = this_state<SvgAnimatedLengthState>("SVGAnimatedLength");
+            return cached(JsValue::current_this(), animated ? "svgLenAnim" : "svgLenBase", [&]() {
+                auto length = std::make_shared<SvgLengthState>();
+                length->element = state.element;
+                length->attribute_name = state.attribute_name;
+                length->animated = animated;
+                return realm.make("SVGLength", length);
+            });
+        });
+    }
 }
 
 void setup_svg_preserve_aspect_ratio(Iface& I) {
@@ -917,6 +1226,64 @@ bool is_svg_graphics_element(const Node& node) {
            tag == "textPath" || tag == "use" || tag == "image" || tag == "foreignObject" || tag == "a";
 }
 
+// The geometry attributes that are lengths, and the elements that carry each.
+// SVG 2 gives every one of these an SVGAnimatedLength, so `el.x` is an object
+// whose baseVal is an SVGLength -- not a number, and not undefined.
+bool svg_length_attribute(const std::string& tag, const std::string& attribute) {
+    static const std::unordered_map<std::string, std::vector<std::string>> s_table = {
+        {"svg", {"x", "y", "width", "height"}},
+        {"rect", {"x", "y", "width", "height", "rx", "ry"}},
+        {"circle", {"cx", "cy", "r"}},
+        {"ellipse", {"cx", "cy", "rx", "ry"}},
+        {"line", {"x1", "y1", "x2", "y2"}},
+        {"image", {"x", "y", "width", "height"}},
+        {"use", {"x", "y", "width", "height"}},
+        {"foreignObject", {"x", "y", "width", "height"}},
+        {"pattern", {"x", "y", "width", "height"}},
+        {"marker", {"refX", "refY", "markerWidth", "markerHeight"}},
+        {"filter", {"x", "y", "width", "height"}},
+        {"mask", {"x", "y", "width", "height"}},
+        {"feImage", {"x", "y", "width", "height"}},
+        {"text", {"x", "y"}},
+        {"tspan", {"x", "y"}},
+    };
+    const auto found = s_table.find(tag);
+    if (found == s_table.end()) return false;
+    for (const auto& name : found->second) {
+        if (name == attribute) return true;
+    }
+    return false;
+}
+// Every length-valued geometry attribute, as an SVGAnimatedLength. The getter
+// is installed once per interface and answers for whichever attributes that
+// interface's elements actually carry (`svg_length_attribute`), so `rect.rx`
+// exists and `circle.rx` does not.
+void setup_svg_length_attributes(Iface& I) {
+    static const char* const kLengthAttributes[] = {
+        "x", "y", "width", "height", "rx", "ry", "cx", "cy", "r", "x1", "y1", "x2", "y2",
+        "refX", "refY", "markerWidth", "markerHeight",
+    };
+    for (const char* attribute : kLengthAttributes) {
+        const std::string name = attribute;
+        // The interface this getter belongs to is not known here, so the
+        // element decides: a tag that does not carry the attribute in SVG 2
+        // does not have it at all, and asking answers `undefined`.
+        I.node_getter(&is_svg_node, attribute, [name](Realm& realm, Node& node) {
+            auto& element = static_cast<Element&>(node);
+            // Only the elements SVG 2 gives this attribute carry it; asking a
+            // `<circle>` for `rx` answers undefined, as a browser does.
+            if (!svg_length_attribute(element.tag_name(), name)) return JsValue();
+            return cached(wrap(realm, node), "svgLen:" + name, [&]() {
+                auto state = std::make_shared<SvgAnimatedLengthState>();
+                state->element = shared(element);
+                state->attribute_name = name;
+                return realm.make("SVGAnimatedLength", state);
+            });
+        });
+    }
+}
+
+
 void setup_svg_graphics_element(Iface& I) {
     I.node_method(&is_svg_graphics_element, "getBBox", 0, [](Realm& realm, Node& node, Args) {
         auto rect = std::make_shared<SvgRectState>();
@@ -928,8 +1295,14 @@ void setup_svg_graphics_element(Iface& I) {
 }
 
 // `createSVGRect()` is SVGSVGElement's, SVG 2 §5.13.2: a fresh empty rect.
+void setup_svg_marker_element(Iface& I) {
+    setup_svg_fit_to_view_box(I);
+    setup_svg_length_attributes(I);
+}
+
 void setup_svg_svg_element(Iface& I) {
     setup_svg_fit_to_view_box(I);
+    setup_svg_length_attributes(I);
     I.method("createSVGRect", 0, [](Realm& realm, Args) {
         return realm.make("SVGRect", std::make_shared<SvgRectState>());
     });
@@ -3847,13 +4220,15 @@ void register_html_interfaces() {
     register_interface({"SVGAnimatedString", nullptr, setup_svg_animated_string, nullptr, 0, nullptr});
     register_interface({"SVGAnimatedRect", nullptr, setup_svg_animated_rect, nullptr, 0, nullptr});
     register_interface({"SVGRect", nullptr, setup_svg_rect, nullptr, 0, nullptr});
+    register_interface({"SVGLength", nullptr, setup_svg_length, nullptr, 0, nullptr});
+    register_interface({"SVGAnimatedLength", nullptr, setup_svg_animated_length, nullptr, 0, nullptr});
     register_interface({"SVGPreserveAspectRatio", nullptr, setup_svg_preserve_aspect_ratio, nullptr, 0, nullptr});
     register_interface({"SVGAnimatedPreserveAspectRatio", nullptr, setup_svg_animated_preserve_aspect_ratio, nullptr, 0, nullptr});
     register_interface({"SVGElement", "Element", setup_svg_element, nullptr, 0, nullptr});
     register_interface({"SVGGraphicsElement", "SVGElement", setup_svg_graphics_element, nullptr, 0, nullptr});
     register_interface({"SVGSVGElement", "SVGGraphicsElement", setup_svg_svg_element, nullptr, 0, nullptr});
     register_interface({"SVGSymbolElement", "SVGGraphicsElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
-    register_interface({"SVGMarkerElement", "SVGElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
+    register_interface({"SVGMarkerElement", "SVGElement", setup_svg_marker_element, nullptr, 0, nullptr});
     register_interface({"SVGPatternElement", "SVGElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
     register_interface({"SVGViewElement", "SVGElement", setup_svg_fit_to_view_box, nullptr, 0, nullptr});
     // The graphics elements: place in the chain is all that is set here, because
@@ -3862,7 +4237,7 @@ void register_html_interfaces() {
                              "SVGLineElement", "SVGPathElement", "SVGPolygonElement", "SVGPolylineElement",
                              "SVGTextElement", "SVGTSpanElement", "SVGTextPathElement", "SVGImageElement",
                              "SVGForeignObjectElement", "SVGUseElement", "SVGAElement", "SVGSwitchElement"}) {
-        register_interface({name, "SVGGraphicsElement", nullptr, nullptr, 0, nullptr});
+        register_interface({name, "SVGGraphicsElement", setup_svg_length_attributes, nullptr, 0, nullptr});
     }
     // Interfaces of their own, but not graphics elements: they inherit
     // SVGElement, so none of them has `getBBox()`.

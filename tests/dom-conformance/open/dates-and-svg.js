@@ -50,4 +50,24 @@ t('preserveAspectRatio on the five or nowhere', function () {
   var NS = 'http://www.w3.org/2000/svg';
   return ['svg', 'symbol', 'marker', 'pattern', 'view', 'g', 'rect'].map(function (tag) {
     return typeof document.createElementNS(NS, tag).preserveAspectRatio; }); });
+// The length-valued geometry attributes (Phase 395). `5mm` is the line that
+// matters: unitType 7 and the number 5 are what was *written*, while `value` is
+// the conversion to user units -- a type that resolved on the way in could not
+// answer the first two.
+t('a geometry attribute is an animated length', function () {
+  var NS = 'http://www.w3.org/2000/svg', e = document.createElementNS(NS, 'rect');
+  e.setAttribute('x', '10');
+  var a = e.x;
+  return [a instanceof SVGAnimatedLength, a.baseVal instanceof SVGLength,
+          a.baseVal.unitType, a.baseVal.valueInSpecifiedUnits, a.baseVal.valueAsString]; });
+t('a length keeps the unit it was written in', function () {
+  var NS = 'http://www.w3.org/2000/svg', e = document.createElementNS(NS, 'rect');
+  e.setAttribute('height', '5mm'); e.setAttribute('width', '50%');
+  return [e.height.baseVal.unitType, e.height.baseVal.valueInSpecifiedUnits,
+          Math.round(e.height.baseVal.value * 1000) / 1000,
+          e.width.baseVal.unitType, e.width.baseVal.value]; });
+t('who has which length attribute', function () {
+  var NS = 'http://www.w3.org/2000/svg', mk = function (t) { return document.createElementNS(NS, t); };
+  return [typeof mk('rect').rx, typeof mk('circle').rx, typeof mk('line').x1,
+          typeof mk('g').x, typeof mk('marker').refX, typeof mk('svg').width]; });
 console.log(out.join('\n'));

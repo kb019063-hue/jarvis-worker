@@ -225,6 +225,33 @@ AGREES: list[Case] = [
     Case("var a=42; function f(){let [a]=[1]; return a;} String(f()+'/'+a)", "function lexical scope"),
     Case("function f(a){var [b]=[3]; return String(a)+','+b;} String(f(1,2,3))", "extra call arguments do not shift slots"),
 
+    # for-of over a simple var or identifier (Phase 446).
+    Case("var s = \"\"; for (var k of [1,2]) { s += k; } String(s)", "the original refusal"),
+    Case("var s=\"\"; for(var x of [1,undefined,3]){s+=String(x)+\",\";} String(s)", "undefined remains an element"),
+    Case("var s=\"before\"; for(var x of []) {s=\"bad\";} String(s)", "empty iterable"),
+    Case("var s=\"\"; for(var x of \"a💡b\") {s+=x+\"/\";} String(s)", "string code points"),
+    Case("var n=0;for(var x of [1,2,3,4]) {if(x==2)continue;if(x==4)break;n+=x;}String(n)", "break and continue"),
+    Case("var s=\"\";for(var x of [1,2]){for(var y of [3,4]){s+=x*y+\",\";}}String(s)", "nested loops"),
+    Case("var a=9; function f(a){for(var a of [1,2]){}return a;} String(f(6)+\"/\"+a)", "a parameter is updated, not the global"),
+    Case("var x=0;for(x of [4,5]){}String(x)", "assignment to an existing name"),
+    Case("var n=0;var a=[1,2];a[Symbol.iterator]=function(){return {next:function(){n++;return {value:9,done:n>2};}}};for(var x of a){n+=10;break;}String(x+\"/\"+n)", "overridden array iterator"),
+    Case("var n=0;var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){n++;return {}}}};for(var x of a){break;}String(n)", "break closes"),
+    Case("var n=0;var a={};a[Symbol.iterator]=function(){return {next:function(){n++;return {value:n,done:n>3}},return:function(){n+=100;return {}}}};for(var x of a){if(x<3)continue;break;}String(n)", "continue does not close"),
+    Case("var n=0;var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){n++;return {}}}};function f(){for(var x of a){return 7;}}String(f()+\"/\"+n)", "return closes"),
+    Case("var s=0;for(var x of [1,2,3]){{let y=x*2;if(x==2)continue;s+=y;}}String(s)", "continue unwinds a block local"),
+    Case("var s=0;for(var x of [1,2,3]){{let y=x*2;if(x==2)break;s+=y;}}String(s)", "break unwinds a block local"),
+    Case("var s=\"\";for(var x of [1,2,3]){switch(x){case 2:continue;default:s+=x;}}String(s)", "continue from switch"),
+    Case("var a=[];for(var x of [1,2]) {a.push(x);}String(a)", "body calls array push"),
+    Case("var a=[];a.length=3;var r=\"\";for(var x of a){r+=String(x)+\",\"}String(r)", "sparse length yields holes"),
+    Case("var a=[1,2];var s=\"\";for(var x of a){s+=x;if(x==1)a.push(3)}String(s)", "array growth during iteration"),
+    Case("var n=0;var a={};a[Symbol.iterator]=function(){return {next:function(){n++;return {done:n>2,value:n}},return:function(){n+=10;return {}}}};for(var x of a){}String(n)", "normal exhaustion does not close"),
+    Case("var n=0;var a={};a[Symbol.iterator]=function(){return {next:function(){n++;return {done:false,value:n}},return:function(){n+=10;return {}}}};function f(){for(var x of a){for(var y of a){return x+y;}}}String(f()+\"/\"+n)", "nested return closes inside out"),
+    Case("var n=0;for(var x of [1,2]){var [v]=[x];n+=v;}String(n)", "nested destructuring in the body"),
+
+    Case("var a=[]; a.length=2; Object.defineProperty(a,\"1\",{get:function(){return 9;},configurable:true}); var [u,v]=a; String(v)", "a sparse binding reads an accessor beyond stored elements"),
+    Case("var a=[];a.length=2;Object.defineProperty(a,\"1\",{get:function(){return 9;},configurable:true});var s=\"\";for(var x of a){s+=String(x)+\",\"}String(s)", "for-of reads sparse accessors"),
+    Case("for(var k of []){} String(k)", "empty var loop still declares the name"),
+    Case("var k=7;for(var k of []){} String(k)", "empty loop does not overwrite an existing binding"),
 ]
 
 # The compiler refuses these. Kept here so the count of what is left has a
@@ -232,7 +259,6 @@ AGREES: list[Case] = [
 # rather than as silence.
 REFUSES: list[Case] = [
     Case("try { 1; } catch (e) { 2; }", "Statement"),
-    Case("var s = \"\"; for (var k of [1,2]) { s += k; } String(s)", "Statement"),
 ]
 
 

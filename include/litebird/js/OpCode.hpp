@@ -38,6 +38,7 @@ enum class OpCode : uint8_t {
     // `[a, ...rest]` drains exactly the remainder.
     OpIteratorInit,     // pop the source, push it as the open cursor
     OpIteratorNext,     // pull one value (undefined once exhausted)
+    OpIteratorStep,     // for-of: push the value and whether it was yielded
     OpIteratorDrain,    // drain the rest into a new array and push it
     OpIteratorClose,    // the normal way out: report a broken `return`, pop it
     OpIsUndefined,      // push whether the top of stack is undefined
@@ -96,6 +97,7 @@ inline std::string_view opcode_name(OpCode op) {
     case OpCode::OpDefineTemplateRaw: return "OP_DEFINE_TEMPLATE_RAW";
     case OpCode::OpIteratorInit:     return "OP_ITERATOR_INIT";
     case OpCode::OpIteratorNext:     return "OP_ITERATOR_NEXT";
+    case OpCode::OpIteratorStep:     return "OP_ITERATOR_STEP";
     case OpCode::OpIteratorDrain:    return "OP_ITERATOR_DRAIN";
     case OpCode::OpIteratorClose:    return "OP_ITERATOR_CLOSE";
     case OpCode::OpIsUndefined:      return "OP_IS_UNDEFINED";

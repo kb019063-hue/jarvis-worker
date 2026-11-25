@@ -847,6 +847,25 @@ jobs:
           if command -v ccache >/dev/null 2>&1; then
             echo "::notice title=ccache, asan build::$(ccache -s 2>/dev/null | grep -E 'Cacheable calls|Hits|Misses|Cache size' | tr -s ' ' | tr '\n' ';')"
           fi
+      - name: Only the objects this build used
+        # What is saved is one build's objects: the ones this build took
+        # from the cache or put into it. ccache marks an object as used by
+        # its modification time, and everything else in the directory is
+        # from a tree that main no longer is. Left in, those fill the
+        # directory to its limit, and then ccache makes room by its own
+        # rule, which with 107 large objects takes some of the newest
+        # (.github/actions/ccache/action.yml). The sanitizer jobs only run
+        # on a lot and on main, which is the newest tree both times, so
+        # an older tree's objects are of no use to them. (The plain build
+        # keeps its older ones: a pull request behind main compiles less
+        # for them, and its 107 objects are 0.05 GB.)
+        if: github.event_name != 'pull_request' || startsWith(github.event.pull_request.title, 'WATCH:')
+        run: |
+          if command -v ccache >/dev/null 2>&1 && [ -n "${CCACHE_BEGAN:-}" ]; then
+            before="$(du -sm "$HOME/.ccache" 2>/dev/null | cut -f1)"
+            ccache --evict-older-than "$(( $(date +%s) - CCACHE_BEGAN + 60 ))s" >/dev/null 2>&1 || true
+            echo "::notice title=the asan objects that are kept::${before} MB in the directory, $(du -sm "$HOME/.ccache" 2>/dev/null | cut -f1) MB of them used by this build and kept"
+          fi
       - name: Keep the objects for the runs that follow
         # A run on main saves them: every pull request can read what
         # such a run saved, and nobody else what a pull request's run

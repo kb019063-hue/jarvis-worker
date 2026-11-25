@@ -7,8 +7,10 @@
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/render/SvgRenderer.hpp"
 #include "litebird/render/ImageDecoder.hpp"
 #include "litebird/render/MediaAudioCodecs.hpp"
+#include "litebird/render/SvgRenderer.hpp"
 #include "litebird/render/WebGL.hpp"
 #include "litebird/js/ImageBitmap.hpp"
 #include "litebird/js/TypedArray.hpp"
@@ -1663,12 +1665,19 @@ void setup_svg_text_path_element(Iface& I) {
     setup_svg_length_attributes(I);
 }
 
+// `getBBox()` is the box of the geometry the element *draws*, in its own user
+// space, with its own transform excluded and its children's included (SVG 2
+// §8.10). It is not a layout box -- an SVG element has none, and Phase 374
+// shipped this reading `Element::bounding_box()`, the HTML layout border box,
+// which is empty for every SVG element. Every call answered 0,0,0,0.
+//
+// The box comes from the renderer's own geometry, so what a page measures and
+// what the painter draws cannot drift apart.
 void setup_svg_graphics_element(Iface& I) {
     I.node_method(&is_svg_graphics_element, "getBBox", 0, [](Realm& realm, Node& node, Args) {
         auto rect = std::make_shared<SvgRectState>();
-        const Rect box = static_cast<Element&>(node).bounding_box();
-        rect->values = {static_cast<float>(box.x), static_cast<float>(box.y),
-                        static_cast<float>(box.width), static_cast<float>(box.height)};
+        const SvgUserBBox box = svg_element_bbox(shared(static_cast<Element&>(node)));
+        rect->values = {box.x, box.y, box.width, box.height};
         return realm.make("SVGRect", rect);
     });
 }
@@ -2070,6 +2079,132 @@ JsValue construct_image_data(Realm& realm, const InterfaceDef&, Args args, const
     const std::string color_space = color_space_of(js_arg(args, 2));
     return image_data_blank(realm, width, height, derived, color_space);
 }
+
+// ---------------------------------------------------------------------------
+// §4.12.5.1.7's `Path2D`
+// ---------------------------------------------------------------------------
+
+/// The script object's own state: the recorded calls. Held on the object as its
+/// `JsExotic`, and mirrored into the value's payload by `construct_path2d` so the
+/// four context methods can recognise a path argument in one `std::get_if`.
+struct Path2DState : JsExotic {
+    std::shared_ptr<Path2D> path = std::make_shared<Path2D>();
+};
+
+Path2DState& this_path2d() { return this_state<Path2DState>("Path2D"); }
+
+/// One recorded call, from an argument list. Written once and used by every
+/// method so the offsets cannot drift between them.
+bool op_from_args(const std::string& name, Args args, Path2D::Op& op) {
+    const auto number = [&args](std::size_t i) { return static_cast<float>(to_double(args[i])); };
+    const auto need = [&args](std::size_t n, const char* what) {
+        require_args(args, n, what);
+    };
+    if (name == "moveTo") { need(2, "Path2D.moveTo"); op.kind = Path2D::Kind::MoveTo; op.a = number(0); op.b = number(1); return true; }
+    if (name == "lineTo") { need(2, "Path2D.lineTo"); op.kind = Path2D::Kind::LineTo; op.a = number(0); op.b = number(1); return true; }
+    if (name == "closePath") { op.kind = Path2D::Kind::ClosePath; return true; }
+    if (name == "quadraticCurveTo") {
+        need(4, "Path2D.quadraticCurveTo"); op.kind = Path2D::Kind::QuadraticCurveTo;
+        op.a = number(0); op.b = number(1); op.c = number(2); op.d = number(3); return true;
+    }
+    if (name == "bezierCurveTo") {
+        need(6, "Path2D.bezierCurveTo"); op.kind = Path2D::Kind::BezierCurveTo;
+        op.a = number(0); op.b = number(1); op.c = number(2); op.d = number(3); op.e = number(4); op.f = number(5);
+        return true;
+    }
+    if (name == "arcTo") {
+        need(5, "Path2D.arcTo"); op.kind = Path2D::Kind::ArcTo;
+        op.a = number(0); op.b = number(1); op.c = number(2); op.d = number(3); op.e = number(4); return true;
+    }
+    if (name == "arc") {
+        need(5, "Path2D.arc"); op.kind = Path2D::Kind::Arc;
+        op.a = number(0); op.b = number(1); op.c = number(2); op.d = number(3); op.e = number(4);
+        op.clockwise = args.size() > 5 && args[5].is_truthy(); return true;
+    }
+    if (name == "ellipse") {
+        need(7, "Path2D.ellipse"); op.kind = Path2D::Kind::Ellipse;
+        op.a = number(0); op.b = number(1); op.c = number(2); op.d = number(3);
+        op.e = number(4); op.f = number(5); op.g = number(6);
+        op.clockwise = args.size() > 7 && args[7].is_truthy(); return true;
+    }
+    if (name == "rect") { need(4, "Path2D.rect"); op.kind = Path2D::Kind::Rect; op.a = number(0); op.b = number(1); op.c = number(2); op.d = number(3); return true; }
+    if (name == "roundRect") {
+        need(4, "Path2D.roundRect"); op.kind = Path2D::Kind::RoundRect;
+        op.a = number(0); op.b = number(1); op.c = number(2); op.d = number(3);
+        // One radius or four; the context's `round_rect` takes one, so four are
+        // averaged here rather than silently using the first. That is a
+        // limitation, not a decision, and the finding says so.
+        float r = 0.0f;
+        if (args.size() > 4 && !args[4].is_nullish()) r = static_cast<float>(to_double(args[4]));
+        op.e = r;
+        return true;
+    }
+    return false;
+}
+
+void install_path2d_methods(Realm& r, JsValue object, const std::shared_ptr<Path2D>& path) {
+    for (const char* name : {"moveTo", "lineTo", "closePath", "quadraticCurveTo", "bezierCurveTo",
+                             "arcTo", "arc", "ellipse", "rect", "roundRect"}) {
+        const std::string which = name;
+        const int length = (which == "closePath") ? 0 : (which == "rect" || which == "roundRect") ? 4
+                          : (which == "quadraticCurveTo") ? 4 : (which == "bezierCurveTo") ? 6
+                          : (which == "arcTo" || which == "arc") ? 5 : (which == "ellipse") ? 7 : 2;
+        object.set_property(name, make_function(r, name, length,
+            [path, which](Realm&, Args args) {
+                Path2D::Op op;
+                if (op_from_args(which, args, op)) path->add_op(std::move(op));
+                return undefined();
+            }));
+    }
+    // `addPath(path, transform)`: another `Path2D`, and optionally the matrix to
+    // apply to its points. The path is kept by pointer, so adding the same path
+    // twice adds its calls twice, which is what the specification says.
+    object.set_property("addPath", make_function(r, "addPath", 1,
+        [path](Realm&, Args args) {
+            require_args(args, 1, "Path2D.addPath");
+            auto other = args[0].path2d_value();
+            if (!other) return undefined();
+            Path2D::Op op;
+            op.kind = Path2D::Kind::AddPath;
+            op.path = other;
+            if (args.size() >= 7) {
+                op.transform = TransformMatrix2D{
+                    static_cast<float>(to_double(args[1])), static_cast<float>(to_double(args[2])),
+                    static_cast<float>(to_double(args[3])), static_cast<float>(to_double(args[4])),
+                    static_cast<float>(to_double(args[5])), static_cast<float>(to_double(args[6]))};
+            }
+            path->add_op(std::move(op));
+            return undefined();
+        }));
+}
+
+JsValue construct_path2d(Realm& r, const InterfaceDef&, Args args, const JsValue* derived) {
+    // Three forms in §4.12.5.1.7: `new Path2D()`, `new Path2D(svgPathString)` and
+    // `new Path2D(otherPath)`, which copies the other path's recorded calls at
+    // the moment of the copy.
+    auto state = std::make_shared<Path2DState>();
+    if (!args.empty() && !args[0].is_undefined()) {
+        if (auto other = args[0].path2d_value()) {
+            state->path = std::make_shared<Path2D>(*other);
+        } else if (args[0].type == JsType::String) {
+            // SVG path data. `build_svg_path` in SvgRenderer walks the grammar into
+            // a sink, so the string is recorded as the equivalent calls and is
+            // replayed into a context the same way a hand-built path is.
+            state->path = parse_svg_path_data(args[0].to_string());
+            if (!state->path) js_throw_type_error("Path2D: the path data could not be parsed");
+        } else {
+            js_throw_type_error("Path2D: the argument must be path data or a Path2D");
+        }
+    }
+    // The value the page holds carries the path in its payload as well as in the
+    // exotic state, so `ctx.fill(p)` recognises it with one `std::get_if`.
+    JsValue value = r.make("Path2D", state, derived);
+    value.set_path2d_value(state->path);
+    install_path2d_methods(r, value, state->path);
+    return value;
+}
+
+void setup_path2d(Iface&) {}
 
 void setup_image_data(Iface& I) {
     I.getter("width", [](Realm&) { return num(static_cast<double>(this_image_data().width)); });
@@ -3758,6 +3893,9 @@ void setup_canvas(Iface& I) {
         set_slot(wrapper, "contextKind", str(type));
         if (type == "2d") {
             return cached(wrapper, "context2d", [&]() {
+                // `direction: "inherit"` walks the element's ancestors for a
+                // `dir`, so the context is told which element it belongs to.
+                backing->set_owner_element(el.shared_from_this());
                 JsValue object = backing->to_js_value(backing);
                 // ImageData needs a realm, so the three methods that speak it are
                 // added here rather than in Canvas2D.cpp.
@@ -4661,6 +4799,7 @@ void register_html_interfaces() {
     register_interface({"HTMLScriptElement", "HTMLElement", setup_script, element_ctor, 0, nullptr});
     register_interface({"HTMLCanvasElement", "HTMLElement", setup_canvas, element_ctor, 0, nullptr});
     register_interface({"OffscreenCanvas", nullptr, setup_offscreen_canvas, construct_offscreen_canvas, 2, nullptr});
+    register_interface({"Path2D", nullptr, setup_path2d, construct_path2d, 0, nullptr});
     register_interface({"ImageData", nullptr, setup_image_data, construct_image_data, 2, nullptr});
     register_interface({"WebGLRenderingContext", nullptr, setup_webgl_rendering_context, nullptr, 0, nullptr});
     register_interface({"WebGL2RenderingContext", nullptr, setup_webgl2_rendering_context, nullptr, 0, nullptr});

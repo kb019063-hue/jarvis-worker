@@ -1,6 +1,7 @@
 #include "litebird/js/VM.hpp"
 #include "litebird/common/TerminalText.hpp"
 #include "litebird/js/JsOps.hpp"
+#include "litebird/js/IterationCursor.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Promise.hpp"
@@ -459,6 +460,7 @@ JsValue VM::interpret(std::shared_ptr<BytecodeFunction> function) {
 
     m_stack.clear();
     m_frames.clear();
+    m_iterators.clear();
 
     push(JsValue::make_undefined()); // slot 0 for main
     CallFrame frame;
@@ -467,10 +469,63 @@ JsValue VM::interpret(std::shared_ptr<BytecodeFunction> function) {
     frame.slots_offset = 0;
     m_frames.push_back(frame);
 
-    return run();
+    // An abrupt completion (a default expression that throws, a getter, a
+    // `return` that fails the close check) unwinds out of `run()` without
+    // walking past the iterator any more than the tree-walker's bind_pattern
+    // does: every cursor still open is told it will not be drained, quietly,
+    // before the exception leaves the machine. `close_quietly` swallows what
+    // the close itself says, which is the abrupt-completion rule (7.4.11).
+    try {
+        return run();
+    } catch (...) {
+        while (!m_iterators.empty()) {
+            auto cursor = std::move(m_iterators.back());
+            m_iterators.pop_back();
+            // IteratorStep's own throwing `next` does not trigger close;
+            // enclosing patterns still close as their binding was abrupt.
+            if (!cursor->next_threw()) cursor->close_quietly();
+        }
+        m_stack.clear();
+        m_frames.clear();
+        throw;
+    }
 }
 
-JsValue VM::run() {
+// Native abstract operations such as IteratorStep call JavaScript functions
+// through JsValue. Re-enter the same VM, preserving the suspended frame and
+// its iterators, instead of running a compiled function in the AST environment.
+JsValue VM::call_compiled(const JsValue& function, const std::vector<JsValue>& args,
+                          const JsValue* this_val) {
+    const auto& code = function.function_bytecode();
+    if (!code || !running()) throw std::runtime_error("No active bytecode function");
+    if (m_frames.size() >= 64) throw std::runtime_error("Stack overflow (Call frame limit 64 exceeded)");
+    const size_t depth = m_frames.size();
+    const size_t stack_size = m_stack.size();
+    const size_t iterator_count = m_iterators.size();
+    push(function);
+    for (const auto& arg : args) push(arg);
+    m_stack.resize(stack_size + 1 + static_cast<size_t>(code->arity), JsValue::make_undefined());
+    m_frames.push_back({code.get(), code->chunk.code.data(), stack_size});
+    const JsValue saved_this = get_global("this");
+    if (this_val && !this_val->is_nullish()) set_global("this", *this_val);
+    try {
+        JsValue result = run(depth);
+        set_global("this", saved_this);
+        return result;
+    } catch (...) {
+        set_global("this", saved_this);
+        while (m_iterators.size() > iterator_count) {
+            auto cursor = std::move(m_iterators.back());
+            m_iterators.pop_back();
+            if (!cursor->next_threw()) cursor->close_quietly();
+        }
+        m_frames.resize(depth);
+        m_stack.resize(stack_size);
+        throw;
+    }
+}
+
+JsValue VM::run(size_t stop_depth) {
     CallFrame* frame = &m_frames.back();
 
     auto read_byte = [&frame]() -> uint8_t {
@@ -567,8 +622,8 @@ JsValue VM::run() {
             case OpCode::OpGetIndex: {
                 JsValue idx = pop();
                 JsValue obj = pop();
-                std::string prop = (idx.type == JsType::Number) ?
-                    std::to_string(static_cast<int64_t>(idx.number_val)) : idx.to_string();
+                // Symbol.iterator is a symbol, not its display string.
+                std::string prop = js_to_property_key(idx);
                 push(obj.get_property(prop));
                 break;
             }
@@ -576,8 +631,8 @@ JsValue VM::run() {
                 JsValue idx = pop();
                 JsValue obj = pop();
                 JsValue val = peek(0);
-                std::string prop = (idx.type == JsType::Number) ?
-                    std::to_string(static_cast<int64_t>(idx.number_val)) : idx.to_string();
+                // Symbol.iterator is a symbol, not its display string.
+                std::string prop = js_to_property_key(idx);
                 obj.set_property(prop, val);
                 break;
             }
@@ -631,6 +686,43 @@ JsValue VM::run() {
                 strings.define_property("raw", std::move(raw), PropertyMap::Hidden);
                 break;
             }
+
+            case OpCode::OpIteratorInit: {
+                JsValue source = pop();
+                // A non-iterable here throws the same TypeError the
+                // tree-walker's bind_pattern throws — same constructor call,
+                // same message. It never reaches the inside of the cursor.
+                m_iterators.push_back(std::make_unique<IterationCursor>(source));
+                break;
+            }
+            case OpCode::OpIteratorNext: {
+                if (m_iterators.empty()) throw std::runtime_error("OP_ITERATOR_NEXT without OP_ITERATOR_INIT");
+                push(m_iterators.back()->pull());
+                break;
+            }
+            case OpCode::OpIteratorDrain: {
+                if (m_iterators.empty()) throw std::runtime_error("OP_ITERATOR_DRAIN without OP_ITERATOR_INIT");
+                std::vector<JsValue> rest;
+                while (true) {
+                    JsValue item = m_iterators.back()->pull();
+                    if (m_iterators.back()->done()) break;
+                    rest.push_back(std::move(item));
+                }
+                push(JsValue::make_array(std::move(rest)));
+                break;
+            }
+            case OpCode::OpIteratorClose: {
+                if (m_iterators.empty()) throw std::runtime_error("OP_ITERATOR_CLOSE without OP_ITERATOR_INIT");
+                // The normal way out reports a broken `return` (a throwing
+                // one, a non-callable one, a non-object answer), exactly as the
+                // tree-walker's bind_pattern does after the last element.
+                m_iterators.back()->close();
+                m_iterators.pop_back();
+                break;
+            }
+            case OpCode::OpIsUndefined:
+                push(JsValue::make_boolean(peek(0).is_undefined()));
+                break;
 
             case OpCode::OpAdd: {
                 JsValue b = pop();
@@ -783,6 +875,10 @@ JsValue VM::run() {
                     next_frame.function = sub_fn;
                     next_frame.ip = sub_fn->chunk.code.data();
                     next_frame.slots_offset = m_stack.size() - arg_count - 1;
+                    // Slots after the callee are parameters; ensure missing
+                    // arguments and extra arguments do not shift local slots.
+                    m_stack.resize(next_frame.slots_offset + 1 + static_cast<size_t>(sub_fn->arity),
+                                   JsValue::make_undefined());
                     m_frames.push_back(next_frame);
                     frame = &m_frames.back();
                 } else {
@@ -796,12 +892,11 @@ JsValue VM::run() {
                 size_t return_slot = frame->slots_offset;
 
                 m_frames.pop_back();
-                if (m_frames.empty()) {
-                    return result;
-                }
-
                 if (m_stack.size() > return_slot) {
                     m_stack.resize(return_slot);
+                }
+                if (m_frames.size() == stop_depth) {
+                    return result;
                 }
 
                 push(result);

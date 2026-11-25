@@ -141,7 +141,9 @@ void increment_decimal(std::string& digits) {
 std::string to_fixed(double x, int fraction_digits) {
     if (std::isnan(x)) return "NaN";
     if (std::fabs(x) >= 1e21 || std::isinf(x)) return js_number_to_string(x);
-    const bool negative = x < 0 || (x == 0 && std::signbit(x));
+    // The sign is determined before rounding: -0 has no sign, but a
+    // negative nonzero value that rounds to zero keeps its minus sign.
+    const bool negative = x < 0;
     double magnitude = std::fabs(x);
 
     const int extra = 40;
@@ -159,8 +161,7 @@ std::string to_fixed(double x, int fraction_digits) {
     }
     if (round_up) increment_decimal(kept);
 
-    bool is_zero = kept.find_first_not_of("0.") == std::string::npos;
-    return (negative && !is_zero ? "-" : "") + kept;
+    return (negative ? "-" : "") + kept;
 }
 
 std::string format_exponent(int exponent) {
@@ -421,6 +422,9 @@ void install_number_builtins(JsIntrinsics& realm) {
         double x = this_number("toExponential");
         if (js_arg(args, 0).is_undefined()) return JsValue::make_string(to_exponential(x, 0, true));
         double digits = js_to_integer(js_to_number(js_arg(args, 0)));
+        // The precision is converted even for NaN and infinities, but the
+        // range check applies only to finite receivers.
+        if (!std::isfinite(x)) return JsValue::make_string(js_number_to_string(x));
         if (digits < 0 || digits > 100) js_throw_range_error("toExponential() argument must be between 0 and 100");
         return JsValue::make_string(to_exponential(x, static_cast<int>(digits), false));
     });
@@ -428,6 +432,7 @@ void install_number_builtins(JsIntrinsics& realm) {
         double x = this_number("toPrecision");
         if (js_arg(args, 0).is_undefined()) return JsValue::make_string(js_number_to_string(x));
         double precision = js_to_integer(js_to_number(js_arg(args, 0)));
+        if (!std::isfinite(x)) return JsValue::make_string(js_number_to_string(x));
         if (precision < 1 || precision > 100) js_throw_range_error("toPrecision() argument must be between 1 and 100");
         return JsValue::make_string(to_precision(x, static_cast<int>(precision)));
     });

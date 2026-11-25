@@ -421,6 +421,9 @@ void install_number_builtins(JsIntrinsics& realm) {
         double x = this_number("toExponential");
         if (js_arg(args, 0).is_undefined()) return JsValue::make_string(to_exponential(x, 0, true));
         double digits = js_to_integer(js_to_number(js_arg(args, 0)));
+        // The precision is converted even for NaN and infinities, but the
+        // range check applies only to finite receivers.
+        if (!std::isfinite(x)) return JsValue::make_string(js_number_to_string(x));
         if (digits < 0 || digits > 100) js_throw_range_error("toExponential() argument must be between 0 and 100");
         return JsValue::make_string(to_exponential(x, static_cast<int>(digits), false));
     });
@@ -428,6 +431,7 @@ void install_number_builtins(JsIntrinsics& realm) {
         double x = this_number("toPrecision");
         if (js_arg(args, 0).is_undefined()) return JsValue::make_string(js_number_to_string(x));
         double precision = js_to_integer(js_to_number(js_arg(args, 0)));
+        if (!std::isfinite(x)) return JsValue::make_string(js_number_to_string(x));
         if (precision < 1 || precision > 100) js_throw_range_error("toPrecision() argument must be between 1 and 100");
         return JsValue::make_string(to_precision(x, static_cast<int>(precision)));
     });

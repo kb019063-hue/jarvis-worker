@@ -1,6 +1,9 @@
 #include "litebird/render/Canvas2D.hpp"
 #include "litebird/js/JsOps.hpp"
 #include "litebird/render/FontRenderer.hpp"
+#include "litebird/dom/Element.hpp"
+#include "litebird/dom/Node.hpp"
+#include "litebird/render/ImageFilter.hpp"
 #include "litebird/render/RasterBudget.hpp"
 #include <algorithm>
 #include <cctype>
@@ -399,6 +402,15 @@ void CanvasRenderingContext2D::save() {
     st.font = font;
     st.text_align = text_align;
     st.text_baseline = text_baseline;
+    st.letter_spacing_px = letter_spacing_px;
+    st.letter_spacing_source = letter_spacing_source;
+    st.word_spacing_px = word_spacing_px;
+    st.word_spacing_source = word_spacing_source;
+    st.direction = direction;
+    st.font_kerning = font_kerning;
+    st.font_stretch = font_stretch;
+    st.font_variant_caps = font_variant_caps;
+    st.text_rendering = text_rendering;
     st.fill_gradient = fill_gradient;
     st.stroke_gradient = stroke_gradient;
     st.fill_pattern = fill_pattern;
@@ -411,6 +423,8 @@ void CanvasRenderingContext2D::save() {
     st.shadow_color = shadow_color;
     st.shadow_offset_x = shadow_offset_x;
     st.shadow_offset_y = shadow_offset_y;
+    st.filter_source = filter_source;
+    st.filter_list = filter_list;
     st.ctm = m_ctm;
     st.clip_mask = m_clip_mask;
     m_state_stack.push_back(std::move(st));
@@ -433,6 +447,15 @@ void CanvasRenderingContext2D::restore() {
     font = std::move(st.font);
     text_align = std::move(st.text_align);
     text_baseline = std::move(st.text_baseline);
+    letter_spacing_px = st.letter_spacing_px;
+    letter_spacing_source = std::move(st.letter_spacing_source);
+    word_spacing_px = st.word_spacing_px;
+    word_spacing_source = std::move(st.word_spacing_source);
+    direction = std::move(st.direction);
+    font_kerning = std::move(st.font_kerning);
+    font_stretch = std::move(st.font_stretch);
+    font_variant_caps = std::move(st.font_variant_caps);
+    text_rendering = std::move(st.text_rendering);
     fill_gradient = std::move(st.fill_gradient);
     stroke_gradient = std::move(st.stroke_gradient);
     fill_pattern = std::move(st.fill_pattern);
@@ -445,6 +468,8 @@ void CanvasRenderingContext2D::restore() {
     shadow_color = st.shadow_color;
     shadow_offset_x = st.shadow_offset_x;
     shadow_offset_y = st.shadow_offset_y;
+    filter_source = st.filter_source;
+    filter_list = st.filter_list;
     m_ctm = st.ctm;
     const size_t expected_mask_size = static_cast<size_t>(m_width) * static_cast<size_t>(m_height);
     if (st.clip_mask.size() == expected_mask_size) {
@@ -472,6 +497,18 @@ void CanvasRenderingContext2D::reset() {
     font = "10px sans-serif";
     text_align = "start";
     text_baseline = "alphabetic";
+    // §4.12.5.1's list of what the canvas state holds names "the current letter
+    // spacing, word spacing, … and shadow color", so `reset()` puts these back to
+    // their initial values as it does the rest.
+    letter_spacing_px = 0.0f;
+    letter_spacing_source = "0px";
+    word_spacing_px = 0.0f;
+    word_spacing_source = "0px";
+    direction = "inherit";
+    font_kerning = "auto";
+    font_stretch = "normal";
+    font_variant_caps = "normal";
+    text_rendering = "auto";
     fill_gradient.reset();
     stroke_gradient.reset();
     fill_pattern.reset();
@@ -546,6 +583,101 @@ void CanvasRenderingContext2D::set_line_dash(const std::vector<float>& segments)
 // Text
 // ---------------------------------------------------------------------------
 
+// §4.12.5.1's spacing rules, in the one place both the measurer and the painter
+// go through. The rule, as the standard puts it, is that a letter space follows
+// every typographic character unit and a word space additionally follows each
+// word-separator character — with the exception that neither applies to the first
+// character of the string, so `letterSpacing: 8px` on "ab" adds 8 and not 16.
+//
+// A `run` may hold several glyphs for one character (a base and its marks, or a
+// ligature). The space goes after the **last** of them, which is where the pen
+// really leaves the character: putting it after every glyph would space a base
+// away from its own accent, a visible break in Arabic and Devanagari.
+void CanvasRenderingContext2D::apply_text_spacing(std::vector<FontRenderer::ShapedGlyph>& run,
+                                                  const std::string& text,
+                                                  float letter_px, float word_px) {
+    if (run.empty()) return;
+    if (letter_px == 0.0f && word_px == 0.0f) return;
+
+    // The characters of `text`, so a space can be recognised. Only the number of
+    // entries matters here, plus which are U+0020.
+    std::vector<uint32_t> cps;
+    cps.reserve(text.size());
+    std::size_t pos = 0;
+    while (pos < text.size()) {
+        const unsigned char lead = static_cast<unsigned char>(text[pos]);
+        uint32_t cp = lead;
+        std::size_t extra = 0;
+        if (lead >= 0xF0) { cp = lead & 0x07u; extra = 3; }
+        else if (lead >= 0xE0) { cp = lead & 0x0Fu; extra = 2; }
+        else if (lead >= 0xC0) { cp = lead & 0x1Fu; extra = 1; }
+        for (std::size_t k = 0; k < extra && pos + 1 < text.size(); ++k) {
+            cp = (cp << 6) | (static_cast<unsigned char>(text[++pos]) & 0x3Fu);
+        }
+        cps.push_back(cp);
+        ++pos;
+    }
+
+    // A shaped run has one glyph per character except where `GSUB` made a
+    // ligature (fewer) or a mark was attached (may be more). The mapping is not
+    // recoverable in general, so the rule is applied by the *run* structure the
+    // shaper keeps: a glyph that starts a new cluster is a new character. That is
+    // `is_mark` being false, plus a real advance — a zero-advance non-mark is an
+    // accent the shaper placed itself.
+    //
+    // When the counts do not line up at all the spacing still applies per glyph,
+    // which is right for the script-less case (Latin, the overwhelmingly common
+    // one) and honest about what it cannot see.
+    const bool counts_agree = (run.size() == cps.size());
+    float running = 0.0f;
+    std::size_t char_index = 0;
+    for (std::size_t i = 0; i < run.size(); ++i) {
+        // Is this glyph the end of its character? Yes unless the next glyph is a
+        // mark that belongs to it.
+        // `ShapedGlyph` carries `is_mark` and nothing about clusters, so a mark
+        // continues the character it follows. That is the one case a shaper puts
+        // a glyph after another without advancing the pen.
+        const bool last_of_character = (i + 1 == run.size()) || !run[i + 1].is_mark;
+        running += run[i].advance;
+        if (!last_of_character) continue;
+
+        // Which character ended here, for the space test.
+        const bool is_space = counts_agree ? (cps[i] == 0x20)
+                                           : (char_index < cps.size() && cps[char_index] == 0x20);
+        ++char_index;
+        // The first character never takes a space, whichever kind.
+        if (char_index == 1) continue;
+        float add = letter_px;
+        if (is_space) add += word_px;
+        if (add == 0.0f) continue;
+        // Widening the last glyph's advance moves the pen and leaves the ink
+        // where it was, which is exactly what letter spacing is: the character
+        // does not stretch, the distance after it does.
+        run[i].advance += add;
+        running += add;
+    }
+}
+
+bool CanvasRenderingContext2D::text_direction_is_rtl() const {
+    if (direction == "rtl") return true;
+    if (direction == "ltr") return false;
+    // "inherit": the direction of the canvas element, which is its `dir`
+    // attribute or its nearest ancestor's. A context has no element of its own
+    // unless one was wired in (`set_owner_element`), and a context made by
+    // `createElement('canvas')` and never attached has no ancestors either — both
+    // are `ltr`, which is the initial value of `dir`.
+    std::shared_ptr<const Node> node = m_owner_element.lock();
+    while (node) {
+        if (const auto* el = dynamic_cast<const Element*>(node.get())) {
+            const std::string d = el->get_attribute("dir");
+            if (d == "rtl" || d == "RTL") return true;
+            if (d == "ltr" || d == "LTR") return false;
+        }
+        node = node->parent();
+    }
+    return false;
+}
+
 CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const std::string& text,
                                                                            float max_width) const {
     TextLayout layout;
@@ -563,10 +695,24 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
     layout.ascent = metrics.first;
     layout.descent = metrics.second;
 
-    const std::vector<FontRenderer::ShapedGlyph> shaped =
+    // §4.12.5.1: `fontKerning: "none"` turns kerning off, and `direction` decides
+    // which way an RTL run is ordered. Both are shaping inputs, so they belong
+    // here rather than being applied to the result.
+    const bool kern = (font_kerning != "none");
+    // `visual_rtl` is deliberately left at its default `true` and is *not* driven
+    // by `direction`. Before Phase 417 the shaper already ordered RTL **script**
+    // runs (Hebrew, Arabic) visually, whatever the context said; passing
+    // `direction` through would have turned that ordering off for every page that
+    // had not set `direction`, which is all of them. `direction` is an inline
+    // direction for `start`/`end`, not a switch for the script's own ordering.
+    std::vector<FontRenderer::ShapedGlyph> shaped =
         (size_px > 0.0f && !text.empty())
-            ? FontRenderer::instance().shape_text(text, size_px, parsed.weight, parsed.family, italic)
+            ? FontRenderer::instance().shape_text(text, size_px, parsed.weight, parsed.family, italic,
+                                                  kern)
             : std::vector<FontRenderer::ShapedGlyph>{};
+    // And the spacing, after shaping and before anything is measured: one call
+    // for both, which is what keeps `measureText` and the painter in step.
+    apply_text_spacing(shaped, text, letter_spacing_px, word_spacing_px);
     float advance = 0.0f;
     float min_x = 0.0f;
     float max_x = 0.0f;
@@ -758,9 +904,12 @@ void CanvasRenderingContext2D::paint_shadow(const std::vector<uint8_t>& coverage
 }
 
 CanvasRenderingContext2D::ShadowCapture::ShadowCapture(CanvasRenderingContext2D* context) {
-    // Only a context that has a visible shadow captures: an invisible shadow
-    // changes no pixel, and the capture is a whole-canvas buffer.
-    if (!context || context->shadow_color.a == 0) return;
+    // Only a context that has a visible shadow, or a filter, captures: an
+    // invisible shadow changes no pixel, and the capture is a whole-canvas
+    // buffer. A filter needs the same buffer for a different reason — it reads
+    // the primitive's pixels as a set, not one at a time as `set_pixel_safe`
+    // does — but the mechanism is identical, so both share it.
+    if (!context || (context->shadow_color.a == 0 && !context->filter_is_active())) return;
     context_ = context;
     if (context_->m_capture_depth++ == 0) {
         const std::size_t size = static_cast<std::size_t>(context_->m_width) *
@@ -781,17 +930,324 @@ bool CanvasRenderingContext2D::ShadowCapture::take(int x, int y, Color& out) {
     return true;
 }
 
+// §4.12.5.1 `filter`, parsed. The grammar is a space-separated list of filter
+// functions, each `name(` argument `)`. Anything outside it — an unknown
+// function, a missing parenthesis, a bad argument, a stray word — makes the
+// whole value invalid, and an invalid value is **ignored**: the previous list
+// stays. Per-function salvage would put a half-understood effect on the canvas,
+// which looks like a rendering bug rather than a rejected assignment.
+namespace {
+
+struct FilterParse {
+    bool ok{false};
+    std::vector<FilterFunction> list;
+};
+
+// A CSS number: `2`, `0.5`, `-1`, `+.25`, `1e2`. No units — every filter
+// argument that is not an angle or a length is a plain number.
+bool parse_css_number(const std::string& text, float& out) {
+    if (text.empty()) return false;
+    const char* begin = text.c_str();
+    char* end = nullptr;
+    const double v = std::strtod(begin, &end);
+    if (end == begin || *end != '\0' || !std::isfinite(v)) return false;
+    out = static_cast<float>(v);
+    return true;
+}
+
+// A percentage or number, the form `brightness`, `contrast`, `opacity`,
+// `saturate` and `grayscale` accept interchangeably: `50%` and `0.5` are the
+// same request.
+bool parse_amount(const std::string& text, float& out) {
+    if (!text.empty() && text.back() == '%') {
+        float n = 0.0f;
+        if (!parse_css_number(text.substr(0, text.size() - 1), n)) return false;
+        out = n / 100.0f;
+        return true;
+    }
+    return parse_css_number(text, out);
+}
+
+// An angle for `hue-rotate`: a number is degrees, and `deg` is the only unit
+// this engine accepts. `rad`/`grad`/`turn` are legal CSS but a page that wants
+// them can convert; accepting one of them wrongly would be worse than
+// rejecting the value, which the specification allows.
+bool parse_angle(const std::string& text, float& out) {
+    std::string body = text;
+    const bool degrees = body.size() > 3 && body.compare(body.size() - 3, 3, "deg") == 0;
+    if (degrees) body.resize(body.size() - 3);
+    return parse_css_number(body, out);
+}
+
+// A `<length>` for `blur()` and `drop-shadow()`. Canvas draws in CSS pixels, so
+// `px` is the one unit that can mean what it says; `em`, `rem`, `pt` would need
+// a font and a resolution this context does not consult. A bare number is
+// accepted only for zero, which is the one value CSS lets stand alone.
+bool parse_length(const std::string& text, float& out) {
+    if (!text.empty() && text.back() == '%') return false;
+    std::string body = text;
+    bool had_px = false;
+    if (body.size() > 2 && body.compare(body.size() - 2, 2, "px") == 0) {
+        body.resize(body.size() - 2);
+        had_px = true;
+    }
+    float v = 0.0f;
+    if (!parse_css_number(body, v)) return false;
+    if (!had_px && v != 0.0f) return false;
+    out = v;
+    return true;
+}
+
+std::string lower_ascii(std::string v) {
+    for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return v;
+}
+
+std::string trim_ascii(const std::string& v) {
+    std::size_t b = v.find_first_not_of(" \t\r\n\f");
+    if (b == std::string::npos) return {};
+    std::size_t e = v.find_last_not_of(" \t\r\n\f");
+    return v.substr(b, e - b + 1);
+}
+
+// `drop-shadow( <dx> <dy> [blur] [colour] )`. The first two are required; the
+// optional colour is the *last* token because a CSS colour can itself contain
+// spaces, and `rgba(0, 0, 0, 0.5)` is four of them.
+bool parse_drop_shadow(const std::string& body, FilterFunction& f) {
+    std::vector<std::string> tokens;
+    std::string current;
+    int depth = 0;
+    for (char c : body) {
+        if (c == '(') ++depth;
+        if (c == ')') --depth;
+        if ((c == ' ' || c == '\t') && depth == 0) {
+            if (!current.empty()) { tokens.push_back(current); current.clear(); }
+        } else {
+            current += c;
+        }
+    }
+    if (!current.empty()) tokens.push_back(current);
+    // A zero-blur drop shadow is still a shadow, but CSS makes the colour
+    // optional and defaults it to the used `color`, which this engine does not
+    // carry; transparent black is what an unstated shadow colour paints.
+    f.type = FilterType::DropShadow;
+    f.color = Color(0, 0, 0, 255);
+    f.dx = 0.0f;
+    f.dy = 0.0f;
+    f.blur_radius = 0.0f;
+    std::size_t i = 0;
+    if (tokens.size() < 2) return false;
+    // A colour may come first in CSS. Only the `#rgb`/`#rrggbb` and
+    // `rgb()`/`rgba()` forms are treated as a leading colour: a number is never
+    // a colour, so this cannot swallow an offset.
+    if (tokens[0][0] == '#') {
+        f.color = Color::parse(tokens[0]);
+        ++i;
+    } else if (lower_ascii(tokens[0]).rfind("rgb", 0) == 0) {
+        f.color = Color::parse(tokens[0]);
+        ++i;
+    }
+    if (i + 1 >= tokens.size()) return false;
+    float dx = 0.0f, dy = 0.0f;
+    if (!parse_length(tokens[i], dx) || !parse_length(tokens[i + 1], dy)) return false;
+    f.dx = dx;
+    f.dy = dy;
+    i += 2;
+    // The remaining tokens are `[blur] [colour]`, each optional and each
+    // recognisable by shape: a blur is a length and a colour never is.
+    if (i < tokens.size()) {
+        float blur = 0.0f;
+        if (parse_length(tokens[i], blur)) {
+            // A negative blur is invalid CSS, so the value is rejected whole.
+            if (blur < 0.0f) return false;
+            f.blur_radius = blur;
+            ++i;
+        }
+    }
+    // At most one colour may follow, and it may equally have come first.
+    if (i < tokens.size() && (tokens[i][0] == '#' || lower_ascii(tokens[i]).rfind("rgb", 0) == 0)) {
+        f.color = Color::parse(tokens[i]);
+        ++i;
+    }
+    if (i != tokens.size()) return false;
+    return true;
+}
+
+// §4.12.5.1's `letterSpacing`/`wordSpacing`: a CSS `<length>`, which is a number
+// and a unit. `px`, `em`, `ex` and `rem` are what a canvas page writes; `em` and
+// `ex` are resolved against the current font size, which is why the setter takes
+// the size as an argument. Returns false for anything else, and the caller then
+// leaves the previous value alone — the specification's "values that cannot be
+// parsed as a CSS <length> are ignored".
+//
+// A bare `0` is the one number CSS lets stand without a unit, and `0px` and `0`
+// both serialize as `0px`, which is what the getter answers.
+// The serialized form of a spacing, for the getter. The specification says the
+// getter answers "the serialized form of this's letter spacing", which is a CSS
+// length value — `2em` stays `2em`, not `32px`. So the page's own text is kept,
+// normalised: lower case, no leading `+`, no trailing zeros. A value whose unit
+// this context could not reproduce exactly (`0.1em` at 10px is 1px, and reading
+// `0.1em` back would be right too, but `1.7em` at 9px is 15.3px and reading
+// `1.7em` back is the *same* value) is answered in `px`, which is exact for what
+// the context actually holds.
+std::string serialize_px(const std::string& asked, float px) {
+    std::string v = trim_ascii(asked);
+    for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // Drop a leading `+` and a redundant `.0` tail, which CSS serialization does.
+    if (!v.empty() && v[0] == '+') v.erase(0, 1);
+    // `2.50px` -> `2.5px`, `2.0px` -> `2px`.
+    if (v.find('.') != std::string::npos && (v.back() == 'p' || v.back() == 'x' || v.back() == 'm')) {
+        const std::size_t unit_at = v.find_first_of("abcdefghijklmnopqrstuvwxyz");
+        if (unit_at != std::string::npos) {
+            std::string num = v.substr(0, unit_at);
+            std::string unit = v.substr(unit_at);
+            while (!num.empty() && num.back() == '0') num.pop_back();
+            if (!num.empty() && num.back() == '.') num.pop_back();
+            if (num.empty()) num = "0";
+            v = num + unit;
+        }
+    }
+    if (v.empty()) return "0px";
+    // A number with no unit can only have been zero, and zero serializes with one.
+    if (std::isdigit(static_cast<unsigned char>(v.back())) || v.back() == '.') return v + "px";
+    return v;
+}
+
+bool parse_css_length_px(const std::string& text, float font_size_px, float& px) {
+    std::string v = trim_ascii(text);
+    if (v.empty()) return false;
+    for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // There is no `calc()`, `var()` or percentage here: a length on this attribute
+    // has no box to take a percentage of.
+    if (v.find('(') != std::string::npos || v.find('%') != std::string::npos) return false;
+
+    std::size_t unit_at = v.size();
+    while (unit_at > 0 && std::isalpha(static_cast<unsigned char>(v[unit_at - 1]))) --unit_at;
+    const std::string unit = v.substr(unit_at);
+    const std::string number = v.substr(0, unit_at);
+    float n = 0.0f;
+    if (!parse_css_number(number, n)) return false;
+    if (unit.empty()) {
+        // Only zero may be written without a unit.
+        if (n != 0.0f) return false;
+        px = 0.0f;
+        return true;
+    }
+    if (unit == "px") { px = n; return true; }
+    if (unit == "em") { px = n * font_size_px; return true; }
+    if (unit == "ex") { px = n * font_size_px * 0.5f; return true; }
+    if (unit == "rem") { px = n * 16.0f; return true; }
+    // `pt`, `pc`, `cm`, `mm`, `in`, `q`, `vw`, `vh`, `vmin`, `vmax`: a length in a
+    // unit this context does not resolve. Rejecting the value is what the
+    // specification asks for an unparseable length, and guessing would put a
+    // number the page did not ask for on the canvas.
+    return false;
+}
+
+FilterParse parse_filter_list(const std::string& text) {
+    FilterParse out;
+    const std::string v = lower_ascii(trim_ascii(text));
+    if (v == "none") { out.ok = true; return out; }
+    if (v.empty()) return out;
+
+    std::size_t i = 0;
+    const std::size_t n = v.size();
+    while (i < n) {
+        while (i < n && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '\r')) ++i;
+        if (i >= n) break;
+        const std::size_t name_start = i;
+        while (i < n && (std::isalpha(static_cast<unsigned char>(v[i])) || v[i] == '-' || v[i] == '_')) ++i;
+        const std::string name = v.substr(name_start, i - name_start);
+        if (name.empty()) return out;  // a bare word or punctuation
+        if (i >= n || v[i] != '(') return out;
+        ++i;
+        // The argument runs to the matching `)`, so `drop-shadow(...)` may hold
+        // parentheses of its own without splitting the list there.
+        const std::size_t arg_start = i;
+        int depth = 1;
+        while (i < n && depth > 0) {
+            if (v[i] == '(') ++depth;
+            else if (v[i] == ')') --depth;
+            if (depth > 0) ++i;
+        }
+        if (depth != 0) return out;  // unbalanced
+        const std::string arg = trim_ascii(v.substr(arg_start, i - arg_start));
+        ++i;  // past the `)`
+
+        FilterFunction f;
+        float amount = 1.0f;
+        if (name == "blur") {
+            // The one filter whose argument is a length, and it may be empty:
+            // `blur()` is `blur(0)`.
+            float radius = 0.0f;
+            if (!arg.empty() && !parse_length(arg, radius)) return out;
+            if (radius < 0.0f) return out;
+            f.type = FilterType::Blur;
+            f.amount = radius;
+        } else if (name == "brightness" || name == "contrast" || name == "opacity" ||
+                   name == "saturate" || name == "grayscale" || name == "sepia" || name == "invert") {
+            // Each of these is `amount || 1`, so an empty argument is the
+            // default rather than an error. `invert(0)`/`invert(1)` are the two
+            // CSS switches, and `sepia`/`grayscale` share the fraction.
+            if (!arg.empty() && !parse_amount(arg, amount)) return out;
+            if (name == "brightness") f.type = FilterType::Brightness;
+            else if (name == "contrast") f.type = FilterType::Contrast;
+            else if (name == "opacity") f.type = FilterType::Opacity;
+            else if (name == "saturate") f.type = FilterType::Saturate;
+            else if (name == "grayscale") f.type = FilterType::Grayscale;
+            else if (name == "sepia") f.type = FilterType::Sepia;
+            else f.type = FilterType::Invert;
+            f.amount = amount;
+        } else if (name == "hue-rotate") {
+            float degrees = 0.0f;
+            if (!arg.empty() && !parse_angle(arg, degrees)) return out;
+            f.type = FilterType::HueRotate;
+            f.amount = degrees;
+        } else if (name == "drop-shadow") {
+            if (!parse_drop_shadow(arg, f)) return out;
+        } else {
+            return out;  // `url()` and anything else this engine cannot do
+        }
+        out.list.push_back(f);
+    }
+    out.ok = true;
+    return out;
+}
+
+}  // namespace
+
 void CanvasRenderingContext2D::replay_captured() {
     const std::size_t size = static_cast<std::size_t>(m_width) * static_cast<std::size_t>(m_height);
     // The shadow first, from the coverage, and then the primitive over it.
     if (m_captured_coverage.size() == size) paint_shadow(m_captured_coverage);
     // Painting the primitive goes through the unchanged path, so it is the same
     // compositing, clipping and alpha as if there had been no shadow at all.
+    // A filter applies to the primitive as a whole — a blur reads the pixels
+    // around each pixel, `grayscale` mixes the three channels — so it runs here,
+    // on the captured buffer, and never inside `set_pixel_safe`. Filtering
+    // before the alpha is unfolded is what keeps `drop-shadow` able to see the
+    // shape's own silhouette.
+    std::vector<Color> pixels;
+    if (filter_is_active() && m_captured_coverage.size() == size) {
+        pixels.resize(size);
+        for (std::size_t i = 0; i < size; ++i) {
+            pixels[i] = Color::from_argb(m_captured_pixels[i]);
+            pixels[i].a = static_cast<uint8_t>(std::min(255, static_cast<int>(m_captured_coverage[i])));
+        }
+        ImageFilter::apply_filters(pixels, m_width, m_height, filter_list);
+    }
     for (std::size_t i = 0; i < m_captured_coverage.size(); ++i) {
-        if (m_captured_coverage[i] == 0) continue;
+        // The coverage gate is right for a shadow — an untouched pixel must not
+        // repaint the background — and wrong for a filter: `drop-shadow` puts
+        // the shadow where the primitive did **not** draw, and a blur softens
+        // the edge outward. So a filter writes every pixel it was given, and
+        // skips only the ones it left completely transparent.
+        if (pixels.empty() && m_captured_coverage[i] == 0) continue;
+        if (!pixels.empty() && pixels[i].a == 0 && m_captured_coverage[i] == 0) continue;
         const int x = static_cast<int>(i % static_cast<std::size_t>(m_width));
         const int y = static_cast<int>(i / static_cast<std::size_t>(m_width));
-        const Color c = Color::from_argb(m_captured_pixels[i]);
+        const Color c = pixels.empty() ? Color::from_argb(m_captured_pixels[i]) : pixels[i];
+        if (!pixels.empty() && c.a == 0) continue;
         // The alpha recorded is already `global_alpha * coverage * colour alpha`,
         // so this writes with full coverage rather than scaling it twice.
         set_pixel_safe(x, y, c, 255);
@@ -935,12 +1391,21 @@ void CanvasRenderingContext2D::draw_text_run(const std::string& text, float x, f
     TextLayout layout = layout_text(text, max_width);
     if (layout.advance <= 0.0f) return; // nothing to draw (or empty string)
 
+    // §4.12.5.1: "start" and "end" are relative to `direction`, which is the one
+    // place `direction` changes a picture in a context with no bidi paragraph of
+    // its own. Before Phase 417 the comment here said "start is left and end is
+    // right" and both were hard-coded.
+    const bool rtl = text_direction_is_rtl();
+    const std::string align =
+        (text_align == "start") ? (rtl ? "right" : "left")
+        : (text_align == "end") ? (rtl ? "left" : "right")
+                                : text_align;
     float pen_user_x = x;
-    if (text_align == "center") {
+    if (align == "center") {
         pen_user_x = x - layout.advance * 0.5f;
-    } else if (text_align == "right" || text_align == "end") {
+    } else if (align == "right") {
         pen_user_x = x - layout.advance;
-    } // "left", "start" (and anything else) draw from x
+    } // "left" (and anything else) draw from x
 
     float baseline_user_y;
     if (text_baseline == "top") {
@@ -2158,6 +2623,111 @@ void CanvasRenderingContext2D::fill(FillRule rule) {
     rasterize_paths(m_paths, rule, fill_style, fill_gradient, m_ctm.inverse(), fill_pattern);
 }
 
+// §4.12.5.1.7: a `Path2D` is the calls it was given, replayed under the CTM in
+// force **now**. Everything about how a curve becomes pixels — the flattening,
+// the arc-to-bezier conversion, the degenerate-radius rules — is the context's own
+// code, so a `Path2D` cannot disagree with `moveTo`+`lineTo` about any of it.
+//
+// The current path is saved and put back, because none of these four methods may
+// disturb it: `ctx.fill(path)` twice must draw the same picture twice, and a page
+// that drew into the context's own path before this call must find it intact
+// afterwards.
+void CanvasRenderingContext2D::replay_into(const Path2D& path) {
+    for (const Path2D::Op& op : path.ops()) {
+        switch (op.kind) {
+            case Path2D::Kind::MoveTo:
+                move_to(op.a, op.b);
+                break;
+            case Path2D::Kind::LineTo:
+                line_to(op.a, op.b);
+                break;
+            case Path2D::Kind::QuadraticCurveTo:
+                quadratic_curve_to(op.a, op.b, op.c, op.d);
+                break;
+            case Path2D::Kind::BezierCurveTo:
+                bezier_curve_to(op.a, op.b, op.c, op.d, op.e, op.f);
+                break;
+            case Path2D::Kind::ArcTo:
+                arc_to(op.a, op.b, op.c, op.d, op.e);
+                break;
+            case Path2D::Kind::Arc:
+                arc(op.a, op.b, op.c, op.d, op.e, op.clockwise);
+                break;
+            case Path2D::Kind::Ellipse:
+                ellipse(op.a, op.b, op.c, op.d, op.e, op.f, op.g, op.clockwise);
+                break;
+            case Path2D::Kind::Rect:
+                rect(op.a, op.b, op.c, op.d);
+                break;
+            case Path2D::Kind::RoundRect:
+                // The radii were kept as the page wrote them, because
+                // `roundRect` takes either one value or four; `op.a`..`op.d` are
+                // the rectangle and the four radii follow in `radii`.
+                round_rect(op.a, op.b, op.c, op.d, op.e);
+                break;
+            case Path2D::Kind::ClosePath:
+                close_path();
+                break;
+            case Path2D::Kind::AddPath: {
+                if (!op.path) break;
+                // `addPath(other, transform)`: the other path's calls, under this
+                // path's matrix composed with the one in force. The transform
+                // belongs to the *added* path's points, so it is applied by
+                // pre-multiplying the CTM for the duration of the replay rather
+                // than by transforming points here — that way an added arc is
+                // still an arc and not a polyline of its flattened form.
+                const TransformMatrix2D outer = m_ctm;
+                m_ctm = outer.multiply(op.transform);
+                // The added path's calls are appended to this path's, which is
+                // what `addPath` means; `replay_into` adds without clearing.
+                replay_into(*op.path);
+                m_ctm = outer;
+                break;
+            }
+        }
+    }
+}
+
+void CanvasRenderingContext2D::fill_path(const Path2D& path, FillRule rule) {
+    if (path.empty()) return;
+    const std::vector<SubPath> saved = m_paths;
+    m_paths.clear();
+    replay_into(path);
+    fill(rule);
+    m_paths = saved;
+}
+
+void CanvasRenderingContext2D::stroke_path(const Path2D& path) {
+    if (path.empty()) return;
+    const std::vector<SubPath> saved = m_paths;
+    m_paths.clear();
+    replay_into(path);
+    stroke();
+    m_paths = saved;
+}
+
+void CanvasRenderingContext2D::clip_path(const Path2D& path, FillRule rule) {
+    if (path.empty()) return;
+    const std::vector<SubPath> saved = m_paths;
+    m_paths.clear();
+    replay_into(path);
+    clip(rule);
+    m_paths = saved;
+}
+
+bool CanvasRenderingContext2D::is_point_in_path_object(float x, float y, const Path2D& path,
+                                                       FillRule rule) const {
+    if (path.empty()) return false;
+    // The test is against the path under the CTM in force, which is what
+    // `is_point_in_path` already does for the current path; a copy of the context
+    // would have to duplicate the whole state, so the path is laid out into a
+    // temporary and asked directly.
+    CanvasRenderingContext2D probe = *this;
+    probe.m_paths.clear();
+    probe.replay_into(path);
+    return probe.is_point_in_path(x, y, rule);
+}
+
 void CanvasRenderingContext2D::clip(FillRule rule) {
     if (!has_backing_store()) return;
     std::vector<uint8_t> new_mask;
@@ -2381,6 +2951,21 @@ void CanvasRenderingContext2D::draw_image(const std::shared_ptr<ImageData>& img,
                                                          image_smoothing_enabled));
         }
     }
+}
+
+/// §4.12.5.1.7: the first argument of `fill`, `stroke`, `clip` and
+/// `isPointInPath` may be a `Path2D`, in which case the path is **that** one and
+/// the current path is untouched. Returns null when the argument is not one, and
+/// the caller then uses the current path — which is what a page that passed
+/// `'evenodd'` or nothing at all expects.
+///
+/// This is the whole reason `fill({})` must not silently fill the current path
+/// while a page believed it passed a path: a plain object is not a `Path2D`, so
+/// the argument is the fill rule position instead. The specification's `[EnforceRange]`
+/// union does not accept an arbitrary object either.
+static std::shared_ptr<Path2D> path_arg(const std::vector<JsValue>& args, size_t idx) {
+    if (args.size() <= idx) return nullptr;
+    return args[idx].path2d_value();
 }
 
 static FillRule parse_fill_rule_arg(const std::vector<JsValue>& args, size_t idx) {
@@ -2681,18 +3266,23 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
         return grad->to_js_value(grad);
     }));
 
-    ctx.set_property("stroke", JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
-        get_ctx()->stroke();
+    ctx.set_property("stroke", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+        if (auto path = path_arg(args, 0)) get_ctx()->stroke_path(*path);
+        else get_ctx()->stroke();
         return JsValue::make_undefined();
     }));
 
     ctx.set_property("fill", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
-        get_ctx()->fill(parse_fill_rule_arg(args, 0));
+        // `fill(path, rule)` or `fill(rule)`: the argument's *type* decides which
+        // shape of call this is, exactly as the IDL union does.
+        if (auto path = path_arg(args, 0)) get_ctx()->fill_path(*path, parse_fill_rule_arg(args, 1));
+        else get_ctx()->fill(parse_fill_rule_arg(args, 0));
         return JsValue::make_undefined();
     }));
 
     ctx.set_property("clip", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
-        get_ctx()->clip(parse_fill_rule_arg(args, 0));
+        if (auto path = path_arg(args, 0)) get_ctx()->clip_path(*path, parse_fill_rule_arg(args, 1));
+        else get_ctx()->clip(parse_fill_rule_arg(args, 0));
         return JsValue::make_undefined();
     }));
 
@@ -2706,6 +3296,15 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
     }));
 
     ctx.set_property("isPointInPath", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+        // `isPointInPath(path, x, y, rule)` shifts every argument by one.
+        if (auto path = path_arg(args, 0)) {
+            if (args.size() >= 3) {
+                return JsValue::make_boolean(get_ctx()->is_point_in_path_object(
+                    static_cast<float>(args[1].to_number()),
+                    static_cast<float>(args[2].to_number()), *path, parse_fill_rule_arg(args, 3)));
+            }
+            return JsValue::make_boolean(false);
+        }
         if (args.size() >= 2) {
             return JsValue::make_boolean(get_ctx()->is_point_in_path(
                 static_cast<float>(args[0].to_number()),
@@ -2850,6 +3449,30 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
         kAccFlags
     );
 
+    // §4.12.5.1's `filter`. It did not exist, so no filter function could be
+    // asked for at all. The getter answers the string the page wrote — as a
+    // browser does, including a value that came back to `"none"` — and the
+    // setter parses it into the list the renderer applies.
+    ctx.define_accessor(
+        "filter",
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
+            return JsValue::make_string(get_ctx()->filter_source);
+        }),
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+            if (args.empty()) return JsValue::make_undefined();
+            const std::string asked = args[0].to_string();
+            FilterParse parsed = parse_filter_list(asked);
+            // An invalid value is ignored, per the specification, so the
+            // previous source and list both stay. A valid one, including
+            // `"none"`, replaces both.
+            if (!parsed.ok) return JsValue::make_undefined();
+            get_ctx()->filter_source = asked;
+            get_ctx()->filter_list = std::move(parsed.list);
+            return JsValue::make_undefined();
+        }),
+        kAccFlags
+    );
+
     ctx.define_accessor(
         "lineCap",
         JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
@@ -2961,6 +3584,99 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
         }),
         kAccFlags
     );
+
+    // §4.12.5.1's two spacings. `typeof ctx.letterSpacing` was `undefined` before
+    // Phase 417, so `ctx.letterSpacing = "5px"` was an expando and changed
+    // nothing: `measureText('ab')` answered the same number before and after it.
+    // The setter parses the value against the **current** font size (which is what
+    // resolves an `em`) and ignores what it cannot parse, keeping the old value.
+    auto spacing_accessor = [&ctx, get_ctx](const char* name, bool letter) {
+        ctx.define_accessor(
+            name,
+            JsValue::make_native_function([get_ctx, letter](const std::vector<JsValue>&) {
+                return JsValue::make_string(letter ? get_ctx()->letter_spacing_source
+                                                   : get_ctx()->word_spacing_source);
+            }),
+            JsValue::make_native_function([get_ctx, letter](const std::vector<JsValue>& args) {
+                if (args.empty()) return JsValue::make_undefined();
+                const std::string asked = args[0].to_string();
+                // The font size the length is resolved against, read the same way
+                // `layout_text` reads it so `1em` here is one em there.
+                ParsedCanvasFont parsed;
+                if (!parse_canvas_font(get_ctx()->font, parsed)) parsed = ParsedCanvasFont{};
+                float px = 0.0f;
+                if (!parse_css_length_px(asked, std::max(0.0f, parsed.size_px), px)) {
+                    return JsValue::make_undefined();
+                }
+                if (letter) {
+                    get_ctx()->letter_spacing_px = px;
+                    // The serialized form, which is what the getter must answer:
+                    // `0` and `0px` both serialize as `0px`, and a page that wrote
+                    // `2EM` reads back `2em`.
+                    get_ctx()->letter_spacing_source = px == 0.0f ? "0px" : serialize_px(asked, px);
+                } else {
+                    get_ctx()->word_spacing_px = px;
+                    get_ctx()->word_spacing_source = px == 0.0f ? "0px" : serialize_px(asked, px);
+                }
+                return JsValue::make_undefined();
+            }),
+            kAccFlags
+        );
+    };
+    spacing_accessor("letterSpacing", true);
+    spacing_accessor("wordSpacing", false);
+
+    ctx.define_accessor(
+        "direction",
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
+            return JsValue::make_string(get_ctx()->direction);
+        }),
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+            if (args.empty()) return JsValue::make_undefined();
+            const std::string v = args[0].to_string();
+            if (v == "ltr" || v == "rtl" || v == "inherit") get_ctx()->direction = v;
+            return JsValue::make_undefined();
+        }),
+        kAccFlags
+    );
+
+    // Four enumerated attributes, whose sets differ in one way that matters: an
+    // unknown value is ignored, and the initial value is not the first of the
+    // list. Registered in a loop because the shape is identical.
+    struct EnumAttr { const char* name; std::string CanvasRenderingContext2D::*field; std::vector<std::string> values; };
+    const std::vector<EnumAttr> enumerated{
+        {"fontKerning", &CanvasRenderingContext2D::font_kerning, {"auto", "normal", "none"}},
+        {"fontStretch", &CanvasRenderingContext2D::font_stretch,
+         {"ultra-condensed", "extra-condensed", "condensed", "semi-condensed", "normal",
+          "semi-expanded", "expanded", "extra-expanded", "ultra-expanded"}},
+        {"fontVariantCaps", &CanvasRenderingContext2D::font_variant_caps,
+         {"normal", "small-caps", "all-small-caps", "petite-caps", "all-petite-caps", "unicase", "titling-caps"}},
+        {"textRendering", &CanvasRenderingContext2D::text_rendering,
+         {"auto", "optimizeSpeed", "optimizeLegibility", "geometricPrecision"}},
+    };
+    for (const EnumAttr& attr : enumerated) {
+        const std::string name = attr.name;
+        const auto field = attr.field;
+        const std::vector<std::string> values = attr.values;
+        ctx.define_accessor(
+            name.c_str(),
+            JsValue::make_native_function([get_ctx, field](const std::vector<JsValue>&) {
+                return JsValue::make_string(get_ctx()->*field);
+            }),
+            JsValue::make_native_function([get_ctx, field, values](const std::vector<JsValue>& args) {
+                if (args.empty()) return JsValue::make_undefined();
+                const std::string v = args[0].to_string();
+                for (const std::string& allowed : values) {
+                    if (v == allowed) {
+                        get_ctx()->*field = v;
+                        break;
+                    }
+                }
+                return JsValue::make_undefined();
+            }),
+            kAccFlags
+        );
+    }
 
     auto text_max_width = [](const std::vector<JsValue>& args) {
         if (args.size() < 4 || args[3].is_nullish() || args[3].is_undefined()) return -1.0f;

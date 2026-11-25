@@ -358,7 +358,7 @@ int main(int argc, char* argv[]) {
                 fn->chunk.disassemble(std::cout, "CLI Script");
             } catch (const std::exception& ex) {
                 // The bytecode compiler covers a subset of the language.
-                std::cerr << "Cannot compile to bytecode: " << ex.what() << "\n";
+                std::cerr << "Cannot compile to bytecode: " << litebird::terminal_safe(ex.what()) << "\n";
                 return 1;
             }
         } else {
@@ -505,7 +505,7 @@ int main(int argc, char* argv[]) {
             auto fn = js_engine.compile_to_bytecode(script);
             fn->chunk.disassemble(std::cout, "Inline <script>");
         } catch (const std::exception& ex) {
-            std::cout << "(not compiled: " << ex.what() << ")";
+            std::cout << "(not compiled: " << litebird::terminal_safe(ex.what()) << ")";
         }
         std::cout << "\n";
     };

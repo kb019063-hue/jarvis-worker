@@ -140,6 +140,7 @@ struct BytecodeFunction;
 class CanvasRenderingContext2D;
 class CanvasGradient;
 class CanvasPattern;
+class Path2D;
 
 class JsValue {
 public:
@@ -227,6 +228,7 @@ public:
                                      std::shared_ptr<CanvasRenderingContext2D>,
                                      std::shared_ptr<CanvasGradient>,
                                      std::shared_ptr<CanvasPattern>,
+                                     std::shared_ptr<Path2D>,
                                      std::shared_ptr<struct PromiseData>,
                                      std::shared_ptr<struct GeneratorData>>;
         Payload payload;
@@ -292,6 +294,10 @@ public:
     /// §4.12.5.1's `CanvasPattern`, when this value is one. A `fillStyle` is
     /// three things: a colour, a gradient or a pattern, and this is the third.
     const std::shared_ptr<CanvasPattern>& canvas_pattern_value() const;
+    /// §4.12.5.1.7's `Path2D`, when this value is one. Carried here rather than
+    /// looked up in a registry, the same way `CanvasPattern` is, so a path is
+    /// released when the last value holding it is.
+    const std::shared_ptr<Path2D>& path2d_value() const;
     const std::shared_ptr<struct PromiseData>& promise_value() const;
     const std::shared_ptr<struct GeneratorData>& generator_value() const;
 
@@ -307,6 +313,7 @@ public:
     void set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> value);
     void set_canvas_gradient_value(std::shared_ptr<CanvasGradient> value);
     void set_canvas_pattern_value(std::shared_ptr<CanvasPattern> value);
+    void set_path2d_value(std::shared_ptr<Path2D> value);
     void set_promise_value(std::shared_ptr<struct PromiseData> value);
     void set_generator_value(std::shared_ptr<struct GeneratorData> value);
 
@@ -695,6 +702,36 @@ JsValue js_get_from_chain(JsObject* start, const std::string& name, const JsValu
 /// The source text of a script function or class (a FunctionNode or ClassNode),
 /// or an empty string when the node has none. Defined in JsParser.cpp.
 std::string js_function_source_text(const AstNode* node);
+
+/// The receiver `Reflect.set` passed, while its own `set_property` call runs.
+///
+/// `set_property` runs a setter with `*this` as `this`, which is right for an
+/// assignment — `obj.x = 1` makes `obj` the receiver — and wrong for
+/// `Reflect.set(target, "x", 1, receiver)`, whose whole point is that the
+/// receiver is neither the target nor reached by walking from it. The
+/// alternative was a second `set_property` taking a receiver, which would have
+/// to be written twice through 300 lines of array, accessor and prototype
+/// rules.
+///
+/// So the receiver travels in a thread-local for the duration of one call and
+/// is null otherwise. Setter calls reach the value through `setter_receiver`,
+/// which answers `*this` when the slot is null: every setter invocation that
+/// is not `Reflect.set` — and that is nearly all of them — is unchanged.
+class SetterReceiverScope {
+public:
+    explicit SetterReceiverScope(const JsValue* receiver);
+    ~SetterReceiverScope();
+    SetterReceiverScope(const SetterReceiverScope&) = delete;
+    SetterReceiverScope& operator=(const SetterReceiverScope&) = delete;
+
+private:
+    const JsValue* m_previous;
+};
+
+/// The `this` a setter should be called with, given the object the write
+/// reached: the `Reflect.set` receiver while a `SetterReceiverScope` is open,
+/// and `on` otherwise.
+const JsValue& setter_receiver(const JsValue& on);
 
 /// ECMAScript `===` (Strict Equality Comparison, 7.2.16).
 ///

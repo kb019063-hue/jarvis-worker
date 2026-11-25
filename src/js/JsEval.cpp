@@ -1658,6 +1658,17 @@ JsValue JsInterpreter::define_class(const std::shared_ptr<ClassNode>& cls, const
             if (JsObject* target = parent_proto.as_prototype()) proto.object_val->prototype = target;
         } else if (parent_proto.type == JsType::Null) {
             proto.object_val->prototype = nullptr;
+        } else {
+            // §15.7.14 step 5: the parent's `prototype` must be an object or
+            // null, and anything else is a TypeError. A *bound* function is
+            // the case this exists for: it is a constructor (§10.4.1.3 gives
+            // it [[Construct]]) but it has no `prototype` property at all, so
+            // `class X extends f.bind(null) {}` has nothing to put in the
+            // chain and Node refuses it. Reading the property and quietly
+            // ignoring a missing one accepted the class and left its instances
+            // inheriting straight from `%Object.prototype%`.
+            js_throw_type_error("Class extends value does not have valid prototype property " +
+                                js_describe_thrown(parent_proto));
         }
     } else if (cls->super_class) {
         proto.object_val->prototype = nullptr;       // `extends null`

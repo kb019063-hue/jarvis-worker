@@ -138,6 +138,11 @@ const std::shared_ptr<CanvasPattern>& JsValue::canvas_pattern_value() const {
     if (extra()) if (auto v = std::get_if<std::shared_ptr<CanvasPattern>>(&extra()->payload)) return *v;
     return empty;
 }
+const std::shared_ptr<Path2D>& JsValue::path2d_value() const {
+    static const std::shared_ptr<Path2D> empty;
+    if (extra()) if (auto v = std::get_if<std::shared_ptr<Path2D>>(&extra()->payload)) return *v;
+    return empty;
+}
 const std::shared_ptr<PromiseData>& JsValue::promise_value() const {
     static const std::shared_ptr<PromiseData> empty;
     if (extra()) if (auto v = std::get_if<std::shared_ptr<PromiseData>>(&extra()->payload)) return *v;
@@ -172,6 +177,7 @@ void JsValue::set_native_function(NativeFn v) {
 void JsValue::set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_canvas_gradient_value(std::shared_ptr<CanvasGradient> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_canvas_pattern_value(std::shared_ptr<CanvasPattern> v) { mutable_extra().payload = std::move(v); }
+void JsValue::set_path2d_value(std::shared_ptr<Path2D> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_promise_value(std::shared_ptr<PromiseData> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_generator_value(std::shared_ptr<GeneratorData> v) { mutable_extra().payload = std::move(v); }
 
@@ -265,6 +271,19 @@ void PropertyMap::clear() {
 // ---------------------------------------------------------------------------
 // Call context: how `this` reaches a native function
 // ---------------------------------------------------------------------------
+
+thread_local const JsValue* t_setter_receiver = nullptr;
+
+SetterReceiverScope::SetterReceiverScope(const JsValue* receiver)
+    : m_previous(t_setter_receiver) {
+    t_setter_receiver = receiver;
+}
+
+SetterReceiverScope::~SetterReceiverScope() { t_setter_receiver = m_previous; }
+
+const JsValue& setter_receiver(const JsValue& on) {
+    return t_setter_receiver ? *t_setter_receiver : on;
+}
 
 namespace {
 
@@ -1112,6 +1131,18 @@ bool JsValue::has_own_property(const std::string& name) const {
         }
         if (is_wrapped_string_index(cell, name)) return true;
         if (cell->properties.find(name) != cell->properties.end()) return true;
+        // A name this object owns outside the table -- the global object's
+        // declarations. The same hook `[[Delete]]` asks below, so the two
+        // agree about what is owned. A cross-origin Window reports only its
+        // exposed table (§7.2.3.5), so the environment is not asked for it.
+        if (cell->own_property_hook) {
+            std::vector<std::string> exposed;
+            const bool cross_origin = dom::cross_origin_own_keys(*this, true, exposed);
+            if (!cross_origin) {
+                bool owned = false;
+                if ((*cell->own_property_hook)(name, /*remove=*/false, owned) && owned) return true;
+            }
+        }
     }
     if (const PropertyMap* map = loose_properties()) {
         if (map->find(name) != map->end()) return true;
@@ -1196,7 +1227,21 @@ bool JsValue::delete_property(const std::string& name) {
             return true;
         }
         auto it = cell->properties.find(name);
-        if (it == cell->properties.end()) return true;
+        if (it == cell->properties.end()) {
+            // Not in the table, but this object may own the name anyway: the
+            // global object's declarations live in the global environment.
+            // Answering `true` without asking is what made
+            // `delete globalThis.Error` report a removal it never made.
+            bool result = true;
+            if (cell->own_property_hook) {
+                std::vector<std::string> exposed;
+                const bool cross_origin = dom::cross_origin_own_keys(*this, true, exposed);
+                if (!cross_origin && (*cell->own_property_hook)(name, /*remove=*/true, result)) {
+                    return result;
+                }
+            }
+            return true;
+        }
         if (!(it->flags & PropertyMap::Configurable)) return false;
         cell->properties.erase(name);
         return true;
@@ -1224,6 +1269,23 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
         if (include_non_enumerable) cell->exotic->own_keys(cell, keys);
         else cell->exotic->keys(cell, keys);
     }
+    // Names this object owns outside the property table -- the global object's
+    // declarations. Collected here and merged below, so a name that is in both
+    // is reported once.
+    //
+    // Not for a cross-origin Window or Location: HTML §7.2.3.5 says such an
+    // object reports exactly the exposed table and nothing else, and the
+    // environment's declarations are not in it. `reflected_own_keys` filters
+    // before calling here, but `has_own_property` and `[[Delete]]` ask the
+    // hook direct, so the test has to be here as well.
+    std::vector<std::string> hooked_keys;
+    bool cross_origin = false;
+    if (cell && cell->own_keys_hook) {
+        std::vector<std::string> exposed;
+        cross_origin = dom::cross_origin_own_keys(*this, true, exposed);
+    }
+    const bool has_hooked_keys = cell && cell->own_keys_hook && !cross_origin &&
+        (*cell->own_keys_hook)(!include_non_enumerable, hooked_keys);
     // The keys of the property map: the ones that are an index in ascending
     // order, then the rest in the order they were made.
     const PropertyMap* map = cell ? &cell->properties : loose_properties();
@@ -1279,6 +1341,16 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
         // `order-after-define-property` catches.
         if (cell && cell->is_array && include_non_enumerable && *key == "length") continue;
         keys.push_back(*key);
+    }
+    if (has_hooked_keys) {
+        for (const std::string& name : hooked_keys) {
+            if (is_hidden_key(name)) continue;
+            bool already = false;
+            for (const std::string& have : keys) {
+                if (have == name) { already = true; break; }
+            }
+            if (!already) keys.push_back(name);
+        }
     }
     return keys;
 }
@@ -1718,7 +1790,7 @@ bool set_through_prototype(const JsValue& receiver, const std::string& name, con
         if (found->flags & PropertyMap::Accessor) {
             handled = true;
             if (found->setter && found->setter->is_function()) {
-                found->setter->call_with_this(receiver, {val});
+                found->setter->call_with_this(setter_receiver(receiver), {val});
                 return true;
             }
             return false;      // an accessor with no setter: refused
@@ -1822,7 +1894,22 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
 
         if (obj->is_array) {
             if (name == "length") {
+                // A length that is not writable takes no value through
+                // `[[Set]]` — not a grow, and not a shrink, and not even the
+                // value it already has. That last one is what separates this
+                // path from the descriptor one: OrdinarySet looks at the own
+                // descriptor and gives up at the writable bit before
+                // ArraySetLength is entered, so `'use strict'; a.length =
+                // a.length` on a read-only length is a TypeError, while
+                // `Object.defineProperty(a, 'length', { value: a.length })`
+                // is allowed by §10.4.2.4 step 3's SameValue test. Node
+                // v22.22.3 answers both ways (Phase 428).
+                // `freeze` makes the length read-only, `{ writable: false }`
+                // does, and `seal` does not.
                 if (obj->frozen) return false;
+                if (const auto entry = obj->properties.find("length"); entry != obj->properties.end()) {
+                    if (!(entry->flags & PropertyMap::Writable)) return false;
+                }
                 double requested = js_to_number(val);
                 if (!(requested >= 0) || requested != std::floor(requested) || requested > 4294967295.0) {
                     js_throw_range_error("Invalid array length");
@@ -1835,6 +1922,13 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                     previous = std::max(previous, static_cast<size_t>(js_to_number(entry->second)));
                 }
                 size_t next = static_cast<size_t>(requested);
+                // A sealed array's length may still be written, and only a
+                // grow is possible: every place it holds is non-configurable,
+                // so the deletion a shorter length asks for fails at
+                // §10.4.2.4 step 4.c and the length stays where it was. The
+                // dense places have no attribute bits, which is why this asks
+                // the cell rather than the map (Phase 428).
+                if (obj->sealed && next < previous) return false;
                 // What `Object.defineProperty` made of an index is in the
                 // property map (has_own_property). A shorter array has lost
                 // the indices past its new end, those included; and one of
@@ -1920,7 +2014,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                             // Held here: the setter may delete the property it is.
                             const std::shared_ptr<JsValue> setter = mapped->setter;
                             if (!setter || !setter->is_function()) return false;
-                            setter->call_with_this(*this, {val});
+                            setter->call_with_this(setter_receiver(*this), {val});
                             return true;
                         }
                         if (!(mapped->flags & PropertyMap::Writable)) return false;
@@ -1944,6 +2038,20 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                 }
                 if (index >= obj->array_elements.size()) {
                     if (!obj->extensible) return false;
+                    // Growing the length to reach a new place: §10.4.2.4 step
+                    // 4.a asks whether the length may be written, and a
+                    // read-only one refuses the place rather than moving
+                    // (Phase 428). Sloppy mode stays silent, strict mode throws
+                    // — that is the caller's business, not this function's.
+                    {
+                        size_t length_now = obj->array_elements.size();
+                        bool length_writable = !obj->frozen;
+                        if (const auto entry = obj->properties.find("length"); entry != obj->properties.end()) {
+                            length_now = std::max(length_now, static_cast<size_t>(js_to_number(entry->second)));
+                            if (!(entry->flags & PropertyMap::Writable)) length_writable = false;
+                        }
+                        if (index >= length_now && !length_writable) return false;
+                    }
                     // The places it skips over are holes, and a hole is not
                     // storage (Phase 288). Writing just past the elements
                     // extends the vector by a little; writing far past them —
@@ -2007,7 +2115,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
         auto it = obj->properties.find(name);
         if (it != obj->properties.end()) {
             if (it->flags & PropertyMap::Accessor) {
-                if (it->setter && it->setter->is_function()) { it->setter->call_with_this(*this, {val}); return true; }
+                if (it->setter && it->setter->is_function()) { it->setter->call_with_this(setter_receiver(*this), {val}); return true; }
                 return false;
             }
             if (obj->frozen || !(it->flags & PropertyMap::Writable)) return false;
@@ -2036,7 +2144,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
             auto pit = proto->properties.find(name);
             if (pit == proto->properties.end()) continue;
             if (pit->flags & PropertyMap::Accessor) {
-                if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(*this, {val}); return true; }
+                if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(setter_receiver(*this), {val}); return true; }
                 return false;
             }
             break;
@@ -2056,7 +2164,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
     auto it = map->find(name);
     if (it != map->end()) {
         if (it->flags & PropertyMap::Accessor) {
-            if (it->setter && it->setter->is_function()) { it->setter->call_with_this(*this, {val}); return true; }
+            if (it->setter && it->setter->is_function()) { it->setter->call_with_this(setter_receiver(*this), {val}); return true; }
             return false;
         }
         if (!(it->flags & PropertyMap::Writable)) return false;

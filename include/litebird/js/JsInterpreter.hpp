@@ -44,6 +44,20 @@ public:
         /// True for bindings created by a sloppy direct `eval` in a local
         /// function scope (§19.2.1.1.1), which `delete x` may remove.
         bool is_deletable{false};
+        /// True for a declaration the engine made before any script ran: a
+        /// library global (`Object`, `Math`), a host global (`console`,
+        /// `setTimeout`) or one of `undefined`/`NaN`/`Infinity`. §9.1.1.4
+        /// makes every one of those a non-enumerable property of the global
+        /// object, which is what tells them from a `var`, whose property is
+        /// enumerable. It does *not* make them all non-configurable: see
+        /// `is_permanent_global`.
+        bool is_builtin{false};
+        /// True for `undefined`, `NaN` and `Infinity` — §18.1.1-§18.1.3 make
+        /// those three `{writable: false, enumerable: false, configurable:
+        /// false}`. Every other built-in is configurable, and deleting one
+        /// has to take its binding with it or the bare name would still
+        /// resolve to a global this interpreter no longer has.
+        bool is_permanent{false};
     };
 
     enum class AssignResult { Ok, NotFound, Const, ReadOnly, Uninitialized };
@@ -124,6 +138,19 @@ public:
         add(name, std::move(value), false, false, true);
     }
 
+    /// Declares a name a running script created, as opposed to one the engine
+    /// declared before any script ran. A sloppy assignment to an undeclared
+    /// name (`zz = 3`) makes such a property, and §9.1.1.4 has it
+    /// `{writable: true, enumerable: true, configurable: true}` — the exact
+    /// opposite of a built-in, which is why the distinction has to be made
+    /// where the name is created rather than assumed from "the engine's
+    /// environment holds it". `define` is used for both, so it cannot say;
+    /// this says.
+    void define_script_global(const std::string& name, JsValue value) {
+        define(name, std::move(value));
+        if (Binding* binding = find_own(name)) binding->is_builtin = false;
+    }
+
     /// See Binding::is_lexical.
     void mark_lexical(const std::string& name) {
         if (Binding* binding = find_own(name)) binding->is_lexical = true;
@@ -197,6 +224,73 @@ public:
         return const_cast<JsEnvironment*>(this)->find_own(name) != nullptr;
     }
 
+    /// Every binding this environment owns, in declaration order, with the
+    /// ones a `let`/`const`/`class` made left out when `properties_only`:
+    /// those are not properties of the global object (§9.1.1.4), and the
+    /// global object is the only caller. `enumerable_only` drops the
+    /// built-ins, whose properties are non-enumerable, leaving what a script
+    /// declared. There was no way to ask before — `find_own` answers one name
+    /// — which is why the global object could find what it could not list.
+    std::vector<std::string> own_names(bool properties_only, bool enumerable_only) const {
+        std::vector<std::string> names;
+        names.reserve(m_bindings.size());
+        for (const Binding& binding : m_bindings) {
+            if (properties_only && binding.is_lexical) continue;
+            if (enumerable_only && binding.is_builtin) continue;
+            names.push_back(binding.name);
+        }
+        return names;
+    }
+
+    /// Marks every binding this environment already owns as a built-in. Called
+    /// once, at the end of the interpreter's construction, when the
+    /// environment holds exactly what the engine declared and no script has
+    /// run — so what it covers is exactly the set §9.1.1.4 calls built-in.
+    void mark_all_builtin() {
+        for (Binding& binding : m_bindings) binding.is_builtin = true;
+    }
+
+    /// Marks a name this environment already owns as one of the three
+    /// permanent values (§18.1.1-§18.1.3), the only engine globals that are
+    /// not configurable.
+    void mark_permanent(const std::string& name) {
+        if (Binding* binding = find_own(name)) binding->is_permanent = true;
+    }
+
+    /// Whether a name this environment owns is one §9.1.1.4 makes
+    /// non-configurable: the three permanent values, and a declaration a
+    /// script's own `var`/`function` made at the top level. Everything the
+    /// engine declares is configurable — §18's table says of RangeError and
+    /// of Math exactly what it says of Array, "configurable: true" — and a
+    /// binding a sloppy direct `eval` made is configurable too, so `delete`
+    /// takes it away.
+    bool is_configurable_binding(const Binding& binding) const {
+        if (binding.is_permanent) return false;
+        if (!binding.is_builtin) return binding.is_deletable;
+        return true;
+    }
+
+    /// The name a global `let`/`const`/`class` shadows, once it has shadowed
+    /// it: §9.1.1.4 has such a declaration shadow rather than replace, so the
+    /// built-in property has to come back when the declaration goes away.
+    /// A binding keeps no value of its own here — the caller's `define`
+    /// masked it — so this remembers only which names are masked.
+    void note_masked(const std::string& name, JsValue value) {
+        m_masked.emplace_back(name, std::move(value));
+    }
+
+    /// Answers a masked name with whatever it was before the declaration
+    /// masked it, and gets rid of it.
+    bool take_masked(const std::string& name, JsValue& out) {
+        for (size_t i = 0; i < m_masked.size(); ++i) {
+            if (m_masked[i].first != name) continue;
+            out = m_masked[i].second;
+            m_masked.erase(m_masked.begin() + static_cast<std::vector<std::pair<std::string, JsValue>>::difference_type>(i));
+            return true;
+        }
+        return false;
+    }
+
     bool remove_own(const std::string& name) {
         for (size_t i = 0; i < m_bindings.size(); ++i) {
             if (m_bindings[i].name == name) {
@@ -242,7 +336,18 @@ public:
     }
     void hoist_var(const std::string& name) {
         auto scope = var_scope();
-        if (!scope->has_own(name)) scope->define(name, JsValue::make_undefined());
+        if (!scope->has_own(name)) {
+            scope->define(name, JsValue::make_undefined());
+            // §9.1.1.4: a `var` or function declaration a script makes at the
+            // top level is a non-configurable property of the global object,
+            // so `delete globalThis.fn` is `false` — and in strict code a
+            // TypeError. This is the one kind of engine-defined global the
+            // standard does make non-configurable, along with
+            // `undefined`/`NaN`/`Infinity`; a sloppy assignment that creates
+            // the name instead (`zz = 3`) goes through `assign` below and
+            // stays configurable.
+            if (Binding* binding = scope->find_own(name)) binding->is_permanent = true;
+        }
     }
 
     /// Legacy assignment: creates the binding in the outermost scope when the
@@ -377,6 +482,9 @@ private:
     JsEnvironment* m_registry_next{nullptr};
     std::vector<Binding> m_bindings;
     std::unordered_map<std::string, uint32_t> m_index;
+    /// Each built-in a script's own top-level `let`/`const`/`class` masked,
+    /// with the value that has to come back when the declaration goes away.
+    std::vector<std::pair<std::string, JsValue>> m_masked;
 };
 
 /// Kept for source compatibility. The interpreter no longer throws this:
@@ -537,6 +645,9 @@ private:
     enum class BindMode { Var, Let, Const, Assign };
 
     void init_builtins();
+    /// The global object's `[[OwnPropertyKeys]]` and `[[Delete]]`: the names it
+    /// owns outside its property table, and what removing one of them means.
+    void install_global_object_hooks();
     void init_language_builtins();
 
     /// RAII call-depth guard. Throws JsStackOverflow once the native stack is

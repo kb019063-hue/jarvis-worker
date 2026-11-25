@@ -698,17 +698,7 @@ private:
     // Once the old declaration is removed from default_user_agent_stylesheet,
     // this one-rule normalization can be removed too.
     struct UserAgentSheet : StyleSheet {
-        explicit UserAgentSheet(StyleSheet sheet) : StyleSheet(std::move(sheet)) {
-            Rule body_reset;
-            Selector selector;
-            SimpleSelector body;
-            body.tag_name = "body";
-            selector.parts.push_back(std::move(body));
-            selector.finalize_metadata();
-            body_reset.selectors.push_back(std::move(selector));
-            body_reset.declarations.push_back({"background-color", "transparent", false});
-            rules.push_back(std::move(body_reset));
-        }
+        explicit UserAgentSheet(StyleSheet sheet) : StyleSheet(std::move(sheet)) {}
     };
 
     UserAgentSheet m_ua_sheet;

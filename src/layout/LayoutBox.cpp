@@ -566,7 +566,9 @@ void LayoutBox::layout_block(float containing_width) {
     // flex/grid item). Note that `<body>` is Litebird's layout root (`!parent`)
     // rather than `<html>`, so `!parent` alone must NOT block body/first-child
     // margin collapse.
+    const bool is_html_root = node && node->is_element() && node->as_element()->tag_name() == "html";
     const bool blocks_collapse =
+        is_html_root ||
         (box_type != BoxType::BlockNode && box_type != BoxType::AnonymousBlock) ||
         parent_is_flex_or_grid ||
         s.is_out_of_flow() || s.is_floated() || s.is_inline_block() ||

@@ -19,6 +19,11 @@
 #include "litebird/css/DocumentStyles.hpp"
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/LayoutTree.hpp"
+#include "litebird/layout/LayoutBox.hpp"
+static inline std::shared_ptr<litebird::LayoutBox> unwrap_root_for_test(const std::shared_ptr<litebird::LayoutBox>& root) {
+    if (root && root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html" && !root->children.empty()) return root->children[0];
+    return root;
+}
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/ImageDecoder.hpp"
 #include "litebird/render/FontRenderer.hpp"
@@ -776,9 +781,14 @@ TEST(layout_box_tree) {
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
     assert(root != nullptr);
 
-    // Root is body, first child is div
-    assert(!root->children.empty());
-    auto div_box = root->children[0];
+    // Root is now html (Phase 423); unwrap to body for legacy test
+    auto body_box_for_test = root;
+    if (root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html") {
+        assert(!root->children.empty());
+        body_box_for_test = root->children[0];
+    }
+    assert(!body_box_for_test->children.empty());
+    auto div_box = body_box_for_test->children[0];
     assert(div_box->dimensions.content.width == 500.0f);
     assert(!div_box->children.empty());
 }
@@ -861,8 +871,10 @@ TEST(flexbox_layout) {
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
     assert(root != nullptr);
     assert(!root->children.empty());
+    auto flex_container_parent = root;
+    if (root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html") flex_container_parent = root->children[0];
 
-    auto flex_container = root->children[0];
+    auto flex_container = flex_container_parent->children[0];
     assert(flex_container->box_type == BoxType::FlexNode);
     assert(flex_container->dimensions.content.width == 600.0f);
     assert(flex_container->children.size() == 3);
@@ -902,7 +914,9 @@ TEST(text_wrapping) {
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
     assert(root != nullptr);
 
-    auto div = root->children[0];
+    auto body_wrap = root;
+    if (root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html") body_wrap = root->children[0];
+    auto div = body_wrap->children[0];
     auto p = div->children[0];
     auto text_box = p->children[0];
 
@@ -926,7 +940,9 @@ TEST(anti_aliased_rasterizer_and_shadows) {
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
     assert(root != nullptr);
 
-    auto card = root->children[0];
+    auto card_parent = root;
+    if (root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html") card_parent = root->children[0];
+    auto card = card_parent->children[0];
     assert(card->style->border_radius == 12.0f);
     assert(card->style->box_shadow.has_shadow);
     assert(card->style->box_shadow.x_offset == 4.0f);
@@ -5290,10 +5306,12 @@ TEST(inline_formatting_context) {
     StyleResolver resolver;
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
     assert(root != nullptr);
-    assert(root->children.size() >= 3);
+    auto inline_root = root;
+    if (root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html") inline_root = root->children[0];
+    assert(inline_root->children.size() >= 3);
 
     // 1. Test mixed inline formatting context on first paragraph
-    auto p1 = root->children[0];
+    auto p1 = inline_root->children[0];
     assert(p1->establishes_ifc());
     assert(!p1->line_boxes.empty());
 
@@ -5326,14 +5344,14 @@ TEST(inline_formatting_context) {
     assert(found_highlight);
 
     // 2. Test text-align: center
-    auto p2 = root->children[1];
+    auto p2 = inline_root->children[1];
     assert(p2->establishes_ifc());
     assert(!p2->line_boxes.empty());
     assert(!p2->line_boxes[0].fragments.empty());
     assert(p2->line_boxes[0].fragments[0].rect.x > p2->dimensions.content.x);
 
     // 3. Test anonymous block creation for mixed block/inline children
-    auto div = root->children[2];
+    auto div = inline_root->children[2];
     assert(div->children.size() == 3);
     assert(div->children[0]->box_type == BoxType::AnonymousBlock);
     assert(div->children[1]->box_type == BoxType::BlockNode);
@@ -6481,8 +6499,10 @@ TEST(css_flex_wrapping_and_grid_layout) {
     StyleResolver resolver;
     auto flex_root = LayoutTree::build(flex_doc, resolver, 300.0f, 600.0f);
     assert(flex_root != nullptr);
+    auto flex_root_body = flex_root;
+    if (flex_root->node && flex_root->node->is_element() && flex_root->node->as_element()->tag_name() == "html") flex_root_body = flex_root->children[0];
 
-    auto flex_box = flex_root->children[0];
+    auto flex_box = flex_root_body->children[0];
     assert(flex_box->box_type == BoxType::FlexNode);
     assert(flex_box->children.size() == 3);
 
@@ -6519,8 +6539,10 @@ TEST(css_flex_wrapping_and_grid_layout) {
     auto grid_doc = HtmlParser::parse(grid_html);
     auto grid_root = LayoutTree::build(grid_doc, resolver, 360.0f, 600.0f);
     assert(grid_root != nullptr);
+    auto grid_root_body = grid_root;
+    if (grid_root->node && grid_root->node->is_element() && grid_root->node->as_element()->tag_name() == "html") grid_root_body = grid_root->children[0];
 
-    auto grid_box = grid_root->children[0];
+    auto grid_box = grid_root_body->children[0];
     assert(grid_box->box_type == BoxType::GridNode);
     assert(grid_box->children.size() == 4);
 
@@ -6709,7 +6731,7 @@ TEST(image_decoding_and_rendering) {
     auto img_el = doc->get_element_by_id("test_img");
     assert(img_el != nullptr);
 
-    auto container_box = root->children[0];
+    auto container_box = unwrap_root_for_test(root)->children[0];
     auto img_box = container_box->children[0];
     assert(img_box->box_type == BoxType::ImageNode);
     assert(img_box->image != nullptr);
@@ -6873,7 +6895,7 @@ void test_html5_canvas_2d_context() {
     auto root_box = layout_tree.build(doc, resolver);
     root_box->layout(800.0f);
 
-    auto canvas_box = root_box->children[0];
+    auto canvas_box = unwrap_root_for_test(root_box)->children[0];
     assert(canvas_box->box_type == BoxType::ImageNode);
     assert(canvas_box->dimensions.content.width == 80.0f);
     assert(canvas_box->dimensions.content.height == 60.0f);
@@ -8334,9 +8356,11 @@ TEST(svg_vector_rendering) {
     LayoutTree layout_tree;
     auto root_box = layout_tree.build(doc, resolver);
     root_box->layout(800.0f);
+    auto svg_root_body = root_box;
+    if (root_box->node && root_box->node->is_element() && root_box->node->as_element()->tag_name() == "html" && !root_box->children.empty()) svg_root_body = root_box->children[0];
 
     std::shared_ptr<LayoutBox> svg_box = nullptr;
-    for (const auto& ch : root_box->children) {
+    for (const auto& ch : svg_root_body->children) {
         if (ch->box_type == BoxType::ImageNode) {
             svg_box = ch;
             break;
@@ -8980,7 +9004,7 @@ TEST(css_flexbox_and_grid_modern_refinements) {
         auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
         assert(root_box != nullptr);
 
-        auto flex_box = root_box->children[0];
+        auto flex_box = unwrap_root_for_test(root_box)->children[0];
         assert(flex_box->box_type == BoxType::FlexNode);
         assert(flex_box->children.size() == 3);
 
@@ -9007,7 +9031,7 @@ TEST(css_flexbox_and_grid_modern_refinements) {
         auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
         assert(root_box != nullptr);
 
-        auto flex_box = root_box->children[0];
+        auto flex_box = unwrap_root_for_test(root_box)->children[0];
         assert(flex_box->children.size() == 2);
         float y0 = flex_box->children[0]->dimensions.content.y;
         float y1 = flex_box->children[1]->dimensions.content.y;
@@ -9031,7 +9055,7 @@ TEST(css_flexbox_and_grid_modern_refinements) {
         auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
         assert(root_box != nullptr);
 
-        auto grid_box = root_box->children[0];
+        auto grid_box = unwrap_root_for_test(root_box)->children[0];
         assert(grid_box->box_type == BoxType::GridNode);
         assert(grid_box->children.size() == 2);
 
@@ -9058,7 +9082,7 @@ TEST(css_flexbox_and_grid_modern_refinements) {
         auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
         assert(root_box != nullptr);
 
-        auto grid_box = root_box->children[0];
+        auto grid_box = unwrap_root_for_test(root_box)->children[0];
         assert(grid_box->box_type == BoxType::GridNode);
         assert(grid_box->children.size() == 3);
         float w1 = grid_box->children[0]->dimensions.content.width;

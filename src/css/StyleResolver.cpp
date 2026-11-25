@@ -681,7 +681,6 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         body {
             margin: 8px;
             color: #222222;
-            background-color: #ffffff;
             font-size: 16px;
         }
         h1 {

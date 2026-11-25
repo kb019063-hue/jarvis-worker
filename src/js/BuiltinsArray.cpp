@@ -1,6 +1,8 @@
 // Array, Array.prototype and the iterator objects the built-ins hand out.
 
 #include "litebird/js/JsBuiltins.hpp"
+#include "litebird/js/Promise.hpp"
+#include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Heap.hpp"
 #include <algorithm>
 #include <cmath>
@@ -1104,6 +1106,145 @@ void install_array_builtins(JsIntrinsics& realm) {
             }
             set_length_or_throw(made, items.size());
             return made;
+        }
+    });
+
+    js_define_method(array_ctor, "fromAsync", 1, [](Args args) {
+        // §23.1.3.1 Array.fromAsync ( asyncItems [ , mapfn [ , thisArg ] ] ).
+        //
+        // The method's whole point is that it *awaits*: every value the source
+        // produces, and the mapper's result for each. A built-in runs to
+        // completion and has no frame to park, so the wait is the same blocking
+        // one `await` at a page's top level does — run the event loop until the
+        // promise is no longer pending (JsInterpreter::eval_await's second
+        // branch, which a built-in cannot call because it is not on the
+        // interpreter).
+        auto await_value = [](const JsValue& value) -> JsValue {
+            auto promise = Promise::to_promise(value);
+            promise->handled = true;
+            auto& loop = EventLoop::default_loop();
+            while (promise->state == PromiseState::Pending) {
+                if (loop.spin_once() == 0) {
+                    if (!loop.has_pending_tasks()) {
+                        js_throw_type_error(
+                            "Array.fromAsync: the promise can never settle, nothing is pending");
+                    }
+                    loop.wait_for_work(false);
+                }
+            }
+            if (promise->state == PromiseState::Rejected) js_throw(promise->result);
+            return promise->result;
+        };
+
+        // GetMethod(value, key): a method that is not callable is a TypeError,
+        // and `undefined` or `null` means there is none.
+        auto get_method = [](const JsValue& value, const char* key, JsValue& method) -> bool {
+            method = value.get_property(key);
+            if (method.is_nullish()) return false;
+            if (!method.is_function()) js_throw_type_error("Array.fromAsync: the iterator method is not a function");
+            return true;
+        };
+
+        const JsValue& source = js_arg(args, 0);
+        const JsValue& map_fn = js_arg(args, 1);
+        const JsValue& this_arg = js_arg(args, 2);
+        const JsValue ctor = self();
+        const bool constructible = js_is_constructor(ctor);
+
+        auto body = [&]() -> JsValue {
+            const bool mapping = !map_fn.is_undefined();
+            if (mapping && !map_fn.is_function()) js_throw_type_error("Array.fromAsync: the mapper is not a function");
+
+            auto make_result = [&](size_t length) {
+                if (!constructible) {
+                    const size_t plain_length = length == static_cast<size_t>(-1) ? 0 : length;
+                    array_result_length(plain_length, "fromAsync");
+                    return make_holey_array(plain_length);
+                }
+                JsValue made = length == static_cast<size_t>(-1)
+                                   ? js_construct(ctor, {})
+                                   : js_construct(ctor, {JsValue::make_number(static_cast<double>(length))});
+                if (!made.is_object_like()) {
+                    js_throw_type_error("Array.fromAsync: the constructor did not return an object");
+                }
+                return made;
+            };
+
+            // §23.1.3.1 steps 5.g.vi-viii: the value is awaited, the mapper is
+            // called on what it settled to, and the mapper's result is awaited
+            // in turn — the method is asynchronous all the way down.
+            auto take = [&](const JsValue& value, size_t index) -> JsValue {
+                if (!mapping) return value;
+                return await_value(map_fn.call_with_this(
+                    this_arg, {value, JsValue::make_number(static_cast<double>(index))}));
+            };
+
+            std::vector<JsValue> items;
+            JsValue async_method;
+            // §23.1.3.1 step 4: the async iterator first, and only a source
+            // without one is read as a sync iterable.
+            if (get_method(source, kAsyncIteratorKey, async_method)) {
+                JsValue made = make_result(static_cast<size_t>(-1));
+                JsValue iterator = js_call(async_method, source, {});
+                while (true) {
+                    JsValue step = await_value(js_call(iterator.get_property("next"), iterator, {}));
+                    if (!step.is_object_like()) {
+                        js_throw_type_error("Array.fromAsync: next() did not answer an object");
+                    }
+                    if (step.get_property("done").is_truthy()) break;
+                    const JsValue item = take(await_value(step.get_property("value")), items.size());
+                    create_data_property_or_throw(made, items.size(), item);
+                    items.push_back(item);
+                }
+                set_length_or_throw(made, items.size());
+                return made;
+            }
+
+            JsValue method;
+            if (js_iterator_method(source, method)) {
+                // The synchronous path still awaits: a value from a sync
+                // iterator may be a promise, and the mapper's result is awaited
+                // as well.
+                JsValue made = make_result(static_cast<size_t>(-1));
+                JsValue iterator = js_call(method, source, {});
+                while (true) {
+                    JsValue step = js_call(iterator.get_property("next"), iterator, {});
+                    if (!step.is_object_like()) {
+                        js_throw_type_error("Array.fromAsync: next() did not answer an object");
+                    }
+                    if (step.get_property("done").is_truthy()) break;
+                    const JsValue item = take(await_value(step.get_property("value")), items.size());
+                    create_data_property_or_throw(made, items.size(), item);
+                    items.push_back(item);
+                }
+                set_length_or_throw(made, items.size());
+                return made;
+            }
+
+            // §23.1.3.1 steps 6-7: the array-like path. `length` is read once,
+            // and the places are awaited one at a time.
+            if (source.is_nullish()) {
+                js_throw_type_error("Array.fromAsync: the source is not iterable and is null or undefined");
+            }
+            const size_t length = static_cast<size_t>(to_length(source.get_property("length")));
+            array_result_length(length, "fromAsync");
+            JsValue made = make_result(length);
+            for (size_t k = 0; k < length; ++k) {
+                const JsValue item =
+                    take(await_value(source.get_property(js_number_to_string(static_cast<double>(k)))), k);
+                create_data_property_or_throw(made, k, item);
+            }
+            set_length_or_throw(made, length);
+            return made;
+        };
+
+        // Every failure inside the work is the promise's *rejection*, as
+        // §23.1.3.1's reject-capability has it; only a `this` that is not a
+        // constructor throws out of the call, which step 2 does.
+        try {
+            return Promise::make_resolved(body());
+        } catch (const JsThrow& thrown) {
+            return Promise::make_rejected(thrown.value);
         }
     });
     realm.add_global("Array", array_ctor);

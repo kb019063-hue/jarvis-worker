@@ -875,15 +875,16 @@ private:
                 }
             }
 
-            JsValue exports = JsValue::make_object(Heap::default_heap().allocate_object());
             const std::string imports_name = module_fresh_identifier(source, m_name_serial, "imports");
-            const std::string exports_name = module_fresh_identifier(source, m_name_serial, "exports");
-            m_interpreter.global_env()->define(imports_name, imports);
-            m_interpreter.global_env()->define(exports_name, exports);
-
             std::string wrapper;
             wrapper.reserve(module.body.size() + module.exports.size() * 56 + 256);
-            wrapper += "(function(" + imports_name + ", " + exports_name + "){\n\"use strict\";\n";
+            // `imports` is a global because the wrapper's parameters cannot be
+            // passed any other way; `exports` is not, and must not be: the
+            // getters below close over this module's scope, and a global
+            // holding them keeps every module this worker ever evaluated
+            // alive. `run()` hands the object back instead.
+            m_interpreter.global_env()->define(imports_name, imports);
+            wrapper += "(function(" + imports_name + "){\n\"use strict\";\nvar exports = {};\n";
             for (const ModuleDependency& dependency : module.dependencies) {
                 for (const ModuleImportBinding& binding : dependency.bindings) {
                     wrapper += "const " + binding.local_name + " = " + imports_name + "[" +
@@ -892,12 +893,25 @@ private:
             }
             wrapper += module.body;
             wrapper += "\n";
+            // A module's exported bindings are live: §16.2.1.6 makes the
+            // namespace answer for the *binding*, not for the value it had
+            // when the module finished. Writing `exports.n = n` here copied
+            // the value once, so an importer that read `n` after `bump()`
+            // saw 1 for ever, and Phase 105's live getter only re-read that
+            // copy.
+            //
+            // So each export is published as a getter closed over the
+            // module's own scope: the wrapper returns, but the thunk keeps
+            // the scope alive and answers with the binding as it is now.
             for (const ModuleExportBinding& binding : module.exports) {
-                wrapper += exports_name + "[" + module_quote(binding.exported_name) + "] = " +
-                           binding.local_name + ";\n";
+                wrapper += "Object.defineProperty(exports, " +
+                           module_quote(binding.exported_name) + ", {" +
+                           " get: function(){ return " + binding.local_name + "; }," +
+                           " enumerable: true, configurable: true });\n";
             }
-            wrapper += "})(" + imports_name + ", " + exports_name + ");";
-            m_interpreter.run(wrapper);
+            wrapper += "return exports;\n})(" + imports_name + ");";
+            JsValue exports = m_interpreter.run(wrapper);
+            m_interpreter.global_env()->define(imports_name, JsValue::make_undefined());
 
             // What the module publishes, read live. The bag the wrapper
             // filled holds this module's own declarations; each `export *`

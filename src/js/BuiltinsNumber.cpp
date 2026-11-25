@@ -141,7 +141,9 @@ void increment_decimal(std::string& digits) {
 std::string to_fixed(double x, int fraction_digits) {
     if (std::isnan(x)) return "NaN";
     if (std::fabs(x) >= 1e21 || std::isinf(x)) return js_number_to_string(x);
-    const bool negative = x < 0 || (x == 0 && std::signbit(x));
+    // The sign is determined before rounding: -0 has no sign, but a
+    // negative nonzero value that rounds to zero keeps its minus sign.
+    const bool negative = x < 0;
     double magnitude = std::fabs(x);
 
     const int extra = 40;
@@ -159,8 +161,7 @@ std::string to_fixed(double x, int fraction_digits) {
     }
     if (round_up) increment_decimal(kept);
 
-    bool is_zero = kept.find_first_not_of("0.") == std::string::npos;
-    return (negative && !is_zero ? "-" : "") + kept;
+    return (negative ? "-" : "") + kept;
 }
 
 std::string format_exponent(int exponent) {

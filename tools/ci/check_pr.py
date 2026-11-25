@@ -178,6 +178,18 @@ SHARED = {
 # opened after #390 that #390 "had" its phase, its finding and its suite
 # first. Named bare they claim nothing; a file in them is claimed by name.
 SHARED_DIRECTORIES = ("docs/phases", "docs/findings", "tests/suites")
+# A file there that is named before its number is known: `docs/phases/N-*.md`.
+# The `Files:` line is written when the pull request is opened, and the number
+# is what opening it gives. At 06:09 UTC on 25 November #415 and #421 had both
+# written `tests/suites/N-*.cpp, docs/phases/N-*.md, docs/findings/N-*.md`,
+# the words of this file's own advice ("name your own files"), and `claim 421`
+# said that #415 "had" the three first and that two pull requests cannot both
+# make them; #421's agent wrote that it would add no phase, finding or suite
+# while they were held. They are no file's name. A name there that begins
+# with a number is a file's (`419-*.md` too: only #419 may make it).
+NOT_YET_NUMBERED = re.compile(
+    r"^(?:docs/phases|docs/findings|tests/suites)/"
+    r"(?:(?:N+|n+|X+|x+|#+|PR)[-_.…*]|[<{\[]|\*|…|\.\.\.)")
 # What no step of CI reads but the four checks named below: the documents at
 # the top of the tree, everything under docs/, and the README.md of a test
 # directory. Not every `.md`: tools/conformance/run_wpt.py fails for any file
@@ -242,7 +254,10 @@ LOT_RE = re.compile(r"^\w+: (?:\*\*)?(?:the last )?lot of ")
 # pair of `tools/next_ids.py` let them do: in one hour of that morning four
 # pull requests of twelve had to be renumbered after they were finished.
 OWN_NUMBER_RE = re.compile(r"^Phase and finding:\s*(?:this|the) pull request'?s?(?: own)? number\b", re.IGNORECASE)
-# The label that gives a pull request the short run of CI (.github/workflows/ci.yml).
+# The label that starts every job of CI on a pull request when it is taken
+# off (.github/workflows/ci.yml). Until 25 November 2026 it was also what
+# made a pull request's runs short while it was on; every run a push starts
+# is short now, with or without it.
 LOT_LABEL = "lot"
 WATCH_ON_TEXT = (
     "While this line says ON and its last look is less than {quiet} minutes old, only the landing session "
@@ -374,8 +389,9 @@ def claim_of(pr: dict) -> dict:
 
 
 def claims_nothing(name: str) -> bool:
-    """A file every pull request changes, or a directory every one adds its own file to."""
-    return name in SHARED or name.rstrip("/") in SHARED_DIRECTORIES
+    """A file every pull request changes, a directory every one adds its own
+    file to, or a file there whose number is not written in yet."""
+    return name in SHARED or name.rstrip("/") in SHARED_DIRECTORIES or NOT_YET_NUMBERED.match(name) is not None
 
 
 def same_files(mine: set[str], theirs: set[str]) -> list[str]:
@@ -497,6 +513,68 @@ def commit(sha: str) -> dict:
 def hours_since(stamp: str) -> float:
     then = datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     return (datetime.now(timezone.utc) - then).total_seconds() / 3600
+
+
+# Of the 22 pull requests that landed in the watch of the night of 25
+# November 2026, 21 went from opened to merged in 9 to 76 minutes. A claim
+# with no push and no word from its agent for this long is worth asking about.
+QUIET_HOURS = 2.0
+
+# Agents sign a comment in its first word: "Vireo: the claim check reports...",
+# "**Merlin — claim: PR #414".
+FIRST_WORD_RE = re.compile(r"^[\s*_>#`]*([A-Za-z][A-Za-z0-9]*)")
+
+
+def last_words(comments: list[dict]) -> dict[str, tuple[str, int]]:
+    """For each name that a comment begins with: (when its newest was made, on which pull request)."""
+    newest: dict[str, tuple[str, int]] = {}
+    for comment in comments:
+        match = FIRST_WORD_RE.match(comment.get("body") or "")
+        if match and (match.group(1) not in newest or comment["created_at"] > newest[match.group(1)][0]):
+            newest[match.group(1)] = (comment["created_at"], int(comment["issue_url"].rsplit("/", 1)[1]))
+    return newest
+
+
+def recent_comments(hours: float) -> list[dict]:
+    """The comments made on any pull request in the last `hours` hours: three calls at most.
+
+    An answer that cannot be read is no comments: the list of claims is then
+    shown without them, and says so, rather than not at all.
+    """
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    found: list[dict] = []
+    for page in (1, 2, 3):
+        answer = gh("api", f"{REPO}/issues/comments?since={since}&sort=created&direction=desc&per_page=100&page={page}",
+                    check=False)
+        try:
+            comments = json.loads(answer)
+        except ValueError:
+            return found
+        if not isinstance(comments, list):
+            return found
+        found += [comment for comment in comments if comment["created_at"] >= since]   # `since` goes by the last edit
+        if len(comments) < 100:
+            break
+    return found
+
+
+def quiet_note(title: str, changed: int, hours: float, agent: str | None, wrote: bool) -> str | None:
+    """What to say of a pull request with no push for a long time and no word from its agent.
+
+    `changed` is how many files it changes (none: a claim and nothing else);
+    `wrote` is whether a comment in its agent's name was made anywhere in the
+    last QUIET_HOURS. Both are needed. On 25 November the landing session
+    closed #389 as given up, 2 h 40 min after its only push, from what #389's
+    own page showed: its agent had written on #416 thirteen minutes before.
+    It was reopened a quarter of an hour later. #367, 21 hours after its only
+    push, had no word from its agent anywhere: that chat could not go on.
+    """
+    if hours < QUIET_HOURS or wrote or not title.startswith("WIP"):
+        return None
+    what = "nothing in it but its claim" if changed == 0 else "work in progress"
+    whose = f"no comment in {agent}'s name anywhere" if agent else "it names no agent whose comments could be looked for"
+    return (f"QUIET: no push for {hours:.1f} h ({what}), and {whose} in the last {QUIET_HOURS:g} h. It is still a claim, "
+            "and not yours to take or to close: ask in a comment on it, and tell the person you work for")
 
 
 def next_pair() -> str:
@@ -675,13 +753,20 @@ def show_claims() -> int:
     claims = open_claims(prs)
     main = on_main()
     print(f"main: phases up to {max(main.phases)}, findings up to {max(main.findings)}")
+    changed = {pr["number"]: len(pr.get("files") or []) for pr in prs}
+    words = last_words(recent_comments(QUIET_HOURS))
     for claim in claims:
         pushed = hours_since(commit(claim["head"])["commit"]["committer"]["date"])
         name = f"  [{claim['agent']}]" if claim.get("agent") else ""
-        print(f"\n#{claim['number']}{name}  {numbers_of(claim)}  (last commit {pushed:.1f} h ago)")
+        wrote = words.get(claim.get("agent") or "")
+        said = f"; {claim['agent']} wrote {hours_since(wrote[0]):.1f} h ago in #{wrote[1]}" if wrote else ""
+        print(f"\n#{claim['number']}{name}  {numbers_of(claim)}  (last commit {pushed:.1f} h ago{said})")
         print(f"    {claim['title'][:110]}")
         own = sorted(name for name in claim["files"] if not claims_nothing(name))
         print("    files: " + (", ".join(own) if own else "(none)"))
+        quiet = quiet_note(claim["title"], changed.get(claim["number"], 0), pushed, claim.get("agent"), bool(wrote))
+        if quiet:
+            print(f"    !! {quiet}")
         for blocking, problem in claim_problems(claim, claims, main):
             print(f"    {'!!' if blocking else '  '} {problem}")
     for pr in sorted(prs, key=lambda pr: pr["number"]):
@@ -707,11 +792,18 @@ def staleness(head: str, main_sha: str) -> tuple[int, str]:
     """
     behind = 0
     counted = git("rev-list", "--count", f"{head}..{main_sha}")
-    if counted.returncode == 0:
-        try:
-            behind = int(counted.stdout.strip() or "0")
-        except ValueError:
-            behind = 0
+    if counted.returncode != 0:
+        # The clone does not have one of the two commits, so git counted
+        # nothing. Until 25 November 2026 that was read as nought: asked
+        # about #415 from a clone that had not fetched its head, `claim 415`
+        # said "main is in the head commit" of a pull request that was 45
+        # commits behind `main` and in conflict with it.
+        return -1, (f"this clone does not have the commit {head[:7]}, so nobody can say here whether it merges "
+                    f"with main: fetch it (`git fetch origin refs/pull/N/head`) and ask again")
+    try:
+        behind = int(counted.stdout.strip() or "0")
+    except ValueError:
+        behind = 0
     if behind == 0:
         return 0, ""
     for _ in range(4):      # a sandbox's clone is shallow: go back until the two share an ancestor
@@ -737,7 +829,11 @@ def staleness_problems(claim: dict, main_sha: str) -> list[tuple[bool, str]]:
     """
     if not claim.get("head"):
         return []
+    if claim.get("number") and git("cat-file", "-e", claim["head"] + "^{commit}").returncode != 0:
+        fetched(f"refs/pull/{claim['number']}/head")     # another agent's pull request: its head is not here yet
     behind, why = staleness(claim["head"], main_sha)
+    if behind < 0:
+        return [(True, why)]
     if behind == 0:
         return [(False, f"main is in the head commit {claim['head'][:7]}")]
     if why:
@@ -772,11 +868,12 @@ def state_of(latest: list[tuple[str, str, str]]) -> tuple[str, list[str]]:
     """'passed', 'short', 'failed', 'running' or 'none' for the jobs of a commit,
     each (name, status, conclusion) in lower case, and the ones that are not green.
 
-    'short' is the run a pull request with the label `lot` gets while a watch
-    is on (.github/workflows/ci.yml): the build, the unit suites and the
-    documents passed, and every other job was skipped, because the whole
-    of CI runs on the lot the pull request lands in. It is enough to be taken
-    into a lot. It is not enough for anybody to merge on.
+    'short' is the run every push to a pull request gets
+    (.github/workflows/ci.yml): the build, the unit suites, the documents
+    and the corpora passed, and every other job was skipped, because the
+    whole of CI runs on the lot the pull request lands in, or when `merge
+    N` asks for it. It is enough to be taken into a lot. It is not enough
+    for anybody to merge on.
     """
     if not latest:
         return "none", []
@@ -801,9 +898,9 @@ def check_runs(sha: str) -> tuple[str, list[str]]:
 
 def short_run_note(head: str, number: int | None = None) -> str:
     """What to say of a short run to somebody who is about to merge on it."""
-    return (f"only the short run of CI passed on {head[:7]} (build, unit suites, documents, the corpora): its title "
-            "began with WIP: when the run started, or it has the label `lot`, which the landing session puts on "
-            "while a watch is on, and the sanitizer jobs and the deep pages were skipped. Nobody merges on that"
+    return (f"only the short run of CI passed on {head[:7]} (build, unit suites, documents, the corpora): that is "
+            "what every push to a pull request gets, and the sanitizer jobs and the deep pages were skipped. "
+            "Nobody merges on that"
             + ("" if number is None else
                f". The label is off now, which starts every job on {head[:7]}: ask again when they have ended"))
 
@@ -1152,6 +1249,15 @@ def why_not_taken(pr: dict, comments: list[dict]) -> str:
         # WIP:", and the landing session's own tool, which read titles
         # only, took it into a lot. GitHub merges no draft.
         return f"it is a draft: `gh pr ready {pr['number']}` when it is finished"
+    if pr.get("files") == []:
+        # A claim whose title says nothing of work in progress. #423 was
+        # opened at 06:19 UTC on 25 November as "Claim: full <html> root
+        # layout box ...", one empty commit, and four minutes later stood
+        # in the landing session's list as "main is in the head: it can be
+        # merged as it is, at once". Merged, it would have ended its
+        # agent's branch before the work began.
+        return ("it changes no file: there is nothing in it to land. If it is a claim, its title begins with "
+                "WIP: until the work is finished and pushed")
     taken = taken_at(comments, pr["number"])
     if taken and pr["headRefOid"].startswith(taken):
         return ""       # the landing session has said so, of this very head
@@ -1404,9 +1510,9 @@ def check_merge(number: int, landing: bool = False) -> int:
         (report.ok if ok else report.no)(text)
     if "short" in (head_state, ran_state) and not watch_on and not landing:
         # No watch is on, so this agent merges, and the whole of CI has not
-        # run on what it would merge. A run is short for one of two reasons
-        # (.github/workflows/ci.yml): the label `lot`, or a title that began
-        # with WIP: when the run started.
+        # run on what it would merge. Every run of a pull request is short
+        # (.github/workflows/ci.yml) but the one that taking a label off
+        # starts, when the title has no WIP:.
         labelled = any(label.get("name") == LOT_LABEL for label in pr.get("labels") or [])
         if pr["title"].startswith("WIP"):
             # Any run started now would be short again.
@@ -1416,17 +1522,17 @@ def check_merge(number: int, landing: bool = False) -> int:
             gh("api", "-X", "DELETE", f"{REPO}/issues/{number}/labels/{LOT_LABEL}", check=False)
             report.note(f"the label `{LOT_LABEL}` is off #{number} now, which starts every job of CI on {head[:7]}: "
                         f"ask again when they have ended (`gh pr checks {number}`). If none has started in a minute, "
-                        "push an empty commit")
+                        "ask again, which starts them again: a push would start the short run and no more")
         else:
-            # No label to take off: the title began with WIP: when the run
-            # started. Putting the label on starts nothing; taking it off
-            # starts every job, now that the title has no WIP:.
+            # No label to take off. Putting the label on starts nothing;
+            # taking it off starts every job.
             gh("api", "-X", "POST", f"{REPO}/issues/{number}/labels", "-f", f"labels[]={LOT_LABEL}", check=False)
             gh("api", "-X", "DELETE", f"{REPO}/issues/{number}/labels/{LOT_LABEL}", check=False)
-            report.note(f"the run on {head[:7]} was the short one because the title began with WIP: when it started. "
+            report.note(f"the run on {head[:7]} was the short one, as every run a push starts is. "
                         f"Every job of CI has been started on {head[:7]} now (the label `{LOT_LABEL}` was put on #{number} "
                         f"and taken off, which does it): ask again when they have ended (`gh pr checks {number}`). "
-                        "If none has started in a minute, push an empty commit")
+                        "If none has started in a minute, ask again, which starts them again: a push would start "
+                        "the short run and no more")
     if quick:
         tree, called, why_not = tree_to_merge(number, head, main_sha, behind)
         if tree is None:
@@ -1526,12 +1632,13 @@ def self_test() -> int:
     # here is what a claim says about each of the three answers it can give,
     # which is the thing the session that opened a 39-commit-old landing never saw.
     stale = [(0, ""), (39, "it does not merge with main any more (tests/test_suite.cpp)"),
-             (39, "")]
+             (39, ""), (-1, "this clone does not have the commit abc1234")]
     wanted_stale = [
         [(False, "main is in the head commit abc1234")],
         [(True, "it does not merge with main any more (tests/test_suite.cpp): it is 39 commit(s) "
                 "behind main. Merge main in, or close it if what it was for has landed")],
         [(False, "39 commit(s) behind main, and it still merges")],
+        [(True, "this clone does not have the commit abc1234")],
     ]
 
     cases = [
@@ -1565,6 +1672,28 @@ def self_test() -> int:
                         "Phase and finding: this pull request's number\nAgent: Merlin\n"), number=393, phase=393, finding=393),
              [], Main({1}, {1}, {1}, {1}, 1, 1)) if blocking],
          ["`docs/phases/387-a-number.md` is called by 387, and this pull request's number is 393: rename it (`docs/phases/393-...`)"]),
+        ("a claim with no push and no word from its agent for two hours is called quiet",
+         (quiet_note("WIP: a row", 0, 21.3, "Rowan", False) or "")[:112],
+         "QUIET: no push for 21.3 h (nothing in it but its claim), and no comment in Rowan's name anywhere in the last 2 h"),
+        ("...not one whose agent wrote somewhere in that time: #389, which was closed for its silence and was not silent",
+         quiet_note("WIP: a row", 0, 2.6, "Vireo", True), None),
+        ("...not one pushed to an hour ago, and not one that is finished and waits to land",
+         (quiet_note("WIP: a row", 0, 1.9, "Vireo", False), quiet_note("Phase 5: a row", 4, 30.0, "Vireo", False)),
+         (None, None)),
+        ("...one with files in it is work in progress, and one that names no agent says so",
+         (quiet_note("WIP: a row", 3, 5.0, None, False) or "")[:103],
+         "QUIET: no push for 5.0 h (work in progress), and it names no agent whose comments could be looked for i"),
+        ("whose a comment is, is its first word, and the newest of each name is kept",
+         last_words([
+             {"body": "Vireo: The #389 claim check reports overlap", "created_at": "2026-11-25T05:02:57Z",
+              "issue_url": "https://api.github.com/repos/o/r/issues/416"},
+             {"body": "**Merlin — claim: PR #414", "created_at": "2026-11-25T05:00:02Z",
+              "issue_url": "https://api.github.com/repos/o/r/issues/219"},
+             {"body": "Vireo: claiming the row", "created_at": "2026-11-25T02:40:00Z",
+              "issue_url": "https://api.github.com/repos/o/r/issues/389"},
+             {"body": "", "created_at": "2026-11-25T05:10:00Z", "issue_url": "https://api.github.com/repos/o/r/issues/1"},
+         ]),
+         {"Vireo": ("2026-11-25T05:02:57Z", 416), "Merlin": ("2026-11-25T05:00:02Z", 219)}),
         ("a file main has, which an earlier pull request changes too, is a note and no refusal",
          [(blocking, text[:60]) for blocking, text in claim_problems(
              dict(claim("Task: a row\nFiles: `src/js/JsInterpreter.cpp`, `tools/new.py`\nPhase and finding: this pull request's number\nAgent: Vega\n"), number=390, phase=390, finding=390),
@@ -1577,6 +1706,25 @@ def self_test() -> int:
         ("...a file in it that two name is still shared",
          same_files({"tests/suites/393-json-raw-json.cpp"}, {"tests/suites/393-json-raw-json.cpp", "tests/suites/"}),
          ["tests/suites/393-json-raw-json.cpp"]),
+        ("a file named before its number is known is nobody's: two that both say N share nothing",
+         same_files({"tests/suites/N-*.cpp", "docs/phases/N-*.md", "docs/findings/N-*.md", "src/js/VM.cpp"},
+                    {"docs/findings/N-*.md", "docs/phases/N-*.md", "tests/suites/N-*.cpp", "src/js/JsOps.cpp"}), []),
+        ("...however the number that is not there yet is written",
+         [name for name in ("docs/phases/N-….md", "docs/phases/NNN-a-name.md", "tests/suites/<N>-a-name.cpp",
+                            "tests/suites/*.cpp", "docs/findings/{N}-x.md", "docs/findings/#-x.md", "tests/suites/...",
+                            "docs/phases/PR-x.md", "tests/suites/[N]-x.cpp")
+          if not claims_nothing(name)], []),
+        ("...a file there with a number, or with a name of its own, is a file",
+         [name for name in ("docs/phases/419-*.md", "tests/suites/421-the-vm-binds.cpp", "tests/suites/README.md",
+                            "tests/suites/Nesting.hpp", "docs/findings/names.md", "src/N-*.cpp", "tools/N-x.py")
+          if claims_nothing(name)], []),
+        ("...and the later of two that wrote N is refused nothing and told nothing for it",
+         claim_problems(
+             dict(claim("Task: a row\nFiles: src/js/VM.cpp, tests/suites/N-*.cpp, docs/phases/N-*.md, docs/findings/N-*.md\n"
+                        "Phase and finding: this pull request's number\nAgent: Arena\n"), number=421, phase=421, finding=421),
+             [dict(claim("Task: another\nFiles: `src/js/JsOps.cpp`, `tests/suites/N-*.cpp`, `docs/phases/N-*.md`, `docs/findings/N-*.md`\n"
+                         "Phase and finding: this pull request's number\nAgent: Marten\n"), number=415, phase=415, finding=415)],
+             Main({1}, {1}, {1}, {1}, 1, 1), on_main_file=lambda name: name.startswith("src/")), []),
         ("...and the pull request that names it bare is told so, in a note",
          [text[:74] for blocking, text in claim_problems(
              claim("Task: a row\nFiles: `src/a.cpp`, `docs/phases/`\nPhase and finding: this pull request's number\nAgent: Vega\n"),
@@ -1833,6 +1981,13 @@ def self_test() -> int:
          why_not_taken(waiting(mergeable="UNKNOWN"), board), ""),
         ("a title that begins with WIP: is not finished",
          why_not_taken(waiting(title="WIP: a change"), board), "its title still begins with WIP:"),
+        ("a pull request with no change in it is a claim, whatever its title says: nothing to land",
+         why_not_taken(waiting(title="Claim: the root layout box", files=()), board)[:62],
+         "it changes no file: there is nothing in it to land. If it is a"),
+        ("...and saying that it is taken does not make it something to land",
+         why_not_taken(waiting(title="Claim: the root layout box", files=(), checks=[]),
+                       board + [said("Lander: lot of 03:01 UTC: #7 (`fffffff`) with `main` `1234567`, one CI run.")])[:19],
+         "it changes no file:"),
         ("a draft is not finished whatever its title says, and is told so in its own words",
          why_not_taken(dict(waiting(), isDraft=True), board), "it is a draft: `gh pr ready 7` when it is finished"),
         ("CI still running on a finished pull request: taken, its run and the lot's go side by side",
@@ -1878,7 +2033,8 @@ def self_test() -> int:
 
     names_stale = ["a head with main in it: quiet",
                    "39 commits behind and it does not merge: blocking, and it names the file",
-                   "39 commits behind and it still merges: a note, not a refusal"]
+                   "39 commits behind and it still merges: a note, not a refusal",
+                   "a head this clone does not have: no answer, and it says so (it used to say main is in it)"]
     for name, (behind, why), wanted in zip(names_stale, stale, wanted_stale):
         real = globals()["staleness"]
         globals()["staleness"] = lambda head, sha, _b=behind, _w=why: (_b, _w)

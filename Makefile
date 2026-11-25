@@ -261,6 +261,11 @@ verify-console-terminal-safety: $(TARGET)
 verify-bytecode-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_bytecode_terminal.py --binary $(TARGET)
 
+## Capture REPL results and CLI echo attacks safely.
+.PHONY: verify-cli-echo-terminal-safety
+verify-cli-echo-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_cli_echo_terminal.py --binary $(TARGET)
+
 $(BUILD_DIR)/terminal_text_probe: tools/security/terminal_text_probe.cpp $(BUILD_DIR)/common/TerminalText.o
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
@@ -394,12 +399,27 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 ## the same six took 89, 79, 69 and 75, then 87 beside 63, and one of the
 ## four failed a bound of five seconds beside the others and passed when it
 ## was run again by itself (run_stretches.py does that): 245 seconds.
+##
+## UNIT_SUITE_ONLY=early runs the stretches that are not late, and
+## UNIT_SUITE_ONLY=late the late ones and nothing else: two calls for two
+## machines, which is what CI's two jobs for the unit suites make since 25
+## November 2026. There the deep ones had been 72 to 87 seconds that began
+## when the other four had taken 102 to 127, in the longest job of a run
+## (5.8 to 6.2 minutes where the next was 4.2 to 4.8); the binary takes
+## 90 to 147 seconds to compile in each job, which the second one spends
+## while the first does. The cross-origin test binary is the first call's.
+## Without UNIT_SUITE_ONLY everything is run, as before.
 STRETCHES ?= 3
 UNIT_SUITE_CUTS ?= inner_html_of_an_xml_document_is_xml,deep_nesting_never_exhausts_the_native_stack,dom_trees_of_any_depth_can_be_walked_and_released,html_parser_void_element_with_a_slash_closes_nothing_else,svg_real_world_paths_arcs_gradients_use_clip_and_guards
 UNIT_SUITE_LATE ?= 2,3
-test-in-stretches: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
-	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(if $(filter balanced,$(STRETCHES)),$(UNIT_SUITE_CUTS) $(UNIT_SUITE_LATE),$(STRETCHES))
-	@./$(CROSS_ORIGIN_TARGET)
+UNIT_SUITE_ONLY ?=
+ifneq ($(filter-out early late,$(UNIT_SUITE_ONLY)),)
+$(error UNIT_SUITE_ONLY is "$(UNIT_SUITE_ONLY)": it is early, late, or nothing)
+endif
+test-in-stretches: $(TEST_TARGET) $(if $(filter late,$(UNIT_SUITE_ONLY)),,$(CROSS_ORIGIN_TARGET))
+	@$(if $(UNIT_SUITE_ONLY),$(if $(filter balanced,$(STRETCHES)),true,echo 'UNIT_SUITE_ONLY=$(UNIT_SUITE_ONLY) means something only with STRETCHES=balanced: with STRETCHES=$(STRETCHES) no stretch is late' >&2; exit 2),true)
+	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(if $(filter balanced,$(STRETCHES)),$(UNIT_SUITE_CUTS) $(UNIT_SUITE_LATE) $(UNIT_SUITE_ONLY),$(STRETCHES))
+	@$(if $(filter late,$(UNIT_SUITE_ONLY)),true,./$(CROSS_ORIGIN_TARGET))
 
 ## The numbers the documents publish: every "A / B (P%)" must divide, the two
 ## corpus totals must equal the cases on disk, and every figure a document marks
@@ -639,13 +659,26 @@ diff-trees: $(TARGET)
 ## the same for XML: documents of the W3C suite (when `make xml-conformance`
 ## has downloaded it) with bytes changed, cut short and pasted over, read as
 ## bytes and through XMLHttpRequest, DOMParser and XMLSerializer.
-fuzz:
+##
+## Six parts that share nothing but the binaries they are given: each makes
+## its inputs from a seed of its own and keeps what it writes in a directory
+## of its own. `make fuzz` runs them one after another, in this order, as it
+## always has. `make -j4 fuzz` runs four at a time: until 25 November 2026
+## the six were six lines of one recipe, so CI's job for them, which has
+## four cores, used one of them for 193 to 266 seconds, and was the second
+## longest job of a run.
+FUZZ_PARTS := fuzz-pages fuzz-pipeline fuzz-xml fuzz-media fuzz-color fuzz-brotli
+.PHONY: fuzz $(FUZZ_PARTS)
+fuzz: $(FUZZ_PARTS)
+
+fuzz-pages:
 	@python3 tools/fuzz/fuzz_parser.py
+
+fuzz-pipeline:
 	@python3 tools/fuzz/fuzz_pipeline.py
+
+fuzz-xml:
 	@python3 tools/fuzz/fuzz_xml.py
-	@$(MAKE) fuzz-media
-	@$(MAKE) fuzz-color
-	@$(MAKE) fuzz-brotli
 
 ## Pages that are hostile by size, not by content: one construct nested
 ## 200,000 levels (markup of every kind, trees built by script, CSS values),
@@ -657,12 +690,17 @@ fuzz:
 ## Then random pages that keep the parser at its nesting limit. About ten
 ## minutes on two cores.
 ##
-## CI runs it as two jobs side by side, `make deep DEEP_KINDS="--runs dumps"`
-## and `make deep DEEP_KINDS="--not-runs dumps"`: every page is given to the
-## engine three ways (dumps, terminal, html5lib), each a run of its own, and
-## the dumps were 530 of 1,270 seconds of work on 24 November 2026, when the
-## one job was the third longest of a run. "Every kind but the dumps" and not
-## the two names, so that a kind added to tools/fuzz/deep_pages.py is run.
+## CI runs it as three jobs side by side, `make deep DEEP_KINDS="--runs
+## dumps"`, `"--runs terminal"` and `"--not-runs dumps,terminal"`: every
+## page is given to the engine three ways (dumps, terminal, html5lib), each
+## a run of its own, and the dumps were 530 of 1,270 seconds of work on 24
+## November 2026, when the one job was the third longest of a run. As two
+## jobs, the dumps and the rest, the rest was the longest job of a run the
+## next day whenever no slower machine made another one longer: 244 to 247
+## seconds of pages on four cores, 448 seconds of work for the terminal
+## and 526 for html5lib, beside 137 to 169 for the dumps. "Every kind but
+## those two" and not the third name, so that a kind added to
+## tools/fuzz/deep_pages.py is run.
 DEEP_KINDS ?=
 deep: $(TARGET)
 	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM) $(DEEP_KINDS)
@@ -770,9 +808,13 @@ asan-xml-generated:
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/xml_roundtrip.py --binary build-asan/litebird --count $(XML_ASAN_ROUNDTRIP_COUNT) --timeout 900
 
 ## The fuzz smoke run: mutated pages, XML documents, media, colours and Brotli
-## streams.
+## streams. With `make -j` its six parts run side by side (see `fuzz`), so
+## what each prints is kept together and shown when it ends
+## (--output-sync), and one that fails does not stop the others
+## (--keep-going): the step then names every part that failed, not the
+## first.
 asan-fuzz:
-	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" fuzz BROTLI_VERIFY_FLAGS=--skip-node
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) --output-sync=target --keep-going BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" fuzz BROTLI_VERIFY_FLAGS=--skip-node
 
 ## The deep pages in the sanitizer build made by asan-core. This run is for
 ## memory errors on those pages, not for recursion: that is found at full

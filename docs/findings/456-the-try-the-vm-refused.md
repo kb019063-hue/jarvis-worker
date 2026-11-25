@@ -19,7 +19,7 @@ from REFUSES to AGREES and leads the new suite.
 
 ## Verification
 
-`make verify-bytecode`: **117/117 agree and 5/5 still refused**. The phase 456
+`make verify-bytecode`: **119/119 agree and 5/5 still refused**. The phase 456
 suite checks nested handlers, reentrant callbacks, abrupt iterator cleanup,
 completion values and the forms that stay refused.
 

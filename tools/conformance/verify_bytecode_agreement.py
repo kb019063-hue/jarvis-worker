@@ -75,6 +75,8 @@ AGREES: list[Case] = [
     Case("var s='';try{throw 3}catch(e){s+=e;}String(s)", "catch effects survive the block"),
     Case("try { Object.create(42); } catch(e) { e.name; }", "native TypeError is caught"),
     Case("function f(){throw 8} try{f()}catch(e){e}", "a throw crosses a VM call frame"),
+    Case("var o={};Object.defineProperty(o,'x',{get:function(){try{throw 5}catch(e){return e}}});try{o.x+2}catch(e){99}", "a reentrant callback catches within its own frame"),
+    Case("var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){throw 7}}};try{for(var x of a){throw 4}}catch(e){e}", "the original throw wins over a failing iterator close"),
     Case("try{try{throw 1}catch(e){throw e+2}}catch(x){x}", "nested handler rethrows to outer handler"),
     Case("try{1;throw 2}catch(e){}", "empty catch preserves prior completion"),
     Case("try{throw 1}catch(e){e+2};", "completion survives a trailing empty statement"),

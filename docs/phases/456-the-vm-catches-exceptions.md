@@ -25,12 +25,18 @@ vector. Completion tracking makes a script's last statement return the result
 of its executed expression statements, including the original witness.
 
 The original refusal is first in the suite and moves atomically into AGREES,
-with 16 additional witnesses. The new refused cases protect unsupported forms.
+with 18 additional witnesses. The new refused cases protect unsupported forms.
 
 ## Verification
 
-- `make verify-bytecode`: **117/117 agree and 5/5 still refused**.
+- `make verify-bytecode`: **119/119 agree and 5/5 still refused**.
 - `python3 tools/conformance/verify_bytecode_agreement.py --self-test`: 6 readings pass.
+- `make -j2 all test`: 499 engine suites and 114 cross-origin checks pass;
+  two additional assertions were then added and passed in the isolated suite.
+- `make deep`: 1,332 runs, 0 failures. The normal HTML, DOM, URL, XML and WPT
+  checks and tree/XML differentials pass. JS conformance met its floor but
+  recorded 2 timeouts under concurrent load (1,151/1,158); a clean rerun and
+  full sanitizer checks are pending.
 - `tests/suites/456-the-vm-catches-exceptions.cpp` covers nested catches,
   catch shadowing, native errors, frame and callback unwinding, iterator close,
   garbage collection, completions, and explicit refusals.

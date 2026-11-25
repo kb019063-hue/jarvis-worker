@@ -34,6 +34,19 @@ private:
     void end_scope();
 
     void add_local(const std::string& name);
+    /// The BindingIdentifier case of a declarator: `var a = v`, including
+    /// where the binding lives (a function's local slot, or the global
+    /// object's property at the script level). Consumes the value on top of
+    /// the stack exactly once.
+    void compile_binding(const std::string& name, JsDeclKind kind);
+    /// Dispatch on the shape of a binding target: a name, or an array
+    /// pattern. An object pattern is refused here, loudly, rather than
+    /// compiled wrongly.
+    void compile_pattern(const Pattern& pattern, JsDeclKind kind);
+    /// The BindingPattern case of a declarator: `var [a, b = 1, ...rest] = v`,
+    /// recursively. The value is on top of the stack; it consumes it. Array
+    /// patterns only — object patterns stay refused rather than half-done.
+    void compile_array_binding(const Pattern& pattern, JsDeclKind kind);
     /// Records a local at `depth` rather than at the scope being compiled, for
     /// a `var` nested in a block: it belongs to the enclosing function.
     void add_local_at(const std::string& name, int depth);

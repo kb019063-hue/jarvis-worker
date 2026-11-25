@@ -117,7 +117,14 @@ code_was_green() {  # code_was_green FULLSHA
   [ -z "$changed" ]
 }
 takeable() {  # takeable N FULLSHA; says why in $WHY
-  local runs
+  local runs wrong
+  # What it adds where every pull request adds its own files is called by its
+  # own number. #393 was taken on 25 November with a phase, a finding and a
+  # suite called 387-..., which is #387's number; its agent renamed them two
+  # minutes later, and the lot was built again, with #388 waiting in it.
+  wrong="$(git diff --name-only --diff-filter=A "origin/main...$2" -- docs/phases docs/findings tests/suites 2>/dev/null \
+           | grep -Ev "^(docs/phases|docs/findings|tests/suites)/$1-" | head -2 | tr '\n' ' ')"
+  [ -z "$wrong" ] || { WHY="it adds ${wrong}and a file added there is called by its own number ($1-...)"; return 1; }
   WHY="green"; green "$2" && return 0
   runs="$(runs_of "$2")"
   case "$runs" in *failure*|*timed_out*) WHY="its own run failed"; return 1 ;; esac

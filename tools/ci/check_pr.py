@@ -570,6 +570,21 @@ def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bo
         problems.append((False, f"its `Files:` line names {', '.join(f'`{name}`' for name in bare)}: every pull request adds a "
                                 f"file of its own there, so that claims nothing. Name the file (`{bare[0].rstrip('/')}/"
                                 f"{claim['number']}-...`)"))
+    # A file it adds where every pull request adds its own is called by its own
+    # number. #393 was written as Phase 387 while #387 to #392 were being
+    # opened, and was taken into a lot with `docs/phases/387-...`; #387 would
+    # have found a second Phase 387 on `main`.
+    for name in sorted(claim["files"]):
+        placed = re.match(r"(docs/phases|docs/findings|tests/suites)/(\d+)-", name)
+        if not placed:
+            continue
+        mine = claim["finding"] if placed.group(1) == "docs/findings" else claim["phase"]
+        written = main.written_findings if placed.group(1) == "docs/findings" else main.written_phases
+        number = int(placed.group(2))
+        if mine is None or number == mine or number in written:
+            continue        # its own, or a write-up or suite `main` has, changed here
+        problems.append((True, f"`{name}` is called by {number}, and this pull request's number is {mine}: "
+                               f"rename it (`{placed.group(1)}/{mine}-...`)"))
     others = [c for c in claims if c["number"] != claim["number"]]
     for kind, key in (("Phase", "phase"), ("finding", "finding")):
         number = claim[key]
@@ -1515,6 +1530,12 @@ def self_test() -> int:
         ("a directory every pull request adds its own file to, named bare, claims nobody's file in it",
          same_files({"src/js/JsOps.cpp", "tests/suites/", "docs/phases/", "docs/findings"},
                     {"tests/suites/393-json-raw-json.cpp", "docs/phases/393-a-number.md", "docs/findings/393-the-text.md"}), []),
+        ("a file added there under another number than its own is a refusal",
+         [text for blocking, text in claim_problems(
+             dict(claim("Task: a row\nFiles: `docs/phases/387-a-number.md`, `docs/findings/393-the-text.md`, `tests/suites/1-old.cpp`\n"
+                        "Phase and finding: this pull request's number\nAgent: Merlin\n"), number=393, phase=393, finding=393),
+             [], Main({1}, {1}, {1}, {1}, 1, 1)) if blocking],
+         ["`docs/phases/387-a-number.md` is called by 387, and this pull request's number is 393: rename it (`docs/phases/393-...`)"]),
         ("...nor do two pull requests that both name it bare share it",
          same_files({"docs/phases/", "docs/findings/"}, {"docs/phases/", "docs/findings/"}), []),
         ("...a file in it that two name is still shared",

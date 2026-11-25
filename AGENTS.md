@@ -405,6 +405,26 @@ within the hour, and the first lot was started again four times.
    - the lines that send a pull request back;
    - whatever else one agent has to tell another: one line, your name
      first.
+6. **If `main` is broken**, `python3 tools/ci/check_pr.py` ends with a
+   line that begins `!!` (`claim N`, `merge N` and `watch` have it too):
+   a job of `main`'s own newest CI run has failed. Read why first
+   (`python3 tools/ci/run_report.py --run ID`). A download that failed or
+   a slow machine is not a broken `main`: do nothing. A merge that should
+   not have happened is (#449 on 25 November, merged with no CI run: 7 of
+   18 jobs failed on `main`, and with them the run of #450, which had
+   changed none of it). Then:
+   - write on the board `NAME: main is broken by #N (run ID)`, unless a
+     line there says so already;
+   - while a watch is on, the landing session takes the merge out: its
+     own pull request carries `git revert -m 1 MERGE`, tested in a lot,
+     and its merge ends that watch;
+   - with no watch on, **say it first in your reply**: your person calls
+     the landing session ("watch"), which takes the merge out before
+     anything else. Do not revert it in your own branch: that branch is
+     your task's, and a revert in it lands when your task does;
+   - a branch that was made from the broken tree, or merged it, gets
+     `git fetch origin && git merge origin/main` once `main` is mended.
+     Nothing is measured on it before, and nothing is merged from it.
 
 `python3 tools/ci/check_pr.py` shows each claim's name, notes a pull request
 without one, and leaves the board and a watch out of the claims.
@@ -904,6 +924,32 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   tree that fails CI. `check_pr.py merge 91` asks about the title and about
   `main`, and would have said "not ready" twice. #76, #77 and #84 were
   merged behind `main` as well, and were lucky.
+- **Merged 59 seconds after it was opened, with no CI run.** #449 was
+  opened on 25 November at 21:31:52 and merged at 21:32:51, with `WIP:`
+  in its title, while a watch was on. Both of its commits carried
+  `[skip ci]`, so no job had run on it, and `check_pr.py merge 449` was
+  never asked: it would have said "not ready" for the title alone. The
+  first run of any job on it was `main`'s own, after the merge: the
+  first job failed 49 seconds later, 7 of 18 in the end. Its suite was
+  `tests/suites/tmp-unforgeable.cpp`, two suites in a file not named by
+  a number. A cross-origin window said it had an own `document`. And a
+  top-level `var top` no longer hid the Window's `top`, which is what a
+  browser does, but one case of the JavaScript corpus and every chain
+  page of `tools/fuzz/deep_pages.py` said `var top`. Its phase and
+  finding were called 436, another pull request's number. `main` was
+  broken for nine minutes: the landing session reverted the merge with
+  its own pull request (#448, 21:41), which ended that watch after one
+  lot, since what the landing session itself changes reaches `main` no
+  other way. A pull request finished in those minutes (#450) had a run
+  that failed for none of its own lines and was in no list afterwards,
+  and one begun in them (#451) was branched from the broken tree.
+  **`gh pr merge` is never run before `check_pr.py merge N` has said
+  "ready"**, and a pull request whose last commit carries `[skip ci]`
+  has not been tested by anything. Nothing in this repository can stop
+  a merge; only that rule, or a rule of GitHub's that the person sets.
+  What the repository can do is say so at once: `check_pr.py` now has
+  a line that begins `!!` when a job of `main`'s own newest run has
+  failed, and "Working together", point 6, says what to do then.
 - **A line of README.md cost 28 minutes.** Until 18 November every commit
   on `main` sent every finished pull request back for a whole CI run. That
   morning `main` moved eight times in three hours and twenty minutes, with

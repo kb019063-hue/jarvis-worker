@@ -873,15 +873,9 @@ static std::string defined_name(const std::string& key, const JsValue* computed,
     if (computed && computed->type == JsType::Symbol) {
         // The description, not `toString()`: a symbol with none contributes
         // nothing at all, where `String(Symbol())` is the text "Symbol()".
-        // `make_symbol` keeps it in the symbol's own property table, which is
-        // where Symbol.prototype.description reads it (BuiltinsObject.cpp).
-        std::string description;
-        if (computed->properties) {
-            auto it = computed->properties->find("description");
-            if (it != computed->properties->end() && it->second.type == JsType::String) {
-                description = it->second.string_val.str();
-            }
-        }
+        // It rides in the value's extra block (JsValue::make_symbol), which is
+        // where Symbol.prototype.description reads it too.
+        const std::string description = computed->symbol_description_text();
         if (!description.empty()) name += "[" + description + "]";
         return name;
     }

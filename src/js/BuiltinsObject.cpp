@@ -14,6 +14,7 @@ namespace litebird {
 
 namespace {
 
+
 using Args = const std::vector<JsValue>&;
 
 /// `this` for the running native. Copied, because any nested call replaces
@@ -1409,7 +1410,17 @@ void install_object_builtins(JsIntrinsics& realm) {
     // ---- Symbol -----------------------------------------------------------
     JsValue symbol_ctor = js_make_native("Symbol", 0, [](Args args) {
         if (JsValue::current_is_construct()) js_throw_type_error("Symbol is not a constructor");
-        return js_new_symbol(js_arg(args, 0).is_undefined() ? std::string() : js_to_string(js_arg(args, 0)));
+        // §20.4.1.1: with no argument — or an `undefined` one — the symbol has
+        // *no* description, and `Symbol.prototype.description` answers
+        // `undefined` for it. `Symbol("")` is the other thing entirely: a
+        // symbol whose description is the empty string, and `.description`
+        // answers `""`. Both print as `Symbol()`, so the difference cannot live
+        // in the description string; the property table marks the absence with
+        // a flag of its own, and the getter below asks for it.
+        const JsValue argument = js_arg(args, 0);
+        JsValue symbol = js_new_symbol(argument.is_undefined() ? std::string() : js_to_string(argument));
+        if (argument.is_undefined()) symbol.mark_symbol_without_description();
+        return symbol;
     });
     symbol_ctor.define_property("prototype", js_object_value(realm.symbol_proto), 0);
     js_define_hidden(realm.symbol_proto, "constructor", symbol_ctor);
@@ -1444,9 +1455,9 @@ void install_object_builtins(JsIntrinsics& realm) {
     });
     js_define_method(realm.symbol_proto, "valueOf", 0, [this_symbol](Args) { return this_symbol(); });
     js_define_getter(realm.symbol_proto, "description", [this_symbol](Args) {
-        JsValue symbol = this_symbol();
-        if (!symbol.properties) return JsValue::make_undefined();
-        return (*symbol.properties)["description"];
+        // §20.4.3.2: `undefined` when the symbol was made with no description,
+        // `""` when it was made with the empty string.
+        return this_symbol().symbol_description();
     });
     realm.add_global("Symbol", symbol_ctor);
 

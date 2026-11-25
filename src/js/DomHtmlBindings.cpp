@@ -7,6 +7,7 @@
 #include "litebird/dom/TreeWalk.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/render/Canvas2D.hpp"
+#include "litebird/render/SvgRenderer.hpp"
 #include "litebird/render/ImageDecoder.hpp"
 #include "litebird/render/MediaAudioCodecs.hpp"
 #include "litebird/render/SvgRenderer.hpp"
@@ -1664,12 +1665,19 @@ void setup_svg_text_path_element(Iface& I) {
     setup_svg_length_attributes(I);
 }
 
+// `getBBox()` is the box of the geometry the element *draws*, in its own user
+// space, with its own transform excluded and its children's included (SVG 2
+// §8.10). It is not a layout box -- an SVG element has none, and Phase 374
+// shipped this reading `Element::bounding_box()`, the HTML layout border box,
+// which is empty for every SVG element. Every call answered 0,0,0,0.
+//
+// The box comes from the renderer's own geometry, so what a page measures and
+// what the painter draws cannot drift apart.
 void setup_svg_graphics_element(Iface& I) {
     I.node_method(&is_svg_graphics_element, "getBBox", 0, [](Realm& realm, Node& node, Args) {
         auto rect = std::make_shared<SvgRectState>();
-        const Rect box = static_cast<Element&>(node).bounding_box();
-        rect->values = {static_cast<float>(box.x), static_cast<float>(box.y),
-                        static_cast<float>(box.width), static_cast<float>(box.height)};
+        const SvgUserBBox box = svg_element_bbox(shared(static_cast<Element&>(node)));
+        rect->values = {box.x, box.y, box.width, box.height};
         return realm.make("SVGRect", rect);
     });
 }

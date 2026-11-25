@@ -389,7 +389,20 @@ build/shaping-venv/bin/python tools/shaping/arabic_marks_diagnostic.py --matrix 
   --font /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf --output build/arabic-matrix.json
 ```
 
-Sans Bold also reaches 23/23 placements; Sans Mono remains 18/23 different,
-including nonzero mark advances. The two remaining Sans matrix differences
-expose Arabic modified-class ordering. See `docs/phases/292-arabic-mark-placement.md`
+Sans Bold also reaches 23/23 placements. See `docs/phases/292-arabic-mark-placement.md`
 for exact hashes, before/after data, synthetic tests and limitations.
+
+## Arabic GDEF mark advances in monospaced faces (Phase 432)
+
+`DejaVuSansMono.ttf` gives combining marks a `1233`-unit `hmtx` advance and
+includes no `SinglePos` zeroing lookup under `arab`, relying on the Arabic
+shaper's late `GDEF` mark-zeroing pass (`ZERO_WIDTH_MARKS_BY_GDEF_LATE`).
+Zeroing `GDEF` class-3 mark advances in `arab` runs after `GPOS`/legacy `kern`
+and before Stage 4a/4b attachment resolution improves `DejaVuSansMono.ttf`
+same-placement results against HarfBuzz 12.1.0 from **10/11 → 11/11** on
+`compare.py`, **5/23 → 23/23** on `arabic_marks_diagnostic.py`, and **0/384 →
+358/384** on supported `--matrix` pairs (`102` unsupported lacking `U+0670`;
+`DejaVuSansMono-Bold.ttf` reaches `23/23` and `368/384`). Raw RTL within-cluster
+order differences (`18/23`), Arabic modified-class ordering (`2` matrix cases),
+and unattached mark origins on unanchored `U+0622`/`U+0623`/`U+0625` composites
+(`24` Mono matrix cases) remain open; see `docs/phases/432-arabic-mark-advances.md`.

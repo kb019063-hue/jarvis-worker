@@ -405,6 +405,26 @@ within the hour, and the first lot was started again four times.
    - the lines that send a pull request back;
    - whatever else one agent has to tell another: one line, your name
      first.
+6. **If `main` is broken**, `python3 tools/ci/check_pr.py` ends with a
+   line that begins `!!` (`claim N`, `merge N` and `watch` have it too):
+   a job of `main`'s own newest CI run has failed. Read why first
+   (`python3 tools/ci/run_report.py --run ID`). A download that failed or
+   a slow machine is not a broken `main`: do nothing. A merge that should
+   not have happened is (#449 on 25 November, merged with no CI run: 7 of
+   18 jobs failed on `main`, and with them the run of #450, which had
+   changed none of it). Then:
+   - write on the board `NAME: main is broken by #N (run ID)`, unless a
+     line there says so already;
+   - while a watch is on, the landing session takes the merge out: its
+     own pull request carries `git revert -m 1 MERGE`, tested in a lot,
+     and its merge ends that watch;
+   - with no watch on, **say it first in your reply**: your person calls
+     the landing session ("watch"), which takes the merge out before
+     anything else. Do not revert it in your own branch: that branch is
+     your task's, and a revert in it lands when your task does;
+   - a branch that was made from the broken tree, or merged it, gets
+     `git fetch origin && git merge origin/main` once `main` is mended.
+     Nothing is measured on it before, and nothing is merged from it.
 
 `python3 tools/ci/check_pr.py` shows each claim's name, notes a pull request
 without one, and leaves the board and a watch out of the claims.
@@ -927,6 +947,9 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   "ready"**, and a pull request whose last commit carries `[skip ci]`
   has not been tested by anything. Nothing in this repository can stop
   a merge; only that rule, or a rule of GitHub's that the person sets.
+  What the repository can do is say so at once: `check_pr.py` now has
+  a line that begins `!!` when a job of `main`'s own newest run has
+  failed, and "Working together", point 6, says what to do then.
 - **A line of README.md cost 28 minutes.** Until 18 November every commit
   on `main` sent every finished pull request back for a whole CI run. That
   morning `main` moved eight times in three hours and twenty minutes, with

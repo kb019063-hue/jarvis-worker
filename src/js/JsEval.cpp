@@ -460,6 +460,10 @@ JsValue js_make_async_from_sync(const JsValue& sync_iterator) {
 
 } // namespace
 
+JsValue js_create_async_from_sync_iterator(const JsValue& sync_iterator) {
+    return js_make_async_from_sync(sync_iterator);
+}
+
 // ---------------------------------------------------------------------------
 // Programs
 // ---------------------------------------------------------------------------

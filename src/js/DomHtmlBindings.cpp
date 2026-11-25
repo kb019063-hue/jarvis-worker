@@ -2129,14 +2129,61 @@ bool op_from_args(const std::string& name, Args args, Path2D::Op& op) {
     }
     if (name == "rect") { need(4, "Path2D.rect"); op.kind = Path2D::Kind::Rect; op.a = number(0); op.b = number(1); op.c = number(2); op.d = number(3); return true; }
     if (name == "roundRect") {
-        need(4, "Path2D.roundRect"); op.kind = Path2D::Kind::RoundRect;
+        need(4, "Path2D.roundRect");
         op.a = number(0); op.b = number(1); op.c = number(2); op.d = number(3);
-        // One radius or four; the context's `round_rect` takes one, so four are
-        // averaged here rather than silently using the first. That is a
-        // limitation, not a decision, and the finding says so.
-        float r = 0.0f;
-        if (args.size() > 4 && !args[4].is_nullish()) r = static_cast<float>(to_double(args[4]));
-        op.e = r;
+        // `radii` is one number or a sequence of up to four, each of which may be
+        // itself a pair `[x, y]` for an elliptical corner. The context's binding
+        // already reads that grammar for its own `roundRect`; this records the
+        // same four corners so the replay goes through the same overload, and the
+        // two cannot drift. A single number, or no argument, stays the one-radius
+        // kind, which is what the context's own no-argument case does.
+        if (args.size() <= 4 || args[4].is_nullish()) {
+            op.kind = Path2D::Kind::RoundRect;
+            op.e = 0.0f;
+            return true;
+        }
+        std::vector<float> corners;  // top-left, top-right, bottom-right, bottom-left
+        const JsValue& radii = args[4];
+        if (radii.is_array()) {
+            const auto& a = radii.array_elements();
+            std::vector<float> given;
+            given.reserve(a.size());
+            for (const JsValue& v : a) {
+                // `round_rect` is circular-only. The context's binding reads an
+                // elliptical pair `[x, y]` with `to_number()`, which becomes NaN
+                // and then a zero radius. Reproduce that answer here so the two
+                // forms stay identical; the shared limitation is documented.
+                given.push_back(v.is_array() ? 0.0f : static_cast<float>(to_double(v)));
+            }
+            if (given.empty()) {
+                // The context's own binding falls through an empty sequence to a
+                // plain rectangle (`rect`), so `roundRect(x, y, w, h, [])` is a
+                // square-cornered box and not an empty path. Written as "no corner
+                // at all" first, which drew nothing while the context drew a box.
+                op.kind = Path2D::Kind::Rect;
+                return true;
+            }
+            // The CSS/Canvas spreading rule the context's binding already uses:
+            // 1 value is all four, 2 are (tl,br) and (tr,bl), 3 are (tl,tr,bl) and
+            // (tr), 4 are the four in order.
+            if (given.size() == 1) corners = {given[0], given[0], given[0], given[0]};
+            else if (given.size() == 2) corners = {given[0], given[1], given[0], given[1]};
+            else if (given.size() == 3) corners = {given[0], given[1], given[2], given[1]};
+            else corners = {given[0], given[1], given[2], given[3]};
+        } else {
+            const float r = static_cast<float>(to_double(radii));
+            corners = {r, r, r, r};
+        }
+        // All four equal is the one-radius shape exactly; keeping it as the simple
+        // kind means a page that passed `[5]` or `5` replays through the overload
+        // it expects rather than a second one that computes the same thing.
+        if (corners[0] == corners[1] && corners[1] == corners[2] && corners[2] == corners[3]) {
+            op.kind = Path2D::Kind::RoundRect;
+            op.e = corners[0];
+            return true;
+        }
+        op.kind = Path2D::Kind::RoundRectRadii;
+        for (int i = 0; i < 4; ++i) op.rr[i] = corners[static_cast<std::size_t>(i)];
         return true;
     }
     return false;

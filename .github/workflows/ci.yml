@@ -364,6 +364,7 @@ jobs:
           python3 tools/ci/run_report.py --self-test
           bash -n tools/watch/watch.sh
           bash tools/ci/logged.sh --self-test
+          python3 tools/ci/annotate_failure.py --self-test
       - name: The documents keep their shape and stay under their budgets
         # ARCHITECTURE.md is 84% phase write-ups and AUDIT.md is 53 resolved
         # findings of 61. Both are frozen as append targets; new write-ups go

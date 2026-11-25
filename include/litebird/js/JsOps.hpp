@@ -268,6 +268,14 @@ bool js_array_holes_read_undefined(const JsValue& array);
 /// not a function. A primitive is asked through its prototype, so a string
 /// has one and a number has one when a script gave `Number.prototype` one.
 bool js_iterator_method(const JsValue& value, JsValue& method);
+/// The engine's one loop over an iterator, and the direct read of an array or
+/// a string that is still the realm's — exported together because a caller
+/// that must know whether its source is iterable *before* it builds the result
+/// (`Array.from`, and `Array.fromAsync` after it) needs both and used to carry
+/// a copy of them. The copy had drifted: it did not tell a generator's abort,
+/// where `return` must not run, from an ordinary error, where it must.
+void iterate_with_method(const JsValue& iterable, const JsValue& method,
+                         const std::function<bool(const JsValue&)>& visit);
 
 /// True when reading `value` directly gives what iterating it would, and
 /// finding that out ran no script: `value` is an array, or a string, whose

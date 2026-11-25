@@ -166,7 +166,7 @@ The 39 that remain, by what they need (one test can need two things):
   `Object.defineProperty` (`src/js/JsValue.cpp`);
 - 1 needs a setter on `Array.prototype` to be written through when the write is
   to an index of an array;
-- 1 is `sort`'s exact `get`/`set` order against `Array.prototype`'s accessors;
+- At this phase, one test was still attributed to `sort`'s exact `get`/`set` order against `Array.prototype`'s accessors. Phase 453 later reran the three `precise-*` cases and found all passing on the current tree; see [Phase 453](453-sort-accessor-order-regression-coverage.md).
 - 2 are `copyWithin` cases where a `valueOf` shortens the array mid-call: V8
   stops the copy at the last place the array still has, and the standard's text
   (which takes `len` before the coercion) makes it 25 places instead of 19. The

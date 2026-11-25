@@ -406,3 +406,20 @@ same-placement results against HarfBuzz 12.1.0 from **10/11 → 11/11** on
 order differences (`18/23`), Arabic modified-class ordering (`2` matrix cases),
 and unattached mark origins on unanchored `U+0622`/`U+0623`/`U+0625` composites
 (`24` Mono matrix cases) remain open; see `docs/phases/432-arabic-mark-advances.md`.
+
+## Arabic mark ordering and pre-mark decomposition (Phase 442)
+
+Extending covered canonical decomposition before following marks to `arab`,
+ordering `arab` mark spans by OpenType modified combining classes (`CCC 27..32
+-> 28..33`, `33 -> 27`) plus UTR #53 Modifier Combining Mark promotion (`220 ->
+25`, `230 -> 26`), and carrying those effective classes into canonical pair
+composition resolves the remaining Arabic mark-ordering differences before
+`GSUB`. `--ordering` on `arabic_marks_diagnostic.py` runs 16 targeted MCM,
+non-MCM blocking, shadda/tanwin `ccmp`, and precomposed-starter probes. Against
+HarfBuzz 12.1.0 on `DejaVuSans.ttf` and `DejaVuSans-Bold.ttf`, same-placement
+matches improve **484/486 → 486/486** on `--matrix` and **3/16 → 16/16** on
+`--ordering` (`DejaVuSansMono-Bold.ttf` improves **368/384 → 370/384** and
+**8/16 → 15/16**). Raw RTL within-cluster `[base, mark]` vs `[mark, base]`
+order (and unattached zero-advance mark origins on unanchored `DejaVuSansMono`
+composites) remains open; see `docs/phases/442-arabic-mark-ordering.md`.
+

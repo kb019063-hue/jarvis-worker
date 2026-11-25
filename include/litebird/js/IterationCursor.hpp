@@ -61,17 +61,16 @@ public:
     }
 
     /// The next value, or undefined once the source is exhausted.
-    JsValue pull() {
+    JsValue pull(bool for_of = false) {
         m_next_threw = false;
         if (m_done) return JsValue::make_undefined();
         switch (m_mode) {
             case Mode::Array: {
-                const auto& elements = m_source.object_val->array_elements;
-                // An element is a read of the array's storage, and a hole is not
-                // undefined necessarily but whatever the index has otherwise:
-                // js_array_get is what `array[index]` gives, and what the
-                // array's own iterator yields for that index.
-                if (m_index < elements.size()) return js_array_get(m_source, m_index++);
+                // The iterator reads the current length each time, including
+                // holes beyond the stored elements and changes made by the
+                // body between pulls. js_array_get also sees inherited indices.
+                const size_t length = static_cast<size_t>(js_to_number(m_source.get_property("length")));
+                if (m_index < length) return js_array_get(m_source, m_index++);
                 m_done = true;
                 return JsValue::make_undefined();
             }
@@ -106,7 +105,10 @@ public:
                     m_next_threw = true;
                     throw JsThrow{m_thrown};
                 }
-                if (!step.is_object_like()) js_throw_type_error("Iterator result is not an object");
+                if (!step.is_object_like()) {
+                    if (for_of) js_throw_type_error("Iterator result " + js_describe_thrown(step) + " is not an object");
+                    js_throw_type_error("Iterator result is not an object");
+                }
                 if (step.get_property("done").is_truthy()) {
                     m_done = true;
                     return JsValue::make_undefined();
@@ -118,6 +120,9 @@ public:
     }
 
     bool done() const { return m_done; }
+    /// An iterator step failed before a for-of body was entered. The loop
+    /// does not invoke return() for a failure in next, done, or value.
+    void abandon() { m_done = true; }
     /// True when the last `pull()` threw from `next` itself; see pull().
     bool next_threw() const { return m_next_threw; }
 

@@ -103,9 +103,14 @@ TEST(structured_clone_keeps_the_type_of_what_it_copies) {
         okThrows('a function', function () { structuredClone(function () {}); }, 'DataCloneError');
         okThrows('a WeakMap', function () { structuredClone(new WeakMap()); }, 'DataCloneError');
         okThrows('a Promise', function () { structuredClone(Promise.resolve(1)); }, 'DataCloneError');
-        // A Symbol has no clone at all, and the refusal is the engine's own
-        // wording rather than Node's DataCloneError — see the phase write-up.
-        okThrows('a Symbol', function () { structuredClone(Symbol('x')); }, 'TypeError');
+        // A Symbol has no clone at all. This assertion used to say `TypeError`
+        // and a comment here said that was "the engine's own wording rather
+        // than Node's DataCloneError". It was not a choice: HTML 2.7.4
+        // StructuredSerializeInternal step 6 is "If value is a Symbol, then
+        // throw a DataCloneError DOMException", in its own step before any
+        // object is looked at, and Node answers exactly that — `e.name` is
+        // DataCloneError, `e.code` 25. Corrected in Phase 414.
+        okThrows('a Symbol', function () { structuredClone(Symbol('x')); }, 'DataCloneError');
 
         // ---- what stays as it was -------------------------------------------
         var date = structuredClone(new Date(86400000));

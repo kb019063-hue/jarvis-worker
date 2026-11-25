@@ -201,7 +201,7 @@ st)
   "$0" look | tail -12
   "$0" lot > "$STATE/lot.out" 2>&1; echo "lot: exit $?: $(tail -2 "$STATE/lot.out" | tr '\n' ' ')"
   open_ones | while read -r n full wip mergeable; do
-    echo "  #$n ${full:0:7} $wip $mergeable $(timeout 30 gh api "repos/$R/commits/$full/check-runs?per_page=100" --jq '([.check_runs[] | select(.conclusion == "success")] | length | tostring) + "/" + (.check_runs | length | tostring) + (if ([.check_runs[] | select(.conclusion != null and .conclusion != "success")] | length) > 0 then " FAILED: " + ([.check_runs[] | select(.conclusion != null and .conclusion != "success") | .name] | join(", ")) else "" end) + " since " + ((([.check_runs[].started_at] | min) // "-----------     ") | .[11:16])')"
+    echo "  #$n ${full:0:7} $wip $mergeable $(timeout 30 gh api "repos/$R/commits/$full/check-runs?per_page=100" --jq '([.check_runs[] | select(.conclusion == "success")] | length | tostring) + "/" + (.check_runs | length | tostring) + (([.check_runs[] | select(.conclusion == "skipped" or .conclusion == "neutral")] | length) as $left | if $left > 0 then " (" + ($left | tostring) + " left out)" else "" end) + (([.check_runs[] | select(.conclusion != null and .conclusion != "success" and .conclusion != "skipped" and .conclusion != "neutral") | .name]) as $bad | if ($bad | length) > 0 then " FAILED: " + ($bad | join(", ")) else "" end) + " since " + ((([.check_runs[].started_at] | min) // "-----------     ") | .[11:16])')"
   done
   date -u '+%H:%M:%S' ;;
 

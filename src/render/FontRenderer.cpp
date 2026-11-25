@@ -2775,13 +2775,47 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             cp, [](const CccRange& range, uint32_t c) { return range.hi < c; });
         return r != kCccRanges + kCccRangesCount && r->lo <= cp ? r->ccc : 0;
     };
+    // HarfBuzz / OpenType Arabic modified combining classes: shadda (CCC 33)
+    // precedes vowels and tanwin (CCC 27..32 -> 28..33); sukun (34) and
+    // superscript alef (35) stay in place.
+    auto arabic_modified_class = [&](uint32_t cp) -> uint8_t {
+        const uint8_t ccc = combining_class(cp);
+        if (ccc >= 27u && ccc <= 32u) return static_cast<uint8_t>(ccc + 1u);
+        if (ccc == 33u) return 27u;
+        return ccc;
+    };
+    // UTR #53 Modifier Combining Marks (MCM): move to the front of an Arabic
+    // mark span (before shadda and vowels) without crossing equal-CCC non-MCM
+    // marks such as U+0653 MADDAH ABOVE or U+0656 SUBSCRIPT ALEF.
+    auto is_arabic_modifier_combining_mark = [](uint32_t cp) -> bool {
+        switch (cp) {
+        case 0x0654u:
+        case 0x0655u:
+        case 0x0658u:
+        case 0x06DCu:
+        case 0x06E3u:
+        case 0x06E7u:
+        case 0x06E8u:
+        case 0x08CAu:
+        case 0x08CBu:
+        case 0x08CDu:
+        case 0x08CEu:
+        case 0x08CFu:
+        case 0x08D3u:
+        case 0x08F3u:
+            return true;
+        default:
+            return false;
+        }
+    };
     const auto original_scripts = itemize_codepoint_scripts(original);
-    // A missing Latin composite can use canonical parts in this same face.
-    // Preserve standalone glyphs. Before a following Latin combining mark,
-    // expose canonical components even for a supported composite so ordering
-    // can interleave that mark. Never substitute a partly covered expansion.
-    // Recursion follows only the generated canonical table, not compatibility
-    // mappings. Bounds are defensive; Unicode's decomposition depth is small.
+    // A missing Latin or Arabic composite can use canonical parts in this same
+    // face. Preserve standalone glyphs. Before a following combining mark of
+    // the same script, expose canonical components even for a supported
+    // composite so ordering can interleave that mark. Never substitute a partly
+    // covered expansion. Recursion follows only the generated canonical table,
+    // not compatibility mappings. Bounds are defensive; Unicode's decomposition
+    // depth is small.
     std::vector<uint32_t> input;
     input.reserve(original.size());
     auto expand = [&](auto& self, uint32_t cp, std::vector<uint32_t>& parts, unsigned depth, bool fully) -> bool {
@@ -2802,9 +2836,10 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
     };
     for (std::size_t i = 0; i < original.size(); ++i) {
         const uint32_t cp = original[i];
+        const uint32_t strong = classify_codepoint_script(cp);
         const bool before_mark = i + 1 < original.size() && combining_class(original[i + 1]) != 0 &&
-                                 original_scripts[i + 1] == kTagLatn;
-        if (classify_codepoint_script(cp) == kTagLatn && (before_mark || glyph_index(cp) == 0)) {
+                                 original_scripts[i + 1] == strong;
+        if ((strong == kTagLatn || strong == kTagArab) && (before_mark || glyph_index(cp) == 0)) {
             std::vector<uint32_t> parts;
             if (expand(expand, cp, parts, 0, before_mark)) {
                 input.insert(input.end(), parts.begin(), parts.end());
@@ -2814,25 +2849,60 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         input.push_back(cp);
     }
 
-    // Canonical order for nonzero-class mark spans resolved to Latin, including
-    // leading marks and marks following Common characters.
-    // Keep equal classes stable and do not cross a starter or script boundary.
-    // This is font-aware Latin normalization, not full Unicode NFC.
+    // Order nonzero-class mark spans resolved to Latin (canonical CCC) or
+    // Arabic (modified CCC + UTR #53 MCM promotion), including leading marks
+    // and marks following Common characters. Keep equal classes stable and do
+    // not cross a starter or script boundary.
     const auto input_scripts = itemize_codepoint_scripts(input);
+    std::vector<uint8_t> effective_class(input.size(), 0);
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        effective_class[i] = (input_scripts[i] == kTagArab)
+            ? arabic_modified_class(input[i])
+            : combining_class(input[i]);
+    }
     for (std::size_t i = 0; i < input.size();) {
-        if (input_scripts[i] != kTagLatn || !combining_class(input[i])) {
+        const uint32_t script = input_scripts[i];
+        if ((script != kTagLatn && script != kTagArab) || !effective_class[i]) {
             ++i;
             continue;
         }
         std::size_t end = i + 1;
-        while (end < input.size() && input_scripts[end] == kTagLatn && combining_class(input[end])) ++end;
-        std::stable_sort(input.begin() + i, input.begin() + end,
-            [&](uint32_t a, uint32_t b) { return combining_class(a) < combining_class(b); });
+        while (end < input.size() && input_scripts[end] == script && effective_class[end]) ++end;
+        if (script == kTagArab) {
+            std::stable_sort(input.begin() + i, input.begin() + end,
+                [&](uint32_t a, uint32_t b) { return arabic_modified_class(a) < arabic_modified_class(b); });
+            for (std::size_t k = i; k < end; ++k) effective_class[k] = arabic_modified_class(input[k]);
+            std::size_t start = i;
+            std::size_t m = start;
+            for (const uint8_t cc : {uint8_t(220), uint8_t(230)}) {
+                while (m < end && effective_class[m] < cc) ++m;
+                if (m == end) break;
+                if (effective_class[m] > cc) continue;
+                std::size_t j = m;
+                while (j < end && effective_class[j] == cc &&
+                       is_arabic_modifier_combining_mark(input[j])) {
+                    ++j;
+                }
+                if (m == j) continue;
+                std::rotate(input.begin() + start, input.begin() + m, input.begin() + j);
+                std::rotate(effective_class.begin() + start, effective_class.begin() + m,
+                            effective_class.begin() + j);
+                const uint8_t new_cc = (cc == 220u) ? 25u : 26u;
+                const std::size_t next_start = start + (j - m);
+                for (std::size_t k = start; k < next_start; ++k) effective_class[k] = new_cc;
+                start = next_start;
+                m = j;
+            }
+        } else {
+            std::stable_sort(input.begin() + i, input.begin() + end,
+                [&](uint32_t a, uint32_t b) { return combining_class(a) < combining_class(b); });
+            for (std::size_t k = i; k < end; ++k) effective_class[k] = combining_class(input[k]);
+        }
         i = end;
     }
 
     // Font-aware Latin and Arabic canonical composition. An intervening unconsumed mark blocks
-    // when its class is equal or greater; lower classes may be crossed. A
+    // when its effective class is equal or greater; lower classes may be crossed. A
     // consumed mark does not become a blocker. Never choose a missing glyph.
     std::vector<uint32_t> codepoints;
     codepoints.reserve(input.size());
@@ -2841,7 +2911,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
     uint8_t last_class = 0;
     uint32_t starter_script = 0;
     for (std::size_t i = 0; i < input.size(); ++i) {
-        const uint8_t cls = combining_class(input[i]);
+        const uint8_t cls = effective_class[i];
         bool composed = false;
         if (starter != no_starter && cls && input_scripts[i] == starter_script && last_class < cls) {
             using namespace unicode::tables;

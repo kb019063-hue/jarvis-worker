@@ -266,6 +266,11 @@ verify-bytecode-terminal-safety: $(TARGET)
 verify-cli-echo-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_cli_echo_terminal.py --binary $(TARGET)
 
+## Capture page-controlled layout dump attacks without displaying them.
+.PHONY: verify-layout-terminal-safety
+verify-layout-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_layout_terminal.py --binary $(TARGET)
+
 $(BUILD_DIR)/terminal_text_probe: tools/security/terminal_text_probe.cpp $(BUILD_DIR)/common/TerminalText.o
 	$(CXX) $(CXXFLAGS) $^ -o $@
 

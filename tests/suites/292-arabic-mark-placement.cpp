@@ -30,7 +30,9 @@ TEST(arabic_composition_and_mark_to_base_coverage) {
     assert((ids(f, {0x0627, ' ', 0x0654}) == std::vector<uint16_t>{1, 5, 3}));
     assert((ids(f, {0x0627, 0x200C, 0x0654}) == std::vector<uint16_t>{1, 5, 3}));
     auto missing = arabic_font(false);
-    assert((ids(missing, {0x0627, 0x064E, 0x0654}) == std::vector<uint16_t>{1, 2, 3}));
+    // UTR #53 promotes MCM U+0654 before fatha while U+0653 (non-MCM) stays after it.
+    assert((ids(missing, {0x0627, 0x064E, 0x0654}) == std::vector<uint16_t>{1, 3, 2}));
+    assert((ids(missing, {0x0627, 0x064E, 0x0653}) == std::vector<uint16_t>{1, 2, 4}));
     const std::vector<uint32_t> original{0x0627, 0x064E, 0x0654};
     ids(f, original);
     assert(original[0] == 0x0627 && original[1] == 0x064E && original[2] == 0x0654);

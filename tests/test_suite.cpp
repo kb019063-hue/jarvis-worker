@@ -7771,6 +7771,25 @@ TEST(crypto_key_algorithm_and_usages) {
     assert(interp.eval("Array.isArray(ecUsages) && ecUsages.length === 2 && ecUsages[0] === 'sign'").is_truthy());
 }
 
+TEST(subtle_crypto_hmac_length) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var algLen = 0, rawLen = 0;
+        crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256', length: 128 }, true, ['sign', 'verify'])
+            .then(function(k) {
+                algLen = k.algorithm.length;
+                return crypto.subtle.exportKey('raw', k);
+            })
+            .then(function(raw) {
+                rawLen = raw.byteLength;
+            });
+    )");
+    assert(interp.eval("algLen === 128 && rawLen === 16").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36764,6 +36783,7 @@ int main() {
     RUN_TEST(subtle_crypto_aes_kw_wrap_and_unwrap);
     RUN_TEST(subtle_crypto_ecdsa_sha384_and_sha512);
     RUN_TEST(crypto_key_algorithm_and_usages);
+    RUN_TEST(subtle_crypto_hmac_length);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

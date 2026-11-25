@@ -66,10 +66,10 @@ public:
         Kind kind{Kind::ClosePath};
         float a{0.0f}, b{0.0f}, c{0.0f}, d{0.0f}, e{0.0f}, f{0.0f}, g{0.0f}, h{0.0f};
         bool clockwise{false};
-        /// `RoundRectRadii`'s four corners, in the order the context's four-value
-        /// overload takes them: top-left, top-right, bottom-right, bottom-left.
-        /// `rr[0]`..`rr[3]`; `a`..`d` remain the rectangle.
-        float rr[4]{0.0f, 0.0f, 0.0f, 0.0f};
+        /// `RoundRectRadii`'s four corners, in clockwise order from top-left.
+        /// Each point is `(horizontal radius, vertical radius)`; `a`..`d` remain
+        /// the rectangle. Circular radii simply have x == y.
+        Point rr[4]{};
         std::shared_ptr<const Path2D> path;
         TransformMatrix2D transform{TransformMatrix2D::identity()};
     };

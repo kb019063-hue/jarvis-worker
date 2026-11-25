@@ -67,14 +67,20 @@ runs:
         # and the lot was 9.7 minutes for it. In the same run another job
         # took 50 seconds over the fetch.
         bin="$RUNNER_TEMP/ccache-bin"
-        kept="$HOME/.ccache/ccache-binary/ccache-$CCACHE_RELEASE"
+        # Its name is `ccache`, in a directory called by its release:
+        # ccache calls itself by the name of its file. Kept as
+        # `ccache-4.14.3` it answered "ccache-4.14 version 4.14.3", which
+        # is not what is looked for below, and the first runs that had a
+        # kept binary fetched it again (the notice said why, once it was
+        # made to: run 45541427952).
+        kept="$HOME/.ccache/ccache-binary/$CCACHE_RELEASE/ccache"
+        rm -f "$HOME/.ccache/ccache-binary/ccache-$CCACHE_RELEASE"
         from=""
         mkdir -p "$bin"
-        # What the kept one says of itself, read whole and not through a
-        # pipe: this shell fails a pipe when any part of it does, and
-        # `--version | grep -q` ends ccache with a broken pipe as soon as
-        # grep has seen enough. The first three runs with a kept binary
-        # fetched it again for that.
+        # What the kept one says of itself is read whole and not through
+        # a pipe: this shell fails a pipe when any part of it does, and
+        # `--version | grep -q` can end ccache with a broken pipe when
+        # grep has seen enough.
         kept_says=""
         if [ -x "$kept" ]; then kept_says="$("$kept" --version 2>/dev/null || true)"; fi
         if command -v ccache >/dev/null 2>&1; then

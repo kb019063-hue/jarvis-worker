@@ -7520,6 +7520,35 @@ TEST(subtle_crypto_ecdh_p256_derive_bits) {
     assert(interp.eval("s1 === s2").is_truthy());
 }
 
+TEST(subtle_crypto_ecdsa_p256_sign_and_verify) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var ok1 = null, ok2 = null, sigLen = 0;
+        var msg = new Uint8Array([104, 101, 108, 108, 111]);
+        var bad = new Uint8Array([104, 101, 108, 108, 112]);
+        crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+            .then(function(pair) {
+                return crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, msg)
+                    .then(function(sig) {
+                        sigLen = sig.byteLength;
+                        return Promise.all([
+                            crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, sig, msg),
+                            crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, sig, bad)
+                        ]);
+                    });
+            })
+            .then(function(res) {
+                ok1 = res[0];
+                ok2 = res[1];
+            });
+    )");
+    assert(interp.eval("sigLen === 64").is_truthy());
+    assert(interp.eval("ok1 === true && ok2 === false").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36472,6 +36501,7 @@ int main() {
     RUN_TEST(subtle_crypto_wrap_and_unwrap_key);
     RUN_TEST(subtle_crypto_jwk_import_and_export);
     RUN_TEST(subtle_crypto_ecdh_p256_derive_bits);
+    RUN_TEST(subtle_crypto_ecdsa_p256_sign_and_verify);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

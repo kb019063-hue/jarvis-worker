@@ -611,7 +611,7 @@ moment it applied, so `tools/ci/check_pr.py` looks it up (it reads GitHub and
 changes nothing there):
 
 ```bash
-python3 tools/ci/check_pr.py            # what each open pull request claims; the numbers taken; the next free pair
+python3 tools/ci/check_pr.py            # what each open pull request claims, and how old its last commit is
 python3 tools/ci/check_pr.py claim N    # right after opening #N
 python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
 ```

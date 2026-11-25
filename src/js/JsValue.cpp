@@ -1114,10 +1114,15 @@ bool JsValue::has_own_property(const std::string& name) const {
         if (cell->properties.find(name) != cell->properties.end()) return true;
         // A name this object owns outside the table -- the global object's
         // declarations. The same hook `[[Delete]]` asks below, so the two
-        // agree about what is owned.
+        // agree about what is owned. A cross-origin Window reports only its
+        // exposed table (§7.2.3.5), so the environment is not asked for it.
         if (cell->own_property_hook) {
-            bool owned = false;
-            if ((*cell->own_property_hook)(name, /*remove=*/false, owned) && owned) return true;
+            std::vector<std::string> exposed;
+            const bool cross_origin = dom::cross_origin_own_keys(*this, true, exposed);
+            if (!cross_origin) {
+                bool owned = false;
+                if ((*cell->own_property_hook)(name, /*remove=*/false, owned) && owned) return true;
+            }
         }
     }
     if (const PropertyMap* map = loose_properties()) {
@@ -1209,8 +1214,12 @@ bool JsValue::delete_property(const std::string& name) {
             // Answering `true` without asking is what made
             // `delete globalThis.Error` report a removal it never made.
             bool result = true;
-            if (cell->own_property_hook && (*cell->own_property_hook)(name, /*remove=*/true, result)) {
-                return result;
+            if (cell->own_property_hook) {
+                std::vector<std::string> exposed;
+                const bool cross_origin = dom::cross_origin_own_keys(*this, true, exposed);
+                if (!cross_origin && (*cell->own_property_hook)(name, /*remove=*/true, result)) {
+                    return result;
+                }
             }
             return true;
         }
@@ -1244,8 +1253,19 @@ std::vector<std::string> JsValue::own_keys(bool include_non_enumerable) const {
     // Names this object owns outside the property table -- the global object's
     // declarations. Collected here and merged below, so a name that is in both
     // is reported once.
+    //
+    // Not for a cross-origin Window or Location: HTML §7.2.3.5 says such an
+    // object reports exactly the exposed table and nothing else, and the
+    // environment's declarations are not in it. `reflected_own_keys` filters
+    // before calling here, but `has_own_property` and `[[Delete]]` ask the
+    // hook direct, so the test has to be here as well.
     std::vector<std::string> hooked_keys;
-    const bool has_hooked_keys = cell && cell->own_keys_hook &&
+    bool cross_origin = false;
+    if (cell && cell->own_keys_hook) {
+        std::vector<std::string> exposed;
+        cross_origin = dom::cross_origin_own_keys(*this, true, exposed);
+    }
+    const bool has_hooked_keys = cell && cell->own_keys_hook && !cross_origin &&
         (*cell->own_keys_hook)(!include_non_enumerable, hooked_keys);
     // The keys of the property map: the ones that are an index in ascending
     // order, then the rest in the order they were made.

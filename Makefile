@@ -469,11 +469,11 @@ bench-floats: $(TARGET)
 bench-collections: $(TARGET)
 	@python3 tools/bench/bench_collection_iterators.py $(TARGET) --rounds 8192 --reps 3 --max-growth 2.25 --slack-ms 40
 
-## The tree-walker's own speed: six scripts (a loop, a property loop, a call, a
-## recursion, an array, a method) run inside a function, against Node.js on the
-## same box. Medians of interleaved runs, so a busy machine does not decide the
-## answer. `BENCH_JS_MAX_RATIO` turns it into a floor for CI; leave it empty to
-## only report. Row 7 of ROADMAP.md's Tier 2 is this number.
+## The tree-walker's own speed: a top-level global-var loop plus six local
+## scripts (a loop, a property loop, a call, recursion, an array, a method),
+## against Node.js on the same box. Medians of interleaved runs, so a busy
+## machine does not decide the answer. `BENCH_JS_MAX_RATIO` gates every case;
+## leave it empty to only report. Row 7 of ROADMAP.md's Tier 2 is this number.
 BENCH_JS_MAX_RATIO ?=
 bench-js-core: $(TARGET)
 	@python3 tools/bench/bench_js_core.py $(TARGET) $(if $(BENCH_JS_MAX_RATIO),--max-ratio $(BENCH_JS_MAX_RATIO),) \

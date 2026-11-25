@@ -1123,46 +1123,91 @@ void install_array_builtins(JsIntrinsics& realm) {
                     this_arg, {value, JsValue::make_number(static_cast<double>(index))}));
             };
 
-            std::vector<JsValue> items;
+            // IfAbruptCloseAsyncIterator (§7.4.16): AsyncIteratorClose runs
+            // before the abrupt completion leaves the walk. Its caller's throw
+            // wins even when that value is `undefined`; the separate completion
+            // kind passed below keeps that case distinct from normal completion.
+            auto close_or_throw = [&](const JsValue& iterator, const JsValue& thrown) {
+                js_throw(close_async_iterator(iterator, thrown, true, await_value));
+            };
+
+            // §23.1.3.1 steps 5.g: both sources now use one async Iterator
+            // Record. `next` was captured once before constructing the result,
+            // as GetIteratorFromMethod requires; it used to be read per step.
+            // The sync source is first adapted by CreateAsyncFromSyncIterator,
+            // so its next/return methods and awaited `value` have the exact
+            // async-from-sync behavior too.
+            //
+            // Close only at the spec's IfAbruptCloseAsyncIterator sites: mapper
+            // call, mapper-result await, CreateDataPropertyOrThrow, and the
+            // safe-integer guard. The source-step `?` operations do not close.
+            auto walk = [&](const JsValue& iterator, const JsValue& next,
+                            const JsValue& made) -> JsValue {
+                size_t k = 0;
+                while (true) {
+                    // §23.1.3.1's k ≥ 2^53 - 1 abrupt completion also closes.
+                    if (k >= 9007199254740991ull) {
+                        close_or_throw(iterator, js_make_error(
+                            JsErrorKind::TypeError, "Array.fromAsync: iterator produced too many values"));
+                    }
+                    // The step's own failures: no close.
+                    JsValue step = await_value(js_call(next, iterator, {}));
+                    if (!step.is_object_like()) {
+                        js_throw_type_error("Array.fromAsync: next() did not answer an object");
+                    }
+                    if (step.get_property("done").is_truthy()) break;
+                    JsValue value = step.get_property("value");
+                    JsValue mapped = value;
+                    if (mapping) {
+                        // Step 6.i.i: the mapper's call. A throw closes.
+                        try {
+                            mapped = map_fn.call_with_this(
+                                this_arg, {value, JsValue::make_number(static_cast<double>(k))});
+                        } catch (const JsThrow& thrown) {
+                            close_or_throw(iterator, thrown.value);
+                        }
+                        // Step 6.i.iii: its result, awaited. A rejection closes.
+                        try {
+                            mapped = await_value(mapped);
+                        } catch (const JsThrow& thrown) {
+                            close_or_throw(iterator, thrown.value);
+                        }
+                    }
+                    // Step 6.i.iv closes on a failed definition whether or not
+                    // a mapper was supplied.
+                    try {
+                        create_data_property_or_throw(made, k, mapped);
+                    } catch (const JsThrow& thrown) {
+                        close_or_throw(iterator, thrown.value);
+                    }
+                    ++k;
+                }
+                set_length_or_throw(made, k);
+                return made;
+            };
             JsValue async_method;
             // §23.1.3.1 step 4: the async iterator first, and only a source
             // without one is read as a sync iterable.
             if (get_method(source, kAsyncIteratorKey, async_method)) {
-                JsValue made = make_result(static_cast<size_t>(-1));
                 JsValue iterator = js_call(async_method, source, {});
-                while (true) {
-                    JsValue step = await_value(js_call(iterator.get_property("next"), iterator, {}));
-                    if (!step.is_object_like()) {
-                        js_throw_type_error("Array.fromAsync: next() did not answer an object");
-                    }
-                    if (step.get_property("done").is_truthy()) break;
-                    const JsValue item = take(await_value(step.get_property("value")), items.size());
-                    create_data_property_or_throw(made, items.size(), item);
-                    items.push_back(item);
+                if (!iterator.is_object_like()) {
+                    js_throw_type_error("Array.fromAsync: the async iterator method did not return an object");
                 }
-                set_length_or_throw(made, items.size());
-                return made;
+                JsValue next = iterator.get_property("next");
+                JsValue made = make_result(static_cast<size_t>(-1));
+                return walk(iterator, next, made);
             }
 
             JsValue method;
             if (js_iterator_method(source, method)) {
-                // The synchronous path still awaits: a value from a sync
-                // iterator may be a promise, and the mapper's result is awaited
-                // as well.
-                JsValue made = make_result(static_cast<size_t>(-1));
-                JsValue iterator = js_call(method, source, {});
-                while (true) {
-                    JsValue step = js_call(iterator.get_property("next"), iterator, {});
-                    if (!step.is_object_like()) {
-                        js_throw_type_error("Array.fromAsync: next() did not answer an object");
-                    }
-                    if (step.get_property("done").is_truthy()) break;
-                    const JsValue item = take(await_value(step.get_property("value")), items.size());
-                    create_data_property_or_throw(made, items.size(), item);
-                    items.push_back(item);
+                JsValue sync_iterator = js_call(method, source, {});
+                if (!sync_iterator.is_object_like()) {
+                    js_throw_type_error("Array.fromAsync: the iterator method did not return an object");
                 }
-                set_length_or_throw(made, items.size());
-                return made;
+                JsValue iterator = js_create_async_from_sync_iterator(sync_iterator);
+                JsValue next = iterator.get_property("next");
+                JsValue made = make_result(static_cast<size_t>(-1));
+                return walk(iterator, next, made);
             }
 
             // §23.1.3.1 steps 6-7: the array-like path. `length` is read once,

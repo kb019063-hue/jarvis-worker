@@ -1067,23 +1067,50 @@ void install_object_builtins(JsIntrinsics& realm) {
         return lookup_legacy_accessor(args, false);
     });
 
-    js_define_method(op, "hasOwnProperty", 1, [](Args args) {
-        return JsValue::make_boolean(self().has_own_property(js_to_property_key(js_arg(args, 0))));
-    });
-    js_define_method(op, "isPrototypeOf", 1, [](Args args) {
+    // §20.1.3.2, §20.1.3.4, §20.1.3.3 and §20.1.3.1 all begin with
+    // "let O be ? ToObject(this value)", and `ToObject` of `null` or `undefined`
+    // is a TypeError. Without this the four answered a confident `false` for
+    // them instead — `Object.prototype.hasOwnProperty.call(null, "foo")` said
+    // `null` is an object that has no such property, which is a claim about the
+    // receiver and not a refusal of one. `Object.prototype.toLocaleString`
+    // below, and `Object.keys(null)` and `Reflect.has(null, …)`, already
+    // refused; only these four did not (finding 445).
+    //
+    // `toString` is deliberately *not* here: §20.1.3.6 uses `ThisObject`, which
+    // answers `[object Null]` and `[object Undefined]` for those two receivers,
+    // which is what this engine already does.
+    //
+    // The receiver is wrapped rather than replaced. `hasOwnProperty.call("ab", 1)`
+    // is `true` because a String object owns its characters, and
+    // `valueOf.call(1)` is a Number object and not the primitive `1`.
+    auto as_object = [](const char* method) -> JsValue {
         JsValue me = self();
+        if (me.is_nullish()) {
+            js_throw_type_error(std::string("Object.prototype.") + method +
+                                " called on null or undefined");
+        }
+        return js_to_object(me);
+    };
+    js_define_method(op, "hasOwnProperty", 1, [as_object](Args args) {
+        std::string key = js_to_property_key(js_arg(args, 0));
+        JsValue target = as_object("hasOwnProperty");
+        return JsValue::make_boolean(target.has_own_property(key));
+    });
+    js_define_method(op, "isPrototypeOf", 1, [as_object](Args args) {
         const JsValue& candidate = js_arg(args, 0);
+        if (!candidate.is_object_like()) return JsValue::make_boolean(false);
+        JsValue me = as_object("isPrototypeOf");
         // `Base.isPrototypeOf(Derived)`: a function is in a chain as its cell.
         const JsObject* mine = me.property_cell();
-        if (!candidate.is_object_like() || !mine) return JsValue::make_boolean(false);
+        if (!mine) return JsValue::make_boolean(false);
         int guard = 0;
         for (JsObject* obj = candidate.prototype_object(); obj && guard < kMaxPrototypeChain; obj = obj->prototype, ++guard) {
             if (obj == mine) return JsValue::make_boolean(true);
         }
         return JsValue::make_boolean(false);
     });
-    js_define_method(op, "propertyIsEnumerable", 1, [](Args args) {
-        JsValue me = self();
+    js_define_method(op, "propertyIsEnumerable", 1, [as_object](Args args) {
+        JsValue me = as_object("propertyIsEnumerable");
         std::string key = js_to_property_key(js_arg(args, 0));
         JsValue d = descriptor_for(me, key);
         return JsValue::make_boolean(d.is_object_like() && d.get_property("enumerable").is_truthy());
@@ -1109,7 +1136,12 @@ void install_object_builtins(JsIntrinsics& realm) {
         }
         return to_string.call_with_this(me, {});
     });
-    js_define_method(op, "valueOf", 0, [](Args) { return self(); });
+    // §20.1.3.7: "return ? ToObject(this value)". The wrapper is the answer, not
+    // the primitive that went in: `valueOf.call(1)` is a Number object whose
+    // `typeof` is `"object"`, and only a `null` or `undefined` receiver throws.
+    js_define_method(op, "valueOf", 0, [as_object](Args) {
+        return as_object("valueOf");
+    });
 
     // ---- Object -----------------------------------------------------------
     JsValue object_ctor = js_make_native("Object", 1, [](Args args) {

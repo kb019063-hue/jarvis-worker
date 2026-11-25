@@ -1462,6 +1462,70 @@ void iterate_with_method(const JsValue& iterable, const JsValue& method,
     iterate_with(iterable, method, visit);
 }
 
+JsValue close_async_iterator(const JsValue& iterator, const JsValue& completion,
+                             bool is_throw_completion,
+                             const std::function<JsValue(const JsValue&)>& await_value) {
+    // Step 3: Completion(GetMethod(iterator, "return")). Keep the abrupt bit
+    // apart from its value: an accessor can throw `undefined` just as the
+    // caller can, and both are real throw completions.
+    bool have_return = false;
+    JsValue method;
+    bool close_is_abrupt = false;
+    JsValue close_error;
+    try {
+        method = iterator.get_property("return");
+        have_return = true;
+    } catch (const JsThrow& thrown_by_get) {
+        close_is_abrupt = true;
+        close_error = thrown_by_get.value;
+    }
+
+    // Step 4: call it, then await what it answered — but only when the get and
+    // call were normal. A call that throws skips the await.
+    bool call_was_normal = false;
+    JsValue call_result;
+    if (have_return && !method.is_nullish()) {
+        if (method.is_function()) {
+            try {
+                call_result = method.call_with_this(iterator, {});
+                call_was_normal = true;
+            } catch (const JsThrow& thrown_by_call) {
+                close_is_abrupt = true;
+                close_error = thrown_by_call.value;
+            }
+        } else {
+            close_is_abrupt = true;
+            close_error = js_make_error(JsErrorKind::TypeError,
+                                        js_describe_thrown(method) + " is not a function");
+        }
+    }
+
+    JsValue settled;
+    bool has_settled = false;
+    if (call_was_normal) {
+        try {
+            settled = await_value(call_result);
+            has_settled = true;
+        } catch (const JsThrow& thrown_by_await) {
+            close_is_abrupt = true;
+            close_error = thrown_by_await.value;
+        }
+    }
+
+    // Step 5: when the caller is already leaving with a throw completion, that
+    // exact value wins (including `undefined`) over a getter/call/await error
+    // or the result's type. The await above still happens first, as required.
+    if (is_throw_completion) return completion;
+    // Step 6: otherwise an abrupt close is the error.
+    if (close_is_abrupt) js_throw(close_error);
+    // Step 7: a `return` that answered something that is not an object, once
+    // awaited, is a TypeError.
+    if (has_settled && !settled.is_object_like()) {
+        js_throw_type_error("Iterator result " + js_describe_thrown(settled) + " is not an object");
+    }
+    return completion;
+}
+
 std::vector<JsValue> js_iterable_to_vector(const JsValue& iterable) {
     std::vector<JsValue> out;
     auto collect = [&](const JsValue& v) {

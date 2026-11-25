@@ -1,7 +1,6 @@
 #pragma once
 
 #include "litebird/common/Geometry.hpp"
-#include <string>
 #include <vector>
 
 namespace litebird {
@@ -51,6 +50,12 @@ public:
         Ellipse,
         Rect,
         RoundRect,
+        /// `roundRect` with **four** distinct radii. Phase 426 recorded only one
+        /// number here; converting the sequence to that number produced NaN, so
+        /// replay drew four square corners while the context's own `roundRect`
+        /// gave the requested shape. The two are separate kinds because a one-radius call must be
+        /// replayable as the one-argument overload the context already had.
+        RoundRectRadii,
         ClosePath,
         /// `addPath(path, transform)`: another path, and the matrix to apply to
         /// it. Kept as a pointer so a path added twice is the same path.
@@ -61,7 +66,10 @@ public:
         Kind kind{Kind::ClosePath};
         float a{0.0f}, b{0.0f}, c{0.0f}, d{0.0f}, e{0.0f}, f{0.0f}, g{0.0f}, h{0.0f};
         bool clockwise{false};
-        std::string radii;  // `roundRect`'s radii, still as the page wrote them
+        /// `RoundRectRadii`'s four corners, in the order the context's four-value
+        /// overload takes them: top-left, top-right, bottom-right, bottom-left.
+        /// `rr[0]`..`rr[3]`; `a`..`d` remain the rectangle.
+        float rr[4]{0.0f, 0.0f, 0.0f, 0.0f};
         std::shared_ptr<const Path2D> path;
         TransformMatrix2D transform{TransformMatrix2D::identity()};
     };

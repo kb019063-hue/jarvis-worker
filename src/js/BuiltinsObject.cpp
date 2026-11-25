@@ -290,7 +290,16 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
             if (auto scope = realm.global_scope.lock()) {
                 const JsEnvironment::Binding* binding = scope->find_own(key);
                 if (binding && !binding->is_lexical) {
-                    return data(binding->value, !binding->is_readonly, false, !binding->is_readonly);
+                    // `configurable` used to be `!is_readonly`, which was
+                    // right for `undefined`/`NaN`/`Infinity` and wrong for
+                    // every function: §18's table says of RangeError and Math
+                    // exactly what it says of Array — "configurable: true" —
+                    // and it is a script's own `var` that §9.1.1.4 makes
+                    // non-configurable, the opposite of what this interpreter
+                    // had marked. The two attributes are separate questions,
+                    // so they get separate answers (Phase 425).
+                    return data(binding->value, !binding->is_readonly, !binding->is_builtin,
+                                scope->is_configurable_binding(*binding));
                 }
             }
         }

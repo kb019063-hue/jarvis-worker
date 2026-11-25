@@ -30,6 +30,13 @@ PromiseData::~PromiseData() {
     handlers.clear();
 }
 
+void PromiseData::release_resolvers() {
+    for (auto& weak : resolver_states) {
+        if (auto state = weak.lock()) state->data.reset();
+    }
+    resolver_states.clear();
+}
+
 namespace {
 
 using Args = const std::vector<JsValue>&;
@@ -39,9 +46,12 @@ using Args = const std::vector<JsValue>&;
 // ---------------------------------------------------------------------------
 //
 // A pending promise's reactions are closures over script values. The promise
-// itself may be reachable only from native code (a queued network request, a
-// suspended async function), which the collector cannot see, so every pending
-// promise that has reactions is listed here and its reactions are roots.
+// itself may be reachable only from native code (a resolver handed to a
+// timer, a suspended async function, or a queued thenable job), which the
+// collector cannot see, so every pending promise that has reactions is
+// listed here and its stored values are roots. The resolvers own the state
+// until it settles; this list is a weak second owner whose only job is to
+// keep the reactions rooted while the promise is pending.
 
 struct PendingRegistry {
     std::mutex mutex;
@@ -54,10 +64,12 @@ struct PendingRegistry {
             for (size_t i = 0; i < entries.size(); ++i) {
                 auto data = entries[i].lock();
                 if (!data || data->state != PromiseState::Pending || data->handlers.empty()) continue;
+                roots.push_back(&data->result);
                 for (auto& handler : data->handlers) {
                     roots.push_back(&handler.on_fulfilled);
                     roots.push_back(&handler.on_rejected);
                     roots.push_back(&handler.resolve);
+                    roots.push_back(&handler.reject);
                     if (handler.keep_alive) {
                         for (auto& value : *handler.keep_alive) roots.push_back(&value);
                     }
@@ -74,11 +86,18 @@ struct PendingRegistry {
             // Prune whenever the list doubles, so it stays proportional to the
             // number of promises that are actually pending.
             entries.erase(std::remove_if(entries.begin(), entries.end(), [](const std::weak_ptr<PromiseData>& weak) {
-                auto d = weak.lock();
-                return !d || d->state != PromiseState::Pending;
+                auto data = weak.lock();
+                return !data || data->state != PromiseState::Pending || data->handlers.empty();
             }), entries.end());
         }
         entries.push_back(data);
+    }
+
+    void release(const std::shared_ptr<PromiseData>& data) {
+        std::lock_guard<std::mutex> lock(mutex);
+        entries.erase(std::remove_if(entries.begin(), entries.end(), [&data](const std::weak_ptr<PromiseData>& entry) {
+            return entry.lock() == data;
+        }), entries.end());
     }
 };
 
@@ -167,9 +186,11 @@ void settle(const std::shared_ptr<PromiseData>& data, PromiseState state, JsValu
     data->state = state;
     data->result = std::move(value);
     data->locked = false;
+    data->release_resolvers();
 
     auto handlers = std::move(data->handlers);
     data->handlers.clear();
+    pending_registry().release(data);
     for (auto& handler : handlers) {
         queue_reaction(std::move(handler), state == PromiseState::Rejected, data->result);
     }
@@ -201,22 +222,28 @@ std::shared_ptr<PromiseData> this_promise(const char* method) {
 /// The pair of functions handed to an executor or a thenable. Only the first
 /// call to either has any effect.
 std::pair<JsValue, JsValue> make_resolving_functions(const std::shared_ptr<PromiseData>& data) {
-    auto called = std::make_shared<bool>(false);
+    auto state = std::make_shared<ResolverState>();
+    state->data = data;
+    data->resolver_states.push_back(state);
     // §27.2.1.3.2 steps 3-4 and §27.2.1.4.2: the pair is made by
     // CreateBuiltinFunction with the empty string for a name, `length` 1 and no
     // `[[Construct]]` -- they are not `new resolve()`. Node prints ` 1` for
     // `resolve.name + ' ' + resolve.length` for exactly this reason, and a
     // script can tell: `new resolve(function () {})` was accepted here.
-    JsValue resolve_fn = js_make_native("", 1, [data, called](Args args) {
-        if (*called) return JsValue::make_undefined();
-        *called = true;
+    JsValue resolve_fn = js_make_native("", 1, [state](Args args) {
+        auto data = state->data;
+        if (!data) return JsValue::make_undefined();
+        if (state->called) return JsValue::make_undefined();
+        state->called = true;
         data->locked = false;
         Promise::resolve(data, arg_or_undefined(args, 0));
         return JsValue::make_undefined();
     });
-    JsValue reject_fn = js_make_native("", 1, [data, called](Args args) {
-        if (*called) return JsValue::make_undefined();
-        *called = true;
+    JsValue reject_fn = js_make_native("", 1, [state](Args args) {
+        auto data = state->data;
+        if (!data) return JsValue::make_undefined();
+        if (state->called) return JsValue::make_undefined();
+        state->called = true;
         data->locked = false;
         settle(data, PromiseState::Rejected, arg_or_undefined(args, 0));
         return JsValue::make_undefined();
@@ -733,17 +760,13 @@ JsValue Promise::create_promise_instance(std::shared_ptr<PromiseData> data) {
     // engine copies around; `internal` is what survives a cell being copied.
     cell->internal = data;
     // The promise's state lives outside the cell; whoever can reach the
-    // promise can reach its result and its reactions.
+    // promise can reach its result and its reactions. Pending reactions are
+    // registered in `pending_registry`, so a promise held only by native code
+    // still keeps them rooted; a settled promise's result has no such need and
+    // is counted like any other reference stored in the cell.
     cell->trace_extra = [cell](Heap& heap) {
         const auto state = std::static_pointer_cast<PromiseData>(cell->internal);
         const PromiseData& data = *state;
-        const long holders = state.use_count();
-        // The value's payload and this cell's own handle are the two owners a
-        // promise has when only script refers to it. Any more and native code
-        // (a resolver handed to a timer, a suspended async function) can settle
-        // it after the object is gone, so its reactions must not be counted as
-        // belonging to this cell: they stay roots.
-        if (heap.counting() && holders > 3) return;
         if (!heap.first_visit(state.get())) return;
         heap.mark_value(data.result);
         for (const auto& handler : data.handlers) {

@@ -62,8 +62,10 @@ that write anything on GitHub.
   - its phase or its finding is on `main` already, or an open pull request
     with a lower number has it (of two that took a number at the same
     moment, the later one moves);
-  - a file it names or has changed belongs to an open pull request with a
-    lower number. The files every pull request changes (AGENTS.md lists
+  - a file it names or has changed, and that `main` does not have, belongs
+    to an open pull request with a lower number (a file `main` has can be
+    changed by both: the one that lands second merges `main`, and `claim N`
+    says so without refusing). The files every pull request changes (AGENTS.md lists
     them) do not count;
   - (a note, not a failure) it has no `Agent:` line: AGENTS.md, "Working
     together", asks each agent for a name of its own since 22 November;
@@ -556,8 +558,18 @@ class Report:
         print(f"    {text}")
 
 
-def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bool, str]]:
-    """What is wrong with a claim: (does this pull request have to change, what)."""
+def file_on_main(path: str) -> bool:
+    """Is this file on `main`, as the clone has it from origin? (A name that ends in `/`: this directory.)"""
+    return git("cat-file", "-e", f"origin/main:{path.rstrip('/')}").returncode == 0
+
+
+def claim_problems(claim: dict, claims: list[dict], main: Main, on_main_file=None) -> list[tuple[bool, str]]:
+    """What is wrong with a claim: (does this pull request have to change, what).
+
+    `on_main_file(path)` says whether a file is on `main`; the clone is asked
+    when it is not given.
+    """
+    on_main_file = on_main_file or file_on_main
     problems: list[tuple[bool, str]] = []
     if not claim["has_claim_lines"]:
         problems.append((True, "its text does not begin with the Task: and Files: lines and the line of its numbers "
@@ -608,10 +620,27 @@ def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bo
             continue
         if other["number"] > claim["number"]:
             problems.append((False, f"#{other['number']}, opened later, names or changes {', '.join(both)} too: "
-                                    "it is the one that has to stay out"))
-        else:
-            problems.append((True, f"#{other['number']} had {', '.join(both)} first: stay out of "
-                                   f"{'it' if len(both) == 1 else 'them'}, or tell the person you work for"))
+                                    "it is the one that gives way"))
+            continue
+        # A file both would make is the first one's: there is nothing to merge
+        # it with. A file `main` has is another matter. Until 25 November 2026
+        # that was a refusal too, and it read "stay out of it, or tell the
+        # person you work for": #390 was finished and measured in its agent's
+        # sandbox, needed one function of src/js/JsInterpreter.cpp, a file
+        # #387 had named eight minutes before #390 was opened, and its agent
+        # closed it unpushed. #387 landed 45 minutes after that. Whoever
+        # lands second merges `main`, which every pull request that `main`
+        # has overtaken does anyway.
+        made = [name for name in both if not on_main_file(name)]
+        shared = [name for name in both if name not in made]
+        if made:
+            problems.append((True, f"#{other['number']} had {', '.join(made)} first, and `main` has no such file: "
+                                   f"two pull requests cannot both make {'it' if len(made) == 1 else 'them'}. "
+                                   "Take another name, or tell the person you work for"))
+        if shared:
+            problems.append((False, f"#{other['number']}, opened first, changes {', '.join(shared)} too. Go on, and change "
+                                    f"no more of {'it' if len(shared) == 1 else 'them'} than the task needs: if "
+                                    f"#{other['number']} lands first and the two no longer merge, merge `main` into this one"))
     return problems
 
 
@@ -1536,6 +1565,13 @@ def self_test() -> int:
                         "Phase and finding: this pull request's number\nAgent: Merlin\n"), number=393, phase=393, finding=393),
              [], Main({1}, {1}, {1}, {1}, 1, 1)) if blocking],
          ["`docs/phases/387-a-number.md` is called by 387, and this pull request's number is 393: rename it (`docs/phases/393-...`)"]),
+        ("a file main has, which an earlier pull request changes too, is a note and no refusal",
+         [(blocking, text[:60]) for blocking, text in claim_problems(
+             dict(claim("Task: a row\nFiles: `src/js/JsInterpreter.cpp`, `tools/new.py`\nPhase and finding: this pull request's number\nAgent: Vega\n"), number=390, phase=390, finding=390),
+             [dict(claim("Task: another\nFiles: `src/js/JsInterpreter.cpp`, `tools/new.py`\nPhase and finding: this pull request's number\nAgent: Cedar\n"), number=387, phase=387, finding=387)],
+             Main({1}, {1}, {1}, {1}, 1, 1), on_main_file=lambda name: name.startswith("src/"))],
+         [(True, "#387 had tools/new.py first, and `main` has no such file: tw"),
+          (False, "#387, opened first, changes src/js/JsInterpreter.cpp too. Go")]),
         ("...nor do two pull requests that both name it bare share it",
          same_files({"docs/phases/", "docs/findings/"}, {"docs/phases/", "docs/findings/"}), []),
         ("...a file in it that two name is still shared",

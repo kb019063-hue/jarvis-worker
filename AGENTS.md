@@ -440,20 +440,27 @@ without one, and leaves the board and a watch out of the claims.
    is not engine work —
    documents, tooling, CI — takes neither: write `No phase, no finding` and
    say why instead.
-3. **One task at a time, inside its files.** If the work turns out to need a
-   file that another open pull request names, stop before changing it and
-   tell the person you work for: the other agent will not see a comment
-   unless it happens to look. A bug found outside the task becomes a new row
-   of the table; it is not fixed in passing.
+3. **One task at a time, inside its files.** A bug found outside the task
+   becomes a new row of the table; it is not fixed in passing. If the work
+   turns out to need a file of `main` that another open pull request names,
+   **go on, and change no more of that file than the task needs**: the
+   one that lands second merges `main` (point 4). Until 25 November 2026
+   the rule was to stop and tell the person you work for, and the first
+   agent it stopped closed a finished pull request for one function of a
+   file somebody else had named ("What has gone wrong", Claims). **Whatever
+   stops you, push what you have under `WIP:` first**: a patch in `/tmp`
+   goes with the sandbox.
 4. **Look again once the pull request is open.** Two agents that look at the
-   same moment both see the same number free, and the same file, and each of
-   them did look first. `python3 tools/ci/check_pr.py claim N` lists what #N
-   has in common with the other open pull requests. Of two that have the
-   same phase, finding or file, **the one opened later moves**: it takes the
-   next free numbers, or stays out of the file, and the earlier one changes
-   nothing. A pull request holds the files it has changed as well as the
-   ones it names. Put `[skip ci]` in the message of the first commit: an
-   empty commit needs no run, and a run is an hour of runner time.
+   same moment both see the same file free, and each of them did look
+   first. `python3 tools/ci/check_pr.py claim N` lists what #N has in
+   common with the other open pull requests. Of two that would **make**
+   the same file, the one opened later takes another name, and the
+   earlier one changes nothing. A file `main` has can be changed by both:
+   `claim N` names the pull requests that share it, and if the one that
+   lands first leaves the other unable to merge, the other merges `main`.
+   A pull request holds the files it has changed as well as the ones it
+   names. Put `[skip ci]` in the message of the first commit: an empty
+   commit needs no run, and a run is an hour of runner time.
 
 ## The files every pull request changes
 
@@ -754,6 +761,21 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   any other, and the landing session takes no pull request that has
   one. The title carries the number into the merge commit: #393's still
   said 387 when its lot had passed.
+- **A finished pull request, closed for a file.** #390 was finished and
+  measured in its agent's sandbox (two more test262 cases, two more of
+  the JavaScript corpus, nothing lost). It needed one function of
+  `src/js/JsInterpreter.cpp`, which #387 had named eight minutes before
+  #390 was opened; `claim 390` said "stay out of it, or tell the person
+  you work for"; its agent kept a patch in `/tmp` and closed the pull
+  request, 23 minutes after opening it, with nothing pushed. #387 landed
+  45 minutes later. The rule had been written for agents that merged
+  their own work and paid for every conflict; with more than ten agents and a
+  landing session it stopped work that would have merged. **A file of
+  `main` that two pull requests change is no longer a refusal**
+  ("Before starting", points 3 and 4): `claim N` says who shares it, and
+  the one that lands second merges `main`. A file both would make is
+  still the first one's. And nothing finished stays in a sandbox: push
+  it under `WIP:`, whatever is in the way.
 
 **`main`**
 

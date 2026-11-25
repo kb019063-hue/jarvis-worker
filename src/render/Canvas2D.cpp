@@ -2660,10 +2660,15 @@ void CanvasRenderingContext2D::replay_into(const Path2D& path) {
                 rect(op.a, op.b, op.c, op.d);
                 break;
             case Path2D::Kind::RoundRect:
-                // The radii were kept as the page wrote them, because
-                // `roundRect` takes either one value or four; `op.a`..`op.d` are
-                // the rectangle and the four radii follow in `radii`.
+                // One radius: the context's overload spreads it to all four corners.
                 round_rect(op.a, op.b, op.c, op.d, op.e);
+                break;
+            case Path2D::Kind::RoundRectRadii:
+                // Four radii, through the same overload the context's own
+                // `roundRect` uses — so the proportional clamping of overlapping
+                // corners (§4.12.5.1's rule for a rectangle too small for its
+                // radii) happens in one place and cannot differ between the two.
+                round_rect(op.a, op.b, op.c, op.d, op.rr[0], op.rr[1], op.rr[2], op.rr[3]);
                 break;
             case Path2D::Kind::ClosePath:
                 close_path();

@@ -34,8 +34,14 @@ engine pages run on.
 ## Verification
 
 - `make verify-bytecode`: **75/75 agree; 2/2 still refused**.
-- `make test`: **463/463 engine suites** and 114 cross-origin checks passed.
+- `make test`: **483/483 engine suites** and 114 cross-origin checks passed.
 - `python3 tools/conformance/verify_bytecode_agreement.py --self-test` passed.
+- After merging main into the branch, `make deep` passed 1,332 runs,
+  `make fuzz` passed, and the new suite passed in an ASan build as its own
+  test stretch. The full `make asan` could not complete in this 3.8 GiB
+  sandbox: its existing deep-nesting suite exhausted memory even in
+  isolation. Full sanitizer CI is required before landing; this is not
+  reported as a local pass.
 
 ## Still open
 

@@ -995,11 +995,55 @@ struct CryptoKeyState : JsExotic {
     bool extractable = false;
     std::string hash_alg;
     std::vector<uint8_t> key_bytes;
+    std::vector<std::string> usages;
 };
+
+static std::vector<std::string> read_usages(const JsValue& arr) {
+    std::vector<std::string> out;
+    if (!arr.is_object_like()) return out;
+    std::size_t n = static_cast<std::size_t>(to_double(arr.get_property("length")));
+    for (std::size_t i = 0; i < n; ++i) out.push_back(to_str(arr.get_property(std::to_string(i))));
+    return out;
+}
 
 void setup_crypto_key(Iface& I) {
     I.getter("type", [](Realm&) { return str(this_state<CryptoKeyState>("CryptoKey").type); });
     I.getter("extractable", [](Realm&) { return boolean(this_state<CryptoKeyState>("CryptoKey").extractable); });
+    I.getter("algorithm", [](Realm& r) {
+        const auto& st = this_state<CryptoKeyState>("CryptoKey");
+        JsValue obj_ctor = r.window.is_object() ? r.window.get_property("Object") : JsValue();
+        JsValue alg = js_construct(obj_ctor, {});
+        if (st.hash_alg == "aes-gcm" || st.hash_alg == "aes-cbc" || st.hash_alg == "aes-ctr" || st.hash_alg == "aes-kw") {
+            std::string name = st.hash_alg == "aes-gcm" ? "AES-GCM"
+                             : st.hash_alg == "aes-cbc" ? "AES-CBC"
+                             : st.hash_alg == "aes-ctr" ? "AES-CTR" : "AES-KW";
+            alg.set_property("name", str(name));
+            alg.set_property("length", num(static_cast<double>(st.key_bytes.size() * 8u)));
+        } else if (st.hash_alg == "ecdh" || st.hash_alg == "ecdsa") {
+            alg.set_property("name", str(st.hash_alg == "ecdh" ? "ECDH" : "ECDSA"));
+            alg.set_property("namedCurve", str("P-256"));
+        } else if (st.hash_alg == "pbkdf2" || st.hash_alg == "hkdf") {
+            alg.set_property("name", str(st.hash_alg == "pbkdf2" ? "PBKDF2" : "HKDF"));
+        } else {
+            alg.set_property("name", str("HMAC"));
+            JsValue h = js_construct(obj_ctor, {});
+            std::string hn = st.hash_alg == "sha-1" ? "SHA-1"
+                           : st.hash_alg == "sha-384" ? "SHA-384"
+                           : st.hash_alg == "sha-512" ? "SHA-512" : "SHA-256";
+            h.set_property("name", str(hn));
+            alg.set_property("hash", h);
+        }
+        return alg;
+    });
+    I.getter("usages", [](Realm& r) {
+        const auto& st = this_state<CryptoKeyState>("CryptoKey");
+        JsValue arr_ctor = r.window.is_object() ? r.window.get_property("Array") : JsValue();
+        JsValue out = js_construct(arr_ctor, {});
+        for (std::size_t i = 0; i < st.usages.size(); ++i) {
+            out.set_property(std::to_string(i), str(st.usages[i]));
+        }
+        return out;
+    });
 }
 
 std::string ascii_lower_str(std::string s) {
@@ -1170,6 +1214,7 @@ void setup_subtle_crypto(Iface& I) {
             state->extractable = args[3].is_truthy();
             state->hash_alg = alg_name;
             state->key_bytes = std::move(key_bytes);
+            state->usages = read_usages(args[4]);
             JsValue key = r.make("CryptoKey", state);
             if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
             return undefined();
@@ -1179,6 +1224,7 @@ void setup_subtle_crypto(Iface& I) {
             state->extractable = args[3].is_truthy();
             state->hash_alg = alg_name;
             state->key_bytes = std::move(key_bytes);
+            state->usages = read_usages(args[4]);
             JsValue key = r.make("CryptoKey", state);
             if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
             return undefined();
@@ -1191,6 +1237,7 @@ void setup_subtle_crypto(Iface& I) {
             state->extractable = args[3].is_truthy();
             state->hash_alg = alg_name;
             state->key_bytes = std::move(key_bytes);
+            state->usages = read_usages(args[4]);
             JsValue key = r.make("CryptoKey", state);
             if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
             return undefined();
@@ -1466,12 +1513,14 @@ void setup_subtle_crypto(Iface& I) {
             priv_state->extractable = args[1].is_truthy();
             priv_state->hash_alg = alg_name;
             priv_state->key_bytes.assign(priv, priv + 32);
+            priv_state->usages = read_usages(args[2]);
 
             auto pub_state = std::make_shared<CryptoKeyState>();
             pub_state->type = "public";
             pub_state->extractable = true;
             pub_state->hash_alg = alg_name;
             pub_state->key_bytes = std::move(pub);
+            pub_state->usages = read_usages(args[2]);
 
             JsValue obj_ctor = r.window.is_object() ? r.window.get_property("Object") : JsValue();
             JsValue pair = js_construct(obj_ctor, {});
@@ -1490,6 +1539,7 @@ void setup_subtle_crypto(Iface& I) {
             state->hash_alg = alg_name;
             state->key_bytes.resize(static_cast<std::size_t>(len_bits / 8));
             fill_random_bytes(state->key_bytes.data(), state->key_bytes.size());
+            state->usages = read_usages(args[2]);
             JsValue key = r.make("CryptoKey", state);
             if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
             return undefined();
@@ -1660,6 +1710,7 @@ void setup_subtle_crypto(Iface& I) {
             state->extractable = args[3].is_truthy();
             state->hash_alg = key_hash_alg;
             state->key_bytes.assign(shared, shared + static_cast<std::size_t>(len_bits / 8));
+            state->usages = read_usages(args[4]);
             JsValue key = r.make("CryptoKey", state);
             if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
             return undefined();

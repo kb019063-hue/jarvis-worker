@@ -1184,7 +1184,11 @@ JsValue clamped_array(Realm& realm, std::size_t length) {
     if (!array_ctor.is_function()) {
         js_throw_type_error("ImageData needs a realm with Uint8ClampedArray.");
     }
-    return js_call(array_ctor, array_ctor, {JsValue::make_number(static_cast<double>(length))});
+    // Constructed, not called: a typed-array constructor refuses a plain call
+    // now (`Constructor Uint8ClampedArray requires 'new'`), and this is the
+    // engine making the array for an ImageData, not a script. `js_call` here
+    // reached the native through [[Call]] and threw.
+    return js_construct(array_ctor, {JsValue::make_number(static_cast<double>(length))});
 }
 
 /// Writes `bytes` into `array`. Through the elements rather than through an

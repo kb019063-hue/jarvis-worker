@@ -445,6 +445,16 @@ public:
     static const JsValue& current_this();
     /// True when the native function currently executing was invoked with `new`.
     static bool current_is_construct();
+    /// True when the native function running now was reached by a *call* --
+    /// `Map(…)`, `Uint8Array(4)` -- rather than by any `[[Construct]]`. Every
+    /// construction sets `current_is_construct()`: a plain `new`, a derived
+    /// `class X extends Map`, `Reflect.construct` and a super() alike. So this
+    /// is the question a built-in constructor asks to refuse being called
+    /// without `new` (§10.2.1.1), and it is not the same question as
+    /// `!current_is_construct()`, which is what makes it worth having a name:
+    /// a native that has to build a `new.target` object under
+    /// `Reflect.construct` cannot use its absence to mean "no new".
+    static bool current_requires_new();
     /// What the function being called captures (see Extra::captured). Empty
     /// when it captures nothing. Valid only for the duration of the call.
     static const std::vector<JsValue>& current_captured();

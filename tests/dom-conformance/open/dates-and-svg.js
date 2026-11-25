@@ -70,4 +70,9 @@ t('who has which length attribute', function () {
   var NS = 'http://www.w3.org/2000/svg', mk = function (t) { return document.createElementNS(NS, t); };
   return [typeof mk('rect').rx, typeof mk('circle').rx, typeof mk('line').x1,
           typeof mk('g').x, typeof mk('marker').refX, typeof mk('svg').width]; });
+t('a text position is a list', function () {
+  var NS = 'http://www.w3.org/2000/svg', mk = function (t) { return document.createElementNS(NS, t); };
+  var e = mk('text'); e.setAttribute('x', '10 20 30'); e.setAttribute('dx', '1 2');
+  return [e.x.baseVal.numberOfItems, e.x.baseVal[0].value, e.dx.baseVal.numberOfItems,
+          typeof mk('textPath').x, typeof mk('tspan').y]; });
 console.log(out.join('\n'));

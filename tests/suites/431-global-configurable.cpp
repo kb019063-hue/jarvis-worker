@@ -90,17 +90,20 @@ TEST(a_global_is_deleted_only_if_its_descriptor_says_it_can_be) {
     // `zzImplicit = 3` with no declaration is a third kind: not a built-in and
     // not a declaration, so §9.1.1.4's rules for a `var` do not reach it. It
     // is `{writable: true, enumerable: true, configurable: true}`, and the
-    // `configurable` half is **still wrong** — the name is created at
-    // `src/js/JsEval.cpp:2439` through the same `define` a built-in uses, and
-    // setting `is_builtin = false` there is the fix. That file is claimed by
-    // the open #421, so the change is left to whoever lands it next, and the
-    // assertion that would hold it is not written rather than written red: a
-    // suite in the tree that fails is not a test of anything. `enumerable` is
-    // asserted because the phase did change it — this name used to report
-    // `enumerable: false` along with the built-ins.
+    // `configurable` half was **still wrong when this suite was written** —
+    // the name was created through the same `define` a built-in uses, in a
+    // file the open #421 owned, so the assertion that would hold it was left
+    // out rather than written red: a test failing in the tree tests nothing.
+    // #421 has landed; the call site now uses `define_script_global` and the
+    // case is closed below.
     assert(run("zzImplicit = 3; 'ok'") == "ok");
-    assert(run("K.getOwnPropertyDescriptor(globalThis, 'zzImplicit').enumerable") == "true");
-    assert(run("K.getOwnPropertyDescriptor(globalThis, 'zzImplicit').writable") == "true");
+    assert(run("K.keys(globalThis).indexOf('zzImplicit') >= 0") == "true");
+    assert(run("[K.getOwnPropertyDescriptor(globalThis,'zzImplicit').writable,"
+               "K.getOwnPropertyDescriptor(globalThis,'zzImplicit').enumerable,"
+               "K.getOwnPropertyDescriptor(globalThis,'zzImplicit').configurable].join(',')")
+           == "true,true,true");
+    assert(run("delete globalThis.zzImplicit") == "true");
+    assert(run("typeof zzImplicit") == "undefined");
 
     // ---- a `let` is not a property in either sense -----------------------
     // The fix touches what the global object reports, so this must not have
@@ -112,5 +115,4 @@ TEST(a_global_is_deleted_only_if_its_descriptor_says_it_can_be) {
     // Deleting is the new behaviour; enumerating must not have moved.
     assert(run("K.keys(globalThis).indexOf('Math')") == "-1");
     assert(run("K.getOwnPropertyNames(globalThis).indexOf('Math') >= 0") == "true");
-    assert(run("K.keys(globalThis).indexOf('zzImplicit') >= 0") == "true");
 }

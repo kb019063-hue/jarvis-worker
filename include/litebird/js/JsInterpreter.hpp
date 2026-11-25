@@ -265,9 +265,17 @@ public:
     /// binding a sloppy direct `eval` made is configurable too, so `delete`
     /// takes it away.
     bool is_configurable_binding(const Binding& binding) const {
-        if (binding.is_permanent) return false;
-        if (!binding.is_builtin) return binding.is_deletable;
-        return true;
+        // Only the two kinds §9.1.1.4 names are not: the permanent values and
+        // a top-level declaration. Everything else — a library global, an
+        // implicit global, a `eval`-made name — is.
+        //
+        // This read `if (!binding.is_builtin) return binding.is_deletable;`
+        // and that was wrong in the one case it was written for: an implicit
+        // global is not a built-in *and* not deletable-by-`is_deletable`
+        // (which marks what a sloppy `eval` made), so it answered `false` and
+        // `zz = 3` could not be deleted. A three-way table written as two
+        // branches looks right from either side and is wrong from the third.
+        return !binding.is_permanent;
     }
 
     /// The name a global `let`/`const`/`class` shadows, once it has shadowed

@@ -690,12 +690,17 @@ fuzz-xml:
 ## Then random pages that keep the parser at its nesting limit. About ten
 ## minutes on two cores.
 ##
-## CI runs it as two jobs side by side, `make deep DEEP_KINDS="--runs dumps"`
-## and `make deep DEEP_KINDS="--not-runs dumps"`: every page is given to the
-## engine three ways (dumps, terminal, html5lib), each a run of its own, and
-## the dumps were 530 of 1,270 seconds of work on 24 November 2026, when the
-## one job was the third longest of a run. "Every kind but the dumps" and not
-## the two names, so that a kind added to tools/fuzz/deep_pages.py is run.
+## CI runs it as three jobs side by side, `make deep DEEP_KINDS="--runs
+## dumps"`, `"--runs terminal"` and `"--not-runs dumps,terminal"`: every
+## page is given to the engine three ways (dumps, terminal, html5lib), each
+## a run of its own, and the dumps were 530 of 1,270 seconds of work on 24
+## November 2026, when the one job was the third longest of a run. As two
+## jobs, the dumps and the rest, the rest was the longest job of a run the
+## next day whenever no slower machine made another one longer: 244 to 247
+## seconds of pages on four cores, 448 seconds of work for the terminal
+## and 526 for html5lib, beside 137 to 169 for the dumps. "Every kind but
+## those two" and not the third name, so that a kind added to
+## tools/fuzz/deep_pages.py is run.
 DEEP_KINDS ?=
 deep: $(TARGET)
 	@python3 tools/fuzz/deep_pages.py --binary $(TARGET) --quiet --random $(DEEP_RANDOM) $(DEEP_KINDS)

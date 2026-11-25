@@ -747,10 +747,10 @@ jobs:
         if: failure()
         run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
 
-  # The same pages as the job above, given to the engine the other ways
-  # there are (the Makefile, above `deep:`, says why they are two jobs).
-  deep-pages-rest:
-    name: "Deep and oversized pages: the terminal and html5lib (stack, memory and time limits)"
+  # The same pages as the job above, given to the engine as the terminal
+  # is (the Makefile, above `deep:`, says why they are three jobs).
+  deep-pages-terminal:
+    name: "Deep and oversized pages: the terminal (stack, memory and time limits)"
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
@@ -778,7 +778,46 @@ jobs:
         # (tools/fuzz/deep_pages.py).
         run: |
           set -o pipefail
-          make deep DEEP_KINDS="--not-runs dumps" 2>&1 | tee "$RUNNER_TEMP/part-deep.log"
+          make deep DEEP_KINDS="--runs terminal" 2>&1 | tee "$RUNNER_TEMP/part-deep.log"
+      - name: What failed, as annotations
+        # Without this a failure here said `exit code 2` and nothing else
+        # where the log could not be fetched (#317, 24 November).
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
+
+  # The same pages again, given to the engine every other way there is:
+  # today that is html5lib's tree. "Every kind but those two" and not its
+  # name, so that a kind of run added to tools/fuzz/deep_pages.py is run.
+  deep-pages-rest:
+    name: "Deep and oversized pages: html5lib (stack, memory and time limits)"
+    runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: plain
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: Pages nested 200,000 deep, oversized bitmaps, long runs of one thing
+        # 165 generated pages, each nesting or repeating one construct far past
+        # what a recursive walk or a quadratic loop survives, then 300 random
+        # pages that keep the parser at its nesting limit. Every run is a child
+        # process with an 8 MB stack, 2 GB of memory and 60 seconds. The
+        # slowest takes 20 to 33 seconds on a quiet two-core machine; what
+        # this is here to catch does not finish at all. The machines this job
+        # gets differ by a factor of two, so a run that goes over the limit
+        # beside the others is run once more by itself before it counts
+        # (tools/fuzz/deep_pages.py).
+        run: |
+          set -o pipefail
+          make deep DEEP_KINDS="--not-runs dumps,terminal" 2>&1 | tee "$RUNNER_TEMP/part-deep.log"
       - name: What failed, as annotations
         # Without this a failure here said `exit code 2` and nothing else
         # where the log could not be fetched (#317, 24 November).

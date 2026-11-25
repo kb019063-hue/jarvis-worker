@@ -38,6 +38,10 @@ TEST(the_bytecode_vm_binds_an_array_pattern) {
     agree("var a=42; function f(){let [a]=[1]; return a;} String(f()+'/'+a)", "1/42");
     // extra call arguments do not shift slots
     agree("function f(a){var [b]=[3]; return String(a)+','+b;} String(f(1,2,3))", "1,3");
+    // The active cursor survives another pattern in a callback.
+    agree("var s={}; s[Symbol.iterator]=function(){return {next:function(){var [x,y]=[3,4];return {value:x+y,done:false}},return:function(){return {}}}}; var [a]=s; String(a)", "7");
+    // A default runs before the next pull; early completion closes once.
+    agree("var x=0; var s={}; s[Symbol.iterator]=function(){return {next:function(){x++;return {value:undefined,done:false}},return:function(){x+=10;return {}}}}; var [a=(x+=100),b=(x+=1000)] = s; String(x+'/'+a+'/'+b)", "1112/101/1102");
 
     // A failed default closes an open iterator, but a throwing next does not.
     // An injected native records the effects even when script execution fails.
@@ -63,4 +67,7 @@ TEST(the_bytecode_vm_binds_an_array_pattern) {
     abrupt("var s={}; s['@@iterator']=function(){return {next:function(){record('n');return {value:undefined,done:false};},return:function(){record('r');return {};}}}; var [a=Object.create(42)]=s", "nr");
     abrupt("var s={}; s['@@iterator']=function(){return {next:function(){record('n');return Object.create(42);},return:function(){record('r');return {};}}}; var [a]=s", "n");
     abrupt("var s={}; s['@@iterator']=function(){return {next:function(){return {value:1,done:false};},return:function(){record('r');return 1;}}}; var [a]=s", "r");
+    // An inner next failure does not close the inner cursor, but the outer
+    // binding is abrupt and must still close its own cursor.
+    abrupt("var i={}; i['@@iterator']=function(){return {next:function(){record('n');return Object.create(42);},return:function(){record('i');return {};}}}; var o={}; o['@@iterator']=function(){return {next:function(){return {value:i,done:false};},return:function(){record('o');return {};}}}; var [[a]]=o", "no");
 }

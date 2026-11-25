@@ -1,6 +1,6 @@
-# Finding 387 — the number was a double, and the text was lost
+# Finding 393 — the number was a double, and the text was lost
 
-Phase 387. Status: **fixed; `JSON.rawJSON` and `JSON.isRawJSON` exist.**
+Phase 393. Status: **fixed; `JSON.rawJSON` and `JSON.isRawJSON` exist.**
 
 ## 1. What was wrong
 

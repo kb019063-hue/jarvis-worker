@@ -1,6 +1,6 @@
-# Phase 387 — a number the double could not hold
+# Phase 393 — a number the double could not hold
 
-Finding 387. Task: no open row names this. It was found by asking the built-in
+Finding 393. Task: no open row names this. It was found by asking the built-in
 namespaces for the members they do not have — see section 1 — and the row it
 belongs to is the JSON one: `JSON.parse` reads source text access into a
 reviver since Phase 288, and the other half of that proposal, `JSON.rawJSON`
@@ -59,7 +59,7 @@ not grow). `JSON.isRawJSON` asks the slot and nothing else, and
 
 ## 3. How it was verified
 
-`tests/suites/387-json-raw-json.cpp`, 50 assertions, every expected value
+`tests/suites/393-json-raw-json.cpp`, 50 assertions, every expected value
 Node v22.22.3's by evaluating the same expression there.
 
 ```
@@ -71,7 +71,7 @@ All 450 engine test suites passed successfully!
 
 | Wrong engine | Fails at | What it says |
 |---|---|---|
-| both methods absent | `387-json-raw-json.cpp:28` | `typeof JSON.rawJSON` is not `"function"` |
+| both methods absent | `393-json-raw-json.cpp:28` | `typeof JSON.rawJSON` is not `"function"` |
 | `isRawJSON`/`stringify` read a `rawJSON` property instead of a slot | `:68` | `JSON.isRawJSON({rawJSON: '1'})` is `true`, Node says `false` |
 | the argument checked by the general parser ("any JSON value") | `:90` | `JSON.rawJSON('{}')` is accepted, Node says `SyntaxError` |
 

@@ -1103,11 +1103,11 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
     }
 
     auto env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
-    // A simple function's bindings are all known before it runs. Reserve the
-    // small common frame once instead of growing the binding vector as `this`,
-    // parameters and `var` names are defined one at a time. Keep the estimate
-    // bounded: over-reserving a large frame (or one with complex parameters)
-    // costs memory without helping the hot, small-call case.
+    // The statically known bindings of a simple function are available before
+    // it runs. Reserve the bounded common frame so its `this`, parameters,
+    // `var` names and hoisted functions do not grow the vector one at a time.
+    // Dynamic declarations (for example, through eval) can still grow it later;
+    // a large estimate or complex parameters do not help the hot small-call case.
     if (node->simple_params && !node->has_parameter_expressions) {
         std::size_t capacity = node->params.size() + node->var_names.size();
         if (!node->is_arrow) {

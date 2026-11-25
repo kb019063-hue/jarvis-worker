@@ -2285,7 +2285,15 @@ void JsInterpreter::assign_identifier(const std::string& name, const JsValue& va
         }
     }
     if (env->is_strict()) js_throw_error(JsErrorKind::ReferenceError, name + " is not defined");
-    m_global_env->define(name, value);      // sloppy mode: implicit global
+    // Sloppy mode: an implicit global. §9.1.1.4 gives it
+    // `{writable: true, enumerable: true, configurable: true}` — it is neither
+    // a built-in nor a declaration, so it is the one kind of global that is
+    // deletable and enumerable both. `define` is what a built-in's binding
+    // went through, and it cannot tell the two apart, so the name was left
+    // looking like a library global: `zz = 3` reported `configurable: false`
+    // and `delete globalThis.zz` refused. `define_script_global` says which
+    // it is (Phase 431's remainder, closed here).
+    m_global_env->define_script_global(name, value);
 }
 
 std::string JsInterpreter::private_key_for(const std::string& display, const EnvPtr& env) const {

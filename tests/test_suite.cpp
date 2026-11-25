@@ -7617,6 +7617,41 @@ TEST(subtle_crypto_ecdh_p256_derive_key) {
     assert(interp.eval("rtHex === '0a141e28'").is_truthy());
 }
 
+TEST(subtle_crypto_ec_spki_and_pkcs8) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var spkiLen = 0, pkcs8Len = 0, ok = null;
+        var msg = new Uint8Array([5, 6, 7, 8]);
+        crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+            .then(function(pair) {
+                return Promise.all([
+                    crypto.subtle.exportKey('spki', pair.publicKey),
+                    crypto.subtle.exportKey('pkcs8', pair.privateKey)
+                ]);
+            })
+            .then(function(ders) {
+                spkiLen = ders[0].byteLength;
+                pkcs8Len = ders[1].byteLength;
+                return Promise.all([
+                    crypto.subtle.importKey('spki', ders[0], { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']),
+                    crypto.subtle.importKey('pkcs8', ders[1], { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])
+                ]);
+            })
+            .then(function(keys) {
+                return crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys[1], msg)
+                    .then(function(sig) {
+                        return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, keys[0], sig, msg);
+                    });
+            })
+            .then(function(v) { ok = v; });
+    )");
+    assert(interp.eval("spkiLen === 91 && pkcs8Len === 67").is_truthy());
+    assert(interp.eval("ok === true").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36572,6 +36607,7 @@ int main() {
     RUN_TEST(subtle_crypto_ecdsa_p256_sign_and_verify);
     RUN_TEST(subtle_crypto_ec_jwk_import_and_export);
     RUN_TEST(subtle_crypto_ecdh_p256_derive_key);
+    RUN_TEST(subtle_crypto_ec_spki_and_pkcs8);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

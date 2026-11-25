@@ -67,6 +67,9 @@ enum class OpCode : uint8_t {
     OpJump,
     OpJumpIfFalse,
     OpLoop,
+    OpTry,          // forward offset to catch; save frame, stack and iterator depths
+    OpEndTry,       // leave the protected block normally
+    OpThrow,        // throw the top value
 
     // Functions
     OpCall,
@@ -119,6 +122,9 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpTypeOf:       return "OP_TYPE_OF";
         case OpCode::OpJump:         return "OP_JUMP";
         case OpCode::OpJumpIfFalse:  return "OP_JUMP_IF_FALSE";
+        case OpCode::OpTry:          return "OP_TRY";
+        case OpCode::OpEndTry:       return "OP_END_TRY";
+        case OpCode::OpThrow:        return "OP_THROW";
         case OpCode::OpLoop:         return "OP_LOOP";
         case OpCode::OpCall:         return "OP_CALL";
         case OpCode::OpReturn:       return "OP_RETURN";

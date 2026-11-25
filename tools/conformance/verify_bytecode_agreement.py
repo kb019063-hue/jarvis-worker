@@ -66,6 +66,28 @@ class Case:
 # Both paths must answer these alike. Each was run on the engine and read
 # before it was written here; none of them is a guess.
 AGREES: list[Case] = [
+    # Phase 456: the protected block either completes or transfers the thrown
+    # value to a fresh catch binding; no finalizer or pattern is implied.
+    Case("try { 1; } catch (e) { 2; }", "the original try/catch refusal"),
+    Case("try { throw 7; } catch (e) { e; }", "catch receives a thrown number"),
+    Case("try { throw 3; } catch { 7; }", "optional catch binding"),
+    Case("var x=7;try{throw 3}catch(x){x+=2}String(x)", "catch shadows an outer binding"),
+    Case("var s='';try{throw 3}catch(e){s+=e;}String(s)", "catch effects survive the block"),
+    Case("try { Object.create(42); } catch(e) { e.name; }", "native TypeError is caught"),
+    Case("function f(){throw 8} try{f()}catch(e){e}", "a throw crosses a VM call frame"),
+    Case("var o={};Object.defineProperty(o,'x',{get:function(){try{throw 5}catch(e){return e}}});try{o.x+2}catch(e){99}", "a reentrant callback catches within its own frame"),
+    Case("var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){throw 7}}};try{for(var x of a){throw 4}}catch(e){e}", "the original throw wins over a failing iterator close"),
+    Case("try{try{throw 1}catch(e){throw e+2}}catch(x){x}", "nested handler rethrows to outer handler"),
+    Case("try{1;throw 2}catch(e){}", "empty catch preserves prior completion"),
+    Case("try{throw 1}catch(e){e+2};", "completion survives a trailing empty statement"),
+    Case("5;try{}catch(e){}", "empty try preserves earlier completion"),
+    Case("try{1;while(false){}}catch(e){}", "empty loop resets script completion"),
+    Case("try{throw 1}catch(e){let x=e; x+2}", "catch and block locals remain distinct"),
+    Case("function f(){try{throw 3}catch(e){return e+1}}String(f())", "return from the catch"),
+    Case("var n=0;try{throw 2}catch(e){n=e}try{throw 3}catch(e){n+=e}String(n)", "handlers do not leak"),
+    Case("var s='';var it={};it[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){s+='r';return {}}}};try{for(var x of it){throw 'x'}}catch(e){s+=e}String(s)", "abrupt loop exit closes before catch"),
+    Case("var s='';var it={};it[Symbol.iterator]=function(){return {next:function(){throw 'x'},return:function(){s+='r';return {}}}};try{for(var x of it){}}catch(e){s+=e}String(s)", "iterator step error does not close"),
+
     Case("1 + 2", "a constant expression"),
     Case("'a' + 'b'", "string concatenation"),
     Case("7 * 6 - 2", "left-to-right precedence"),
@@ -258,7 +280,11 @@ AGREES: list[Case] = [
 # number, and so the day one of them starts working shows up as a failure
 # rather than as silence.
 REFUSES: list[Case] = [
-    Case("try { 1; } catch (e) { 2; }", "Statement"),
+    Case("try { 1; } finally { 2; }", "finally"),
+    Case("try { throw [1]; } catch ([e]) { e; }", "catch pattern"),
+    Case("function f(){try{return 1}catch(e){}} f()", "return from protected block"),
+    Case("while(true){try{throw 1}catch(e){break}}", "jump from catch"),
+    Case("try{throw 3}catch(e){function f(){return e}f()}", "function in catch would capture its binding"),
 ]
 
 

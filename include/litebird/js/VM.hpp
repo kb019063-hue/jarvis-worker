@@ -43,6 +43,13 @@ private:
     void init_builtins();
     JsValue run(size_t stop_depth = 0);
 
+    struct Handler {
+        size_t frame_depth;
+        size_t stack_size;
+        size_t iterator_count;
+        const uint8_t* target;
+    };
+    std::vector<Handler> m_handlers;
     std::vector<CallFrame> m_frames;
     std::vector<JsValue> m_stack;
     /// The array-destructuring cursors this script left open, one per

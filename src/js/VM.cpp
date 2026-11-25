@@ -593,7 +593,23 @@ JsValue VM::run(size_t stop_depth) {
                 if (it != m_globals.end()) {
                     push(it->second);
                 } else {
+                    // The quiet answer, for the operand of `typeof` only
+                    // (§13.5.3 forbids that from throwing).
                     push(JsValue::make_undefined());
+                }
+                break;
+            }
+            case OpCode::OpGetGlobalChecked: {
+                const std::string name = read_constant().string_val.str();
+                auto it = m_globals.find(name);
+                if (it != m_globals.end()) {
+                    push(it->second);
+                } else {
+                    // ECMA-262 §6.1.7: GetValue on an unresolvable Reference is
+                    // a `ReferenceError`, which is what the tree-walker raises
+                    // (`JsEval.cpp`) and what this pushes `undefined` for
+                    // before Phase 440.
+                    js_throw_error(JsErrorKind::ReferenceError, name + " is not defined");
                 }
                 break;
             }

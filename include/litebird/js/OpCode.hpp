@@ -18,6 +18,12 @@ enum class OpCode : uint8_t {
     OpGetLocal,
     OpSetLocal,
     OpGetGlobal,
+    // The same read, but a name that is not a global of the frame throws a
+    // `ReferenceError` instead of pushing `undefined` (ECMA-262 §6.1.7,
+    // GetValue on an unresolvable Reference). `OpGetGlobal` is kept for the
+    // one place the quiet answer is the right one: the operand of `typeof`,
+    // which §13.5.3 forbids from throwing.
+    OpGetGlobalChecked,
     OpSetGlobal,
 
     // Object properties & indexing
@@ -83,7 +89,8 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpDup:          return "OP_DUP";
         case OpCode::OpGetLocal:     return "OP_GET_LOCAL";
         case OpCode::OpSetLocal:     return "OP_SET_LOCAL";
-        case OpCode::OpGetGlobal:    return "OP_GET_GLOBAL";
+        case OpCode::OpGetGlobal:        return "OP_GET_GLOBAL";
+        case OpCode::OpGetGlobalChecked: return "OP_GET_GLOBAL_CHECKED";
         case OpCode::OpSetGlobal:    return "OP_SET_GLOBAL";
         case OpCode::OpGetProperty:  return "OP_GET_PROPERTY";
         case OpCode::OpSetProperty:  return "OP_SET_PROPERTY";

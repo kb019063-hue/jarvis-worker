@@ -607,7 +607,8 @@ void BytecodeCompiler::require_simple_function(const FunctionNode& node) {
     }
 }
 
-void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hint) {
+void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hint,
+                                    bool quiet_unresolvable) {
     if (!expr) {
         emit_opcode(OpCode::OpUndefined);
         return;
@@ -628,7 +629,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
             emit_byte(static_cast<uint8_t>(local_slot));
         } else {
             size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(id->name));
-            emit_opcode(OpCode::OpGetGlobal);
+            emit_opcode(quiet_unresolvable ? OpCode::OpGetGlobal : OpCode::OpGetGlobalChecked);
             emit_byte(static_cast<uint8_t>(name_idx));
         }
     } else if (auto assign = dynamic_cast<const AssignExpr*>(expr)) {
@@ -657,7 +658,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
                     emit_byte(static_cast<uint8_t>(local_slot));
                 } else {
                     size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(id_target->name));
-                    emit_opcode(OpCode::OpGetGlobal);
+                    emit_opcode(OpCode::OpGetGlobalChecked);
                     emit_byte(static_cast<uint8_t>(name_idx));
                 }
             } else if (auto mem_target = dynamic_cast<const MemberExpr*>(assign->target.get())) {
@@ -726,7 +727,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
                     emit_byte(static_cast<uint8_t>(slot));
                 } else {
                     size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(id->name));
-                    emit_opcode(OpCode::OpGetGlobal);
+                    emit_opcode(OpCode::OpGetGlobalChecked);
                     emit_byte(static_cast<uint8_t>(name_idx));
                 }
             } else if (auto mem = dynamic_cast<const MemberExpr*>(update->target.get())) {
@@ -772,13 +773,13 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
         // Postfix must yield the pre-change value; discard the new one.
         if (!update->prefix) emit_opcode(OpCode::OpPop);
     } else if (auto unary = dynamic_cast<const UnaryExpr*>(expr)) {
-        // ECMA-262 §13.5.3: `typeof` never throws, not even for an unresolvable
-        // reference. The VM answers an undeclared global with `undefined`
-        // (OpGetGlobal), which is the type such an operand has, so the
-        // operand is compiled the ordinary way and no reference token is
-        // needed here. `void` is still refused: nobody has asked for it.
+        // ECMA-262 §13.5.3 suppresses only an unresolvable reference;
+        // evaluating a compound operand can still throw. `void` is refused.
         if (unary->op == JsTokenType::Typeof) {
-            compile_expr(unary->operand.get());
+            // Only the bare identifier case may suppress an unresolvable
+            // reference; reads inside larger operands still throw.
+            const bool bare = dynamic_cast<const IdentifierExpr*>(unary->operand.get()) != nullptr;
+            compile_expr(unary->operand.get(), nullptr, bare);
             emit_opcode(OpCode::OpTypeOf);
         } else if (unary->op == JsTokenType::Minus || unary->op == JsTokenType::Bang) {
             compile_expr(unary->operand.get());

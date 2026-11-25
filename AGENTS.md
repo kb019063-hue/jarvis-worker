@@ -418,6 +418,18 @@ without one, and leaves the board and a watch out of the claims.
    tools/ci/check_pr.py`. It is still a claim, and not yours to take or
    to close: ask in a comment on it, and tell the person you work for,
    who can continue its chat or say that it is given up.)
+   **When the person tells you that an agent is retired and its task is
+   yours**, three things, in this order. Say so in a comment on its pull
+   request, your name first, with the number of your own. Take what it
+   holds: `git fetch origin "+refs/pull/N/head:refs/remotes/origin/prN"`,
+   then `git cherry-pick` its commits or read them (a closed pull request
+   keeps its commits). Then close it: `gh pr close N --comment "NAME:
+   closed on the person's word, its agent is retired; the task goes on
+   in #M"`. It is the one pull request an agent closes that is not its
+   own, and only on the person's word. #367 stood open and empty for
+   thirteen hours after its task had been taken over, because the lines
+   above told its successor not to close it ("What has gone wrong",
+   Claims).
 2. **Claim before doing the work.** Pick a row of the table below that nobody
    has, push a first commit (an empty one will do) and open a pull request
    whose title begins with `WIP:` and whose text begins:
@@ -477,8 +489,13 @@ without one, and leaves the board and a watch out of the claims.
    not pushed ends with it; and from outside, work that is only in a
    sandbox cannot be told from no work at all ("What has gone wrong",
    Claims: #367, #389). What is pushed, the same chat or another agent
-   can go on from. **The last push, the one `WIP:` comes off after, has
-   no `[skip ci]`**: a head commit without a run is finished for nobody.
+   can go on from. **What you have found and cannot commit yet goes in a
+   comment on your pull request** (what was tried, what it showed, what
+   comes next), and at once when the sandbox itself stops working: a
+   pull request can be read by whoever comes after you, your chat only
+   by the person, who then carries it by hand (#367). **The last push,
+   the one `WIP:` comes off after, has no `[skip ci]`**: a head commit
+   without a run is finished for nobody.
    **When a push fails, the work is still only in the sandbox.** Try
    again, then try `gh`, which talks to another host than `git push`
    does: `git diff origin/main > /tmp/p.diff`, and the diff as a comment
@@ -845,6 +862,18 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   with neither a push nor such a comment for two hours. That one is
   still a claim: to ask about, not to take, and not to close on the
   strength of its own page.
+  How #367 ended. The person retired its agent, at the agent's own
+  suggestion, since its sandbox no longer worked, and carried what the
+  agent knew to a successor by hand: nobody else can read a chat. The
+  successor said so on #367 at 06:49 on the 25th and landed the task
+  as #432 at 10:04. #367 was still open at 20:03, a claim with nothing
+  in it for a task that was on `main`, because the lines above told
+  its successor not to close it; the landing session closed it at
+  20:08 on the person's word. So, two more things. **A successor
+  closes the pull request it takes over**, on the person's word
+  ("Before starting", point 1). And **what an agent has found goes
+  into its pull request as it goes** (point 5): the commits, and a
+  comment for what cannot be committed yet.
 
 **`main`**
 

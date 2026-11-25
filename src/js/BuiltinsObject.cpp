@@ -439,6 +439,82 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     // mapping. The question is the pure one — `owns_place` has no
     // consequences, while applying a descriptor can unmap the place, and it
     // was being applied twice: once here as a question and once below.
+    // ArraySetLength (§10.4.2.4). A `length` given as a value must be a valid
+    // array length, and a negative one is a RangeError before any attribute is
+    // looked at (finding 253).
+    if (cell && cell->is_array && key == "length" && value.present) {
+        const double asked = value.value.to_number();
+        if (!(asked >= 0) || asked != std::floor(asked) || asked > 4294967295.0) {
+            js_throw_range_error("Invalid array length");
+        }
+        // Steps 4.a-c, which the assignment path already had and this one did
+        // not: shortening an array *deletes* every place at or above the new
+        // length, and a place that is not configurable cannot be deleted — the
+        // deletion stops there, that place and the ones above it stay, the
+        // length ends up just past the last of them, and the whole request is
+        // refused with a TypeError. This is the step that answers the
+        // `defineProperties` family: `Object.defineProperties(arr, { length:
+        // { value: 1 } })` over a non-configurable `arr[1]`.
+        //
+        // The removal happens before the attribute checks below, so it is done
+        // here rather than beside them: those checks refuse the descriptor and
+        // return false, while this step has already had its effect on the
+        // array, as §10.4.2.4 step 4 has it.
+        const size_t asked_length = static_cast<size_t>(asked);
+        // What the array holds now: the dense places, and any index that a
+        // descriptor moved into the property map (a place that is a hole is
+        // the map's only where `define_accessor` or a non-plain attribute put
+        // it there).
+        size_t previous = cell->array_elements.size();
+        if (const auto entry = cell->properties.find("length"); entry != cell->properties.end()) {
+            previous = std::max(previous, static_cast<size_t>(js_to_number(entry->second)));
+        }
+        bool refused = false;
+        if (asked_length < previous) {
+            // A place in the map at or above the new length: configurable ones
+            // are deleted, and the first non-configurable one stops the sweep
+            // and refuses the request.
+            std::vector<std::string> lost;
+            for (const auto& entry : cell->properties) {
+                size_t at = 0;
+                if (!parse_index(entry.first, at) || at < asked_length || at >= previous) continue;
+                if (entry.flags & PropertyMap::Accessor) continue;   // handled below
+                if (entry.flags & PropertyMap::Configurable) {
+                    lost.push_back(entry.first);
+                    continue;
+                }
+                refused = true;
+            }
+            if (refused) {
+                // §10.4.2.4 step 4.c.iii: the length ends up just after the
+                // last place that could not be deleted.
+                size_t keep = asked_length;
+                for (const auto& entry : cell->properties) {
+                    size_t at = 0;
+                    if (!parse_index(entry.first, at) || at < asked_length) continue;
+                    if (entry.flags & PropertyMap::Configurable) continue;
+                    keep = std::max(keep, at + 1);
+                }
+                object.define_property(
+                    "length", JsValue::make_number(static_cast<double>(keep)),
+                    static_cast<uint8_t>(PropertyMap::Writable));
+                js_throw_type_error("Cannot delete property of an array");
+            }
+            for (const auto& entry : lost) cell->properties.erase(entry);
+            // The dense places past the new end are gone, and so are their
+            // hole bits; the map's own entries went above.
+            if (asked_length < cell->array_elements.size()) {
+                const size_t from = cell->array_elements.size();
+                cell->array_elements.resize(asked_length, JsValue::make_undefined());
+                if (cell->array_holes) {
+                    for (size_t i = asked_length; i < from; ++i) cell->array_holes->clear(i);
+                }
+            }
+            if (cell->array_holes) {
+                for (size_t i = asked_length; i < previous; ++i) cell->array_holes->clear(i);
+            }
+        }
+    }
     const bool host_keeps = cell && cell->exotic && array_index && cell->exotic->owns_place(cell, key);
     if (cell && cell->is_array && !host_keeps && !wants_accessor && (array_index || key == "length") &&
         !mapped_hole && plain_attributes) {
@@ -477,22 +553,27 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         }
         cell->has_accessors = true;
     }
-    // ArraySetLength: a `length` given as a value must be a valid array
-    // length, and a negative one is a RangeError before any attribute is
-    // looked at (finding 253).
-    if (cell && cell->is_array && key == "length" && value.present) {
-        const double asked = value.value.to_number();
-        if (!(asked >= 0) || asked != std::floor(asked) || asked > 4294967295.0) {
-            js_throw_range_error("Invalid array length");
-        }
-    }
     if (cell && cell->is_array && !wants_accessor && key == "length" && writable.present &&
         !writable.value.is_truthy()) {
         cell->has_accessors = true;
-        // The count is still the value; only the attributes are new.
+        // The count is still the value; only the attributes are new — and an
+        // array's `length` is not enumerable and not configurable, so what a
+        // descriptor does not mention keeps those two as they are. (This used
+        // to write Enumerable|Configurable, which made `length` both when it
+        // was asked to become non-writable: `Object.defineProperty([], 'length',
+        // { writable: false })` left `length` enumerable and configurable,
+        // where Node keeps both false.)
         object.define_property("length",
                                JsValue::make_number(static_cast<double>(cell->array_elements.size())),
-                               static_cast<uint8_t>(PropertyMap::Enumerable | PropertyMap::Configurable));
+                               static_cast<uint8_t>(PropertyMap::Writable));
+    }
+    // §10.4.2.3 step 3.a.i: an array's `length` may not be made configurable.
+    // A descriptor that asks for `configurable: true` on it is refused, and
+    // since the attribute starts false and can never become true, asking for
+    // it is a TypeError rather than a silent no-op.
+    if (cell && cell->is_array && !wants_accessor && key == "length" && configurable.present &&
+        configurable.value.is_truthy()) {
+        js_throw_type_error("Cannot redefine property: length");
     }
     // An accessor asked for on an index that is an element. The element is a
     // property that exists, though the map does not have it: writable,

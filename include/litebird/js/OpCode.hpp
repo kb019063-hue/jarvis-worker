@@ -33,6 +33,15 @@ enum class OpCode : uint8_t {
     OpObjectSpread, // Object.keys-order copy of a source's own enumerable properties
     OpDefineTemplateRaw, // the tagged template's strings.raw, hidden as the tree-walker makes it
 
+    // Array destructuring: values come one at a time from a cursor the VM
+    // holds on a stack of its own, so defaults never see the next pull and
+    // `[a, ...rest]` drains exactly the remainder.
+    OpIteratorInit,     // pop the source, push it as the open cursor
+    OpIteratorNext,     // pull one value (undefined once exhausted)
+    OpIteratorDrain,    // drain the rest into a new array and push it
+    OpIteratorClose,    // the normal way out: report a broken `return`, pop it
+    OpIsUndefined,      // push whether the top of stack is undefined
+
     // Arithmetic
     OpAdd,
     OpSubtract,
@@ -85,6 +94,11 @@ inline std::string_view opcode_name(OpCode op) {
     case OpCode::OpObjectDefine: return "OP_OBJECT_DEFINE";
     case OpCode::OpObjectSpread: return "OP_OBJECT_SPREAD";
     case OpCode::OpDefineTemplateRaw: return "OP_DEFINE_TEMPLATE_RAW";
+    case OpCode::OpIteratorInit:     return "OP_ITERATOR_INIT";
+    case OpCode::OpIteratorNext:     return "OP_ITERATOR_NEXT";
+    case OpCode::OpIteratorDrain:    return "OP_ITERATOR_DRAIN";
+    case OpCode::OpIteratorClose:    return "OP_ITERATOR_CLOSE";
+    case OpCode::OpIsUndefined:      return "OP_IS_UNDEFINED";
         case OpCode::OpAdd:          return "OP_ADD";
         case OpCode::OpSubtract:     return "OP_SUBTRACT";
         case OpCode::OpMultiply:     return "OP_MULTIPLY";

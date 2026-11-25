@@ -3,6 +3,7 @@
 #include "litebird/render/ImageDecoder.hpp"
 #include "litebird/render/FontRenderer.hpp"
 #include "litebird/render/ImageFilter.hpp"
+#include "litebird/render/Path2D.hpp"
 #include "litebird/common/Color.hpp"
 #include "litebird/common/Geometry.hpp"
 #include "litebird/js/JsValue.hpp"
@@ -272,6 +273,22 @@ public:
     void fill(FillRule rule = FillRule::NonZero);
     void clip(FillRule rule = FillRule::NonZero);
     bool is_point_in_path(float x, float y, FillRule rule = FillRule::NonZero) const;
+
+    /// §4.12.5.1.7: the four methods that take a `Path2D` **instead of** the
+    /// current path. The current path is left alone — a page that fills a
+    /// `Path2D` and then fills again gets the same picture twice, because the
+    /// `Path2D` was never the current path.
+    ///
+    /// `replay` is the whole of it: it runs the recorded calls into `m_paths`
+    /// under the CTM **now in force**, which is what makes a path built at one
+    /// scale draw at another. It saves and restores the current path around the
+    /// replay, so `fill(path)` is not a `beginPath` in disguise.
+    void replay_into(const Path2D& path);
+    void fill_path(const Path2D& path, FillRule rule = FillRule::NonZero);
+    void stroke_path(const Path2D& path);
+    void clip_path(const Path2D& path, FillRule rule = FillRule::NonZero);
+    [[nodiscard]] bool is_point_in_path_object(float x, float y, const Path2D& path,
+                                               FillRule rule = FillRule::NonZero) const;
 
     // Text drawing. `max_width` <= 0 means "not given"; when the natural
     // advance exceeds it, the run is condensed horizontally (glyphs are

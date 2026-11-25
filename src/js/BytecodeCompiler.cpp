@@ -10,6 +10,114 @@ BytecodeCompiler::BytecodeCompiler(std::shared_ptr<BytecodeFunction> function)
     add_local("");
 }
 
+void BytecodeCompiler::compile_binding(const std::string& name, JsDeclKind kind) {
+    // ECMA-262 14.3.2: a `let`/`const` belongs to the block it is declared
+    // in, and `end_scope` pops it when that block ends. A `var` belongs to
+    // the enclosing *function*, however deeply it is nested, so it is not a
+    // local of the inner block and must not be popped with it.
+    //
+    // Where a `var` can live depends on what this compiler has a place
+    // for. A function's own body has var slots -- its parameters are the
+    // first of them. The script body has none: its bindings are properties
+    // of the global object, which is what `OpSetGlobal` writes. So a `var`
+    // goes to a local only when the enclosing function has already given
+    // that name a slot (a parameter, or a `var` at the function's top
+    // level); otherwise it goes where a top-level `var` goes, and the VM
+    // keeps it for the rest of the script.
+    //
+    // A redeclaration must write the existing slot, not append another
+    // local: in particular, `function f(a) { var [a] = [3]; return a; }`
+    // has to update the parameter rather than shadow it.
+    const int slot = resolve_local(name);
+    if (kind == JsDeclKind::Var && slot == -1) {
+        size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(name));
+        emit_opcode(OpCode::OpSetGlobal);
+        emit_byte(static_cast<uint8_t>(name_idx));
+        emit_opcode(OpCode::OpPop);
+    } else if ((m_scope_depth > 0 || m_is_function) && kind != JsDeclKind::Var) {
+        add_local(name);
+    } else if (kind == JsDeclKind::Var && slot != -1) {
+        // A var redeclaration updates the existing slot, including a
+        // parameter. Adding a second local would leave the original unchanged.
+        emit_opcode(OpCode::OpSetLocal);
+        emit_byte(static_cast<uint8_t>(slot));
+        emit_opcode(OpCode::OpPop);
+    } else {
+        size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(name));
+        emit_opcode(OpCode::OpSetGlobal);
+        emit_byte(static_cast<uint8_t>(name_idx));
+        emit_opcode(OpCode::OpPop);
+    }
+}
+
+void BytecodeCompiler::compile_pattern(const Pattern& pattern, JsDeclKind kind) {
+    switch (pattern.kind) {
+        case Pattern::Kind::Identifier:
+            compile_binding(pattern.name, kind);
+            return;
+        case Pattern::Kind::Array:
+            compile_array_binding(pattern, kind);
+            return;
+        // Object patterns and `Target`s (`a.b` in an assignment pattern) are
+        // out of this phase's scope: refuse rather than compile them wrongly.
+        default:
+            throw std::runtime_error(
+                "Destructuring declarations are not supported by the bytecode compiler");
+    }
+}
+
+void BytecodeCompiler::compile_array_binding(const Pattern& pattern, JsDeclKind kind) {
+    js_check_stack();   // patterns nest: [[[x]]] = v
+    // The value is on top of the stack; the cursor takes it. The VM holds
+    // the cursor, not the stack, so a default expression that itself
+    // destructures (or throws, or returns a function that does) opens and
+    // closes its own cursor on the nested frame without disturbing this one.
+    emit_opcode(OpCode::OpIteratorInit);
+    for (const auto& element : pattern.elements) {
+        if (element.rest) {
+            // AssignmentRestEvaluation drains the remainder before the
+            // target is touched; so does OpIteratorDrain.
+            emit_opcode(OpCode::OpIteratorDrain);
+            if (!element.target) {
+                emit_opcode(OpCode::OpPop);   // `[...]` with nothing to bind
+                continue;
+            }
+            compile_pattern(*element.target, kind);
+            continue;
+        }
+        if (!element.target) {                // a hole still pulls a value
+            emit_opcode(OpCode::OpIteratorNext);
+            emit_opcode(OpCode::OpPop);
+            continue;
+        }
+        if (element.default_value) {
+            // ECMA-262 destructuring: the default is used only when the
+            // pulled value is undefined — never when it is absent-but-0, or
+            // `null`, or a hole in the source's storage.
+            emit_opcode(OpCode::OpIteratorNext);
+            emit_opcode(OpCode::OpDup);
+            emit_opcode(OpCode::OpIsUndefined);
+            size_t keep = emit_jump(OpCode::OpJumpIfFalse);  // not undefined: keep it
+            emit_opcode(OpCode::OpPop);                      // drop the condition
+            emit_opcode(OpCode::OpPop);                      // drop the undefined
+            const std::string* hint = element.target->kind == Pattern::Kind::Identifier
+                ? &element.target->name : nullptr;
+            compile_expr(element.default_value.get(), hint); // [default]
+            size_t joined = emit_jump(OpCode::OpJump);
+            patch_jump(keep);                                // [pulled, condition]
+            emit_opcode(OpCode::OpPop);                      // drop the condition [pulled]
+            patch_jump(joined);                              // jejoin: one value either way
+        } else {
+            emit_opcode(OpCode::OpIteratorNext);
+        }
+        compile_pattern(*element.target, kind);
+    }
+    // The normal way out reports a broken `return` method, as the tree-walker
+    // does after the last element. An abrupt completion never reaches here:
+    // `VM::interpret` closes every open cursor quietly on the way out.
+    emit_opcode(OpCode::OpIteratorClose);
+}
+
 OpCode BytecodeCompiler::compound_opcode(JsTokenType op) {
     switch (op) {
         case JsTokenType::PlusEqual:    return OpCode::OpAdd;
@@ -189,59 +297,27 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         // tree-walker does for them, so a pair of declarators cannot disagree
         // with the single form.
         for (const auto& declarator : var_decl->decls) {
-            // Only a plain name is a binding this compiler can place. `var
-            // [a, b] = ...` is ECMA-262's BindingPattern, which the tree-walker
-            // destructures; there is no opcode here that does that, so it is
-            // still refused rather than half-done.
-            if (!declarator.target || declarator.target->kind != Pattern::Kind::Identifier) {
+            // `var x;` (no initializer) declares nothing at run time: the
+            // tree-walker skips the declarator, and so does the compiler.
+            // Everything else evaluates the initializer once, left to right,
+            // and binds what it answers — by name, or by pattern.
+            if (!declarator.target) {
                 throw std::runtime_error(
                     "Destructuring declarations are not supported by the bytecode compiler");
             }
-            const std::string& name = declarator.target->name;
+            // Only a plain name used to be a binding this compiler could
+            // place. Array patterns are handled now (with what the source
+            // does not have to give, bound as undefined); an object pattern
+            // stays refused rather than half-done.
+            if (var_decl->kind == JsDeclKind::Var && !declarator.init) {
+                continue;
+            }
             if (declarator.init) {
                 compile_expr(declarator.init.get());
             } else {
                 emit_opcode(OpCode::OpUndefined);
             }
-
-            // ECMA-262 14.3.2: a `let`/`const` belongs to the block it is
-            // declared in, and `end_scope` pops it when that block ends. A
-            // `var` belongs to the enclosing *function*, however deeply it is
-            // nested, so it is not a local of the inner block and must not be
-            // popped with it.
-            //
-            // Where a `var` can live depends on what this compiler has a place
-            // for. A function's own body has var slots -- its parameters are
-            // the first of them. The script body has none: its bindings are
-            // properties of the global object, which is what `OpSetGlobal`
-            // writes. So a `var` goes to a local only when the enclosing
-            // function has already given that name a slot (a parameter, or a
-            // `var` at the function's top level); otherwise it goes where a
-            // top-level `var` goes, and the VM keeps it for the rest of the
-            // script.
-            //
-            // Recording the name with `add_local_at` instead was tried and is
-            // wrong: the slot is a position on the VM stack, and leaving the
-            // block pops it, so the binding was gone by the time anything read
-            // it -- `var a = 1; { var b = 2; } a + b` answered 1 where the
-            // tree-walker answers 3.
-            const int slot = resolve_local(name);
-            if (var_decl->kind == JsDeclKind::Var && slot == -1) {
-                size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(name));
-                emit_opcode(OpCode::OpSetGlobal);
-                emit_byte(static_cast<uint8_t>(name_idx));
-                emit_opcode(OpCode::OpPop);
-            } else if (m_scope_depth > 0 && var_decl->kind != JsDeclKind::Var) {
-                add_local(name);
-            } else if (m_scope_depth > 0) {
-                // A block-nested `var` whose function already has the slot.
-                add_local_at(name, 0);
-            } else {
-                size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(name));
-                emit_opcode(OpCode::OpSetGlobal);
-                emit_byte(static_cast<uint8_t>(name_idx));
-                emit_opcode(OpCode::OpPop);
-            }
+            compile_pattern(*declarator.target, var_decl->kind);
         }
     } else if (auto for_stmt = dynamic_cast<const ForStmt*>(stmt)) {
         if (!for_stmt->per_iteration_names.empty()) {
@@ -416,10 +492,18 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         const std::vector<std::string> params = node.simple_param_names();
         auto sub_fn = std::make_shared<BytecodeFunction>(node.name, static_cast<int>(params.size()));
         BytecodeCompiler sub_compiler(sub_fn);
+        sub_compiler.m_is_function = true;
 
         // Parameters are local variables in the function scope
         for (const auto& p : params) {
             sub_compiler.add_local(p);
+        }
+        // The parser collects function-scoped vars, including pattern names.
+        // Reserve them on entry, not conditionally as declarations execute.
+        for (const auto& name : node.var_names) {
+            if (sub_compiler.resolve_local(name) != -1) continue;
+            sub_compiler.emit_opcode(OpCode::OpUndefined);
+            sub_compiler.add_local(name);
         }
 
         sub_compiler.compile(node.body.get());
@@ -523,7 +607,7 @@ void BytecodeCompiler::require_simple_function(const FunctionNode& node) {
     }
 }
 
-void BytecodeCompiler::compile_expr(const Expr* expr) {
+void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hint) {
     if (!expr) {
         emit_opcode(OpCode::OpUndefined);
         return;
@@ -838,9 +922,17 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         const std::vector<std::string> params = node.simple_param_names();
         auto sub_fn = std::make_shared<BytecodeFunction>(node.name.empty() ? "__anon__" : node.name, static_cast<int>(params.size()));
         BytecodeCompiler sub_compiler(sub_fn);
+        sub_compiler.m_is_function = true;
 
         for (const auto& p : params) {
             sub_compiler.add_local(p);
+        }
+        // The parser collects function-scoped vars, including pattern names.
+        // Reserve them on entry, not conditionally as declarations execute.
+        for (const auto& name : node.var_names) {
+            if (sub_compiler.resolve_local(name) != -1) continue;
+            sub_compiler.emit_opcode(OpCode::OpUndefined);
+            sub_compiler.add_local(name);
         }
 
         sub_compiler.compile(node.body.get());
@@ -853,6 +945,10 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
         m_function->sub_functions.push_back(sub_fn);
         fn_obj.set_property("__fn_ptr__", JsValue::make_number(reinterpret_cast<uintptr_t>(sub_fn.get())));
         fn_obj.set_property("__fn_name__", JsValue::make_string(node.name));
+        if (name_hint && node.name.empty()) {
+            fn_obj.ensure_function_data().name = *name_hint;
+            fn_obj.define_property("name", JsValue::make_string(*name_hint), PropertyMap::Configurable);
+        }
 
         size_t const_idx = m_function->chunk.add_constant(fn_obj);
         emit_opcode(OpCode::OpConstant);

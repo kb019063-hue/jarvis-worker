@@ -90,6 +90,14 @@ runs:
             found="$(find "$RUNNER_TEMP/$name" -maxdepth 2 -type f -name ccache | head -n 1)"
             if [ -n "$found" ]; then
               cp "$found" "$bin/ccache" && chmod +x "$bin/ccache" && from="fetched from the project's release"
+              # Why the kept one was not used, for the notice of the two
+              # jobs that save: it was not there (and what was), or what
+              # it said of itself.
+              if [ -e "$kept" ]; then
+                from="$from (the kept one said '${kept_says%%$'\n'*}')"
+              else
+                from="$from (none was kept; beside the objects: $(ls "$HOME/.ccache" 2>/dev/null | tr '\n' ' ' | cut -c1-70 || true))"
+              fi
               # For the job that saves the objects, and so for every job after it.
               mkdir -p "$(dirname "$kept")" && cp "$bin/ccache" "$kept" || true
             fi

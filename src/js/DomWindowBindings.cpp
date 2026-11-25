@@ -2788,35 +2788,6 @@ void attach_window(Realm& realm, const JsValue& global, const std::shared_ptr<Do
                 return undefined();
             }));
     }
-    // [LegacyUnforgeable] members of Window (WebIDL §3.4.10): "the property
-    // will be non-configurable and will exist as an own property on the object
-    // itself rather than on its prototype". `setup_window` puts them on
-    // Window.prototype, which is right for every other attribute; these four —
-    // window, document, location, top — also get an own copy on the object,
-    // non-configurable, so a page can neither delete nor redefine them.
-    // Enumerable is true, as §3.7.6 gives every attribute.
-    //
-    // Copying the prototype's getter rather than rebuilding one keeps a single
-    // implementation: each getter already resolves the window realm, so an own
-    // copy handed a frame's window still answers for that frame.
-    //
-    // The own copy also has to refuse to be deleted through the exotic
-    // [[Delete]] hook, which consults the environment record; the permanent
-    // mark is set in JsInterpreter where `window`, `document`, `location` and
-    // `top` are defined, and both halves are needed — the accessor half gives
-    // the right descriptor shape, the permanent half makes `delete` answer
-    // false.
-    for (const char* name : {"window", "document", "location", "top"}) {
-        JsObject* proto = cell->prototype;
-        if (proto == nullptr) break;
-        auto it = proto->properties.find(name);
-        if (it == proto->properties.end() || !(it->flags & PropertyMap::Accessor)) continue;
-        auto& entry = cell->properties.entry(name);
-        entry.second = it->second;
-        entry.setter = it->setter;
-        entry.flags = static_cast<uint8_t>(PropertyMap::Enumerable | PropertyMap::Accessor);
-        cell->has_accessors = true;
-    }
     js_uncaught_handler = &handle_uncaught;
 }
 

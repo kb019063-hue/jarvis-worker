@@ -34,6 +34,8 @@
 #   tools/watch/watch.sh once N          #N is green with main in its head and no lot is in test:
 #                                        merge it at once
 #   tools/watch/watch.sh taken HH:MM     a "taken" note in each pull request of the lot, a board line
+#                                        (3, and nothing sent, when one of them is no longer open at
+#                                        the head it was taken at: the lot is not in test)
 #   tools/watch/watch.sh landed "how" N [N...]   a "landed" note in each, a board line, a row for `table`
 #   tools/watch/watch.sh table           the lots that landed in this watch, as the table its own pull
 #                                        request ends with: when each run began and passed, when it
@@ -495,6 +497,15 @@ once)
 taken)
   at="$1"; main7="$(cat "$STATE/lot.main")"; list=""
   nums="$(cut -d' ' -f1 "$STATE/lot.heads" | tr '\n' ' ')"
+  # Only for a lot that is in test: every one of its pull requests open, at
+  # the head it was taken at. On 25 November at 20:50 `full` had refused a
+  # pull request and built nothing, the next command of the same line was
+  # this one, and #443, which had landed two minutes before with the lot
+  # that was still written here, was told it was taken, and the board too.
+  while read -r n sha; do
+    st="$(timeout 30 gh pr view "$n" --json state,headRefOid --jq '"\(.state) \(.headRefOid[0:7])"')"
+    [ "$st" = "OPEN $sha" ] || { echo "taken: #$n is '$st', not open at $sha: this lot is not in test. Nothing sent"; exit 3; }
+  done < "$STATE/lot.heads"
   while read -r n sha; do
     others="$(for m in $nums; do [ "$m" != "$n" ] && printf '#%s, ' "$m"; done | sed 's/, $//')"
     printf '%s: #%s is taken, as it is at head `%s`. Push nothing more to it and do not merge `main` into it. It is being tested with `main` `%s`%s in one CI run (begun %s UTC), and lands when that run has passed; `python3 tools/ci/check_pr.py landed %s` says when.\n' "$NAME" "$n" "$sha" "$main7" "${others:+ and $others}" "$at" "$n" > "$STATE/land/taken$n.md"

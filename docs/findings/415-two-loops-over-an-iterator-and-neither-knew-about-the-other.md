@@ -85,7 +85,7 @@ put a suite next to the shared code that had to state the rule out loud.
 
 ## Numbers
 
-`make test` **471/471**. test262 **15,182 of 15,686, unchanged** (two binaries:
-`0 pass in now and not in before; 0 pass in before and not in now`),
-js-conformance **1,153/1,158** and WPT **9,570/9,824** unchanged — a
-consolidation may not move them, and did not.
+`make test` **488/488** on the merged tree. test262 **15,210 of 15,686,
+unchanged** (two binaries on the merged tree: `0 pass in now and not in before;
+0 pass in before and not in now`), js-conformance **1,153/1,158** and WPT
+**9,570/9,824** unchanged — a consolidation may not move them, and did not.

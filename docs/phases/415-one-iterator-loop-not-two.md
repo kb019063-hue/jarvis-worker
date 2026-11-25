@@ -106,13 +106,14 @@ one.
 
 ## 5. Numbers
 
-- `make test` **471/471** (470 before this phase; the suite is the one added).
-- **test262 15,182 of 15,686, unchanged** — measured with both binaries, the
-  branch point `24e5c7a` and this tree:
-  `15182 before / 15182 now, 0 pass in now and not in before; 0 pass in before
-  and not in now`. The figure is the runner's whole default set (it runs 15,686
-  cases, not the 15,180 recorded in this session's notes, which was stale: the
-  branch point itself reports 15,182 — #412 moved it from 15,177 to 15,180 and
-  two later merges on `main` carried it to 15,182).
+- `make test` **488/488** on the merged tree (486 on `main` at `39645176`; the
+  suite is the addition, and the run before this phase's branch merged `main`
+  was 470/470 of a smaller main).
+- **test262 15,210 of 15,686, unchanged** — measured with both binaries on the
+  merged tree, `main` at `39645176` against this branch:
+  `15210 before / 15210 now, 0 pass in now and not in before; 0 pass in before
+  and not in now`. (The 15,180 in this session's earlier notes was stale: the
+  branch point `24e5c7a` itself reports 15,182, and `main` has gained 28 more
+  since through other phases.)
 - js-conformance **1,153/1,158** — unchanged.
 - WPT **9,570/9,824**, 254 fail as listed, **0 unlisted** — unchanged.

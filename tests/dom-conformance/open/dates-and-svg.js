@@ -29,4 +29,25 @@ t('svg symbol viewBox reads its attribute', function () { var NS = 'http://www.w
 t('getBBox and createSVGRect exist', function () { var NS = 'http://www.w3.org/2000/svg';
   var g = document.createElementNS(NS, 'g'), s = document.getElementById('svg');
   return [typeof g.getBBox, s.createSVGRect().constructor.name, g.getBBox() instanceof SVGRect]; });
+// `preserveAspectRatio`, the other half of SVGFitToViewBox (Phase 381). The
+// interesting line is the third: setting align to `none` still writes the
+// meetOrSlice (`none meet`), because SVG 2 §8.14.4 serializes both parts with
+// no exception for `none`.
+t('preserveAspectRatio is an animated pair', function () {
+  var NS = 'http://www.w3.org/2000/svg', e = document.createElementNS(NS, 'svg');
+  var p = e.preserveAspectRatio;
+  return [p instanceof SVGAnimatedPreserveAspectRatio, p.baseVal instanceof SVGPreserveAspectRatio,
+          p.baseVal.align, p.baseVal.meetOrSlice, p.baseVal === p.animVal]; });
+t('preserveAspectRatio reads its attribute', function () {
+  var NS = 'http://www.w3.org/2000/svg', e = document.createElementNS(NS, 'svg');
+  e.setAttribute('preserveAspectRatio', 'xMinYMax slice');
+  return [e.preserveAspectRatio.baseVal.align, e.preserveAspectRatio.baseVal.meetOrSlice]; });
+t('preserveAspectRatio writes both parts', function () {
+  var NS = 'http://www.w3.org/2000/svg', e = document.createElementNS(NS, 'svg');
+  e.preserveAspectRatio.baseVal.align = SVGPreserveAspectRatio.SVG_PRESERVEASPECTRATIO_NONE;
+  return [e.getAttribute('preserveAspectRatio'), e.preserveAspectRatio.baseVal.align]; });
+t('preserveAspectRatio on the five or nowhere', function () {
+  var NS = 'http://www.w3.org/2000/svg';
+  return ['svg', 'symbol', 'marker', 'pattern', 'view', 'g', 'rect'].map(function (tag) {
+    return typeof document.createElementNS(NS, tag).preserveAspectRatio; }); });
 console.log(out.join('\n'));

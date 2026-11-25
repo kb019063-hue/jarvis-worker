@@ -1695,6 +1695,41 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
         return JsValue::make_number(-1);
     });
 
+    // ES2023 §23.2.3.10 and §23.2.3.11. `Array.prototype` has had these two
+    // since Phase 213's family, and `%TypedArray%.prototype` did not: every
+    // other `Array.prototype` method the language defines for typed arrays is
+    // installed here, so `new Uint8Array(3).findLast` answered `undefined`
+    // while `[1,2,3].findLast` answered a function. The walk is downwards —
+    // `len - 1` to 0 — and reads each element live, as `find` does.
+    js_define_method(proto, "findLast", 1, [](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.findLast");
+        const std::size_t len = effective_length(*data);
+        const JsValue callback = require_callback(args, "TypedArray.prototype.findLast");
+        for (std::size_t i = len; i > 0; --i) {
+            const JsValue current = read_live(*data, i - 1);
+            if (js_call(callback, js_arg(args, 1),
+                        {current, JsValue::make_number(static_cast<double>(i - 1)), self})
+                    .is_truthy())
+                return current;
+        }
+        return JsValue::make_undefined();
+    });
+
+    js_define_method(proto, "findLastIndex", 1, [](Args args) {
+        const JsValue self = JsValue::current_this();
+        auto data = require_view(self, "TypedArray.prototype.findLastIndex");
+        const std::size_t len = effective_length(*data);
+        const JsValue callback = require_callback(args, "TypedArray.prototype.findLastIndex");
+        for (std::size_t i = len; i > 0; --i) {
+            if (js_call(callback, js_arg(args, 1),
+                        {read_live(*data, i - 1), JsValue::make_number(static_cast<double>(i - 1)), self})
+                    .is_truthy())
+                return JsValue::make_number(static_cast<double>(i - 1));
+        }
+        return JsValue::make_number(-1);
+    });
+
     js_define_method(proto, "reduce", 1, [](Args args) {
         const JsValue self = JsValue::current_this();
         auto data = require_view(self, "TypedArray.prototype.reduce");

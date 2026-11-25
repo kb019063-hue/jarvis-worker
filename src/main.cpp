@@ -1,3 +1,4 @@
+#include "litebird/common/TerminalText.hpp"
 #include "litebird/xml/XmlTools.hpp"
 #include "litebird/xml/XmlDom.hpp"
 #include "litebird/dom/Document.hpp"
@@ -578,7 +579,8 @@ int main(int argc, char* argv[]) {
                           << " cls=" << r.selectors[0].specificity().classes
                           << " tags=" << r.selectors[0].specificity().tags << "\n";
                 for (const auto& d : r.declarations) {
-                    std::cout << "    " << d.property << ": " << d.value << ";\n";
+                    std::cout << "    " << litebird::terminal_safe(d.property) << ": "
+                              << litebird::terminal_safe(d.value) << ";\n";
                 }
             }
         }
@@ -611,7 +613,7 @@ int main(int argc, char* argv[]) {
                               << "] Color: " << arg.color.to_hex() << "\n";
                 } else if constexpr (std::is_same_v<T, litebird::DrawTextCommand>) {
                     std::cout << "  DrawText: (" << arg.position.x << ", " << arg.position.y
-                              << ") \"" << arg.text << "\" Color: " << arg.color.to_hex() << "\n";
+                              << ") \"" << litebird::terminal_safe(arg.text) << "\" Color: " << arg.color.to_hex() << "\n";
                 }
             }, cmd);
         }

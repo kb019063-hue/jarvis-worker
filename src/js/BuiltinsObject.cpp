@@ -255,7 +255,12 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
                 d.set_property("configurable", JsValue::make_boolean((it->flags & PropertyMap::Configurable) && !sealed));
                 return d;
             }
-            return data(it->second, it->flags & PropertyMap::Writable, it->flags & PropertyMap::Enumerable,
+            // The entry a defined arguments place keeps holds a placeholder,
+            // not the value: the value is the parameter's (see `Kept` in
+            // MappedArguments::defining).
+            JsValue described = it->second;
+            if (cell && cell->exotic) (void)cell->exotic->host_value(cell, key, described);
+            return data(described, it->flags & PropertyMap::Writable, it->flags & PropertyMap::Enumerable,
                         it->flags & PropertyMap::Configurable);
         }
     }
@@ -428,8 +433,15 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         (!enumerable.present || enumerable.value.is_truthy()) &&
         (!configurable.present || (key == "length" ? !configurable.value.is_truthy()
                                                    : configurable.value.is_truthy()));
-    if (cell && cell->is_array && !wants_accessor && (array_index || key == "length") && !mapped_hole &&
-        plain_attributes) {
+    // A host object answers for its own places, and this shortcut writes the
+    // elements and never asks: an arguments place that is still mapped is its
+    // parameter's binding, and a descriptor on it has to go through the
+    // mapping. The question is the pure one — `owns_place` has no
+    // consequences, while applying a descriptor can unmap the place, and it
+    // was being applied twice: once here as a question and once below.
+    const bool host_keeps = cell && cell->exotic && array_index && cell->exotic->owns_place(cell, key);
+    if (cell && cell->is_array && !host_keeps && !wants_accessor && (array_index || key == "length") &&
+        !mapped_hole && plain_attributes) {
         if (value.present) object.set_property(key, value.value);
         return true;
     }
@@ -582,14 +594,22 @@ std::string object_tag(const JsValue& value) {
         case JsType::Number: return "Number";
         case JsType::String: return "String";
         case JsType::Symbol: return "Symbol";
+        // A function is *not* answered here (§20.1.3.6 step 15 asks for
+        // @@toStringTag before the built-in tag), because an async function
+        // and a generator function carry one on their own prototype and
+        // answer "AsyncFunction" and "GeneratorFunction". Falling through to
+        // the shared lookup is what lets the kind's tag be found.
         case JsType::Function:
-        case JsType::NativeFunction: return "Function";
+        case JsType::NativeFunction: break;
         default: break;
     }
     if (value.is_object_like()) {
         JsValue tag = value.get_property("@@toStringTag");
         if (tag.type == JsType::String) return tag.string_val.str();
     }
+    // Only now, when nothing along the chain named a tag. A native function
+    // that carries no tag still answers "Function", as it did before.
+    if (value.type == JsType::Function || value.type == JsType::NativeFunction) return "Function";
     if (JsObject* cell = value.object_val) {
         switch (cell->klass) {
             case ObjectClass::Array: return "Array";

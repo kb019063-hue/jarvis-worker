@@ -164,6 +164,29 @@ AGREES: list[Case] = [
          "fall-through chains from the only match to the end"),
     Case("var d = 0; function side() { d += 1; return 2; } var r = 0; switch (side()) { case 1: r = 1; break; case 2: r = d; } String(r) + '/' + String(d)",
          "the discriminant is evaluated exactly once"),
+
+    # Object-literal spread, which the compiler refused with "This object
+    # literal form is not supported by the bytecode compiler". The spread is
+    # evaluated at its position, and CopyDataProperties (ECMA-262 §7.3.24) —
+    # the tree-walker's own routine — copies the source's own enumerable keys
+    # via a CreateDataProperty each. Null and undefined copy nothing.
+    Case("var o = {a: 1, ...{b: 2}}; String(o.b)", "the original refusal"),
+    Case("var o = {a: 1, ...undefined, ...null, ...7}; String(o.a) + '/' + String(Object.keys(o).length)",
+         "spreading null, undefined or a number copies nothing"),
+    Case("var o = {...{a: 1, b: 2, c: 3}, b: 9}; String(o.b) + '/' + String(o.a) + '/' + String(o.c)",
+         "an own key written after the spread wins"),
+    Case("var o = {a: 1, ...{a: 2, b: 2}, c: 3, ...{c: 4}}; String(o.a) + '/' + String(o.c)",
+         "a later spread overwrites an earlier one"),
+    Case("var o = {...[7, 8]}; String(o[0]) + '/' + String(o[1]) + '/' + String(Object.keys(o).join(','))",
+         "an array spreads its indices"),
+    Case("var o = {...'abc'}; String(o[0]) + '/' + String(o[1]) + '/' + String(o[2])",
+         "a string spreads its positions"),
+    Case("var d = ''; function mark(x) { d += x; return {p: x}; } var o = {...mark('a'), ...mark('b')}; String(d) + '/' + String(o.p)",
+         "each spread is evaluated at its position"),
+    Case("var o = {a: {...{b: {...{c: 5}}}}}; String(o.a.b.c)",
+         "spread composes with nesting"),
+    Case("var o = {}; var src = {x: 1}; o['s'] = 9; var p = {...src, s: o.s}; String(p.x) + '/' + String(p.s)",
+         "spread next to an ordinary key, the key order agrees"),
 ]
 
 # The compiler refuses these. Kept here so the count of what is left has a
@@ -173,7 +196,6 @@ REFUSES: list[Case] = [
     Case("var [a, b] = [1, 2]; String(a)", "Destructuring"),
     Case("try { 1; } catch (e) { 2; }", "Statement"),
     Case("var s = \"\"; for (var k of [1,2]) { s += k; } String(s)", "Statement"),
-    Case("var o = {a: 1, ...{b: 2}}; String(o.b)", "object literal form"),
     Case("function f() { return 1; } String(f`x`)", "expression"),
 ]
 

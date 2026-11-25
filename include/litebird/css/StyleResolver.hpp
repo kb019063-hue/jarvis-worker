@@ -275,6 +275,12 @@ struct BoxShadow {
     bool operator==(const BoxShadow& other) const = default;
 };
 
+struct CounterOp {
+    std::string name;
+    int value{0};
+    bool operator==(const CounterOp& other) const = default;
+};
+
 struct ComputedStyle {
     Display display{Display::Inline};
     /// CSS Generated Content 3 `content`. Only a string value is represented:
@@ -282,6 +288,14 @@ struct ComputedStyle {
     /// property computes to when the page says nothing. Phase 215 makes
     /// `::before`/`::after` with a non-empty string generate an inline run.
     std::string content;
+    /// Raw `content` value before `counter()` expansion, kept for layout-time
+    /// counter evaluation (Phase 379). Empty when `content` was not declared.
+    std::string content_raw;
+    /// CSS Counter Styles: `counter-reset`, `counter-increment`, `counter-set`
+    /// (Phase 379). Each is a list of name+value pairs; `none` is empty.
+    std::vector<CounterOp> counter_reset;
+    std::vector<CounterOp> counter_increment;
+    std::vector<CounterOp> counter_set;
     Color color{Color::black()};
     Color background_color{Color::transparent()};
     bool has_background_image{false};
@@ -635,6 +649,14 @@ public:
     /// treating the whole declaration as invalid (Phase 364).
     std::string evaluate_content(const std::string& raw, const Element* element,
                                  const std::unordered_map<std::string, std::string>& vars) const;
+    /// Counter-aware evaluation: `counter()` and `counters()` are resolved
+    /// against `counters` (each counter is a stack of ints for nesting).
+    /// When `counters` is null, counter items are skipped (Phase 364 compat).
+    std::string evaluate_content(const std::string& raw, const Element* element,
+                                 const std::unordered_map<std::string, std::string>& vars,
+                                 const std::unordered_map<std::string, std::vector<int>>* counters) const;
+    /// Parse `counter-*` properties into `ComputedStyle` (Phase 379).
+    static std::vector<CounterOp> parse_counter_ops(const std::string& raw, int default_value);
 
 private:
     struct IndexedSelector {

@@ -38,10 +38,11 @@ on:
 # three times over: by its own run, by the lot's, and by the run on `main`
 # after the lot.
 #
-# - **The short run of a pull request that has the label `lot`**: the jobs
+# - **The short run of a pull request that has the label `lot`, or whose
+#   title begins with `WIP:`**: the jobs
 #   of the plain build that take a minute or two ("Build & unit tests",
 #   "Documentation shape", the reftests, and the four corpus jobs: html5lib,
-#   JavaScript, script DOM and URLs, XML and web-platform-tests). The six
+#   JavaScript, script DOM and URLs, XML and web-platform-tests). The
 #   sanitizer jobs and the deep pages, which are the long ones, are skipped.
 #   The landing session puts the label on while a watch is on
 #   (`tools/watch/watch.sh look`), because the whole of CI then runs on the
@@ -50,6 +51,17 @@ on:
 #   job. With no watch, `python3 tools/ci/check_pr.py merge N` takes the
 #   label off before it says "ready", which starts every job (`unlabeled`,
 #   above): nothing is merged by its own agent on a short run.
+#
+#   `WIP:` in the title is here because the label comes too late for the run
+#   that needs it least. The landing session looks every few minutes, and a
+#   pull request's first push is before any look: at 18:10 UTC on 24
+#   November three pull requests that had just been opened each started all
+#   fourteen jobs, and the lot of 18:12, which one finished pull request was
+#   waiting for, had ten jobs without a runner two and a half minutes after
+#   its push (no more than twenty run at once). Work in progress is not
+#   merged on any run; when the `WIP:` is off, every job runs before a merge:
+#   in the lot while a watch is on, and with no watch because `merge N`
+#   starts them (it puts the label on and takes it off when there is none).
 #
 #   For its first four hours the short run was the first two of those jobs
 #   and no more. On 24 November two lots in a row failed for it (pushed
@@ -138,6 +150,8 @@ jobs:
         run: make verify-cli-error-terminal-safety
       - name: A page's own text cannot inject terminal controls through a dump
         run: make verify-page-text-terminal-safety
+      - name: CSS and paint dumps filter UTF-8 terminal controls
+        run: make verify-css-paint-terminal-safety
       - name: Pathless URL references agree with Node
         run: make verify-relative-navigation
       - name: Path-bearing URL references agree with Node
@@ -689,11 +703,11 @@ jobs:
         run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
 
   deep-pages:
-    name: Deep and oversized pages (stack, memory and time limits)
+    name: "Deep and oversized pages: the dumps (stack, memory and time limits)"
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -717,7 +731,45 @@ jobs:
         # (tools/fuzz/deep_pages.py).
         run: |
           set -o pipefail
-          make deep 2>&1 | tee "$RUNNER_TEMP/part-deep.log"
+          make deep DEEP_KINDS="--runs dumps" 2>&1 | tee "$RUNNER_TEMP/part-deep.log"
+      - name: What failed, as annotations
+        # Without this a failure here said `exit code 2` and nothing else
+        # where the log could not be fetched (#317, 24 November).
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
+
+  # The same pages as the job above, given to the engine the other ways
+  # there are (the Makefile, above `deep:`, says why they are two jobs).
+  deep-pages-rest:
+    name: "Deep and oversized pages: the terminal and html5lib (stack, memory and time limits)"
+    runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: plain
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build
+        run: make -j"$(nproc)"
+      - name: Pages nested 200,000 deep, oversized bitmaps, long runs of one thing
+        # 165 generated pages, each nesting or repeating one construct far past
+        # what a recursive walk or a quadratic loop survives, then 300 random
+        # pages that keep the parser at its nesting limit. Every run is a child
+        # process with an 8 MB stack, 2 GB of memory and 60 seconds. The
+        # slowest takes 20 to 33 seconds on a quiet two-core machine; what
+        # this is here to catch does not finish at all. The machines this job
+        # gets differ by a factor of two, so a run that goes over the limit
+        # beside the others is run once more by itself before it counts
+        # (tools/fuzz/deep_pages.py).
+        run: |
+          set -o pipefail
+          make deep DEEP_KINDS="--not-runs dumps" 2>&1 | tee "$RUNNER_TEMP/part-deep.log"
       - name: What failed, as annotations
         # Without this a failure here said `exit code 2` and nothing else
         # where the log could not be fetched (#317, 24 November).
@@ -751,7 +803,7 @@ jobs:
     # Not in the short run of a pull request. After the last merge of a lot it
     # builds and keeps the objects, and leaves the suites out (the top of this
     # file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -772,11 +824,18 @@ jobs:
         # in front of all of them instead of beside them. From nothing it is
         # five to six minutes; with the objects of main's last run (the
         # ccache step above) it compiles what the pull request changed.
+        # In this job the binary of the unit suites is built in the same
+        # `make` (ASAN_BUILD_ALSO, the Makefile): one compiler needs 147
+        # seconds for it, and it used to start when the engine was built.
+        # Not after the last merge of a lot: that run leaves the suites
+        # out, and the binary's object is the one ccache is not given
+        # (TEST_OBJ, the Makefile), so no later run would have it.
         env:
           ASAN_OPTIONS: detect_leaks=0
+          ALSO: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) && 'build-asan/test_suite' || '' }}
         run: |
           set -o pipefail
-          make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+          make -j"$(nproc)" asan-build ASAN_BUILD_ALSO="$ALSO" 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
       - name: What ccache had for it, as a notice on the run
         if: always()
         run: |
@@ -801,12 +860,25 @@ jobs:
         # suite that passes in the normal build can fail in this one.
         env:
           ASAN_OPTIONS: detect_leaks=0
-        # As three processes side by side (ASAN_UNIT_STRETCHES, the
-        # Makefile): as one, this step took 8 min 52 s and was the length of
-        # the run.
+        # As six processes (ASAN_UNIT_STRETCHES, the Makefile): as one,
+        # this step took 8 min 52 s and was the length of the run. As three
+        # equal stretches it was still 5 min 22 s of suites, one stretch of
+        # 322 seconds beside two of 22 and 24, so the stretches now begin
+        # where UNIT_SUITE_CUTS in the Makefile says: four side by side,
+        # and the two that hold the deep suites when those have ended
+        # (UNIT_SUITE_LATE), because beside them a suite that measures time
+        # ran out of it. That was 117 seconds of suites in one run and 245
+        # in the next, on a slower machine (45473629683, 45475379777).
+        # A stretch that fails beside the others and has no sanitizer's
+        # report is run once more by itself; if it passes then, the job
+        # passes with a warning that names it. The second of those runs
+        # was the first to need that: a suite's bound of five seconds,
+        # which the sanitizer build has since been given more of.
+        # The step ends with a notice on the job: the time and the memory
+        # of each stretch, and the slowest suites of the slowest.
         run: |
           set -o pipefail
-          make -j"$(nproc)" asan-unit ASAN_UNIT_STRETCHES=3 2>&1 | tee "$RUNNER_TEMP/part-asan-unit.log"
+          make -j"$(nproc)" asan-unit ASAN_UNIT_STRETCHES=balanced 2>&1 | tee "$RUNNER_TEMP/part-asan-unit.log"
       - name: What failed, as annotations
         # A job's log is served by another host than the API, and a failure
         # here has had nothing but `exit code 2` to go by where the log could
@@ -823,7 +895,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -852,7 +924,7 @@ jobs:
         # Until 24 November 2026 the fuzzing was a step after the XML suite
         # in one job, which unpacked them; that job was the longest of a
         # run (12.0 minutes of a run of 12.1, run 45350008834). Now the
-        # suite is run beside the web-platform-tests and this job unpacks
+        # suite is a job of its own and this job unpacks
         # the documents for itself, and fails here if they are not there.
         # tools/ci/check_ci_parts.py fails the run if this step is taken
         # out or put after the fuzzing.
@@ -881,11 +953,54 @@ jobs:
         run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
 
   sanitizers-wpt:
-    name: "Sanitizers: web-platform-tests and the XML suite"
+    name: "Sanitizers: web-platform-tests"
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: asan
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Address randomisation the sanitizers can live with
+        # See the string stress tests in the last of these jobs. Every
+        # sanitizer step has always run after this setting, so each job makes
+        # it before it builds.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
+      - name: Sanitizer build
+        # As in the first of these jobs.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+      - name: Web-platform-tests in the sanitizer build
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-wpt 2>&1 | tee "$RUNNER_TEMP/part-asan-wpt.log"
+      - name: What failed, as annotations
+        # As in the first of these jobs.
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
+
+  # A job of its own since 24 November 2026, for the second time. It was
+  # one with the fuzzing until that morning, then a step behind the
+  # web-platform-tests, and that job was the second longest of a run whose
+  # objects were all in ccache: 7.5 minutes of 8.5 (run 45451780819: 276
+  # seconds of web-platform-tests, then 139 of this).
+  sanitizers-xml:
+    name: "Sanitizers: the XML suite"
+    runs-on: ubuntu-latest
+    # Not in the short run of a pull request, nor after the last merge of a lot
+    # (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -914,15 +1029,7 @@ jobs:
         run: |
           set -o pipefail
           make -j"$(nproc)" asan-build 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
-      - name: Web-platform-tests in the sanitizer build
-        env:
-          ASAN_OPTIONS: detect_leaks=0
-        run: |
-          set -o pipefail
-          make -j"$(nproc)" asan-wpt 2>&1 | tee "$RUNNER_TEMP/part-asan-wpt.log"
       - name: W3C XML suite in the sanitizer build
-        # Here since 24 November 2026, from the job it shared with the
-        # fuzzing (that job says why).
         env:
           ASAN_OPTIONS: detect_leaks=0
           GITHUB_TOKEN: ${{ github.token }}
@@ -941,7 +1048,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -982,7 +1089,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -1032,7 +1139,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'lot') && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run

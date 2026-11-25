@@ -150,8 +150,19 @@ static void note_suite_run(void (*run)()) {
 /// Every suite has one place in the order (the files of tests/suites/ first,
 /// then the list in `main()`), and a place belongs to one stretch, so N
 /// processes that all pass have run every suite once.
+///
+/// Equal stretches are equal in suites, not in time. In the sanitizer build
+/// of 24 November 2026 three stretches of 147 suites took 22, 322 and 24
+/// seconds: five suites of the middle one took 190 of them (pages nested
+/// 200,000 deep, and the like). So the stretches can also be told where to
+/// begin: `LITEBIRD_SUITE_CUTS=a,b,c` beside `LITEBIRD_SUITE_SHARD=K/4`
+/// makes four stretches, the first from the start and the others from the
+/// suites named a, b and c, which must come in that order. A name that is
+/// not a suite of the run ends it with status 2, in every process.
 static std::size_t g_shard = 0, g_shards = 1;
 static bool g_divided = false;    ///< LITEBIRD_SUITE_SHARD was given, be it 0/1
+static std::vector<std::string> g_cuts;   ///< LITEBIRD_SUITE_CUTS, in order
+static std::size_t g_cuts_passed = 0;     ///< how many of them the order has reached
 static std::size_t g_place = 0;   ///< the place in the order of the next suite
 static std::size_t g_places = 0;  ///< how many places there are
 /// True the first time `main()` goes down its list, when the run is divided:
@@ -171,15 +182,49 @@ static void read_the_shard() {
     g_shard = k;
     g_shards = n;
     g_divided = true;
+    const char* cuts = std::getenv("LITEBIRD_SUITE_CUTS");
+    if (cuts == nullptr || *cuts == '\0') return;
+    std::string name;
+    for (const char* c = cuts;; ++c) {
+        if (*c == ',' || *c == '\0') {
+            g_cuts.push_back(name);
+            name.clear();
+            if (*c == '\0') break;
+        } else {
+            name += *c;
+        }
+    }
+    if (g_cuts.size() + 1 != g_shards) {
+        std::cout << "\033[1;31mFAILED\033[0m: LITEBIRD_SUITE_CUTS names "
+                  << g_cuts.size() << " suites, which makes "
+                  << g_cuts.size() + 1 << " stretches, and LITEBIRD_SUITE_SHARD"
+                  << " says there are " << g_shards << "\n" << std::flush;
+        std::_Exit(2);
+    }
+}
+/// Before each time down the list. After the first, which counts: every
+/// name of LITEBIRD_SUITE_CUTS was the name of a suite, in the order given.
+static void begin_a_pass_down_the_list(bool counted_before) {
+    if (counted_before && g_cuts_passed != g_cuts.size()) {
+        std::cout << "\033[1;31mFAILED\033[0m: LITEBIRD_SUITE_CUTS names \""
+                  << g_cuts[g_cuts_passed] << "\", which is not a suite of "
+                  << "this run, or does not come after the name before it\n"
+                  << std::flush;
+        std::_Exit(2);
+    }
+    g_cuts_passed = 0;
 }
 /// Whether the next suite in the order is this process's. Asked once a suite.
-static bool this_process_runs_the_next_suite() {
+static bool this_process_runs_the_next_suite(const char* name) {
+    if (g_cuts_passed < g_cuts.size() && g_cuts[g_cuts_passed] == name)
+        ++g_cuts_passed;  // a new stretch begins at this suite
     if (g_counting_places) {
         ++g_places;
         return false;
     }
     const std::size_t place = g_place++;
     if (g_shards <= 1 || g_places == 0) return true;
+    if (!g_cuts.empty()) return g_cuts_passed == g_shard;
     return place * g_shards / g_places == g_shard;
 }
 static void note_suite_is_elsewhere(void (*run)()) {
@@ -254,15 +299,57 @@ static void give_memory_back() {
 static void give_memory_back() {}
 #endif
 
+/// How long each suite took, for the one line at the end that names the
+/// slowest. The run of the sanitizer build was the longest job of CI on 24
+/// November 2026, and the time was not where anybody had looked: of three
+/// stretches of 147 suites each, two took 22 and 24 seconds and the third
+/// 320 (and 5 GB), and nothing the run printed said which suite that was.
+/// tools/ci/run_stretches.py reads the line and CI shows it as a notice.
+static std::vector<std::pair<double, const char*>> g_suite_seconds;
+static std::chrono::steady_clock::time_point g_suite_began;
+static void suite_begins() { g_suite_began = std::chrono::steady_clock::now(); }
+static void suite_ended(const char* name) {
+    const std::chrono::duration<double> took =
+        std::chrono::steady_clock::now() - g_suite_began;
+    g_suite_seconds.push_back({took.count(), name});
+}
+static void say_the_slowest_suites() {
+    double all = 0;
+    for (const auto& suite : g_suite_seconds) all += suite.first;
+    // Where the middle of the time is, in the order of the run: the suite to
+    // name in UNIT_SUITE_CUTS (the Makefile) to make two stretches of this
+    // one that take as long as each other.
+    double before = 0;
+    const char* middle = nullptr;
+    for (const auto& suite : g_suite_seconds) {
+        if (before >= all / 2) { middle = suite.second; break; }
+        before += suite.first;
+    }
+    if (middle != nullptr)
+        std::cout << "\nHalf of the time of these suites was over when "
+                  << middle << " began.";
+    std::sort(g_suite_seconds.begin(), g_suite_seconds.end(),
+              [](const auto& a, const auto& b) { return a.first > b.first; });
+    std::cout << "\nThe slowest suites of " << g_suite_seconds.size() << " ("
+              << static_cast<long>(all + 0.5) << " s in all):";
+    for (std::size_t i = 0; i < g_suite_seconds.size() && i < 5; ++i) {
+        std::cout << (i == 0 ? " " : ", ") << g_suite_seconds[i].second << " "
+                  << static_cast<long>(g_suite_seconds[i].first + 0.5) << " s";
+    }
+    std::cout << "\n";
+}
+
 #define RUN_TEST(name) do { \
-    if (!this_process_runs_the_next_suite()) { \
+    if (!this_process_runs_the_next_suite(#name)) { \
         note_suite_is_elsewhere(&test_##name); \
         break; \
     } \
     ++g_tests_run; \
     std::cout << "Running test: " #name "... " << std::flush; \
+    suite_begins(); \
     test_##name(); \
     give_memory_back(); \
+    suite_ended(#name); \
     note_suite_run(&test_##name); \
     std::cout << "\033[32mPASSED\033[0m\n"; \
 } while(0)
@@ -277,15 +364,17 @@ static void give_memory_back() {}
 static void run_the_suites_in_files_of_their_own() {
     for (std::size_t i = 0; i < suite_list().size(); ++i) {
         if (!suite_list()[i].own_file) continue;
-        if (!this_process_runs_the_next_suite()) {
+        if (!this_process_runs_the_next_suite(suite_list()[i].name)) {
             if (!g_counting_places) suite_list()[i].elsewhere = true;
             continue;
         }
         ++g_tests_run;
         std::cout << "Running test: " << suite_list()[i].name << "... "
                   << std::flush;
+        suite_begins();
         suite_list()[i].run();
         give_memory_back();
+        suite_ended(suite_list()[i].name);
         ++suite_list()[i].runs;
         std::cout << "\033[32mPASSED\033[0m\n";
     }
@@ -16416,7 +16505,16 @@ TEST(inner_html_is_parsed_as_the_content_of_its_element) {
             at = std::static_pointer_cast<Element>(at->children().front()->children().front());
         }
         const auto took = std::chrono::steady_clock::now() - started;
+        // The sanitizer build is given more. Twice in one evening this loop
+        // took more than five seconds there, beside other processes of the
+        // suites on CI's machine (runs 45459129005 and 45475379777), and
+        // less when it was run again by itself. The square of its length,
+        // which is what the bound is for, is 44 seconds in the plain build.
+#if defined(__SANITIZE_ADDRESS__)
+        assert(took < std::chrono::seconds(30));
+#else
         assert(took < std::chrono::seconds(5));
+#endif
         std::size_t depth = 0;
         for (std::shared_ptr<Node> node = at; node; node = node->parent()) ++depth;
         assert(depth == 60001);
@@ -36259,6 +36357,7 @@ int main() {
     // to run the ones that are its own. A whole run goes down it once.
     for (int pass = g_divided ? 0 : 1; pass < 2; ++pass) {
     g_counting_places = pass == 0;
+    begin_a_pass_down_the_list(g_divided && pass == 1);
 
     // The suites of tests/suites/, which have no line here, and then the list.
     run_the_suites_in_files_of_their_own();
@@ -36837,6 +36936,7 @@ int main() {
 
     }  // the second time down the list, or the only one
 
+    say_the_slowest_suites();
     if (g_divided) {
         // Not the sentence of a whole run: a count of suites that is a third
         // of them must not be read as the number of suites there are.

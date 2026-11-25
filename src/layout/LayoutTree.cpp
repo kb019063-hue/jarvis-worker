@@ -16,6 +16,66 @@ namespace litebird {
 
 namespace {
 
+struct CounterContext {
+    std::unordered_map<std::string, std::vector<int>> stacks;
+    // Apply reset: push new level for each name, return names pushed for later pop
+    std::vector<std::string> apply_reset(const std::vector<CounterOp>& ops) {
+        std::vector<std::string> pushed;
+        for (const auto& op : ops) {
+            std::string lname = op.name;
+            for (char& c : lname) c = static_cast<char>(std::tolower((unsigned char)c));
+            stacks[lname].push_back(op.value);
+            pushed.push_back(std::move(lname));
+        }
+        return pushed;
+    }
+    void apply_set(const std::vector<CounterOp>& ops) {
+        for (const auto& op : ops) {
+            std::string lname = op.name;
+            for (char& c : lname) c = static_cast<char>(std::tolower((unsigned char)c));
+            auto& st = stacks[lname];
+            if (st.empty()) st.push_back(op.value);
+            else st.back() = op.value;
+        }
+    }
+    void apply_increment(const std::vector<CounterOp>& ops) {
+        for (const auto& op : ops) {
+            std::string lname = op.name;
+            for (char& c : lname) c = static_cast<char>(std::tolower((unsigned char)c));
+            auto& st = stacks[lname];
+            if (st.empty()) st.push_back(op.value);
+            else st.back() += op.value;
+        }
+    }
+    void pop_resets(const std::vector<std::string>& pushed) {
+        for (const auto& lname : pushed) {
+            auto it = stacks.find(lname);
+            if (it != stacks.end() && !it->second.empty()) it->second.pop_back();
+        }
+    }
+    std::unordered_map<std::string, size_t> snapshot() const {
+        std::unordered_map<std::string, size_t> s;
+        s.reserve(stacks.size());
+        for (const auto& kv : stacks) s[kv.first] = kv.second.size();
+        return s;
+    }
+    void restore(const std::unordered_map<std::string, size_t>& snap) {
+        for (auto it = stacks.begin(); it != stacks.end(); ) {
+            auto f = snap.find(it->first);
+            size_t target = (f == snap.end() ? 0 : f->second);
+            if (it->second.size() > target) it->second.resize(target);
+            if (it->second.empty()) it = stacks.erase(it);
+            else ++it;
+        }
+    }
+};
+
+thread_local CounterContext* t_counter_ctx = nullptr;
+
+namespace CounterUtil {
+    // Helper to normalize name for lookup
+}
+
 bool is_all_whitespace(std::string_view s) {
     for (char c : s) {
         if (!std::isspace(static_cast<unsigned char>(c))) return false;
@@ -164,58 +224,13 @@ void place_document_body(LayoutBox& box, float viewport_width, float viewport_he
         }
     }
 
-    // A body's top margin can collapse through a chain of first in-flow
-    // blocks. Merely adding the body margin would move common first headings
-    // and paragraphs too far. This handles nonempty first-child chains only;
-    // empty boxes, sibling-margin collapse, bottom margins and constrained
-    // heights still need the general block-formatting algorithm.
-    struct CollapsedEdge { LayoutBox* parent; float margin; float child_height_change = 0.0f; };
-    std::vector<CollapsedEdge> top_chain;
-    float largest_positive = std::max(0.0f, d.margin.top);
-    float most_negative = std::min(0.0f, d.margin.top);
-    LayoutBox* parent = &box;
-    while (parent) {
-        const auto& ps = *parent->style;
-        const auto& pd = parent->dimensions;
-        if (parent->box_type != BoxType::BlockNode || !parent->line_boxes.empty() ||
-            ps.is_out_of_flow() || ps.is_floated() || ps.overflow != Overflow::Visible ||
-            ps.contains_layout() || ps.contains_paint() || ps.min_height >= 0.0f ||
-            ps.max_height >= 0.0f || pd.border.top != 0.0f || pd.padding.top != 0.0f ||
-            parent->children.empty()) break;
-        const auto& first = parent->children.front();
-        const auto& cs = *first->style;
-        // A nonempty block can have a nonpositive *current* height when a
-        // negative child margin was incorrectly included in it. Do not mistake
-        // that for a genuinely empty box whose margins may collapse through it.
-        const bool has_in_flow_child = std::any_of(first->children.begin(), first->children.end(),
-            [](const auto& child) { return !child->style->is_out_of_flow() && !child->style->is_floated(); });
-        const bool empty_block = first->box_type == BoxType::BlockNode && !has_in_flow_child &&
-                                 first->line_boxes.empty() && first->dimensions.border_box().height <= 0.0f;
-        if ((first->box_type != BoxType::BlockNode && first->box_type != BoxType::FlexNode &&
-             first->box_type != BoxType::GridNode) ||
-            cs.is_out_of_flow() || cs.is_floated() || cs.clear_type != ClearType::None ||
-            cs.margin_top_auto || empty_block) break;
-        const float margin = first->dimensions.margin.top;
-        top_chain.push_back({parent, margin});
-        largest_positive = std::max(largest_positive, margin);
-        most_negative = std::min(most_negative, margin);
-        parent = first.get();
-    }
-    const float body_top = largest_positive + most_negative;
-
-    // Each collapsed margin used to be included in the auto height of every
-    // ancestor up to a definite-height box. Correct heights from the inside
-    // out; a fixed height stops the correction propagating through it.
-    float height_change = 0.0f;
-    for (auto it = top_chain.rbegin(); it != top_chain.rend(); ++it) {
-        it->child_height_change = height_change;
-        auto& pd = it->parent->dimensions;
-        const float old_height = pd.content.height;
-        if (it->parent->style->height < 0.0f) {
-            pd.content.height = std::max(0.0f, old_height - it->margin - height_change);
-        }
-        height_change = old_height - pd.content.height;
-    }
+    // `layout_block()` already collapsed the body's top margin through any
+    // leading empty blocks and first-child chain (and adjusted descendant
+    // positions and auto heights accordingly). Use its collapsed top strut
+    // directly for the body's vertical placement inside the viewport.
+    const float body_top = box.has_collapsed_margins
+                               ? box.collapsed_margin_top.value()
+                               : d.margin.top;
 
     float x = d.margin.left + d.border.left + d.padding.left;
     float y = body_top + d.border.top + d.padding.top;
@@ -243,46 +258,26 @@ void place_document_body(LayoutBox& box, float viewport_width, float viewport_he
         else if (s.has_bottom) y = viewport_height - inset.bottom - d.margin.bottom -
                                    d.border.bottom - d.padding.bottom - d.content.height;
     }
-    // Shift each in-flow box and its line fragments once. Descendants of a
-    // collapsing parent also lose the child's margin that layout added inside
-    // the parent. A single iterative walk avoids a quadratic set of subtree
-    // shifts for a deeply nested first-child chain. The out-of-flow pass that
-    // follows places absolute and fixed descendants against their own block.
-    std::unordered_map<const LayoutBox*, CollapsedEdge> collapsed_margins;
-    for (const auto& edge : top_chain) {
-        if (edge.margin != 0.0f || edge.child_height_change != 0.0f) {
-            collapsed_margins.emplace(edge.parent, edge);
-        }
-    }
-    if (x == d.content.x && y == d.content.y && collapsed_margins.empty()) return;
-    struct Shift { LayoutBox* box; float dx; float dy; };
-    std::vector<Shift> stack{{&box, x - d.content.x, y - d.content.y}};
+    const float dx = x - d.content.x;
+    const float dy = y - d.content.y;
+    if (dx == 0.0f && dy == 0.0f) return;
+    std::vector<LayoutBox*> stack{&box};
     while (!stack.empty()) {
-        const auto current = stack.back();
+        LayoutBox* current = stack.back();
         stack.pop_back();
-        current.box->dimensions.content.x += current.dx;
-        current.box->dimensions.content.y += current.dy;
-        for (auto& line : current.box->line_boxes) {
-            line.rect.x += current.dx;
-            line.rect.y += current.dy;
+        current->dimensions.content.x += dx;
+        current->dimensions.content.y += dy;
+        for (auto& line : current->line_boxes) {
+            line.rect.x += dx;
+            line.rect.y += dy;
             for (auto& frag : line.fragments) {
-                frag.rect.x += current.dx;
-                frag.rect.y += current.dy;
+                frag.rect.x += dx;
+                frag.rect.y += dy;
             }
         }
-        float child_dy = current.dy;
-        float following_dy = 0.0f;
-        if (const auto found = collapsed_margins.find(current.box); found != collapsed_margins.end()) {
-            child_dy -= found->second.margin;
-            // A nested collapse may also have shortened the first child. Its
-            // following siblings must move by that height change, but the
-            // first child's own position must not.
-            following_dy = found->second.child_height_change;
-        }
-        for (std::size_t i = 0; i < current.box->children.size(); ++i) {
-            auto& child = current.box->children[i];
+        for (auto& child : current->children) {
             if (!child->style->is_out_of_flow()) {
-                stack.push_back({child.get(), current.dx, child_dy - (i == 0 ? 0.0f : following_dy)});
+                stack.push_back(child.get());
             }
         }
     }
@@ -775,6 +770,17 @@ void LayoutTree::build_boxes(
         SharedComputedStyle style = resolve_element_style(element, resolver, parent_style, pool);
         if (!style) return;
 
+        // CSS Counter handling (Phase 385): each element may reset/set/increment
+        // counters. Resets push a new instance that scopes to the element and
+        // its following siblings (CSS Lists 3). Increments modify the nearest
+        // instance. Pushing is not popped at element exit but when leaving the
+        // parent — implemented via snapshot/restore around the children loop.
+        if (t_counter_ctx) {
+            t_counter_ctx->apply_reset(style->counter_reset);
+            t_counter_ctx->apply_set(style->counter_set);
+            t_counter_ctx->apply_increment(style->counter_increment);
+        }
+
         // CSS Display 3 §2.7 `display: contents`: the element generates no box
         // of its own and its children take part in its parent's formatting
         // context, as if the element had been replaced by them. `None` would
@@ -789,9 +795,11 @@ void LayoutTree::build_boxes(
         if (style->is_contents()) {
             const auto& contents_children =
                 element->shadow_root() ? element->shadow_root()->children() : element->children();
+            auto snap = t_counter_ctx ? t_counter_ctx->snapshot() : std::unordered_map<std::string, size_t>{};
             for (const auto& ch : contents_children) {
                 build_boxes(ch, resolver, parent_style, pool, depth + 1, out, split_inline_blocks);
             }
+            if (t_counter_ctx) t_counter_ctx->restore(snap);
             return;
         }
 
@@ -885,16 +893,27 @@ void LayoutTree::build_boxes(
             auto generated_run = [&](int which) -> std::shared_ptr<LayoutBox> {
                 const ComputedStyle pseudo =
                     resolver.resolve_pseudo_element(element, which, *style);
-                if (pseudo.content.empty()) return nullptr;
+                if (pseudo.content_raw.empty() && pseudo.content.empty()) return nullptr;
                 if (pseudo.is_none() || pseudo.is_contents()) return nullptr;
+                std::string final_content;
+                if (!pseudo.content_raw.empty()) {
+                    if (t_counter_ctx)
+                        final_content = resolver.evaluate_content(pseudo.content_raw, element.get(), pseudo.custom_properties, &t_counter_ctx->stacks);
+                    else
+                        final_content = resolver.evaluate_content(pseudo.content_raw, element.get(), pseudo.custom_properties);
+                } else {
+                    final_content = pseudo.content;
+                }
+                if (final_content.empty()) return nullptr;
                 SharedComputedStyle run_style = pool.intern(pseudo);
-                return LayoutBox::create_text(nullptr, collapse_whitespace(pseudo.content),
+                return LayoutBox::create_text(nullptr, collapse_whitespace(final_content),
                                               std::move(run_style));
             };
             if (auto before = generated_run(1)) box->append_child(std::move(before));
             const auto& children_to_process =
                 element->shadow_root() ? element->shadow_root()->children() : element->children();
             std::vector<std::shared_ptr<LayoutBox>> child_boxes;
+            auto snap = t_counter_ctx ? t_counter_ctx->snapshot() : std::unordered_map<std::string, size_t>{};
             // With an explicit summary, a closed disclosure lays out only
             // its first summary child. The DOM and its listeners stay intact.
             const Node* closed_summary = nullptr;
@@ -928,6 +947,7 @@ void LayoutTree::build_boxes(
                     if (cb) box->append_child(cb);
                 }
             }
+            if (t_counter_ctx) t_counter_ctx->restore(snap);
             if (auto after = generated_run(2)) box->append_child(std::move(after));
         }
 
@@ -970,7 +990,11 @@ std::shared_ptr<LayoutBox> LayoutTree::build_box(
 ) {
     std::vector<std::shared_ptr<LayoutBox>> boxes;
     std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>> split_inline_blocks;
+    CounterContext counter_ctx;
+    CounterContext* prev = t_counter_ctx;
+    if (!prev) t_counter_ctx = &counter_ctx;
     build_boxes(node, resolver, parent_style, pool, depth, boxes, split_inline_blocks);
+    if (!prev) t_counter_ctx = nullptr;
     if (boxes.empty()) return nullptr;
     if (boxes.size() == 1) return boxes.front();
 
@@ -1019,11 +1043,15 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
     ComputedStylePool pool;
     std::vector<std::shared_ptr<LayoutBox>> root_boxes;
     std::vector<std::pair<std::shared_ptr<Element>, std::shared_ptr<LayoutBox>>> split_inline_blocks;
+    // CSS counters (Phase 379): fresh scope per layout.
+    CounterContext counter_ctx;
+    t_counter_ctx = &counter_ctx;
     // The tree normally starts at body, but a display:none HTML ancestor hides
     // that whole tree, including both candidates for canvas propagation.
     if (!html_style || !html_style->is_none()) {
         build_boxes(root_node, resolver, nullptr, pool, 0, root_boxes, split_inline_blocks);
     }
+    t_counter_ctx = nullptr;
 
     std::shared_ptr<LayoutBox> root_box;
     if (root_boxes.size() == 1 && is_block_level_box(*root_boxes.front())) {

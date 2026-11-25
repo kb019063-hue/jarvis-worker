@@ -137,8 +137,11 @@ note() {  # note N FILE -> "#N COMMENTID"
   echo "#$1 ${url##*-}"
 }
 open_ones() {  # "N FULLSHA fin|WIP MERGEABLE..." of every open pull request that is a claim
-  timeout 40 gh pr list --state open --limit 100 --json number,title,headRefOid,mergeable \
-    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.title | test("^WIP")) then "WIP" else "fin" end) \(.mergeable)"' | sort -n
+  # A draft is work in progress whatever its title says, as it is for
+  # check_pr.py: GitHub does not merge one. On 24 November #385, a draft
+  # whose title had lost its WIP:, was taken into a lot for three minutes.
+  timeout 40 gh pr list --state open --limit 100 --json number,title,headRefOid,mergeable,isDraft \
+    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "fin" end) \(.mergeable)"' | sort -n
 }
 fetch_pr() { timeout 60 git fetch -q origin "+refs/pull/$1/head:refs/remotes/origin/pr$1"; }
 agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^Agent: *(\\w+)") | .captures[0].string] | first) // "-"' 2>/dev/null; }
@@ -146,7 +149,21 @@ agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^
 cmd="${1:-}"; [ $# -gt 0 ] && shift
 case "$cmd" in
 start)
-  echo "$1" > "$STATE/end"; exec "$0" look ;;
+  echo "$1" > "$STATE/end"
+  # What earlier watches sent back is on the board and nowhere else: $STATE
+  # is new with every sandbox. `cands` reads $STATE/sentback, so without
+  # these lines a pull request that was sent back in the watch before, and
+  # has not moved, is a candidate again as soon as its old run counts as
+  # green. On 24 November #366, sent back eight hours earlier for a crash,
+  # was put into a lot that way; it was out again thirty seconds later,
+  # before anything was written to it.
+  if [ -n "$BOARD" ]; then
+    timeout 90 gh pr view "$BOARD" --json comments --jq '.comments[].body | split("\n")[0]' 2>/dev/null \
+      | sed -nE 's/^[A-Za-z]+: #([0-9]+) is yours again \(head ([0-9a-f]{7})[0-9a-f]*\).*/\1 \2/p' > "$STATE/sentback.board"
+    [ -s "$STATE/sentback.board" ] || echo "note: no line of the board says a pull request was sent back (or the board could not be read)" >&2
+    cat "$STATE/sentback.board" "$STATE/sentback" 2>/dev/null | awk '!seen[$0]++' > "$STATE/sentback.new" && mv "$STATE/sentback.new" "$STATE/sentback"
+  fi
+  exec "$0" look ;;
 
 look)
   end="$(cat "$STATE/end" 2>/dev/null)"; [ -n "$end" ] || { echo "no hour: tools/watch/watch.sh start \"YYYY-MM-DD HH:MM\" first"; exit 9; }
@@ -231,7 +248,7 @@ build)
   for n in $nums; do
     fetch_pr "$n" || { echo "could not fetch #$n"; exit 9; }
     full="$(git rev-parse "origin/pr$n")"
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title --jq '"\(.state) \(.headRefOid) \(if (.title | test("^WIP")) then "WIP" else "finished" end)"')"
+    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title,isDraft --jq '"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"')"
     [ "$st" = "OPEN $full finished" ] || { echo "#$n: '$st' is not OPEN and finished at ${full:0:7}"; exit 6; }
     takeable "$n" "$full" || { echo "#$n ${full:0:7} is not green: $(runs_of "$full")"; exit 6; }
     echo "$n ${full:0:7}" >> "$STATE/lot.heads.new"
@@ -386,7 +403,7 @@ rehead)
   while read -r n sha; do
     fetch_pr "$n" || exit 9
     full="$(git rev-parse "origin/pr$n")"
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title --jq '"\(.state) \(.headRefOid) \(if (.title | test("^WIP")) then "WIP" else "finished" end)"')"
+    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title,isDraft --jq '"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"')"
     [ "$st" = "OPEN $full finished" ] || { echo "#$n: '$st' is not OPEN and finished at ${full:0:7}"; exit 3; }
     if [ "${full:0:7}" != "$sha" ]; then
       takeable "$n" "$full" || { echo "#$n moved to ${full:0:7}, and that head cannot be taken: $(runs_of "$full")"; exit 3; }

@@ -812,6 +812,8 @@ def main() -> int:
     parser.add_argument("--depth", type=int, default=200_000, help="levels of nesting (default 200000)")
     parser.add_argument("--only", default="", help="only pages whose name contains this text")
     parser.add_argument("--runs", default="", help="comma-separated kinds of run (dumps, terminal, html5lib); default: all")
+    parser.add_argument("--not-runs", default="", help="every kind of run but these: with `--runs` of the same kinds in "
+                                                         "another process, the two are every kind there is, whatever is added")
     parser.add_argument("--random", type=int, default=0, metavar="N", help="also run N random pages at the nesting limit")
     parser.add_argument("--seed", type=int, default=20261110, help="seed of the random pages")
     parser.add_argument("--random-only", action="store_true", help="run only the random pages")
@@ -846,10 +848,18 @@ def main() -> int:
         print(f"error: {args.binary} not found (run `make`)", file=sys.stderr)
         return 2
     kinds = [kind for kind in (args.runs.split(",") if args.runs else RUNS) if kind]
-    for kind in kinds:
+    left_out = [kind for kind in args.not_runs.split(",") if kind]
+    for kind in kinds + left_out:
         if kind not in RUNS:
             print(f"error: no such kind of run: {kind} (there are: {', '.join(RUNS)})", file=sys.stderr)
             return 2
+    if args.runs and args.not_runs:
+        print("error: --runs and --not-runs are two ways to say the same thing: give one", file=sys.stderr)
+        return 2
+    kinds = [kind for kind in kinds if kind not in left_out]
+    if not kinds:
+        print("error: no kind of run is left", file=sys.stderr)
+        return 2
 
     workdir = Path(args.keep) if args.keep else Path(tempfile.mkdtemp(prefix="litebird-deep-"))
     workdir.mkdir(parents=True, exist_ok=True)
@@ -859,6 +869,10 @@ def main() -> int:
     slowest = (0.0, "")
     total_runs = 0
     print_lock = threading.Lock()
+    began = time.time()
+    # Seconds of work by kind of run and by kind of page, for the last line:
+    # where the time of this check goes cannot be read from its length.
+    work: dict[str, float] = {}
 
     def one(job: tuple[int, Page, str], alone: bool = False) -> tuple[str, float]:
         index, page, kind = job
@@ -900,6 +914,8 @@ def main() -> int:
         with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
             for job, (failure, seconds) in zip(jobs, pool.map(one, jobs)):
                 total_runs += 1
+                for key in (job[2], "random pages" if job[1].name.startswith("random page ") else "generated pages"):
+                    work[key] = work.get(key, 0.0) + seconds
                 if failure == AGAIN:
                     slow.append(job)
                     continue
@@ -925,6 +941,13 @@ def main() -> int:
         print(f"deep pages: {len(slow)} run(s) went over {args.timeout:g} s beside the others and were run again by themselves")
     print(f"deep pages: {total_runs} runs over {len(pages)} pages at depth {args.depth} on a {args.stack_mb} MB stack, "
           f"{len(failures)} failed; slowest {slowest[0]:.1f} s ({slowest[1]})")
+    spent = (f"{time.time() - began:.0f} s on the clock with {max(1, args.jobs)} at a time; seconds of work: "
+             + ", ".join(f"{key} {seconds:.0f}" for key, seconds in sorted(work.items())))
+    print(f"deep pages: {spent}")
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        # A notice on the job: read through the API where the log cannot be.
+        print(f"::notice title=deep pages, {Path(args.binary).parent.name}::{total_runs} runs over {len(pages)} pages; {spent}; "
+              f"slowest {slowest[0]:.1f} s ({slowest[1]})")
     return 1 if failures else 0
 
 

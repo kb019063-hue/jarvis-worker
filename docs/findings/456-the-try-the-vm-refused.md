@@ -27,4 +27,6 @@ completion values and the forms that stay refused.
 
 Finalizers, catch patterns, jumps from protected blocks or catch, and functions
 in catch are refused; VM closure, TDZ and receiver semantics remain incomplete.
-The VM is not the engine used for web pages.
+Existing VM property access on nullish values does not throw, and non-callable
+calls produce `Error` rather than `TypeError`; these gaps remain visible inside
+catch. The VM is not the engine used for web pages.

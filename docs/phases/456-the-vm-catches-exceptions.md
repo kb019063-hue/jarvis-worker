@@ -46,6 +46,9 @@ with 18 additional witnesses. The new refused cases protect unsupported forms.
 `finally`, destructuring catch parameters, returns or jumps from a protected
 block, and jumps or nested functions from catch are explicitly refused. Nested
 functions in catch could capture the catch binding; the VM has no closure
-machinery for it. More general closure, TDZ and receiver semantics remain open,
-and the bytecode VM is not the page engine. No browser conformance or speed
+machinery for it. Existing VM operations still diverge independently of the
+handler: `try{null.x}catch(e){e.name}` returns `undefined` in the VM rather
+than `TypeError`, and a non-callable invocation produces `Error` rather than
+`TypeError`. These are not fixed by this phase. More general closure, TDZ and
+receiver semantics remain open, and the bytecode VM is not the page engine. No browser conformance or speed
 improvement is claimed.

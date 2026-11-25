@@ -1070,6 +1070,26 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
     to, and nobody read warnings. The binary now comes with the saved
     objects.
 
+  The same morning the two longest jobs of a run each had cores that
+  stood idle, which the times of their steps showed and nothing else:
+  - **the fuzz run's six parts were six lines of one recipe**, one
+    after another on a machine with four cores: 237 and 245 seconds.
+    They are six targets now, and `make -j` runs them side by side:
+    138 seconds (run 45555583953). `make fuzz` alone does what it did;
+  - **the two deep stretches of the unit suites waited for the other
+    four**: 72 and 85 seconds, begun when those had taken 102 and 127.
+    They have a job of their own, "Sanitizers: unit suites, the deep
+    ones" (`UNIT_SUITE_ONLY`, the Makefile), and took 54 seconds there
+    with the machine to themselves: **seventeen jobs in a run, seven
+    in the short run.**
+
+  A run with its objects in ccache was 5.9 minutes before the two
+  (45554494852: the unit suites' job 5.8, the fuzzing 4.2) and 4.7 and
+  4.8 after (45555583953, 45556761844). In both of those the longest
+  job was the web-platform-tests of the sanitizer build, on a machine
+  where they took 267 seconds; they had taken 154 in the run before.
+  What is left is five jobs of four minutes and more, and the machine.
+
   `python3 tools/ci/run_report.py N --times` prints every job of #N's
   newest run with its long steps, its notices and its warnings, and how
   long the jobs waited for a machine. **When a run is longer than the

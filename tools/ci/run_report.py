@@ -212,10 +212,14 @@ def at_once(runs: list[tuple[dict, list[dict]]]) -> list[str]:
     return lines
 
 
-def gh_json(path: str):
+def gh_json(path: str, missing=None):
+    """What `gh api PATH` answers. When it fails the script ends with 2,
+    unless `missing` is given: then that is the answer, and one line says so."""
     result = subprocess.run(["gh", "api", path], capture_output=True, text=True)
     if result.returncode != 0:
         print(f"gh api {path}\n{result.stderr.strip()}", file=sys.stderr)
+        if missing is not None:
+            return missing
         sys.exit(2)
     return json.loads(result.stdout)
 
@@ -332,7 +336,11 @@ def main(arguments: list[str]) -> int:
     rest = [argument for argument in arguments if argument != "--times"]
     if rest == ["--now"]:
         active = [run for run in gh_json(f"{REPO}/actions/runs?per_page=40")["workflow_runs"] if run.get("status") != "completed"]
-        print("\n".join(at_once([(run, gh_json(f"{REPO}/actions/runs/{run['id']}/jobs?per_page=100")["jobs"]) for run in active])))
+        # A run that was begun a second ago has no jobs to ask for yet (404,
+        # 25 November 06:58 UTC, and the count of every other run was lost
+        # with it): it is counted as a run with no job.
+        print("\n".join(at_once([(run, gh_json(f"{REPO}/actions/runs/{run['id']}/jobs?per_page=100", {"jobs": []})["jobs"])
+                                 for run in active])))
         return 0
     if len(rest) == 2 and rest[0] == "--row":
         identity = newest_run_on(rest[1], "")

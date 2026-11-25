@@ -14,6 +14,7 @@
 #include "litebird/render/BitmapRenderer.hpp"
 #include "litebird/render/ImageDecoder.hpp"
 #include "litebird/js/JsInterpreter.hpp"
+#include "litebird/js/JsOps.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/js/EventLoop.hpp"
 #include "litebird/js/Storage.hpp"
@@ -60,7 +61,7 @@ void run_page_loop(litebird::EventLoop& loop, std::chrono::milliseconds budget, 
 
 void print_help(const char* prog) {
     print_banner();
-    std::cout << "Usage: " << prog << " [options] <html-file>\n\n";
+    std::cout << "Usage: " << litebird::terminal_safe(prog) << " [options] <html-file>\n\n";
     std::cout << "Options:\n";
     std::cout << "  --dump-dom             Dump parsed DOM tree\n";
     std::cout << "  --dump-dom-webplatform Dump DOM in WPT/html5lib tree-dump format\n";
@@ -141,7 +142,10 @@ void run_repl() {
         if (line.empty()) continue;
 
         auto result = interp.eval(line);
-        std::cout << "\033[90m=> \033[0m" << result.to_string() << "\n";
+        // A result may contain text from the page or a script. Filter only
+        // its display; the JS value remains available unchanged in the REPL.
+        std::cout << "\033[90m=> \033[0m"
+                  << litebird::terminal_safe(litebird::js_output_text(result.to_string())) << "\n";
     }
 }
 
@@ -330,7 +334,7 @@ int main(int argc, char* argv[]) {
                                           : input_file;
         server.navigate_to(start_url);
         std::cout << "Litebird Graphical Browser Server listening on http://0.0.0.0:" << actual_port << "\n"
-                  << "Initial page: " << start_url << "\n" << std::flush;
+                  << "Initial page: " << litebird::terminal_safe(start_url) << "\n" << std::flush;
         while (server.is_running()) {
             std::this_thread::sleep_for(std::chrono::seconds(1));
         }
@@ -627,9 +631,9 @@ int main(int argc, char* argv[]) {
         bmp.render(display_list);
         if (!bmp_output.empty()) {
             if (bmp.save_bmp(bmp_output)) {
-                std::cout << "\033[1;32mRendered bitmap saved to: " << bmp_output << "\033[0m\n";
+                std::cout << "\033[1;32mRendered bitmap saved to: " << litebird::terminal_safe(bmp_output) << "\033[0m\n";
             } else {
-                std::cerr << "Failed to save bitmap to: " << bmp_output << "\n";
+                std::cerr << "Failed to save bitmap to: " << litebird::terminal_safe(bmp_output) << "\n";
             }
         }
         if (!png_output.empty()) {
@@ -643,9 +647,9 @@ int main(int argc, char* argv[]) {
                 }
             }
             if (litebird::ImageDecoder::save_png(img, png_output)) {
-                std::cout << "\033[1;32mRendered PNG saved to: " << png_output << "\033[0m\n";
+                std::cout << "\033[1;32mRendered PNG saved to: " << litebird::terminal_safe(png_output) << "\033[0m\n";
             } else {
-                std::cerr << "Failed to save PNG to: " << png_output << "\n";
+                std::cerr << "Failed to save PNG to: " << litebird::terminal_safe(png_output) << "\n";
             }
         }
     }

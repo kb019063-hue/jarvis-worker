@@ -168,6 +168,14 @@ SHARED = {
     "README.md", "ARCHITECTURE.md", "AUDIT.md", "AGENTS.md", "ROADMAP.md",
     "tests/test_suite.cpp", "Makefile", ".github/workflows/ci.yml",
 }
+# The directories every pull request adds a file of its own to, named by its
+# own number. A `Files:` line that names one of them bare ("`docs/phases/`")
+# would claim every other pull request's file there, since a name that ends
+# in `/` is every file under it: at 02:53 UTC on 25 November #390 and #395
+# said so of all three, and `claim N` told each of the six pull requests
+# opened after #390 that #390 "had" its phase, its finding and its suite
+# first. Named bare they claim nothing; a file in them is claimed by name.
+SHARED_DIRECTORIES = ("docs/phases", "docs/findings", "tests/suites")
 # What no step of CI reads but the four checks named below: the documents at
 # the top of the tree, everything under docs/, and the README.md of a test
 # directory. Not every `.md`: tools/conformance/run_wpt.py fails for any file
@@ -363,11 +371,20 @@ def claim_of(pr: dict) -> dict:
     }
 
 
+def claims_nothing(name: str) -> bool:
+    """A file every pull request changes, or a directory every one adds its own file to."""
+    return name in SHARED or name.rstrip("/") in SHARED_DIRECTORIES
+
+
 def same_files(mine: set[str], theirs: set[str]) -> list[str]:
     """Files two claims share. A name that ends in `/` is every file under it."""
     shared = set()
-    for a in mine - SHARED:
-        for b in theirs - SHARED:
+    for a in mine:
+        if claims_nothing(a):
+            continue
+        for b in theirs:
+            if claims_nothing(b):
+                continue
             if a == b or (a.endswith("/") and b.startswith(a)) or (b.endswith("/") and a.startswith(b)):
                 shared.add(a if len(a) >= len(b) else b)
     return sorted(shared)
@@ -548,6 +565,11 @@ def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bo
     if claim["has_claim_lines"] and not claim.get("agent"):
         problems.append((False, "no `Agent:` line: give yourself a name and put it under the three lines "
                                 "(AGENTS.md, \"Working together\")"))
+    bare = sorted(name for name in claim["files"] if name.rstrip("/") in SHARED_DIRECTORIES)
+    if bare:
+        problems.append((False, f"its `Files:` line names {', '.join(f'`{name}`' for name in bare)}: every pull request adds a "
+                                f"file of its own there, so that claims nothing. Name the file (`{bare[0].rstrip('/')}/"
+                                f"{claim['number']}-...`)"))
     others = [c for c in claims if c["number"] != claim["number"]]
     for kind, key in (("Phase", "phase"), ("finding", "finding")):
         number = claim[key]
@@ -614,7 +636,7 @@ def show_claims() -> int:
         name = f"  [{claim['agent']}]" if claim.get("agent") else ""
         print(f"\n#{claim['number']}{name}  {numbers_of(claim)}  (last commit {pushed:.1f} h ago)")
         print(f"    {claim['title'][:110]}")
-        own = sorted(claim["files"] - SHARED)
+        own = sorted(name for name in claim["files"] if not claims_nothing(name))
         print("    files: " + (", ".join(own) if own else "(none)"))
         for blocking, problem in claim_problems(claim, claims, main):
             print(f"    {'!!' if blocking else '  '} {problem}")
@@ -1490,6 +1512,19 @@ def self_test() -> int:
          same_files(folder["files"], inside["files"]), ["tests/dom-conformance/everyday.dat"]),
         ("the files every pull request changes are shared by none",
          same_files({"AGENTS.md", "README.md"}, {"AGENTS.md", "README.md"}), []),
+        ("a directory every pull request adds its own file to, named bare, claims nobody's file in it",
+         same_files({"src/js/JsOps.cpp", "tests/suites/", "docs/phases/", "docs/findings"},
+                    {"tests/suites/393-json-raw-json.cpp", "docs/phases/393-a-number.md", "docs/findings/393-the-text.md"}), []),
+        ("...nor do two pull requests that both name it bare share it",
+         same_files({"docs/phases/", "docs/findings/"}, {"docs/phases/", "docs/findings/"}), []),
+        ("...a file in it that two name is still shared",
+         same_files({"tests/suites/393-json-raw-json.cpp"}, {"tests/suites/393-json-raw-json.cpp", "tests/suites/"}),
+         ["tests/suites/393-json-raw-json.cpp"]),
+        ("...and the pull request that names it bare is told so, in a note",
+         [text[:74] for blocking, text in claim_problems(
+             claim("Task: a row\nFiles: `src/a.cpp`, `docs/phases/`\nPhase and finding: this pull request's number\nAgent: Vega\n"),
+             [], Main({1}, {1}, {1}, {1}, 1, 1)) if not blocking and "Files:" in text],
+         ["its `Files:` line names `docs/phases/`: every pull request adds a file of "]),
         ("a claim without numbers is called that, not `Phase None`", numbers_of(plain), "no phase, no finding"),
         ("`Agent: Heron` is the agent's name", named["agent"], "Heron"),
         ("a name ends at the first space or stop", named_with_remark["agent"], "Heron"),

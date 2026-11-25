@@ -453,6 +453,10 @@ bool JsValue::current_is_construct() {
     return t_call_context.is_construct;
 }
 
+bool JsValue::current_requires_new() {
+    return !t_call_context.is_construct;
+}
+
 namespace {
 // An empty capture list, so a native entry point written to take one always
 // has something to index.

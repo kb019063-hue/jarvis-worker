@@ -965,8 +965,8 @@ bool read_buffer_source(Realm& r, const JsValue& src, std::vector<uint8_t>& out)
     JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
     if (!u8_ctor.is_function()) return false;
     JsValue view = src.get_property("buffer").is_object_like()
-        ? js_call(u8_ctor, u8_ctor, {src.get_property("buffer"), src.get_property("byteOffset"), src.get_property("byteLength")})
-        : js_call(u8_ctor, u8_ctor, {src});
+        ? js_construct(u8_ctor, {src.get_property("buffer"), src.get_property("byteOffset"), src.get_property("byteLength")})
+        : js_construct(u8_ctor, {src});
     const std::size_t len = static_cast<std::size_t>(to_double(view.get_property("byteLength")));
     out.resize(len);
     for (std::size_t i = 0; i < len; ++i) {
@@ -1003,8 +1003,8 @@ void setup_subtle_crypto(Iface& I) {
             return reject_with("OperationError", "SubtleCrypto.digest: ArrayBuffer/Uint8Array unavailable.");
         }
         JsValue view = src.get_property("buffer").is_object_like()
-            ? js_call(u8_ctor, u8_ctor, {src.get_property("buffer"), src.get_property("byteOffset"), src.get_property("byteLength")})
-            : js_call(u8_ctor, u8_ctor, {src});
+            ? js_construct(u8_ctor, {src.get_property("buffer"), src.get_property("byteOffset"), src.get_property("byteLength")})
+            : js_construct(u8_ctor, {src});
         const std::size_t len = static_cast<std::size_t>(to_double(view.get_property("byteLength")));
         std::vector<uint8_t> in(len);
         for (std::size_t i = 0; i < len; ++i) {

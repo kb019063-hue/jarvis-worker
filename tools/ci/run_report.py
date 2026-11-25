@@ -4,6 +4,7 @@
     python3 tools/ci/run_report.py N              # the newest run on the head commit of pull request #N
     python3 tools/ci/run_report.py --run RUN      # that run (the number in its address)
     python3 tools/ci/run_report.py N --times      # also every job with its long steps, the notices, the warnings
+    python3 tools/ci/run_report.py --row COMMIT   # the newest run on that commit as three cells of a table
     python3 tools/ci/run_report.py --self-test
 
 CI's logs cannot be read from every sandbox. A job's annotations can: the
@@ -27,6 +28,9 @@ ten jobs without a machine two and a half minutes after its push.
 Exit status: 0 every job that ran passed; 1 a job failed, or the run was
 cancelled (a later push to the same pull request ends a run); 3 the run is
 still going; 2 it could not be read, or there is none on that commit.
+
+`--row` is for the landing session (tools/watch/watch.sh): when the run
+began, when its last job ended, and `RUN, 5.3 min`, with tabs between them.
 
 It reads GitHub and changes nothing there.
 """
@@ -178,6 +182,16 @@ def report(run: dict, jobs: list[dict], annotations: dict[int, list[dict]], time
     return lines, 0
 
 
+def row_of(run: dict, jobs: list[dict]) -> str:
+    """`02:23<tab>02:29<tab>45532555413, 5.6 min`, or nothing while a job has not ended."""
+    began = run.get("run_started_at") or run.get("created_at")
+    ran = [job for job in jobs if job.get("conclusion") != "skipped"]
+    if not began or not ran or any(not job.get("completed_at") for job in ran):
+        return ""
+    last = max(job["completed_at"] for job in ran)
+    return f"{began[11:16]}\t{last[11:16]}\t{run.get('id', '?')}, {minutes(seconds(began, last))}"
+
+
 def gh_json(path: str):
     result = subprocess.run(["gh", "api", path], capture_output=True, text=True)
     if result.returncode != 0:
@@ -186,14 +200,17 @@ def gh_json(path: str):
     return json.loads(result.stdout)
 
 
-def newest_run_of(number: int) -> int:
-    head = gh_json(f"{REPO}/pulls/{number}")["head"]["sha"]
+def newest_run_on(head: str, called: str) -> int:
     runs = gh_json(f"{REPO}/actions/runs?head_sha={head}&per_page=30")["workflow_runs"]
     if not runs:
-        print(f"no run on {head[:7]}, the head commit of #{number}. A push starts none while the pull request "
-              "conflicts with main, or when its message has the mark that skips CI.", file=sys.stderr)
+        print(f"no run on {head[:7]}{called}. A push starts none while the pull request conflicts with main, "
+              "or when its message has the mark that skips CI.", file=sys.stderr)
         sys.exit(2)
     return max(runs, key=lambda run: run["created_at"])["id"]
+
+
+def newest_run_of(number: int) -> int:
+    return newest_run_on(gh_json(f"{REPO}/pulls/{number}")["head"]["sha"], f", the head commit of #{number}")
 
 
 def self_test() -> int:
@@ -271,6 +288,9 @@ def self_test() -> int:
     lines, status = report(dict(run, status="queued", conclusion=None), [], {}, False, now)
     cases.append(("a run with no job yet is status 3", status == 3 and "no job has a machine yet" in lines[1]))
 
+    cases.append(("a row of the table of lots", row_of(run, short) == "02:00\t02:04\t7, 4.0 min"))
+    cases.append(("no row while a job is going", row_of(run, going) == ""))
+
     failed_count = 0
     for name, ok in cases:
         if not ok:
@@ -285,6 +305,12 @@ def main(arguments: list[str]) -> int:
         return self_test()
     times = "--times" in arguments
     rest = [argument for argument in arguments if argument != "--times"]
+    if len(rest) == 2 and rest[0] == "--row":
+        identity = newest_run_on(rest[1], "")
+        cells = row_of(gh_json(f"{REPO}/actions/runs/{identity}"),
+                       gh_json(f"{REPO}/actions/runs/{identity}/jobs?per_page=100")["jobs"])
+        print(cells)
+        return 0 if cells else 3
     if len(rest) == 2 and rest[0] == "--run" and rest[1].isdigit():
         identity = int(rest[1])
     elif len(rest) == 1 and rest[0].lstrip("#").isdigit():

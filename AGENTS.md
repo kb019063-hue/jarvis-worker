@@ -886,10 +886,10 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
 - **A push starts no CI run while the pull request conflicts with `main`.**
   It looks like a run that has not started yet. `gh pr view N --json
   mergeable` after `git fetch`, before spending a commit on CI.
-- **A run of every job is seventeen jobs and 36 to 41 minutes of runner
+- **A run of every job is eighteen jobs and 36 to 41 minutes of runner
   time; the short run of a pull request is seven jobs and six minutes**
-  (25 November, with the objects in ccache: runs 45556761844,
-  45557484052 and 45552164646), and more by how much of the engine it
+  (25 November, with the objects in ccache: runs 45557484052,
+  45558414164 and 45552164646), and more by how much of the engine it
   has to compile (how long it takes is two points down).
   **The mark works wherever it stands in the message**, in a sentence
   about it too. On 24 November #313's commit "re-run CI on the merged
@@ -1038,8 +1038,9 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
     an object then took 2.3 to 3.0 seconds where it had taken 3.5 to 4.3,
     in runs that were not otherwise alike);
   - the XML suite is a job of its own again, and the deep pages are two
-    jobs (the dumps; the terminal and html5lib): **sixteen jobs in a
-    run, seven in the short run**.
+    jobs (the dumps; the terminal and html5lib): sixteen jobs in a
+    run then, seven in the short run (eighteen since the next
+    morning, below).
 
   With all of it a run of every job, its objects in ccache, was 5.3
   minutes from the push (run 45473629683), where the first of that
@@ -1086,25 +1087,31 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
     to, and nobody read warnings. The binary now comes with the saved
     objects.
 
-  The same morning the two longest jobs of a run each had cores that
-  stood idle, which the times of their steps showed and nothing else:
+  The same morning the three longest jobs of a run were taken one
+  after another, each found by the times of its steps and nothing else:
   - **the fuzz run's six parts were six lines of one recipe**, one
     after another on a machine with four cores: 237 and 245 seconds.
     They are six targets now, and `make -j` runs them side by side:
-    138 seconds (run 45555583953). `make fuzz` alone does what it did;
+    138 and 129 seconds. `make fuzz` alone does what it did;
   - **the two deep stretches of the unit suites waited for the other
     four**: 72 and 85 seconds, begun when those had taken 102 and 127.
     They have a job of their own, "Sanitizers: unit suites, the deep
-    ones" (`UNIT_SUITE_ONLY`, the Makefile), and took 54 seconds there
-    with the machine to themselves: **seventeen jobs in a run, seven
-    in the short run.**
+    ones" (`UNIT_SUITE_ONLY`, the Makefile), and took 54 to 93 seconds
+    there with the machine to themselves;
+  - **the deep pages' second job gave every page to the engine twice**
+    (the terminal, html5lib): 244 to 247 seconds, the longest job of
+    the run that landed #407. They are three jobs, one for each way,
+    and took 116, 110 and 74 seconds (run 45558414164).
 
-  A run with its objects in ccache was 5.9 minutes before the two
-  (45554494852: the unit suites' job 5.8, the fuzzing 4.2) and 4.7 and
-  4.8 after (45555583953, 45556761844). In both of those the longest
-  job was the web-platform-tests of the sanitizer build, on a machine
-  where they took 267 seconds; they had taken 154 in the run before.
-  What is left is five jobs of four minutes and more, and the machine.
+  **Eighteen jobs in a run, seven in the short run.** A run with its
+  objects in ccache was 5.9 minutes before the three (45554494852),
+  then 4.7, 4.8, 4.5 and, with all three, 4.8 (45555583953,
+  45556761844, 45557484052, 45558414164). In three of those four the
+  longest job was the web-platform-tests of the sanitizer build, 267
+  to 270 seconds; in the 4.5 they took 154, on another machine, and
+  the deep pages were the longest. What is left is the machine. A job
+  cut in two would cost a build more and a place among the twenty
+  that run at once, which a lot and two pull requests' runs now fill.
 
   `python3 tools/ci/run_report.py N --times` prints every job of #N's
   newest run with its long steps, its notices and its warnings, and how

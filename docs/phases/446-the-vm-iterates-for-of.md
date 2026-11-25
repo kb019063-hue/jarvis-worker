@@ -39,6 +39,12 @@ close, step failure and explicit refusals.
 - `make verify-bytecode`: **98/100 agree; 1/1 still refused**.
 - `make test`: **495/495 engine suites**; 114 cross-origin checks pass.
 - `python3 tools/conformance/verify_bytecode_agreement.py --self-test` passes.
+- `make deep`: 1,332 runs, 0 failures; `make fuzz` passes. The normal HTML,
+  JavaScript, DOM, URL and XML corpora, WPT, and tree/XML differential checks
+  pass. The new suite passes as an isolated ASan/UBSan test stretch. A full
+  local `make asan` was stopped after 150 seconds in the pre-existing deep
+  nesting suite; full sanitizer CI remains required and is not claimed as a
+  local pass.
 
 ## Still open
 

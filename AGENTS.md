@@ -196,8 +196,8 @@ within the hour, and the first lot was started again four times.
      in, in the order of their numbers, and nothing else: `git merge-tree`
      of `main` and the heads, one after the other, gives the same tree.
      One push, one CI run. `make -j2 all && make -j2 test` in the sandbox
-     says in about six minutes what the run will say in twenty about the
-     unit suites;
+     says in two to four minutes what the run will say in five about the
+     unit suites of the plain build;
    - **the run passes and `main` has not moved:** each of them is merged as
      it is, in that order, and `main` has, file for file, the tree the run
      passed on. The command is `gh pr merge N --merge --match-head-commit
@@ -872,9 +872,11 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
 - **A push starts no CI run while the pull request conflicts with `main`.**
   It looks like a run that has not started yet. `gh pr view N --json
   mergeable` after `git fetch`, before spending a commit on CI.
-- **A run is twelve jobs, and half an hour to an hour and a quarter of
-  runner time**, by how much of the engine it has to compile (how long it
-  takes is two points down).
+- **A run of every job is seventeen jobs and 36 to 41 minutes of runner
+  time; the short run of a pull request is seven jobs and six minutes**
+  (25 November, with the objects in ccache: runs 45556761844,
+  45557484052 and 45552164646), and more by how much of the engine it
+  has to compile (how long it takes is two points down).
   **The mark works wherever it stands in the message**, in a sentence
   about it too. On 24 November #313's commit "re-run CI on the merged
   head" explained in its message why the commit before it had carried

@@ -762,8 +762,22 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   its phase, its finding and its suite first, and to stay out of them.
   Those three directories are where every pull request adds a file of
   its own; named bare they claim nothing now, and the pull request that
-  named them is told so. **Name your own files** (`docs/phases/N-….md`).
-  A directory that is yours alone is still claimed whole.
+  named them is told so. A directory that is yours alone is still
+  claimed whole.
+
+  The advice that stood here then, "name your own files
+  (`docs/phases/N-….md`)", made the next one. The `Files:` line is
+  written when the pull request is opened, before its number is known,
+  so #415 and #421 both wrote `docs/phases/N-*.md`, `docs/findings/N-*.md`
+  and `tests/suites/N-*.cpp`, letter for letter, and at 06:09 the same
+  morning `claim 421` said #415 had the three first and that two pull
+  requests cannot both make them. #421's agent wrote on the board that
+  it would add no phase, finding or suite while they were held. Nothing
+  was held: a name there that is written before its number is no file's
+  name, and claims nothing now. **Your own phase, finding and suite need
+  not be in the `Files:` line at all**: they begin with your number, and
+  nobody else has it. The line is for the files of the engine and the
+  tools, which somebody else may want too.
 - **A file under another pull request's number.** #393 was written as
   Phase 387 while #387 to #392 were being opened, and was finished with
   a phase, a finding and a suite called `387-…`. The landing session

@@ -178,6 +178,18 @@ SHARED = {
 # opened after #390 that #390 "had" its phase, its finding and its suite
 # first. Named bare they claim nothing; a file in them is claimed by name.
 SHARED_DIRECTORIES = ("docs/phases", "docs/findings", "tests/suites")
+# A file there that is named before its number is known: `docs/phases/N-*.md`.
+# The `Files:` line is written when the pull request is opened, and the number
+# is what opening it gives. At 06:09 UTC on 25 November #415 and #421 had both
+# written `tests/suites/N-*.cpp, docs/phases/N-*.md, docs/findings/N-*.md`,
+# the words of this file's own advice ("name your own files"), and `claim 421`
+# said that #415 "had" the three first and that two pull requests cannot both
+# make them; #421's agent wrote that it would add no phase, finding or suite
+# while they were held. They are no file's name. A name there that begins
+# with a number is a file's (`419-*.md` too: only #419 may make it).
+NOT_YET_NUMBERED = re.compile(
+    r"^(?:docs/phases|docs/findings|tests/suites)/"
+    r"(?:(?:N+|n+|X+|x+|#+|PR)[-_.…*]|[<{\[]|\*|…|\.\.\.)")
 # What no step of CI reads but the four checks named below: the documents at
 # the top of the tree, everything under docs/, and the README.md of a test
 # directory. Not every `.md`: tools/conformance/run_wpt.py fails for any file
@@ -374,8 +386,9 @@ def claim_of(pr: dict) -> dict:
 
 
 def claims_nothing(name: str) -> bool:
-    """A file every pull request changes, or a directory every one adds its own file to."""
-    return name in SHARED or name.rstrip("/") in SHARED_DIRECTORIES
+    """A file every pull request changes, a directory every one adds its own
+    file to, or a file there whose number is not written in yet."""
+    return name in SHARED or name.rstrip("/") in SHARED_DIRECTORIES or NOT_YET_NUMBERED.match(name) is not None
 
 
 def same_files(mine: set[str], theirs: set[str]) -> list[str]:
@@ -1668,6 +1681,25 @@ def self_test() -> int:
         ("...a file in it that two name is still shared",
          same_files({"tests/suites/393-json-raw-json.cpp"}, {"tests/suites/393-json-raw-json.cpp", "tests/suites/"}),
          ["tests/suites/393-json-raw-json.cpp"]),
+        ("a file named before its number is known is nobody's: two that both say N share nothing",
+         same_files({"tests/suites/N-*.cpp", "docs/phases/N-*.md", "docs/findings/N-*.md", "src/js/VM.cpp"},
+                    {"docs/findings/N-*.md", "docs/phases/N-*.md", "tests/suites/N-*.cpp", "src/js/JsOps.cpp"}), []),
+        ("...however the number that is not there yet is written",
+         [name for name in ("docs/phases/N-….md", "docs/phases/NNN-a-name.md", "tests/suites/<N>-a-name.cpp",
+                            "tests/suites/*.cpp", "docs/findings/{N}-x.md", "docs/findings/#-x.md", "tests/suites/...",
+                            "docs/phases/PR-x.md", "tests/suites/[N]-x.cpp")
+          if not claims_nothing(name)], []),
+        ("...a file there with a number, or with a name of its own, is a file",
+         [name for name in ("docs/phases/419-*.md", "tests/suites/421-the-vm-binds.cpp", "tests/suites/README.md",
+                            "tests/suites/Nesting.hpp", "docs/findings/names.md", "src/N-*.cpp", "tools/N-x.py")
+          if claims_nothing(name)], []),
+        ("...and the later of two that wrote N is refused nothing and told nothing for it",
+         claim_problems(
+             dict(claim("Task: a row\nFiles: src/js/VM.cpp, tests/suites/N-*.cpp, docs/phases/N-*.md, docs/findings/N-*.md\n"
+                        "Phase and finding: this pull request's number\nAgent: Arena\n"), number=421, phase=421, finding=421),
+             [dict(claim("Task: another\nFiles: `src/js/JsOps.cpp`, `tests/suites/N-*.cpp`, `docs/phases/N-*.md`, `docs/findings/N-*.md`\n"
+                         "Phase and finding: this pull request's number\nAgent: Marten\n"), number=415, phase=415, finding=415)],
+             Main({1}, {1}, {1}, {1}, 1, 1), on_main_file=lambda name: name.startswith("src/")), []),
         ("...and the pull request that names it bare is told so, in a note",
          [text[:74] for blocking, text in claim_problems(
              claim("Task: a row\nFiles: `src/a.cpp`, `docs/phases/`\nPhase and finding: this pull request's number\nAgent: Vega\n"),

@@ -834,6 +834,111 @@ inline void be_to_fe(const uint8_t in[32], Fe& a) {
         a.v[3 - i] = w;
     }
 }
+
+static constexpr Fe kN = {{0xf3b9cac2fc632551ull, 0xbce6faada7179e84ull, 0xffffffffffffffffull, 0xffffffff00000000ull}};
+
+inline void add_n(const Fe& a, const Fe& b, Fe& r) {
+    unsigned __int128 c = 0;
+    for (int i = 0; i < 4; ++i) {
+        c += static_cast<unsigned __int128>(a.v[i]) + b.v[i];
+        r.v[i] = static_cast<uint64_t>(c);
+        c >>= 64;
+    }
+    uint64_t borrow = 0;
+    Fe t{};
+    for (int i = 0; i < 4; ++i) {
+        unsigned __int128 diff = static_cast<unsigned __int128>(r.v[i]) - kN.v[i] - borrow;
+        t.v[i] = static_cast<uint64_t>(diff);
+        borrow = (diff >> 127) & 1u;
+    }
+    if (c || !borrow) r = t;
+}
+
+inline void mul_n(const Fe& a, const Fe& b, Fe& r) {
+    Fe acc{};
+    Fe x = a;
+    for (int i = 0; i < 4; ++i) {
+        for (int bit = 0; bit < 64; ++bit) {
+            if ((b.v[i] >> bit) & 1ull) add_n(acc, x, acc);
+            add_n(x, x, x);
+        }
+    }
+    r = acc;
+}
+
+inline void inv_n(const Fe& a, Fe& r) {
+    Fe base = a;
+    r = {{1, 0, 0, 0}};
+    Fe exp = kN;
+    exp.v[0] -= 2ull;
+    for (int i = 0; i < 4; ++i) {
+        for (int b = 0; b < 64; ++b) {
+            if ((exp.v[i] >> b) & 1ull) mul_n(r, base, r);
+            mul_n(base, base, base);
+        }
+    }
+}
+
+inline bool ecdsa_sign(const uint8_t priv[32], const uint8_t hash32[32], uint8_t sig64[64],
+                       const uint8_t k_be[32]) {
+    Fe k, rx, ry;
+    be_to_fe(k_be, k);
+    if (is_zero(k)) return false;
+    scalar_mul(k_be, kGx, kGy, rx, ry);
+    Fe r_fe = rx;
+    Fe zero{};
+    add_n(r_fe, zero, r_fe);
+    if (is_zero(r_fe)) return false;
+
+    Fe z, d, kinv, rd, s;
+    be_to_fe(hash32, z);
+    add_n(z, zero, z);
+    be_to_fe(priv, d);
+    mul_n(r_fe, d, rd);
+    add_n(z, rd, s);
+    inv_n(k, kinv);
+    mul_n(kinv, s, s);
+    if (is_zero(s)) return false;
+    fe_to_be(r_fe, sig64);
+    fe_to_be(s, sig64 + 32);
+    return true;
+}
+
+inline bool ecdsa_verify(const uint8_t pub65[65], const uint8_t hash32[32], const uint8_t sig64[64]) {
+    if (pub65[0] != 0x04u) return false;
+    Fe qx, qy, r_fe, s_fe, z;
+    be_to_fe(pub65 + 1, qx);
+    be_to_fe(pub65 + 33, qy);
+    be_to_fe(sig64, r_fe);
+    be_to_fe(sig64 + 32, s_fe);
+    if (is_zero(r_fe) || is_zero(s_fe)) return false;
+    be_to_fe(hash32, z);
+    Fe zero{};
+    add_n(z, zero, z);
+
+    Fe w, u1, u2;
+    inv_n(s_fe, w);
+    mul_n(z, w, u1);
+    mul_n(r_fe, w, u2);
+    uint8_t u1_be[32], u2_be[32];
+    fe_to_be(u1, u1_be);
+    fe_to_be(u2, u2_be);
+
+    Fe p1x, p1y, p2x, p2y;
+    scalar_mul(u1_be, kGx, kGy, p1x, p1y);
+    scalar_mul(u2_be, qx, qy, p2x, p2y);
+    Jac j1{p1x, p1y, {{1, 0, 0, 0}}};
+    Jac j2{p2x, p2y, {{1, 0, 0, 0}}};
+    Jac sum{};
+    point_add(j1, j2, sum);
+    if (is_zero(sum.z)) return false;
+    Fe zinv, zinv2, vx;
+    inv(sum.z, zinv);
+    sqr(zinv, zinv2);
+    mul(sum.x, zinv2, vx);
+    add_n(vx, zero, vx);
+    return vx.v[0] == r_fe.v[0] && vx.v[1] == r_fe.v[1] && vx.v[2] == r_fe.v[2] && vx.v[3] == r_fe.v[3];
+}
 } // namespace p256
 
 struct CryptoKeyState : JsExotic {
@@ -955,14 +1060,14 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[2];
         std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
                                                         : ascii_lower_str(to_str(alg_val));
-        if (alg_name == "ecdh") {
+        if (alg_name == "ecdh" || alg_name == "ecdsa") {
             if (fmt != "raw" || key_bytes.size() != 65u || key_bytes[0] != 0x04u) {
-                return reject_with("DataError", "SubtleCrypto.importKey: ECDH raw public key must be 65 bytes (0x04 || X || Y).");
+                return reject_with("DataError", "SubtleCrypto.importKey: EC raw public key must be 65 bytes (0x04 || X || Y).");
             }
             auto state = std::make_shared<CryptoKeyState>();
             state->type = "public";
             state->extractable = args[3].is_truthy();
-            state->hash_alg = "ecdh";
+            state->hash_alg = alg_name;
             state->key_bytes = std::move(key_bytes);
             JsValue key = r.make("CryptoKey", state);
             if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
@@ -1017,7 +1122,35 @@ void setup_subtle_crypto(Iface& I) {
         if (args.size() < 3) return reject_with("TypeError", "SubtleCrypto.sign: 3 arguments required.");
         std::string alg = args[0].is_object_like() ? ascii_lower_str(to_str(args[0].get_property("name")))
                                                    : ascii_lower_str(to_str(args[0]));
-        if (alg != "hmac") return reject_with("NotSupportedError", "SubtleCrypto.sign: only HMAC is supported.");
+        if (alg == "ecdsa") {
+            CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
+            if (!key || key->hash_alg != "ecdsa" || key->type != "private" || key->key_bytes.size() != 32u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.sign: ECDSA requires a private ECDSA CryptoKey.");
+            }
+            std::vector<uint8_t> data;
+            if (!read_buffer_source(r, args[2], data)) {
+                return reject_with("TypeError", "SubtleCrypto.sign: data must be a BufferSource.");
+            }
+            auto h = sha256_bytes(data.data(), data.size());
+            uint8_t sig[64]{};
+            for (int attempt = 0; attempt < 16; ++attempt) {
+                uint8_t k_be[32];
+                fill_random_bytes(k_be, 32u);
+                k_be[0] &= 0x7fu;
+                k_be[31] |= 0x01u;
+                if (p256::ecdsa_sign(key->key_bytes.data(), h.data(), sig, k_be)) break;
+            }
+            JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
+            JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
+            JsValue out_ab = js_construct(ab_ctor, {num(64.0)});
+            JsValue out_u8 = js_construct(u8_ctor, {out_ab});
+            for (std::size_t i = 0; i < 64u; ++i) {
+                out_u8.set_property(std::to_string(i), num(static_cast<double>(sig[i])));
+            }
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {out_ab});
+            return undefined();
+        }
+        if (alg != "hmac") return reject_with("NotSupportedError", "SubtleCrypto.sign: only HMAC and ECDSA are supported.");
         CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
         if (!key) return reject_with("TypeError", "SubtleCrypto.sign: key must be a CryptoKey.");
         std::vector<uint8_t> data;
@@ -1046,7 +1179,24 @@ void setup_subtle_crypto(Iface& I) {
         if (args.size() < 4) return reject_with("TypeError", "SubtleCrypto.verify: 4 arguments required.");
         std::string alg = args[0].is_object_like() ? ascii_lower_str(to_str(args[0].get_property("name")))
                                                    : ascii_lower_str(to_str(args[0]));
-        if (alg != "hmac") return reject_with("NotSupportedError", "SubtleCrypto.verify: only HMAC is supported.");
+        if (alg == "ecdsa") {
+            CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
+            if (!key || key->hash_alg != "ecdsa" || key->type != "public" || key->key_bytes.size() != 65u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.verify: ECDSA requires a public ECDSA CryptoKey.");
+            }
+            std::vector<uint8_t> sig, data;
+            if (!read_buffer_source(r, args[2], sig) || !read_buffer_source(r, args[3], data)) {
+                return reject_with("TypeError", "SubtleCrypto.verify: signature and data must be BufferSources.");
+            }
+            bool ok = false;
+            if (sig.size() == 64u) {
+                auto h = sha256_bytes(data.data(), data.size());
+                ok = p256::ecdsa_verify(key->key_bytes.data(), h.data(), sig.data());
+            }
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {boolean(ok)});
+            return undefined();
+        }
+        if (alg != "hmac") return reject_with("NotSupportedError", "SubtleCrypto.verify: only HMAC and ECDSA are supported.");
         CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
         if (!key) return reject_with("TypeError", "SubtleCrypto.verify: key must be a CryptoKey.");
         std::vector<uint8_t> sig, data;
@@ -1122,10 +1272,10 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[0];
         std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
                                                         : ascii_lower_str(to_str(alg_val));
-        if (alg_name == "ecdh") {
+        if (alg_name == "ecdh" || alg_name == "ecdsa") {
             std::string curve = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("namedCurve"))) : "";
             if (curve != "p-256") {
-                return reject_with("NotSupportedError", "SubtleCrypto.generateKey: only ECDH P-256 is supported.");
+                return reject_with("NotSupportedError", "SubtleCrypto.generateKey: only P-256 is supported.");
             }
             uint8_t priv[32];
             fill_random_bytes(priv, 32u);
@@ -1141,13 +1291,13 @@ void setup_subtle_crypto(Iface& I) {
             auto priv_state = std::make_shared<CryptoKeyState>();
             priv_state->type = "private";
             priv_state->extractable = args[1].is_truthy();
-            priv_state->hash_alg = "ecdh";
+            priv_state->hash_alg = alg_name;
             priv_state->key_bytes.assign(priv, priv + 32);
 
             auto pub_state = std::make_shared<CryptoKeyState>();
             pub_state->type = "public";
             pub_state->extractable = true;
-            pub_state->hash_alg = "ecdh";
+            pub_state->hash_alg = alg_name;
             pub_state->key_bytes = std::move(pub);
 
             JsValue obj_ctor = r.window.is_object() ? r.window.get_property("Object") : JsValue();

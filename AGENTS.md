@@ -735,6 +735,25 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   comparison is written by the compiler now. When you carry a change
   across another, read what the other one made every member of a type
   take part in.
+- **A whole directory in a `Files:` line.** `check_pr.py` reads a name
+  that ends in `/` as every file under it. On 25 November #390 named
+  `tests/suites/`, `docs/phases/` and `docs/findings/` so, and `claim N`
+  told each of the six pull requests opened after it that #390 "had"
+  its phase, its finding and its suite first, and to stay out of them.
+  Those three directories are where every pull request adds a file of
+  its own; named bare they claim nothing now, and the pull request that
+  named them is told so. **Name your own files** (`docs/phases/N-….md`).
+  A directory that is yours alone is still claimed whole.
+- **A file under another pull request's number.** #393 was written as
+  Phase 387 while #387 to #392 were being opened, and was finished with
+  a phase, a finding and a suite called `387-…`. The landing session
+  took it; its agent renamed the three two minutes later; a lot can
+  only land the commit it was tested with, so it was built again, with
+  #388 waiting in it. **The number is the one GitHub gave the pull
+  request, and the three file names begin with it**: `claim N` refuses
+  any other, and the landing session takes no pull request that has
+  one. The title carries the number into the merge commit: #393's still
+  said 387 when its lot had passed.
 
 **`main`**
 
@@ -980,6 +999,26 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   the suites take depends on the machine by a factor of two**: 117, 176
   and 204 seconds for the same six stretches in three runs within half
   an hour. One run says little about a change to CI; compare several.
+
+  On 25 November two things were found in a run's notices and warnings
+  that no failure would ever have shown, because nothing failed:
+  - **the sanitizer jobs were compiling what nothing had changed.** The
+    saved objects were kept under a limit, the directory was always at
+    it, and what ccache removed to stay under it included 8 to 21 of
+    the 107 objects the last build had used. Every sanitizer job then
+    compiled those again: 20 to 88 seconds each, where the step takes 3
+    to 5 when every object is there. The job that saves now keeps what
+    its build used and nothing else (0.11 GB where 0.5 was fetched);
+  - **one job in fourteen was refused ccache's binary** by the project's
+    release page, compiled the sanitizer build from nothing, 300
+    seconds, and made its lot 9.7 minutes. It warned, as it is meant
+    to, and nobody read warnings. The binary now comes with the saved
+    objects.
+
+  `python3 tools/ci/run_report.py N --times` prints every job of #N's
+  newest run with its long steps, its notices and its warnings, and how
+  long the jobs waited for a machine. **When a run is longer than the
+  one before it, read that before you change anything.**
 
 **The turn, and what a merge does to it**
 

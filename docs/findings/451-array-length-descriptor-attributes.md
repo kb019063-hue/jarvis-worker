@@ -34,7 +34,7 @@ The dense shortcut now applies to a new index only when the array remains extens
 - `make js-conformance`: 1,153 / 1,158; DOM 678/678; URL 1,188/1,188; tree-construction 1,973/1,973; XML 1,718/1,718; WPT 9,570/9,824 with its reported Grid, XML serializer, and parent-global failures.
 - `make diff-trees`: all four runs pass with no differing trees. `PATH="$PWD/build/venv/bin:$PATH" make diff-xml` (with `lxml` installed in a local venv): 4,000 XML differential inputs with 0 differences and 3,000/3,000 round trips. `make deep`: 1,332/1,332 runs pass.
 - `python3 tools/ci/check_suites.py`, `python3 tools/ci/check_docs.py`, `make check-numbers`, `python3 tools/next_ids.py --self-test`, and `git diff --check` pass.
-- A local `make asan` attempt exceeded the 30-minute tool limit and was killed during its deep-nesting unit suite. Sanitizer checks will run on the merged PR head in CI; the local fuzz run was not completed.
+- A local `make asan` attempt exceeded the 30-minute tool limit and was killed during its deep-nesting unit suite. The full merged-head CI run on `96c37749` passed all jobs, including sanitizer and deep-page jobs; the local fuzz run was not completed.
 
 ## Remaining scope
 

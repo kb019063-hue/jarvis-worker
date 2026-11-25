@@ -23,7 +23,7 @@ Compared the engine with Node using fresh, read-only, frozen, and sealed arrays.
 - `make wpt`: 9,570 / 9,824 subtests, with the reported Grid, XML serializer, and parent-global failures. `make xml-conformance`: 1,718 / 1,718.
 - `make diff-trees`: all four runs pass with 0 differing trees. `PATH="$PWD/build/venv/bin:$PATH" make diff-xml` (with `lxml` installed in a local venv): 4,000 XML differential inputs with 0 differences and 3,000/3,000 round trips.
 - `make deep`: 1,332 / 1,332 runs pass. `python3 tools/ci/check_suites.py`, `python3 tools/ci/check_docs.py`, `make check-numbers`, `python3 tools/next_ids.py --self-test`, and `git diff --check` pass.
-- A local `make asan` attempt exceeded the 30-minute tool limit and was killed during its deep-nesting unit suite. The sanitizer checks will be evaluated on the merged PR head by CI; the dependent local fuzz run was unavailable before the ASan binary was produced.
+- A local `make asan` attempt exceeded the 30-minute tool limit and was killed during its deep-nesting unit suite. The full merged-head CI run on `96c37749` passed all jobs, including sanitizer and deep-page jobs; the local fuzz run was not completed.
 
 ## Remaining scope
 

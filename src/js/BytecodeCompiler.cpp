@@ -261,11 +261,11 @@ int BytecodeCompiler::resolve_local(const std::string& name) {
 }
 
 std::shared_ptr<BytecodeFunction> BytecodeCompiler::compile(const BlockStmt* program) {
-    // A script ending in try must return the last expression completion,
-    // including one preceding it or in either branch. Functions return only
-    // explicit return values and use their ordinary compilation path.
+    // A script whose last statement is not an expression must still return
+    // its accumulated completion, including in either arm of a try. Functions
+    // return only explicit values and use their ordinary compilation path.
     if (!m_is_function && program && !program->statements.empty() &&
-        dynamic_cast<const TryStmt*>(program->statements.back().get())) {
+        !dynamic_cast<const ExprStmt*>(program->statements.back().get())) {
         emit_opcode(OpCode::OpUndefined);
         m_completion_slot = static_cast<int>(m_locals.size());
         add_local("");
@@ -587,6 +587,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         }
         emit_opcode(OpCode::OpReturn);
     } else if (auto fn_decl = dynamic_cast<const FunctionDeclStmt*>(stmt)) {
+        if (m_catch_depth) throw std::runtime_error("A function in catch is not supported by the bytecode compiler");
         const FunctionNode& node = *fn_decl->fn;
         require_simple_function(node);
         const std::vector<std::string> params = node.simple_param_names();
@@ -1017,6 +1018,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
     } else if (dynamic_cast<const YieldExpr*>(expr)) {
         throw std::runtime_error("Yield compiled via AST interpreter");
     } else if (auto fn_expr = dynamic_cast<const FunctionExpr*>(expr)) {
+        if (m_catch_depth) throw std::runtime_error("A function in catch is not supported by the bytecode compiler");
         const FunctionNode& node = *fn_expr->fn;
         require_simple_function(node);
         const std::vector<std::string> params = node.simple_param_names();

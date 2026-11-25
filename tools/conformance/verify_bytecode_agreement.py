@@ -77,6 +77,7 @@ AGREES: list[Case] = [
     Case("function f(){throw 8} try{f()}catch(e){e}", "a throw crosses a VM call frame"),
     Case("try{try{throw 1}catch(e){throw e+2}}catch(x){x}", "nested handler rethrows to outer handler"),
     Case("try{1;throw 2}catch(e){}", "empty catch preserves prior completion"),
+    Case("try{throw 1}catch(e){e+2};", "completion survives a trailing empty statement"),
     Case("5;try{}catch(e){}", "empty try preserves earlier completion"),
     Case("try{1;while(false){}}catch(e){}", "empty loop resets script completion"),
     Case("try{throw 1}catch(e){let x=e; x+2}", "catch and block locals remain distinct"),
@@ -281,6 +282,7 @@ REFUSES: list[Case] = [
     Case("try { throw [1]; } catch ([e]) { e; }", "catch pattern"),
     Case("function f(){try{return 1}catch(e){}} f()", "return from protected block"),
     Case("while(true){try{throw 1}catch(e){break}}", "jump from catch"),
+    Case("try{throw 3}catch(e){function f(){return e}f()}", "function in catch would capture its binding"),
 ]
 
 

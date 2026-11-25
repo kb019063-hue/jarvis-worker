@@ -16,6 +16,7 @@ TEST(the_bytecode_vm_catches_exceptions) {
     agree("function f(){throw 8} try{f()}catch(e){e}", "8");
     agree("try{try{throw 1}catch(e){throw e+2}}catch(x){x}", "3");
     agree("try{1;throw 2}catch(e){}", "1");
+    agree("try{throw 1}catch(e){e+2};", "3");
     agree("5;try{}catch(e){}", "5");
     agree("try{1;while(false){}}catch(e){}", "undefined");
     agree("try{throw 1}catch(e){let x=e; x+2}", "3");
@@ -35,7 +36,8 @@ TEST(the_bytecode_vm_catches_exceptions) {
     // unwinding that is not implemented, so the compiler refuses them.
     for (const char* source : {"try{1}finally{2}", "try{throw [1]}catch([e]){e}",
                                "function f(){try{return 1}catch(e){}}f()",
-                               "while(true){try{throw 1}catch(e){break}}"}) {
+                               "while(true){try{throw 1}catch(e){break}}",
+                               "try{throw 3}catch(e){function f(){return e}f()}"}) {
         TestPage page;
         bool refused = false;
         try { page.js.eval_bytecode(source); }

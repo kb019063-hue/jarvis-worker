@@ -2820,9 +2820,17 @@ uint64_t s_style_generation = 0;
 
 uint64_t style_generation() { return s_style_generation; }
 
+/// Defined after the CSSOM serializers it needs; it writes an adopted sheet
+/// back to CSS so the layout's cascade reads the edit (Phase 457). `realm` is
+/// allowed to be null for a write outside a realm.
+void refresh_adopted_record(Realm& realm, const std::shared_ptr<ParsedSheet>& sheet);
+
 void touch_sheet(const std::shared_ptr<ParsedSheet>& sheet) {
     if (sheet) ++sheet->generation;
     ++s_style_generation;
+    // An adopted sheet's text is what the layout reads, so a write to it has to
+    // be written back. Nothing happens for a sheet no document adopted.
+    if (sheet) refresh_adopted_record(current_realm(), sheet);
 }
 
 /// The frames of a `@keyframes` block: `0%, 50% { … }` each, until the brace
@@ -3137,6 +3145,11 @@ struct StylePart : RealmPart {
     /// text can be replaced by another (an entry made again), and `disabled`
     /// is what was written on the object, not on the element.
     std::map<const ParsedSheet*, bool> disabled_sheets;
+    /// An adopted sheet's record parsed into this cascade's own model, by the
+    /// record. Kept and rebuilt only when the record's generation moves, so a
+    /// `getComputedStyle` on a thousand elements does not parse the same sheet
+    /// a thousand times.
+    std::map<const Document::AdoptedStyleSheet*, std::shared_ptr<ParsedSheet>> adopted_parsed;
 
     bool is_disabled(const ParsedSheet* sheet) const {
         auto found = disabled_sheets.find(sheet);
@@ -4155,6 +4168,31 @@ void compute_block(Realm& realm, const Element& element, Block& block, const Nod
                 if (part.is_disabled(part.style_sheets[i].get())) continue;
             }
             collect(*part.style_sheets[i], 1);
+        }
+    }
+
+    // What a script adopted (`document.adoptedStyleSheets`), after the
+    // document's own sheets, which is the order CSSOM gives them: a later
+    // adopted rule beats an earlier one at equal specificity, and both beat
+    // the document's. The text is the sheet written back to CSS by the CSSOM
+    // side (Phase 457), and it is parsed here exactly as a `<style>`'s is.
+    // `@media` rules inside it keep their queries: `walk` reads the query of a
+    // media rule and the rules it holds.
+    if (root->is_document()) {
+        if (const auto* found = dynamic_cast<const Document*>(root)) {
+            for (const auto& adopted : found->adopted_sheets()) {
+                if (!adopted || adopted->text.empty()) continue;
+                StylePart& style_part = realm.part<StylePart>();
+                auto& cached_sheet = style_part.adopted_parsed[adopted.get()];
+                if (!cached_sheet || cached_sheet->generation != adopted->generation) {
+                    cached_sheet = std::make_shared<ParsedSheet>();
+                    std::size_t at = 0;
+                    parse_rules(adopted->text, at, cached_sheet->rules, false);
+                    cached_sheet->number_rules();
+                    cached_sheet->generation = adopted->generation;
+                }
+                collect(*cached_sheet, 2);
+            }
         }
     }
     std::vector<RawDeclaration> inline_declarations;
@@ -5672,6 +5710,95 @@ void RuleListState::keys(JsObject*, std::vector<std::string>& out) {
     for (std::size_t i = 0; i < rules->size(); ++i) out.push_back(std::to_string(i));
 }
 
+// --- `document.adoptedStyleSheets` ------------------------------------------
+//
+// The sheets a script built and the document adopted (CSSOM §"Adopted
+// style sheets"). The list belongs to the document, not to the realm: the
+// cascade is built from the document, in `DocumentStyles::build_resolver`,
+// which knows nothing of a realm. What is kept there is the sheet as *CSS
+// text* and a generation, because the CSSOM's model of a sheet and the
+// layout's are different types and text is the one form every CSSOM write can
+// be turned back into.
+
+/// The `StyleSheetList` object `document.adoptedStyleSheets` answers. It reads
+/// the document's list live, so a sheet that left it is gone from a list object
+/// a script held on to.
+struct AdoptedSheetListState : JsExotic {
+    std::weak_ptr<Document> document;
+
+    bool get(JsObject*, const std::string& name, JsValue& out) override;
+    bool has(JsObject*, const std::string& name) override;
+    void keys(JsObject*, std::vector<std::string>& out) override;
+};
+
+/// The sheet record of one CSSOM sheet object, made when it is adopted.
+/// `SheetState` holds it so `insertRule` and `replaceSync` can write the text
+/// back as they change the rules, which is what makes an edit reach the layout.
+std::unordered_map<const ParsedSheet*, std::shared_ptr<Document::AdoptedStyleSheet>> s_adopted_records;
+
+/// A whole sheet written back to CSS, which is what the layout's cascade is
+/// given. Each rule is serialized by the same writer `rule.cssText` uses, so
+/// `cssRules` and the layout cannot disagree about what a rule says.
+std::string sheet_css_text(Realm& realm, const std::shared_ptr<ParsedSheet>& sheet) {
+    if (!sheet) return std::string();
+    std::string out;
+    for (const auto& rule : sheet->rules) {
+        if (!rule) continue;
+        RuleState state;
+        state.sheet = sheet;
+        state.rule = rule;
+        std::string text = rule_css_text(realm, state);
+        if (text.empty()) continue;
+        out += text;
+        out += '\n';
+    }
+    return out;
+}
+
+/// Called by every CSSOM write, through `touch_sheet`: an adopted sheet's
+/// record is brought up to date, so the next layout pass reads the rules the
+/// script just wrote. A sheet no document adopted has no record and costs
+/// nothing.
+void refresh_adopted_record(Realm& realm, const std::shared_ptr<ParsedSheet>& sheet) {
+    if (!sheet) return;
+    auto found = s_adopted_records.find(sheet.get());
+    if (found == s_adopted_records.end() || !found->second) return;
+    found->second->text = sheet_css_text(realm, sheet);
+    ++found->second->generation;
+}
+
+/// The live sheet whose adoption record is `record`, so a list index can be
+/// answered with the sheet object it is, not a copy of it.
+std::unordered_map<const Document::AdoptedStyleSheet*, std::weak_ptr<ParsedSheet>> s_adopted_sheets;
+
+bool AdoptedSheetListState::get(JsObject*, const std::string& name, JsValue& out) {
+    std::size_t index = 0;
+    if (!parse_index(name, index)) return false;
+    auto owner = this->document.lock();
+    if (!owner) return false;
+    const auto& sheets = owner->adopted_sheets();
+    if (index >= sheets.size() || !sheets[index]) return false;
+    auto live = s_adopted_sheets.find(sheets[index].get());
+    if (live == s_adopted_sheets.end()) return false;
+    auto sheet = live->second.lock();
+    if (!sheet) return false;
+    out = make_sheet(current_realm(), sheet, nullptr, true, true, std::string());
+    return true;
+}
+
+bool AdoptedSheetListState::has(JsObject*, const std::string& name) {
+    std::size_t index = 0;
+    if (!parse_index(name, index)) return false;
+    auto owner = this->document.lock();
+    return owner && index < owner->adopted_sheets().size();
+}
+
+void AdoptedSheetListState::keys(JsObject*, std::vector<std::string>& out) {
+    auto owner = this->document.lock();
+    if (!owner) return;
+    for (std::size_t i = 0; i < owner->adopted_sheets().size(); ++i) out.push_back(std::to_string(i));
+}
+
 /// A media query list as the parts a browser counts: `media.length` is the
 /// number of alternatives, and each is trimmed as it is stored.
 std::vector<std::string> media_list_items(const SheetRulePtr& rule) {
@@ -5794,6 +5921,30 @@ void setup_rule_list(Iface& I) {
         const std::size_t index = static_cast<std::size_t>(to_ulong(args[0]));
         if (index >= rules->size() || !(*rules)[index]) return null();
         return make_rule(realm, state.sheet, state.parent, (*rules)[index]);
+    });
+}
+
+/// `StyleSheetList`, the interface `document.adoptedStyleSheets` answers:
+/// `length` and `item(i)`, with the indices answering the same sheet objects.
+void setup_style_sheet_list(Iface& I) {
+    I.getter("length", [](Realm&) {
+        AdoptedSheetListState& state = this_state<AdoptedSheetListState>("StyleSheetList");
+        auto owner = state.document.lock();
+        return num(owner ? static_cast<double>(owner->adopted_sheets().size()) : 0.0);
+    });
+    I.method("item", 1, [](Realm& realm, Args args) {
+        require_args(args, 1, "StyleSheetList.item");
+        AdoptedSheetListState& state = this_state<AdoptedSheetListState>("StyleSheetList");
+        auto owner = state.document.lock();
+        if (!owner) return null();
+        const std::size_t index = static_cast<std::size_t>(to_ulong(args[0]));
+        const auto& sheets = owner->adopted_sheets();
+        if (index >= sheets.size() || !sheets[index]) return null();
+        auto live = s_adopted_sheets.find(sheets[index].get());
+        if (live == s_adopted_sheets.end()) return null();
+        auto sheet = live->second.lock();
+        if (!sheet) return null();
+        return make_sheet(realm, sheet, nullptr, true, true, std::string());
     });
 }
 
@@ -6169,6 +6320,61 @@ JsValue style_sheet(Realm& realm, Element& element) {
     return sheet_object(realm, element);
 }
 
+/// `document.adoptedStyleSheets`: a live `StyleSheetList` over the document's
+/// adopted records. Handed out once per document, as a browser does, so
+/// `document.adoptedStyleSheets === document.adoptedStyleSheets`.
+JsValue document_adopted_style_sheets(Realm& realm, Document& document) {
+    auto state = std::make_shared<AdoptedSheetListState>();
+    state->document = std::const_pointer_cast<Document>(
+        std::static_pointer_cast<const Document>(document.shared_from_this()));
+    return realm.make("StyleSheetList", state);
+}
+
+/// `document.adoptedStyleSheets = [...]`, CSSOM's "set an adopted style sheet
+/// list". Every value must be a `CSSStyleSheet` the script constructed: an
+/// element-owned sheet belongs to its element, and a browser refuses one with
+/// `NotAllowedError` rather than taking it away from the element. The list is
+/// copied in order, and a sheet that was already adopted keeps the record it
+/// has, so the text written back by a later `insertRule` still lands in the
+/// right place.
+void set_document_adopted_style_sheets(Realm& realm, Document& document, const JsValue& value) {
+    std::vector<std::shared_ptr<Document::AdoptedStyleSheet>> next;
+    if (!value.is_nullish()) {
+        if (!value.is_object_like()) {
+            throw_dom(realm, "TypeError", "The provided value is not of type 'CSSStyleSheet[]'.");
+        }
+        const JsValue length_value = value.get_property("length");
+        const double length = length_value.to_number();
+        for (double i = 0; i < length; i += 1.0) {
+            const JsValue item = value.get_property(std::to_string(static_cast<long long>(i)));
+            auto* state = state_of<SheetState>(item);
+            if (!state) {
+                throw_dom(realm, "TypeError",
+                          "Failed to set the 'adoptedStyleSheets' property: the value is not of type "
+                          "'CSSStyleSheet'.");
+            }
+            if (!state->own_sheet || state->owner) {
+                throw_dom(realm, "NotAllowedError",
+                          "Failed to set the 'adoptedStyleSheets' property: a sheet owned by an "
+                          "element cannot be adopted.");
+            }
+            auto& record = s_adopted_records[state->sheet.get()];
+            if (!record) {
+                record = std::make_shared<Document::AdoptedStyleSheet>();
+                // Written now, so a list adopted without the text having ever
+                // been read still carries the rules it has.
+                record->text = sheet_css_text(realm, state->sheet);
+            }
+            s_adopted_sheets[record.get()] = state->sheet;
+            next.push_back(record);
+        }
+    }
+    document.set_adopted_sheets(std::move(next));
+    // The cascade reads the list, so a change to it is a style change: the
+    // next `getComputedStyle` and the next layout both see it.
+    ++s_style_generation;
+}
+
 JsValue document_style_sheets(Realm& realm, Document& document) {
     std::vector<JsValue> out;
     for_each_descendant(document, [&](Node& node) {
@@ -6228,6 +6434,7 @@ void register_style_interfaces() {
     register_interface({"CSSRuleList", nullptr, setup_rule_list, nullptr, 0, nullptr});
     register_interface({"MediaList", nullptr, setup_media_list, nullptr, 0, nullptr});
     register_interface({"CSSStyleSheet", nullptr, setup_style_sheet, construct_style_sheet, 0, nullptr});
+    register_interface({"StyleSheetList", nullptr, setup_style_sheet_list, nullptr, 0, nullptr});
     register_interface({"FontFaceSet", nullptr, setup_font_face_set, nullptr, 0, nullptr});
 }
 

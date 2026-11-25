@@ -290,7 +290,16 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
             if (auto scope = realm.global_scope.lock()) {
                 const JsEnvironment::Binding* binding = scope->find_own(key);
                 if (binding && !binding->is_lexical) {
-                    return data(binding->value, !binding->is_readonly, false, !binding->is_readonly);
+                    // `configurable` used to be `!is_readonly`, which was
+                    // right for `undefined`/`NaN`/`Infinity` and wrong for
+                    // every function: §18's table says of RangeError and Math
+                    // exactly what it says of Array — "configurable: true" —
+                    // and it is a script's own `var` that §9.1.1.4 makes
+                    // non-configurable, the opposite of what this interpreter
+                    // had marked. The two attributes are separate questions,
+                    // so they get separate answers (Phase 425).
+                    return data(binding->value, !binding->is_readonly, !binding->is_builtin,
+                                scope->is_configurable_binding(*binding));
                 }
             }
         }
@@ -448,6 +457,29 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         if (!(asked >= 0) || asked != std::floor(asked) || asked > 4294967295.0) {
             js_throw_range_error("Invalid array length");
         }
+        // §10.4.2.4 step 3.b, which this path did not have (Phase 428): a
+        // `length` that is not writable refuses every *new* value. It is not
+        // the same question as "nothing can be deleted": `Object.freeze` makes
+        // the length read-only, and `Object.seal` leaves it writable while
+        // making every place non-configurable, so a sealed array may grow and
+        // may not shrink. What says "read-only" is the entry a
+        // `{ writable: false }` definition wrote, or the cell `freeze` marked —
+        // `seal` marks the cell but not the entry.
+        bool length_writable = !cell->frozen;
+        if (const auto entry = cell->properties.find("length"); entry != cell->properties.end()) {
+            if (!(entry->flags & PropertyMap::Writable)) length_writable = false;
+        }
+        size_t length_now = cell->array_elements.size();
+        if (const auto entry = cell->properties.find("length"); entry != cell->properties.end()) {
+            length_now = std::max(length_now, static_cast<size_t>(js_to_number(entry->second)));
+        }
+        // Asking again for the value the array already has is not a new value:
+        // step 3 says "if SameValue(Desc.[[Value]], oldLenDesc.[[Value]]) is
+        // true, return true", which is what
+        // `Object.defineProperty(frozen, "length", { value: frozen.length })` is.
+        if (!length_writable && asked != static_cast<double>(length_now)) {
+            js_throw_type_error("Cannot redefine property: length");
+        }
         // Steps 4.a-c, which the assignment path already had and this one did
         // not: shortening an array *deletes* every place at or above the new
         // length, and a place that is not configurable cannot be deleted — the
@@ -472,6 +504,17 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         }
         bool refused = false;
         if (asked_length < previous) {
+            // §10.4.2.4 step 4.c for the places that are *elements*. `seal`
+            // and `freeze` mark the cell and never write an attribute onto a
+            // dense place, so a sealed array's elements are not configurable
+            // even though the map says nothing about them: the deletion the
+            // shrink asks for fails at the last element, and the whole request
+            // is refused (Phase 428). Without this, `Object.seal([1,2,3])`
+            // then `length: 1` shrank the array, which is the one thing
+            // sealing is for.
+            if (cell->sealed && asked_length < cell->array_elements.size()) {
+                js_throw_type_error("Cannot delete property of an array");
+            }
             // A place in the map at or above the new length: configurable ones
             // are deleted, and the first non-configurable one stops the sweep
             // and refuses the request.
@@ -514,6 +557,21 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
             if (cell->array_holes) {
                 for (size_t i = asked_length; i < previous; ++i) cell->array_holes->clear(i);
             }
+        }
+    }
+    // §10.4.2.4 step 4.a through an index: a definition at or past the length
+    // is a write to that length, and a read-only length refuses it. Step 4.a
+    // is "if index >= oldLen and oldLenDesc.[[Writable]] is false, return
+    // false", so the place never exists and the length never moves.
+    if (cell && cell->is_array && array_index) {
+        size_t length_now = cell->array_elements.size();
+        bool length_writable = !cell->frozen;
+        if (const auto entry = cell->properties.find("length"); entry != cell->properties.end()) {
+            length_now = std::max(length_now, static_cast<size_t>(js_to_number(entry->second)));
+            if (!(entry->flags & PropertyMap::Writable)) length_writable = false;
+        }
+        if (index >= length_now && !length_writable) {
+            js_throw_type_error("Cannot define property past a read only length");
         }
     }
     const bool host_keeps = cell && cell->exotic && array_index && cell->exotic->owns_place(cell, key);

@@ -146,7 +146,31 @@ public:
     /// are held; `has_credentials` is the question, not an error.
     static bool has_credentials(const std::string& origin, const std::string& realm);
 
-    /// Forgets every credential held, for every origin and realm.
+    /// Credentials for a **proxy** authentication realm (RFC 9110 §11.7).
+    ///
+    /// A proxy's protection space is its own: RFC 9110 §11.7.1 gives it
+    /// `Proxy-Authenticate` on a `407` and `Proxy-Authorization` on the
+    /// request, and §11.7 says the two spaces are kept apart so that a proxy
+    /// can never collect credentials meant for an origin (or the reverse).
+    /// `authority` is the proxy's authority as the client names it --
+    /// `host` or `host:port` -- and `realm` is the realm its challenge
+    /// carried. Nothing is sent until a proxy asks, and a non-stale `407`
+    /// after an attempt forgets the pair exactly as a `401` does.
+    static void set_proxy_credentials(const std::string& authority, const std::string& realm,
+                                      const std::string& username, const std::string& password);
+
+    /// The proxy credentials held for an authority and realm, if any.
+    static bool has_proxy_credentials(const std::string& authority, const std::string& realm);
+
+    /// Forgets every proxy credential held, for every authority and realm.
+    /// Separate from `clear_auth_credentials`, which is the document's.
+    static void clear_proxy_credentials();
+    /// How many (authority, realm) proxy pairs are held. For tests.
+    static std::size_t proxy_credential_count();
+
+    /// Forgets every credential held, for every origin and realm -- and, for
+    /// the document space only, every proxy credential too. A caller that
+    /// means "all of it" gets all of it.
     static void clear_auth_credentials();
     /// How many (origin, realm) pairs are held. For tests.
     static std::size_t auth_credential_count();

@@ -2561,6 +2561,47 @@
         }
       ],
       "note": "Khronos WebGL 1.0 \u00a7\u00a72.2, 5.14.3: paired with canvas_2d_script_paints_canvas_green so the only variable under test is WebGL context creation and compositing."
+    },
+    {
+      "name": "svg_shapes_paint_where_getbbox_says",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}svg{display:block}</style></head><body><svg width=\"200\" height=\"120\"><rect x=\"10\" y=\"10\" width=\"40\" height=\"30\" fill=\"#ff0000\"/><circle cx=\"100\" cy=\"25\" r=\"15\" fill=\"#0000ff\"/><path d=\"M20 100 A40 40 0 0 1 100 100\" fill=\"#00ff00\"/></svg></body></html>",
+      "assert": [
+        {
+          "kind": "pixel",
+          "x": 30,
+          "y": 25,
+          "colour": "#ff0000",
+          "describe": "the rect's fill is where its x/y/width/height put it"
+        },
+        {
+          "kind": "pixel",
+          "x": 100,
+          "y": 25,
+          "colour": "#0000ff",
+          "describe": "the circle's centre is its cx/cy"
+        },
+        {
+          "kind": "pixel",
+          "x": 60,
+          "y": 60,
+          "colour": "#00ff00",
+          "describe": "the arc M20 100 A40 40 0 0 1 100 100 rises exactly 40 user units from its chord -- the rim of the circle the sweep follows, which is the curve bound getBBox() reports"
+        },
+        {
+          "kind": "pixel",
+          "x": 60,
+          "y": 59,
+          "colour": "#ffffff",
+          "describe": "and not one pixel higher: a box built from the command's own points, or an arc flattened without its extremes, comes up short of the rim"
+        },
+        {
+          "kind": "pixel",
+          "x": 5,
+          "y": 5,
+          "colour": "#ffffff",
+          "describe": "nothing is painted outside the shapes"
+        }
+      ]
     }
   ]
 }

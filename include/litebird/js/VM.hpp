@@ -1,6 +1,7 @@
 #pragma once
 
 #include "litebird/js/Bytecode.hpp"
+#include "litebird/js/IterationCursor.hpp"
 #include "litebird/js/JsValue.hpp"
 #include "litebird/js/Heap.hpp"
 #include "litebird/dom/Document.hpp"
@@ -22,6 +23,9 @@ public:
     explicit VM(std::shared_ptr<Document> doc = nullptr);
 
     JsValue interpret(std::shared_ptr<BytecodeFunction> function);
+    bool running() const { return !m_frames.empty(); }
+    JsValue call_compiled(const JsValue& function, const std::vector<JsValue>& args,
+                          const JsValue* this_val);
 
     void set_global(const std::string& name, JsValue value);
     JsValue get_global(const std::string& name) const;
@@ -37,10 +41,15 @@ public:
 
 private:
     void init_builtins();
-    JsValue run();
+    JsValue run(size_t stop_depth = 0);
 
     std::vector<CallFrame> m_frames;
     std::vector<JsValue> m_stack;
+    /// The array-destructuring cursors this script left open, one per
+    /// `OpIteratorInit` without its close yet. Nested patterns stack, so a
+    /// default expression that destructures again opens its own cursor on
+    /// top of the one being served.
+    std::vector<std::unique_ptr<IterationCursor>> m_iterators;
     std::unordered_map<std::string, JsValue> m_globals;
     std::shared_ptr<Document> m_document;
 };

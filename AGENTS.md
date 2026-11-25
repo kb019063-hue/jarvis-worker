@@ -614,6 +614,16 @@ asan`.
   part of `make asan-core`, and `make asan-build` and then that part
   (`make asan-unit`, say; `make help` lists the nine) runs it here without
   the rest.
+- **Nobody reviews a pull request here, and a finished one says so
+  itself.** When the checks pass, take `WIP:` off the title (and
+  `gh pr ready N`, if it was opened as a draft) and run `python3
+  tools/ci/check_pr.py merge N`: that, CI and the lot are the review.
+  A pull request left as a draft or under `WIP:` "for review" is in no
+  list, and waits for nothing. #425 was pushed at 06:58 on 25 November,
+  by its own text implemented, measured and validated, and "remains
+  draft for review"; nothing was pushed or said after that, and it
+  stood for thirteen hours, until the landing session took the `WIP:`
+  off and put it in a lot at 20:14.
 - A floor in CI is not lowered to let a pull request pass.
   `tests/js-conformance/everyday-*.dat` and
   `tests/dom-conformance/everyday.dat` are not edited. A DOM case that

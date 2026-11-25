@@ -70,9 +70,16 @@ runs:
         kept="$HOME/.ccache/ccache-binary/ccache-$CCACHE_RELEASE"
         from=""
         mkdir -p "$bin"
+        # What the kept one says of itself, read whole and not through a
+        # pipe: this shell fails a pipe when any part of it does, and
+        # `--version | grep -q` ends ccache with a broken pipe as soon as
+        # grep has seen enough. The first three runs with a kept binary
+        # fetched it again for that.
+        kept_says=""
+        if [ -x "$kept" ]; then kept_says="$("$kept" --version 2>/dev/null || true)"; fi
         if command -v ccache >/dev/null 2>&1; then
           ln -sf "$(command -v ccache)" "$bin/ccache" && from="the runner's own"
-        elif [ -x "$kept" ] && "$kept" --version 2>/dev/null | grep -q "ccache version $CCACHE_RELEASE"; then
+        elif [ "${kept_says%%$'\n'*}" = "ccache version $CCACHE_RELEASE" ]; then
           cp "$kept" "$bin/ccache" && from="kept with the objects"
         else
           name="ccache-$CCACHE_RELEASE-linux-x86_64-musl-static"
@@ -101,14 +108,16 @@ runs:
             # build. It tidies each of its sixteen directories by itself
             # when that one is over a sixteenth of the limit, and the
             # objects of the sanitizer build are few and large: 107 of
-            # them are 0.45 GB. Under a limit of 500M a build that
-            # compiled them all kept 86 (run 45471158220, 24 November;
-            # the run after it had 86 hits and 21 misses with nothing
-            # changed), and each of the seven sanitizer jobs then compiled
-            # the 21 again: 57 to 88 seconds where a build that finds
-            # everything takes 3 to 5 (runs 45473629683 and 45478444576).
-            # What is kept is decided where the objects are saved
-            # (ci.yml, "Only the objects this build used"), not here.
+            # them, 0.11 GB, two of them 14 and 28 MB before they are
+            # compressed. Under a limit of 500M, with the directory full
+            # of older builds' objects, a build that compiled them all
+            # kept 86 (run 45471158220, 24 November; the run after it had
+            # 86 hits and 21 misses with nothing changed), and each of the
+            # seven sanitizer jobs then compiled the 21 again: 57 to 88
+            # seconds where a build that finds everything takes 3 to 5
+            # (runs 45473629683 and 45478444576). What is kept is decided
+            # where the objects are saved (ci.yml, "Only the objects this
+            # build used"), not here.
             echo "CCACHE_MAXSIZE=${{ inputs.objects == 'asan' && '2G' || '500M' }}"
             # When this job began to use the cache: see the same step.
             echo "CCACHE_BEGAN=$(date +%s)"

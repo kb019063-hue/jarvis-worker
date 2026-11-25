@@ -620,6 +620,15 @@ JsValue VM::run() {
                 copy_data_properties(target, source, nullptr);
                 break;
             }
+            case OpCode::OpDefineTemplateRaw: {
+                JsValue raw = pop();
+                // The tagged template's strings array sits below the raw one;
+                // `raw` is not enumerable (PropertyMap::Hidden), matching the
+                // tree-walker's eval_tagged_template.
+                JsValue& strings = m_stack.back();
+                strings.define_property("raw", std::move(raw), PropertyMap::Hidden);
+                break;
+            }
 
             case OpCode::OpAdd: {
                 JsValue b = pop();

@@ -1808,6 +1808,12 @@ struct AuthCredentials {
 std::mutex g_auth_mutex;
 std::unordered_map<std::string, AuthCredentials> g_auth_store;
 
+/// The proxy's protection space, kept apart from the origin's on purpose
+/// (RFC 9110 §11.7): a credential a server asked for must never be offered to
+/// a proxy, and one a proxy asked for must never be offered to a server. The
+/// key's first component is the proxy's authority as the client names it.
+std::unordered_map<std::string, AuthCredentials> g_proxy_auth_store;
+
 std::string auth_store_key(std::string_view origin, std::string_view realm) {
     return std::string(origin) + "\n" + std::string(realm);
 }
@@ -2288,6 +2294,70 @@ bool auth_authorization_for(const std::vector<AuthChallenge>& challenges,
     return false;
 }
 
+/// The value for `Proxy-Authorization`, from the challenges a `407` carried.
+///
+/// Same ranking and the same refusal rules as the origin's helper above, but
+/// it reads the *proxy* store and only ever matches a challenge against the
+/// credential held for that challenge's own realm. RFC 9110 §11.7: the proxy's
+/// protection space is not the origin's, so a credential the document set can
+/// never be offered here even when the realm names match.
+///
+/// The realm a challenge names goes back to the caller so that a refusal can
+/// forget exactly the pair that was refused, the way a `401` does.
+bool auth_proxy_authorization_for(const std::vector<AuthChallenge>& challenges,
+                                  const std::string& proxy_authority,
+                                  std::string& out,
+                                  std::string* authorized_realm = nullptr,
+                                  std::string* authorized_scheme = nullptr) {
+    const std::vector<const AuthChallenge*> digests = auth_ranked_digest_challenges(challenges);
+    const AuthChallenge* basic = nullptr;
+    for (const AuthChallenge& challenge : challenges) {
+        if (ascii_lower(challenge.scheme) == "basic") {
+            basic = &challenge;
+            break;
+        }
+    }
+
+    for (const AuthChallenge* challenge : digests) {
+        auto it = challenge->params.find("realm");
+        const std::string realm = it == challenge->params.end() ? std::string() : it->second;
+        AuthCredentials creds;
+        {
+            std::lock_guard<std::mutex> lock(g_auth_mutex);
+            auto found = g_proxy_auth_store.find(auth_store_key(proxy_authority, realm));
+            if (found == g_proxy_auth_store.end()) continue;
+            creds = found->second;
+        }
+        if (!auth_is_header_safe(creds.username) || !auth_is_header_safe(creds.password)) continue;
+        // `auth_digest_value` keys its nonce bookkeeping by (origin, realm); a
+        // proxy's protection space is keyed by its authority instead, which is
+        // what `proxy_authority` is here, so the two never share a nonce.
+        if (!auth_digest_value(*challenge, proxy_authority, std::string(), std::string(), creds,
+                               std::string_view(), out)) continue;
+        if (authorized_realm) *authorized_realm = realm;
+        if (authorized_scheme) *authorized_scheme = challenge->scheme;
+        return true;
+    }
+
+    if (basic) {
+        auto it = basic->params.find("realm");
+        const std::string realm = it == basic->params.end() ? std::string() : it->second;
+        AuthCredentials creds;
+        {
+            std::lock_guard<std::mutex> lock(g_auth_mutex);
+            auto found = g_proxy_auth_store.find(auth_store_key(proxy_authority, realm));
+            if (found == g_proxy_auth_store.end()) return false;
+            creds = found->second;
+        }
+        if (!auth_is_header_safe(creds.username) || !auth_is_header_safe(creds.password) ||
+            !auth_basic_value(creds, out)) return false;
+        if (authorized_realm) *authorized_realm = realm;
+        if (authorized_scheme) *authorized_scheme = basic->scheme;
+        return true;
+    }
+    return false;
+}
+
 } // namespace
 
 std::string ResourceLoader::auth_md5_hex(std::string_view data) { return auth_hex(auth_md5(data)); }
@@ -2334,6 +2404,27 @@ void ResourceLoader::set_auth_credentials(const std::string& origin, const std::
 bool ResourceLoader::has_credentials(const std::string& origin, const std::string& realm) {
     std::lock_guard<std::mutex> lock(g_auth_mutex);
     return g_auth_store.count(auth_store_key(origin, realm)) != 0;
+}
+
+void ResourceLoader::set_proxy_credentials(const std::string& authority, const std::string& realm,
+                                           const std::string& username, const std::string& password) {
+    std::lock_guard<std::mutex> lock(g_auth_mutex);
+    g_proxy_auth_store[auth_store_key(authority, realm)] = AuthCredentials{username, password};
+}
+
+bool ResourceLoader::has_proxy_credentials(const std::string& authority, const std::string& realm) {
+    std::lock_guard<std::mutex> lock(g_auth_mutex);
+    return g_proxy_auth_store.count(auth_store_key(authority, realm)) != 0;
+}
+
+void ResourceLoader::clear_proxy_credentials() {
+    std::lock_guard<std::mutex> lock(g_auth_mutex);
+    g_proxy_auth_store.clear();
+}
+
+std::size_t ResourceLoader::proxy_credential_count() {
+    std::lock_guard<std::mutex> lock(g_auth_mutex);
+    return g_proxy_auth_store.size();
 }
 
 void ResourceLoader::clear_auth_credentials() {
@@ -2893,6 +2984,9 @@ ResourceResponse ResourceLoader::load_http(
     // Digest stale=true challenge, allow one bounded retry with its replacement
     // nonce; a repeated stale response stops without treating the password as bad.
     bool auth_attempted = false;
+    // The same, for a proxy's challenge (RFC 9110 §11.7.1), counted apart
+    // from the origin's because they are different protection spaces.
+    bool proxy_auth_attempted = false;
 
     for (int hop = 0; hop <= MaxRedirects; ++hop) {
         const std::string hop_address = cur_url.href(true);
@@ -3001,6 +3095,68 @@ ResourceResponse ResourceLoader::load_http(
                     // it. Kept against the origin and realm so the next load
                     // does not have to be challenged again.
                     auth_note_authentication_info(resp, cur_url.origin(), challenges);
+                }
+            }
+        }
+        // RFC 9110 §11.7.1. A `407` is the proxy's challenge, answered in
+        // `Proxy-Authorization` and out of the *proxy* store: a credential the
+        // document set is never offered here, whatever realm the proxy names,
+        // because §11.7 keeps the two protection spaces apart. Nothing is sent
+        // pre-emptively, and this is bounded to one attempt per hop, exactly
+        // like the `401` above. A non-stale `407` after the attempt forgets the
+        // pair that was refused; a stale Digest nonce keeps it.
+        if (resp.status_code == 407 && !proxy_auth_attempted) {
+            std::vector<AuthChallenge> proxy_challenges;
+            for (const auto& [name, value] : resp.header_list) {
+                if (ascii_lower(name) != "proxy-authenticate") continue;
+                for (auto& challenge : auth_parse_challenges(value)) {
+                    proxy_challenges.push_back(std::move(challenge));
+                }
+            }
+            // The authority the credential was set against: the host and port
+            // the request went to, which is the proxy that answered it here.
+            // Keyed the way the `Host` header is written, so a URL that leaves
+            // the scheme's own port out and one that names it are one proxy.
+            const int proxy_port = cur_url.port >= 0 ? cur_url.port
+                                                     : (cur_url.scheme == "https" ? 443 : 80);
+            const std::string proxy_authority =
+                cur_url.host + ":" + std::to_string(proxy_port);
+            std::string proxy_authorization;
+            std::string attempted_proxy_realm;
+            std::string attempted_proxy_scheme;
+            if (!proxy_challenges.empty() &&
+                auth_proxy_authorization_for(proxy_challenges, proxy_authority, proxy_authorization,
+                                             &attempted_proxy_realm, &attempted_proxy_scheme) &&
+                is_safe_header_value(proxy_authorization)) {
+                proxy_auth_attempted = true;
+                hop_headers["Proxy-Authorization"] = proxy_authorization;
+                resp = execute_http_hop_with_cache(
+                    hop_address, cur_method, hop_headers, cur_body,
+                    CacheMode::Default, "nav:cred", /*ingest_cookies=*/true, nullptr);
+                if (!resp.network_ok) return resp;
+
+                if (resp.status_code == 407) {
+                    std::vector<AuthChallenge> retried_challenges;
+                    for (const auto& [name, value] : resp.header_list) {
+                        if (ascii_lower(name) != "proxy-authenticate") continue;
+                        for (auto& challenge : auth_parse_challenges(value)) {
+                            retried_challenges.push_back(std::move(challenge));
+                        }
+                    }
+                    const std::vector<AuthChallenge> stale_challenges =
+                        ascii_lower(attempted_proxy_scheme) == "digest"
+                            ? auth_stale_digest_challenges(retried_challenges, attempted_proxy_realm)
+                            : std::vector<AuthChallenge>{};
+                    if (stale_challenges.empty()) {
+                        // The proxy refused the credential itself. Forget only
+                        // the pair that was attempted, so a proxy's wrong
+                        // password is not replayed for the life of the process.
+                        std::lock_guard<std::mutex> lock(g_auth_mutex);
+                        g_proxy_auth_store.erase(auth_store_key(proxy_authority, attempted_proxy_realm));
+                    }
+                    // A stale nonce is not a refusal: the credential stays, and
+                    // the 407 carries the replacement nonce for the next load.
+                    auth_note_proxy_challenge(resp);
                 }
             }
         }

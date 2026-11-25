@@ -290,7 +290,16 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
             if (auto scope = realm.global_scope.lock()) {
                 const JsEnvironment::Binding* binding = scope->find_own(key);
                 if (binding && !binding->is_lexical) {
-                    return data(binding->value, !binding->is_readonly, false, !binding->is_readonly);
+                    // `configurable` used to be `!is_readonly`, which was
+                    // right for `undefined`/`NaN`/`Infinity` and wrong for
+                    // every function: §18's table says of RangeError and Math
+                    // exactly what it says of Array — "configurable: true" —
+                    // and it is a script's own `var` that §9.1.1.4 makes
+                    // non-configurable, the opposite of what this interpreter
+                    // had marked. The two attributes are separate questions,
+                    // so they get separate answers (Phase 425).
+                    return data(binding->value, !binding->is_readonly, !binding->is_builtin,
+                                scope->is_configurable_binding(*binding));
                 }
             }
         }
@@ -448,6 +457,29 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         if (!(asked >= 0) || asked != std::floor(asked) || asked > 4294967295.0) {
             js_throw_range_error("Invalid array length");
         }
+        // §10.4.2.4 step 3.b, which this path did not have (Phase 428): a
+        // `length` that is not writable refuses every *new* value. It is not
+        // the same question as "nothing can be deleted": `Object.freeze` makes
+        // the length read-only, and `Object.seal` leaves it writable while
+        // making every place non-configurable, so a sealed array may grow and
+        // may not shrink. What says "read-only" is the entry a
+        // `{ writable: false }` definition wrote, or the cell `freeze` marked —
+        // `seal` marks the cell but not the entry.
+        bool length_writable = !cell->frozen;
+        if (const auto entry = cell->properties.find("length"); entry != cell->properties.end()) {
+            if (!(entry->flags & PropertyMap::Writable)) length_writable = false;
+        }
+        size_t length_now = cell->array_elements.size();
+        if (const auto entry = cell->properties.find("length"); entry != cell->properties.end()) {
+            length_now = std::max(length_now, static_cast<size_t>(js_to_number(entry->second)));
+        }
+        // Asking again for the value the array already has is not a new value:
+        // step 3 says "if SameValue(Desc.[[Value]], oldLenDesc.[[Value]]) is
+        // true, return true", which is what
+        // `Object.defineProperty(frozen, "length", { value: frozen.length })` is.
+        if (!length_writable && asked != static_cast<double>(length_now)) {
+            js_throw_type_error("Cannot redefine property: length");
+        }
         // Steps 4.a-c, which the assignment path already had and this one did
         // not: shortening an array *deletes* every place at or above the new
         // length, and a place that is not configurable cannot be deleted — the
@@ -472,6 +504,17 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         }
         bool refused = false;
         if (asked_length < previous) {
+            // §10.4.2.4 step 4.c for the places that are *elements*. `seal`
+            // and `freeze` mark the cell and never write an attribute onto a
+            // dense place, so a sealed array's elements are not configurable
+            // even though the map says nothing about them: the deletion the
+            // shrink asks for fails at the last element, and the whole request
+            // is refused (Phase 428). Without this, `Object.seal([1,2,3])`
+            // then `length: 1` shrank the array, which is the one thing
+            // sealing is for.
+            if (cell->sealed && asked_length < cell->array_elements.size()) {
+                js_throw_type_error("Cannot delete property of an array");
+            }
             // A place in the map at or above the new length: configurable ones
             // are deleted, and the first non-configurable one stops the sweep
             // and refuses the request.
@@ -514,6 +557,21 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
             if (cell->array_holes) {
                 for (size_t i = asked_length; i < previous; ++i) cell->array_holes->clear(i);
             }
+        }
+    }
+    // §10.4.2.4 step 4.a through an index: a definition at or past the length
+    // is a write to that length, and a read-only length refuses it. Step 4.a
+    // is "if index >= oldLen and oldLenDesc.[[Writable]] is false, return
+    // false", so the place never exists and the length never moves.
+    if (cell && cell->is_array && array_index) {
+        size_t length_now = cell->array_elements.size();
+        bool length_writable = !cell->frozen;
+        if (const auto entry = cell->properties.find("length"); entry != cell->properties.end()) {
+            length_now = std::max(length_now, static_cast<size_t>(js_to_number(entry->second)));
+            if (!(entry->flags & PropertyMap::Writable)) length_writable = false;
+        }
+        if (index >= length_now && !length_writable) {
+            js_throw_type_error("Cannot define property past a read only length");
         }
     }
     const bool host_keeps = cell && cell->exotic && array_index && cell->exotic->owns_place(cell, key);
@@ -725,11 +783,14 @@ std::string object_tag(const JsValue& value) {
 // graph: two references to one object are one object afterwards, and a cycle
 // is a cycle.
 //
-// What is here and what is not is the standard's split. Functions and host
-// objects are refused with a DataCloneError (§2.7.3 of the HTML standard's
-// "StructuredSerializeInternal"), a Symbol throws a TypeError because it has
-// no representation at all, and WeakMap and WeakSet are refused because their
-// entries are exactly what a script may not read back.
+// What is here and what is not is the standard's split. Functions, host
+// objects, symbols, WeakMap and WeakSet are all refused with a DataCloneError
+// (§2.7.7's "StructuredSerializeInternal", steps 6 and 19-21) — a Symbol most
+// of all, in its own step before any object is looked at, even though it is a
+// primitive: it has no representation at all. That step used to be read as a
+// TypeError here, which was a misreading of the standard and not a choice
+// about this engine: Node v22.22.3 answers a `DataCloneError` DOMException,
+// `e.code` 25, for a symbol exactly as it does for a function.
 
 struct CloneState {
     std::unordered_map<const void*, JsValue> seen;
@@ -749,8 +810,11 @@ JsValue structured_clone(const JsValue& value, CloneState& state);
 
 JsValue structured_clone(const JsValue& value, CloneState& state) {
     js_check_stack();
+    // Step 6, before step 19 looks for [[Call]]: a symbol is refused on its
+    // own, and the message names it the way Node's does (`Symbol(x)` when it
+    // has a description, `Symbol()` when it does not).
     if (value.type == JsType::Symbol) {
-        js_throw_type_error("structuredClone: a Symbol cannot be cloned");
+        throw_data_clone(value.to_string().c_str());
     }
     if (!value.is_object_like()) return value;
     if (value.is_function() || value.dom_node_value()) {
@@ -1488,12 +1552,39 @@ void install_object_builtins(JsIntrinsics& realm) {
                                          .has_property(js_to_property_key(js_arg(args, 1))));
     });
     js_define_method(reflect, "get", 2, [](Args args) {
-        return require_object(js_arg(args, 0), "Reflect.get").get_property(js_to_property_key(js_arg(args, 1)));
+        // §28.1.6 is `target.[[Get]](key, receiver)`, with step 1's default:
+        // when no third argument was given the receiver is the target itself.
+        // `js_get_from_chain` is the lookup `super.name` uses — the one that
+        // runs a getter with a receiver that need not be the object it found —
+        // and it is what makes `Reflect.get({get x(){return this.y;}}, "x", {y: 9})`
+        // answer 9 rather than what `this` would be without one.
+        JsValue target = require_object(js_arg(args, 0), "Reflect.get");
+        const std::string key = js_to_property_key(js_arg(args, 1));
+        const JsValue& receiver = js_arg(args, 2).is_undefined() ? target : js_arg(args, 2);
+        JsObject* cell = target.is_function() ? target.function_cell() : target.property_cell();
+        if (cell == nullptr) return JsValue::make_undefined();
+        return js_get_from_chain(cell, key, receiver);
     });
     js_define_method(reflect, "set", 3, [](Args args) {
+        // §28.1.13 is `target.[[Set]](key, value, receiver)`, and it answers
+        // the `Set` result rather than throwing — that is the whole difference
+        // from an assignment in strict code, and it is why this used to answer
+        // `true` for a frozen target when the standard says `false`.
+        //
+        // The plain path is taken when there is no third argument or it *is*
+        // the target: `set_property` already runs a setter with the object as
+        // `this` and already refuses a frozen object, so nothing is gained by
+        // a second implementation of the ordinary rules. Any other receiver
+        // goes through the thread-local slot, because `set_property` has no
+        // parameter for one.
         JsValue target = require_object(js_arg(args, 0), "Reflect.set");
-        target.set_property(js_to_property_key(js_arg(args, 1)), js_arg(args, 2));
-        return JsValue::make_boolean(true);
+        const std::string key = js_to_property_key(js_arg(args, 1));
+        const JsValue& receiver = js_arg(args, 3).is_undefined() ? target : js_arg(args, 3);
+        if (receiver.identity() == target.identity() || !target.is_object_like()) {
+            return JsValue::make_boolean(target.set_property(key, js_arg(args, 2)));
+        }
+        const SetterReceiverScope scope(&receiver);
+        return JsValue::make_boolean(target.set_property(key, js_arg(args, 2)));
     });
     js_define_method(reflect, "deleteProperty", 2, [](Args args) {
         JsValue target = require_object(js_arg(args, 0), "Reflect.deleteProperty");

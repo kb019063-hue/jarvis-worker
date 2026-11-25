@@ -241,11 +241,22 @@ public:
     /// The bool is `enumerable_only`, the way `own_keys` takes it.
     std::shared_ptr<std::function<bool(bool, std::vector<std::string>&)>> own_keys_hook;
 
-    /// Asked by `[[Delete]]` when the name is not in the property table, and by
-    /// `has_own_property` for the same reason: `true` means this object owns
-    /// the name. The second bool is `remove`; the third is the answer.
+    /// Asked by `[[Delete]]` when the name is not in the property table, by
+    /// `has_own_property` for the same reason, and by
+    /// `get_own_property_descriptor` to learn whether the name *is*
+    /// configurable: `true` means this object owns the name. The second bool
+    /// is `remove`; the third is the answer.
     /// Without this, `delete globalThis.Error` erased nothing and answered
     /// `true` — the wrong half of the pair, since `true` means it is gone.
+    ///
+    /// The third question was added for Phase 425. The global object's
+    /// `[[GetOwnProperty]]` answered `{configurable: true}` for every built-in
+    /// while `[[Delete]]` refused to remove one, because this interpreter had
+    /// marked the whole set non-configurable (§9.1.1.4) although §18's table
+    /// says the opposite: it is a `var` a script declares that is
+    /// non-configurable, and the library globals this engine defines are
+    /// `{writable: true, enumerable: false, configurable: true}` like any
+    /// other data property §17-§26 describes.
     std::shared_ptr<std::function<bool(const std::string&, bool, bool&)>> own_property_hook;
 
     /// Host behaviour and state; see JsExotic. Null for ordinary objects.

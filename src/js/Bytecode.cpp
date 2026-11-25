@@ -1,4 +1,6 @@
 #include "litebird/js/Bytecode.hpp"
+#include "litebird/common/TerminalText.hpp"
+#include "litebird/js/JsOps.hpp"
 #include <iomanip>
 
 namespace litebird {
@@ -26,7 +28,9 @@ size_t Chunk::add_constant(JsValue value) {
 }
 
 void Chunk::disassemble(std::ostream& os, const std::string& name) const {
-    os << "== Disassembly for " << name << " ==\n";
+    // This is a human-readable dump: callers and bytecode may supply text
+    // containing terminal instructions. Leave the underlying values intact.
+    os << "== Disassembly for " << terminal_safe(name) << " ==\n";
     size_t offset = 0;
     while (offset < code.size()) {
         offset = disassemble_instruction(os, offset);
@@ -54,7 +58,8 @@ size_t Chunk::disassemble_instruction(std::ostream& os, size_t offset) const {
         case OpCode::OpGetProperty:
         case OpCode::OpSetProperty: {
             uint8_t const_idx = code[offset + 1];
-            os << " '" << constants[const_idx].to_string() << "' (idx=" << (int)const_idx << ")\n";
+            os << " '" << terminal_safe(js_output_text(constants[const_idx].to_string()))
+               << "' (idx=" << (int)const_idx << ")\n";
             return offset + 2;
         }
         case OpCode::OpGetLocal:

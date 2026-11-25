@@ -731,11 +731,12 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
            `margin: auto` centres it on both axes), and kept off the edges of a
            small viewport. `:modal` is what tells the two states apart; a dialog
            opened with `show()` keeps the rule above. The standard also says
-           `overflow: auto` here; it is left out because this engine draws no
-           scrollbars, and a clip it cannot show would only hide a dialog's own
-           border -- see finding 227 on the paint-order defect underneath. */
+           `overflow: auto`: even without painted scrollbars, it must clip the
+           contents. The painter emits the dialog's chrome first and clips at
+           its padding edge, so the border and background stay visible. */
         dialog:modal {
             position: fixed;
+            overflow: auto;
             top: 0;
             bottom: 0;
             max-width: calc(100% - 6px - 2em);

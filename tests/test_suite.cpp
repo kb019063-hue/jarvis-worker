@@ -7617,6 +7617,85 @@ TEST(subtle_crypto_ecdh_p256_derive_key) {
     assert(interp.eval("rtHex === '0a141e28'").is_truthy());
 }
 
+TEST(subtle_crypto_ec_spki_and_pkcs8) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var spkiLen = 0, pkcs8Len = 0, ok = null;
+        var msg = new Uint8Array([5, 6, 7, 8]);
+        crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+            .then(function(pair) {
+                return Promise.all([
+                    crypto.subtle.exportKey('spki', pair.publicKey),
+                    crypto.subtle.exportKey('pkcs8', pair.privateKey)
+                ]);
+            })
+            .then(function(ders) {
+                spkiLen = ders[0].byteLength;
+                pkcs8Len = ders[1].byteLength;
+                return Promise.all([
+                    crypto.subtle.importKey('spki', ders[0], { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']),
+                    crypto.subtle.importKey('pkcs8', ders[1], { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])
+                ]);
+            })
+            .then(function(keys) {
+                return crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys[1], msg)
+                    .then(function(sig) {
+                        return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, keys[0], sig, msg);
+                    });
+            })
+            .then(function(v) { ok = v; });
+    )");
+    assert(interp.eval("spkiLen === 91 && pkcs8Len === 67").is_truthy());
+    assert(interp.eval("ok === true").is_truthy());
+}
+
+TEST(subtle_crypto_aes_kw_wrap_and_unwrap) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    // RFC 3394 Section 4.1: 128-bit KEK, 128-bit Key Data
+    // KEK = 000102030405060708090a0b0c0d0e0f
+    // Key = 00112233445566778899aabbccddeeff
+    // Wrapped = 1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5
+    interp.eval(R"(
+        function fromHex(h) {
+            var a = new Uint8Array(h.length / 2);
+            for (var i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16);
+            return a;
+        }
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var wrappedHex = null, rtHex = null;
+        Promise.all([
+            crypto.subtle.importKey('raw', fromHex('000102030405060708090a0b0c0d0e0f'), 'AES-KW', false, ['wrapKey', 'unwrapKey']),
+            crypto.subtle.importKey('raw', fromHex('00112233445566778899aabbccddeeff'), 'AES-GCM', true, ['encrypt'])
+        ]).then(function(keys) {
+            var kek = keys[0], target = keys[1];
+            return crypto.subtle.wrapKey('raw', target, kek, { name: 'AES-KW' })
+                .then(function(wrapped) {
+                    wrappedHex = toHex(wrapped);
+                    return crypto.subtle.unwrapKey('raw', wrapped, kek, { name: 'AES-KW' }, 'AES-GCM', true, ['encrypt']);
+                })
+                .then(function(unwrapped) {
+                    return crypto.subtle.exportKey('raw', unwrapped);
+                })
+                .then(function(raw) {
+                    rtHex = toHex(raw);
+                });
+        });
+    )");
+    assert(interp.eval("wrappedHex === '1fa68b0a8112b447aef34bd8fb5a7b829d3e862371d2cfe5'").is_truthy());
+    assert(interp.eval("rtHex === '00112233445566778899aabbccddeeff'").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36583,6 +36662,8 @@ int main() {
     RUN_TEST(subtle_crypto_ecdsa_p256_sign_and_verify);
     RUN_TEST(subtle_crypto_ec_jwk_import_and_export);
     RUN_TEST(subtle_crypto_ecdh_p256_derive_key);
+    RUN_TEST(subtle_crypto_ec_spki_and_pkcs8);
+    RUN_TEST(subtle_crypto_aes_kw_wrap_and_unwrap);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

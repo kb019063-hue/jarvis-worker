@@ -675,7 +675,103 @@ void emit_svg_arc(
         const double px = cx + cos_phi * rx * ct - sin_phi * ry * st;
         const double py = cy + sin_phi * rx * ct + cos_phi * ry * st;
         ctx.line_to(static_cast<float>(px), static_cast<float>(py));
-        bbox.include(static_cast<float>(px), static_cast<float>(py));
+    }
+
+    // The box is the disc's, not the flattening's: an ellipse's extreme points
+    // are at four known angles, and the arc holds its box where the sweep
+    // covers one of them. Including only the sampled points left the box 0.5%
+    // short of a half circle's rim, which the curve-bound tests measured.
+    auto on_arc = [&](double theta, float& px, float& py) {
+        const double ct = std::cos(theta);
+        const double st = std::sin(theta);
+        px = static_cast<float>(cx + cos_phi * rx * ct - sin_phi * ry * st);
+        py = static_cast<float>(cy + sin_phi * rx * ct + cos_phi * ry * st);
+    };
+    auto sweep_contains = [&](double theta) {
+        // Normalise the offset from theta1 into the arc's own direction.
+        double offset = theta - theta1;
+        while (offset > kTwoPi) offset -= kTwoPi;
+        while (offset < -kTwoPi) offset += kTwoPi;
+        if (dtheta >= 0.0) return offset >= 0.0 && offset <= dtheta;
+        return offset <= 0.0 && offset >= dtheta;
+    };
+    // x is extreme where d/dtheta (cos_phi*rx*cos t - sin_phi*ry*sin t) is
+    // zero, which is t = -phi (mod pi); y's is t = pi/2 - phi (mod pi).
+    const double axis_phi = std::atan2(sin_phi, cos_phi);
+    for (const double base : {0.0, kPi * 0.5}) {
+        for (int half = 0; half < 2; ++half) {
+            const double candidate = base - axis_phi + static_cast<double>(half) * kPi;
+            if (!sweep_contains(candidate)) continue;
+            float px = 0.0f, py = 0.0f;
+            on_arc(candidate, px, py);
+            bbox.include(px, py);
+        }
+    }
+    for (int i = 0; i <= segs; ++i) {
+        const double t = theta1 + dtheta * (static_cast<double>(i) / static_cast<double>(segs));
+        float px = 0.0f, py = 0.0f;
+        on_arc(t, px, py);
+        bbox.include(px, py);
+    }
+}
+
+// A cubic's control points are not on the cubic, so the box of the four points
+// is not the box of the curve: `C0 100 100 100 100 0` reaches y=75, not 100.
+// The extremes are where the derivative is zero, solved per axis. SVG 2 §8.10's
+// box is the outer bound of the drawn curve, and this is the answer a browser
+// gives (measured: Chromium says 75 for that curve, 50 for `Q50 100 100 0`).
+void include_cubic(BBox& bbox, float x0, float y0, float x1, float y1,
+                   float x2, float y2, float x3, float y3) {
+    bbox.include(x0, y0);
+    bbox.include(x3, y3);
+    auto value_at = [](float p0, float p1, float p2, float p3, float t) {
+        const float u = 1.0f - t;
+        return u * u * u * p0 + 3.0f * u * u * t * p1 + 3.0f * u * t * t * p2 + t * t * t * p3;
+    };
+    // B'(t) = 3a t^2 + 2b t + c, with a = -p0 + 3p1 - 3p2 + p3 and so on.
+    auto roots = [](float p0, float p1, float p2, float p3, float* out) {
+        int count = 0;
+        const float a = -p0 + 3.0f * p1 - 3.0f * p2 + p3;
+        const float b = 2.0f * (p0 - 2.0f * p1 + p2);
+        const float c = p1 - p0;
+        auto take = [&](float t) { if (t > 0.0f && t < 1.0f) out[count++] = t; };
+        if (std::abs(a) < 1e-6f) {
+            if (std::abs(b) > 1e-6f) take(-c / b);
+            return count;
+        }
+        const float disc = b * b - 4.0f * a * c;
+        if (disc < 0.0f) return count;
+        const float root = std::sqrt(disc);
+        take((-b + root) / (2.0f * a));
+        take((-b - root) / (2.0f * a));
+        return count;
+    };
+    float ts[4];
+    for (int i = 0, n = roots(x0, x1, x2, x3, ts); i < n; ++i) {
+        bbox.include(value_at(x0, x1, x2, x3, ts[i]), value_at(y0, y1, y2, y3, ts[i]));
+    }
+    for (int i = 0, n = roots(y0, y1, y2, y3, ts); i < n; ++i) {
+        bbox.include(value_at(x0, x1, x2, x3, ts[i]), value_at(y0, y1, y2, y3, ts[i]));
+    }
+}
+
+void include_quadratic(BBox& bbox, float x0, float y0, float x1, float y1, float x2, float y2) {
+    bbox.include(x0, y0);
+    bbox.include(x2, y2);
+    auto value_at = [](float p0, float p1, float p2, float t) {
+        const float u = 1.0f - t;
+        return u * u * p0 + 2.0f * u * t * p1 + t * t * p2;
+    };
+    // B'(t) = 2((p0 - 2p1 + p2) t + (p1 - p0)).
+    auto root = [](float p0, float p1, float p2) {
+        const float a = p0 - 2.0f * p1 + p2;
+        if (std::abs(a) < 1e-6f) return -1.0f;
+        const float t = (p0 - p1) / a;
+        return (t > 0.0f && t < 1.0f) ? t : -1.0f;
+    };
+    for (const float t : {root(x0, x1, x2), root(y0, y1, y2)}) {
+        if (t < 0.0f) continue;
+        bbox.include(value_at(x0, x1, x2, t), value_at(y0, y1, y2, t));
     }
 }
 
@@ -843,9 +939,7 @@ void build_svg_path(Sink& ctx, std::string_view d, BBox& bbox) {
                     x += cur_x; y += cur_y;
                 }
                 ctx.bezier_curve_to(x1, y1, x2, y2, x, y);
-                bbox.include(x1, y1);
-                bbox.include(x2, y2);
-                bbox.include(x, y);
+                include_cubic(bbox, cur_x, cur_y, x1, y1, x2, y2, x, y);
                 last_cubic_x = x2;
                 last_cubic_y = y2;
                 cur_x = x;
@@ -868,9 +962,7 @@ void build_svg_path(Sink& ctx, std::string_view d, BBox& bbox) {
                     x += cur_x; y += cur_y;
                 }
                 ctx.bezier_curve_to(x1, y1, x2, y2, x, y);
-                bbox.include(x1, y1);
-                bbox.include(x2, y2);
-                bbox.include(x, y);
+                include_cubic(bbox, cur_x, cur_y, x1, y1, x2, y2, x, y);
                 last_cubic_x = x2;
                 last_cubic_y = y2;
                 cur_x = x;
@@ -888,8 +980,7 @@ void build_svg_path(Sink& ctx, std::string_view d, BBox& bbox) {
                     x += cur_x; y += cur_y;
                 }
                 ctx.quadratic_curve_to(x1, y1, x, y);
-                bbox.include(x1, y1);
-                bbox.include(x, y);
+                include_quadratic(bbox, cur_x, cur_y, x1, y1, x, y);
                 last_quad_x = x1;
                 last_quad_y = y1;
                 cur_x = x;
@@ -910,8 +1001,7 @@ void build_svg_path(Sink& ctx, std::string_view d, BBox& bbox) {
                     x += cur_x; y += cur_y;
                 }
                 ctx.quadratic_curve_to(x1, y1, x, y);
-                bbox.include(x1, y1);
-                bbox.include(x, y);
+                include_quadratic(bbox, cur_x, cur_y, x1, y1, x, y);
                 last_quad_x = x1;
                 last_quad_y = y1;
                 cur_x = x;
@@ -950,6 +1040,56 @@ void build_svg_path(Sink& ctx, std::string_view d, BBox& bbox) {
         }
     }
 }
+
+// §4.12.5.1.7's `new Path2D(svgPathData)`: the same walk of the same grammar that
+// an SVG `d` attribute goes through, recording into a `Path2D` instead of a
+// context. Reusing `build_svg_path` rather than writing a second parser is the
+// point: a page that draws a `Path2D` and an `<svg><path>` with the same data must
+// get the same shape, and two parsers would drift.
+//
+// The sink has the five calls the walker makes. `arc_to` cannot appear in path
+// data, so a linear approximation of it here would be dead code; the walker never
+// calls it, which is why the signature matches `CanvasRenderingContext2D`'s rather
+// than being invented.
+struct Path2DRecorder {
+    Path2D* path{nullptr};
+    void move_to(float x, float y) {
+        Path2D::Op op; op.kind = Path2D::Kind::MoveTo; op.a = x; op.b = y; path->add_op(std::move(op));
+    }
+    void line_to(float x, float y) {
+        Path2D::Op op; op.kind = Path2D::Kind::LineTo; op.a = x; op.b = y; path->add_op(std::move(op));
+    }
+    void bezier_curve_to(float x1, float y1, float x2, float y2, float x, float y) {
+        Path2D::Op op; op.kind = Path2D::Kind::BezierCurveTo;
+        op.a = x1; op.b = y1; op.c = x2; op.d = y2; op.e = x; op.f = y;
+        path->add_op(std::move(op));
+    }
+    void quadratic_curve_to(float cx, float cy, float x, float y) {
+        Path2D::Op op; op.kind = Path2D::Kind::QuadraticCurveTo;
+        op.a = cx; op.b = cy; op.c = x; op.d = y; path->add_op(std::move(op));
+    }
+    void close_path() {
+        Path2D::Op op; op.kind = Path2D::Kind::ClosePath; path->add_op(std::move(op));
+    }
+};
+}  // namespace
+
+// §4.12.5.1.7, declared in the header: outside the file-local namespace, because
+// the binding layer calls it. The recorder above is a sink for `build_svg_path`,
+// whose template still reaches it, so a `Path2D` from path data cannot drift from
+// the same data on an `<svg><path>`.
+std::shared_ptr<Path2D> parse_svg_path_data(std::string_view d) {
+    auto path = std::make_shared<Path2D>();
+    Path2DRecorder recorder;
+    recorder.path = path.get();
+    BBox box;
+    build_svg_path(recorder, d, box);
+    // An empty `d` is a valid, empty path in SVG rather than an error, so an empty
+    // string answers an empty `Path2D` and not `nullptr`.
+    return path;
+}
+
+namespace {
 
 // A polyline with its cumulative lengths: what <textPath> needs to answer "what
 // point is 37 px along this path, and which way is it facing".
@@ -2027,6 +2167,170 @@ void render_element(
 
 } // anonymous namespace
 
+// ---------------------------------------------------------------------------
+// The box an element draws: SVG 2 §8.10, answered from the painter's geometry
+// ---------------------------------------------------------------------------
+//
+// `getBBox()` asks this. It must not be a second implementation of where a
+// shape is: the paths below are `build_shape_geometry` and `build_svg_path`,
+// the same two the painter fills and strokes, so a shape cannot be in one
+// place for the DOM and another on the screen. Nothing here parses an
+// attribute the first time.
+//
+// A canvas is the sink those two write their path into, and a 1x1 one holds no
+// pixels worth the name; the path commands are not drawn. The box they report
+// is in the element's own user space -- `build_shape_geometry` resolves each
+// length against the viewport's, and no transform has been applied yet.
+
+namespace {
+
+// Elements that are not rendered where they stand, so a box walk contributes
+// nothing from them. This is the set `render_element` returns on, minus the
+// elements that *are* drawn somewhere else (`use`).
+bool svg_is_unrendered_container(std::string_view tag) {
+    return tag == "defs" || tag == "clippath" || tag == "mask" || tag == "symbol" ||
+           tag == "lineargradient" || tag == "radialgradient" ||
+           tag == "title" || tag == "desc" || tag == "metadata" ||
+           tag == "style" || tag == "script";
+}
+
+// The union of two boxes. An invalid box has no say in the answer: a
+// container's box is the union of the children that *draw*, and a child that
+// draws nothing must not pull the box to the origin.
+BBox svg_union_bbox(const BBox& a, const BBox& b) {
+    if (!a.valid()) return b;
+    if (!b.valid()) return a;
+    BBox both;
+    both.include(a.min_x, a.min_y);
+    both.include(a.max_x, a.max_y);
+    both.include(b.min_x, b.min_y);
+    both.include(b.max_x, b.max_y);
+    return both;
+}
+
+// One element's own geometry, in its own user space, and whether it drew.
+//
+// A shape that draws nothing still *has* a box when its geometry is merely
+// degenerate: a `rect` with `width="0"` and a position answers a zero-width box
+// where that position is (`[5,5,0,4]`), not an empty one, which is what a
+// browser answers. `build_shape_geometry` returns false for it because there is
+// nothing to paint, so the degenerate shapes are answered here.
+BBox svg_own_geometry(const std::shared_ptr<Element>& el, float ref_w, float ref_h) {
+    BBox box;
+    CanvasRenderingContext2D sink(1, 1);
+    bool allow_fill = true;
+    if (build_shape_geometry(sink, el, ref_w, ref_h, box, allow_fill)) return box;
+
+    const std::string tag = to_lower_ascii(el->tag_name());
+    if (tag == "rect") {
+        auto attr = [&](std::string_view name, float def, float pct) {
+            std::string text;
+            float value = def;
+            return (get_attr_ci(el, name, text) && parse_float_value(text, value, pct)) ? value : def;
+        };
+        const float x = attr("x", 0.0f, ref_w);
+        const float y = attr("y", 0.0f, ref_h);
+        const float w = attr("width", 0.0f, ref_w);
+        const float h = attr("height", 0.0f, ref_h);
+        // Empty only when both sides vanish: one zero side is a line of a box.
+        if (w <= 0.0f && h <= 0.0f) return BBox();
+        box.include(x, y);
+        box.include(x + std::max(0.0f, w), y + std::max(0.0f, h));
+    }
+    return box;
+}
+
+// The box of `el` and everything it draws below it, with every descendant's
+// `transform` applied and `el`'s own excluded.
+BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h, int depth) {
+    if (!el || depth > 64) return BBox();
+    const std::string tag = to_lower_ascii(el->tag_name());
+    if (svg_is_unrendered_container(tag)) return BBox();
+
+    BBox box = svg_own_geometry(el, ref_w, ref_h);
+    for (const auto& child : el->children()) {
+        auto child_el = std::dynamic_pointer_cast<Element>(child);
+        if (!child_el) continue;
+        BBox child_box = svg_bbox_walk(child_el, ref_w, ref_h, depth + 1);
+        if (!child_box.valid()) continue;
+        std::string transform_text;
+        if (get_attr_ci(child_el, "transform", transform_text)) {
+            const TransformMatrix2D matrix = parse_svg_transform(transform_text);
+            const TransformMatrix2D identity = TransformMatrix2D::identity();
+            if (!(matrix == identity)) {
+                BBox mapped;
+                const Point p1 = matrix.map_point(child_box.min_x, child_box.min_y);
+                const Point p2 = matrix.map_point(child_box.max_x, child_box.min_y);
+                const Point p3 = matrix.map_point(child_box.min_x, child_box.max_y);
+                const Point p4 = matrix.map_point(child_box.max_x, child_box.max_y);
+                mapped.include(p1.x, p1.y);
+                mapped.include(p2.x, p2.y);
+                mapped.include(p3.x, p3.y);
+                mapped.include(p4.x, p4.y);
+                child_box = mapped;
+            }
+        }
+        box = svg_union_bbox(box, child_box);
+    }
+    return box;
+}
+
+// The coordinate system a `<svg>`'s children draw in, which is what their
+// percentages resolve against. A viewBox replaces it: `<svg width="200"
+// viewBox="0 0 20 10">` is 20 user units wide inside, so `width="50%"` on a
+// child is 10 and not 100. This is the same rule `SvgRenderer::render` applies
+// when it hands `doc_ctx.viewport_w`/`_h` to the children it paints, and
+// Chromium answers it the same way.
+void svg_viewport_of(const std::shared_ptr<Element>& svg, float& width, float& height) {
+    width = 300.0f;
+    height = 150.0f;
+    std::string attr;
+    float parsed = 0.0f;
+    const bool has_view_box = get_attr_ci(svg, "viewBox", attr);
+    ViewBox view_box;
+    if (has_view_box) view_box = parse_viewbox(attr);
+    if (has_view_box && view_box.valid && view_box.width > 0.0f && view_box.height > 0.0f) {
+        width = view_box.width;
+        height = view_box.height;
+        return;
+    }
+    if (get_attr_ci(svg, "width", attr) && parse_float_value(attr, parsed, 300.0f) && parsed > 0.0f) {
+        width = parsed;
+    }
+    if (get_attr_ci(svg, "height", attr) && parse_float_value(attr, parsed, 150.0f) && parsed > 0.0f) {
+        height = parsed;
+    }
+}
+
+}  // namespace
+
+SvgUserBBox svg_element_bbox(const std::shared_ptr<Element>& element) {
+    SvgUserBBox answer;
+    if (!element) return answer;
+
+    // The lengths inside a box resolve against the viewport the element is
+    // drawn in, exactly as the painter resolves them: the nearest `<svg>`
+    // ancestor's. A percentage on a `<rect>` is a share of that, not of the
+    // rectangle.
+    float ref_w = 300.0f, ref_h = 150.0f;
+    for (std::shared_ptr<Node> node = element; node; node = node->parent()) {
+        auto el = std::dynamic_pointer_cast<Element>(node);
+        if (el && to_lower_ascii(el->tag_name()) == "svg") {
+            svg_viewport_of(el, ref_w, ref_h);
+            break;
+        }
+    }
+
+    const BBox box = svg_bbox_walk(element, ref_w, ref_h, 0);
+    if (!box.valid()) return answer;
+    answer.x = box.min_x;
+    answer.y = box.min_y;
+    answer.width = box.width();
+    answer.height = box.height();
+    answer.valid = true;
+    return answer;
+}
+
 std::shared_ptr<ImageData> SvgRenderer::render(
     const std::shared_ptr<Element>& svg_element,
     float target_width,
@@ -2102,3 +2406,4 @@ std::shared_ptr<ImageData> SvgRenderer::render(
 }
 
 } // namespace litebird
+

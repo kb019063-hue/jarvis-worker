@@ -1,7 +1,9 @@
 #pragma once
 
 #include "litebird/render/ImageDecoder.hpp"
+#include "litebird/render/FontRenderer.hpp"
 #include "litebird/render/ImageFilter.hpp"
+#include "litebird/render/Path2D.hpp"
 #include "litebird/common/Color.hpp"
 #include "litebird/common/Geometry.hpp"
 #include "litebird/js/JsValue.hpp"
@@ -151,6 +153,26 @@ public:
     std::string text_align{"start"};
     // "top" | "hanging" | "middle" | "alphabetic" | "ideographic" | "bottom"
     std::string text_baseline{"alphabetic"};
+    /// §4.12.5.1's seven text properties, which had no home at all before Phase
+    /// 417 — `typeof` answered `undefined` for every one, so a page's assignment
+    /// was an ordinary expando that changed no measurement and no drawing.
+    /// The two spacings keep the text the page wrote (the getter answers the
+    /// serialized form) and the px it worked out to; see `set_spacing`.
+    float letter_spacing_px{0.0f};
+    std::string letter_spacing_source{"0px"};
+    float word_spacing_px{0.0f};
+    std::string word_spacing_source{"0px"};
+    /// "ltr" | "rtl" | "inherit"
+    std::string direction{"inherit"};
+    /// "auto" | "normal" | "none" — `auto` and `normal` both kern
+    std::string font_kerning{"auto"};
+    std::string font_stretch{"normal"};
+    std::string font_variant_caps{"normal"};
+    std::string text_rendering{"auto"};
+    /// The canvas element this context belongs to, when one was wired in, so
+    /// `direction: "inherit"` has ancestors to ask. Weak: the element owns the
+    /// context, and a strong pointer here would be a cycle.
+    std::weak_ptr<const Node> m_owner_element;
 
     // Gradients
     std::shared_ptr<CanvasGradient> fill_gradient{nullptr};
@@ -252,6 +274,22 @@ public:
     void clip(FillRule rule = FillRule::NonZero);
     bool is_point_in_path(float x, float y, FillRule rule = FillRule::NonZero) const;
 
+    /// §4.12.5.1.7: the four methods that take a `Path2D` **instead of** the
+    /// current path. The current path is left alone — a page that fills a
+    /// `Path2D` and then fills again gets the same picture twice, because the
+    /// `Path2D` was never the current path.
+    ///
+    /// `replay` is the whole of it: it runs the recorded calls into `m_paths`
+    /// under the CTM **now in force**, which is what makes a path built at one
+    /// scale draw at another. It saves and restores the current path around the
+    /// replay, so `fill(path)` is not a `beginPath` in disguise.
+    void replay_into(const Path2D& path);
+    void fill_path(const Path2D& path, FillRule rule = FillRule::NonZero);
+    void stroke_path(const Path2D& path);
+    void clip_path(const Path2D& path, FillRule rule = FillRule::NonZero);
+    [[nodiscard]] bool is_point_in_path_object(float x, float y, const Path2D& path,
+                                               FillRule rule = FillRule::NonZero) const;
+
     // Text drawing. `max_width` <= 0 means "not given"; when the natural
     // advance exceeds it, the run is condensed horizontally (glyphs are
     // drawn narrower, not re-spaced).
@@ -312,6 +350,15 @@ private:
         std::string font;
         std::string text_align;
         std::string text_baseline;
+        float letter_spacing_px{0.0f};
+        std::string letter_spacing_source;
+        float word_spacing_px{0.0f};
+        std::string word_spacing_source;
+        std::string direction;
+        std::string font_kerning;
+        std::string font_stretch;
+        std::string font_variant_caps;
+        std::string text_rendering;
         std::shared_ptr<CanvasGradient> fill_gradient;
         std::shared_ptr<CanvasGradient> stroke_gradient;
         std::shared_ptr<CanvasPattern> fill_pattern;
@@ -395,6 +442,21 @@ private:
     void paint_shadow(const std::vector<uint8_t>& coverage);
     /// The extra room the current shadow needs around a bounding box.
     [[nodiscard]] float shadow_padding() const;
+    /// The direction text is laid out in, resolved from `direction` and, for
+    /// `inherit`, the document's root element. §4.12.5.1's `direction` is what
+    /// chooses between "start" = left and "start" = right, which is the one
+    /// visible difference it makes in a context that has no bidi paragraph.
+    [[nodiscard]] bool text_direction_is_rtl() const;
+public:
+    /// Called once by the binding that hands the context to script.
+    void set_owner_element(const std::shared_ptr<const Node>& element) { m_owner_element = element; }
+private:
+    /// §4.12.5.1's letter/word spacing applied to one shaping result: every glyph
+    /// after a base advances by the letter spacing, and every U+0020 that is not
+    /// the first character by the word spacing as well. Kept in one place so
+    /// `measureText` and the painter cannot disagree about it.
+    static void apply_text_spacing(std::vector<FontRenderer::ShapedGlyph>& glyphs,
+                                   const std::string& text, float letter_px, float word_px);
     /// A primitive's coverage, or nothing. While one of these is alive
     /// `set_pixel_safe` records **what** the primitive covers instead of painting
     /// it, and the destructor paints the shadow first and the primitive second.

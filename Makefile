@@ -251,6 +251,11 @@ verify-page-text-terminal-safety: $(TARGET)
 verify-css-paint-terminal-safety: $(TARGET) $(BUILD_DIR)/terminal_text_probe
 	@python3 tools/security/verify_css_paint_terminal.py --binary $(TARGET) --probe $(BUILD_DIR)/terminal_text_probe
 
+## Capture console attacks without displaying them on a terminal.
+.PHONY: verify-console-terminal-safety
+verify-console-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_console_terminal.py --binary $(TARGET)
+
 $(BUILD_DIR)/terminal_text_probe: tools/security/terminal_text_probe.cpp $(BUILD_DIR)/common/TerminalText.o
 	$(CXX) $(CXXFLAGS) $^ -o $@
 

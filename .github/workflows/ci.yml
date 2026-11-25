@@ -152,6 +152,8 @@ jobs:
         run: make verify-page-text-terminal-safety
       - name: CSS and paint dumps filter UTF-8 terminal controls
         run: make verify-css-paint-terminal-safety
+      - name: Console output filters UTF-8 terminal controls
+        run: make verify-console-terminal-safety
       - name: Pathless URL references agree with Node
         run: make verify-relative-navigation
       - name: Path-bearing URL references agree with Node

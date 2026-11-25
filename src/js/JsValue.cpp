@@ -266,6 +266,19 @@ void PropertyMap::clear() {
 // Call context: how `this` reaches a native function
 // ---------------------------------------------------------------------------
 
+thread_local const JsValue* t_setter_receiver = nullptr;
+
+SetterReceiverScope::SetterReceiverScope(const JsValue* receiver)
+    : m_previous(t_setter_receiver) {
+    t_setter_receiver = receiver;
+}
+
+SetterReceiverScope::~SetterReceiverScope() { t_setter_receiver = m_previous; }
+
+const JsValue& setter_receiver(const JsValue& on) {
+    return t_setter_receiver ? *t_setter_receiver : on;
+}
+
 namespace {
 
 struct CallContext {
@@ -1771,7 +1784,7 @@ bool set_through_prototype(const JsValue& receiver, const std::string& name, con
         if (found->flags & PropertyMap::Accessor) {
             handled = true;
             if (found->setter && found->setter->is_function()) {
-                found->setter->call_with_this(receiver, {val});
+                found->setter->call_with_this(setter_receiver(receiver), {val});
                 return true;
             }
             return false;      // an accessor with no setter: refused
@@ -1973,7 +1986,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                             // Held here: the setter may delete the property it is.
                             const std::shared_ptr<JsValue> setter = mapped->setter;
                             if (!setter || !setter->is_function()) return false;
-                            setter->call_with_this(*this, {val});
+                            setter->call_with_this(setter_receiver(*this), {val});
                             return true;
                         }
                         if (!(mapped->flags & PropertyMap::Writable)) return false;
@@ -2060,7 +2073,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
         auto it = obj->properties.find(name);
         if (it != obj->properties.end()) {
             if (it->flags & PropertyMap::Accessor) {
-                if (it->setter && it->setter->is_function()) { it->setter->call_with_this(*this, {val}); return true; }
+                if (it->setter && it->setter->is_function()) { it->setter->call_with_this(setter_receiver(*this), {val}); return true; }
                 return false;
             }
             if (obj->frozen || !(it->flags & PropertyMap::Writable)) return false;
@@ -2089,7 +2102,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
             auto pit = proto->properties.find(name);
             if (pit == proto->properties.end()) continue;
             if (pit->flags & PropertyMap::Accessor) {
-                if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(*this, {val}); return true; }
+                if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(setter_receiver(*this), {val}); return true; }
                 return false;
             }
             break;
@@ -2109,7 +2122,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
     auto it = map->find(name);
     if (it != map->end()) {
         if (it->flags & PropertyMap::Accessor) {
-            if (it->setter && it->setter->is_function()) { it->setter->call_with_this(*this, {val}); return true; }
+            if (it->setter && it->setter->is_function()) { it->setter->call_with_this(setter_receiver(*this), {val}); return true; }
             return false;
         }
         if (!(it->flags & PropertyMap::Writable)) return false;

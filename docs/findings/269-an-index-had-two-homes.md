@@ -64,9 +64,10 @@ is how it survived review.
   thing. The moment a write to a hole asks the chain, a setter on
   `Array.prototype[0]` swallows every result `Array.from` builds.
 
-## Still open
+## Follow-up: the sort item is closed in Phase 453
 
-`sort` does not do its `Get`, `Set` and `DeleteProperty` in the standard's
-order when `Array.prototype` has accessors (`sort/precise-comparefn-throws.js`,
-`sort/precise-prototype-element.js`); `precise-prototype-accessors.js` passes
-now. That is the other half of `AGENTS.md` row 971 and stays open.
+When this finding was written, `sort/precise-comparefn-throws.js` and
+`sort/precise-prototype-element.js` were recorded as remaining while
+`precise-prototype-accessors.js` passed. Rerunning all three on the current tree
+shows 3/3 passing; Phase 453 adds the standalone suite and corrects the stale
+status in `AGENTS.md`.

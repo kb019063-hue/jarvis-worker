@@ -5,6 +5,7 @@
     python3 tools/ci/run_report.py --run RUN      # that run (the number in its address)
     python3 tools/ci/run_report.py N --times      # also every job with its long steps, the notices, the warnings
     python3 tools/ci/run_report.py --row COMMIT   # the newest run on that commit as three cells of a table
+    python3 tools/ci/run_report.py --now          # the runs that are going: how many jobs have a machine, how many wait
     python3 tools/ci/run_report.py --self-test
 
 CI's logs cannot be read from every sandbox. A job's annotations can: the
@@ -31,6 +32,9 @@ still going; 2 it could not be read, or there is none on that commit.
 
 `--row` is for the landing session (tools/watch/watch.sh): when the run
 began, when its last job ended, and `RUN, 5.3 min`, with tabs between them.
+
+`--now` counts over every run that has not ended. When jobs wait while
+others run, the number that run is the account's limit, or close to it.
 
 It reads GitHub and changes nothing there.
 """
@@ -192,6 +196,22 @@ def row_of(run: dict, jobs: list[dict]) -> str:
     return f"{began[11:16]}\t{last[11:16]}\t{run.get('id', '?')}, {minutes(seconds(began, last))}"
 
 
+def at_once(runs: list[tuple[dict, list[dict]]]) -> list[str]:
+    """One line for each run that is going, and the sum: jobs with a machine, jobs without."""
+    lines, running, waiting = [], 0, 0
+    for run, jobs in runs:
+        has = sum(1 for job in jobs if job.get("status") == "in_progress")
+        waits = sum(1 for job in jobs if job.get("status") in ("queued", "waiting", "pending", "requested"))
+        if not has and not waits:
+            continue
+        running, waiting = running + has, waiting + waits
+        pulls = ", ".join(f"#{pull['number']}" for pull in run.get("pull_requests") or []) or run.get("head_branch") or "?"
+        lines.append(f"run {run.get('id', '?')} ({pulls}, {(run.get('head_sha') or '?')[:7]}, begun {clock(run.get('run_started_at') or run.get('created_at'))}): "
+                     f"{has} with a machine, {waits} without")
+    lines.append(f"at once: {running} jobs with a machine, {waiting} waiting for one, in {len(lines)} run(s)")
+    return lines
+
+
 def gh_json(path: str):
     result = subprocess.run(["gh", "api", path], capture_output=True, text=True)
     if result.returncode != 0:
@@ -289,6 +309,11 @@ def self_test() -> int:
     cases.append(("a run with no job yet is status 3", status == 3 and "no job has a machine yet" in lines[1]))
 
     cases.append(("a row of the table of lots", row_of(run, short) == "02:00\t02:04\t7, 4.0 min"))
+    waiting_job = dict(job(4, "Sanitizers: fuzzing", None, 0, None), status="queued", started_at=None)
+    counted = at_once([(run, going + [waiting_job]), (dict(run, id=8, pull_requests=[], head_branch="main"), passed)])
+    cases.append(("--now counts the jobs with a machine and without, and leaves out a run that has ended",
+                  counted == ["run 7 (#386, abcdef1, begun 02:00:00): 1 with a machine, 1 without",
+                              "at once: 1 jobs with a machine, 1 waiting for one, in 1 run(s)"]))
     cases.append(("no row while a job is going", row_of(run, going) == ""))
 
     failed_count = 0
@@ -305,6 +330,10 @@ def main(arguments: list[str]) -> int:
         return self_test()
     times = "--times" in arguments
     rest = [argument for argument in arguments if argument != "--times"]
+    if rest == ["--now"]:
+        active = [run for run in gh_json(f"{REPO}/actions/runs?per_page=40")["workflow_runs"] if run.get("status") != "completed"]
+        print("\n".join(at_once([(run, gh_json(f"{REPO}/actions/runs/{run['id']}/jobs?per_page=100")["jobs"]) for run in active])))
+        return 0
     if len(rest) == 2 and rest[0] == "--row":
         identity = newest_run_on(rest[1], "")
         cells = row_of(gh_json(f"{REPO}/actions/runs/{identity}"),

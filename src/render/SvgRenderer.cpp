@@ -951,6 +951,56 @@ void build_svg_path(Sink& ctx, std::string_view d, BBox& bbox) {
     }
 }
 
+// §4.12.5.1.7's `new Path2D(svgPathData)`: the same walk of the same grammar that
+// an SVG `d` attribute goes through, recording into a `Path2D` instead of a
+// context. Reusing `build_svg_path` rather than writing a second parser is the
+// point: a page that draws a `Path2D` and an `<svg><path>` with the same data must
+// get the same shape, and two parsers would drift.
+//
+// The sink has the five calls the walker makes. `arc_to` cannot appear in path
+// data, so a linear approximation of it here would be dead code; the walker never
+// calls it, which is why the signature matches `CanvasRenderingContext2D`'s rather
+// than being invented.
+struct Path2DRecorder {
+    Path2D* path{nullptr};
+    void move_to(float x, float y) {
+        Path2D::Op op; op.kind = Path2D::Kind::MoveTo; op.a = x; op.b = y; path->add_op(std::move(op));
+    }
+    void line_to(float x, float y) {
+        Path2D::Op op; op.kind = Path2D::Kind::LineTo; op.a = x; op.b = y; path->add_op(std::move(op));
+    }
+    void bezier_curve_to(float x1, float y1, float x2, float y2, float x, float y) {
+        Path2D::Op op; op.kind = Path2D::Kind::BezierCurveTo;
+        op.a = x1; op.b = y1; op.c = x2; op.d = y2; op.e = x; op.f = y;
+        path->add_op(std::move(op));
+    }
+    void quadratic_curve_to(float cx, float cy, float x, float y) {
+        Path2D::Op op; op.kind = Path2D::Kind::QuadraticCurveTo;
+        op.a = cx; op.b = cy; op.c = x; op.d = y; path->add_op(std::move(op));
+    }
+    void close_path() {
+        Path2D::Op op; op.kind = Path2D::Kind::ClosePath; path->add_op(std::move(op));
+    }
+};
+}  // namespace
+
+// §4.12.5.1.7, declared in the header: outside the file-local namespace, because
+// the binding layer calls it. The recorder above is a sink for `build_svg_path`,
+// whose template still reaches it, so a `Path2D` from path data cannot drift from
+// the same data on an `<svg><path>`.
+std::shared_ptr<Path2D> parse_svg_path_data(std::string_view d) {
+    auto path = std::make_shared<Path2D>();
+    Path2DRecorder recorder;
+    recorder.path = path.get();
+    BBox box;
+    build_svg_path(recorder, d, box);
+    // An empty `d` is a valid, empty path in SVG rather than an error, so an empty
+    // string answers an empty `Path2D` and not `nullptr`.
+    return path;
+}
+
+namespace {
+
 // A polyline with its cumulative lengths: what <textPath> needs to answer "what
 // point is 37 px along this path, and which way is it facing".
 class PathSampler {
@@ -2102,3 +2152,4 @@ std::shared_ptr<ImageData> SvgRenderer::render(
 }
 
 } // namespace litebird
+

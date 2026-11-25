@@ -1,5 +1,3 @@
-#include "litebird/js/JsOps.hpp"
-
 // Phase 441, finding 441: `Array.fromAsync` closes the iterator it was given.
 //
 // Phase 415 measured the gap and filed it: the async walk was a third copy of

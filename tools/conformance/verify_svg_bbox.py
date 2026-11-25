@@ -29,6 +29,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 
 HTML = '''<!doctype html><svg id="s" width="200" height="100" viewBox="0 0 20 10">
+  <defs><rect id="source" x="1" y="2" width="3" height="4" transform="scale(2)"/><g id="source-group"><rect x="2" y="3" width="4" height="5"/></g><use id="cycle" href="#cycle"/></defs>
+  <use id="instance" href="#source" x="10" y="20"/>
+  <use id="group-instance" href="#source-group" x="4" y="5"/>
+  <use id="bad-instance" href="#cycle"/>
   <g id="g">
     <rect id="r" x="1" y="2" width="3" height="4"/>
     <circle id="c" cx="10" cy="10" r="4"/>
@@ -65,7 +69,7 @@ function box(id) {
   // a curve bound are not what this test is about.
   return [b.x, b.y, b.width, b.height].map(function (v) { return Math.round(v * 1000) / 1000; });
 }
-var ids = ['g', 'r', 'c', 'l', 'e', 'pg', 'pl', 'pa', 'round'];
+var ids = ['instance', 'group-instance', 'bad-instance', 'g', 'r', 'c', 'l', 'e', 'pg', 'pl', 'pa', 'round'];
 for (var i = 0; i < ids.length; ++i) {
   (function (id) { P('shape ' + id, function () { return box(id); }); })(ids[i]);
 }

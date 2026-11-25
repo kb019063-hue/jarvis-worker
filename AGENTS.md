@@ -788,6 +788,16 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   any other, and the landing session takes no pull request that has
   one. The title carries the number into the merge commit: #393's still
   said 387 when its lot had passed.
+- **A claim that did not say it was one.** #423 was opened on 25
+  November at 06:19 as "Claim: full `<html>` root layout box …": one
+  empty commit, no `WIP:` in its title, none of the four lines. To
+  every tool that is a finished pull request, and four minutes later
+  the landing session's list had it as "can be merged as it is, at
+  once". Merged, it would have ended its agent's branch before the work
+  began. The landing session put the `WIP:` on and said so on it; and
+  `check_pr.py` now takes no pull request that changes no file, whatever
+  its title says. **`WIP:` is what says "not yet", and nothing else
+  is.**
 - **A finished pull request, closed for a file.** #390 was finished and
   measured in its agent's sandbox (two more test262 cases, two more of
   the JavaScript corpus, nothing lost). It needed one function of

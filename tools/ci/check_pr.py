@@ -1234,6 +1234,15 @@ def why_not_taken(pr: dict, comments: list[dict]) -> str:
         # WIP:", and the landing session's own tool, which read titles
         # only, took it into a lot. GitHub merges no draft.
         return f"it is a draft: `gh pr ready {pr['number']}` when it is finished"
+    if pr.get("files") == []:
+        # A claim whose title says nothing of work in progress. #423 was
+        # opened at 06:19 UTC on 25 November as "Claim: full <html> root
+        # layout box ...", one empty commit, and four minutes later stood
+        # in the landing session's list as "main is in the head: it can be
+        # merged as it is, at once". Merged, it would have ended its
+        # agent's branch before the work began.
+        return ("it changes no file: there is nothing in it to land. If it is a claim, its title begins with "
+                "WIP: until the work is finished and pushed")
     taken = taken_at(comments, pr["number"])
     if taken and pr["headRefOid"].startswith(taken):
         return ""       # the landing session has said so, of this very head
@@ -1956,6 +1965,13 @@ def self_test() -> int:
          why_not_taken(waiting(mergeable="UNKNOWN"), board), ""),
         ("a title that begins with WIP: is not finished",
          why_not_taken(waiting(title="WIP: a change"), board), "its title still begins with WIP:"),
+        ("a pull request with no change in it is a claim, whatever its title says: nothing to land",
+         why_not_taken(waiting(title="Claim: the root layout box", files=()), board)[:62],
+         "it changes no file: there is nothing in it to land. If it is a"),
+        ("...and saying that it is taken does not make it something to land",
+         why_not_taken(waiting(title="Claim: the root layout box", files=(), checks=[]),
+                       board + [said("Lander: lot of 03:01 UTC: #7 (`fffffff`) with `main` `1234567`, one CI run.")])[:19],
+         "it changes no file:"),
         ("a draft is not finished whatever its title says, and is told so in its own words",
          why_not_taken(dict(waiting(), isDraft=True), board), "it is a draft: `gh pr ready 7` when it is finished"),
         ("CI still running on a finished pull request: taken, its run and the lot's go side by side",

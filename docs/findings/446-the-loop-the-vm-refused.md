@@ -22,7 +22,7 @@ moved into AGREES with 24 related cases.
 ## Verification
 
 `make verify-bytecode` reports **98/100 agree and 1/1 refused**. `make test`
-reports **495/495 engine suites** and 114 passing cross-origin checks. The
+reports **498/498 engine suites** and 114 passing cross-origin checks. The
 suite also asserts iterator cleanup on errors and the still-refused heads.
 
 ## Still open

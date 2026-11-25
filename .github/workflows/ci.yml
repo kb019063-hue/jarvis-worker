@@ -124,7 +124,7 @@ jobs:
         if: always()
         run: |
           if command -v ccache >/dev/null 2>&1; then
-            echo "::notice title=ccache, plain build::$(ccache -s 2>/dev/null | grep -E 'Cacheable calls|Hits|Misses|Cache size' | tr -s ' ' | tr '\n' ';')"
+            echo "::notice title=ccache, plain build::$(ccache -s 2>/dev/null | grep -E 'Cacheable calls|Hits|Misses|Cache size' | tr -s ' ' | tr '\n' ';') ccache itself: ${CCACHE_FROM:-?}"
           fi
       - name: Keep the objects for the runs that follow
         # A run on main saves them: every pull request can read what
@@ -845,7 +845,7 @@ jobs:
         if: always()
         run: |
           if command -v ccache >/dev/null 2>&1; then
-            echo "::notice title=ccache, asan build::$(ccache -s 2>/dev/null | grep -E 'Cacheable calls|Hits|Misses|Cache size' | tr -s ' ' | tr '\n' ';')"
+            echo "::notice title=ccache, asan build::$(ccache -s 2>/dev/null | grep -E 'Cacheable calls|Hits|Misses|Cache size' | tr -s ' ' | tr '\n' ';') ccache itself: ${CCACHE_FROM:-?}"
           fi
       - name: Only the objects this build used
         # What is saved is one build's objects: the ones this build took

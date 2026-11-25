@@ -36,6 +36,14 @@ inputs:
 runs:
   using: composite
   steps:
+    # The objects first: ccache itself comes with them (the step below).
+    - name: The objects of the last run on main
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.ccache
+        key: ccache-${{ inputs.objects }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          ccache-${{ inputs.objects }}-
     - name: ccache in front of the compiler
       shell: bash
       env:
@@ -48,10 +56,24 @@ runs:
       run: |
         # A job that cannot get ccache compiles everything, as every job did
         # before. It must not fail for want of it.
+        #
+        # It is fetched once and then kept beside the objects, in a
+        # directory of its own inside the one that is saved (ccache reads
+        # and tidies only its sixteen directories 0 to f). Fourteen jobs
+        # of a run used to fetch the same file from the project's releases
+        # in the same second, and at 02:39 UTC on 25 November one of them
+        # was refused: "Sanitizers: fuzzing" compiled the sanitizer build
+        # from nothing, 300 seconds where its neighbours took 20 to 51,
+        # and the lot was 9.7 minutes for it. In the same run another job
+        # took 50 seconds over the fetch.
         bin="$RUNNER_TEMP/ccache-bin"
+        kept="$HOME/.ccache/ccache-binary/ccache-$CCACHE_RELEASE"
+        from=""
         mkdir -p "$bin"
         if command -v ccache >/dev/null 2>&1; then
-          ln -sf "$(command -v ccache)" "$bin/ccache"
+          ln -sf "$(command -v ccache)" "$bin/ccache" && from="the runner's own"
+        elif [ -x "$kept" ] && "$kept" --version 2>/dev/null | grep -q "ccache version $CCACHE_RELEASE"; then
+          cp "$kept" "$bin/ccache" && from="kept with the objects"
         else
           name="ccache-$CCACHE_RELEASE-linux-x86_64-musl-static"
           if curl -fsSL --retry 2 --max-time 60 -o "$RUNNER_TEMP/$name.tar.xz" \
@@ -59,10 +81,15 @@ runs:
              && echo "$CCACHE_SHA256  $RUNNER_TEMP/$name.tar.xz" | sha256sum --check --status \
              && tar -xJf "$RUNNER_TEMP/$name.tar.xz" -C "$RUNNER_TEMP"; then
             found="$(find "$RUNNER_TEMP/$name" -maxdepth 2 -type f -name ccache | head -n 1)"
-            if [ -n "$found" ]; then cp "$found" "$bin/ccache" && chmod +x "$bin/ccache"; fi
+            if [ -n "$found" ]; then
+              cp "$found" "$bin/ccache" && chmod +x "$bin/ccache" && from="fetched from the project's release"
+              # For the job that saves the objects, and so for every job after it.
+              mkdir -p "$(dirname "$kept")" && cp "$bin/ccache" "$kept" || true
+            fi
           fi
         fi
         if [ -x "$bin/ccache" ] && "$bin/ccache" --version >/dev/null 2>&1; then
+          echo "CCACHE_FROM=$from" >> "$GITHUB_ENV"
           # A `g++` that is a link to ccache, first on the PATH: ccache finds
           # the real one behind it, and the Makefile's `CXX ?= g++` and every
           # tool that calls g++ go through it with nothing else changed.
@@ -95,13 +122,6 @@ runs:
         else
           echo "::warning title=ccache::ccache could not be fetched; this job compiles everything"
         fi
-    - name: The objects of the last run on main
-      uses: actions/cache/restore@v4
-      with:
-        path: ~/.ccache
-        key: ccache-${{ inputs.objects }}-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: |
-          ccache-${{ inputs.objects }}-
     - name: Count from here
       shell: bash
       run: ccache --zero-stats >/dev/null 2>&1 || true

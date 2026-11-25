@@ -605,7 +605,7 @@ JsValue VM::run(size_t stop_depth) {
                 if (it != m_globals.end()) {
                     push(it->second);
                 } else {
-                    // ECMA-262 §6.1.7: GetValue on an unresolvable Reference is
+                    // ECMA-262 §6.2.5.5: GetValue on an unresolvable Reference is
                     // a `ReferenceError`, which is what the tree-walker raises
                     // (`JsEval.cpp`) and what this pushes `undefined` for
                     // before Phase 440.

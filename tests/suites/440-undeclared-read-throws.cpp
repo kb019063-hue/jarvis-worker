@@ -1,6 +1,6 @@
 // Phase 440, finding 440: the bytecode VM's undeclared read throws.
 //
-// ECMA-262 §6.1.7: GetValue on an unresolvable Reference is a thrown
+// ECMA-262 §6.2.5.5: GetValue on an unresolvable Reference is a thrown
 // `ReferenceError`. `OpGetGlobal` pushed `undefined` instead, so on the VM
 // `missingName` answered `undefined` and `'p' + missingName` answered
 // `'pundefined'` -- a wrong answer where the tree-walker, and Node, raise an

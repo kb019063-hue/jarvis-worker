@@ -19,10 +19,10 @@ enum class OpCode : uint8_t {
     OpSetLocal,
     OpGetGlobal,
     // The same read, but a name that is not a global of the frame throws a
-    // `ReferenceError` instead of pushing `undefined` (ECMA-262 §6.1.7,
+    // `ReferenceError` instead of pushing `undefined` (ECMA-262 §6.2.5.5,
     // GetValue on an unresolvable Reference). `OpGetGlobal` is kept for the
-    // one place the quiet answer is the right one: the operand of `typeof`,
-    // which §13.5.3 forbids from throwing.
+    // one place the quiet answer is right: an unresolvable identifier as
+    // the operand of `typeof` (§13.5.3).
     OpGetGlobalChecked,
     OpSetGlobal,
 

@@ -7485,6 +7485,41 @@ TEST(subtle_crypto_jwk_import_and_export) {
     assert(interp.eval("rtHex === '000102030405060708090a0b0c0d0e0f'").is_truthy());
 }
 
+TEST(subtle_crypto_ecdh_p256_derive_bits) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var s1 = null, s2 = null, pubLen = 0;
+        Promise.all([
+            crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']),
+            crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])
+        ]).then(function(pairs) {
+            var alice = pairs[0];
+            var bob = pairs[1];
+            return Promise.all([
+                crypto.subtle.exportKey('raw', bob.publicKey),
+                crypto.subtle.deriveBits({ name: 'ECDH', public: bob.publicKey }, alice.privateKey, 256),
+                crypto.subtle.deriveBits({ name: 'ECDH', public: alice.publicKey }, bob.privateKey, 256)
+            ]).then(function(res) {
+                pubLen = res[0].byteLength;
+                s1 = toHex(res[1]);
+                s2 = toHex(res[2]);
+            });
+        });
+    )");
+    assert(interp.eval("pubLen === 65").is_truthy());
+    assert(interp.eval("s1 !== null && s1.length === 64").is_truthy());
+    assert(interp.eval("s1 === s2").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36436,6 +36471,7 @@ int main() {
     RUN_TEST(subtle_crypto_aes_cbc_encrypt_and_decrypt);
     RUN_TEST(subtle_crypto_wrap_and_unwrap_key);
     RUN_TEST(subtle_crypto_jwk_import_and_export);
+    RUN_TEST(subtle_crypto_ecdh_p256_derive_bits);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

@@ -156,6 +156,8 @@ jobs:
         run: make verify-console-terminal-safety
       - name: Bytecode dumps filter UTF-8 terminal controls
         run: make verify-bytecode-terminal-safety
+      - name: CLI and REPL echoes filter UTF-8 terminal controls
+        run: make verify-cli-echo-terminal-safety
       - name: Pathless URL references agree with Node
         run: make verify-relative-navigation
       - name: Path-bearing URL references agree with Node

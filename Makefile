@@ -261,6 +261,11 @@ verify-console-terminal-safety: $(TARGET)
 verify-bytecode-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_bytecode_terminal.py --binary $(TARGET)
 
+## Capture REPL results and CLI echo attacks safely.
+.PHONY: verify-cli-echo-terminal-safety
+verify-cli-echo-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_cli_echo_terminal.py --binary $(TARGET)
+
 $(BUILD_DIR)/terminal_text_probe: tools/security/terminal_text_probe.cpp $(BUILD_DIR)/common/TerminalText.o
 	$(CXX) $(CXXFLAGS) $^ -o $@
 

@@ -310,19 +310,41 @@ void BrowserShell::scan_interactive_elements() {
     std::vector<std::shared_ptr<Element>> candidates;
 
     // Every element of the document, in tree order, without recursion.
+    //
+    // What stands in the ring is what the Tab key can reach, and the answer to
+    // that is the bindings' own `is_focusable` -- the predicate `focus()` obeys
+    // -- not a list of three tag names. The scan used to take `a[href]`,
+    // `button` (or a `btn`-ish class or id, or any element with a click
+    // listener) and `input`, which left `select`, `textarea`, a `summary` in a
+    // `details`, a `[contenteditable]` region and any `[tabindex]` element
+    // reachable by `focus()` and unreachable by Tab (Phase 409, finding 409).
+    //
+    // The three that are not themselves focusable stay, because they are what
+    // the ring was built for: a `btn`-classed `div` or a `div` with a click
+    // listener is what an old page's button is. They are appended after the
+    // focusable ones rather than mixed into tree order, so widening the ring
+    // cannot reorder the stops a page already had. The list is a *tab order*
+    // now, not a list of click targets: `element_at` does the hit testing.
     for_each_descendant(*m_document, [&](Node& n) {
         if (!n.is_element()) return true;
         auto el = std::static_pointer_cast<Element>(n.shared_from_this());
+        if (dom::is_focusable(*el)) {
+            candidates.push_back(el);
+        }
+        return true;
+    });
+
+    // The legacy click targets, in tree order, after the focusable ones.
+    for_each_descendant(*m_document, [&](Node& n) {
+        if (!n.is_element()) return true;
+        auto el = std::static_pointer_cast<Element>(n.shared_from_this());
+        if (dom::is_focusable(*el)) return true;
         std::string tag = el->tag_name();
         std::string cls = el->get_attribute("class");
         std::string id = el->id();
-        bool is_link = (tag == "a" && el->has_attribute("href"));
-        bool is_btn = (tag == "button" || cls.find("btn") != std::string::npos || id.find("btn") != std::string::npos || el->has_listeners("click"));
-        bool is_inp = (tag == "input");
-
-        if (is_link || is_btn || is_inp) {
-            candidates.push_back(el);
-        }
+        bool is_btn = (tag == "button" || cls.find("btn") != std::string::npos ||
+                       id.find("btn") != std::string::npos || el->has_listeners("click"));
+        if (is_btn) candidates.push_back(el);
         return true;
     });
 

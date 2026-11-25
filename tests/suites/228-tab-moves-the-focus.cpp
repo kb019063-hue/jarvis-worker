@@ -116,18 +116,24 @@ TEST(shell_tab_moves_the_focus_and_dispatches_its_events) {
             "</script></body>")));
         JsInterpreter& other = *empty.js_engine();
         auto read = [&](const char* source) { return other.eval(source).to_string(); };
-        // The page focused a `tabindex` div before the ring was built. That
-        // div is not a ring stop (the scan takes `a`, `button` and `input`),
-        // so the walk has nothing to reconcile with and the first Tab starts
-        // at the first stop -- and the div that loses the focus hears it.
+        // The page focused a `tabindex` div before the ring was built, and the
+        // div is a stop: Phase 409 (finding 409) made the ring what
+        // `is_focusable` accepts rather than `a`, `button` and `input`, so a
+        // `tabindex` element is reachable by Tab as it is by `focus()`. This
+        // block used to assert the opposite -- "that div is not a ring stop
+        // (the scan takes `a`, `button` and `input`)" -- which was the defect
+        // stated as the contract. The walk now reconciles with the document's
+        // focus, so the first Tab leaves `sink` and takes `go`.
         assert(read("document.activeElement.id") == "sink");
         assert(empty.handle_key("Tab"));
         assert(read("document.activeElement.id") == "go");
         assert(read("log.join(',')") == "blur:sink,focus:go");
-        // The ring holds one stop, so the back step is the same press again:
-        // it re-focuses that stop, and nothing blurs.
+        // Two stops, so the back step returns to `sink`. The page listens for
+        // `blur` on `sink` only and `focus` on `go` only, so the pair this
+        // step dispatches -- `blur` on `go`, `focus` on `sink` -- has no
+        // listener to reach, and the log is the same afterwards.
         empty.focus_prev();
-        assert(read("document.activeElement.id") == "go");
+        assert(read("document.activeElement.id") == "sink");
         assert(read("log.join(',')") == "blur:sink,focus:go");
     }
 

@@ -692,6 +692,150 @@ bool base64url_decode(const std::string& s, std::vector<uint8_t>& out) {
     return true;
 }
 
+// NIST P-256 (secp256r1) ECDH primitives.
+namespace p256 {
+struct Fe { uint64_t v[4]; }; // little-endian limbs mod p
+
+static constexpr Fe kP = {{0xffffffffffffffffull, 0x00000000ffffffffull, 0x0000000000000000ull, 0xffffffff00000001ull}};
+static constexpr Fe kB = {{0x3bce3c3e27d2604bull, 0x651d06b0cc53b0f6ull, 0xb3ebbd55769886bcull, 0x5ac635d8aa3a93e7ull}};
+static constexpr Fe kGx = {{0xf4a13945d898c296ull, 0x77037d812deb33a0ull, 0xf8bce6e563a440f2ull, 0x6b17d1f2e12c4247ull}};
+static constexpr Fe kGy = {{0xcbb6406837bf51f5ull, 0x2bce33576b315eceull, 0x8ee7eb4a7c0f9e16ull, 0x4fe342e2fe1a7f9bull}};
+
+inline bool is_zero(const Fe& a) { return (a.v[0] | a.v[1] | a.v[2] | a.v[3]) == 0; }
+
+inline void add(const Fe& a, const Fe& b, Fe& r) {
+    unsigned __int128 c = 0;
+    for (int i = 0; i < 4; ++i) {
+        c += static_cast<unsigned __int128>(a.v[i]) + b.v[i];
+        r.v[i] = static_cast<uint64_t>(c);
+        c >>= 64;
+    }
+    uint64_t borrow = 0;
+    Fe t{};
+    for (int i = 0; i < 4; ++i) {
+        unsigned __int128 diff = static_cast<unsigned __int128>(r.v[i]) - kP.v[i] - borrow;
+        t.v[i] = static_cast<uint64_t>(diff);
+        borrow = (diff >> 127) & 1u;
+    }
+    if (c || !borrow) r = t;
+}
+
+inline void sub(const Fe& a, const Fe& b, Fe& r) {
+    uint64_t borrow = 0;
+    for (int i = 0; i < 4; ++i) {
+        unsigned __int128 diff = static_cast<unsigned __int128>(a.v[i]) - b.v[i] - borrow;
+        r.v[i] = static_cast<uint64_t>(diff);
+        borrow = (diff >> 127) & 1u;
+    }
+    if (borrow) {
+        unsigned __int128 c = 0;
+        for (int i = 0; i < 4; ++i) {
+            c += static_cast<unsigned __int128>(r.v[i]) + kP.v[i];
+            r.v[i] = static_cast<uint64_t>(c);
+            c >>= 64;
+        }
+    }
+}
+
+inline void mul(const Fe& a, const Fe& b, Fe& r) {
+    Fe acc{};
+    Fe x = a;
+    for (int i = 0; i < 4; ++i) {
+        for (int bit = 0; bit < 64; ++bit) {
+            if ((b.v[i] >> bit) & 1ull) add(acc, x, acc);
+            add(x, x, x);
+        }
+    }
+    r = acc;
+}
+
+inline void sqr(const Fe& a, Fe& r) { mul(a, a, r); }
+
+inline void inv(const Fe& a, Fe& r) {
+    // a^(p-2) mod p
+    Fe base = a;
+    r = {{1, 0, 0, 0}};
+    Fe exp = kP;
+    exp.v[0] -= 2ull;
+    for (int i = 0; i < 4; ++i) {
+        for (int b = 0; b < 64; ++b) {
+            if ((exp.v[i] >> b) & 1ull) mul(r, base, r);
+            sqr(base, base);
+        }
+    }
+}
+
+struct Jac { Fe x, y, z; };
+
+inline void point_double(const Jac& p, Jac& r) {
+    if (is_zero(p.z) || is_zero(p.y)) { r = {{0,0,0,0}, {1,0,0,0}, {0,0,0,0}}; return; }
+    Fe s, m, t1, t2, z2;
+    sqr(p.y, t1); mul(p.x, t1, s); add(s, s, s); add(s, s, s); // S = 4*X*Y^2
+    sqr(p.z, z2);
+    sub(p.x, z2, t1); add(p.x, z2, t2); mul(t1, t2, m);
+    add(m, m, t1); add(t1, m, m); // M = 3*(X-Z^2)*(X+Z^2)
+    sqr(m, r.x); sub(r.x, s, r.x); sub(r.x, s, r.x); // X' = M^2 - 2*S
+    sub(s, r.x, t1); mul(m, t1, t2);
+    sqr(p.y, t1); sqr(t1, t1);
+    for (int i = 0; i < 3; ++i) add(t1, t1, t1); // 8*Y^4
+    mul(p.y, p.z, r.z); add(r.z, r.z, r.z);
+    sub(t2, t1, r.y);
+}
+
+inline void point_add(const Jac& p, const Jac& q, Jac& r) {
+    if (is_zero(p.z)) { r = q; return; }
+    if (is_zero(q.z)) { r = p; return; }
+    Fe z1z1, z2z2, u1, u2, s1, s2, h, hh, hhh, r_val, v, t1;
+    sqr(p.z, z1z1); sqr(q.z, z2z2);
+    mul(p.x, z2z2, u1); mul(q.x, z1z1, u2);
+    mul(p.y, q.z, s1); mul(s1, z2z2, s1);
+    mul(q.y, p.z, s2); mul(s2, z1z1, s2);
+    sub(u2, u1, h);
+    sub(s2, s1, r_val);
+    if (is_zero(h)) {
+        if (is_zero(r_val)) point_double(p, r);
+        else r = {{0,0,0,0}, {1,0,0,0}, {0,0,0,0}};
+        return;
+    }
+    sqr(h, hh); mul(hh, h, hhh); mul(u1, hh, v);
+    sqr(r_val, r.x); sub(r.x, hhh, r.x); sub(r.x, v, r.x); sub(r.x, v, r.x);
+    sub(v, r.x, t1); mul(r_val, t1, r.y); mul(s1, hhh, t1); sub(r.y, t1, r.y);
+    mul(p.z, q.z, r.z); mul(r.z, h, r.z);
+}
+
+inline void scalar_mul(const uint8_t k_be[32], const Fe& px, const Fe& py, Fe& rx, Fe& ry) {
+    Jac acc{{0,0,0,0}, {1,0,0,0}, {0,0,0,0}};
+    Jac base{px, py, {{1,0,0,0}}};
+    for (int i = 0; i < 32; ++i) {
+        for (int b = 7; b >= 0; --b) {
+            point_double(acc, acc);
+            if ((k_be[i] >> b) & 1u) point_add(acc, base, acc);
+        }
+    }
+    Fe zinv, zinv2, zinv3;
+    inv(acc.z, zinv);
+    sqr(zinv, zinv2);
+    mul(zinv2, zinv, zinv3);
+    mul(acc.x, zinv2, rx);
+    mul(acc.y, zinv3, ry);
+}
+
+inline void fe_to_be(const Fe& a, uint8_t out[32]) {
+    for (int i = 0; i < 4; ++i) {
+        uint64_t w = a.v[3 - i];
+        for (int j = 0; j < 8; ++j) out[i * 8 + j] = static_cast<uint8_t>((w >> ((7 - j) * 8)) & 0xffu);
+    }
+}
+
+inline void be_to_fe(const uint8_t in[32], Fe& a) {
+    for (int i = 0; i < 4; ++i) {
+        uint64_t w = 0;
+        for (int j = 0; j < 8; ++j) w = (w << 8) | in[i * 8 + j];
+        a.v[3 - i] = w;
+    }
+}
+} // namespace p256
+
 struct CryptoKeyState : JsExotic {
     std::string type = "secret";
     bool extractable = false;
@@ -811,6 +955,19 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[2];
         std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
                                                         : ascii_lower_str(to_str(alg_val));
+        if (alg_name == "ecdh") {
+            if (fmt != "raw" || key_bytes.size() != 65u || key_bytes[0] != 0x04u) {
+                return reject_with("DataError", "SubtleCrypto.importKey: ECDH raw public key must be 65 bytes (0x04 || X || Y).");
+            }
+            auto state = std::make_shared<CryptoKeyState>();
+            state->type = "public";
+            state->extractable = args[3].is_truthy();
+            state->hash_alg = "ecdh";
+            state->key_bytes = std::move(key_bytes);
+            JsValue key = r.make("CryptoKey", state);
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
+            return undefined();
+        }
         if (alg_name == "pbkdf2" || alg_name == "hkdf") {
             auto state = std::make_shared<CryptoKeyState>();
             state->extractable = args[3].is_truthy();
@@ -965,6 +1122,41 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[0];
         std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
                                                         : ascii_lower_str(to_str(alg_val));
+        if (alg_name == "ecdh") {
+            std::string curve = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("namedCurve"))) : "";
+            if (curve != "p-256") {
+                return reject_with("NotSupportedError", "SubtleCrypto.generateKey: only ECDH P-256 is supported.");
+            }
+            uint8_t priv[32];
+            fill_random_bytes(priv, 32u);
+            priv[0] &= 0x7fu; // ensure < n
+            priv[31] |= 0x01u; // ensure != 0
+            p256::Fe rx, ry;
+            p256::scalar_mul(priv, p256::kGx, p256::kGy, rx, ry);
+            std::vector<uint8_t> pub(65u);
+            pub[0] = 0x04u;
+            p256::fe_to_be(rx, &pub[1]);
+            p256::fe_to_be(ry, &pub[33]);
+
+            auto priv_state = std::make_shared<CryptoKeyState>();
+            priv_state->type = "private";
+            priv_state->extractable = args[1].is_truthy();
+            priv_state->hash_alg = "ecdh";
+            priv_state->key_bytes.assign(priv, priv + 32);
+
+            auto pub_state = std::make_shared<CryptoKeyState>();
+            pub_state->type = "public";
+            pub_state->extractable = true;
+            pub_state->hash_alg = "ecdh";
+            pub_state->key_bytes = std::move(pub);
+
+            JsValue obj_ctor = r.window.is_object() ? r.window.get_property("Object") : JsValue();
+            JsValue pair = js_construct(obj_ctor, {});
+            pair.set_property("privateKey", r.make("CryptoKey", priv_state));
+            pair.set_property("publicKey", r.make("CryptoKey", pub_state));
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {pair});
+            return undefined();
+        }
         if ((alg_name == "aes-ctr" || alg_name == "aes-gcm" || alg_name == "aes-cbc") && alg_val.is_object_like()) {
             const int len_bits = static_cast<int>(to_double(alg_val.get_property("length")));
             if (len_bits != 128 && len_bits != 192 && len_bits != 256) {
@@ -1014,6 +1206,36 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[0];
         const std::string alg_name = alg_val.is_object_like()
             ? ascii_lower_str(to_str(alg_val.get_property("name"))) : std::string();
+        if (alg_name == "ecdh") {
+            CryptoKeyState* base_key = state_of<CryptoKeyState>(args[1]);
+            if (!base_key || base_key->hash_alg != "ecdh" || base_key->type != "private" || base_key->key_bytes.size() != 32u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.deriveBits: ECDH requires a private ECDH CryptoKey.");
+            }
+            CryptoKeyState* pub_key = state_of<CryptoKeyState>(alg_val.get_property("public"));
+            if (!pub_key || pub_key->hash_alg != "ecdh" || pub_key->type != "public" || pub_key->key_bytes.size() != 65u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.deriveBits: ECDH public key must be a public ECDH CryptoKey.");
+            }
+            const int len_bits = static_cast<int>(to_double(args[2]));
+            if (len_bits < 0 || (len_bits % 8) != 0 || len_bits > 256) {
+                return reject_with("OperationError", "SubtleCrypto.deriveBits: ECDH P-256 length must be 0..256 and a multiple of 8.");
+            }
+            p256::Fe px, py, sx, sy;
+            p256::be_to_fe(&pub_key->key_bytes[1], px);
+            p256::be_to_fe(&pub_key->key_bytes[33], py);
+            p256::scalar_mul(base_key->key_bytes.data(), px, py, sx, sy);
+            uint8_t shared[32];
+            p256::fe_to_be(sx, shared);
+            const std::size_t out_bytes = static_cast<std::size_t>(len_bits / 8);
+            JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
+            JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
+            JsValue out_ab = js_construct(ab_ctor, {num(static_cast<double>(out_bytes))});
+            JsValue out_u8 = js_construct(u8_ctor, {out_ab});
+            for (std::size_t i = 0; i < out_bytes; ++i) {
+                out_u8.set_property(std::to_string(i), num(static_cast<double>(shared[i])));
+            }
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {out_ab});
+            return undefined();
+        }
         if (alg_name != "pbkdf2" && alg_name != "hkdf") {
             return reject_with("NotSupportedError", "SubtleCrypto.deriveBits: only PBKDF2 and HKDF are supported.");
         }

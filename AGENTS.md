@@ -1151,6 +1151,17 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   day. So what has to happen is done before the reply, and the reply, which
   is all that reaches the person, says which pull request is merged, which
   is still open and why, and what they have to do before you can go on.
+- **A watch that stopped without saying so.** On 25 November the landing
+  session's turn ended at 07:22 with a lot in test and the status line
+  promising a watch until 08:15. #433 had been told at 07:22 that it would
+  land when the run passed; the run passed at 07:26 and nobody was there.
+  `merge N` went on saying "a watch is on" until 07:52, thirty minutes
+  after the last look, and #433 was merged by its own agent at 08:26.
+  Three more pull requests were finished by 09:05 and stood until 12:40.
+  **The landing session ends its watch itself** (`check_pr.py watch
+  --off`, then its own merge) **while it still has the turn to do it
+  in**: a watch of two hours is long, and the hour it names on the board
+  is a promise that somebody is looking.
 - **The merge is the last thing an agent does with GitHub.** Minutes after
   `gh pr merge` the platform cuts the branch off, in the middle of the
   turn. #175 was merged on 21 November at 03:50:48. `gh` answered until

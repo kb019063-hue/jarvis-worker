@@ -43,7 +43,7 @@ The new suite fails against the old implementation: its mapper-throw checks obse
 - `make -j2 test`: **495/495 engine suites** and **114/114 cross-origin checks** after merging the latest `main`.
 - `make js-conformance`: **1,153/1,158**, everyday probe **90/90**.
 - `make wpt`: **9,570/9,824** subtests; 254 failures listed in the repository's expected-failures file, 0 unlisted.
-- test262 before/after totals are recorded once the two-binary run finishes.
+- test262 at pinned commit `2e58f87d8350`: **15,211/15,686** pass both before and after (14 module tests skipped); **0 gained, 0 lost**.
 
 The pinned test262 commit predates `Array.fromAsync`, so it contains no tests for this method; its before/after comparison is a regression check, not a direct test of this change.
 

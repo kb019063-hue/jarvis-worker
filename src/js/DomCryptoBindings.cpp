@@ -1232,14 +1232,22 @@ void setup_subtle_crypto(Iface& I) {
             if (!read_buffer_source(r, args[2], data)) {
                 return reject_with("TypeError", "SubtleCrypto.sign: data must be a BufferSource.");
             }
-            auto h = sha256_bytes(data.data(), data.size());
+            JsValue hash_val = args[0].is_object_like() ? args[0].get_property("hash") : JsValue();
+            std::string h_name = hash_val.is_object_like() ? ascii_lower_str(to_str(hash_val.get_property("name")))
+                                                           : ascii_lower_str(to_str(hash_val));
+            if (h_name.empty()) h_name = "sha-256";
+            std::vector<uint8_t> digest;
+            if (h_name == "sha-256") { auto a = sha256_bytes(data.data(), data.size()); digest.assign(a.begin(), a.end()); }
+            else if (h_name == "sha-384") digest = sha512_family_bytes(data.data(), data.size(), true);
+            else if (h_name == "sha-512") digest = sha512_family_bytes(data.data(), data.size(), false);
+            else return reject_with("NotSupportedError", "SubtleCrypto.sign: unsupported ECDSA hash '" + h_name + "'.");
             uint8_t sig[64]{};
             for (int attempt = 0; attempt < 16; ++attempt) {
                 uint8_t k_be[32];
                 fill_random_bytes(k_be, 32u);
                 k_be[0] &= 0x7fu;
                 k_be[31] |= 0x01u;
-                if (p256::ecdsa_sign(key->key_bytes.data(), h.data(), sig, k_be)) break;
+                if (p256::ecdsa_sign(key->key_bytes.data(), digest.data(), sig, k_be)) break;
             }
             JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
             JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
@@ -1289,10 +1297,18 @@ void setup_subtle_crypto(Iface& I) {
             if (!read_buffer_source(r, args[2], sig) || !read_buffer_source(r, args[3], data)) {
                 return reject_with("TypeError", "SubtleCrypto.verify: signature and data must be BufferSources.");
             }
+            JsValue hash_val = args[0].is_object_like() ? args[0].get_property("hash") : JsValue();
+            std::string h_name = hash_val.is_object_like() ? ascii_lower_str(to_str(hash_val.get_property("name")))
+                                                           : ascii_lower_str(to_str(hash_val));
+            if (h_name.empty()) h_name = "sha-256";
+            std::vector<uint8_t> digest;
+            if (h_name == "sha-256") { auto a = sha256_bytes(data.data(), data.size()); digest.assign(a.begin(), a.end()); }
+            else if (h_name == "sha-384") digest = sha512_family_bytes(data.data(), data.size(), true);
+            else if (h_name == "sha-512") digest = sha512_family_bytes(data.data(), data.size(), false);
+            else return reject_with("NotSupportedError", "SubtleCrypto.verify: unsupported ECDSA hash '" + h_name + "'.");
             bool ok = false;
             if (sig.size() == 64u) {
-                auto h = sha256_bytes(data.data(), data.size());
-                ok = p256::ecdsa_verify(key->key_bytes.data(), h.data(), sig.data());
+                ok = p256::ecdsa_verify(key->key_bytes.data(), digest.data(), sig.data());
             }
             if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {boolean(ok)});
             return undefined();

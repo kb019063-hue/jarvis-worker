@@ -32503,6 +32503,17 @@ TEST(automatic_gc_reclaims_churn_without_calling_gc) {
 
     Heap& heap = Heap::default_heap();
     heap.collect_garbage();
+    // Begin from the collector's floor rather than from whatever suite ran
+    // before this one. A collection sizes the agent's next threshold at
+    // `max(min_threshold, alive_at_that_collection)` (Heap.cpp,
+    // reset_auto_gc_after_collect_locked), so any suite that leaves a large
+    // live heap raises this test's threshold above the 12,000 allocations the
+    // VM loop below makes -- and then no collection fires and the last
+    // assertion fails. Reached in practice by an ordinary worker suite: the
+    // document a module worker is given to resolve its imports against stays
+    // live on the main agent, which is the agent this test allocates on.
+    // Setting the floor zeroes the count as well as the threshold.
+    heap.set_auto_gc_min_threshold(Heap::kDefaultAutoGcMinThreshold);
     const uint64_t auto_before = heap.auto_gc_collections();
     const size_t base_alive = heap.stats().alive_cells;
 

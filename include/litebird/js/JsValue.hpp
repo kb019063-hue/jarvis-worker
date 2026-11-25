@@ -140,6 +140,7 @@ struct BytecodeFunction;
 class CanvasRenderingContext2D;
 class CanvasGradient;
 class CanvasPattern;
+class Path2D;
 
 class JsValue {
 public:
@@ -227,6 +228,7 @@ public:
                                      std::shared_ptr<CanvasRenderingContext2D>,
                                      std::shared_ptr<CanvasGradient>,
                                      std::shared_ptr<CanvasPattern>,
+                                     std::shared_ptr<Path2D>,
                                      std::shared_ptr<struct PromiseData>,
                                      std::shared_ptr<struct GeneratorData>>;
         Payload payload;
@@ -292,6 +294,10 @@ public:
     /// §4.12.5.1's `CanvasPattern`, when this value is one. A `fillStyle` is
     /// three things: a colour, a gradient or a pattern, and this is the third.
     const std::shared_ptr<CanvasPattern>& canvas_pattern_value() const;
+    /// §4.12.5.1.7's `Path2D`, when this value is one. Carried here rather than
+    /// looked up in a registry, the same way `CanvasPattern` is, so a path is
+    /// released when the last value holding it is.
+    const std::shared_ptr<Path2D>& path2d_value() const;
     const std::shared_ptr<struct PromiseData>& promise_value() const;
     const std::shared_ptr<struct GeneratorData>& generator_value() const;
 
@@ -307,6 +313,7 @@ public:
     void set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> value);
     void set_canvas_gradient_value(std::shared_ptr<CanvasGradient> value);
     void set_canvas_pattern_value(std::shared_ptr<CanvasPattern> value);
+    void set_path2d_value(std::shared_ptr<Path2D> value);
     void set_promise_value(std::shared_ptr<struct PromiseData> value);
     void set_generator_value(std::shared_ptr<struct GeneratorData> value);
 

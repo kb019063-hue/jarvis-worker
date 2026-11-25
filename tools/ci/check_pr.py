@@ -789,11 +789,18 @@ def staleness(head: str, main_sha: str) -> tuple[int, str]:
     """
     behind = 0
     counted = git("rev-list", "--count", f"{head}..{main_sha}")
-    if counted.returncode == 0:
-        try:
-            behind = int(counted.stdout.strip() or "0")
-        except ValueError:
-            behind = 0
+    if counted.returncode != 0:
+        # The clone does not have one of the two commits, so git counted
+        # nothing. Until 25 November 2026 that was read as nought: asked
+        # about #415 from a clone that had not fetched its head, `claim 415`
+        # said "main is in the head commit" of a pull request that was 45
+        # commits behind `main` and in conflict with it.
+        return -1, (f"this clone does not have the commit {head[:7]}, so nobody can say here whether it merges "
+                    f"with main: fetch it (`git fetch origin refs/pull/N/head`) and ask again")
+    try:
+        behind = int(counted.stdout.strip() or "0")
+    except ValueError:
+        behind = 0
     if behind == 0:
         return 0, ""
     for _ in range(4):      # a sandbox's clone is shallow: go back until the two share an ancestor
@@ -819,7 +826,11 @@ def staleness_problems(claim: dict, main_sha: str) -> list[tuple[bool, str]]:
     """
     if not claim.get("head"):
         return []
+    if claim.get("number") and git("cat-file", "-e", claim["head"] + "^{commit}").returncode != 0:
+        fetched(f"refs/pull/{claim['number']}/head")     # another agent's pull request: its head is not here yet
     behind, why = staleness(claim["head"], main_sha)
+    if behind < 0:
+        return [(True, why)]
     if behind == 0:
         return [(False, f"main is in the head commit {claim['head'][:7]}")]
     if why:
@@ -1617,12 +1628,13 @@ def self_test() -> int:
     # here is what a claim says about each of the three answers it can give,
     # which is the thing the session that opened a 39-commit-old landing never saw.
     stale = [(0, ""), (39, "it does not merge with main any more (tests/test_suite.cpp)"),
-             (39, "")]
+             (39, ""), (-1, "this clone does not have the commit abc1234")]
     wanted_stale = [
         [(False, "main is in the head commit abc1234")],
         [(True, "it does not merge with main any more (tests/test_suite.cpp): it is 39 commit(s) "
                 "behind main. Merge main in, or close it if what it was for has landed")],
         [(False, "39 commit(s) behind main, and it still merges")],
+        [(True, "this clone does not have the commit abc1234")],
     ]
 
     cases = [
@@ -2017,7 +2029,8 @@ def self_test() -> int:
 
     names_stale = ["a head with main in it: quiet",
                    "39 commits behind and it does not merge: blocking, and it names the file",
-                   "39 commits behind and it still merges: a note, not a refusal"]
+                   "39 commits behind and it still merges: a note, not a refusal",
+                   "a head this clone does not have: no answer, and it says so (it used to say main is in it)"]
     for name, (behind, why), wanted in zip(names_stale, stale, wanted_stale):
         real = globals()["staleness"]
         globals()["staleness"] = lambda head, sha, _b=behind, _w=why: (_b, _w)

@@ -1,0 +1,42 @@
+# Phase 440 — the VM rejects an unresolvable read
+
+Task: the bytecode VM's undeclared read; finding 440; agent Vega.
+
+## What was wrong
+
+`missingName;` raised a ReferenceError in the tree-walker but the experimental
+VM returned `undefined`. The difference could propagate as a wrong value:
+`'p' + missingName` produced `pundefined`. `typeof missingName` must remain
+quiet, but that exception applies to an unresolvable reference, not to every
+read inside a `typeof` expression: `typeof (missingName + 1)` and
+`typeof missingName.x` throw. Node confirms these cases.
+
+## What changed
+
+`OpGetGlobalChecked` reads the same global map as `OpGetGlobal`, but raises a
+JavaScript `ReferenceError` on a miss. The compiler uses it for ordinary name
+reads, compound-assignment target reads and updates. Only a bare identifier
+operand of `typeof` uses the quiet opcode; its other operands compile normally.
+Existing global values, including an explicitly present `undefined`, are not
+mistaken for missing bindings. Simple sloppy assignment still creates a global.
+The bytecode disassembler consumes and prints the new opcode's name operand.
+
+## Verification
+
+`tests/suites/440-undeclared-read-throws.cpp` covers each read site, missing
+and declared names, simple assignment, the bare and nested `typeof` cases,
+and the disassembly. With the fix stashed, the suite failed on its first
+undeclared read; with the fix restored it passed. The tree-walker's `eval`
+reports uncaught errors to stderr and returns `undefined`, while the VM raises
+`JsThrow` to its caller; the suite checks each path according to its interface.
+`make verify-bytecode` reports 75/75 agreeing and 2/2 still refused, and the
+normal engine suite reports 492/492 on this branch before merging main.
+
+## Still open
+
+The VM is experimental, not the engine pages run on. General exception
+handling (`try`/`catch`), lexical TDZ, closures and other semantics listed in
+Phase 421 remain incomplete. The existing bytecode oracle compares returned
+values and does not yet compare the tree-walker's reported uncaught errors to
+VM throws; the new suite checks those explicitly. No external conformance
+score or speed improvement is claimed.

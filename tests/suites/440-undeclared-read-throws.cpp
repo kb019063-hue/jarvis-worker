@@ -21,7 +21,7 @@ TEST(an_undeclared_read_throws_in_the_vm) {
             JsInterpreter js(nullptr);
             VM vm;
             return vm.interpret(js.compile_to_bytecode(source)).to_string();
-        } catch (const std::exception& e) {
+        } catch (const JsThrow& e) {
             const std::string what = e.what();
             const std::string::size_type colon = what.find(':');
             return colon == std::string::npos ? what : what.substr(0, colon);
@@ -83,6 +83,14 @@ TEST(an_undeclared_read_throws_in_the_vm) {
         auto result = vm.interpret(js.compile_to_bytecode("typeof missingName;"));
         assert(result.type == JsType::String);
         assert(result.to_string() == "undefined");
+        vm.set_global("presentButUndefined", JsValue::make_undefined());
+        assert(vm.interpret(js.compile_to_bytecode("presentButUndefined;")).is_undefined());
+        try {
+            vm.interpret(js.compile_to_bytecode("missingName;"));
+            assert(false && "expected a JavaScript ReferenceError");
+        } catch (const JsThrow& error) {
+            assert(js_describe_thrown(error.value) == "ReferenceError: missingName is not defined");
+        }
         // The constant operand belongs to the checked opcode, not another
         // instruction. A dump must advance over it and show the next opcode.
         auto fn = js.compile_to_bytecode("missingName;");

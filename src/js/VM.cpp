@@ -1,4 +1,5 @@
 #include "litebird/js/VM.hpp"
+#include "litebird/common/TerminalText.hpp"
 #include "litebird/js/JsOps.hpp"
 #include "litebird/dom/Element.hpp"
 #include "litebird/js/EventLoop.hpp"
@@ -89,24 +90,25 @@ void VM::init_builtins() {
         return res;
     }));
 
-    // console object
+    // As in the tree-walker console, filter page-controlled text only at
+    // the output boundary; the program-owned ANSI prefixes are unchanged.
     JsValue console_obj = JsValue::make_object();
     console_obj.set_property("log", JsValue::make_native_function([](const std::vector<JsValue>& args) {
         for (size_t i = 0; i < args.size(); ++i) {
-            std::cout << js_output_text(args[i].to_string()) << (i + 1 < args.size() ? " " : "");
+            std::cout << terminal_safe(js_output_text(args[i].to_string())) << (i + 1 < args.size() ? " " : "");
         }
         std::cout << std::endl;
         return JsValue::make_undefined();
     }));
     console_obj.set_property("warn", JsValue::make_native_function([](const std::vector<JsValue>& args) {
         std::cout << "\033[33m[WARN] ";
-        for (const auto& a : args) std::cout << js_output_text(a.to_string()) << " ";
+        for (const auto& a : args) std::cout << terminal_safe(js_output_text(a.to_string())) << " ";
         std::cout << "\033[0m" << std::endl;
         return JsValue::make_undefined();
     }));
     console_obj.set_property("error", JsValue::make_native_function([](const std::vector<JsValue>& args) {
         std::cerr << "\033[31m[ERROR] ";
-        for (const auto& a : args) std::cerr << js_output_text(a.to_string()) << " ";
+        for (const auto& a : args) std::cerr << terminal_safe(js_output_text(a.to_string())) << " ";
         std::cerr << "\033[0m" << std::endl;
         return JsValue::make_undefined();
     }));
@@ -618,6 +620,15 @@ JsValue VM::run() {
                 // the value just below the source.
                 JsValue& target = m_stack.back();
                 copy_data_properties(target, source, nullptr);
+                break;
+            }
+            case OpCode::OpDefineTemplateRaw: {
+                JsValue raw = pop();
+                // The tagged template's strings array sits below the raw one;
+                // `raw` is not enumerable (PropertyMap::Hidden), matching the
+                // tree-walker's eval_tagged_template.
+                JsValue& strings = m_stack.back();
+                strings.define_property("raw", std::move(raw), PropertyMap::Hidden);
                 break;
             }
 

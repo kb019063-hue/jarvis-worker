@@ -606,9 +606,28 @@ ElementType current_element_type(ElementType self) {
     return self;
 }
 
+/// §10.2.1.1 / §23.2.5.1 and the rest: a built-in constructor is not callable,
+/// only constructible. `Map()` and `new Uint8Array(4)` without its `new` were
+/// both ordinary calls here, which made them make an object out of nothing --
+/// where V8 refuses with `Constructor Map requires 'new'`.
+///
+/// Only the *call* form is refused. A derived construction (`class MyMap
+/// extends Map`) reaches this same native through `[[Construct]]` with
+/// `new.target` set, and `Reflect.construct(Uint8Array, [4])` reaches it with
+/// no `new` in the source at all; both are legal and both must keep working,
+/// which is why this asks `requires_new()` and not `current_is_construct()`
+/// (the latter is also false for a `Reflect.construct` and would have taken
+/// that away).
+void require_new(const char* name) {
+    if (JsValue::current_requires_new()) {
+        js_throw_type_error(std::string("Constructor ") + name + " requires 'new'");
+    }
+}
+
 JsValue construct_view(Args args, ElementType self_type) {
     const ElementType type = current_element_type(self_type);
     const char* what = element_name(type);
+    require_new(what);
     const JsValue& first = js_arg(args, 0);
 
     // A derived construction already has its object; a plain one is made here.
@@ -996,6 +1015,7 @@ void install_data_view(JsIntrinsics& intrinsics, JsEnvironment& global) {
     JsValue proto_value = JsValue::make_object(proto);
 
     JsValue constructor = js_make_native("DataView", 1, [](Args args) -> JsValue {
+        require_new("DataView");
         return construct_data_view(args);
     });
     constructor.define_property("prototype", proto_value, 0);
@@ -1106,6 +1126,7 @@ void install_array_buffer(JsIntrinsics& intrinsics, JsEnvironment& global) {
     JsValue proto_value = JsValue::make_object(proto);
 
     JsValue constructor = js_make_native("ArrayBuffer", 1, [](Args args) {
+        require_new("ArrayBuffer");
         const std::size_t byte_length = to_index(js_arg(args, 0), "ArrayBuffer");
         bool resizable = false;
         std::size_t max_byte_length = byte_length;

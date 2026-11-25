@@ -34,12 +34,15 @@
 #   tools/watch/watch.sh once N          #N is green with main in its head and no lot is in test:
 #                                        merge it at once
 #   tools/watch/watch.sh taken HH:MM     a "taken" note in each pull request of the lot, a board line
-#   tools/watch/watch.sh landed "how" N [N...]   a "landed" note in each, a board line
+#   tools/watch/watch.sh landed "how" N [N...]   a "landed" note in each, a board line, a row for `table`
+#   tools/watch/watch.sh table           the lots that landed in this watch, as the table its own pull
+#                                        request ends with: when each run began and passed, when it
+#                                        was merged, whose pull requests, the run and its length
 #   tools/watch/watch.sh sendback N "why, and what to do"   the line that sends #N back, in #N and
 #                                        on the board; #N is then left alone until its head moves
 #   tools/watch/watch.sh note N FILE     comment FILE on #N, print the comment's id
 #
-# State is in $WATCH_STATE (default /tmp/watch): end (the hour), lot.heads
+# State is in $WATCH_STATE (default /tmp/watch): lots.md (the rows of `table`), end (the hour), lot.heads
 # (lines "N SHORTSHA"), lot.main, lot.head, lot.asis, sentback (lines
 # "N SHORTSHA"), ignore (one number a line: a pull request that has no agent
 # and is left alone, as #193 is), land/ (the bodies of the merges and the
@@ -114,7 +117,14 @@ code_was_green() {  # code_was_green FULLSHA
   [ -z "$changed" ]
 }
 takeable() {  # takeable N FULLSHA; says why in $WHY
-  local runs
+  local runs wrong
+  # What it adds where every pull request adds its own files is called by its
+  # own number. #393 was taken on 25 November with a phase, a finding and a
+  # suite called 387-..., which is #387's number; its agent renamed them two
+  # minutes later, and the lot was built again, with #388 waiting in it.
+  wrong="$(git diff --name-only --diff-filter=A "origin/main...$2" -- docs/phases docs/findings tests/suites 2>/dev/null \
+           | grep -Ev "^(docs/phases|docs/findings|tests/suites)/$1-" | head -2 | tr '\n' ' ')"
+  [ -z "$wrong" ] || { WHY="it adds ${wrong}and a file added there is called by its own number ($1-...)"; return 1; }
   WHY="green"; green "$2" && return 0
   runs="$(runs_of "$2")"
   case "$runs" in *failure*|*timed_out*) WHY="its own run failed"; return 1 ;; esac
@@ -502,17 +512,27 @@ taken)
   [ -n "$BOARD" ] && note "$BOARD" "$STATE/land/taken.board.md" ;;
 
 landed)
-  how="$1"; shift; names=""
+  how="$1"; shift; names=""; merged=""
   for n in "$@"; do
     read -r st at sha <<< "$(timeout 30 gh pr view "$n" --json state,mergedAt,headRefOid --jq '"\(.state) \(.mergedAt) \(.headRefOid[0:7])"')"
     [ "$st" = "MERGED" ] || { echo "#$n is $st: no note"; continue; }
+    merged="$(echo "$at" | sed -E 's/.*T([0-9]+:[0-9]+):.*/\1/')"
     printf '%s: #%s has landed: merged as it was at `%s`, %s UTC (%s). Your next task begins with the person'"'"'s Continue.\n' "$NAME" "$n" "$sha" "$(echo "$at" | sed -E 's/.*T([0-9]+:[0-9]+):.*/\1/')" "$how" > "$STATE/land/landed$n.md"
     note "$n" "$STATE/land/landed$n.md"
     names="$names#$n ($(agent_of "$n")), "
   done
   [ -n "$names" ] || exit 0
   printf '%s: landed, each as it was: %s; %s. `main` is `%s`.\n' "$NAME" "$(echo "$names" | sed 's/, $//')" "$how" "$(timeout 20 git ls-remote origin refs/heads/main | cut -c1-7)" > "$STATE/land/landed.board.md"
-  [ -n "$BOARD" ] && note "$BOARD" "$STATE/land/landed.board.md" ;;
+  [ -n "$BOARD" ] && note "$BOARD" "$STATE/land/landed.board.md"
+  # The lot's row in the table the watch's own pull request ends with. It was
+  # written by hand at the end of every watch, from run numbers and times
+  # looked up again one by one.
+  IFS=$'\t' read -r began ended run <<< "$(timeout 60 python3 tools/ci/run_report.py --row "$(cat "$STATE/lot.head" 2>/dev/null)" 2>/dev/null)"
+  printf '| %s | %s | %s | %s | %s |\n' "${began:-?}" "${ended:-?}" "${merged:-?}" "$(echo "$names" | sed -E 's/, $//; s/ \(([^)]*)\)/ \1/g')" "${run:-?}" >> "$STATE/lots.md" ;;
+
+table)
+  printf '| run began | run passed | merged | pull requests | run |\n| :--- | :--- | :--- | :--- | :--- |\n'
+  cat "$STATE/lots.md" 2>/dev/null ;;
 
 sendback)
   n="$1"; why="$2"

@@ -203,6 +203,14 @@ public:
     bool has_accessors{false};      // some own property is a getter/setter
     bool has_legacy_getters{false}; // some own property is a "__get_<name>__" host getter
     bool not_constructor{false};    // the cell of a built-in function that `new` refuses (js_is_constructor)
+    /// The cell of a `JSON.rawJSON` object: its text is in `internal` and
+    /// `JSON.stringify` writes that text as it stands (§25.5.3.1's
+    /// [[IsRawJSON]]). A flag rather than a new `ObjectClass`, because the
+    /// standard's tag for one is "Object" — `Object.prototype.toString.call`
+    /// on it answers `[object Object]` — and `internal` alone cannot say
+    /// which built-in filled it. Ninth bool: it sits in the padding before
+    /// `klass`, so `JsObject` does not grow.
+    bool raw_json_slot{false};
     ObjectClass klass{ObjectClass::Plain};
 
     /// Built-in state that is not a property: a Date's time value, a RegExp's
@@ -221,6 +229,24 @@ public:
     /// Offered every write first; returning true means the hook stored the
     /// value. Lets `window.x = 1` update a global variable named x.
     std::shared_ptr<std::function<bool(const std::string&, const JsValue&)>> assign_hook;
+
+    /// Asked when `[[OwnPropertyKeys]]` enumerates this object: the names it
+    /// adds are own properties that are not in the property table. Used by the
+    /// global object, whose declarations live in the global environment.
+    /// `lookup_fallback` and `assign_hook` each answer for one name the caller
+    /// already has; until this hook existed nothing could ask for *all* of
+    /// them, so `Object.getOwnPropertyNames(globalThis)` reported only the
+    /// names that happened to be table entries.
+    ///
+    /// The bool is `enumerable_only`, the way `own_keys` takes it.
+    std::shared_ptr<std::function<bool(bool, std::vector<std::string>&)>> own_keys_hook;
+
+    /// Asked by `[[Delete]]` when the name is not in the property table, and by
+    /// `has_own_property` for the same reason: `true` means this object owns
+    /// the name. The second bool is `remove`; the third is the answer.
+    /// Without this, `delete globalThis.Error` erased nothing and answered
+    /// `true` — the wrong half of the pair, since `true` means it is gone.
+    std::shared_ptr<std::function<bool(const std::string&, bool, bool&)>> own_property_hook;
 
     /// Host behaviour and state; see JsExotic. Null for ordinary objects.
     std::shared_ptr<JsExotic> exotic;

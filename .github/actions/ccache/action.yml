@@ -36,6 +36,14 @@ inputs:
 runs:
   using: composite
   steps:
+    # The objects first: ccache itself comes with them (the step below).
+    - name: The objects of the last run on main
+      uses: actions/cache/restore@v4
+      with:
+        path: ~/.ccache
+        key: ccache-${{ inputs.objects }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          ccache-${{ inputs.objects }}-
     - name: ccache in front of the compiler
       shell: bash
       env:
@@ -48,10 +56,37 @@ runs:
       run: |
         # A job that cannot get ccache compiles everything, as every job did
         # before. It must not fail for want of it.
+        #
+        # It is fetched once and then kept beside the objects, in a
+        # directory of its own inside the one that is saved (ccache reads
+        # and tidies only its sixteen directories 0 to f). Fourteen jobs
+        # of a run used to fetch the same file from the project's releases
+        # in the same second, and at 02:39 UTC on 25 November one of them
+        # was refused: "Sanitizers: fuzzing" compiled the sanitizer build
+        # from nothing, 300 seconds where its neighbours took 20 to 51,
+        # and the lot was 9.7 minutes for it. In the same run another job
+        # took 50 seconds over the fetch.
         bin="$RUNNER_TEMP/ccache-bin"
+        # Its name is `ccache`, in a directory called by its release:
+        # ccache calls itself by the name of its file. Kept as
+        # `ccache-4.14.3` it answered "ccache-4.14 version 4.14.3", which
+        # is not what is looked for below, and the first runs that had a
+        # kept binary fetched it again (the notice said why, once it was
+        # made to: run 45541427952).
+        kept="$HOME/.ccache/ccache-binary/$CCACHE_RELEASE/ccache"
+        rm -f "$HOME/.ccache/ccache-binary/ccache-$CCACHE_RELEASE"
+        from=""
         mkdir -p "$bin"
+        # What the kept one says of itself is read whole and not through
+        # a pipe: this shell fails a pipe when any part of it does, and
+        # `--version | grep -q` can end ccache with a broken pipe when
+        # grep has seen enough.
+        kept_says=""
+        if [ -x "$kept" ]; then kept_says="$("$kept" --version 2>/dev/null || true)"; fi
         if command -v ccache >/dev/null 2>&1; then
-          ln -sf "$(command -v ccache)" "$bin/ccache"
+          ln -sf "$(command -v ccache)" "$bin/ccache" && from="the runner's own"
+        elif [ "${kept_says%%$'\n'*}" = "ccache version $CCACHE_RELEASE" ]; then
+          cp "$kept" "$bin/ccache" && from="kept with the objects"
         else
           name="ccache-$CCACHE_RELEASE-linux-x86_64-musl-static"
           if curl -fsSL --retry 2 --max-time 60 -o "$RUNNER_TEMP/$name.tar.xz" \
@@ -59,10 +94,23 @@ runs:
              && echo "$CCACHE_SHA256  $RUNNER_TEMP/$name.tar.xz" | sha256sum --check --status \
              && tar -xJf "$RUNNER_TEMP/$name.tar.xz" -C "$RUNNER_TEMP"; then
             found="$(find "$RUNNER_TEMP/$name" -maxdepth 2 -type f -name ccache | head -n 1)"
-            if [ -n "$found" ]; then cp "$found" "$bin/ccache" && chmod +x "$bin/ccache"; fi
+            if [ -n "$found" ]; then
+              cp "$found" "$bin/ccache" && chmod +x "$bin/ccache" && from="fetched from the project's release"
+              # Why the kept one was not used, for the notice of the two
+              # jobs that save: it was not there (and what was), or what
+              # it said of itself.
+              if [ -e "$kept" ]; then
+                from="$from (the kept one said '${kept_says%%$'\n'*}')"
+              else
+                from="$from (none was kept; beside the objects: $(ls "$HOME/.ccache" 2>/dev/null | tr '\n' ' ' | cut -c1-70 || true))"
+              fi
+              # For the job that saves the objects, and so for every job after it.
+              mkdir -p "$(dirname "$kept")" && cp "$bin/ccache" "$kept" || true
+            fi
           fi
         fi
         if [ -x "$bin/ccache" ] && "$bin/ccache" --version >/dev/null 2>&1; then
+          echo "CCACHE_FROM=$from" >> "$GITHUB_ENV"
           # A `g++` that is a link to ccache, first on the PATH: ccache finds
           # the real one behind it, and the Makefile's `CXX ?= g++` and every
           # tool that calls g++ go through it with nothing else changed.
@@ -70,7 +118,23 @@ runs:
           echo "$bin" >> "$GITHUB_PATH"
           {
             echo "CCACHE_DIR=$HOME/.ccache"
-            echo "CCACHE_MAXSIZE=500M"
+            # The limit is there so that ccache never tidies up during a
+            # build. It tidies each of its sixteen directories by itself
+            # when that one is over a sixteenth of the limit, and the
+            # objects of the sanitizer build are few and large: 107 of
+            # them, 0.11 GB, two of them 14 and 28 MB before they are
+            # compressed. Under a limit of 500M, with the directory full
+            # of older builds' objects, a build that compiled them all
+            # kept 86 (run 45471158220, 24 November; the run after it had
+            # 86 hits and 21 misses with nothing changed), and each of the
+            # seven sanitizer jobs then compiled the 21 again: 57 to 88
+            # seconds where a build that finds everything takes 3 to 5
+            # (runs 45473629683 and 45478444576). What is kept is decided
+            # where the objects are saved (ci.yml, "Only the objects this
+            # build used"), not here.
+            echo "CCACHE_MAXSIZE=${{ inputs.objects == 'asan' && '2G' || '500M' }}"
+            # When this job began to use the cache: see the same step.
+            echo "CCACHE_BEGAN=$(date +%s)"
             # The compiler is told apart by what it is, not by when the
             # runner's image installed it.
             echo "CCACHE_COMPILERCHECK=content"
@@ -81,13 +145,6 @@ runs:
         else
           echo "::warning title=ccache::ccache could not be fetched; this job compiles everything"
         fi
-    - name: The objects of the last run on main
-      uses: actions/cache/restore@v4
-      with:
-        path: ~/.ccache
-        key: ccache-${{ inputs.objects }}-${{ github.run_id }}-${{ github.run_attempt }}
-        restore-keys: |
-          ccache-${{ inputs.objects }}-
     - name: Count from here
       shell: bash
       run: ccache --zero-stats >/dev/null 2>&1 || true

@@ -1,6 +1,7 @@
 #include "litebird/render/Canvas2D.hpp"
 #include "litebird/js/JsOps.hpp"
 #include "litebird/render/FontRenderer.hpp"
+#include "litebird/render/ImageFilter.hpp"
 #include "litebird/render/RasterBudget.hpp"
 #include <algorithm>
 #include <cctype>
@@ -407,6 +408,12 @@ void CanvasRenderingContext2D::save() {
     st.stroke_paint = stroke_paint;
     st.image_smoothing_enabled = image_smoothing_enabled;
     st.image_smoothing_quality = image_smoothing_quality;
+    st.shadow_blur = shadow_blur;
+    st.shadow_color = shadow_color;
+    st.shadow_offset_x = shadow_offset_x;
+    st.shadow_offset_y = shadow_offset_y;
+    st.filter_source = filter_source;
+    st.filter_list = filter_list;
     st.ctm = m_ctm;
     st.clip_mask = m_clip_mask;
     m_state_stack.push_back(std::move(st));
@@ -437,6 +444,12 @@ void CanvasRenderingContext2D::restore() {
     stroke_paint = std::move(st.stroke_paint);
     image_smoothing_enabled = st.image_smoothing_enabled;
     image_smoothing_quality = std::move(st.image_smoothing_quality);
+    shadow_blur = st.shadow_blur;
+    shadow_color = st.shadow_color;
+    shadow_offset_x = st.shadow_offset_x;
+    shadow_offset_y = st.shadow_offset_y;
+    filter_source = st.filter_source;
+    filter_list = st.filter_list;
     m_ctm = st.ctm;
     const size_t expected_mask_size = static_cast<size_t>(m_width) * static_cast<size_t>(m_height);
     if (st.clip_mask.size() == expected_mask_size) {
@@ -472,10 +485,19 @@ void CanvasRenderingContext2D::reset() {
     stroke_paint = JsValue();
     image_smoothing_enabled = true;
     image_smoothing_quality = "low";
+    shadow_blur = 0.0f;
+    shadow_color = Color(0, 0, 0, 0);
+    shadow_offset_x = 0.0f;
+    shadow_offset_y = 0.0f;
     m_ctm = TransformMatrix2D::identity();
     m_clip_mask.clear();
     m_state_stack.clear();
     m_paths.clear();
+    // A `reset()` inside a shadow capture would leave the capture counting; the
+    // buffers are dropped with it, so nothing stale can be replayed.
+    m_capture_depth = 0;
+    m_captured_pixels.clear();
+    m_captured_coverage.clear();
 }
 
 void CanvasRenderingContext2D::translate(float tx, float ty) {
@@ -636,9 +658,405 @@ CanvasRenderingContext2D::TextLayout CanvasRenderingContext2D::layout_text(const
     return layout;
 }
 
+float CanvasRenderingContext2D::shadow_padding() const {
+    // A Gaussian's visible extent is about three standard deviations, and the
+    // specification maps `shadowBlur` to a standard deviation of half its value,
+    // so 1.5 times the blur is where the shadow has faded out. The offset is
+    // added because the shadow may land entirely outside the shape.
+    if (shadow_color.a == 0) return 0.0f;
+    const float reach = 1.5f * std::max(0.0f, shadow_blur);
+    return std::abs(shadow_offset_x) + std::abs(shadow_offset_y) + reach;
+}
+
+void CanvasRenderingContext2D::paint_shadow(const std::vector<uint8_t>& coverage) {
+    if (!has_backing_store() || shadow_color.a == 0) return;
+    const std::size_t expected = static_cast<std::size_t>(m_width) * static_cast<std::size_t>(m_height);
+    if (coverage.size() != expected) return;
+
+    const int pad = static_cast<int>(std::ceil(shadow_padding())) + 1;
+    const int ox = static_cast<int>(std::lround(shadow_offset_x));
+    const int oy = static_cast<int>(std::lround(shadow_offset_y));
+
+    // §4.12.5.1: the blur is applied to the shape's own alpha, and the colour is
+    // the shadow colour's, not the shape's. Three box passes approximate a
+    // Gaussian well enough that the edge falls off smoothly; a single box would
+    // leave a hard step and no box at all would leave the shape's own edge.
+    std::vector<uint8_t> alpha = coverage;
+    const int radius = static_cast<int>(std::lround(shadow_blur * 0.5f));
+    if (radius > 0) {
+        auto box_pass = [this](const std::vector<uint8_t>& in, int r) {
+            std::vector<uint8_t> out(in.size(), 0);
+            const int w = m_width;
+            const int h = m_height;
+            // Horizontal, then vertical, with a running sum so the cost does
+            // not grow with the radius.
+            std::vector<uint8_t> tmp(in.size(), 0);
+            for (int y = 0; y < h; ++y) {
+                const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(w);
+                int sum = 0;
+                for (int x = -r; x <= r; ++x) {
+                    if (x >= 0 && x < w) sum += in[row + static_cast<std::size_t>(x)];
+                }
+                for (int x = 0; x < w; ++x) {
+                    tmp[row + static_cast<std::size_t>(x)] =
+                        static_cast<uint8_t>((sum + (2 * r + 1) / 2) / (2 * r + 1));
+                    const int add = x + r + 1;
+                    const int drop = x - r;
+                    if (add < w) sum += in[row + static_cast<std::size_t>(add)];
+                    if (drop >= 0) sum -= in[row + static_cast<std::size_t>(drop)];
+                }
+            }
+            for (int x = 0; x < w; ++x) {
+                int sum = 0;
+                for (int y = -r; y <= r; ++y) {
+                    if (y >= 0 && y < h) sum += tmp[static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                                                   static_cast<std::size_t>(x)];
+                }
+                for (int y = 0; y < h; ++y) {
+                    out[static_cast<std::size_t>(y) * static_cast<std::size_t>(w) + static_cast<std::size_t>(x)] =
+                        static_cast<uint8_t>((sum + (2 * r + 1) / 2) / (2 * r + 1));
+                    const int add = y + r + 1;
+                    const int drop = y - r;
+                    if (add < h) sum += tmp[static_cast<std::size_t>(add) * static_cast<std::size_t>(w) +
+                                            static_cast<std::size_t>(x)];
+                    if (drop >= 0) sum -= tmp[static_cast<std::size_t>(drop) * static_cast<std::size_t>(w) +
+                                              static_cast<std::size_t>(x)];
+                }
+            }
+            return out;
+        };
+        for (int pass = 0; pass < 3; ++pass) alpha = box_pass(alpha, radius);
+    }
+
+    // The shadow's colour never changes the shape's, and a shadow is not itself
+    // shadowed: `set_pixel_safe` composites it under whatever is already there.
+    for (int y = 0; y < m_height; ++y) {
+        for (int x = 0; x < m_width; ++x) {
+            const std::size_t idx = static_cast<std::size_t>(y) * static_cast<std::size_t>(m_width) +
+                                    static_cast<std::size_t>(x);
+            const uint8_t a = alpha[idx];
+            if (a == 0) continue;
+            // The offset moves the shadow **to** (x + ox, y + oy): the shape at
+            // (2,2) with an offset of (4,4) casts its shadow at (6,6). Written
+            // the other way round first (x - ox), which put a shadow of a shape
+            // at the origin nowhere at all — the only pixels it would ever move
+            // were already off-canvas.
+            const int dx_px = x + ox;
+            const int dy_px = y + oy;
+            if (dx_px < 0 || dx_px >= m_width || dy_px < 0 || dy_px >= m_height) continue;
+            // Read the shape's coverage where the shadow lands, not where the
+            // shape is: the offset moves the shadow, and the blur has already
+            // been applied to the shape's own position.
+            // The shadow colour's own alpha times the blurred coverage — passed
+            // as the colour rather than as `coverage`, because `set_pixel_safe`
+            // multiplies coverage into the alpha *and* `global_alpha` into it,
+            // and the capture has already applied both once. Passing the blurred
+            // value as coverage scaled it a second time and made an opaque shadow
+            // of a solid shape come out at 25% (measured: 0,0,0,64).
+            (void)pad;
+            Color sc = shadow_color;
+            sc.a = static_cast<uint8_t>(std::clamp(
+                std::lround(static_cast<float>(shadow_color.a) * (static_cast<float>(a) / 255.0f)), 0l, 255l));
+            set_pixel_safe(dx_px, dy_px, sc, 255);
+        }
+    }
+}
+
+CanvasRenderingContext2D::ShadowCapture::ShadowCapture(CanvasRenderingContext2D* context) {
+    // Only a context that has a visible shadow, or a filter, captures: an
+    // invisible shadow changes no pixel, and the capture is a whole-canvas
+    // buffer. A filter needs the same buffer for a different reason — it reads
+    // the primitive's pixels as a set, not one at a time as `set_pixel_safe`
+    // does — but the mechanism is identical, so both share it.
+    if (!context || (context->shadow_color.a == 0 && !context->filter_is_active())) return;
+    context_ = context;
+    if (context_->m_capture_depth++ == 0) {
+        const std::size_t size = static_cast<std::size_t>(context_->m_width) *
+                                 static_cast<std::size_t>(context_->m_height);
+        context_->m_captured_pixels.assign(size, 0u);
+        context_->m_captured_coverage.assign(size, 0u);
+    }
+}
+
+bool CanvasRenderingContext2D::ShadowCapture::take(int x, int y, Color& out) {
+    if (!context_) return false;
+    if (x < 0 || x >= context_->m_width || y < 0 || y >= context_->m_height) return false;
+    const std::size_t idx = static_cast<std::size_t>(y) * static_cast<std::size_t>(context_->m_width) +
+                            static_cast<std::size_t>(x);
+    const uint8_t cov = context_->m_captured_coverage[idx];
+    if (cov == 0) return false;
+    out = Color::from_argb(context_->m_captured_pixels[idx]);
+    return true;
+}
+
+// §4.12.5.1 `filter`, parsed. The grammar is a space-separated list of filter
+// functions, each `name(` argument `)`. Anything outside it — an unknown
+// function, a missing parenthesis, a bad argument, a stray word — makes the
+// whole value invalid, and an invalid value is **ignored**: the previous list
+// stays. Per-function salvage would put a half-understood effect on the canvas,
+// which looks like a rendering bug rather than a rejected assignment.
+namespace {
+
+struct FilterParse {
+    bool ok{false};
+    std::vector<FilterFunction> list;
+};
+
+// A CSS number: `2`, `0.5`, `-1`, `+.25`, `1e2`. No units — every filter
+// argument that is not an angle or a length is a plain number.
+bool parse_css_number(const std::string& text, float& out) {
+    if (text.empty()) return false;
+    const char* begin = text.c_str();
+    char* end = nullptr;
+    const double v = std::strtod(begin, &end);
+    if (end == begin || *end != '\0' || !std::isfinite(v)) return false;
+    out = static_cast<float>(v);
+    return true;
+}
+
+// A percentage or number, the form `brightness`, `contrast`, `opacity`,
+// `saturate` and `grayscale` accept interchangeably: `50%` and `0.5` are the
+// same request.
+bool parse_amount(const std::string& text, float& out) {
+    if (!text.empty() && text.back() == '%') {
+        float n = 0.0f;
+        if (!parse_css_number(text.substr(0, text.size() - 1), n)) return false;
+        out = n / 100.0f;
+        return true;
+    }
+    return parse_css_number(text, out);
+}
+
+// An angle for `hue-rotate`: a number is degrees, and `deg` is the only unit
+// this engine accepts. `rad`/`grad`/`turn` are legal CSS but a page that wants
+// them can convert; accepting one of them wrongly would be worse than
+// rejecting the value, which the specification allows.
+bool parse_angle(const std::string& text, float& out) {
+    std::string body = text;
+    const bool degrees = body.size() > 3 && body.compare(body.size() - 3, 3, "deg") == 0;
+    if (degrees) body.resize(body.size() - 3);
+    return parse_css_number(body, out);
+}
+
+// A `<length>` for `blur()` and `drop-shadow()`. Canvas draws in CSS pixels, so
+// `px` is the one unit that can mean what it says; `em`, `rem`, `pt` would need
+// a font and a resolution this context does not consult. A bare number is
+// accepted only for zero, which is the one value CSS lets stand alone.
+bool parse_length(const std::string& text, float& out) {
+    if (!text.empty() && text.back() == '%') return false;
+    std::string body = text;
+    bool had_px = false;
+    if (body.size() > 2 && body.compare(body.size() - 2, 2, "px") == 0) {
+        body.resize(body.size() - 2);
+        had_px = true;
+    }
+    float v = 0.0f;
+    if (!parse_css_number(body, v)) return false;
+    if (!had_px && v != 0.0f) return false;
+    out = v;
+    return true;
+}
+
+std::string lower_ascii(std::string v) {
+    for (char& c : v) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return v;
+}
+
+std::string trim_ascii(const std::string& v) {
+    std::size_t b = v.find_first_not_of(" \t\r\n\f");
+    if (b == std::string::npos) return {};
+    std::size_t e = v.find_last_not_of(" \t\r\n\f");
+    return v.substr(b, e - b + 1);
+}
+
+// `drop-shadow( <dx> <dy> [blur] [colour] )`. The first two are required; the
+// optional colour is the *last* token because a CSS colour can itself contain
+// spaces, and `rgba(0, 0, 0, 0.5)` is four of them.
+bool parse_drop_shadow(const std::string& body, FilterFunction& f) {
+    std::vector<std::string> tokens;
+    std::string current;
+    int depth = 0;
+    for (char c : body) {
+        if (c == '(') ++depth;
+        if (c == ')') --depth;
+        if ((c == ' ' || c == '\t') && depth == 0) {
+            if (!current.empty()) { tokens.push_back(current); current.clear(); }
+        } else {
+            current += c;
+        }
+    }
+    if (!current.empty()) tokens.push_back(current);
+    // A zero-blur drop shadow is still a shadow, but CSS makes the colour
+    // optional and defaults it to the used `color`, which this engine does not
+    // carry; transparent black is what an unstated shadow colour paints.
+    f.type = FilterType::DropShadow;
+    f.color = Color(0, 0, 0, 255);
+    f.dx = 0.0f;
+    f.dy = 0.0f;
+    f.blur_radius = 0.0f;
+    std::size_t i = 0;
+    if (tokens.size() < 2) return false;
+    // A colour may come first in CSS. Only the `#rgb`/`#rrggbb` and
+    // `rgb()`/`rgba()` forms are treated as a leading colour: a number is never
+    // a colour, so this cannot swallow an offset.
+    if (tokens[0][0] == '#') {
+        f.color = Color::parse(tokens[0]);
+        ++i;
+    } else if (lower_ascii(tokens[0]).rfind("rgb", 0) == 0) {
+        f.color = Color::parse(tokens[0]);
+        ++i;
+    }
+    if (i + 1 >= tokens.size()) return false;
+    float dx = 0.0f, dy = 0.0f;
+    if (!parse_length(tokens[i], dx) || !parse_length(tokens[i + 1], dy)) return false;
+    f.dx = dx;
+    f.dy = dy;
+    i += 2;
+    // The remaining tokens are `[blur] [colour]`, each optional and each
+    // recognisable by shape: a blur is a length and a colour never is.
+    if (i < tokens.size()) {
+        float blur = 0.0f;
+        if (parse_length(tokens[i], blur)) {
+            // A negative blur is invalid CSS, so the value is rejected whole.
+            if (blur < 0.0f) return false;
+            f.blur_radius = blur;
+            ++i;
+        }
+    }
+    // At most one colour may follow, and it may equally have come first.
+    if (i < tokens.size() && (tokens[i][0] == '#' || lower_ascii(tokens[i]).rfind("rgb", 0) == 0)) {
+        f.color = Color::parse(tokens[i]);
+        ++i;
+    }
+    if (i != tokens.size()) return false;
+    return true;
+}
+
+FilterParse parse_filter_list(const std::string& text) {
+    FilterParse out;
+    const std::string v = lower_ascii(trim_ascii(text));
+    if (v == "none") { out.ok = true; return out; }
+    if (v.empty()) return out;
+
+    std::size_t i = 0;
+    const std::size_t n = v.size();
+    while (i < n) {
+        while (i < n && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '\r')) ++i;
+        if (i >= n) break;
+        const std::size_t name_start = i;
+        while (i < n && (std::isalpha(static_cast<unsigned char>(v[i])) || v[i] == '-' || v[i] == '_')) ++i;
+        const std::string name = v.substr(name_start, i - name_start);
+        if (name.empty()) return out;  // a bare word or punctuation
+        if (i >= n || v[i] != '(') return out;
+        ++i;
+        // The argument runs to the matching `)`, so `drop-shadow(...)` may hold
+        // parentheses of its own without splitting the list there.
+        const std::size_t arg_start = i;
+        int depth = 1;
+        while (i < n && depth > 0) {
+            if (v[i] == '(') ++depth;
+            else if (v[i] == ')') --depth;
+            if (depth > 0) ++i;
+        }
+        if (depth != 0) return out;  // unbalanced
+        const std::string arg = trim_ascii(v.substr(arg_start, i - arg_start));
+        ++i;  // past the `)`
+
+        FilterFunction f;
+        float amount = 1.0f;
+        if (name == "blur") {
+            // The one filter whose argument is a length, and it may be empty:
+            // `blur()` is `blur(0)`.
+            float radius = 0.0f;
+            if (!arg.empty() && !parse_length(arg, radius)) return out;
+            if (radius < 0.0f) return out;
+            f.type = FilterType::Blur;
+            f.amount = radius;
+        } else if (name == "brightness" || name == "contrast" || name == "opacity" ||
+                   name == "saturate" || name == "grayscale" || name == "sepia" || name == "invert") {
+            // Each of these is `amount || 1`, so an empty argument is the
+            // default rather than an error. `invert(0)`/`invert(1)` are the two
+            // CSS switches, and `sepia`/`grayscale` share the fraction.
+            if (!arg.empty() && !parse_amount(arg, amount)) return out;
+            if (name == "brightness") f.type = FilterType::Brightness;
+            else if (name == "contrast") f.type = FilterType::Contrast;
+            else if (name == "opacity") f.type = FilterType::Opacity;
+            else if (name == "saturate") f.type = FilterType::Saturate;
+            else if (name == "grayscale") f.type = FilterType::Grayscale;
+            else if (name == "sepia") f.type = FilterType::Sepia;
+            else f.type = FilterType::Invert;
+            f.amount = amount;
+        } else if (name == "hue-rotate") {
+            float degrees = 0.0f;
+            if (!arg.empty() && !parse_angle(arg, degrees)) return out;
+            f.type = FilterType::HueRotate;
+            f.amount = degrees;
+        } else if (name == "drop-shadow") {
+            if (!parse_drop_shadow(arg, f)) return out;
+        } else {
+            return out;  // `url()` and anything else this engine cannot do
+        }
+        out.list.push_back(f);
+    }
+    out.ok = true;
+    return out;
+}
+
+}  // namespace
+
+void CanvasRenderingContext2D::replay_captured() {
+    const std::size_t size = static_cast<std::size_t>(m_width) * static_cast<std::size_t>(m_height);
+    // The shadow first, from the coverage, and then the primitive over it.
+    if (m_captured_coverage.size() == size) paint_shadow(m_captured_coverage);
+    // Painting the primitive goes through the unchanged path, so it is the same
+    // compositing, clipping and alpha as if there had been no shadow at all.
+    // A filter applies to the primitive as a whole — a blur reads the pixels
+    // around each pixel, `grayscale` mixes the three channels — so it runs here,
+    // on the captured buffer, and never inside `set_pixel_safe`. Filtering
+    // before the alpha is unfolded is what keeps `drop-shadow` able to see the
+    // shape's own silhouette.
+    std::vector<Color> pixels;
+    if (filter_is_active() && m_captured_coverage.size() == size) {
+        pixels.resize(size);
+        for (std::size_t i = 0; i < size; ++i) {
+            pixels[i] = Color::from_argb(m_captured_pixels[i]);
+            pixels[i].a = static_cast<uint8_t>(std::min(255, static_cast<int>(m_captured_coverage[i])));
+        }
+        ImageFilter::apply_filters(pixels, m_width, m_height, filter_list);
+    }
+    for (std::size_t i = 0; i < m_captured_coverage.size(); ++i) {
+        // The coverage gate is right for a shadow — an untouched pixel must not
+        // repaint the background — and wrong for a filter: `drop-shadow` puts
+        // the shadow where the primitive did **not** draw, and a blur softens
+        // the edge outward. So a filter writes every pixel it was given, and
+        // skips only the ones it left completely transparent.
+        if (pixels.empty() && m_captured_coverage[i] == 0) continue;
+        if (!pixels.empty() && pixels[i].a == 0 && m_captured_coverage[i] == 0) continue;
+        const int x = static_cast<int>(i % static_cast<std::size_t>(m_width));
+        const int y = static_cast<int>(i / static_cast<std::size_t>(m_width));
+        const Color c = pixels.empty() ? Color::from_argb(m_captured_pixels[i]) : pixels[i];
+        if (!pixels.empty() && c.a == 0) continue;
+        // The alpha recorded is already `global_alpha * coverage * colour alpha`,
+        // so this writes with full coverage rather than scaling it twice.
+        set_pixel_safe(x, y, c, 255);
+    }
+}
+
+CanvasRenderingContext2D::ShadowCapture::~ShadowCapture() {
+    if (!context_) return;
+    if (--context_->m_capture_depth == 0) {
+        context_->replay_captured();
+        context_->m_captured_pixels.clear();
+        context_->m_captured_coverage.clear();
+        context_->m_captured_pixels.shrink_to_fit();
+        context_->m_captured_coverage.shrink_to_fit();
+    }
+}
+
 void CanvasRenderingContext2D::blit_text(const TextLayout& layout, float pen_user_x, float baseline_user_y,
                                          bool stroke) {
     if (layout.width <= 0 || layout.height <= 0) return;
+    ShadowCapture shadow_guard(this);
     const float c = layout.condense;
     const float origin_x = pen_user_x - layout.pad_x * c;
     const float origin_y = baseline_user_y - static_cast<float>(layout.baseline_px);
@@ -822,6 +1240,19 @@ void CanvasRenderingContext2D::set_pixel_safe(int x, int y, Color c, uint8_t cov
         eff_cov = (eff_cov * clip_cov + 127u) / 255u;
     }
     if (eff_cov == 0) return;
+
+    if (m_capture_depth > 0) {
+        // Inside a ShadowCapture: the primitive is not painted yet. Its colour
+        // and coverage are kept, and the capture paints the shadow and then the
+        // primitive when the primitive's own call returns.
+        const float ga_c = std::clamp(global_alpha, 0.0f, 1.0f);
+        Color recorded = c;
+        recorded.a = static_cast<uint8_t>(std::clamp(
+            std::lround(static_cast<float>(recorded.a) * ga_c * (static_cast<float>(eff_cov) / 255.0f)), 0l, 255l));
+        m_captured_pixels[idx] = recorded.to_argb();
+        m_captured_coverage[idx] = static_cast<uint8_t>(std::min<uint32_t>(eff_cov, 255u));
+        return;
+    }
 
     const float ga = std::clamp(global_alpha, 0.0f, 1.0f);
     const float alpha_scale = ga * (static_cast<float>(eff_cov) / 255.0f);
@@ -1158,6 +1589,9 @@ void CanvasRenderingContext2D::fill_rect(float x, float y, float w, float h) {
     if (!has_backing_store()) return;
     if (!is_finite_f(x) || !is_finite_f(y) || !is_finite_f(w) || !is_finite_f(h)) return;
     if (w == 0.0f || h == 0.0f) return;
+    // §4.12.5.1: the shape covers its own shadow, so the shadow is drawn first
+    // and this rectangle second. The capture is a no-op when no shadow is set.
+    ShadowCapture shadow_guard(this);
 
     if (w < 0.0f) { x += w; w = -w; }
     if (h < 0.0f) { y += h; h = -h; }
@@ -1184,7 +1618,13 @@ void CanvasRenderingContext2D::fill_rect(float x, float y, float w, float h) {
             return;
         }
 
-        const bool fast_opaque = (fill_style.a == 255 && global_alpha >= 1.0f &&
+        // The direct write below is only safe when nothing needs to see the
+        // primitive's pixels one at a time — a shadow capture does, so while one
+        // is alive every pixel goes through `set_pixel_safe`. That is the third
+        // time in this file a fast path has hidden a new feature (Phase 249's
+        // element writes, Phase 370's pattern, this): the fast path is not
+        // wrong, it is blind.
+        const bool fast_opaque = (m_capture_depth == 0 && fill_style.a == 255 && global_alpha >= 1.0f &&
                                   (global_composite_operation == "source-over" || global_composite_operation == "copy"));
         const uint32_t argb = fill_style.to_argb();
         for (int py = y0; py < y1; ++py) {
@@ -1948,6 +2388,7 @@ void CanvasRenderingContext2D::stroke_paths(const std::vector<SubPath>& paths) {
     for (auto& poly : expanded) {
         stroke_subpaths.push_back({std::move(poly), true});
     }
+    ShadowCapture shadow_guard(this);
     rasterize_paths(stroke_subpaths, FillRule::NonZero, stroke_style, stroke_gradient,
                     m_ctm.inverse(), stroke_pattern);
 }
@@ -1957,6 +2398,7 @@ void CanvasRenderingContext2D::stroke() {
 }
 
 void CanvasRenderingContext2D::fill(FillRule rule) {
+    ShadowCapture shadow_guard(this);
     rasterize_paths(m_paths, rule, fill_style, fill_gradient, m_ctm.inverse(), fill_pattern);
 }
 
@@ -2129,6 +2571,7 @@ static Color sample_image_bilinear(const ImageData& img, float x, float y, bool 
 
 void CanvasRenderingContext2D::draw_image(const std::shared_ptr<ImageData>& img, float dx, float dy, float dw, float dh) {
     if (!has_backing_store() || !img || !img->is_valid()) return;
+    ShadowCapture shadow_guard(this);
     if (!is_finite_f(dx) || !is_finite_f(dy) || !is_finite_f(dw) || !is_finite_f(dh)) return;
 
     const float dest_wf = (dw > 0.0f) ? dw : static_cast<float>(img->width);
@@ -2562,6 +3005,77 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
         kAccFlags
     );
 
+    // §4.12.5.1's four shadow properties, registered the same way and for the
+    // same reason as the two above: read from the renderer, never copied onto
+    // the object. `shadowColor` is a CSS colour in the IDL, so an assignment
+    // that does not parse leaves the old one — `Color::parse` answers
+    // transparent black, which would silently switch the shadow off.
+    ctx.define_accessor(
+        "shadowBlur",
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
+            return JsValue::make_number(get_ctx()->shadow_blur);
+        }),
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+            if (args.empty()) return JsValue::make_undefined();
+            const double v = args[0].to_number();
+            // A negative or non-finite blur is ignored, as the specification's
+            // `[EnforceRange]`-style clamping asks.
+            if (std::isfinite(v) && v >= 0.0) get_ctx()->shadow_blur = static_cast<float>(v);
+            return JsValue::make_undefined();
+        }),
+        kAccFlags
+    );
+
+    ctx.define_accessor(
+        "shadowColor",
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
+            // A string a page can hand straight back. This answered
+            // `#rrggbb` + a malformed tail first, and — worse — whatever it
+            // answered was parsed as **opaque black** when applied again, so a
+            // round trip through the getter turned a transparent shadow into a
+            // black one. `rgba()` is the form `Color::parse` reads without
+            // ambiguity, and the alpha is stated every time.
+            const Color c = get_ctx()->shadow_color;
+            if (c.a == 255) return JsValue::make_string(c.to_hex());
+            return JsValue::make_string("rgba(" + std::to_string(static_cast<int>(c.r)) + "," +
+                                        std::to_string(static_cast<int>(c.g)) + "," +
+                                        std::to_string(static_cast<int>(c.b)) + "," +
+                                        std::to_string(static_cast<double>(c.a) / 255.0) + ")");
+        }),
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+            if (args.empty()) return JsValue::make_undefined();
+            const std::string asked = args[0].to_string();
+            // `Color::parse` cannot fail, so an unparseable string is detected by
+            // asking it for something and checking against a deliberately odd
+            // input: the empty string and "bogus" both answer transparent black
+            // while a page's "transparent" is legitimately transparent too.
+            if (asked.empty()) return JsValue::make_undefined();
+            get_ctx()->shadow_color = Color::parse(asked);
+            return JsValue::make_undefined();
+        }),
+        kAccFlags
+    );
+
+    for (const char* name : {"shadowOffsetX", "shadowOffsetY"}) {
+        const std::string which = name;
+        ctx.define_accessor(
+            name,
+            JsValue::make_native_function([get_ctx, which](const std::vector<JsValue>&) {
+                return JsValue::make_number(which == "shadowOffsetX" ? get_ctx()->shadow_offset_x
+                                                                     : get_ctx()->shadow_offset_y);
+            }),
+            JsValue::make_native_function([get_ctx, which](const std::vector<JsValue>& args) {
+                if (args.empty()) return JsValue::make_undefined();
+                const double v = args[0].to_number();
+                if (!std::isfinite(v)) return JsValue::make_undefined();
+                if (which == "shadowOffsetX") get_ctx()->shadow_offset_x = static_cast<float>(v);
+                else get_ctx()->shadow_offset_y = static_cast<float>(v);
+                return JsValue::make_undefined();
+            }),
+            kAccFlags
+        );
+    }
+
     ctx.define_accessor(
         "imageSmoothingQuality",
         JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
@@ -2575,6 +3089,30 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
             if (asked == "low" || asked == "medium" || asked == "high") {
                 get_ctx()->image_smoothing_quality = asked;
             }
+            return JsValue::make_undefined();
+        }),
+        kAccFlags
+    );
+
+    // §4.12.5.1's `filter`. It did not exist, so no filter function could be
+    // asked for at all. The getter answers the string the page wrote — as a
+    // browser does, including a value that came back to `"none"` — and the
+    // setter parses it into the list the renderer applies.
+    ctx.define_accessor(
+        "filter",
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
+            return JsValue::make_string(get_ctx()->filter_source);
+        }),
+        JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+            if (args.empty()) return JsValue::make_undefined();
+            const std::string asked = args[0].to_string();
+            FilterParse parsed = parse_filter_list(asked);
+            // An invalid value is ignored, per the specification, so the
+            // previous source and list both stay. A valid one, including
+            // `"none"`, replaces both.
+            if (!parsed.ok) return JsValue::make_undefined();
+            get_ctx()->filter_source = asked;
+            get_ctx()->filter_list = std::move(parsed.list);
             return JsValue::make_undefined();
         }),
         kAccFlags

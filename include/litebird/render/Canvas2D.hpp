@@ -1,10 +1,12 @@
 #pragma once
 
 #include "litebird/render/ImageDecoder.hpp"
+#include "litebird/render/ImageFilter.hpp"
 #include "litebird/common/Color.hpp"
 #include "litebird/common/Geometry.hpp"
 #include "litebird/js/JsValue.hpp"
 #include <vector>
+#include <string>
 #include <memory>
 #include <string>
 #include <algorithm>
@@ -163,6 +165,22 @@ public:
     /// Phase 382 neither property existed and every sample was nearest.
     bool image_smoothing_enabled{true};
     std::string image_smoothing_quality{"low"};
+    /// §4.12.5.1's four shadow properties. `shadowColor` starts as transparent
+    /// black, which is what makes a shadow invisible until a page sets a colour;
+    /// the other three start at zero. Before Phase 391 none of the four existed
+    /// and nothing this engine drew ever cast one.
+    float shadow_blur{0.0f};
+    Color shadow_color{0, 0, 0, 0};
+    float shadow_offset_x{0.0f};
+    float shadow_offset_y{0.0f};
+    /// §4.12.5.1's `filter`: the CSS filter list as the page wrote it, and the
+    /// parsed form it is applied as. `"none"` is the initial value and means no
+    /// filter, which is the case every primitive takes when a page sets nothing.
+    /// A string that does not parse leaves the list empty — the specification's
+    /// "ignore the value" — rather than silently filtering with what it could
+    /// read, which would put a partly-parsed effect on the canvas.
+    std::string filter_source{"none"};
+    std::vector<FilterFunction> filter_list;
     /// The script object of the gradient or pattern a style was set to, so that
     /// reading `fillStyle` back answers **that object** — §4.12.5.1 says the
     /// getter returns the object that was set — and not a marker or a colour.
@@ -302,10 +320,27 @@ private:
         JsValue stroke_paint;
         bool image_smoothing_enabled{true};
         std::string image_smoothing_quality;
+        float shadow_blur{0.0f};
+        Color shadow_color{0, 0, 0, 0};
+        float shadow_offset_x{0.0f};
+        float shadow_offset_y{0.0f};
+        std::string filter_source;
+        std::vector<FilterFunction> filter_list;
         TransformMatrix2D ctm;
         std::vector<uint8_t> clip_mask;
     };
     std::vector<SavedState> m_state_stack;
+
+    // Shadow capture, used by `ShadowCapture`. `m_capture_depth` counts nested
+    // primitives, and the buffers hold the primitive's own pixels and coverage.
+    int m_capture_depth{0};
+    std::vector<uint32_t> m_captured_pixels;
+    std::vector<uint8_t> m_captured_coverage;
+    void replay_captured();
+    /// True when a `filter` is set, which is what makes a primitive capture its
+    /// own pixels: a filter is applied to the drawing **as a whole**, so it
+    /// cannot be a per-pixel tint in `set_pixel_safe`.
+    [[nodiscard]] bool filter_is_active() const { return !filter_list.empty(); }
 
     /// A glyph run rasterised into a tight coverage buffer, in CSS pixels at
     /// the uncondensed size. `condense` is <= 1 when `max_width` requested it.
@@ -353,6 +388,30 @@ private:
         /// need not know which of the three the style is.
         const std::shared_ptr<CanvasPattern>& pattern = nullptr
     );
+    /// Draws the shadow a primitive would cast, before the primitive is drawn:
+    /// §4.12.5.1 says shadows are composited under their shapes, not over them.
+    /// `coverage` is the shape's own coverage mask and it is blurred, offset and
+    /// tinted here. A no-op when `shadow_color` is fully transparent.
+    void paint_shadow(const std::vector<uint8_t>& coverage);
+    /// The extra room the current shadow needs around a bounding box.
+    [[nodiscard]] float shadow_padding() const;
+    /// A primitive's coverage, or nothing. While one of these is alive
+    /// `set_pixel_safe` records **what** the primitive covers instead of painting
+    /// it, and the destructor paints the shadow first and the primitive second.
+    /// Buffers are only allocated when the context has a visible shadow.
+    class ShadowCapture {
+    public:
+        explicit ShadowCapture(CanvasRenderingContext2D* context);
+        ~ShadowCapture();
+        ShadowCapture(const ShadowCapture&) = delete;
+        ShadowCapture& operator=(const ShadowCapture&) = delete;
+        [[nodiscard]] bool active() const { return context_ != nullptr; }
+        /// The colour the primitive asked for at (x, y), if it asked.
+        bool take(int x, int y, Color& out);
+    private:
+        CanvasRenderingContext2D* context_{nullptr};
+    };
+    friend class ShadowCapture;
     void rasterize_paths_to_mask(
         const std::vector<SubPath>& paths,
         FillRule rule,

@@ -472,10 +472,12 @@ void install_number_builtins(JsIntrinsics& realm) {
     def("cbrt", math_unary("cbrt", [](double x) {
         double root = std::cbrt(x);
         if (!std::isfinite(root) || root == 0.0) return root;
-        // The C library's cbrt is allowed to be an ulp off, and is: it gives
-        // 3.0000000000000004 for 27. One Newton step lands on the nearest
-        // double, which is the exact root whenever there is one.
-        return root - (root * root * root - x) / (3.0 * root * root);
+        // The C library's cbrt may be an ulp off (for example, cbrt(27)).
+        // Refine with an algebraically equivalent Newton step that never
+        // cubes the root: root*root*root can overflow for finite x near
+        // DBL_MAX, even though the cube root is finite. root squared is
+        // representable across the entire finite binary64 input range.
+        return root + (x / (root * root) - root) / 3.0;
     }));
     def("exp", math_unary("exp", [](double x) { return std::exp(x); }));
     def("expm1", math_unary("expm1", [](double x) { return std::expm1(x); }));

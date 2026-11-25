@@ -692,6 +692,255 @@ bool base64url_decode(const std::string& s, std::vector<uint8_t>& out) {
     return true;
 }
 
+// NIST P-256 (secp256r1) ECDH primitives.
+namespace p256 {
+struct Fe { uint64_t v[4]; }; // little-endian limbs mod p
+
+static constexpr Fe kP = {{0xffffffffffffffffull, 0x00000000ffffffffull, 0x0000000000000000ull, 0xffffffff00000001ull}};
+static constexpr Fe kB = {{0x3bce3c3e27d2604bull, 0x651d06b0cc53b0f6ull, 0xb3ebbd55769886bcull, 0x5ac635d8aa3a93e7ull}};
+static constexpr Fe kGx = {{0xf4a13945d898c296ull, 0x77037d812deb33a0ull, 0xf8bce6e563a440f2ull, 0x6b17d1f2e12c4247ull}};
+static constexpr Fe kGy = {{0xcbb6406837bf51f5ull, 0x2bce33576b315eceull, 0x8ee7eb4a7c0f9e16ull, 0x4fe342e2fe1a7f9bull}};
+
+inline bool is_zero(const Fe& a) { return (a.v[0] | a.v[1] | a.v[2] | a.v[3]) == 0; }
+
+inline void add(const Fe& a, const Fe& b, Fe& r) {
+    unsigned __int128 c = 0;
+    for (int i = 0; i < 4; ++i) {
+        c += static_cast<unsigned __int128>(a.v[i]) + b.v[i];
+        r.v[i] = static_cast<uint64_t>(c);
+        c >>= 64;
+    }
+    uint64_t borrow = 0;
+    Fe t{};
+    for (int i = 0; i < 4; ++i) {
+        unsigned __int128 diff = static_cast<unsigned __int128>(r.v[i]) - kP.v[i] - borrow;
+        t.v[i] = static_cast<uint64_t>(diff);
+        borrow = (diff >> 127) & 1u;
+    }
+    if (c || !borrow) r = t;
+}
+
+inline void sub(const Fe& a, const Fe& b, Fe& r) {
+    uint64_t borrow = 0;
+    for (int i = 0; i < 4; ++i) {
+        unsigned __int128 diff = static_cast<unsigned __int128>(a.v[i]) - b.v[i] - borrow;
+        r.v[i] = static_cast<uint64_t>(diff);
+        borrow = (diff >> 127) & 1u;
+    }
+    if (borrow) {
+        unsigned __int128 c = 0;
+        for (int i = 0; i < 4; ++i) {
+            c += static_cast<unsigned __int128>(r.v[i]) + kP.v[i];
+            r.v[i] = static_cast<uint64_t>(c);
+            c >>= 64;
+        }
+    }
+}
+
+inline void mul(const Fe& a, const Fe& b, Fe& r) {
+    Fe acc{};
+    Fe x = a;
+    for (int i = 0; i < 4; ++i) {
+        for (int bit = 0; bit < 64; ++bit) {
+            if ((b.v[i] >> bit) & 1ull) add(acc, x, acc);
+            add(x, x, x);
+        }
+    }
+    r = acc;
+}
+
+inline void sqr(const Fe& a, Fe& r) { mul(a, a, r); }
+
+inline void inv(const Fe& a, Fe& r) {
+    // a^(p-2) mod p
+    Fe base = a;
+    r = {{1, 0, 0, 0}};
+    Fe exp = kP;
+    exp.v[0] -= 2ull;
+    for (int i = 0; i < 4; ++i) {
+        for (int b = 0; b < 64; ++b) {
+            if ((exp.v[i] >> b) & 1ull) mul(r, base, r);
+            sqr(base, base);
+        }
+    }
+}
+
+struct Jac { Fe x, y, z; };
+
+inline void point_double(const Jac& p, Jac& r) {
+    if (is_zero(p.z) || is_zero(p.y)) { r = {{0,0,0,0}, {1,0,0,0}, {0,0,0,0}}; return; }
+    Fe s, m, t1, t2, z2;
+    sqr(p.y, t1); mul(p.x, t1, s); add(s, s, s); add(s, s, s); // S = 4*X*Y^2
+    sqr(p.z, z2);
+    sub(p.x, z2, t1); add(p.x, z2, t2); mul(t1, t2, m);
+    add(m, m, t1); add(t1, m, m); // M = 3*(X-Z^2)*(X+Z^2)
+    sqr(m, r.x); sub(r.x, s, r.x); sub(r.x, s, r.x); // X' = M^2 - 2*S
+    sub(s, r.x, t1); mul(m, t1, t2);
+    sqr(p.y, t1); sqr(t1, t1);
+    for (int i = 0; i < 3; ++i) add(t1, t1, t1); // 8*Y^4
+    mul(p.y, p.z, r.z); add(r.z, r.z, r.z);
+    sub(t2, t1, r.y);
+}
+
+inline void point_add(const Jac& p, const Jac& q, Jac& r) {
+    if (is_zero(p.z)) { r = q; return; }
+    if (is_zero(q.z)) { r = p; return; }
+    Fe z1z1, z2z2, u1, u2, s1, s2, h, hh, hhh, r_val, v, t1;
+    sqr(p.z, z1z1); sqr(q.z, z2z2);
+    mul(p.x, z2z2, u1); mul(q.x, z1z1, u2);
+    mul(p.y, q.z, s1); mul(s1, z2z2, s1);
+    mul(q.y, p.z, s2); mul(s2, z1z1, s2);
+    sub(u2, u1, h);
+    sub(s2, s1, r_val);
+    if (is_zero(h)) {
+        if (is_zero(r_val)) point_double(p, r);
+        else r = {{0,0,0,0}, {1,0,0,0}, {0,0,0,0}};
+        return;
+    }
+    sqr(h, hh); mul(hh, h, hhh); mul(u1, hh, v);
+    sqr(r_val, r.x); sub(r.x, hhh, r.x); sub(r.x, v, r.x); sub(r.x, v, r.x);
+    sub(v, r.x, t1); mul(r_val, t1, r.y); mul(s1, hhh, t1); sub(r.y, t1, r.y);
+    mul(p.z, q.z, r.z); mul(r.z, h, r.z);
+}
+
+inline void scalar_mul(const uint8_t k_be[32], const Fe& px, const Fe& py, Fe& rx, Fe& ry) {
+    Jac acc{{0,0,0,0}, {1,0,0,0}, {0,0,0,0}};
+    Jac base{px, py, {{1,0,0,0}}};
+    for (int i = 0; i < 32; ++i) {
+        for (int b = 7; b >= 0; --b) {
+            point_double(acc, acc);
+            if ((k_be[i] >> b) & 1u) point_add(acc, base, acc);
+        }
+    }
+    Fe zinv, zinv2, zinv3;
+    inv(acc.z, zinv);
+    sqr(zinv, zinv2);
+    mul(zinv2, zinv, zinv3);
+    mul(acc.x, zinv2, rx);
+    mul(acc.y, zinv3, ry);
+}
+
+inline void fe_to_be(const Fe& a, uint8_t out[32]) {
+    for (int i = 0; i < 4; ++i) {
+        uint64_t w = a.v[3 - i];
+        for (int j = 0; j < 8; ++j) out[i * 8 + j] = static_cast<uint8_t>((w >> ((7 - j) * 8)) & 0xffu);
+    }
+}
+
+inline void be_to_fe(const uint8_t in[32], Fe& a) {
+    for (int i = 0; i < 4; ++i) {
+        uint64_t w = 0;
+        for (int j = 0; j < 8; ++j) w = (w << 8) | in[i * 8 + j];
+        a.v[3 - i] = w;
+    }
+}
+
+static constexpr Fe kN = {{0xf3b9cac2fc632551ull, 0xbce6faada7179e84ull, 0xffffffffffffffffull, 0xffffffff00000000ull}};
+
+inline void add_n(const Fe& a, const Fe& b, Fe& r) {
+    unsigned __int128 c = 0;
+    for (int i = 0; i < 4; ++i) {
+        c += static_cast<unsigned __int128>(a.v[i]) + b.v[i];
+        r.v[i] = static_cast<uint64_t>(c);
+        c >>= 64;
+    }
+    uint64_t borrow = 0;
+    Fe t{};
+    for (int i = 0; i < 4; ++i) {
+        unsigned __int128 diff = static_cast<unsigned __int128>(r.v[i]) - kN.v[i] - borrow;
+        t.v[i] = static_cast<uint64_t>(diff);
+        borrow = (diff >> 127) & 1u;
+    }
+    if (c || !borrow) r = t;
+}
+
+inline void mul_n(const Fe& a, const Fe& b, Fe& r) {
+    Fe acc{};
+    Fe x = a;
+    for (int i = 0; i < 4; ++i) {
+        for (int bit = 0; bit < 64; ++bit) {
+            if ((b.v[i] >> bit) & 1ull) add_n(acc, x, acc);
+            add_n(x, x, x);
+        }
+    }
+    r = acc;
+}
+
+inline void inv_n(const Fe& a, Fe& r) {
+    Fe base = a;
+    r = {{1, 0, 0, 0}};
+    Fe exp = kN;
+    exp.v[0] -= 2ull;
+    for (int i = 0; i < 4; ++i) {
+        for (int b = 0; b < 64; ++b) {
+            if ((exp.v[i] >> b) & 1ull) mul_n(r, base, r);
+            mul_n(base, base, base);
+        }
+    }
+}
+
+inline bool ecdsa_sign(const uint8_t priv[32], const uint8_t hash32[32], uint8_t sig64[64],
+                       const uint8_t k_be[32]) {
+    Fe k, rx, ry;
+    be_to_fe(k_be, k);
+    if (is_zero(k)) return false;
+    scalar_mul(k_be, kGx, kGy, rx, ry);
+    Fe r_fe = rx;
+    Fe zero{};
+    add_n(r_fe, zero, r_fe);
+    if (is_zero(r_fe)) return false;
+
+    Fe z, d, kinv, rd, s;
+    be_to_fe(hash32, z);
+    add_n(z, zero, z);
+    be_to_fe(priv, d);
+    mul_n(r_fe, d, rd);
+    add_n(z, rd, s);
+    inv_n(k, kinv);
+    mul_n(kinv, s, s);
+    if (is_zero(s)) return false;
+    fe_to_be(r_fe, sig64);
+    fe_to_be(s, sig64 + 32);
+    return true;
+}
+
+inline bool ecdsa_verify(const uint8_t pub65[65], const uint8_t hash32[32], const uint8_t sig64[64]) {
+    if (pub65[0] != 0x04u) return false;
+    Fe qx, qy, r_fe, s_fe, z;
+    be_to_fe(pub65 + 1, qx);
+    be_to_fe(pub65 + 33, qy);
+    be_to_fe(sig64, r_fe);
+    be_to_fe(sig64 + 32, s_fe);
+    if (is_zero(r_fe) || is_zero(s_fe)) return false;
+    be_to_fe(hash32, z);
+    Fe zero{};
+    add_n(z, zero, z);
+
+    Fe w, u1, u2;
+    inv_n(s_fe, w);
+    mul_n(z, w, u1);
+    mul_n(r_fe, w, u2);
+    uint8_t u1_be[32], u2_be[32];
+    fe_to_be(u1, u1_be);
+    fe_to_be(u2, u2_be);
+
+    Fe p1x, p1y, p2x, p2y;
+    scalar_mul(u1_be, kGx, kGy, p1x, p1y);
+    scalar_mul(u2_be, qx, qy, p2x, p2y);
+    Jac j1{p1x, p1y, {{1, 0, 0, 0}}};
+    Jac j2{p2x, p2y, {{1, 0, 0, 0}}};
+    Jac sum{};
+    point_add(j1, j2, sum);
+    if (is_zero(sum.z)) return false;
+    Fe zinv, zinv2, vx;
+    inv(sum.z, zinv);
+    sqr(zinv, zinv2);
+    mul(sum.x, zinv2, vx);
+    add_n(vx, zero, vx);
+    return vx.v[0] == r_fe.v[0] && vx.v[1] == r_fe.v[1] && vx.v[2] == r_fe.v[2] && vx.v[3] == r_fe.v[3];
+}
+} // namespace p256
+
 struct CryptoKeyState : JsExotic {
     std::string type = "secret";
     bool extractable = false;
@@ -716,8 +965,8 @@ bool read_buffer_source(Realm& r, const JsValue& src, std::vector<uint8_t>& out)
     JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
     if (!u8_ctor.is_function()) return false;
     JsValue view = src.get_property("buffer").is_object_like()
-        ? js_call(u8_ctor, u8_ctor, {src.get_property("buffer"), src.get_property("byteOffset"), src.get_property("byteLength")})
-        : js_call(u8_ctor, u8_ctor, {src});
+        ? js_construct(u8_ctor, {src.get_property("buffer"), src.get_property("byteOffset"), src.get_property("byteLength")})
+        : js_construct(u8_ctor, {src});
     const std::size_t len = static_cast<std::size_t>(to_double(view.get_property("byteLength")));
     out.resize(len);
     for (std::size_t i = 0; i < len; ++i) {
@@ -754,8 +1003,8 @@ void setup_subtle_crypto(Iface& I) {
             return reject_with("OperationError", "SubtleCrypto.digest: ArrayBuffer/Uint8Array unavailable.");
         }
         JsValue view = src.get_property("buffer").is_object_like()
-            ? js_call(u8_ctor, u8_ctor, {src.get_property("buffer"), src.get_property("byteOffset"), src.get_property("byteLength")})
-            : js_call(u8_ctor, u8_ctor, {src});
+            ? js_construct(u8_ctor, {src.get_property("buffer"), src.get_property("byteOffset"), src.get_property("byteLength")})
+            : js_construct(u8_ctor, {src});
         const std::size_t len = static_cast<std::size_t>(to_double(view.get_property("byteLength")));
         std::vector<uint8_t> in(len);
         for (std::size_t i = 0; i < len; ++i) {
@@ -794,16 +1043,42 @@ void setup_subtle_crypto(Iface& I) {
             return reject_with("NotSupportedError", "SubtleCrypto.importKey: only 'raw' and 'jwk' formats are supported.");
         }
         std::vector<uint8_t> key_bytes;
+        std::string ec_key_type;
         if (fmt == "jwk") {
             if (!args[1].is_object_like()) {
                 return reject_with("TypeError", "SubtleCrypto.importKey: jwk keyData must be an object.");
             }
-            if (to_str(args[1].get_property("kty")) != "oct") {
-                return reject_with("DataError", "SubtleCrypto.importKey: only kty 'oct' JWK is supported.");
-            }
-            std::string k_str = to_str(args[1].get_property("k"));
-            if (k_str.empty() || !base64url_decode(k_str, key_bytes)) {
-                return reject_with("DataError", "SubtleCrypto.importKey: invalid JWK 'k' field.");
+            std::string kty = to_str(args[1].get_property("kty"));
+            if (kty == "EC") {
+                if (to_str(args[1].get_property("crv")) != "P-256") {
+                    return reject_with("NotSupportedError", "SubtleCrypto.importKey: only P-256 EC JWK is supported.");
+                }
+                std::vector<uint8_t> x_bytes, y_bytes, d_bytes;
+                if (!base64url_decode(to_str(args[1].get_property("x")), x_bytes) || x_bytes.size() != 32u ||
+                    !base64url_decode(to_str(args[1].get_property("y")), y_bytes) || y_bytes.size() != 32u) {
+                    return reject_with("DataError", "SubtleCrypto.importKey: invalid EC JWK x/y coordinates.");
+                }
+                JsValue d_val = args[1].get_property("d");
+                if (!d_val.is_undefined() && !d_val.is_nullish()) {
+                    if (!base64url_decode(to_str(d_val), d_bytes) || d_bytes.size() != 32u) {
+                        return reject_with("DataError", "SubtleCrypto.importKey: invalid EC JWK 'd' field.");
+                    }
+                    ec_key_type = "private";
+                    key_bytes = std::move(d_bytes);
+                } else {
+                    ec_key_type = "public";
+                    key_bytes.reserve(65u);
+                    key_bytes.push_back(0x04u);
+                    key_bytes.insert(key_bytes.end(), x_bytes.begin(), x_bytes.end());
+                    key_bytes.insert(key_bytes.end(), y_bytes.begin(), y_bytes.end());
+                }
+            } else if (kty == "oct") {
+                std::string k_str = to_str(args[1].get_property("k"));
+                if (k_str.empty() || !base64url_decode(k_str, key_bytes)) {
+                    return reject_with("DataError", "SubtleCrypto.importKey: invalid JWK 'k' field.");
+                }
+            } else {
+                return reject_with("DataError", "SubtleCrypto.importKey: only kty 'oct' or 'EC' JWK is supported.");
             }
         } else if (!read_buffer_source(r, args[1], key_bytes)) {
             return reject_with("TypeError", "SubtleCrypto.importKey: keyData must be a BufferSource.");
@@ -811,6 +1086,25 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[2];
         std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
                                                         : ascii_lower_str(to_str(alg_val));
+        if (alg_name == "ecdh" || alg_name == "ecdsa") {
+            if (fmt == "jwk") {
+                if (ec_key_type.empty()) {
+                    return reject_with("DataError", "SubtleCrypto.importKey: EC algorithm requires kty 'EC' JWK.");
+                }
+            } else if (fmt != "raw" || key_bytes.size() != 65u || key_bytes[0] != 0x04u) {
+                return reject_with("DataError", "SubtleCrypto.importKey: EC raw public key must be 65 bytes (0x04 || X || Y).");
+            } else {
+                ec_key_type = "public";
+            }
+            auto state = std::make_shared<CryptoKeyState>();
+            state->type = ec_key_type;
+            state->extractable = args[3].is_truthy();
+            state->hash_alg = alg_name;
+            state->key_bytes = std::move(key_bytes);
+            JsValue key = r.make("CryptoKey", state);
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
+            return undefined();
+        }
         if (alg_name == "pbkdf2" || alg_name == "hkdf") {
             auto state = std::make_shared<CryptoKeyState>();
             state->extractable = args[3].is_truthy();
@@ -860,7 +1154,35 @@ void setup_subtle_crypto(Iface& I) {
         if (args.size() < 3) return reject_with("TypeError", "SubtleCrypto.sign: 3 arguments required.");
         std::string alg = args[0].is_object_like() ? ascii_lower_str(to_str(args[0].get_property("name")))
                                                    : ascii_lower_str(to_str(args[0]));
-        if (alg != "hmac") return reject_with("NotSupportedError", "SubtleCrypto.sign: only HMAC is supported.");
+        if (alg == "ecdsa") {
+            CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
+            if (!key || key->hash_alg != "ecdsa" || key->type != "private" || key->key_bytes.size() != 32u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.sign: ECDSA requires a private ECDSA CryptoKey.");
+            }
+            std::vector<uint8_t> data;
+            if (!read_buffer_source(r, args[2], data)) {
+                return reject_with("TypeError", "SubtleCrypto.sign: data must be a BufferSource.");
+            }
+            auto h = sha256_bytes(data.data(), data.size());
+            uint8_t sig[64]{};
+            for (int attempt = 0; attempt < 16; ++attempt) {
+                uint8_t k_be[32];
+                fill_random_bytes(k_be, 32u);
+                k_be[0] &= 0x7fu;
+                k_be[31] |= 0x01u;
+                if (p256::ecdsa_sign(key->key_bytes.data(), h.data(), sig, k_be)) break;
+            }
+            JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
+            JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
+            JsValue out_ab = js_construct(ab_ctor, {num(64.0)});
+            JsValue out_u8 = js_construct(u8_ctor, {out_ab});
+            for (std::size_t i = 0; i < 64u; ++i) {
+                out_u8.set_property(std::to_string(i), num(static_cast<double>(sig[i])));
+            }
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {out_ab});
+            return undefined();
+        }
+        if (alg != "hmac") return reject_with("NotSupportedError", "SubtleCrypto.sign: only HMAC and ECDSA are supported.");
         CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
         if (!key) return reject_with("TypeError", "SubtleCrypto.sign: key must be a CryptoKey.");
         std::vector<uint8_t> data;
@@ -889,7 +1211,24 @@ void setup_subtle_crypto(Iface& I) {
         if (args.size() < 4) return reject_with("TypeError", "SubtleCrypto.verify: 4 arguments required.");
         std::string alg = args[0].is_object_like() ? ascii_lower_str(to_str(args[0].get_property("name")))
                                                    : ascii_lower_str(to_str(args[0]));
-        if (alg != "hmac") return reject_with("NotSupportedError", "SubtleCrypto.verify: only HMAC is supported.");
+        if (alg == "ecdsa") {
+            CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
+            if (!key || key->hash_alg != "ecdsa" || key->type != "public" || key->key_bytes.size() != 65u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.verify: ECDSA requires a public ECDSA CryptoKey.");
+            }
+            std::vector<uint8_t> sig, data;
+            if (!read_buffer_source(r, args[2], sig) || !read_buffer_source(r, args[3], data)) {
+                return reject_with("TypeError", "SubtleCrypto.verify: signature and data must be BufferSources.");
+            }
+            bool ok = false;
+            if (sig.size() == 64u) {
+                auto h = sha256_bytes(data.data(), data.size());
+                ok = p256::ecdsa_verify(key->key_bytes.data(), h.data(), sig.data());
+            }
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {boolean(ok)});
+            return undefined();
+        }
+        if (alg != "hmac") return reject_with("NotSupportedError", "SubtleCrypto.verify: only HMAC and ECDSA are supported.");
         CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
         if (!key) return reject_with("TypeError", "SubtleCrypto.verify: key must be a CryptoKey.");
         std::vector<uint8_t> sig, data;
@@ -927,6 +1266,26 @@ void setup_subtle_crypto(Iface& I) {
         if (fmt == "jwk") {
             JsValue obj_ctor = r.window.is_object() ? r.window.get_property("Object") : JsValue();
             JsValue jwk = js_construct(obj_ctor, {});
+            if (key->hash_alg == "ecdh" || key->hash_alg == "ecdsa") {
+                jwk.set_property("kty", str("EC"));
+                jwk.set_property("crv", str("P-256"));
+                jwk.set_property("ext", boolean(key->extractable));
+                if (key->type == "public" && key->key_bytes.size() == 65u) {
+                    jwk.set_property("x", str(base64url_encode(std::vector<uint8_t>(key->key_bytes.begin() + 1, key->key_bytes.begin() + 33))));
+                    jwk.set_property("y", str(base64url_encode(std::vector<uint8_t>(key->key_bytes.begin() + 33, key->key_bytes.end()))));
+                } else if (key->type == "private" && key->key_bytes.size() == 32u) {
+                    p256::Fe rx, ry;
+                    p256::scalar_mul(key->key_bytes.data(), p256::kGx, p256::kGy, rx, ry);
+                    std::vector<uint8_t> xb(32), yb(32);
+                    p256::fe_to_be(rx, xb.data());
+                    p256::fe_to_be(ry, yb.data());
+                    jwk.set_property("x", str(base64url_encode(xb)));
+                    jwk.set_property("y", str(base64url_encode(yb)));
+                    jwk.set_property("d", str(base64url_encode(key->key_bytes)));
+                }
+                if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {jwk});
+                return undefined();
+            }
             jwk.set_property("kty", str("oct"));
             jwk.set_property("k", str(base64url_encode(key->key_bytes)));
             jwk.set_property("ext", boolean(key->extractable));
@@ -965,6 +1324,41 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[0];
         std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
                                                         : ascii_lower_str(to_str(alg_val));
+        if (alg_name == "ecdh" || alg_name == "ecdsa") {
+            std::string curve = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("namedCurve"))) : "";
+            if (curve != "p-256") {
+                return reject_with("NotSupportedError", "SubtleCrypto.generateKey: only P-256 is supported.");
+            }
+            uint8_t priv[32];
+            fill_random_bytes(priv, 32u);
+            priv[0] &= 0x7fu; // ensure < n
+            priv[31] |= 0x01u; // ensure != 0
+            p256::Fe rx, ry;
+            p256::scalar_mul(priv, p256::kGx, p256::kGy, rx, ry);
+            std::vector<uint8_t> pub(65u);
+            pub[0] = 0x04u;
+            p256::fe_to_be(rx, &pub[1]);
+            p256::fe_to_be(ry, &pub[33]);
+
+            auto priv_state = std::make_shared<CryptoKeyState>();
+            priv_state->type = "private";
+            priv_state->extractable = args[1].is_truthy();
+            priv_state->hash_alg = alg_name;
+            priv_state->key_bytes.assign(priv, priv + 32);
+
+            auto pub_state = std::make_shared<CryptoKeyState>();
+            pub_state->type = "public";
+            pub_state->extractable = true;
+            pub_state->hash_alg = alg_name;
+            pub_state->key_bytes = std::move(pub);
+
+            JsValue obj_ctor = r.window.is_object() ? r.window.get_property("Object") : JsValue();
+            JsValue pair = js_construct(obj_ctor, {});
+            pair.set_property("privateKey", r.make("CryptoKey", priv_state));
+            pair.set_property("publicKey", r.make("CryptoKey", pub_state));
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {pair});
+            return undefined();
+        }
         if ((alg_name == "aes-ctr" || alg_name == "aes-gcm" || alg_name == "aes-cbc") && alg_val.is_object_like()) {
             const int len_bits = static_cast<int>(to_double(alg_val.get_property("length")));
             if (len_bits != 128 && len_bits != 192 && len_bits != 256) {
@@ -1014,6 +1408,36 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[0];
         const std::string alg_name = alg_val.is_object_like()
             ? ascii_lower_str(to_str(alg_val.get_property("name"))) : std::string();
+        if (alg_name == "ecdh") {
+            CryptoKeyState* base_key = state_of<CryptoKeyState>(args[1]);
+            if (!base_key || base_key->hash_alg != "ecdh" || base_key->type != "private" || base_key->key_bytes.size() != 32u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.deriveBits: ECDH requires a private ECDH CryptoKey.");
+            }
+            CryptoKeyState* pub_key = state_of<CryptoKeyState>(alg_val.get_property("public"));
+            if (!pub_key || pub_key->hash_alg != "ecdh" || pub_key->type != "public" || pub_key->key_bytes.size() != 65u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.deriveBits: ECDH public key must be a public ECDH CryptoKey.");
+            }
+            const int len_bits = static_cast<int>(to_double(args[2]));
+            if (len_bits < 0 || (len_bits % 8) != 0 || len_bits > 256) {
+                return reject_with("OperationError", "SubtleCrypto.deriveBits: ECDH P-256 length must be 0..256 and a multiple of 8.");
+            }
+            p256::Fe px, py, sx, sy;
+            p256::be_to_fe(&pub_key->key_bytes[1], px);
+            p256::be_to_fe(&pub_key->key_bytes[33], py);
+            p256::scalar_mul(base_key->key_bytes.data(), px, py, sx, sy);
+            uint8_t shared[32];
+            p256::fe_to_be(sx, shared);
+            const std::size_t out_bytes = static_cast<std::size_t>(len_bits / 8);
+            JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
+            JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
+            JsValue out_ab = js_construct(ab_ctor, {num(static_cast<double>(out_bytes))});
+            JsValue out_u8 = js_construct(u8_ctor, {out_ab});
+            for (std::size_t i = 0; i < out_bytes; ++i) {
+                out_u8.set_property(std::to_string(i), num(static_cast<double>(shared[i])));
+            }
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {out_ab});
+            return undefined();
+        }
         if (alg_name != "pbkdf2" && alg_name != "hkdf") {
             return reject_with("NotSupportedError", "SubtleCrypto.deriveBits: only PBKDF2 and HKDF are supported.");
         }
@@ -1073,8 +1497,54 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[0];
         const std::string alg_name = alg_val.is_object_like()
             ? ascii_lower_str(to_str(alg_val.get_property("name"))) : std::string();
+        if (alg_name == "ecdh") {
+            CryptoKeyState* base_key = state_of<CryptoKeyState>(args[1]);
+            if (!base_key || base_key->hash_alg != "ecdh" || base_key->type != "private" || base_key->key_bytes.size() != 32u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.deriveKey: ECDH requires a private ECDH CryptoKey.");
+            }
+            CryptoKeyState* pub_key = state_of<CryptoKeyState>(alg_val.get_property("public"));
+            if (!pub_key || pub_key->hash_alg != "ecdh" || pub_key->type != "public" || pub_key->key_bytes.size() != 65u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.deriveKey: ECDH public key must be a public ECDH CryptoKey.");
+            }
+            const JsValue& target_alg = args[2];
+            const std::string target_name = target_alg.is_object_like()
+                ? ascii_lower_str(to_str(target_alg.get_property("name"))) : std::string();
+            int len_bits = 0;
+            std::string key_hash_alg;
+            if (target_name == "aes-gcm" || target_name == "aes-cbc" || target_name == "aes-ctr") {
+                len_bits = static_cast<int>(to_double(target_alg.get_property("length")));
+                if (len_bits != 128 && len_bits != 192 && len_bits != 256) {
+                    return reject_with("OperationError", "SubtleCrypto.deriveKey: AES key length must be 128, 192, or 256.");
+                }
+                key_hash_alg = target_name;
+            } else if (target_name == "hmac") {
+                JsValue th = target_alg.get_property("hash");
+                std::string th_name = th.is_object_like() ? ascii_lower_str(to_str(th.get_property("name")))
+                                                          : ascii_lower_str(to_str(th));
+                if (th_name != "sha-1" && th_name != "sha-256" && th_name != "sha-384" && th_name != "sha-512") {
+                    return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: unsupported HMAC hash.");
+                }
+                len_bits = 256;
+                key_hash_alg = th_name;
+            } else {
+                return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: unsupported derivedKeyType '" + target_name + "'.");
+            }
+            p256::Fe px, py, sx, sy;
+            p256::be_to_fe(&pub_key->key_bytes[1], px);
+            p256::be_to_fe(&pub_key->key_bytes[33], py);
+            p256::scalar_mul(base_key->key_bytes.data(), px, py, sx, sy);
+            uint8_t shared[32];
+            p256::fe_to_be(sx, shared);
+            auto state = std::make_shared<CryptoKeyState>();
+            state->extractable = args[3].is_truthy();
+            state->hash_alg = key_hash_alg;
+            state->key_bytes.assign(shared, shared + static_cast<std::size_t>(len_bits / 8));
+            JsValue key = r.make("CryptoKey", state);
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
+            return undefined();
+        }
         if (alg_name != "pbkdf2" && alg_name != "hkdf") {
-            return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: only PBKDF2 and HKDF are supported.");
+            return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: only PBKDF2, HKDF, and ECDH are supported.");
         }
         CryptoKeyState* base_key = state_of<CryptoKeyState>(args[1]);
         if (!base_key || base_key->hash_alg != alg_name) {

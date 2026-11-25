@@ -268,6 +268,18 @@ std::shared_ptr<CollectionData> data_of(const JsValue& value, ObjectClass klass,
     }
     return std::static_pointer_cast<CollectionData>(value.object_val->internal);
 }
+/// §24.1.1.1 and its three siblings: `Map`, `Set`, `WeakMap` and `WeakSet` are
+/// constructible and not callable. `Map()` built an empty map here, where V8
+/// refuses with `Constructor Map requires 'new'`. Only the call is refused: a
+/// derived construction and `Reflect.construct` both set
+/// `current_is_construct()`, so both go on working (see
+/// JsValue::current_requires_new).
+void require_new(const char* name) {
+    if (JsValue::current_requires_new()) {
+        js_throw_type_error(std::string("Constructor ") + name + " requires 'new'");
+    }
+}
+
 
 JsValue make_collection(ObjectClass klass, JsObject* proto, const JsValue* derived = nullptr) {
     JsObject* cell = (derived && derived->object_val) ? derived->object_val.get()
@@ -325,6 +337,7 @@ void install_collection_builtins(JsIntrinsics& realm) {
     // ---- Map --------------------------------------------------------------
     JsObject* mp = realm.map_proto;
     JsValue map_ctor = js_make_native("Map", 0, [](Args args) {
+        require_new("Map");
         // In a derived construction this is the object with new.target's
         // prototype. Under Reflect.construct it also performs that one
         // prototype lookup, so do it before any user code runs.
@@ -442,6 +455,7 @@ void install_collection_builtins(JsIntrinsics& realm) {
     // ---- Set --------------------------------------------------------------
     JsObject* sp = realm.set_proto;
     JsValue set_ctor = js_make_native("Set", 0, [](Args args) {
+        require_new("Set");
         // As for Map, let current_derived_this() make (and retain) the
         // new.target-prototype object before a source or override can run.
         const JsValue* derived_ptr = JsValue::current_is_construct() ? JsValue::current_derived_this() : nullptr;
@@ -534,6 +548,7 @@ void install_collection_builtins(JsIntrinsics& realm) {
     // early, which is safe, just not memory-optimal.
     JsObject* wmp = realm.weakmap_proto;
     JsValue weakmap_ctor = js_make_native("WeakMap", 0, [](Args args) {
+        require_new("WeakMap");
         JsValue map = make_collection(ObjectClass::WeakMap, JsIntrinsics::get().weakmap_proto);
         const JsValue& source = js_arg(args, 0);
         if (!source.is_nullish()) {
@@ -571,6 +586,7 @@ void install_collection_builtins(JsIntrinsics& realm) {
 
     JsObject* wsp = realm.weakset_proto;
     JsValue weakset_ctor = js_make_native("WeakSet", 0, [](Args args) {
+        require_new("WeakSet");
         JsValue set = make_collection(ObjectClass::WeakSet, JsIntrinsics::get().weakset_proto);
         const JsValue& source = js_arg(args, 0);
         if (!source.is_nullish()) {

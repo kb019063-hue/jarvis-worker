@@ -251,6 +251,11 @@ verify-page-text-terminal-safety: $(TARGET)
 verify-css-paint-terminal-safety: $(TARGET) $(BUILD_DIR)/terminal_text_probe
 	@python3 tools/security/verify_css_paint_terminal.py --binary $(TARGET) --probe $(BUILD_DIR)/terminal_text_probe
 
+## Capture console attacks without displaying them on a terminal.
+.PHONY: verify-console-terminal-safety
+verify-console-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_console_terminal.py --binary $(TARGET)
+
 $(BUILD_DIR)/terminal_text_probe: tools/security/terminal_text_probe.cpp $(BUILD_DIR)/common/TerminalText.o
 	$(CXX) $(CXXFLAGS) $^ -o $@
 
@@ -293,19 +298,32 @@ $(SUITE_LIST): FORCE
 
 ## The suites are one translation unit: tests/test_suite.cpp and, through
 ## the list above, every file of tests/suites/, 43,000 lines in all. One
-## compiler takes 64 seconds for it here and 147 in the sanitizer build in
-## CI, which is most of `make test` after any change. It is compiled to an
-## object of its own and linked afterwards. Until 24 November 2026 one
-## command did both with the engine's objects on its line, so it could only
-## begin when the last of them was there; now `make -j` compiles it beside
-## the engine (`make -j2 test` from nothing is the longer of the two, not
-## their sum). ccache is told to leave this one alone: nearly every change
-## adds a suite or touches a header it includes, so the object would be kept
-## and almost never asked for again, in a cache that is full of the engine's.
+## compiler took 64 seconds for it here at -O2 and takes 147 in the
+## sanitizer build in CI, which is most of `make test` after any change.
+## It is compiled to an object of its own and linked afterwards. Until 24
+## November 2026 one command did both with the engine's objects on its
+## line, so it could only begin when the last of them was there; now
+## `make -j` compiles it beside the engine (`make -j2 test` from nothing is
+## the longer of the two, not their sum). ccache is told to leave this one
+## alone: nearly every change adds a suite or touches a header it includes,
+## so the object would be kept and almost never asked for again, in a cache
+## that is full of the engine's.
+##
+## In the plain build the suites are compiled without optimisation
+## ($(TEST_OPT)): 21 seconds here on 25 November 2026 where -O2 had taken 64
+## the day before, and the 462 suites then ran for 51 seconds where they had
+## run for 44, because what a suite spends its time in is the engine, whose
+## objects are compiled as they always were. That is half a minute less of
+## every `make test` here, and in CI the step went from 86 to 106 seconds
+## to 65 (run 45544470867), which made "Build & unit tests" 2.1 minutes
+## where it had been 2.6 to 3.0. A build with a sanitizer keeps the
+## optimisation its own flags name: its suites are several times slower
+## already, and some fifty places in them measure time.
+TEST_OPT ?= $(if $(findstring -fsanitize,$(CXXFLAGS)),,-O0)
 TEST_OBJ := $(BUILD_DIR)/test_suite.o
 $(TEST_OBJ): tests/test_suite.cpp tests/js_string_stress.hpp $(SUITE_FILES) $(SUITE_LIST)
 	@mkdir -p $(BUILD_DIR)
-	CCACHE_DISABLE=1 $(CXX) $(CXXFLAGS) -iquote . -iquote $(BUILD_DIR) -c tests/test_suite.cpp -o $@
+	CCACHE_DISABLE=1 $(CXX) $(CXXFLAGS) $(TEST_OPT) -iquote . -iquote $(BUILD_DIR) -c tests/test_suite.cpp -o $@
 
 -include $(TEST_OBJ:.o=.d)
 

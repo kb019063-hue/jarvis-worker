@@ -31,6 +31,7 @@ enum class OpCode : uint8_t {
     // one empty object is pushed first, and every property defines onto it.
     OpObjectDefine, // define a `key: value` pair on the object below the operands
     OpObjectSpread, // Object.keys-order copy of a source's own enumerable properties
+    OpDefineTemplateRaw, // the tagged template's strings.raw, hidden as the tree-walker makes it
 
     // Arithmetic
     OpAdd,
@@ -83,6 +84,7 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpNewObject:    return "OP_NEW_OBJECT";
     case OpCode::OpObjectDefine: return "OP_OBJECT_DEFINE";
     case OpCode::OpObjectSpread: return "OP_OBJECT_SPREAD";
+    case OpCode::OpDefineTemplateRaw: return "OP_DEFINE_TEMPLATE_RAW";
         case OpCode::OpAdd:          return "OP_ADD";
         case OpCode::OpSubtract:     return "OP_SUBTRACT";
         case OpCode::OpMultiply:     return "OP_MULTIPLY";

@@ -44,6 +44,13 @@ public:
         /// True for bindings created by a sloppy direct `eval` in a local
         /// function scope (§19.2.1.1.1), which `delete x` may remove.
         bool is_deletable{false};
+        /// True for a declaration the engine made before any script ran: a
+        /// library global (`Object`, `Math`), a host global (`console`,
+        /// `setTimeout`) or one of `undefined`/`NaN`/`Infinity`. §9.1.1.4
+        /// makes every one of those a non-enumerable, non-configurable
+        /// property of the global object, which is what tells them from a
+        /// `var`, whose property is enumerable.
+        bool is_builtin{false};
     };
 
     enum class AssignResult { Ok, NotFound, Const, ReadOnly, Uninitialized };
@@ -195,6 +202,32 @@ public:
 
     bool has_own(const std::string& name) const {
         return const_cast<JsEnvironment*>(this)->find_own(name) != nullptr;
+    }
+
+    /// Every binding this environment owns, in declaration order, with the
+    /// ones a `let`/`const`/`class` made left out when `properties_only`:
+    /// those are not properties of the global object (§9.1.1.4), and the
+    /// global object is the only caller. `enumerable_only` drops the
+    /// built-ins, whose properties are non-enumerable, leaving what a script
+    /// declared. There was no way to ask before — `find_own` answers one name
+    /// — which is why the global object could find what it could not list.
+    std::vector<std::string> own_names(bool properties_only, bool enumerable_only) const {
+        std::vector<std::string> names;
+        names.reserve(m_bindings.size());
+        for (const Binding& binding : m_bindings) {
+            if (properties_only && binding.is_lexical) continue;
+            if (enumerable_only && binding.is_builtin) continue;
+            names.push_back(binding.name);
+        }
+        return names;
+    }
+
+    /// Marks every binding this environment already owns as a built-in. Called
+    /// once, at the end of the interpreter's construction, when the
+    /// environment holds exactly what the engine declared and no script has
+    /// run — so what it covers is exactly the set §9.1.1.4 calls built-in.
+    void mark_all_builtin() {
+        for (Binding& binding : m_bindings) binding.is_builtin = true;
     }
 
     bool remove_own(const std::string& name) {
@@ -537,6 +570,9 @@ private:
     enum class BindMode { Var, Let, Const, Assign };
 
     void init_builtins();
+    /// The global object's `[[OwnPropertyKeys]]` and `[[Delete]]`: the names it
+    /// owns outside its property table, and what removing one of them means.
+    void install_global_object_hooks();
     void init_language_builtins();
 
     /// RAII call-depth guard. Throws JsStackOverflow once the native stack is

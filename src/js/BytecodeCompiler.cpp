@@ -865,6 +865,38 @@ void BytecodeCompiler::compile_expr(const Expr* expr) {
             compile_expr(part.get());
             emit_opcode(OpCode::OpAdd);
         }
+    } else if (auto tte = dynamic_cast<const TaggedTemplateExpr*>(expr)) {
+        // ECMA-262 13.2.8: the tag runs first, then the substitutions are
+        // evaluated left to right, and the tag is called with the template
+        // object as its first argument. The template object itself is built
+        // fresh on every evaluation, exactly as the tree-walker does — neither
+        // path caches per call site — and `raw` is defined hidden, as
+        // eval_tagged_template does. (Neither path freezes the arrays today;
+        // that predates this phase and stays as it is.)
+        //
+        // Stack: the tag, then the strings array with `raw` hidden, then the
+        // substitution values — the shape OpCall reads backwards.
+        compile_expr(tte->tag.get());
+        for (const auto& s : tte->cooked) {
+            size_t idx = m_function->chunk.add_constant(JsValue::make_string(s));
+            emit_opcode(OpCode::OpConstant);
+            emit_byte(static_cast<uint8_t>(idx));
+        }
+        emit_opcode(OpCode::OpNewArray);
+        emit_byte(static_cast<uint8_t>(tte->cooked.size()));
+        for (const auto& s : tte->raw) {
+            size_t idx = m_function->chunk.add_constant(JsValue::make_string(s));
+            emit_opcode(OpCode::OpConstant);
+            emit_byte(static_cast<uint8_t>(idx));
+        }
+        emit_opcode(OpCode::OpNewArray);
+        emit_byte(static_cast<uint8_t>(tte->raw.size()));
+        emit_opcode(OpCode::OpDefineTemplateRaw);
+        for (const auto& e : tte->expressions) {
+            compile_expr(e.get());
+        }
+        emit_opcode(OpCode::OpCall);
+        emit_byte(static_cast<uint8_t>(tte->expressions.size() + 1));
     } else {
         throw std::runtime_error("Unsupported expression in bytecode compiler");
     }

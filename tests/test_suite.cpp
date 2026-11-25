@@ -7485,6 +7485,138 @@ TEST(subtle_crypto_jwk_import_and_export) {
     assert(interp.eval("rtHex === '000102030405060708090a0b0c0d0e0f'").is_truthy());
 }
 
+TEST(subtle_crypto_ecdh_p256_derive_bits) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        function toHex(buf) {
+            var u8 = new Uint8Array(buf);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            return s;
+        }
+        var s1 = null, s2 = null, pubLen = 0;
+        Promise.all([
+            crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits']),
+            crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])
+        ]).then(function(pairs) {
+            var alice = pairs[0];
+            var bob = pairs[1];
+            return Promise.all([
+                crypto.subtle.exportKey('raw', bob.publicKey),
+                crypto.subtle.deriveBits({ name: 'ECDH', public: bob.publicKey }, alice.privateKey, 256),
+                crypto.subtle.deriveBits({ name: 'ECDH', public: alice.publicKey }, bob.privateKey, 256)
+            ]).then(function(res) {
+                pubLen = res[0].byteLength;
+                s1 = toHex(res[1]);
+                s2 = toHex(res[2]);
+            });
+        });
+    )");
+    assert(interp.eval("pubLen === 65").is_truthy());
+    assert(interp.eval("s1 !== null && s1.length === 64").is_truthy());
+    assert(interp.eval("s1 === s2").is_truthy());
+}
+
+TEST(subtle_crypto_ecdsa_p256_sign_and_verify) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var ok1 = null, ok2 = null, sigLen = 0;
+        var msg = new Uint8Array([104, 101, 108, 108, 111]);
+        var bad = new Uint8Array([104, 101, 108, 108, 112]);
+        crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+            .then(function(pair) {
+                return crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, pair.privateKey, msg)
+                    .then(function(sig) {
+                        sigLen = sig.byteLength;
+                        return Promise.all([
+                            crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, sig, msg),
+                            crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, sig, bad)
+                        ]);
+                    });
+            })
+            .then(function(res) {
+                ok1 = res[0];
+                ok2 = res[1];
+            });
+    )");
+    assert(interp.eval("sigLen === 64").is_truthy());
+    assert(interp.eval("ok1 === true && ok2 === false").is_truthy());
+}
+
+TEST(subtle_crypto_ec_jwk_import_and_export) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var ok = null, pubJwk = null, privJwk = null;
+        var msg = new Uint8Array([1, 2, 3, 4]);
+        crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+            .then(function(pair) {
+                return Promise.all([
+                    crypto.subtle.exportKey('jwk', pair.publicKey),
+                    crypto.subtle.exportKey('jwk', pair.privateKey)
+                ]);
+            })
+            .then(function(jwks) {
+                pubJwk = jwks[0];
+                privJwk = jwks[1];
+                return Promise.all([
+                    crypto.subtle.importKey('jwk', pubJwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']),
+                    crypto.subtle.importKey('jwk', privJwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])
+                ]);
+            })
+            .then(function(keys) {
+                return crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys[1], msg)
+                    .then(function(sig) {
+                        return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, keys[0], sig, msg);
+                    });
+            })
+            .then(function(v) { ok = v; });
+    )");
+    assert(interp.eval("pubJwk !== null && pubJwk.kty === 'EC' && pubJwk.crv === 'P-256' && typeof pubJwk.x === 'string' && typeof pubJwk.y === 'string' && pubJwk.d === undefined").is_truthy());
+    assert(interp.eval("privJwk !== null && privJwk.kty === 'EC' && privJwk.crv === 'P-256' && typeof privJwk.d === 'string'").is_truthy());
+    assert(interp.eval("ok === true").is_truthy());
+}
+
+TEST(subtle_crypto_ecdh_p256_derive_key) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var iv = new Uint8Array([1,2,3,4,5,6,7,8,9,10,11,12]);
+        var pt = new Uint8Array([10, 20, 30, 40]);
+        var rtHex = null;
+        Promise.all([
+            crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey']),
+            crypto.subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveKey'])
+        ]).then(function(pairs) {
+            return Promise.all([
+                crypto.subtle.deriveKey({ name: 'ECDH', public: pairs[1].publicKey }, pairs[0].privateKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt']),
+                crypto.subtle.deriveKey({ name: 'ECDH', public: pairs[0].publicKey }, pairs[1].privateKey, { name: 'AES-GCM', length: 256 }, false, ['decrypt'])
+            ]);
+        }).then(function(keys) {
+            return crypto.subtle.encrypt({ name: 'AES-GCM', iv: iv }, keys[0], pt)
+                .then(function(ct) {
+                    return crypto.subtle.decrypt({ name: 'AES-GCM', iv: iv }, keys[1], ct);
+                });
+        }).then(function(rt) {
+            var u8 = new Uint8Array(rt);
+            var s = '';
+            for (var i = 0; i < u8.length; i++) s += (u8[i] < 16 ? '0' : '') + u8[i].toString(16);
+            rtHex = s;
+        });
+    )");
+    assert(interp.eval("rtHex === '0a141e28'").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36436,6 +36568,10 @@ int main() {
     RUN_TEST(subtle_crypto_aes_cbc_encrypt_and_decrypt);
     RUN_TEST(subtle_crypto_wrap_and_unwrap_key);
     RUN_TEST(subtle_crypto_jwk_import_and_export);
+    RUN_TEST(subtle_crypto_ecdh_p256_derive_bits);
+    RUN_TEST(subtle_crypto_ecdsa_p256_sign_and_verify);
+    RUN_TEST(subtle_crypto_ec_jwk_import_and_export);
+    RUN_TEST(subtle_crypto_ecdh_p256_derive_key);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

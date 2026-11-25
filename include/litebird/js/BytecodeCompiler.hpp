@@ -88,6 +88,8 @@ private:
         /// inside a switch (ECMA-262 14.13.4.1) targets the enclosing loop,
         /// so a `continue` skips over this context.
         bool is_switch{false};
+        bool is_for_of{false};
+        size_t iteration_locals{0};  ///< stack locals present before this loop's body
     };
 
     std::shared_ptr<BytecodeFunction> m_function;

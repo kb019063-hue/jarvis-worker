@@ -92,13 +92,6 @@ struct PendingRegistry {
         }
         entries.push_back(data);
     }
-
-    void release(const std::shared_ptr<PromiseData>& data) {
-        std::lock_guard<std::mutex> lock(mutex);
-        entries.erase(std::remove_if(entries.begin(), entries.end(), [&data](const std::weak_ptr<PromiseData>& entry) {
-            return entry.lock() == data;
-        }), entries.end());
-    }
 };
 
 PendingRegistry& pending_registry() {
@@ -190,7 +183,9 @@ void settle(const std::shared_ptr<PromiseData>& data, PromiseState state, JsValu
 
     auto handlers = std::move(data->handlers);
     data->handlers.clear();
-    pending_registry().release(data);
+    // Entries are weak and the registry prunes settled promises during root
+    // tracing / amortized cleanup. Erasing here would scan the full registry
+    // for every promise in a long chain, making settlement quadratic.
     for (auto& handler : handlers) {
         queue_reaction(std::move(handler), state == PromiseState::Rejected, data->result);
     }

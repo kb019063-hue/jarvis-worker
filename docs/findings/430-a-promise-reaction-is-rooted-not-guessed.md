@@ -59,9 +59,10 @@ Three problems came out of that one guess:
     handlers, pushes the stored result and every handler slot that can carry a
     value — `on_fulfilled`, `on_rejected`, `resolve`, `reject` — plus every
     `keep_alive` value.
-  - `PendingRegistry::release(data)` removes the entry in `settle()`, so a
-    settled promise is not kept by the registry either. The doubling prune now
-    also drops entries with no handlers.
+  - The registry holds weak entries and does not erase on settlement: doing a
+    full vector scan for every settled promise made a long chain quadratic. The
+    root provider skips settled entries; the amortized doubling prune removes
+    them, so they do not become roots or accumulate without bound.
   - `make_resolving_functions()` captures a shared `ResolverState` in both the
     resolve and the reject closure instead of capturing `PromiseData`
     directly.
@@ -79,8 +80,10 @@ On this branch, with `build/litebird` built from the changed tree:
 
 | command | result |
 |---|---|
-| `make test` | All **485** engine test suites passed; cross-origin suite **114 checks, 0 failures**. |
-| `LITEBIRD_SUITE_SHARD=96/485 build/test_suite` | `a_promise_reaction_is_rooted_not_guessed` passed (stretch 96 of 485). |
+| `make test` | All **491** engine test suites passed; cross-origin suite **114 checks, 0 failures**. |
+| `LITEBIRD_SUITE_SHARD=100/491 build/test_suite` | `a_promise_reaction_is_rooted_not_guessed` passed (stretch 100 of 491). |
+| `python3 tools/conformance/run_js_conformance.py --reference "node -e" --quiet` and `--quiet --min-pass 1153` | Expectations **1158/1158**; Litebird **1153/1158**, floor met. The 100,000-link promise chain passes. |
+| `python3 tools/conformance/run_dom_conformance.py --reference --quiet` | **678/678** cases. |
 | `python3 tools/conformance/verify_gc_residue.py` | **flat: 22 of 22 cases**, drift 0. |
 | `python3 tools/conformance/verify_gc_residue.py --filter promise` | **flat: 6 of 6 cases**, 0 cells at 200 and 2,000 iterations. |
 

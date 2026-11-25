@@ -566,7 +566,9 @@ void LayoutBox::layout_block(float containing_width) {
     // flex/grid item). Note that `<body>` is Litebird's layout root (`!parent`)
     // rather than `<html>`, so `!parent` alone must NOT block body/first-child
     // margin collapse.
+    const bool is_html_root = node && node->is_element() && node->as_element()->tag_name() == "html";
     const bool blocks_collapse =
+        is_html_root ||
         (box_type != BoxType::BlockNode && box_type != BoxType::AnonymousBlock) ||
         parent_is_flex_or_grid ||
         s.is_out_of_flow() || s.is_floated() || s.is_inline_block() ||
@@ -598,7 +600,8 @@ void LayoutBox::layout_block(float containing_width) {
                             dimensions.padding.left + dimensions.padding.right;
     float v_padding_border = dimensions.border.top + dimensions.border.bottom +
                             dimensions.padding.top + dimensions.padding.bottom;
-    float total_horizontal_spacing = dimensions.margin.left + dimensions.margin.right + h_padding_border;
+    float total_horizontal_spacing = (s.margin_left_auto ? 0.0f : dimensions.margin.left) +
+                                     (s.margin_right_auto ? 0.0f : dimensions.margin.right) + h_padding_border;
 
     // 1. Calculate Content Width with BoxSizing & Min/Max constraints
     if (s.width >= 0.0f && !ignore_own_width) {
@@ -637,7 +640,10 @@ void LayoutBox::layout_block(float containing_width) {
 
     // Margin: auto centering (block-level only; inline-block auto margins compute to 0 per CSS 2.1 §10.3.9)
     if (!s.is_inline_block()) {
-        float remaining_h = std::max(0.0f, containing_width - (dimensions.content.width + h_padding_border));
+        float fixed_margins = 0.0f;
+        if (!s.margin_left_auto) fixed_margins += dimensions.margin.left;
+        if (!s.margin_right_auto) fixed_margins += dimensions.margin.right;
+        float remaining_h = std::max(0.0f, containing_width - (dimensions.content.width + h_padding_border + fixed_margins));
         if (s.margin_left_auto && s.margin_right_auto) {
             dimensions.margin.left = remaining_h / 2.0f;
             dimensions.margin.right = remaining_h / 2.0f;
@@ -805,6 +811,22 @@ void LayoutBox::layout_block(float containing_width) {
             }
         }
 
+        // Auto margins for block-level flex/grid children (html root case): body with display:flex/grid and margin:auto was previously handled as document root via place_document_body. Now inside html, resolve its horizontal auto margins here after its own layout has computed its content width.
+        if ((child->box_type == BoxType::FlexNode || child->box_type == BoxType::GridNode || child->box_type == BoxType::BlockNode) && (child->style->margin_left_auto || child->style->margin_right_auto)) {
+            float child_h_pb = child->dimensions.border.left + child->dimensions.border.right + child->dimensions.padding.left + child->dimensions.padding.right;
+            float child_fixed = 0.0f;
+            if (!child->style->margin_left_auto) child_fixed += child->dimensions.margin.left;
+            if (!child->style->margin_right_auto) child_fixed += child->dimensions.margin.right;
+            float child_remaining = std::max(0.0f, dimensions.content.width - (child->dimensions.content.width + child_h_pb + child_fixed));
+            if (child->style->margin_left_auto && child->style->margin_right_auto) {
+                child->dimensions.margin.left = child_remaining / 2.0f;
+                child->dimensions.margin.right = child_remaining / 2.0f;
+            } else if (child->style->margin_left_auto) {
+                child->dimensions.margin.left = child_remaining;
+            } else if (child->style->margin_right_auto) {
+                child->dimensions.margin.right = child_remaining;
+            }
+        }
         float new_x = dimensions.content.x +
                       child->dimensions.margin.left +
                       child->dimensions.border.left +

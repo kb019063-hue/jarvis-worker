@@ -19,6 +19,11 @@
 #include "litebird/css/DocumentStyles.hpp"
 #include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/LayoutTree.hpp"
+#include "litebird/layout/LayoutBox.hpp"
+static inline std::shared_ptr<litebird::LayoutBox> unwrap_root_for_test(const std::shared_ptr<litebird::LayoutBox>& root) {
+    if (root && root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html" && !root->children.empty()) return root->children[0];
+    return root;
+}
 #include "litebird/render/PaintCommand.hpp"
 #include "litebird/render/ImageDecoder.hpp"
 #include "litebird/render/FontRenderer.hpp"
@@ -776,9 +781,14 @@ TEST(layout_box_tree) {
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
     assert(root != nullptr);
 
-    // Root is body, first child is div
-    assert(!root->children.empty());
-    auto div_box = root->children[0];
+    // Root is now html (Phase 423); unwrap to body for legacy test
+    auto body_box_for_test = root;
+    if (root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html") {
+        assert(!root->children.empty());
+        body_box_for_test = root->children[0];
+    }
+    assert(!body_box_for_test->children.empty());
+    auto div_box = body_box_for_test->children[0];
     assert(div_box->dimensions.content.width == 500.0f);
     assert(!div_box->children.empty());
 }
@@ -861,8 +871,10 @@ TEST(flexbox_layout) {
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
     assert(root != nullptr);
     assert(!root->children.empty());
+    auto flex_container_parent = root;
+    if (root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html") flex_container_parent = root->children[0];
 
-    auto flex_container = root->children[0];
+    auto flex_container = flex_container_parent->children[0];
     assert(flex_container->box_type == BoxType::FlexNode);
     assert(flex_container->dimensions.content.width == 600.0f);
     assert(flex_container->children.size() == 3);
@@ -902,7 +914,9 @@ TEST(text_wrapping) {
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
     assert(root != nullptr);
 
-    auto div = root->children[0];
+    auto body_wrap = root;
+    if (root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html") body_wrap = root->children[0];
+    auto div = body_wrap->children[0];
     auto p = div->children[0];
     auto text_box = p->children[0];
 
@@ -926,7 +940,9 @@ TEST(anti_aliased_rasterizer_and_shadows) {
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
     assert(root != nullptr);
 
-    auto card = root->children[0];
+    auto card_parent = root;
+    if (root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html") card_parent = root->children[0];
+    auto card = card_parent->children[0];
     assert(card->style->border_radius == 12.0f);
     assert(card->style->box_shadow.has_shadow);
     assert(card->style->box_shadow.x_offset == 4.0f);
@@ -5290,10 +5306,12 @@ TEST(inline_formatting_context) {
     StyleResolver resolver;
     auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
     assert(root != nullptr);
-    assert(root->children.size() >= 3);
+    auto inline_root = root;
+    if (root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html") inline_root = root->children[0];
+    assert(inline_root->children.size() >= 3);
 
     // 1. Test mixed inline formatting context on first paragraph
-    auto p1 = root->children[0];
+    auto p1 = inline_root->children[0];
     assert(p1->establishes_ifc());
     assert(!p1->line_boxes.empty());
 
@@ -5326,14 +5344,14 @@ TEST(inline_formatting_context) {
     assert(found_highlight);
 
     // 2. Test text-align: center
-    auto p2 = root->children[1];
+    auto p2 = inline_root->children[1];
     assert(p2->establishes_ifc());
     assert(!p2->line_boxes.empty());
     assert(!p2->line_boxes[0].fragments.empty());
     assert(p2->line_boxes[0].fragments[0].rect.x > p2->dimensions.content.x);
 
     // 3. Test anonymous block creation for mixed block/inline children
-    auto div = root->children[2];
+    auto div = inline_root->children[2];
     assert(div->children.size() == 3);
     assert(div->children[0]->box_type == BoxType::AnonymousBlock);
     assert(div->children[1]->box_type == BoxType::BlockNode);
@@ -6481,8 +6499,10 @@ TEST(css_flex_wrapping_and_grid_layout) {
     StyleResolver resolver;
     auto flex_root = LayoutTree::build(flex_doc, resolver, 300.0f, 600.0f);
     assert(flex_root != nullptr);
+    auto flex_root_body = flex_root;
+    if (flex_root->node && flex_root->node->is_element() && flex_root->node->as_element()->tag_name() == "html") flex_root_body = flex_root->children[0];
 
-    auto flex_box = flex_root->children[0];
+    auto flex_box = flex_root_body->children[0];
     assert(flex_box->box_type == BoxType::FlexNode);
     assert(flex_box->children.size() == 3);
 
@@ -6519,8 +6539,10 @@ TEST(css_flex_wrapping_and_grid_layout) {
     auto grid_doc = HtmlParser::parse(grid_html);
     auto grid_root = LayoutTree::build(grid_doc, resolver, 360.0f, 600.0f);
     assert(grid_root != nullptr);
+    auto grid_root_body = grid_root;
+    if (grid_root->node && grid_root->node->is_element() && grid_root->node->as_element()->tag_name() == "html") grid_root_body = grid_root->children[0];
 
-    auto grid_box = grid_root->children[0];
+    auto grid_box = grid_root_body->children[0];
     assert(grid_box->box_type == BoxType::GridNode);
     assert(grid_box->children.size() == 4);
 
@@ -6709,7 +6731,7 @@ TEST(image_decoding_and_rendering) {
     auto img_el = doc->get_element_by_id("test_img");
     assert(img_el != nullptr);
 
-    auto container_box = root->children[0];
+    auto container_box = unwrap_root_for_test(root)->children[0];
     auto img_box = container_box->children[0];
     assert(img_box->box_type == BoxType::ImageNode);
     assert(img_box->image != nullptr);
@@ -6873,7 +6895,7 @@ void test_html5_canvas_2d_context() {
     auto root_box = layout_tree.build(doc, resolver);
     root_box->layout(800.0f);
 
-    auto canvas_box = root_box->children[0];
+    auto canvas_box = unwrap_root_for_test(root_box)->children[0];
     assert(canvas_box->box_type == BoxType::ImageNode);
     assert(canvas_box->dimensions.content.width == 80.0f);
     assert(canvas_box->dimensions.content.height == 60.0f);
@@ -8364,9 +8386,11 @@ TEST(svg_vector_rendering) {
     LayoutTree layout_tree;
     auto root_box = layout_tree.build(doc, resolver);
     root_box->layout(800.0f);
+    auto svg_root_body = root_box;
+    if (root_box->node && root_box->node->is_element() && root_box->node->as_element()->tag_name() == "html" && !root_box->children.empty()) svg_root_body = root_box->children[0];
 
     std::shared_ptr<LayoutBox> svg_box = nullptr;
-    for (const auto& ch : root_box->children) {
+    for (const auto& ch : svg_root_body->children) {
         if (ch->box_type == BoxType::ImageNode) {
             svg_box = ch;
             break;
@@ -9010,7 +9034,7 @@ TEST(css_flexbox_and_grid_modern_refinements) {
         auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
         assert(root_box != nullptr);
 
-        auto flex_box = root_box->children[0];
+        auto flex_box = unwrap_root_for_test(root_box)->children[0];
         assert(flex_box->box_type == BoxType::FlexNode);
         assert(flex_box->children.size() == 3);
 
@@ -9037,7 +9061,7 @@ TEST(css_flexbox_and_grid_modern_refinements) {
         auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
         assert(root_box != nullptr);
 
-        auto flex_box = root_box->children[0];
+        auto flex_box = unwrap_root_for_test(root_box)->children[0];
         assert(flex_box->children.size() == 2);
         float y0 = flex_box->children[0]->dimensions.content.y;
         float y1 = flex_box->children[1]->dimensions.content.y;
@@ -9061,7 +9085,7 @@ TEST(css_flexbox_and_grid_modern_refinements) {
         auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
         assert(root_box != nullptr);
 
-        auto grid_box = root_box->children[0];
+        auto grid_box = unwrap_root_for_test(root_box)->children[0];
         assert(grid_box->box_type == BoxType::GridNode);
         assert(grid_box->children.size() == 2);
 
@@ -9088,7 +9112,7 @@ TEST(css_flexbox_and_grid_modern_refinements) {
         auto root_box = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
         assert(root_box != nullptr);
 
-        auto grid_box = root_box->children[0];
+        auto grid_box = unwrap_root_for_test(root_box)->children[0];
         assert(grid_box->box_type == BoxType::GridNode);
         assert(grid_box->children.size() == 3);
         float w1 = grid_box->children[0]->dimensions.content.width;
@@ -31309,7 +31333,9 @@ TEST(cross_axis_alignment_places_flex_and_grid_items) {
     auto build = [](const std::string& html) {
         auto doc = HtmlParser::parse(html);
         StyleResolver resolver;
-        return LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        if (root && root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html" && !root->children.empty()) return root->children[0];
+        return root;
     };
 
     // Stretch is the default: an item with no cross size of its own fills the
@@ -32907,6 +32933,7 @@ TEST(body_origin_reaches_pixels_positioned_descendants_and_live_geometry) {
     auto inline_doc = HtmlParser::parse(
         R"(<!doctype html><body style="margin:15px;padding:5px;border:3px solid blue"><span id="kid">text</span></body>)");
     auto inline_root = LayoutTree::build(inline_doc, resolver, 800.0f, 600.0f);
+    if (inline_root && inline_root->node && inline_root->node->is_element() && inline_root->node->as_element()->tag_name() == "html" && !inline_root->children.empty()) inline_root = inline_root->children[0];
     auto span = inline_doc->get_element_by_id("kid");
     assert(inline_root && span && !inline_root->line_boxes.empty());
     assert(span->bounding_box().x == 23.0f && span->bounding_box().y == 23.0f);
@@ -32940,10 +32967,16 @@ TEST(document_canvas_background_is_scoped_and_keeps_computed_styles) {
     }
     assert(white_count == 12);
     auto root = LayoutTree::build(doc, resolver, 200, 150);
-    assert(root && root->node == doc->body() && root->has_document_canvas);
+    assert(root && root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html" && root->has_document_canvas);
     assert(root->canvas_background == Color(255, 0, 0, 128));
-    assert(root->background_propagated);
-    assert(root->style->background_color == Color(255, 0, 0, 128)); // computed style did not change
+    // body background propagated to canvas: html root not, body is
+    {
+        const LayoutBox* body_box = nullptr;
+        std::vector<const LayoutBox*> st{root.get()};
+        while (!st.empty()) { auto b=st.back(); st.pop_back(); if (b->node && b->node->is_element() && b->node->as_element()->tag_name()=="body") { body_box=b; break; } for (auto &c:b->children) st.push_back(c.get()); }
+        assert(body_box && body_box->background_propagated);
+        assert(body_box->style->background_color == Color(255, 0, 0, 128)); // computed style did not change
+    }
     auto list = DisplayList::build(root);
     assert(!list.commands().empty() && std::holds_alternative<DrawCanvasCommand>(list.commands().front()));
     int canvases = 0;
@@ -32975,7 +33008,15 @@ TEST(document_canvas_background_is_scoped_and_keeps_computed_styles) {
     auto both = HtmlParser::parse(
         R"(<!doctype html><html style="background:#0000ff"><body style="margin:20px;height:50px;background:#ff0000"></body></html>)");
     auto both_root = LayoutTree::build(both, resolver, 200, 150);
-    assert(both_root->canvas_background == Color::blue() && !both_root->background_propagated);
+    assert(both_root->canvas_background == Color::blue());
+    {
+        const LayoutBox* html_box = both_root.get();
+        assert(html_box->background_propagated);
+        const LayoutBox* body_box = nullptr;
+        std::vector<const LayoutBox*> st{html_box};
+        while (!st.empty()) { auto b=st.back(); st.pop_back(); if (b->node && b->node->is_element() && b->node->as_element()->tag_name()=="body") { body_box=b; break; } for (auto &c:b->children) st.push_back(c.get()); }
+        assert(body_box && !body_box->background_propagated);
+    }
     BitmapRenderer layered(200, 150);
     layered.clear(Color::white());
     layered.render(DisplayList::build(both_root));
@@ -33052,9 +33093,11 @@ TEST(display_contents_generates_no_box_and_splices_its_children) {
     // The splice: `#wrap` has no box, and its two blocks sit in `body` as if
     // they were its children -- no 50px padding, no 9px border, so #b starts
     // exactly where #a ends at y=20.
-    assert(root->children.size() == 2);
-    const LayoutBox* box_a = root->children[0].get();
-    const LayoutBox* box_b = root->children[1].get();
+    auto display_body = root;
+    if (root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html" && !root->children.empty()) display_body = root->children[0];
+    assert(display_body->children.size() == 2);
+    const LayoutBox* box_a = display_body->children[0].get();
+    const LayoutBox* box_b = display_body->children[1].get();
     assert(box_a->node && box_a->node->as_element()->get_attribute("id") == "a");
     assert(box_b->node && box_b->node->as_element()->get_attribute("id") == "b");
     assert(box_a->dimensions.content.x == 0.0f && box_a->dimensions.content.y == 0.0f);
@@ -36065,7 +36108,9 @@ TEST(flex_and_grid_box_alignment_properties) {
     auto build = [](const std::string& html) {
         auto doc = HtmlParser::parse(html);
         StyleResolver resolver;
-        return LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        auto root = LayoutTree::build(doc, resolver, 800.0f, 600.0f);
+        if (root && root->node && root->node->is_element() && root->node->as_element()->tag_name() == "html" && !root->children.empty()) return root->children[0];
+        return root;
     };
     auto approx = [](float a, float b) { return std::fabs(a - b) < 0.05f; };
 

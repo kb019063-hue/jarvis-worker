@@ -22,7 +22,7 @@ it in AGREES.
 ## Verification
 
 `make verify-bytecode` reports **75/75 agree and 2/2 refused**. `make test`
-reports **483/483 engine suites**, including the original case, overridden
+reports **484/484 engine suites**, including the original case, overridden
 iterators, rest, scope, defaults, close-on-throw, and close errors; the
 cross-origin suite has 114 passing checks.
 

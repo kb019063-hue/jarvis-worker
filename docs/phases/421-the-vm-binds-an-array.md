@@ -34,7 +34,7 @@ engine pages run on.
 ## Verification
 
 - `make verify-bytecode`: **75/75 agree; 2/2 still refused**.
-- `make test`: **483/483 engine suites** and 114 cross-origin checks passed.
+- `make test`: **484/484 engine suites** and 114 cross-origin checks passed.
 - `python3 tools/conformance/verify_bytecode_agreement.py --self-test` passed.
 - After merging main into the branch, `make deep` passed 1,332 runs,
   `make fuzz` passed, and the new suite passed in an ASan build as its own

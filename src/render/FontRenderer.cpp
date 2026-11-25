@@ -2994,6 +2994,20 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             }
         }
 
+        // HarfBuzz's Arabic shaper (`ZERO_WIDTH_MARKS_BY_GDEF_LATE`) zeroes
+        // `GDEF` mark advances (`GlyphClassDef == 3`) after positioning lookups
+        // and before attachment offset propagation. Monospaced faces such as
+        // `DejaVuSansMono` give combining marks full-cell `hmtx` advances and
+        // include no `SinglePos` zeroing lookup under `arab`.
+        if (script_tag == kTagArab && m_has_gdef_glyph_class) {
+            for (ShapingGlyph& sg : run) {
+                if (m_gdef_glyph_class.class_of(sg.glyph) == 3) {
+                    sg.x_advance = 0;
+                    sg.y_advance = 0;
+                }
+            }
+        }
+
         // Stage 4a: Resolve CursiveAttachment chains via memoized DFS (works for
         // both LTR `parent < i` and RTL `parent > i`).
         std::vector<uint8_t> cursive_state(n, 0); // 0=unvisited, 1=visiting, 2=done

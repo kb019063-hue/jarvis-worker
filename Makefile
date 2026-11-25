@@ -644,13 +644,26 @@ diff-trees: $(TARGET)
 ## the same for XML: documents of the W3C suite (when `make xml-conformance`
 ## has downloaded it) with bytes changed, cut short and pasted over, read as
 ## bytes and through XMLHttpRequest, DOMParser and XMLSerializer.
-fuzz:
+##
+## Six parts that share nothing but the binaries they are given: each makes
+## its inputs from a seed of its own and keeps what it writes in a directory
+## of its own. `make fuzz` runs them one after another, in this order, as it
+## always has. `make -j4 fuzz` runs four at a time: until 25 November 2026
+## the six were six lines of one recipe, so CI's job for them, which has
+## four cores, used one of them for 193 to 266 seconds, and was the second
+## longest job of a run.
+FUZZ_PARTS := fuzz-pages fuzz-pipeline fuzz-xml fuzz-media fuzz-color fuzz-brotli
+.PHONY: fuzz $(FUZZ_PARTS)
+fuzz: $(FUZZ_PARTS)
+
+fuzz-pages:
 	@python3 tools/fuzz/fuzz_parser.py
+
+fuzz-pipeline:
 	@python3 tools/fuzz/fuzz_pipeline.py
+
+fuzz-xml:
 	@python3 tools/fuzz/fuzz_xml.py
-	@$(MAKE) fuzz-media
-	@$(MAKE) fuzz-color
-	@$(MAKE) fuzz-brotli
 
 ## Pages that are hostile by size, not by content: one construct nested
 ## 200,000 levels (markup of every kind, trees built by script, CSS values),
@@ -775,9 +788,13 @@ asan-xml-generated:
 	ASAN_OPTIONS=detect_leaks=0 python3 tools/fuzz/xml_roundtrip.py --binary build-asan/litebird --count $(XML_ASAN_ROUNDTRIP_COUNT) --timeout 900
 
 ## The fuzz smoke run: mutated pages, XML documents, media, colours and Brotli
-## streams.
+## streams. With `make -j` its six parts run side by side (see `fuzz`), so
+## what each prints is kept together and shown when it ends
+## (--output-sync), and one that fails does not stop the others
+## (--keep-going): the step then names every part that failed, not the
+## first.
 asan-fuzz:
-	ASAN_OPTIONS=detect_leaks=0 $(MAKE) BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" fuzz BROTLI_VERIFY_FLAGS=--skip-node
+	ASAN_OPTIONS=detect_leaks=0 $(MAKE) --output-sync=target --keep-going BUILD_DIR=build-asan CXXFLAGS="$(ASAN_FLAGS)" fuzz BROTLI_VERIFY_FLAGS=--skip-node
 
 ## The deep pages in the sanitizer build made by asan-core. This run is for
 ## memory errors on those pages, not for recursion: that is found at full

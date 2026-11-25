@@ -406,6 +406,13 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     // would define a second, empty one in its place.
     if (object.type == JsType::Function && key == "prototype") (void)object.get_property(key);
     JsObject* cell = object.property_cell(true);
+    auto refuse = [&](const std::string& message) {
+        if (should_throw) js_throw_type_error(message);
+        return false;
+    };
+    const bool array_length = cell && cell->is_array && key == "length";
+    bool has_requested_length = false;
+    size_t requested_length = 0;
 
     // Array elements are stored densely; attributes on them are not tracked.
     // An *accessor* already defined on the index is a different matter: it
@@ -452,7 +459,7 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     // ArraySetLength (§10.4.2.4). A `length` given as a value must be a valid
     // array length, and a negative one is a RangeError before any attribute is
     // looked at (finding 253).
-    if (cell && cell->is_array && key == "length" && value.present) {
+    if (array_length && value.present) {
         const double asked = value.value.to_number();
         if (!(asked >= 0) || asked != std::floor(asked) || asked > 4294967295.0) {
             js_throw_range_error("Invalid array length");
@@ -478,8 +485,10 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         // true, return true", which is what
         // `Object.defineProperty(frozen, "length", { value: frozen.length })` is.
         if (!length_writable && asked != static_cast<double>(length_now)) {
-            js_throw_type_error("Cannot redefine property: length");
+            return refuse("Cannot redefine property: length");
         }
+        has_requested_length = true;
+        requested_length = static_cast<size_t>(asked);
         // Steps 4.a-c, which the assignment path already had and this one did
         // not: shortening an array *deletes* every place at or above the new
         // length, and a place that is not configurable cannot be deleted — the
@@ -559,6 +568,67 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
             }
         }
     }
+    // `length` is an own, non-configurable data property even when no map
+    // entry is needed to represent it. Do not let the dense-array shortcut
+    // bypass ValidateAndApplyPropertyDescriptor: its writable bit can only
+    // move true -> false, and its enumerable/configurable bits are fixed false.
+    // ArraySetLength above runs first when a value was supplied, so its
+    // specified partial effects on a failed shrink are preserved.
+    if (array_length) {
+        if (wants_accessor) return refuse("Cannot redefine property: length");
+        if (configurable.present && configurable.value.is_truthy()) {
+            return refuse("Cannot redefine property: length");
+        }
+        if (enumerable.present && enumerable.value.is_truthy()) {
+            return refuse("Cannot redefine property: length");
+        }
+
+        auto length_entry = cell->properties.find("length");
+        bool length_writable = !cell->frozen;
+        if (length_entry != cell->properties.end() &&
+            !(length_entry->flags & PropertyMap::Writable)) {
+            length_writable = false;
+        }
+        if (writable.present && writable.value.is_truthy() && !length_writable) {
+            return refuse("Cannot redefine property: length");
+        }
+
+        size_t current_length = cell->array_elements.size();
+        if (length_entry != cell->properties.end()) {
+            current_length = std::max(current_length,
+                                      static_cast<size_t>(js_to_number(length_entry->second)));
+        }
+        const size_t final_length = has_requested_length ? requested_length : current_length;
+        uint8_t flags = length_entry == cell->properties.end()
+                      ? static_cast<uint8_t>(cell->frozen ? 0 : PropertyMap::Writable)
+                      : length_entry->flags;
+        flags = static_cast<uint8_t>(flags & ~(PropertyMap::Enumerable |
+                                                PropertyMap::Configurable |
+                                                PropertyMap::Accessor));
+        if (writable.present) {
+            if (writable.value.is_truthy()) flags = static_cast<uint8_t>(flags | PropertyMap::Writable);
+            else flags = static_cast<uint8_t>(flags & ~PropertyMap::Writable);
+        }
+
+        // When an ordinary writable length again equals the dense element
+        // count, the count itself is the value; discard the redundant entry.
+        // A non-writable entry must stay, including when its value is the
+        // current element count, because that is where [[Writable]] lives.
+        if (final_length == cell->array_elements.size() &&
+            (flags & PropertyMap::Writable) && !cell->frozen) {
+            if (length_entry != cell->properties.end()) cell->properties.erase("length");
+            return true;
+        }
+        if (length_entry == cell->properties.end()) {
+            if (final_length == cell->array_elements.size() && !writable.present) return true;
+            (void)cell->properties.entry("length");
+            length_entry = cell->properties.find("length");
+        }
+        length_entry->second = JsValue::make_number(static_cast<double>(final_length));
+        length_entry->flags = flags;
+        return true;
+    }
+
     // §10.4.2.4 step 4.a through an index: a definition at or past the length
     // is a write to that length, and a read-only length refuses it. Step 4.a
     // is "if index >= oldLen and oldLenDesc.[[Writable]] is false, return
@@ -576,7 +646,7 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     }
     const bool host_keeps = cell && cell->exotic && array_index && cell->exotic->owns_place(cell, key);
     if (cell && cell->is_array && !host_keeps && !wants_accessor && (array_index || key == "length") &&
-        !mapped_hole && plain_attributes) {
+        !mapped_hole && plain_attributes && (!array_index || cell->extensible || element_there)) {
         if (value.present) object.set_property(key, value.value);
         return true;
     }
@@ -612,39 +682,12 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         }
         cell->has_accessors = true;
     }
-    if (cell && cell->is_array && !wants_accessor && key == "length" && writable.present &&
-        !writable.value.is_truthy()) {
-        cell->has_accessors = true;
-        // The count is still the value; only the attributes are new — and an
-        // array's `length` is not enumerable and not configurable, so what a
-        // descriptor does not mention keeps those two as they are. (This used
-        // to write Enumerable|Configurable, which made `length` both when it
-        // was asked to become non-writable: `Object.defineProperty([], 'length',
-        // { writable: false })` left `length` enumerable and configurable,
-        // where Node keeps both false.)
-        object.define_property("length",
-                               JsValue::make_number(static_cast<double>(cell->array_elements.size())),
-                               static_cast<uint8_t>(PropertyMap::Writable));
-    }
-    // §10.4.2.3 step 3.a.i: an array's `length` may not be made configurable.
-    // A descriptor that asks for `configurable: true` on it is refused, and
-    // since the attribute starts false and can never become true, asking for
-    // it is a TypeError rather than a silent no-op.
-    if (cell && cell->is_array && !wants_accessor && key == "length" && configurable.present &&
-        configurable.value.is_truthy()) {
-        js_throw_type_error("Cannot redefine property: length");
-    }
     // An accessor asked for on an index that is an element. The element is a
     // property that exists, though the map does not have it: writable,
     // enumerable and configurable, unless the array is sealed or frozen. So
     // it may become an accessor on an array that takes no new properties,
     // and it keeps being enumerable, as a data property that is turned into
     // an accessor keeps the two attributes they share.
-
-    auto refuse = [&](const std::string& message) {
-        if (should_throw) js_throw_type_error(message);
-        return false;
-    };
 
     PropertyMap* table = own_table(object, true);
     if (!table) js_throw_type_error("Object.defineProperty called on non-object");

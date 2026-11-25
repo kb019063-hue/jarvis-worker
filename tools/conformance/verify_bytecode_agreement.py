@@ -187,6 +187,26 @@ AGREES: list[Case] = [
          "spread composes with nesting"),
     Case("var o = {}; var src = {x: 1}; o['s'] = 9; var p = {...src, s: o.s}; String(p.x) + '/' + String(p.s)",
          "spread next to an ordinary key, the key order agrees"),
+
+    # Tagged templates, which the compiler refused with "Unsupported
+    # expression in bytecode compiler". The tag runs first, the substitutions
+    # after it, and the template object is built fresh on every evaluation —
+    # the tree-walker does the same today, and neither path freezes the
+    # arrays or caches per call site. `raw` is defined hidden, as
+    # eval_tagged_template does.
+    Case("function f() { return 1; } String(f`x`)", "the original refusal"),
+    Case("var f = function(s) { return s[0] + '/' + s.raw[0]; }; String(f`abc`)",
+         "the tag receives the cooked and the raw strings"),
+    Case("var f = function(s, x, y) { return s[0] + x + s[1] + y + s[2]; }; String(f`a${40 + 2}b${6 * 7}c`)",
+         "substitutions evaluate in order, left to right"),
+    Case("var f = function(s) { return s.raw[0] + '/' + s[0]; }; String(f`\\u0041`)",
+         "an escape: raw keeps the escape, cooked does not"),
+    Case("var d = ''; var f = function(s) { d += 't'; return s[0].length; }; function sub() { d += 's'; return 'y'; } var r = f`q${sub()}w`; String(d) + '/' + String(r)",
+         "the tag runs before the substitutions"),
+    Case("var f = function(s) { return Object.keys(s).join(','); }; String(f`ab${1}cd`)",
+         "the raw property is not enumerable on the strings array"),
+    Case("var o = {f: function(s) { return s[0] + s.raw[0]; }}; String(o.f`xy`)",
+         "a member-expression tag is bound to its receiver"),
 ]
 
 # The compiler refuses these. Kept here so the count of what is left has a
@@ -196,7 +216,6 @@ REFUSES: list[Case] = [
     Case("var [a, b] = [1, 2]; String(a)", "Destructuring"),
     Case("try { 1; } catch (e) { 2; }", "Statement"),
     Case("var s = \"\"; for (var k of [1,2]) { s += k; } String(s)", "Statement"),
-    Case("function f() { return 1; } String(f`x`)", "expression"),
 ]
 
 

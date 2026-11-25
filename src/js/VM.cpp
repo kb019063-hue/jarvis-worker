@@ -700,6 +700,24 @@ JsValue VM::run(size_t stop_depth) {
                 push(m_iterators.back()->pull());
                 break;
             }
+            case OpCode::OpIteratorStep: {
+                if (m_iterators.empty()) throw std::runtime_error("OP_ITERATOR_STEP without OP_ITERATOR_INIT");
+                // IteratorStep and IteratorValue happen before the loop body.
+                // A failure here must not close this iterator, even when a
+                // nested caller still has an enclosing iterator to close.
+                auto* cursor = m_iterators.back().get();
+                JsValue value;
+                try {
+                    value = cursor->pull(/*for_of=*/true);
+                } catch (...) {
+                    cursor->abandon();
+                    throw;
+                }
+                const bool yielded = !cursor->done();
+                push(std::move(value));
+                push(JsValue::make_boolean(yielded));
+                break;
+            }
             case OpCode::OpIteratorDrain: {
                 if (m_iterators.empty()) throw std::runtime_error("OP_ITERATOR_DRAIN without OP_ITERATOR_INIT");
                 std::vector<JsValue> rest;

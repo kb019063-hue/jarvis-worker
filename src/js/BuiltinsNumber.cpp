@@ -42,6 +42,16 @@ size_t skip_leading_space(const std::string& s) {
         if (c == 0xC2 && i + 1 < s.size() && static_cast<unsigned char>(s[i + 1]) == 0xA0) { i += 2; continue; }
         if (c == 0xEF && i + 2 < s.size() && static_cast<unsigned char>(s[i + 1]) == 0xBB &&
             static_cast<unsigned char>(s[i + 2]) == 0xBF) { i += 3; continue; }
+        // The remaining ECMAScript WhiteSpace code points not in U+2000's
+        // UTF-8 block: OGHAM SPACE MARK, MEDIUM MATHEMATICAL SPACE and
+        // IDEOGRAPHIC SPACE. Match whole sequences, not partial prefixes.
+        if (i + 2 < s.size()) {
+            const auto b1 = static_cast<unsigned char>(s[i + 1]);
+            const auto b2 = static_cast<unsigned char>(s[i + 2]);
+            if ((c == 0xE1 && b1 == 0x9A && b2 == 0x80) ||
+                (c == 0xE2 && b1 == 0x81 && b2 == 0x9F) ||
+                (c == 0xE3 && b1 == 0x80 && b2 == 0x80)) { i += 3; continue; }
+        }
         if (c == 0xE2 && i + 2 < s.size() && static_cast<unsigned char>(s[i + 1]) == 0x80) {
             unsigned char d = static_cast<unsigned char>(s[i + 2]);
             if ((d >= 0x80 && d <= 0x8A) || d == 0xA8 || d == 0xA9 || d == 0xAF) { i += 3; continue; }

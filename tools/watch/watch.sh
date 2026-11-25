@@ -34,6 +34,8 @@
 #   tools/watch/watch.sh once N          #N is green with main in its head and no lot is in test:
 #                                        merge it at once
 #   tools/watch/watch.sh taken HH:MM     a "taken" note in each pull request of the lot, a board line
+#                                        (3, and nothing sent, when one of them is no longer open at
+#                                        the head it was taken at: the lot is not in test)
 #   tools/watch/watch.sh landed "how" N [N...]   a "landed" note in each, a board line, a row for `table`
 #   tools/watch/watch.sh table           the lots that landed in this watch, as the table its own pull
 #                                        request ends with: when each run began and passed, when it
@@ -41,10 +43,13 @@
 #   tools/watch/watch.sh sendback N "why, and what to do"   the line that sends #N back, in #N and
 #                                        on the board; #N is then left alone until its head moves
 #   tools/watch/watch.sh note N FILE     comment FILE on #N, print the comment's id
+#   tools/watch/watch.sh notits N        #N's own run failed and its change is not why (read
+#                                        `python3 tools/ci/run_report.py N` first): it is taken at the
+#                                        head it has now all the same; the lot's run does every job
 #
 # State is in $WATCH_STATE (default /tmp/watch): lots.md (the rows of `table`), end (the hour), lot.heads
 # (lines "N SHORTSHA"), lot.main, lot.head, lot.asis, sentback (lines
-# "N SHORTSHA"), ignore (one number a line: a pull request that has no agent
+# "N SHORTSHA"), notits (lines "N SHORTSHA"), ignore (one number a line: a pull request that has no agent
 # and is left alone, as #193 is), land/ (the bodies of the merges and the
 # notes).
 #
@@ -126,6 +131,16 @@ takeable() {  # takeable N FULLSHA; says why in $WHY
            | grep -Ev "^(docs/phases|docs/findings|tests/suites)/$1-" | head -2 | tr '\n' ' ')"
   [ -z "$wrong" ] || { WHY="it adds ${wrong}and a file added there is called by its own number ($1-...)"; return 1; }
   WHY="green"; green "$2" && return 0
+  # Its own run failed, the landing session has read why (`run_report.py N`),
+  # and what failed was not its change: `main` was broken under it, or a
+  # download failed on CI's machine. `watch.sh notits N` wrote "N SHORTSHA" in
+  # $STATE/notits, and it is taken at that head: the lot's run does every job
+  # again. Twice on 25 November such a pull request was in no list: #430
+  # (an `npm install` failed on CI's machine), and #450, whose run was a
+  # run on `main` as #449 had left it.
+  if grep -qx "$1 ${2:0:7}" "$STATE/notits" 2>/dev/null; then
+    WHY="its own run failed for a reason that is not its change"; return 0
+  fi
   runs="$(runs_of "$2")"
   case "$runs" in *failure*|*timed_out*) WHY="its own run failed"; return 1 ;; esac
   WHY="its code was green"; came_back_without_a_run "$1" "$2" && return 0
@@ -382,6 +397,7 @@ lot)
   done < "$STATE/lot.heads"
   while read -r n sha; do   # a member that was taken while its own run was going: has that run failed?
     [ -n "$n" ] || continue
+    grep -qx "$n $sha" "$STATE/notits" 2>/dev/null && continue   # failed before it was taken, and not for its change
     own="$(runs_of "$(git rev-parse "origin/pr$n")")"
     case "$own" in *failure*|*timed_out*) echo "lot: #$n's own run failed ($own): build the lot again without it"; exit 5 ;; esac
   done < "$STATE/lot.heads"
@@ -495,6 +511,15 @@ once)
 taken)
   at="$1"; main7="$(cat "$STATE/lot.main")"; list=""
   nums="$(cut -d' ' -f1 "$STATE/lot.heads" | tr '\n' ' ')"
+  # Only for a lot that is in test: every one of its pull requests open, at
+  # the head it was taken at. On 25 November at 20:50 `full` had refused a
+  # pull request and built nothing, the next command of the same line was
+  # this one, and #443, which had landed two minutes before with the lot
+  # that was still written here, was told it was taken, and the board too.
+  while read -r n sha; do
+    st="$(timeout 30 gh pr view "$n" --json state,headRefOid --jq '"\(.state) \(.headRefOid[0:7])"')"
+    [ "$st" = "OPEN $sha" ] || { echo "taken: #$n is '$st', not open at $sha: this lot is not in test. Nothing sent"; exit 3; }
+  done < "$STATE/lot.heads"
   while read -r n sha; do
     others="$(for m in $nums; do [ "$m" != "$n" ] && printf '#%s, ' "$m"; done | sed 's/, $//')"
     printf '%s: #%s is taken, as it is at head `%s`. Push nothing more to it and do not merge `main` into it. It is being tested with `main` `%s`%s in one CI run (begun %s UTC), and lands when that run has passed; `python3 tools/ci/check_pr.py landed %s` says when.\n' "$NAME" "$n" "$sha" "$main7" "${others:+ and $others}" "$at" "$n" > "$STATE/land/taken$n.md"
@@ -533,6 +558,13 @@ sendback)
   printf '%s: #%s is yours again (head %s): %s\n' "$NAME" "$n" "${full:0:7}" "$why" > "$STATE/land/back$n.md"
   note "$n" "$STATE/land/back$n.md"; [ -n "$BOARD" ] && note "$BOARD" "$STATE/land/back$n.md"
   echo "$n ${full:0:7}" >> "$STATE/sentback" ;;
+
+notits)
+  n="$1"
+  fetch_pr "$n" || { echo "could not fetch #$n"; exit 9; }
+  sha="$(git rev-parse --short=7 "origin/pr$n")"
+  grep -qx "$n $sha" "$STATE/notits" 2>/dev/null || echo "$n $sha" >> "$STATE/notits"
+  echo "notits: #$n at $sha is taken though its own run failed ($(runs_of "$(git rev-parse "origin/pr$n")"))" ;;
 
 note)
   note "$1" "$2" ;;

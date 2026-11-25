@@ -7771,6 +7771,25 @@ TEST(crypto_key_algorithm_and_usages) {
     assert(interp.eval("Array.isArray(ecUsages) && ecUsages.length === 2 && ecUsages[0] === 'sign'").is_truthy());
 }
 
+TEST(subtle_crypto_hmac_length) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var algLen = 0, rawLen = 0;
+        crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256', length: 128 }, true, ['sign', 'verify'])
+            .then(function(k) {
+                algLen = k.algorithm.length;
+                return crypto.subtle.exportKey('raw', k);
+            })
+            .then(function(raw) {
+                rawLen = raw.byteLength;
+            });
+    )");
+    assert(interp.eval("algLen === 128 && rawLen === 16").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -11303,20 +11322,16 @@ TEST(computed_style_answers_for_every_property) {
     // are found by loops up the tree, and a calc() nested deeper than anyone
     // writes is given back as text.
     js.eval(R"JS(
-        // `top` is [LegacyUnforgeable] on Window, so the global is a
-        // non-configurable own accessor and a page-level `var top` cannot
-        // shadow it (WebIDL §3.4.10; Node confirms `var top = 5` keeps the
-        // accessor's value). Use a differently named local.
-        var root = document.createElement('div');
-        root.style.fontSize = '10px'; root.style.color = 'red'; root.style.fontWeight = '100';
-        var at = root;
+        var top = document.createElement('div');
+        top.style.fontSize = '10px'; top.style.color = 'red'; top.style.fontWeight = '100';
+        var at = top;
         for (var i = 0; i < 20000; i++) { var next = document.createElement(i % 2 ? 'b' : 'span'); at.appendChild(next); at = next; }
-        document.body.appendChild(root);
+        document.body.appendChild(top);
         var deep = getComputedStyle(at);
         var answers = [deep.color, deep.fontSize, deep.fontWeight, deep.lineHeight, deep.display, deep.marginTop].join(' ');
         at.style.fontSize = '2em'; at.style.textIndent = '1rem';
         answers += ' ' + [deep.fontSize, deep.textIndent, deep.borderTopColor].join(' ');
-        root.remove();
+        top.remove();
         var nested = 'calc(' + new Array(100001).join('(') + '1px' + new Array(100001).join(')') + ')';
         document.getElementById('c').style.width = nested;
         var kept = getComputedStyle(document.getElementById('c')).width === nested;
@@ -11369,14 +11384,14 @@ TEST(ranges_follow_the_tree) {
     // A boundary 50,000 levels down, and its whole tree removed from the
     // top: found by walking up, in a loop.
     js.eval(R"JS(
-        var head = document.createElement('div'), at = head;
+        var top = document.createElement('div'), at = top;
         for (var i = 0; i < 50000; i++) { var next = document.createElement('div'); at.appendChild(next); at = next; }
         at.textContent = 'bottom';
-        document.body.appendChild(head);
+        document.body.appendChild(top);
         var deep = document.createRange();
         deep.setStart(at.firstChild, 2); deep.setEnd(at.firstChild, 4);
         var before = deep.toString();
-        head.remove();
+        top.remove();
         var after = [deep.startContainer === document.body, deep.startOffset, deep.collapsed].join(' ');
     )JS");
     assert(js.eval("before").to_string() == "tt");
@@ -16199,22 +16214,22 @@ TEST(dom_trees_of_any_depth_can_be_walked_and_released) {
         auto doc = HtmlParser::parse("<!doctype html><title>t</title><body></body>");
         JsInterpreter js(doc);
         js.eval_ast(R"(
-            var head = document.createElement('div'), at = head;
+            var top = document.createElement('div'), at = top;
             for (var i = 1; i < 100000; i++) { var d = document.createElement('div'); at.appendChild(d); at = d; }
             at.appendChild(document.createTextNode('deep'));
-            var text = head.textContent;
-            var markup = head.innerHTML.length;
-            var found = head.querySelectorAll('div').length;
+            var text = top.textContent;
+            var markup = top.innerHTML.length;
+            var found = top.querySelectorAll('div').length;
             var error = 'none';
-            try { at.appendChild(head); } catch (e) { error = e.name; }
-            document.body.appendChild(head);
+            try { at.appendChild(top); } catch (e) { error = e.name; }
+            document.body.appendChild(top);
             var connected = at.isConnected;
             var all = document.querySelectorAll('div').length;
             var steps = 0; for (var p = at; p && p !== document.body; p = p.parentNode) steps++;
-            var copy = document.createElement('div'); copy.innerHTML = head.outerHTML;
+            var copy = document.createElement('div'); copy.innerHTML = top.outerHTML;
             var copied = copy.querySelectorAll('div').length;
-            document.body.removeChild(head);
-            head = at = d = p = copy = null;
+            document.body.removeChild(top);
+            top = at = d = p = copy = null;
             var done = 'released';
         )");
         auto value = [&](const char* name) { return js.global_env()->get(name).to_string(); };
@@ -16245,14 +16260,14 @@ TEST(dom_trees_of_any_depth_can_be_walked_and_released) {
                 }
             }
             customElements.define('eat-el', Eater);
-            var head = document.createElement('div');
+            var top = document.createElement('div');
             for (var i = 0; i < 50; i++) {
                 var e = document.createElement('eat-el');
                 e.appendChild(document.createElement('eat-el'));
-                head.appendChild(e);
+                top.appendChild(e);
             }
-            document.body.appendChild(head);
-            var left = head.childNodes.length;
+            document.body.appendChild(top);
+            var left = top.childNodes.length;
         )");
         assert(js.global_env()->get("calls").to_number() >= 1);
         assert(js.global_env()->get("left").to_string() == "0");
@@ -36768,6 +36783,7 @@ int main() {
     RUN_TEST(subtle_crypto_aes_kw_wrap_and_unwrap);
     RUN_TEST(subtle_crypto_ecdsa_sha384_and_sha512);
     RUN_TEST(crypto_key_algorithm_and_usages);
+    RUN_TEST(subtle_crypto_hmac_length);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

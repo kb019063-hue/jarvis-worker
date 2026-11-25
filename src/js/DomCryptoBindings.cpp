@@ -1043,16 +1043,42 @@ void setup_subtle_crypto(Iface& I) {
             return reject_with("NotSupportedError", "SubtleCrypto.importKey: only 'raw' and 'jwk' formats are supported.");
         }
         std::vector<uint8_t> key_bytes;
+        std::string ec_key_type;
         if (fmt == "jwk") {
             if (!args[1].is_object_like()) {
                 return reject_with("TypeError", "SubtleCrypto.importKey: jwk keyData must be an object.");
             }
-            if (to_str(args[1].get_property("kty")) != "oct") {
-                return reject_with("DataError", "SubtleCrypto.importKey: only kty 'oct' JWK is supported.");
-            }
-            std::string k_str = to_str(args[1].get_property("k"));
-            if (k_str.empty() || !base64url_decode(k_str, key_bytes)) {
-                return reject_with("DataError", "SubtleCrypto.importKey: invalid JWK 'k' field.");
+            std::string kty = to_str(args[1].get_property("kty"));
+            if (kty == "EC") {
+                if (to_str(args[1].get_property("crv")) != "P-256") {
+                    return reject_with("NotSupportedError", "SubtleCrypto.importKey: only P-256 EC JWK is supported.");
+                }
+                std::vector<uint8_t> x_bytes, y_bytes, d_bytes;
+                if (!base64url_decode(to_str(args[1].get_property("x")), x_bytes) || x_bytes.size() != 32u ||
+                    !base64url_decode(to_str(args[1].get_property("y")), y_bytes) || y_bytes.size() != 32u) {
+                    return reject_with("DataError", "SubtleCrypto.importKey: invalid EC JWK x/y coordinates.");
+                }
+                JsValue d_val = args[1].get_property("d");
+                if (!d_val.is_undefined() && !d_val.is_nullish()) {
+                    if (!base64url_decode(to_str(d_val), d_bytes) || d_bytes.size() != 32u) {
+                        return reject_with("DataError", "SubtleCrypto.importKey: invalid EC JWK 'd' field.");
+                    }
+                    ec_key_type = "private";
+                    key_bytes = std::move(d_bytes);
+                } else {
+                    ec_key_type = "public";
+                    key_bytes.reserve(65u);
+                    key_bytes.push_back(0x04u);
+                    key_bytes.insert(key_bytes.end(), x_bytes.begin(), x_bytes.end());
+                    key_bytes.insert(key_bytes.end(), y_bytes.begin(), y_bytes.end());
+                }
+            } else if (kty == "oct") {
+                std::string k_str = to_str(args[1].get_property("k"));
+                if (k_str.empty() || !base64url_decode(k_str, key_bytes)) {
+                    return reject_with("DataError", "SubtleCrypto.importKey: invalid JWK 'k' field.");
+                }
+            } else {
+                return reject_with("DataError", "SubtleCrypto.importKey: only kty 'oct' or 'EC' JWK is supported.");
             }
         } else if (!read_buffer_source(r, args[1], key_bytes)) {
             return reject_with("TypeError", "SubtleCrypto.importKey: keyData must be a BufferSource.");
@@ -1061,11 +1087,17 @@ void setup_subtle_crypto(Iface& I) {
         std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
                                                         : ascii_lower_str(to_str(alg_val));
         if (alg_name == "ecdh" || alg_name == "ecdsa") {
-            if (fmt != "raw" || key_bytes.size() != 65u || key_bytes[0] != 0x04u) {
+            if (fmt == "jwk") {
+                if (ec_key_type.empty()) {
+                    return reject_with("DataError", "SubtleCrypto.importKey: EC algorithm requires kty 'EC' JWK.");
+                }
+            } else if (fmt != "raw" || key_bytes.size() != 65u || key_bytes[0] != 0x04u) {
                 return reject_with("DataError", "SubtleCrypto.importKey: EC raw public key must be 65 bytes (0x04 || X || Y).");
+            } else {
+                ec_key_type = "public";
             }
             auto state = std::make_shared<CryptoKeyState>();
-            state->type = "public";
+            state->type = ec_key_type;
             state->extractable = args[3].is_truthy();
             state->hash_alg = alg_name;
             state->key_bytes = std::move(key_bytes);
@@ -1234,6 +1266,26 @@ void setup_subtle_crypto(Iface& I) {
         if (fmt == "jwk") {
             JsValue obj_ctor = r.window.is_object() ? r.window.get_property("Object") : JsValue();
             JsValue jwk = js_construct(obj_ctor, {});
+            if (key->hash_alg == "ecdh" || key->hash_alg == "ecdsa") {
+                jwk.set_property("kty", str("EC"));
+                jwk.set_property("crv", str("P-256"));
+                jwk.set_property("ext", boolean(key->extractable));
+                if (key->type == "public" && key->key_bytes.size() == 65u) {
+                    jwk.set_property("x", str(base64url_encode(std::vector<uint8_t>(key->key_bytes.begin() + 1, key->key_bytes.begin() + 33))));
+                    jwk.set_property("y", str(base64url_encode(std::vector<uint8_t>(key->key_bytes.begin() + 33, key->key_bytes.end()))));
+                } else if (key->type == "private" && key->key_bytes.size() == 32u) {
+                    p256::Fe rx, ry;
+                    p256::scalar_mul(key->key_bytes.data(), p256::kGx, p256::kGy, rx, ry);
+                    std::vector<uint8_t> xb(32), yb(32);
+                    p256::fe_to_be(rx, xb.data());
+                    p256::fe_to_be(ry, yb.data());
+                    jwk.set_property("x", str(base64url_encode(xb)));
+                    jwk.set_property("y", str(base64url_encode(yb)));
+                    jwk.set_property("d", str(base64url_encode(key->key_bytes)));
+                }
+                if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {jwk});
+                return undefined();
+            }
             jwk.set_property("kty", str("oct"));
             jwk.set_property("k", str(base64url_encode(key->key_bytes)));
             jwk.set_property("ext", boolean(key->extractable));

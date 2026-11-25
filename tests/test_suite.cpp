@@ -7549,6 +7549,42 @@ TEST(subtle_crypto_ecdsa_p256_sign_and_verify) {
     assert(interp.eval("ok1 === true && ok2 === false").is_truthy());
 }
 
+TEST(subtle_crypto_ec_jwk_import_and_export) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var ok = null, pubJwk = null, privJwk = null;
+        var msg = new Uint8Array([1, 2, 3, 4]);
+        crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+            .then(function(pair) {
+                return Promise.all([
+                    crypto.subtle.exportKey('jwk', pair.publicKey),
+                    crypto.subtle.exportKey('jwk', pair.privateKey)
+                ]);
+            })
+            .then(function(jwks) {
+                pubJwk = jwks[0];
+                privJwk = jwks[1];
+                return Promise.all([
+                    crypto.subtle.importKey('jwk', pubJwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['verify']),
+                    crypto.subtle.importKey('jwk', privJwk, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign'])
+                ]);
+            })
+            .then(function(keys) {
+                return crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, keys[1], msg)
+                    .then(function(sig) {
+                        return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, keys[0], sig, msg);
+                    });
+            })
+            .then(function(v) { ok = v; });
+    )");
+    assert(interp.eval("pubJwk !== null && pubJwk.kty === 'EC' && pubJwk.crv === 'P-256' && typeof pubJwk.x === 'string' && typeof pubJwk.y === 'string' && pubJwk.d === undefined").is_truthy());
+    assert(interp.eval("privJwk !== null && privJwk.kty === 'EC' && privJwk.crv === 'P-256' && typeof privJwk.d === 'string'").is_truthy());
+    assert(interp.eval("ok === true").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36502,6 +36538,7 @@ int main() {
     RUN_TEST(subtle_crypto_jwk_import_and_export);
     RUN_TEST(subtle_crypto_ecdh_p256_derive_bits);
     RUN_TEST(subtle_crypto_ecdsa_p256_sign_and_verify);
+    RUN_TEST(subtle_crypto_ec_jwk_import_and_export);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

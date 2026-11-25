@@ -277,6 +277,32 @@ bool js_iterator_method(const JsValue& value, JsValue& method);
 void iterate_with_method(const JsValue& iterable, const JsValue& method,
                          const std::function<bool(const JsValue&)>& visit);
 
+/// AsyncIteratorClose (ECMA-262 7.4.15): ask the iterator for `return`, call
+/// it, and wait for what it answers. `completion` is the caller's completion
+/// value, and `is_throw_completion` records its kind separately: JavaScript
+/// may throw `undefined`, so that value cannot double as a normal-completion
+/// sentinel. With a throw completion, step 5 preserves it over every close
+/// failure; with a normal completion, a throwing/rejecting `return` or a
+/// non-object answer is itself abrupt (steps 3, 6 and 7).
+///
+/// `await_value` is the caller's own blocking await (a built-in has no frame to
+/// park, so it runs the event loop until the promise settles); it throws what
+/// the promise rejected with.
+///
+/// This is not `close_iterator_quietly`: that one is IteratorClose (7.4.11) for
+/// a synchronous walk that is already leaving with an error, and it does not
+/// await, does not turn a non-object into a TypeError, and drops what `return`
+/// throws. A sync iterator wrapped by CreateAsyncFromSyncIterator closes
+/// through *this* one, because the walk is an async one.
+JsValue close_async_iterator(const JsValue& iterator, const JsValue& completion,
+                             bool is_throw_completion,
+                             const std::function<JsValue(const JsValue&)>& await_value);
+
+/// CreateAsyncFromSyncIterator (§27.1.6), shared with `yield*` in the
+/// interpreter. It returns an async wrapper whose `next` and `return` await
+/// the sync iterator result's `value`, and whose `next` method is cached once.
+JsValue js_create_async_from_sync_iterator(const JsValue& sync_iterator);
+
 /// True when reading `value` directly gives what iterating it would, and
 /// finding that out ran no script: `value` is an array, or a string, whose
 /// `Symbol.iterator` is, by a plain lookup, still the function this realm put

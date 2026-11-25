@@ -880,6 +880,98 @@ double svg_length_in_user_units(const SvgLengthValue& value) {
     return static_cast<double>(value.number) * svg_length_unit_in_px(value.unit);
 }
 
+// A double from script narrowed to the float an SVG length stores, keeping
+// the infinities rather than flattening them to a finite number: the WebIDL
+// conversion happens before any rule of §4.5.2 reads the value.
+float svg_float_from_double(double converted) {
+    if (std::isfinite(converted)) return static_cast<float>(converted);
+    if (converted > 0) return std::numeric_limits<float>::infinity();
+    if (converted < 0) return -std::numeric_limits<float>::infinity();
+    return 0.0f;
+}
+
+// A length in user units expressed as a number in `unit`. This is the
+// direction §4.5.2's `value` setter needs and `convertToSpecifiedUnits` walks:
+// user units are the common currency, and a percentage is a share of the
+// unassociated basis of 100.
+float svg_length_number_in_unit(SvgLengthUnit unit, float user_units) {
+    if (unit == SvgLengthUnit::Percentage) {
+        return static_cast<float>(static_cast<double>(user_units) / (0.01 * kSvgLengthUnassociatedPercentageBasis));
+    }
+    if (unit == SvgLengthUnit::Unknown) return user_units;
+    return static_cast<float>(static_cast<double>(user_units) / svg_length_unit_in_px(unit));
+}
+
+// ---------------------------------------------------------------------------
+// SVGLengthList (SVG 2 §4.5.3) and SVGAnimatedLengthList (§4.6.3)
+// ---------------------------------------------------------------------------
+//
+// `x`, `y`, `dx` and `dy` on the text elements hold a *list* of lengths -- one
+// per glyph run -- not one length. Phase 395 gave them an SVGAnimatedLength,
+// because every other <length> attribute is one; these four are the exception,
+// and a single-length model cannot represent them at all: `x="10 20 30"` read
+// as a single length reports 0, and a write to it replaces all three positions
+// with one.
+//
+// The list is kept whole. An attribute the list is created from is parsed into
+// its values once, when the list is made, and the attribute is re-written from
+// them in full when any one of them changes. Serializing the whole list on
+// every write is what a browser does -- the attribute stays the single source
+// of truth, and `getItem(0).value = 99` rewrites `10 20 30` as `99 20 30`.
+struct SvgLengthListValue {
+    std::vector<SvgLengthValue> values;
+};
+
+// How a list is written back: between entries, a single space. SVG's list
+// grammar accepts comma-wsp, but the attribute a browser writes uses spaces
+// uniformly, which is also what its own reader expects.
+std::string serialize_svg_length_list(const SvgLengthListValue& list) {
+    std::string text;
+    for (const auto& value : list.values) {
+        if (!text.empty()) text += ' ';
+        text += serialize_svg_length(value);
+    }
+    return text;
+}
+
+// Parse an SVG list of lengths: `<length>` entries separated by comma-wsp
+// (SVG 1.1 §4.2 "comma-wsp"), in either order, with either count. An entry the
+// grammar rejects makes the whole attribute invalid, which §4.5.3 says reads
+// as an empty list rather than a partial one -- so `x="10 bogus 30"` is no
+// list at all, and the attribute is left alone.
+bool parse_svg_length_list(const std::string& text, SvgLengthListValue& out) {
+    out.values.clear();
+    std::size_t at = 0;
+    auto skip = [&]() {
+        bool jumped = false;
+        while (at < text.size() && svg_space(text[at])) { ++at; jumped = true; }
+        return jumped;
+    };
+    skip();
+    while (at < text.size()) {
+        // The entry's text runs to the next separator, but a comma is a
+        // separator too and is not part of any length, so the whole
+        // comma-wsp run is scanned here to find where the entry stops.
+        const std::size_t start = at;
+        while (at < text.size() && !svg_space(text[at]) && text[at] != ',') ++at;
+        if (start == at) return false;                  // an empty entry: ",,"
+        SvgLengthValue value;
+        if (!parse_svg_length(text.substr(start, at - start), value)) return false;
+        out.values.push_back(std::move(value));
+        const bool spaced = skip();
+        if (at < text.size() && text[at] == ',') {
+            ++at;
+            // comma-wsp may be followed by more whitespace; `10, 20` is one
+            // separator, and `10 ,20` too.
+            skip();
+            if (at == text.size()) return false;        // trailing comma
+        } else if (!spaced && at < text.size()) {
+            return false;                               // neither comma nor space
+        }
+    }
+    return true;
+}
+
 // `preserveAspectRatio`, the other half of SVGFitToViewBox (SVG 2 §8.14.4,
 // §8.14.5). The attribute's value is a keyword pair -- `xMidYMid meet` by
 // default -- and the DOM exposes it as an SVGPreserveAspectRatio whose `align`
@@ -970,13 +1062,19 @@ bool is_svg_preserve_aspect_ratio_holder(const Node& node) {
     return svg_fits_to_view_box(node);
 }
 
-// An SVGLength either reflects an element's attribute (`element` and
-// `attribute_name` set) or stands on its own, as `createSVGLength()` and
-// `new SVGLength(...)` make one. The reflected kind reads and writes the
-// attribute; the standalone kind owns its value.
+// An SVGLength either reflects one entry of an element's attribute
+// (`element` and `attribute_name` set) or stands on its own, as
+// `createSVGLength()` and `new SVGLength(...)` make one. The reflected kind
+// reads and writes the attribute; the standalone kind owns its value.
+//
+// `index` is which entry of the attribute it reflects. It is 0 for every
+// single-length attribute (`rect.x`, `circle.r`), and for the text elements'
+// `x`/`y`/`dx`/`dy` it is the position in the list that the item was taken
+// from -- `text.x.baseVal.getItem(1)` is an SVGLength reflecting entry 1.
 struct SvgLengthState : JsExotic {
     std::shared_ptr<Element> element;
     std::string attribute_name;
+    std::size_t index{0};
     SvgLengthValue standalone;
     bool animated{false};
     void trace(Heap& heap) override { if (element) trace_node(heap, element.get()); }
@@ -988,21 +1086,48 @@ struct SvgAnimatedLengthState : JsExotic {
     void trace(Heap& heap) override { trace_node(heap, element.get()); }
 };
 
+// The whole attribute as a list, whatever kind it is. Every length-valued
+// attribute is read this way: a single length is a list of one, so the two
+// kinds differ only in how many entries the text has.
+SvgLengthListValue read_svg_length_list(Element& element, const std::string& attribute_name) {
+    SvgLengthListValue list;
+    const std::string* text = element.attribute(attribute_name);
+    // An attribute that is absent or unparseable is an empty list, which is
+    // the initial value §4.5.3 gives every SVGLengthList.
+    if (text && !parse_svg_length_list(*text, list)) list.values.clear();
+    return list;
+}
+
+void write_svg_length_list(Element& element, const std::string& attribute_name, const SvgLengthListValue& list) {
+    // An empty list has no text, so the attribute is removed: `clear()` on a
+    // text element's `x` leaves no `x` behind, which is what a browser does.
+    if (list.values.empty()) {
+        if (element.has_attribute(attribute_name)) element.remove_attribute(attribute_name);
+        return;
+    }
+    element.set_attribute(attribute_name, serialize_svg_length_list(list));
+}
+
+// A list of one that the attribute cannot express is still a list of one: an
+// unparseable single length (Phase 395's `3ch`) keeps its source text.
 SvgLengthValue read_svg_length(const SvgLengthState& state) {
     if (!state.element || state.attribute_name.empty()) return state.standalone;
-    SvgLengthValue value;
-    const std::string* text = state.element->attribute(state.attribute_name);
+    const SvgLengthListValue list = read_svg_length_list(*state.element, state.attribute_name);
     // An attribute that is absent or unparseable reads as 0 user units, which
-    // is the initial value §A.1.1 gives every SVGLength.
-    if (!text || !parse_svg_length(*text, value)) {
-        value = SvgLengthValue{};
-    }
-    return value;
+    // is the initial value §A.1.1 gives every SVGLength; so does an index the
+    // list does not have.
+    if (state.index >= list.values.size()) return SvgLengthValue{};
+    return list.values[state.index];
 }
 
 void write_svg_length(const SvgLengthState& state, const SvgLengthValue& value) {
     if (!state.element || state.attribute_name.empty()) return;
-    state.element->set_attribute(state.attribute_name, serialize_svg_length(value));
+    SvgLengthListValue list = read_svg_length_list(*state.element, state.attribute_name);
+    // Writing an index the attribute does not have would silently do nothing,
+    // so it appends: the list grows to hold what was written.
+    while (list.values.size() <= state.index) list.values.push_back(SvgLengthValue{});
+    list.values[state.index] = value;
+    write_svg_length_list(*state.element, state.attribute_name, list);
 }
 
 void setup_svg_length(Iface& I) {
@@ -1019,7 +1144,11 @@ void setup_svg_length(Iface& I) {
         return num(static_cast<double>(read_svg_length(state).unit));
     });
     // `value` is in user units; `valueInSpecifiedUnits` is the number as
-    // written. They differ for every unit but NUMBER (§4.5.2).
+    // written. They differ for every unit but NUMBER (§4.5.2) -- and so does
+    // what a write to each one does. `value = 100` on `x="1cm"` asks for 100
+    // user units, which is `2.64583cm`; writing the 100 into the number alone
+    // would make it `100cm`, 37.795 times too long. Only the member that is
+    // *in specified units* takes the number as written.
     I.accessor("value",
         [](Realm&) {
             auto& state = this_state<SvgLengthState>("SVGLength");
@@ -1030,15 +1159,16 @@ void setup_svg_length(Iface& I) {
         [](Realm& realm, const JsValue& assigned) {
             auto& state = this_state<SvgLengthState>("SVGLength");
             const double converted = to_double(assigned);
-            const float number = std::isfinite(converted) ? static_cast<float>(converted)
-                                                          : (converted > 0 ? std::numeric_limits<float>::infinity()
-                                                                           : (converted < 0 ? -std::numeric_limits<float>::infinity() : 0.0f));
+            const float number = svg_float_from_double(converted);
             if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated length is read-only.");
             SvgLengthValue value = read_svg_length(state);
-            // §4.5.2: a scalar keeps its unit and takes the new number; a
-            // non-scalar value becomes a plain number in user units.
-            if (value.scalar) value.number = number;
-            else value = SvgLengthValue{SvgLengthUnit::Number, number, true};
+            // §4.5.2: a scalar keeps its unit and takes the length in that
+            // unit; a non-scalar value becomes a plain number in user units.
+            if (value.scalar) {
+                value.number = svg_length_number_in_unit(value.unit, number);
+            } else {
+                value = SvgLengthValue{SvgLengthUnit::Number, number, true};
+            }
             if (!state.element || state.attribute_name.empty()) state.standalone = value;
             else write_svg_length(state, value);
         });
@@ -1050,10 +1180,7 @@ void setup_svg_length(Iface& I) {
         },
         [](Realm& realm, const JsValue& assigned) {
             auto& state = this_state<SvgLengthState>("SVGLength");
-            const double converted = to_double(assigned);
-            const float number = std::isfinite(converted) ? static_cast<float>(converted)
-                                                          : (converted > 0 ? std::numeric_limits<float>::infinity()
-                                                                           : (converted < 0 ? -std::numeric_limits<float>::infinity() : 0.0f));
+            const float number = svg_float_from_double(to_double(assigned));
             if (state.animated) throw_dom(realm, "NoModificationAllowedError", "The animated length is read-only.");
             SvgLengthValue value = read_svg_length(state);
             if (value.scalar) value.number = number;
@@ -1103,12 +1230,9 @@ void setup_svg_length(Iface& I) {
         SvgLengthValue value = read_svg_length(state);
         if (!value.scalar) { value = SvgLengthValue{}; }
         else {
-            const double user_units = svg_length_in_user_units(value);
             const auto target = static_cast<SvgLengthUnit>(unit);
+            value.number = svg_length_number_in_unit(target, static_cast<float>(svg_length_in_user_units(value)));
             value.unit = target;
-            value.number = target == SvgLengthUnit::Percentage
-                ? static_cast<float>(user_units / (0.01 * kSvgLengthUnassociatedPercentageBasis))
-                : static_cast<float>(user_units / svg_length_unit_in_px(target));
         }
         if (!state.element || state.attribute_name.empty()) state.standalone = value;
         else write_svg_length(state, value);
@@ -1125,8 +1249,201 @@ void setup_svg_animated_length(Iface& I) {
                 auto length = std::make_shared<SvgLengthState>();
                 length->element = state.element;
                 length->attribute_name = state.attribute_name;
+                length->index = 0;
                 length->animated = animated;
                 return realm.make("SVGLength", length);
+            });
+        });
+    }
+}
+
+// An item handed to a list mutator. §4.5.3 takes an `SVGLength*`, and a
+// browser refuses anything else with a TypeError before the index is even
+// looked at; the item's own value is then copied into the list.
+SvgLengthValue length_from_item_argument(Realm& realm, const JsValue& value) {
+    auto* state = state_of<SvgLengthState>(value);
+    if (!state) throw_dom(realm, "TypeError", "The item is not an SVGLength.");
+    return read_svg_length(*state);
+}
+
+// A list index the interface checks rather than clamps: `getItem`, `removeItem`
+// and `replaceItem` all throw IndexSizeError past the end (§4.5.3). WebIDL has
+// already converted the argument to unsigned long, so -1 arrives as 4294967295
+// and is simply past the end.
+std::size_t checked_list_index(Realm& realm, const JsValue& value, std::size_t size) {
+    const std::size_t index = static_cast<std::size_t>(to_ulong(value));
+    if (index >= size) throw_dom(realm, "IndexSizeError", "The index is greater than the maximum bound.");
+    return index;
+}
+
+// ---------------------------------------------------------------------------
+// SVGLengthList and SVGAnimatedLengthList
+// ---------------------------------------------------------------------------
+//
+// The list is a live view of the attribute, not a copy: `text.x.baseVal` is
+// the same object every time it is asked for (§4.6.3's [SameObject]), and the
+// values in it are the attribute's. Every mutator therefore reads the
+// attribute, changes what it read, and writes the whole attribute back -- so
+// an item taken from the list (`getItem(0)`) is connected to the attribute it
+// came from: that item is an SVGLength reflecting entry 0, and writing its
+// `value` rewrites the list.
+//
+// `numberOfItems` and `length` are the same number. §4.5.3 gives the list
+// both, and a browser answers both.
+struct SvgLengthListState : JsExotic {
+    std::shared_ptr<Element> element;
+    std::string attribute_name;
+
+    SvgLengthListValue read() const {
+        if (!element) return SvgLengthListValue{};
+        return read_svg_length_list(*element, attribute_name);
+    }
+    void write(const SvgLengthListValue& list) const {
+        if (!element) return;
+        write_svg_length_list(*element, attribute_name, list);
+    }
+    bool get(JsObject*, const std::string& name, JsValue& out) override {
+        std::size_t index = 0;
+        if (!parse_index(name, index)) return false;
+        if (index >= read().values.size()) return false;
+        out = make_item(current_realm(), index);
+        return true;
+    }
+    bool has(JsObject*, const std::string& name) override {
+        std::size_t index = 0;
+        return parse_index(name, index) && index < read().values.size();
+    }
+    JsExotic::SetResult set(JsObject*, const std::string& name, const JsValue& value) override {
+        std::size_t index = 0;
+        if (!parse_index(name, index)) return JsExotic::SetResult::NotHandled;
+        // The list *does* take an indexed write, of an SVGLength, into the
+        // place it names: `list[0] = other` puts `other`'s value at 0 and
+        // keeps the count. §4.5.3 gives the interface an indexed setter, and a
+        // browser enforces its argument type before the range -- which is why
+        // `list[0] = 5` throws a TypeError in sloppy code and not the silent
+        // nothing a refused write would be.
+        auto* item = state_of<SvgLengthState>(value);
+        if (!item) throw_dom(current_realm(), "TypeError", "The value is not an SVGLength.");
+        SvgLengthListValue list = read();
+        if (index >= list.values.size()) {
+            throw_dom(current_realm(), "IndexSizeError", "The index is greater than the maximum bound.");
+        }
+        list.values[index] = read_svg_length(*item);
+        write(list);
+        return JsExotic::SetResult::Handled;
+    }
+    void keys(JsObject*, std::vector<std::string>& out) override {
+        const std::size_t count = read().values.size();
+        for (std::size_t i = 0; i < count; ++i) out.push_back(std::to_string(i));
+    }
+    /// A fresh SVGLength reflecting entry `index` of this list's attribute.
+    /// A browser answers a new object every time (`getItem(0) !== getItem(0)`),
+    /// so there is nothing to cache here.
+    JsValue make_item(Realm& realm, std::size_t index) const;
+    /// True while this list is an `animVal`: every item it answers is
+    /// read-only (§4.6.3, §4.5.2 -- writing one throws).
+    bool animated_items{false};
+    void trace(Heap& heap) override { if (element) trace_node(heap, element.get()); }
+};
+
+struct SvgAnimatedLengthListState : JsExotic {
+    std::shared_ptr<Element> element;
+    std::string attribute_name;
+    void trace(Heap& heap) override { if (element) trace_node(heap, element.get()); }
+};
+
+// The item needs a Realm to be made in, which the state does not keep (a state
+// can outlive the realm that made it), so it is made from the getter's realm
+// and handed the article it reflects.
+JsValue SvgLengthListState::make_item(Realm& realm, std::size_t index) const {
+    auto state = std::make_shared<SvgLengthState>();
+    state->element = element;
+    state->attribute_name = attribute_name;
+    state->index = index;
+    state->animated = animated_items;
+    return realm.make("SVGLength", state);
+}
+
+void setup_svg_length_list(Iface& I) {
+    // §4.5.3's members. `length` is the [LegacyArrayClass] one and
+    // `numberOfItems` the SVG 1.1 one; both answer the size, and both are
+    // read-only.
+    for (const char* name : {"length", "numberOfItems"}) {
+        I.getter(name, [](Realm&) {
+            auto& state = this_state<SvgLengthListState>("SVGLengthList");
+            return num(static_cast<double>(state.read().values.size()));
+        });
+    }
+    I.method("clear", 0, [](Realm&, Args) {
+        this_state<SvgLengthListState>("SVGLengthList").write(SvgLengthListValue{});
+        return undefined();
+    });
+    I.method("initialize", 1, [](Realm& realm, Args args) {
+        auto& state = this_state<SvgLengthListState>("SVGLengthList");
+        SvgLengthListValue list;
+        list.values.push_back(length_from_item_argument(realm, args[0]));
+        state.write(list);
+        return state.make_item(realm, 0);
+    });
+    I.method("insertItemBefore", 2, [](Realm& realm, Args args) {
+        auto& state = this_state<SvgLengthListState>("SVGLengthList");
+        SvgLengthListValue list = state.read();
+        const SvgLengthValue entry = length_from_item_argument(realm, args[0]);
+        // The index is clamped rather than checked (§4.5.3: past the end is
+        // the end, and a negative converts to 0 by WebIDL's unsigned long).
+        const std::size_t at = std::min(std::size_t(to_ulong(args[1])), list.values.size());
+        list.values.insert(list.values.begin() + static_cast<std::ptrdiff_t>(at), entry);
+        state.write(list);
+        return state.make_item(realm, at);
+    });
+    I.method("removeItem", 1, [](Realm& realm, Args args) {
+        auto& state = this_state<SvgLengthListState>("SVGLengthList");
+        SvgLengthListValue list = state.read();
+        const std::size_t at = checked_list_index(realm, args[0], list.values.size());
+        SvgLengthListValue removed;
+        removed.values.push_back(list.values[at]);
+        list.values.erase(list.values.begin() + static_cast<std::ptrdiff_t>(at));
+        state.write(list);
+        // The removed item keeps reading the attribute it no longer belongs to,
+        // so it is answered as a length the attribute no longer has: 0.
+        auto item = std::make_shared<SvgLengthState>();
+        item->standalone = removed.values[0];
+        return realm.make("SVGLength", item);
+    });
+    I.method("appendItem", 1, [](Realm& realm, Args args) {
+        auto& state = this_state<SvgLengthListState>("SVGLengthList");
+        SvgLengthListValue list = state.read();
+        list.values.push_back(length_from_item_argument(realm, args[0]));
+        state.write(list);
+        return state.make_item(realm, list.values.size() - 1);
+    });
+    I.method("replaceItem", 2, [](Realm& realm, Args args) {
+        auto& state = this_state<SvgLengthListState>("SVGLengthList");
+        SvgLengthListValue list = state.read();
+        const SvgLengthValue entry = length_from_item_argument(realm, args[0]);
+        const std::size_t at = checked_list_index(realm, args[1], list.values.size());
+        list.values[at] = entry;
+        state.write(list);
+        return state.make_item(realm, at);
+    });
+    I.method("getItem", 1, [](Realm& realm, Args args) {
+        auto& state = this_state<SvgLengthListState>("SVGLengthList");
+        const std::size_t at = checked_list_index(realm, args[0], state.read().values.size());
+        return state.make_item(realm, at);
+    });
+}
+
+void setup_svg_animated_length_list(Iface& I) {
+    for (const auto& member : {std::pair<const char*, bool>{"baseVal", false}, {"animVal", true}}) {
+        const bool animated = member.second;
+        I.getter(member.first, [animated](Realm& realm) {
+            auto& state = this_state<SvgAnimatedLengthListState>("SVGAnimatedLengthList");
+            return cached(JsValue::current_this(), animated ? "svgLenListAnim" : "svgLenListBase", [&]() {
+                auto list = std::make_shared<SvgLengthListState>();
+                list->element = state.element;
+                list->attribute_name = state.attribute_name;
+                list->animated_items = animated;
+                return realm.make("SVGLengthList", list);
             });
         });
     }
@@ -1244,8 +1561,10 @@ bool svg_length_attribute(const std::string& tag, const std::string& attribute) 
         {"filter", {"x", "y", "width", "height"}},
         {"mask", {"x", "y", "width", "height"}},
         {"feImage", {"x", "y", "width", "height"}},
-        {"text", {"x", "y"}},
-        {"tspan", {"x", "y"}},
+        // `text`, `tspan` and `textPath` are *not* here: their `x` and `y` are
+        // SVGAnimatedLengthLists (§4.6.3), not single lengths. Phase 395 put
+        // them in this table, which made `x="10 20 30"` read as one length --
+        // 0 -- and a write to it replace all three positions with one.
     };
     const auto found = s_table.find(tag);
     if (found == s_table.end()) return false;
@@ -1265,6 +1584,26 @@ void setup_svg_length_attributes(Iface& I) {
     };
     for (const char* attribute : kLengthAttributes) {
         const std::string name = attribute;
+        // `text` and `tspan` do not carry a single length called `x` or `y`:
+        // theirs are lists, installed by setup_svg_text_positioning_element on
+        // the interface that inherits this one. The getter stays out of their
+        // way so the two setups cannot answer for the same name, whichever
+        // order the prototypes are built in.
+        if (name == "x" || name == "y") {
+            I.node_getter(&is_svg_node, attribute, [name](Realm& realm, Node& node) {
+                auto& element = static_cast<Element&>(node);
+                const std::string tag = element.tag_name();
+                if (tag == "text" || tag == "tspan") return JsValue();
+                if (!svg_length_attribute(tag, name)) return JsValue();
+                return cached(wrap(realm, node), "svgLen:" + name, [&]() {
+                    auto state = std::make_shared<SvgAnimatedLengthState>();
+                    state->element = shared(element);
+                    state->attribute_name = name;
+                    return realm.make("SVGAnimatedLength", state);
+                });
+            });
+            continue;
+        }
         // The interface this getter belongs to is not known here, so the
         // element decides: a tag that does not carry the attribute in SVG 2
         // does not have it at all, and asking answers `undefined`.
@@ -1283,6 +1622,46 @@ void setup_svg_length_attributes(Iface& I) {
     }
 }
 
+
+// `SVGTextPositioningElement`'s four lists (SVG 2 §4.6.3): `x` and `y` place
+// each glyph run, `dx` and `dy` shift it. All four are SVGAnimatedLengthLists
+// and all four are read and written through the attribute, so one setup serves
+// both elements that have them, `text` and `tspan`.
+//
+// `rotate` sits beside them as an SVGAnimatedNumberList (§4.6.3); it is a list
+// of numbers rather than lengths and is not built here.
+void setup_svg_text_positioning_element(Iface& I) {
+    for (const char* attribute : {"x", "y", "dx", "dy"}) {
+        const std::string name = attribute;
+        I.node_getter(&is_svg_node, attribute, [name](Realm& realm, Node& node) {
+            auto& element = static_cast<Element&>(node);
+            return cached(wrap(realm, node), "svgLenList:" + name, [&]() {
+                auto state = std::make_shared<SvgAnimatedLengthListState>();
+                state->element = shared(element);
+                state->attribute_name = name;
+                return realm.make("SVGAnimatedLengthList", state);
+            });
+        });
+    }
+}
+
+void setup_svg_text_element(Iface& I) {
+    setup_svg_length_attributes(I);
+    setup_svg_text_positioning_element(I);
+}
+
+void setup_svg_tspan_element(Iface& I) {
+    setup_svg_length_attributes(I);
+    setup_svg_text_positioning_element(I);
+}
+
+void setup_svg_text_path_element(Iface& I) {
+    // `SVGTextPathElement` inherits `SVGTextContentElement` directly, not
+    // `SVGTextPositioningElement`: a text path takes its positions from the
+    // path, so it has none of the four lists, and a browser answers all four
+    // as absent. Only `text` and `tspan` carry them.
+    setup_svg_length_attributes(I);
+}
 
 void setup_svg_graphics_element(Iface& I) {
     I.node_method(&is_svg_graphics_element, "getBBox", 0, [](Realm& realm, Node& node, Args) {
@@ -4226,6 +4605,8 @@ void register_html_interfaces() {
     register_interface({"SVGRect", nullptr, setup_svg_rect, nullptr, 0, nullptr});
     register_interface({"SVGLength", nullptr, setup_svg_length, nullptr, 0, nullptr});
     register_interface({"SVGAnimatedLength", nullptr, setup_svg_animated_length, nullptr, 0, nullptr});
+    register_interface({"SVGLengthList", nullptr, setup_svg_length_list, nullptr, 0, nullptr});
+    register_interface({"SVGAnimatedLengthList", nullptr, setup_svg_animated_length_list, nullptr, 0, nullptr});
     register_interface({"SVGPreserveAspectRatio", nullptr, setup_svg_preserve_aspect_ratio, nullptr, 0, nullptr});
     register_interface({"SVGAnimatedPreserveAspectRatio", nullptr, setup_svg_animated_preserve_aspect_ratio, nullptr, 0, nullptr});
     register_interface({"SVGElement", "Element", setup_svg_element, nullptr, 0, nullptr});
@@ -4239,10 +4620,18 @@ void register_html_interfaces() {
     // `getBBox` is SVGGraphicsElement's and is reached through the parent.
     for (const char* name : {"SVGGElement", "SVGRectElement", "SVGCircleElement", "SVGEllipseElement",
                              "SVGLineElement", "SVGPathElement", "SVGPolygonElement", "SVGPolylineElement",
-                             "SVGTextElement", "SVGTSpanElement", "SVGTextPathElement", "SVGImageElement",
-                             "SVGForeignObjectElement", "SVGUseElement", "SVGAElement", "SVGSwitchElement"}) {
+                             "SVGImageElement", "SVGForeignObjectElement", "SVGUseElement", "SVGAElement",
+                             "SVGSwitchElement"}) {
         register_interface({name, "SVGGraphicsElement", setup_svg_length_attributes, nullptr, 0, nullptr});
     }
+    // The text family is a chain of its own: `text` and `tspan` are
+    // SVGTextPositioningElements (the four length *lists*), `textPath` is only
+    // an SVGTextContentElement, and all three are graphics elements.
+    register_interface(InterfaceDef{"SVGTextContentElement", "SVGGraphicsElement", setup_svg_length_attributes, nullptr, 0, nullptr});
+    register_interface(InterfaceDef{"SVGTextPositioningElement", "SVGTextContentElement", setup_svg_text_positioning_element, nullptr, 0, nullptr});
+    register_interface(InterfaceDef{"SVGTextElement", "SVGTextPositioningElement", setup_svg_text_element, nullptr, 0, nullptr});
+    register_interface(InterfaceDef{"SVGTSpanElement", "SVGTextPositioningElement", setup_svg_tspan_element, nullptr, 0, nullptr});
+    register_interface(InterfaceDef{"SVGTextPathElement", "SVGTextContentElement", setup_svg_text_path_element, nullptr, 0, nullptr});
     // Interfaces of their own, but not graphics elements: they inherit
     // SVGElement, so none of them has `getBBox()`.
     for (const char* name : {"SVGDefsElement", "SVGDescElement", "SVGMetadataElement", "SVGStyleElement",

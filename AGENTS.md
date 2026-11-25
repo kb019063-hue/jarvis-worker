@@ -549,9 +549,11 @@ asan`.
 - A unit suite that passes in the normal build can fail in the sanitizer
   build, and CI's log cannot be read from every sandbox: run `make asan`
   here first. When a job of CI fails all the same, **its last step says
-  what failed in the job's annotations**, which the API itself serves:
-  `gh run view RUN --json jobs` for the job's id, then
-  `gh api repos/OWNER/REPO/check-runs/JOB_ID/annotations --jq '.[].message'`.
+  what failed in the job's annotations**, which the API itself serves,
+  and **`python3 tools/ci/run_report.py N` reads them for you**: which
+  job of #N's newest run failed, in which step, and what it said
+  (`--run RUN` for another run; `--times` for where a run's time went,
+  job by job, and how long its jobs waited for a machine).
   Every job does that since 24 November (`tools/ci/annotate_failure.py`;
   the steps of the jobs that are not sanitizer jobs run in
   `tools/ci/logged.sh`, which keeps a failed step's output for it). Until

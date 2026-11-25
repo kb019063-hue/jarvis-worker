@@ -335,9 +335,12 @@ jobs:
         # fixed texts, and tools/watch/watch.sh must at least be a script.
         # logged.sh is the shell these very steps run in: it is tested on
         # small scripts for the exit status it gives and the file it keeps.
+        # run_report.py says what a run did from what the API answers: it
+        # is tested on answers written down, and asks GitHub nothing here.
         run: |
           python3 tools/watch/carry_rows.py --self-test
           python3 tools/ci/run_stretches.py --self-test
+          python3 tools/ci/run_report.py --self-test
           bash -n tools/watch/watch.sh
           bash tools/ci/logged.sh --self-test
       - name: The documents keep their shape and stay under their budgets

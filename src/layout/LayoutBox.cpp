@@ -1,5 +1,6 @@
 #include "litebird/layout/LayoutBox.hpp"
 #include "litebird/common/StackLimit.hpp"
+#include "litebird/common/TerminalText.hpp"
 #include "litebird/render/FontRenderer.hpp"
 #include "litebird/text/Bidi.hpp"
 #include <algorithm>
@@ -2621,8 +2622,11 @@ void LayoutBox::dump(std::ostream& os, int indent) const {
         case BoxType::TableCellNode: os << "TableCellBox"; break;
     }
 
+    // This is a human-readable dump: page data is filtered only as it is
+    // written, never in the DOM or layout tree. Redirected dumps use the
+    // same policy as terminal output.
     if (node && node->is_element() && !node->as_element()->id().empty()) {
-        os << " #" << node->as_element()->id();
+        os << " #" << terminal_safe(node->as_element()->id());
     }
 
     os << " [x=" << dimensions.content.x
@@ -2636,9 +2640,9 @@ void LayoutBox::dump(std::ostream& os, int indent) const {
            << " w=" << line_boxes.front().rect.width
            << " intrude=" << line_boxes.front().left_intrusion << ")";
     } else if (!lines.empty()) {
-        os << " lines=" << lines.size() << " text=\"" << lines[0] << (lines.size() > 1 ? "...\"" : "\"");
+        os << " lines=" << lines.size() << " text=\"" << terminal_safe(lines[0]) << (lines.size() > 1 ? "...\"" : "\"");
     } else if (!text.empty()) {
-        os << " text=\"" << text << "\"";
+        os << " text=\"" << terminal_safe(text) << "\"";
     }
 
     os << "\n";

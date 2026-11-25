@@ -440,20 +440,27 @@ without one, and leaves the board and a watch out of the claims.
    is not engine work —
    documents, tooling, CI — takes neither: write `No phase, no finding` and
    say why instead.
-3. **One task at a time, inside its files.** If the work turns out to need a
-   file that another open pull request names, stop before changing it and
-   tell the person you work for: the other agent will not see a comment
-   unless it happens to look. A bug found outside the task becomes a new row
-   of the table; it is not fixed in passing.
+3. **One task at a time, inside its files.** A bug found outside the task
+   becomes a new row of the table; it is not fixed in passing. If the work
+   turns out to need a file of `main` that another open pull request names,
+   **go on, and change no more of that file than the task needs**: the
+   one that lands second merges `main` (point 4). Until 25 November 2026
+   the rule was to stop and tell the person you work for, and the first
+   agent it stopped closed a finished pull request for one function of a
+   file somebody else had named ("What has gone wrong", Claims). **Whatever
+   stops you, push what you have under `WIP:` first**: a patch in `/tmp`
+   goes with the sandbox.
 4. **Look again once the pull request is open.** Two agents that look at the
-   same moment both see the same number free, and the same file, and each of
-   them did look first. `python3 tools/ci/check_pr.py claim N` lists what #N
-   has in common with the other open pull requests. Of two that have the
-   same phase, finding or file, **the one opened later moves**: it takes the
-   next free numbers, or stays out of the file, and the earlier one changes
-   nothing. A pull request holds the files it has changed as well as the
-   ones it names. Put `[skip ci]` in the message of the first commit: an
-   empty commit needs no run, and a run is an hour of runner time.
+   same moment both see the same file free, and each of them did look
+   first. `python3 tools/ci/check_pr.py claim N` lists what #N has in
+   common with the other open pull requests. Of two that would **make**
+   the same file, the one opened later takes another name, and the
+   earlier one changes nothing. A file `main` has can be changed by both:
+   `claim N` names the pull requests that share it, and if the one that
+   lands first leaves the other unable to merge, the other merges `main`.
+   A pull request holds the files it has changed as well as the ones it
+   names. Put `[skip ci]` in the message of the first commit: an empty
+   commit needs no run, and a run is an hour of runner time.
 
 ## The files every pull request changes
 
@@ -549,9 +556,11 @@ asan`.
 - A unit suite that passes in the normal build can fail in the sanitizer
   build, and CI's log cannot be read from every sandbox: run `make asan`
   here first. When a job of CI fails all the same, **its last step says
-  what failed in the job's annotations**, which the API itself serves:
-  `gh run view RUN --json jobs` for the job's id, then
-  `gh api repos/OWNER/REPO/check-runs/JOB_ID/annotations --jq '.[].message'`.
+  what failed in the job's annotations**, which the API itself serves,
+  and **`python3 tools/ci/run_report.py N` reads them for you**: which
+  job of #N's newest run failed, in which step, and what it said
+  (`--run RUN` for another run; `--times` for where a run's time went,
+  job by job, and how long its jobs waited for a machine).
   Every job does that since 24 November (`tools/ci/annotate_failure.py`;
   the steps of the jobs that are not sanitizer jobs run in
   `tools/ci/logged.sh`, which keeps a failed step's output for it). Until
@@ -611,7 +620,7 @@ moment it applied, so `tools/ci/check_pr.py` looks it up (it reads GitHub and
 changes nothing there):
 
 ```bash
-python3 tools/ci/check_pr.py            # what each open pull request claims; the numbers taken; the next free pair
+python3 tools/ci/check_pr.py            # what each open pull request claims, and how old its last commit is
 python3 tools/ci/check_pr.py claim N    # right after opening #N
 python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
 ```
@@ -733,6 +742,40 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   comparison is written by the compiler now. When you carry a change
   across another, read what the other one made every member of a type
   take part in.
+- **A whole directory in a `Files:` line.** `check_pr.py` reads a name
+  that ends in `/` as every file under it. On 25 November #390 named
+  `tests/suites/`, `docs/phases/` and `docs/findings/` so, and `claim N`
+  told each of the six pull requests opened after it that #390 "had"
+  its phase, its finding and its suite first, and to stay out of them.
+  Those three directories are where every pull request adds a file of
+  its own; named bare they claim nothing now, and the pull request that
+  named them is told so. **Name your own files** (`docs/phases/N-….md`).
+  A directory that is yours alone is still claimed whole.
+- **A file under another pull request's number.** #393 was written as
+  Phase 387 while #387 to #392 were being opened, and was finished with
+  a phase, a finding and a suite called `387-…`. The landing session
+  took it; its agent renamed the three two minutes later; a lot can
+  only land the commit it was tested with, so it was built again, with
+  #388 waiting in it. **The number is the one GitHub gave the pull
+  request, and the three file names begin with it**: `claim N` refuses
+  any other, and the landing session takes no pull request that has
+  one. The title carries the number into the merge commit: #393's still
+  said 387 when its lot had passed.
+- **A finished pull request, closed for a file.** #390 was finished and
+  measured in its agent's sandbox (two more test262 cases, two more of
+  the JavaScript corpus, nothing lost). It needed one function of
+  `src/js/JsInterpreter.cpp`, which #387 had named eight minutes before
+  #390 was opened; `claim 390` said "stay out of it, or tell the person
+  you work for"; its agent kept a patch in `/tmp` and closed the pull
+  request, 23 minutes after opening it, with nothing pushed. #387 landed
+  45 minutes later. The rule had been written for agents that merged
+  their own work and paid for every conflict; with more than ten agents and a
+  landing session it stopped work that would have merged. **A file of
+  `main` that two pull requests change is no longer a refusal**
+  ("Before starting", points 3 and 4): `claim N` says who shares it, and
+  the one that lands second merges `main`. A file both would make is
+  still the first one's. And nothing finished stays in a sandbox: push
+  it under `WIP:`, whatever is in the way.
 
 **`main`**
 
@@ -978,6 +1021,26 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   the suites take depends on the machine by a factor of two**: 117, 176
   and 204 seconds for the same six stretches in three runs within half
   an hour. One run says little about a change to CI; compare several.
+
+  On 25 November two things were found in a run's notices and warnings
+  that no failure would ever have shown, because nothing failed:
+  - **the sanitizer jobs were compiling what nothing had changed.** The
+    saved objects were kept under a limit, the directory was always at
+    it, and what ccache removed to stay under it included 8 to 21 of
+    the 107 objects the last build had used. Every sanitizer job then
+    compiled those again: 20 to 88 seconds each, where the step takes 3
+    to 5 when every object is there. The job that saves now keeps what
+    its build used and nothing else (0.11 GB where 0.5 was fetched);
+  - **one job in fourteen was refused ccache's binary** by the project's
+    release page, compiled the sanitizer build from nothing, 300
+    seconds, and made its lot 9.7 minutes. It warned, as it is meant
+    to, and nobody read warnings. The binary now comes with the saved
+    objects.
+
+  `python3 tools/ci/run_report.py N --times` prints every job of #N's
+  newest run with its long steps, its notices and its warnings, and how
+  long the jobs waited for a machine. **When a run is longer than the
+  one before it, read that before you change anything.**
 
 **The turn, and what a merge does to it**
 
@@ -1287,6 +1350,7 @@ files every pull request changes", point 4).
 | **What is left of `DataView` and `%TypedArray%.prototype` after Phases 126, 157 and 177.** Phase 106 supplied `ArrayBuffer` and the nine typed arrays; Phase 126 (`docs/phases/126-a-dataview-and-the-iterating-half.md`, finding 131) added `DataView` and the thirteen iterating `%TypedArray%.prototype` methods; Phase 157 (`docs/phases/157-arraybuffer-transfer-and-resize.md`, finding 162) added ES2024 `transfer()`, `transferToFixedLength()`, `detached`, `{ maxByteLength }`, `resizable`, `maxByteLength`, `resize()`, prototype accessors, and length-tracking / out-of-bounds views (+287 test262 passes, 0 lost); Phase 177 ([`docs/phases/177-the-element-was-never-asked.md`](docs/phases/177-the-element-was-never-asked.md), finding 181) made `%TypedArray%.prototype.toLocaleString` ask every element for its own `toLocaleString` with the boxed element as `this` (it printed the numbers itself, so `Number.prototype.toLocaleString = () => "X"` left `new Uint8Array([1,2]).toLocaleString()` as "1,2"), kept it a separate receiver-validating function as §23.2.3.29 requires, read `[[ArrayLength]]` rather than a redefinable `length` property, and made `%TypedArray%.prototype.toString` *be* `Array.prototype.toString` (§23.2.3.30) (+14 over all of `built-ins/TypedArray`+`built-ins/Array`, 0 lost). **Phase 380 ([finding 380](docs/findings/380-two-methods-the-typed-array-never-had.md)) added the two methods this row's own audit had missed:** `%TypedArray%.prototype.findLast` and `.findLastIndex` (ES2023 §23.2.3.10/§23.2.3.11) answered `undefined` — found by asking all 34 method names of §23.2.3 for their type on a `Uint8Array` and listing what was not a function, while `Array.prototype` has had both since the ES2023 family. Both now walk downwards and short-circuit at the first match; 21 assertions against Node v22.22.3's answers, red on the forward walk and on an off-by-direction index. **Still open:** `BigInt64`/`BigUint64` on a `DataView` (needs `BigInt`), `SharedArrayBuffer`, and `transferToImmutable`. **Not a gap: `Symbol.species`.** The 2025 edition removed `@@species` from `%TypedArray%` (tc39/ecma262#3450), so `TypedArray[Symbol.species]` is `undefined` and `.map`/`.slice` build from the receiver's own constructor; Node v22.22.3 does the same, which was measured rather than assumed. | `src/js/TypedArray.cpp`, `include/litebird/js/TypedArray.hpp`, `tests/test_suite.cpp` | `docs/phases/106-typed-arrays-and-arraybuffer.md` section 4, `docs/phases/126-a-dataview-and-the-iterating-half.md`, `docs/phases/157-arraybuffer-transfer-and-resize.md`, `docs/findings/162-a-buffer-checked-detached-and-could-never-be-detached.md`, `docs/phases/177-the-element-was-never-asked.md` | Additive: the byte order and detachment rules are asserted against Node.js v22.22.3 and test262 (`2e58f87d8350`) |
 | | | | |
 | **A built-in constructor refuses a call since Phase 396** ([`docs/phases/396-constructors-need-new.md`](docs/phases/396-constructors-need-new.md), [finding 396](docs/findings/396-nothing-checked-for-new.md)): fifteen constructors were ordinary functions, so `Map()`, `Set()`, `WeakMap()`, `WeakSet()`, `ArrayBuffer(8)`, `DataView(buffer)` and the nine typed arrays — `Uint8Array(4)` among them — quietly made an object where every other engine throws. §10.2.1.1 and §24.1.1.1 make them constructible and **not callable**; they now answer `TypeError: Constructor <name> requires 'new'`, V8's words word for word, measured against Node v22.22.3 rather than assumed. The check is `JsValue::current_requires_new()`, which is `!current_is_construct()` today and is named separately because that is *not* the same question as "was there a `new` in the source": every `[[Construct]]` sets `is_construct` — plain `new`, a derived `class M extends Map`, `Reflect.construct(M, args)`, `Reflect.construct` with another `new.target`, and `super()` — and a guard written against the source would refuse the third. `Array`, `Object`, `Date`, `RegExp`, `Error`, `Function`, `Number`, `String`, `Boolean` and `Symbol` are callable on purpose and the suite asserts all ten. **The general lesson:** a built-in that starts refusing a call breaks every C++ site that reached it through `[[Call]]`, and the compiler says nothing — `ImageData`'s pixel array (`DomHtmlBindings.cpp`, caught by suite 237) and four `Uint8Array` views in `DomCryptoBindings.cpp` both threw until they became `js_construct`. The audit is a grep for `js_call(<constructor>, …)`. `make test` 450 → **451**; test262 15,153 → 15,153 (0 moved, 0 lost); js-conformance 1,152/1,158 and dom-conformance 678/678 unchanged. **Still open:** `WeakRef`, `FinalizationRegistry`, `SharedArrayBuffer`, `BigInt64Array` and `BigUint64Array` do not exist yet and each needs this guard when it arrives | `src/js/TypedArray.cpp`, `src/js/BuiltinsCollections.cpp`, `src/js/JsValue.cpp`, `include/litebird/js/JsValue.hpp`, `src/js/DomHtmlBindings.cpp`, `src/js/DomCryptoBindings.cpp` | [`docs/phases/396-constructors-need-new.md`](docs/phases/396-constructors-need-new.md), [`docs/findings/396-nothing-checked-for-new.md`](docs/findings/396-nothing-checked-for-new.md); §10.2.1.1, §24.1.1.1, §23.2.5.1 | Found while auditing the `DataView` / `%TypedArray%.prototype` row above, which asks about `new DataView(b)` and never about `DataView(b)`. Fifteen messages compared byte for byte with Node v22.22.3's |
+| | | | |
 | ~~**The four interfaces typed arrays unblocked.**~~ **All four are now implemented.** Phase 106 made `ArrayBuffer` exist; all four interfaces it unblocked have landed: (1) `TextDecoder`/`TextEncoder` in Phase 127 (`docs/phases/127-textdecoder-and-textencoder-reach-script.md`, finding 132), (2) `CanvasRenderingContext2D`'s `ImageData` in Phase 139 (`docs/phases/139-image-data-is-an-interface.md`, finding 144; `toDataURL()` in Phase 144, while `toBlob()`, `ImageBitmap` and `OffscreenCanvas` are separate), (3) Fetch/XHR binary bodies (`Response.arrayBuffer()`, `Blob.arrayBuffer()`, XHR `responseType = "arraybuffer"`) in Phase 150 (`docs/phases/150-binary-response-bodies.md`, finding 155), and (4) **WebSocket binary frames (`send(ArrayBuffer | TypedArray | DataView | Blob | File)` and `binaryType = "arraybuffer"` / `"blob"` delivery) in Phase 161** (`docs/phases/161-websocket-binary-frames.md`, finding 166) | `src/net/Fetch.cpp`, `src/js/DomFileBindings.cpp`, `src/js/DomWindowBindings.cpp`, `src/net/WebSocket.cpp`, `src/render/Canvas2D.cpp`, `src/js/JsInterpreter.cpp` | `ROADMAP.md` row 6; [`docs/phases/150-binary-response-bodies.md`](docs/phases/150-binary-response-bodies.md), finding 155; [`docs/phases/161-websocket-binary-frames.md`](docs/phases/161-websocket-binary-frames.md), finding 166 | Done across all four interfaces; remaining per-interface extensions live in their own rows |
 | | | | |
 | **A canvas has an origin-clean flag since Phase 237, and `drawImage` is what can taint it.** `HTMLCanvasElement.toDataURL()` (Phase 144) hands a script every pixel the canvas holds, which the standard allows only while the bitmap is origin-clean (HTML §4.12.5.1). The row used to say the flag had "no input" because `drawImage`, `ImageBitmap`/`createImageBitmap` and `Response.arrayBuffer()` did not exist; two of those had since landed, and the input it had not considered was `<img>` — the renderer was already fetching and decoding image pixels under a CORS-aware request context and recording whether the response crossed an origin. **Phase 237** (`docs/phases/237-the-canvas-that-drew-a-cross-origin-image.md`, finding 241) binds `drawImage` (3-, 5- and 9-argument forms, sources: canvas, `ImageBitmap`, decoded `<img>`) and writes the flag the row refused to fake: drawing a source that is not CORS-same-origin clears it, `toDataURL()` then throws `SecurityError`, and setting `width`/`height` gives the canvas a new bitmap and with it a clean flag. The origin is carried fetch → element (`Element::m_image_source_cross_origin`, set once by `load_image_for_element` from `ResourceResponse::cross_origin`) → `ImageBitmap` → destination, so a tainted canvas cannot be laundered through a bitmap. Two bugs came out with it: `createImageBitmap(canvas)` built a bitmap of zeroed pixels instead of copying the canvas, and nothing connected the decoded cross-origin pixels to the serializer. The suite serves one PNG from two origin roots and requires **opposite** answers on the two pages — `SecurityError` from the cross-origin one, real pixels from the same-origin one — because a flag that is always true and a flag that is never true both pass a single-page test; both were injected and both fail it. **Phase 262** (`docs/phases/262-the-canvas-makes-its-blob.md`, finding 266) then added the second door: `HTMLCanvasElement.toBlob(callback, type, quality)` serializes the same bitmap into a `Blob` (`image/png` only, like `toDataURL()`), throws `SecurityError` synchronously on an unclean bitmap, fires the callback in its own task with `null` whenever the encoding fails, and `TypeError` for a missing or non-callable callback. The Phase 153 write-up and finding 158 describe a landing that was not in the tree (no binding, no `canvas_to_blob_is_the_png_it_painted` suite) and are left as written; 262 is the one that landed. **Still open:** `drawImage` of an `<img>` needs the layout pass to have decoded it, so a page that draws before layout gets a `TypeError` rather than an on-demand fetch; `createImageBitmap`'s crop/resize options and an `<img>`-to-`ImageBitmap` path; and `OffscreenCanvas` transfer. | `src/render/Canvas2D.cpp`, `src/js/DomHtmlBindings.cpp`, `src/js/DomWindowBindings.cpp`, `src/layout/LayoutTree.cpp`, `include/litebird/render/Canvas2D.hpp`, `include/litebird/dom/Element.hpp`, `include/litebird/js/ImageBitmap.hpp`, `tests/suites/237-the-canvas-that-drew-a-cross-origin-image.cpp`, `tests/suites/262-canvas-to-blob.cpp` | `docs/phases/144-the-canvas-hands-back-its-png.md`, [Phase 237](docs/phases/237-the-canvas-that-drew-a-cross-origin-image.md), [finding 241](docs/findings/241-the-pixels-had-an-origin-and-nobody-asked.md), [Phase 262](docs/phases/262-the-canvas-makes-its-blob.md), [finding 266](docs/findings/266-the-canvas-could-not-export-a-blob.md) | The flag is not a follow-up to `drawImage`, it is part of it: adding `drawImage` without it would have created a real cross-origin read in one commit. Any new pixel source must set the flag where it is decoded, not where it is serialized; both serializers (`toDataURL()`, `toBlob()`) must refuse the unclean bitmap |
@@ -1298,6 +1362,7 @@ files every pull request changes", point 4).
 | **Images are sampled bilinearly since Phase 382, and the two properties that choose it exist** ([`docs/phases/382-image-smoothing.md`](docs/phases/382-image-smoothing.md), [finding 382](docs/findings/382-no-smoothing-anywhere.md)): `imageSmoothingEnabled` and `imageSmoothingQuality` were **`undefined`** on the context, and every sample this engine took was the nearest pixel — `drawImage` of a 2×2 to 8×8 came out in 8-pixel blocks. Both are **live accessors** registered in `to_js_value`, beside `globalAlpha`/`lineCap`, deliberately not copied onto the object: `fillStyle` and three others *are* copied, and Phases 280 and 370 each had to repair state that copy had shadowed. The enabled flag coerces (`0`/`""` turn it off) and starts `true`; the quality is an **enumeration** — a fourth value is ignored, not stored — and starts `"low"`. Both are carried by `save()`/`restore()` and put back by `reset()`. **An image at 1:1 must come out exactly, either way** (the half-pixel placement makes the weights `1,0,0,0`), which is what a filter that always blurs fails. **A pattern is the harder case and it broke Phase 370:** a pattern has no destination rectangle, so the CTM scale must be passed in at the call site — without that, smoothing on by default blended a 1:1 tile edge (`128,128,0` for `0,255,0`) and the four repetition rules stopped holding. **Still open:** `imageSmoothingQuality` selects nothing (all three filter the same, bilinear only); downscaling is bilinear too, so a fine checkerboard shrunk far enough still aliases where a box filter would not; a sheared pattern's scale is the longer axis of the CTM inverse. | `src/render/Canvas2D.cpp`, `include/litebird/render/Canvas2D.hpp`, `tests/suites/382-image-smoothing.cpp` | [`docs/phases/382-image-smoothing.md`](docs/phases/382-image-smoothing.md), [`docs/findings/382-no-smoothing-anywhere.md`](docs/findings/382-no-smoothing-anywhere.md); HTML §4.12.5.1 | Assert **both settings**: a filter that ignores the switch passes the scaled draw and fails 1:1, a switch that does nothing passes 1:1 and fails the scaled one. And hand-written pixel expectations in this area have been wrong twice where the engine was right — count the block size before asserting it |
 | | | | |
 | **Canvas `filter` exists since Phase 406** ([`docs/phases/406-canvas-filter.md`](docs/phases/406-canvas-filter.md), [finding 406](docs/findings/406-no-way-to-ask-for-a-filter.md)): `typeof ctx.filter` was **`undefined`**, so none of §4.12.5.1's ten filter functions could be asked for — while `ImageFilter` had six of them implemented in `src/render/ImageFilter.cpp` and nothing reaching it. One live accessor starting at `"none"`, a **whole-value** parser (an unknown function, a bad number, an unbalanced parenthesis or a `blur()` with no unit all leave the **previous** filter in place), the two missing matrices (`hue-rotate`, `saturate`) on one shared `apply_color_matrix`, and filtering done on the **captured buffer** rather than per pixel — a filter is a property of the drawing, not of a pixel, and `blur`/`drop-shadow` need their neighbours. **`replay_captured`'s coverage gate is right for a shadow and wrong for a filter:** a blur's softened edge and a drop shadow's silhouette are all at zero coverage, so the gate silently drew an *unfiltered* shape and every "is the shape the filtered colour" assertion passed. **`blur(2)` is invalid CSS** (`<length>` needs a unit; `blur(2px)` parses), and `drop-shadow`'s colour may come first or last with the blur optional. **Still open:** `drop-shadow`'s unstated colour should be the used `color` (the context has none) and is opaque black; blur is a box clamped to the bitmap, not a Gaussian; `url()` filters and `em`/`rem`/`pt` lengths are rejected; `ImageFilter::blur`'s radius clamp went 50 → the bitmap size. | `src/render/Canvas2D.cpp`, `src/render/ImageFilter.cpp`, `tests/suites/406-canvas-filter.cpp` | [`docs/phases/406-canvas-filter.md`](docs/phases/406-canvas-filter.md), [`docs/findings/406-no-way-to-ask-for-a-filter.md`](docs/findings/406-no-way-to-ask-for-a-filter.md); HTML §4.12.5.1 | `fast_opaque` is gated on `m_capture_depth == 0`, so a filter bypasses it for free — but suite **391** aborts on that injection before this suite runs, so prove a fast-path catch by asking the canvas, not by the runner's exit status. `grayscale(0.5)` leaves the channels **unequal** (`155,27,27`, not `154,154,154`), and a 4px box never reaches 255 in its middle under `blur(2px)` — use a 10px one |
+| | | | |
 | **Canvas shadows exist since Phase 391** ([`docs/phases/391-canvas-shadows.md`](docs/phases/391-canvas-shadows.md), [finding 391](docs/findings/391-nothing-cast-a-shadow.md)): `shadowBlur`, `shadowColor`, `shadowOffsetX`, `shadowOffsetY` were all **`undefined`**, so nothing this engine drew ever cast one. Four live accessors (never copied onto the object) and a `ShadowCapture` guard: while it is alive `set_pixel_safe` **records** a primitive's colour and coverage instead of painting it, and the destructor paints the shadow and then the primitive over it — the whole feature, since §4.12.5.1 puts shadows **under** their shapes. `shadowColor` starts **transparent black** (that keeps shadows off until set) and an unparseable colour is ignored rather than stored as transparent; blur is three box passes with a running sum. **`fillRect`'s fast path hid it:** the opaque identity-CTM path writes the pixel array directly, so the capture saw nothing — the third feature in this file hidden by a fast path, after Phase 249 and Phase 370. Gate any capture on `m_capture_depth == 0`. **Two defects the assertions found:** the offset had the wrong sign (`x - ox`, so a shape at (2,2) cast nothing visible — only a **negative** offset catches it), and the alpha was applied twice (25% instead of 255). **Still open:** the blur is a box approximation, not a Gaussian, and `shadowBlur`'s half-value mapping is used as a radius rather than a standard deviation; capture buffers are canvas-sized, not bounding-box-sized; `ctx.filter` and the seven text properties (`letterSpacing`, `wordSpacing`, `direction`, `fontKerning`, `fontStretch`, `fontVariantCaps`, `textRendering`) remain `undefined`. | `src/render/Canvas2D.cpp`, `include/litebird/render/Canvas2D.hpp`, `tests/suites/391-canvas-shadows.cpp` | [`docs/phases/391-canvas-shadows.md`](docs/phases/391-canvas-shadows.md), [`docs/findings/391-nothing-cast-a-shadow.md`](docs/findings/391-nothing-cast-a-shadow.md); HTML §4.12.5.1 | Assert the **initial** `shadowColor` is transparent by asking the original context to cast one, not by copying its string to another context — the round trip passes either way. And `reset()` resets state, **not the bitmap**: an assertion that the canvas is clear after it is wrong |
 | | | | |
 | **AVIF, still: an AV1 intra-frame decoder.** The container is read since Phase 172 ([`docs/phases/172-the-avif-container-read-and-the-picture-still-open.md`](docs/phases/172-the-avif-container-read-and-the-picture-still-open.md), finding 172): `AvifContainer` parses `ftyp`, `pitm`, `iloc`, `iinf`/`infe`, `iprp`/`ipco`/`ipma`, `ispe`, `pixi`, `av1C` and `colr`, bounds-checks every length and offset against its parent, and hands back the primary `av01` item's bytes, its size, its bit depths and its decoder configuration. 200,000 mutated files through it under ASan and UBSan: no crash. **Phase 218** ([`docs/phases/218-avif-picture-and-container-oracle.md`](docs/phases/218-avif-picture-and-container-oracle.md), [finding 222](docs/findings/222-avif-picture-decoding-unmeasured.md)) adds the CI-enforced differential oracle `make verify-avif` (`tools/conformance/verify_avif.py`, `tests/media/avif/corpus.json`, `media_check --probe-avif`/`--decode-avif`/`--fuzz-batch avif`, also wired into `asan-verify`) with an independent ISO-BMFF + AV1 §5.3 OBU parser, 6 committed libheif-verified AVIF fixtures + 3 live libheif patterns, 8 hostile/malformed/unsupported refusals, 200 deterministic fuzz mutations, 5 negative controls, and an end-to-end `<img src="data:image/avif;base64,...">` `known_failure` reftest in `tests/render/reftests.json` — grading any future AV1 decoder pixel-by-pixel against libheif RGBA (`KNOWN` -> `FIXED` gate). What is still missing is the picture: there is no AV1 decoder, so `ImageDecoder::decode` returns `nullptr` for an AVIF and both the unit test and `verify-avif` / `reftests.json` assert that on purpose, so the day one lands they flip and say the row is done. AV1 is not VP8: `Vp8Decoder.cpp` is 1,451 lines and 583 of tables for a much smaller codec, so this is several sessions, not one. The AV1 specification's own §9.4 lists the default CDF tables normatively, which is where `Vp8Tables.cpp` took VP8's from RFC 6386 — take them from there, not from libaom. Alpha is a second `av01` item marked by an `auxl` reference (`iref`/`auxC`, not read here); a tiled image's primary is a `grid` item (refused, `Unsupported`); a sequence (`avis`) keeps frames in a track, not in `meta`; `irot`, `imir` and `clap` change presentation and are not read | `src/render/AvifContainer.cpp`, `include/litebird/render/AvifContainer.hpp`, `src/render/ImageDecoder.cpp`, `tools/media_check.cpp`, `tools/conformance/verify_avif.py`, `tests/media/avif/corpus.json` | [`docs/phases/172-the-avif-container-read-and-the-picture-still-open.md`](docs/phases/172-the-avif-container-read-and-the-picture-still-open.md), section 4; [`docs/findings/172-the-box-was-read-as-a-picture.md`](docs/findings/172-the-box-was-read-as-a-picture.md); [`docs/phases/218-avif-picture-and-container-oracle.md`](docs/phases/218-avif-picture-and-container-oracle.md), [finding 222](docs/findings/222-avif-picture-decoding-unmeasured.md); the AV1 specification §9.4 (default CDF tables), ISO/IEC 14496-12 (the box structure), ISO/IEC 23000-22 and the AV1 Image File Format specification | The row used to be one word, which read as one task and is several. The oracle (`make verify-avif`) is now in CI and ready to grade any AV1 intra-frame decoder pixel-by-pixel against libheif | `src/render/AvifContainer.cpp` (`Walk`) |

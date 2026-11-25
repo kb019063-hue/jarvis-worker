@@ -62,8 +62,10 @@ that write anything on GitHub.
   - its phase or its finding is on `main` already, or an open pull request
     with a lower number has it (of two that took a number at the same
     moment, the later one moves);
-  - a file it names or has changed belongs to an open pull request with a
-    lower number. The files every pull request changes (AGENTS.md lists
+  - a file it names or has changed, and that `main` does not have, belongs
+    to an open pull request with a lower number (a file `main` has can be
+    changed by both: the one that lands second merges `main`, and `claim N`
+    says so without refusing). The files every pull request changes (AGENTS.md lists
     them) do not count;
   - (a note, not a failure) it has no `Agent:` line: AGENTS.md, "Working
     together", asks each agent for a name of its own since 22 November;
@@ -168,6 +170,14 @@ SHARED = {
     "README.md", "ARCHITECTURE.md", "AUDIT.md", "AGENTS.md", "ROADMAP.md",
     "tests/test_suite.cpp", "Makefile", ".github/workflows/ci.yml",
 }
+# The directories every pull request adds a file of its own to, named by its
+# own number. A `Files:` line that names one of them bare ("`docs/phases/`")
+# would claim every other pull request's file there, since a name that ends
+# in `/` is every file under it: at 02:53 UTC on 25 November #390 and #395
+# said so of all three, and `claim N` told each of the six pull requests
+# opened after #390 that #390 "had" its phase, its finding and its suite
+# first. Named bare they claim nothing; a file in them is claimed by name.
+SHARED_DIRECTORIES = ("docs/phases", "docs/findings", "tests/suites")
 # What no step of CI reads but the four checks named below: the documents at
 # the top of the tree, everything under docs/, and the README.md of a test
 # directory. Not every `.md`: tools/conformance/run_wpt.py fails for any file
@@ -363,11 +373,20 @@ def claim_of(pr: dict) -> dict:
     }
 
 
+def claims_nothing(name: str) -> bool:
+    """A file every pull request changes, or a directory every one adds its own file to."""
+    return name in SHARED or name.rstrip("/") in SHARED_DIRECTORIES
+
+
 def same_files(mine: set[str], theirs: set[str]) -> list[str]:
     """Files two claims share. A name that ends in `/` is every file under it."""
     shared = set()
-    for a in mine - SHARED:
-        for b in theirs - SHARED:
+    for a in mine:
+        if claims_nothing(a):
+            continue
+        for b in theirs:
+            if claims_nothing(b):
+                continue
             if a == b or (a.endswith("/") and b.startswith(a)) or (b.endswith("/") and a.startswith(b)):
                 shared.add(a if len(a) >= len(b) else b)
     return sorted(shared)
@@ -539,8 +558,18 @@ class Report:
         print(f"    {text}")
 
 
-def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bool, str]]:
-    """What is wrong with a claim: (does this pull request have to change, what)."""
+def file_on_main(path: str) -> bool:
+    """Is this file on `main`, as the clone has it from origin? (A name that ends in `/`: this directory.)"""
+    return git("cat-file", "-e", f"origin/main:{path.rstrip('/')}").returncode == 0
+
+
+def claim_problems(claim: dict, claims: list[dict], main: Main, on_main_file=None) -> list[tuple[bool, str]]:
+    """What is wrong with a claim: (does this pull request have to change, what).
+
+    `on_main_file(path)` says whether a file is on `main`; the clone is asked
+    when it is not given.
+    """
+    on_main_file = on_main_file or file_on_main
     problems: list[tuple[bool, str]] = []
     if not claim["has_claim_lines"]:
         problems.append((True, "its text does not begin with the Task: and Files: lines and the line of its numbers "
@@ -548,6 +577,26 @@ def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bo
     if claim["has_claim_lines"] and not claim.get("agent"):
         problems.append((False, "no `Agent:` line: give yourself a name and put it under the three lines "
                                 "(AGENTS.md, \"Working together\")"))
+    bare = sorted(name for name in claim["files"] if name.rstrip("/") in SHARED_DIRECTORIES)
+    if bare:
+        problems.append((False, f"its `Files:` line names {', '.join(f'`{name}`' for name in bare)}: every pull request adds a "
+                                f"file of its own there, so that claims nothing. Name the file (`{bare[0].rstrip('/')}/"
+                                f"{claim['number']}-...`)"))
+    # A file it adds where every pull request adds its own is called by its own
+    # number. #393 was written as Phase 387 while #387 to #392 were being
+    # opened, and was taken into a lot with `docs/phases/387-...`; #387 would
+    # have found a second Phase 387 on `main`.
+    for name in sorted(claim["files"]):
+        placed = re.match(r"(docs/phases|docs/findings|tests/suites)/(\d+)-", name)
+        if not placed:
+            continue
+        mine = claim["finding"] if placed.group(1) == "docs/findings" else claim["phase"]
+        written = main.written_findings if placed.group(1) == "docs/findings" else main.written_phases
+        number = int(placed.group(2))
+        if mine is None or number == mine or number in written:
+            continue        # its own, or a write-up or suite `main` has, changed here
+        problems.append((True, f"`{name}` is called by {number}, and this pull request's number is {mine}: "
+                               f"rename it (`{placed.group(1)}/{mine}-...`)"))
     others = [c for c in claims if c["number"] != claim["number"]]
     for kind, key in (("Phase", "phase"), ("finding", "finding")):
         number = claim[key]
@@ -571,10 +620,27 @@ def claim_problems(claim: dict, claims: list[dict], main: Main) -> list[tuple[bo
             continue
         if other["number"] > claim["number"]:
             problems.append((False, f"#{other['number']}, opened later, names or changes {', '.join(both)} too: "
-                                    "it is the one that has to stay out"))
-        else:
-            problems.append((True, f"#{other['number']} had {', '.join(both)} first: stay out of "
-                                   f"{'it' if len(both) == 1 else 'them'}, or tell the person you work for"))
+                                    "it is the one that gives way"))
+            continue
+        # A file both would make is the first one's: there is nothing to merge
+        # it with. A file `main` has is another matter. Until 25 November 2026
+        # that was a refusal too, and it read "stay out of it, or tell the
+        # person you work for": #390 was finished and measured in its agent's
+        # sandbox, needed one function of src/js/JsInterpreter.cpp, a file
+        # #387 had named eight minutes before #390 was opened, and its agent
+        # closed it unpushed. #387 landed 45 minutes after that. Whoever
+        # lands second merges `main`, which every pull request that `main`
+        # has overtaken does anyway.
+        made = [name for name in both if not on_main_file(name)]
+        shared = [name for name in both if name not in made]
+        if made:
+            problems.append((True, f"#{other['number']} had {', '.join(made)} first, and `main` has no such file: "
+                                   f"two pull requests cannot both make {'it' if len(made) == 1 else 'them'}. "
+                                   "Take another name, or tell the person you work for"))
+        if shared:
+            problems.append((False, f"#{other['number']}, opened first, changes {', '.join(shared)} too. Go on, and change "
+                                    f"no more of {'it' if len(shared) == 1 else 'them'} than the task needs: if "
+                                    f"#{other['number']} lands first and the two no longer merge, merge `main` into this one"))
     return problems
 
 
@@ -614,7 +680,7 @@ def show_claims() -> int:
         name = f"  [{claim['agent']}]" if claim.get("agent") else ""
         print(f"\n#{claim['number']}{name}  {numbers_of(claim)}  (last commit {pushed:.1f} h ago)")
         print(f"    {claim['title'][:110]}")
-        own = sorted(claim["files"] - SHARED)
+        own = sorted(name for name in claim["files"] if not claims_nothing(name))
         print("    files: " + (", ".join(own) if own else "(none)"))
         for blocking, problem in claim_problems(claim, claims, main):
             print(f"    {'!!' if blocking else '  '} {problem}")
@@ -1490,6 +1556,32 @@ def self_test() -> int:
          same_files(folder["files"], inside["files"]), ["tests/dom-conformance/everyday.dat"]),
         ("the files every pull request changes are shared by none",
          same_files({"AGENTS.md", "README.md"}, {"AGENTS.md", "README.md"}), []),
+        ("a directory every pull request adds its own file to, named bare, claims nobody's file in it",
+         same_files({"src/js/JsOps.cpp", "tests/suites/", "docs/phases/", "docs/findings"},
+                    {"tests/suites/393-json-raw-json.cpp", "docs/phases/393-a-number.md", "docs/findings/393-the-text.md"}), []),
+        ("a file added there under another number than its own is a refusal",
+         [text for blocking, text in claim_problems(
+             dict(claim("Task: a row\nFiles: `docs/phases/387-a-number.md`, `docs/findings/393-the-text.md`, `tests/suites/1-old.cpp`\n"
+                        "Phase and finding: this pull request's number\nAgent: Merlin\n"), number=393, phase=393, finding=393),
+             [], Main({1}, {1}, {1}, {1}, 1, 1)) if blocking],
+         ["`docs/phases/387-a-number.md` is called by 387, and this pull request's number is 393: rename it (`docs/phases/393-...`)"]),
+        ("a file main has, which an earlier pull request changes too, is a note and no refusal",
+         [(blocking, text[:60]) for blocking, text in claim_problems(
+             dict(claim("Task: a row\nFiles: `src/js/JsInterpreter.cpp`, `tools/new.py`\nPhase and finding: this pull request's number\nAgent: Vega\n"), number=390, phase=390, finding=390),
+             [dict(claim("Task: another\nFiles: `src/js/JsInterpreter.cpp`, `tools/new.py`\nPhase and finding: this pull request's number\nAgent: Cedar\n"), number=387, phase=387, finding=387)],
+             Main({1}, {1}, {1}, {1}, 1, 1), on_main_file=lambda name: name.startswith("src/"))],
+         [(True, "#387 had tools/new.py first, and `main` has no such file: tw"),
+          (False, "#387, opened first, changes src/js/JsInterpreter.cpp too. Go")]),
+        ("...nor do two pull requests that both name it bare share it",
+         same_files({"docs/phases/", "docs/findings/"}, {"docs/phases/", "docs/findings/"}), []),
+        ("...a file in it that two name is still shared",
+         same_files({"tests/suites/393-json-raw-json.cpp"}, {"tests/suites/393-json-raw-json.cpp", "tests/suites/"}),
+         ["tests/suites/393-json-raw-json.cpp"]),
+        ("...and the pull request that names it bare is told so, in a note",
+         [text[:74] for blocking, text in claim_problems(
+             claim("Task: a row\nFiles: `src/a.cpp`, `docs/phases/`\nPhase and finding: this pull request's number\nAgent: Vega\n"),
+             [], Main({1}, {1}, {1}, {1}, 1, 1)) if not blocking and "Files:" in text],
+         ["its `Files:` line names `docs/phases/`: every pull request adds a file of "]),
         ("a claim without numbers is called that, not `Phase None`", numbers_of(plain), "no phase, no finding"),
         ("`Agent: Heron` is the agent's name", named["agent"], "Heron"),
         ("a name ends at the first space or stop", named_with_remark["agent"], "Heron"),

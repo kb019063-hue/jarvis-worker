@@ -904,9 +904,12 @@ jobs:
         # which the sanitizer build has since been given more of.
         # The step ends with a notice on the job: the time and the memory
         # of each stretch, and the slowest suites of the slowest.
+        # Since 25 November 2026 this job runs the four stretches that are
+        # not late (UNIT_SUITE_ONLY=early) and the next job the two that
+        # are, at the same time on a machine of its own.
         run: |
           set -o pipefail
-          make -j"$(nproc)" asan-unit ASAN_UNIT_STRETCHES=balanced 2>&1 | tee "$RUNNER_TEMP/part-asan-unit.log"
+          make -j"$(nproc)" asan-unit ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=early 2>&1 | tee "$RUNNER_TEMP/part-asan-unit.log"
       - name: What failed, as annotations
         # A job's log is served by another host than the API, and a failure
         # here has had nothing but `exit code 2` to go by where the log could
@@ -915,6 +918,55 @@ jobs:
         #   gh api repos/OWNER/REPO/check-runs/JOB_ID/annotations --jq '.[].message'
         # Each step keeps its output in a file of its own, and the step that
         # failed is the last one that wrote one, so the newest file is read.
+        if: failure()
+        run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
+
+  # The two late stretches of the unit suites: the suites that nest pages
+  # 200,000 deep, which hold 5 GB and are not run beside anything that
+  # measures time. Until 25 November 2026 they were started in the job
+  # above when its four other stretches had ended: 72 to 87 seconds after
+  # 102 to 127, in the job that was the longest of a run by a minute and a
+  # half (5.8 to 6.2 minutes; the next was 4.2 to 4.8). Here they have a
+  # machine to themselves from the start. The price is the binary of the
+  # suites compiled a second time, 90 to 147 seconds of this machine, while
+  # the job above compiles its own. Every suite is still run once:
+  # UNIT_SUITE_ONLY=early there and =late here are the same stretches of the
+  # same order (tools/ci/run_stretches.py), and tools/ci/check_ci_parts.py
+  # fails the run if the two jobs do not say exactly that.
+  sanitizers-unit-deep:
+    name: "Sanitizers: unit suites, the deep ones"
+    runs-on: ubuntu-latest
+    # Not in the short run of a pull request, and not after the last merge
+    # of a lot (the top of this file).
+    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile through ccache, with the objects of main's last run
+        uses: ./.github/actions/ccache
+        with:
+          objects: asan
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Address randomisation the sanitizers can live with
+        # As in the first of these jobs.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28 || true
+      - name: Sanitizer build
+        # As in the first of these jobs, the binary of the unit suites with
+        # it.
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-build ASAN_BUILD_ALSO=build-asan/test_suite 2>&1 | tee "$RUNNER_TEMP/part-asan-build.log"
+      - name: The deep unit suites in the sanitizer build
+        env:
+          ASAN_OPTIONS: detect_leaks=0
+        run: |
+          set -o pipefail
+          make -j"$(nproc)" asan-unit ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=late 2>&1 | tee "$RUNNER_TEMP/part-asan-unit.log"
+      - name: What failed, as annotations
+        # As in the first of these jobs.
         if: failure()
         run: python3 tools/ci/annotate_failure.py "$(ls -t "$RUNNER_TEMP"/part-*.log 2>/dev/null | head -n 1)"
 

@@ -399,12 +399,27 @@ test: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
 ## the same six took 89, 79, 69 and 75, then 87 beside 63, and one of the
 ## four failed a bound of five seconds beside the others and passed when it
 ## was run again by itself (run_stretches.py does that): 245 seconds.
+##
+## UNIT_SUITE_ONLY=early runs the stretches that are not late, and
+## UNIT_SUITE_ONLY=late the late ones and nothing else: two calls for two
+## machines, which is what CI's two jobs for the unit suites make since 25
+## November 2026. There the deep ones had been 72 to 87 seconds that began
+## when the other four had taken 102 to 127, in the longest job of a run
+## (5.8 to 6.2 minutes where the next was 4.2 to 4.8); the binary takes
+## 90 to 147 seconds to compile in each job, which the second one spends
+## while the first does. The cross-origin test binary is the first call's.
+## Without UNIT_SUITE_ONLY everything is run, as before.
 STRETCHES ?= 3
 UNIT_SUITE_CUTS ?= inner_html_of_an_xml_document_is_xml,deep_nesting_never_exhausts_the_native_stack,dom_trees_of_any_depth_can_be_walked_and_released,html_parser_void_element_with_a_slash_closes_nothing_else,svg_real_world_paths_arcs_gradients_use_clip_and_guards
 UNIT_SUITE_LATE ?= 2,3
-test-in-stretches: $(TEST_TARGET) $(CROSS_ORIGIN_TARGET)
-	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(if $(filter balanced,$(STRETCHES)),$(UNIT_SUITE_CUTS) $(UNIT_SUITE_LATE),$(STRETCHES))
-	@./$(CROSS_ORIGIN_TARGET)
+UNIT_SUITE_ONLY ?=
+ifneq ($(filter-out early late,$(UNIT_SUITE_ONLY)),)
+$(error UNIT_SUITE_ONLY is "$(UNIT_SUITE_ONLY)": it is early, late, or nothing)
+endif
+test-in-stretches: $(TEST_TARGET) $(if $(filter late,$(UNIT_SUITE_ONLY)),,$(CROSS_ORIGIN_TARGET))
+	@$(if $(UNIT_SUITE_ONLY),$(if $(filter balanced,$(STRETCHES)),true,echo 'UNIT_SUITE_ONLY=$(UNIT_SUITE_ONLY) means something only with STRETCHES=balanced: with STRETCHES=$(STRETCHES) no stretch is late' >&2; exit 2),true)
+	@python3 tools/ci/run_stretches.py ./$(TEST_TARGET) $(if $(filter balanced,$(STRETCHES)),$(UNIT_SUITE_CUTS) $(UNIT_SUITE_LATE) $(UNIT_SUITE_ONLY),$(STRETCHES))
+	@$(if $(filter late,$(UNIT_SUITE_ONLY)),true,./$(CROSS_ORIGIN_TARGET))
 
 ## The numbers the documents publish: every "A / B (P%)" must divide, the two
 ## corpus totals must equal the cases on disk, and every figure a document marks

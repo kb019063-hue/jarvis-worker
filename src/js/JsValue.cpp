@@ -1888,7 +1888,22 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
 
         if (obj->is_array) {
             if (name == "length") {
+                // A length that is not writable takes no value through
+                // `[[Set]]` — not a grow, and not a shrink, and not even the
+                // value it already has. That last one is what separates this
+                // path from the descriptor one: OrdinarySet looks at the own
+                // descriptor and gives up at the writable bit before
+                // ArraySetLength is entered, so `'use strict'; a.length =
+                // a.length` on a read-only length is a TypeError, while
+                // `Object.defineProperty(a, 'length', { value: a.length })`
+                // is allowed by §10.4.2.4 step 3's SameValue test. Node
+                // v22.22.3 answers both ways (Phase 428).
+                // `freeze` makes the length read-only, `{ writable: false }`
+                // does, and `seal` does not.
                 if (obj->frozen) return false;
+                if (const auto entry = obj->properties.find("length"); entry != obj->properties.end()) {
+                    if (!(entry->flags & PropertyMap::Writable)) return false;
+                }
                 double requested = js_to_number(val);
                 if (!(requested >= 0) || requested != std::floor(requested) || requested > 4294967295.0) {
                     js_throw_range_error("Invalid array length");
@@ -1901,6 +1916,13 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                     previous = std::max(previous, static_cast<size_t>(js_to_number(entry->second)));
                 }
                 size_t next = static_cast<size_t>(requested);
+                // A sealed array's length may still be written, and only a
+                // grow is possible: every place it holds is non-configurable,
+                // so the deletion a shorter length asks for fails at
+                // §10.4.2.4 step 4.c and the length stays where it was. The
+                // dense places have no attribute bits, which is why this asks
+                // the cell rather than the map (Phase 428).
+                if (obj->sealed && next < previous) return false;
                 // What `Object.defineProperty` made of an index is in the
                 // property map (has_own_property). A shorter array has lost
                 // the indices past its new end, those included; and one of
@@ -2010,6 +2032,20 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                 }
                 if (index >= obj->array_elements.size()) {
                     if (!obj->extensible) return false;
+                    // Growing the length to reach a new place: §10.4.2.4 step
+                    // 4.a asks whether the length may be written, and a
+                    // read-only one refuses the place rather than moving
+                    // (Phase 428). Sloppy mode stays silent, strict mode throws
+                    // — that is the caller's business, not this function's.
+                    {
+                        size_t length_now = obj->array_elements.size();
+                        bool length_writable = !obj->frozen;
+                        if (const auto entry = obj->properties.find("length"); entry != obj->properties.end()) {
+                            length_now = std::max(length_now, static_cast<size_t>(js_to_number(entry->second)));
+                            if (!(entry->flags & PropertyMap::Writable)) length_writable = false;
+                        }
+                        if (index >= length_now && !length_writable) return false;
+                    }
                     // The places it skips over are holes, and a hole is not
                     // storage (Phase 288). Writing just past the elements
                     // extends the vector by a little; writing far past them —

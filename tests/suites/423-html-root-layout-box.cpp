@@ -1,10 +1,4 @@
 // Phase 423, finding 423: full <html> root layout box.
-#include "litebird/html/HtmlParser.hpp"
-#include "litebird/css/DocumentStyles.hpp"
-#include "litebird/layout/LayoutTree.hpp"
-#include "litebird/layout/LayoutBox.hpp"
-using namespace litebird;
-
 TEST(html_root_layout_box_exists_and_offsets_body) {
     auto layout_doc = [](const std::string& html, float vw = 800.0f, float vh = 600.0f) {
         auto doc = HtmlParser::parse(html);

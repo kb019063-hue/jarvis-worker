@@ -1234,6 +1234,20 @@ void JsInterpreter::init_language_builtins() {
     }
     m_global_env->define("globalThis", m_global_object);
     m_global_env->define("self", m_global_object);
+    // HTML lists `window`, `document`, `location` and `top` as
+    // [LegacyUnforgeable] on the Window interface. WebIDL §3.4.10 says of such
+    // a member that "the property will be non-configurable and will exist as
+    // an own property on the object itself rather than on its prototype", and
+    // §3.7.6 gives it `{[[Enumerable]]: true, [[Configurable]]: false}` — so
+    // none of the four may be deleted or redefined, which is what makes a page
+    // unable to forge them.
+    //
+    // `self` is [Replaceable], not [LegacyUnforgeable], so it is deliberately
+    // left configurable; `globalThis` likewise (§18.1.5).
+    m_global_env->mark_permanent("window");
+    m_global_env->mark_permanent("document");
+    m_global_env->mark_permanent("location");
+    m_global_env->mark_permanent("top");
     // `globalThis` is *not* one of the permanent ones: §18.1.5 gives it
     // `{writable: true, enumerable: false, configurable: true}`, and Node
     // answers `true` to `delete globalThis.globalThis`. (`window` and `self`

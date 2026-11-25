@@ -11303,16 +11303,20 @@ TEST(computed_style_answers_for_every_property) {
     // are found by loops up the tree, and a calc() nested deeper than anyone
     // writes is given back as text.
     js.eval(R"JS(
-        var top = document.createElement('div');
-        top.style.fontSize = '10px'; top.style.color = 'red'; top.style.fontWeight = '100';
-        var at = top;
+        // `top` is [LegacyUnforgeable] on Window, so the global is a
+        // non-configurable own accessor and a page-level `var top` cannot
+        // shadow it (WebIDL §3.4.10; Node confirms `var top = 5` keeps the
+        // accessor's value). Use a differently named local.
+        var root = document.createElement('div');
+        root.style.fontSize = '10px'; root.style.color = 'red'; root.style.fontWeight = '100';
+        var at = root;
         for (var i = 0; i < 20000; i++) { var next = document.createElement(i % 2 ? 'b' : 'span'); at.appendChild(next); at = next; }
-        document.body.appendChild(top);
+        document.body.appendChild(root);
         var deep = getComputedStyle(at);
         var answers = [deep.color, deep.fontSize, deep.fontWeight, deep.lineHeight, deep.display, deep.marginTop].join(' ');
         at.style.fontSize = '2em'; at.style.textIndent = '1rem';
         answers += ' ' + [deep.fontSize, deep.textIndent, deep.borderTopColor].join(' ');
-        top.remove();
+        root.remove();
         var nested = 'calc(' + new Array(100001).join('(') + '1px' + new Array(100001).join(')') + ')';
         document.getElementById('c').style.width = nested;
         var kept = getComputedStyle(document.getElementById('c')).width === nested;
@@ -11365,14 +11369,14 @@ TEST(ranges_follow_the_tree) {
     // A boundary 50,000 levels down, and its whole tree removed from the
     // top: found by walking up, in a loop.
     js.eval(R"JS(
-        var top = document.createElement('div'), at = top;
+        var head = document.createElement('div'), at = head;
         for (var i = 0; i < 50000; i++) { var next = document.createElement('div'); at.appendChild(next); at = next; }
         at.textContent = 'bottom';
-        document.body.appendChild(top);
+        document.body.appendChild(head);
         var deep = document.createRange();
         deep.setStart(at.firstChild, 2); deep.setEnd(at.firstChild, 4);
         var before = deep.toString();
-        top.remove();
+        head.remove();
         var after = [deep.startContainer === document.body, deep.startOffset, deep.collapsed].join(' ');
     )JS");
     assert(js.eval("before").to_string() == "tt");
@@ -16195,22 +16199,22 @@ TEST(dom_trees_of_any_depth_can_be_walked_and_released) {
         auto doc = HtmlParser::parse("<!doctype html><title>t</title><body></body>");
         JsInterpreter js(doc);
         js.eval_ast(R"(
-            var top = document.createElement('div'), at = top;
+            var head = document.createElement('div'), at = head;
             for (var i = 1; i < 100000; i++) { var d = document.createElement('div'); at.appendChild(d); at = d; }
             at.appendChild(document.createTextNode('deep'));
-            var text = top.textContent;
-            var markup = top.innerHTML.length;
-            var found = top.querySelectorAll('div').length;
+            var text = head.textContent;
+            var markup = head.innerHTML.length;
+            var found = head.querySelectorAll('div').length;
             var error = 'none';
-            try { at.appendChild(top); } catch (e) { error = e.name; }
-            document.body.appendChild(top);
+            try { at.appendChild(head); } catch (e) { error = e.name; }
+            document.body.appendChild(head);
             var connected = at.isConnected;
             var all = document.querySelectorAll('div').length;
             var steps = 0; for (var p = at; p && p !== document.body; p = p.parentNode) steps++;
-            var copy = document.createElement('div'); copy.innerHTML = top.outerHTML;
+            var copy = document.createElement('div'); copy.innerHTML = head.outerHTML;
             var copied = copy.querySelectorAll('div').length;
-            document.body.removeChild(top);
-            top = at = d = p = copy = null;
+            document.body.removeChild(head);
+            head = at = d = p = copy = null;
             var done = 'released';
         )");
         auto value = [&](const char* name) { return js.global_env()->get(name).to_string(); };
@@ -16241,14 +16245,14 @@ TEST(dom_trees_of_any_depth_can_be_walked_and_released) {
                 }
             }
             customElements.define('eat-el', Eater);
-            var top = document.createElement('div');
+            var head = document.createElement('div');
             for (var i = 0; i < 50; i++) {
                 var e = document.createElement('eat-el');
                 e.appendChild(document.createElement('eat-el'));
-                top.appendChild(e);
+                head.appendChild(e);
             }
-            document.body.appendChild(top);
-            var left = top.childNodes.length;
+            document.body.appendChild(head);
+            var left = head.childNodes.length;
         )");
         assert(js.global_env()->get("calls").to_number() >= 1);
         assert(js.global_env()->get("left").to_string() == "0");

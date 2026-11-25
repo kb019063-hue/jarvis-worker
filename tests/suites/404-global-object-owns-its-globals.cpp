@@ -76,14 +76,26 @@ TEST(global_object_owns_the_globals_it_can_find) {
             ok('for-in skips non-enumerable', found, 0);
         })();
 
-        // ---- deleting one answers false ---------------------------------
-        // The old answer was `true` with the property still there.
-        ok('delete Object answers false', delete globalThis.Object, false);
-        ok('Object survives', typeof Object, 'function');
-        ok('delete Error answers false', delete globalThis.Error, false);
-        ok('Error survives', typeof Error, 'function');
-        ok('still own after a refused delete',
-           Object.prototype.hasOwnProperty.call(globalThis, 'Error'), true);
+        // ---- deleting one answers true, and the name goes with it ---------
+        // This block used to assert `false` and "Object survives" — in the
+        // same file, twenty lines below the assertion that the descriptor has
+        // `configurable: true`. The two could not both be right, and Node
+        // v22.22.3 settles it: `delete globalThis.Object` is `true` and the
+        // bare name is a ReferenceError afterwards. Corrected in Phase 425,
+        // which is the phase that made `[[Delete]]` agree with the descriptor
+        // it had been reporting all along. The reference is held first so the
+        // rest of the test does not have to mention a name it just removed.
+        var held = Object;
+        ok('Error is configurable', Object.getOwnPropertyDescriptor(globalThis, 'Error').configurable, true);
+        ok('delete Error answers true', delete globalThis.Error, true);
+        ok('Error is gone', Object.getOwnPropertyNames(held.create(globalThis)).length >= 0, true);
+        ok('Error no longer own',
+           held.prototype.hasOwnProperty.call(globalThis, 'Error'), false);
+        ok('delete Object answers true', delete globalThis.Object, true);
+        ok('Object no longer own',
+           held.prototype.hasOwnProperty.call(globalThis, 'Object'), false);
+        globalThis.Error = held;         // put them back for what follows
+        globalThis.Object = held;
 
         // ---- a script's declaration is a property of a different kind ----
         var scriptVar = 1;

@@ -2623,6 +2623,111 @@ void CanvasRenderingContext2D::fill(FillRule rule) {
     rasterize_paths(m_paths, rule, fill_style, fill_gradient, m_ctm.inverse(), fill_pattern);
 }
 
+// §4.12.5.1.7: a `Path2D` is the calls it was given, replayed under the CTM in
+// force **now**. Everything about how a curve becomes pixels — the flattening,
+// the arc-to-bezier conversion, the degenerate-radius rules — is the context's own
+// code, so a `Path2D` cannot disagree with `moveTo`+`lineTo` about any of it.
+//
+// The current path is saved and put back, because none of these four methods may
+// disturb it: `ctx.fill(path)` twice must draw the same picture twice, and a page
+// that drew into the context's own path before this call must find it intact
+// afterwards.
+void CanvasRenderingContext2D::replay_into(const Path2D& path) {
+    for (const Path2D::Op& op : path.ops()) {
+        switch (op.kind) {
+            case Path2D::Kind::MoveTo:
+                move_to(op.a, op.b);
+                break;
+            case Path2D::Kind::LineTo:
+                line_to(op.a, op.b);
+                break;
+            case Path2D::Kind::QuadraticCurveTo:
+                quadratic_curve_to(op.a, op.b, op.c, op.d);
+                break;
+            case Path2D::Kind::BezierCurveTo:
+                bezier_curve_to(op.a, op.b, op.c, op.d, op.e, op.f);
+                break;
+            case Path2D::Kind::ArcTo:
+                arc_to(op.a, op.b, op.c, op.d, op.e);
+                break;
+            case Path2D::Kind::Arc:
+                arc(op.a, op.b, op.c, op.d, op.e, op.clockwise);
+                break;
+            case Path2D::Kind::Ellipse:
+                ellipse(op.a, op.b, op.c, op.d, op.e, op.f, op.g, op.clockwise);
+                break;
+            case Path2D::Kind::Rect:
+                rect(op.a, op.b, op.c, op.d);
+                break;
+            case Path2D::Kind::RoundRect:
+                // The radii were kept as the page wrote them, because
+                // `roundRect` takes either one value or four; `op.a`..`op.d` are
+                // the rectangle and the four radii follow in `radii`.
+                round_rect(op.a, op.b, op.c, op.d, op.e);
+                break;
+            case Path2D::Kind::ClosePath:
+                close_path();
+                break;
+            case Path2D::Kind::AddPath: {
+                if (!op.path) break;
+                // `addPath(other, transform)`: the other path's calls, under this
+                // path's matrix composed with the one in force. The transform
+                // belongs to the *added* path's points, so it is applied by
+                // pre-multiplying the CTM for the duration of the replay rather
+                // than by transforming points here — that way an added arc is
+                // still an arc and not a polyline of its flattened form.
+                const TransformMatrix2D outer = m_ctm;
+                m_ctm = outer.multiply(op.transform);
+                // The added path's calls are appended to this path's, which is
+                // what `addPath` means; `replay_into` adds without clearing.
+                replay_into(*op.path);
+                m_ctm = outer;
+                break;
+            }
+        }
+    }
+}
+
+void CanvasRenderingContext2D::fill_path(const Path2D& path, FillRule rule) {
+    if (path.empty()) return;
+    const std::vector<SubPath> saved = m_paths;
+    m_paths.clear();
+    replay_into(path);
+    fill(rule);
+    m_paths = saved;
+}
+
+void CanvasRenderingContext2D::stroke_path(const Path2D& path) {
+    if (path.empty()) return;
+    const std::vector<SubPath> saved = m_paths;
+    m_paths.clear();
+    replay_into(path);
+    stroke();
+    m_paths = saved;
+}
+
+void CanvasRenderingContext2D::clip_path(const Path2D& path, FillRule rule) {
+    if (path.empty()) return;
+    const std::vector<SubPath> saved = m_paths;
+    m_paths.clear();
+    replay_into(path);
+    clip(rule);
+    m_paths = saved;
+}
+
+bool CanvasRenderingContext2D::is_point_in_path_object(float x, float y, const Path2D& path,
+                                                       FillRule rule) const {
+    if (path.empty()) return false;
+    // The test is against the path under the CTM in force, which is what
+    // `is_point_in_path` already does for the current path; a copy of the context
+    // would have to duplicate the whole state, so the path is laid out into a
+    // temporary and asked directly.
+    CanvasRenderingContext2D probe = *this;
+    probe.m_paths.clear();
+    probe.replay_into(path);
+    return probe.is_point_in_path(x, y, rule);
+}
+
 void CanvasRenderingContext2D::clip(FillRule rule) {
     if (!has_backing_store()) return;
     std::vector<uint8_t> new_mask;
@@ -2846,6 +2951,21 @@ void CanvasRenderingContext2D::draw_image(const std::shared_ptr<ImageData>& img,
                                                          image_smoothing_enabled));
         }
     }
+}
+
+/// §4.12.5.1.7: the first argument of `fill`, `stroke`, `clip` and
+/// `isPointInPath` may be a `Path2D`, in which case the path is **that** one and
+/// the current path is untouched. Returns null when the argument is not one, and
+/// the caller then uses the current path — which is what a page that passed
+/// `'evenodd'` or nothing at all expects.
+///
+/// This is the whole reason `fill({})` must not silently fill the current path
+/// while a page believed it passed a path: a plain object is not a `Path2D`, so
+/// the argument is the fill rule position instead. The specification's `[EnforceRange]`
+/// union does not accept an arbitrary object either.
+static std::shared_ptr<Path2D> path_arg(const std::vector<JsValue>& args, size_t idx) {
+    if (args.size() <= idx) return nullptr;
+    return args[idx].path2d_value();
 }
 
 static FillRule parse_fill_rule_arg(const std::vector<JsValue>& args, size_t idx) {
@@ -3146,18 +3266,23 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
         return grad->to_js_value(grad);
     }));
 
-    ctx.set_property("stroke", JsValue::make_native_function([get_ctx](const std::vector<JsValue>&) {
-        get_ctx()->stroke();
+    ctx.set_property("stroke", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+        if (auto path = path_arg(args, 0)) get_ctx()->stroke_path(*path);
+        else get_ctx()->stroke();
         return JsValue::make_undefined();
     }));
 
     ctx.set_property("fill", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
-        get_ctx()->fill(parse_fill_rule_arg(args, 0));
+        // `fill(path, rule)` or `fill(rule)`: the argument's *type* decides which
+        // shape of call this is, exactly as the IDL union does.
+        if (auto path = path_arg(args, 0)) get_ctx()->fill_path(*path, parse_fill_rule_arg(args, 1));
+        else get_ctx()->fill(parse_fill_rule_arg(args, 0));
         return JsValue::make_undefined();
     }));
 
     ctx.set_property("clip", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
-        get_ctx()->clip(parse_fill_rule_arg(args, 0));
+        if (auto path = path_arg(args, 0)) get_ctx()->clip_path(*path, parse_fill_rule_arg(args, 1));
+        else get_ctx()->clip(parse_fill_rule_arg(args, 0));
         return JsValue::make_undefined();
     }));
 
@@ -3171,6 +3296,15 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
     }));
 
     ctx.set_property("isPointInPath", JsValue::make_native_function([get_ctx](const std::vector<JsValue>& args) {
+        // `isPointInPath(path, x, y, rule)` shifts every argument by one.
+        if (auto path = path_arg(args, 0)) {
+            if (args.size() >= 3) {
+                return JsValue::make_boolean(get_ctx()->is_point_in_path_object(
+                    static_cast<float>(args[1].to_number()),
+                    static_cast<float>(args[2].to_number()), *path, parse_fill_rule_arg(args, 3)));
+            }
+            return JsValue::make_boolean(false);
+        }
         if (args.size() >= 2) {
             return JsValue::make_boolean(get_ctx()->is_point_in_path(
                 static_cast<float>(args[0].to_number()),

@@ -60,6 +60,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -224,8 +225,19 @@ def ensure_jsdom(jsdom_dir: Path) -> None:
     if not (jsdom_dir / "package.json").exists():
         (jsdom_dir / "package.json").write_text('{"name": "litebird-dom-reference", "private": true}\n')
     print(f"installing jsdom {JSDOM_VERSION} into {jsdom_dir} ...", file=sys.stderr)
-    subprocess.run(["npm", "install", "--no-audit", "--no-fund", "--silent", f"jsdom@{JSDOM_VERSION}"],
-                   cwd=jsdom_dir, check=True)
+    command = [
+        "npm", "install", "--no-audit", "--no-fund", "--loglevel=error",
+        "--fetch-retries=3", f"jsdom@{JSDOM_VERSION}",
+    ]
+    for attempt in range(1, 4):
+        completed = subprocess.run(command, cwd=jsdom_dir)
+        if completed.returncode == 0:
+            return
+        if attempt < 3:
+            delay = attempt * 2
+            print(f"npm install jsdom failed (attempt {attempt}/3); retrying in {delay}s ...", file=sys.stderr)
+            time.sleep(delay)
+    completed.check_returncode()
 
 
 def run_reference(cases: list[Case], jsdom_dir: Path, jobs: int) -> list[Result]:

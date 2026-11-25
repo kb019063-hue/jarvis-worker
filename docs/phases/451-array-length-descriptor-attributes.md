@@ -17,14 +17,13 @@ Compared the engine with Node using fresh, read-only, frozen, and sealed arrays.
 
 ## Verification
 
-- `make -j2 build/test_suite && ./build/test_suite`: all 500 engine test suites pass, including the Phase 451 regression.
-- `python3 tools/conformance/run_test262.py built-ins/Object`: 3,218 / 3,411 pass (193 existing failures; this run was not a before/after comparison).
-- `make js-conformance`: 1,152 / 1,158; the six reported failures are the existing Proxy, iterator, BigInt, map, and inherited read-only assignment cases.
-- `make dom-conformance`: 678 / 678; `make url-conformance`: 1,188 / 1,188; `make conformance`: 1,973 / 1,973.
-- `make test` reaches the separate cross-origin Window/Location and MessageChannel checks, which report 1 failure in 114 checks (`hasOwnProperty('document')`, got `ok:false`). The 500 engine suites pass before that separate failure.
-- `make wpt`: 9,570 / 9,824 subtests; the reported failures are the existing Grid, XML serializer, and parent-global cases. `make diff-trees`: all four runs pass with 0 differing trees. `make xml-conformance`: 1,718 / 1,718.
-- `python3 tools/ci/check_docs.py`, `make check-numbers`, `python3 tools/next_ids.py --self-test`, and `git diff --check` pass. `python3 tools/ci/check_suites.py` is blocked by the already tracked `tests/suites/tmp-unforgeable.cpp`, which has a non-numbered filename and contains two `TEST` declarations; that unrelated file was not changed.
-- `make deep` reports 64 failures across its 1,332 deep-page runs (mostly DOM tree-chain expectations); this change does not touch those paths. `make diff-xml` cannot run because `lxml` is not installed. `make fuzz` cannot run before an ASan binary is built; the attempted `make asan` exceeded the 30-minute tool limit and was killed during the deep-nesting unit suite.
+- `make test`: all 505 engine test suites pass, followed by 114/114 cross-origin Window/Location and MessageChannel checks.
+- `python3 tools/conformance/run_test262.py built-ins/Object`: 3,218 / 3,411 pass (193 failures; this run was not a before/after comparison).
+- `make js-conformance`: 1,153 / 1,158; `make dom-conformance`: 678 / 678; `make url-conformance`: 1,188 / 1,188; `make conformance`: 1,973 / 1,973.
+- `make wpt`: 9,570 / 9,824 subtests, with the reported Grid, XML serializer, and parent-global failures. `make xml-conformance`: 1,718 / 1,718.
+- `make diff-trees`: all four runs pass with 0 differing trees. `PATH="$PWD/build/venv/bin:$PATH" make diff-xml` (with `lxml` installed in a local venv): 4,000 XML differential inputs with 0 differences and 3,000/3,000 round trips.
+- `make deep`: 1,332 / 1,332 runs pass. `python3 tools/ci/check_suites.py`, `python3 tools/ci/check_docs.py`, `make check-numbers`, `python3 tools/next_ids.py --self-test`, and `git diff --check` pass.
+- A local `make asan` attempt exceeded the 30-minute tool limit and was killed during its deep-nesting unit suite. The sanitizer checks will be evaluated on the merged PR head by CI; the dependent local fuzz run was unavailable before the ASan binary was produced.
 
 ## Remaining scope
 

@@ -29,10 +29,12 @@ The dense shortcut now applies to a new index only when the array remains extens
 - `make -j2 build/test_suite && ./build/test_suite`: all 500 engine test suites pass, including the Phase 451 regression.
 - `python3 tools/conformance/run_test262.py built-ins/Object`: 3,218 / 3,411 pass (193 existing failures; this run was not a before/after comparison).
 - `make js-conformance`: 1,152 / 1,158; `make dom-conformance`: 678 / 678; `make url-conformance`: 1,188 / 1,188; `make conformance`: 1,973 / 1,973.
-- `make test` then reports one failure in its separate cross-origin Window/Location and MessageChannel suite: `hasOwnProperty('document')` returned `ok:false` (1 failure of 114). The engine suites pass before that separate failure.
-- `make wpt`: 9,570 / 9,824 subtests with the reported Grid, XML serializer, and parent-global failures; `make diff-trees` passes all four runs with no differing trees; `make xml-conformance`: 1,718 / 1,718.
-- `python3 tools/ci/check_docs.py`, `make check-numbers`, `python3 tools/next_ids.py --self-test`, and `git diff --check` pass. `python3 tools/ci/check_suites.py` reports the tracked, unrelated `tests/suites/tmp-unforgeable.cpp` filename and two-suite-format violations.
-- `make deep` reports 64 failures across its 1,332 deep-page runs, mostly DOM tree-chain expectations. `make diff-xml` could not run because `lxml` is not installed; `make fuzz` could not run because the ASan binary was not available. The attempted `make asan` exceeded the 30-minute tool limit and was killed during the deep-nesting unit suite.
+- `make test`: all 505 engine test suites pass, followed by 114/114 cross-origin Window/Location and MessageChannel checks.
+- `python3 tools/conformance/run_test262.py built-ins/Object`: 3,218 / 3,411 pass (193 failures; this run was not a before/after comparison).
+- `make js-conformance`: 1,153 / 1,158; DOM 678/678; URL 1,188/1,188; tree-construction 1,973/1,973; XML 1,718/1,718; WPT 9,570/9,824 with its reported Grid, XML serializer, and parent-global failures.
+- `make diff-trees`: all four runs pass with no differing trees. `PATH="$PWD/build/venv/bin:$PATH" make diff-xml` (with `lxml` installed in a local venv): 4,000 XML differential inputs with 0 differences and 3,000/3,000 round trips. `make deep`: 1,332/1,332 runs pass.
+- `python3 tools/ci/check_suites.py`, `python3 tools/ci/check_docs.py`, `make check-numbers`, `python3 tools/next_ids.py --self-test`, and `git diff --check` pass.
+- A local `make asan` attempt exceeded the 30-minute tool limit and was killed during its deep-nesting unit suite. Sanitizer checks will run on the merged PR head in CI; the local fuzz run was not completed.
 
 ## Remaining scope
 

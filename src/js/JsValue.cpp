@@ -138,6 +138,11 @@ const std::shared_ptr<CanvasPattern>& JsValue::canvas_pattern_value() const {
     if (extra()) if (auto v = std::get_if<std::shared_ptr<CanvasPattern>>(&extra()->payload)) return *v;
     return empty;
 }
+const std::shared_ptr<Path2D>& JsValue::path2d_value() const {
+    static const std::shared_ptr<Path2D> empty;
+    if (extra()) if (auto v = std::get_if<std::shared_ptr<Path2D>>(&extra()->payload)) return *v;
+    return empty;
+}
 const std::shared_ptr<PromiseData>& JsValue::promise_value() const {
     static const std::shared_ptr<PromiseData> empty;
     if (extra()) if (auto v = std::get_if<std::shared_ptr<PromiseData>>(&extra()->payload)) return *v;
@@ -172,6 +177,7 @@ void JsValue::set_native_function(NativeFn v) {
 void JsValue::set_canvas_context(std::shared_ptr<CanvasRenderingContext2D> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_canvas_gradient_value(std::shared_ptr<CanvasGradient> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_canvas_pattern_value(std::shared_ptr<CanvasPattern> v) { mutable_extra().payload = std::move(v); }
+void JsValue::set_path2d_value(std::shared_ptr<Path2D> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_promise_value(std::shared_ptr<PromiseData> v) { mutable_extra().payload = std::move(v); }
 void JsValue::set_generator_value(std::shared_ptr<GeneratorData> v) { mutable_extra().payload = std::move(v); }
 

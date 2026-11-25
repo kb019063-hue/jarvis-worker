@@ -97,13 +97,19 @@ TEST(css_vertical_margin_collapse_general) {
             "</body>");
         const auto* e1 = find_box(root, "e1");
         const auto* target = find_box(root, "target");
+        const LayoutBox* body_box = nullptr;
+        {
+            std::vector<const LayoutBox*> st{root.get()};
+            while (!st.empty()) { auto b=st.back(); st.pop_back(); if (b->node && b->node->is_element() && b->node->as_element()->tag_name()=="body") { body_box=b; break; } for (auto &c:b->children) st.push_back(c.get()); }
+        }
+        const auto* root_body = body_box ? body_box : root.get();
         assert(e1 && target);
         // Collapsed top = max(8, 20, 25, 30, 12, 15, 10) + (-5) = 25.
-        assert(near(root->dimensions.border_box().y, 25.0f));
+        assert(near(root_body->dimensions.border_box().y, 25.0f));
         // Empty block collapsing with parent's top has same top border edge as parent.
         assert(near(e1->dimensions.border_box().y, 25.0f));
         assert(near(target->dimensions.border_box().y, 25.0f));
-        assert(near(root->dimensions.border_box().height, 20.0f));
+        assert(near(root_body->dimensions.border_box().height, 20.0f));
     }
 
     // 4. Parent-bottom / last-child-bottom collapse and all barrier conditions:

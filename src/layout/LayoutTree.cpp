@@ -1068,6 +1068,21 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
         root_box = LayoutBox::create_block(nullptr, std::move(root_style));
     }
 
+    // Full <html> root layout box (Phase 423): the document element now owns
+    // a real box when its style is not none/contents, so html margins,
+    // borders and padding are layout geometry rather than a viewport offset.
+    // The html box becomes the layout root and the body subtree is its child;
+    // its own margin blocks collapse with the body (addition not max) so
+    // html(30)+body(8)=38 matches Chromium. See LayoutBox::blocks_collapse
+    // html special case.
+    std::shared_ptr<LayoutBox> html_root_box;
+    if (document && html && html_style && !html_style->is_none() && !html_style->is_contents()) {
+        html_root_box = LayoutBox::create_block(html, pool.intern(*html_style));
+        if (root_box) html_root_box->append_child(root_box);
+        normalize_block_children(html_root_box, html_root_box->style, pool);
+        root_box = html_root_box;
+    }
+
     // Even an uncolored HTML document owns a transparent canvas: embedded
     // documents preserve its alpha, while a top-level terminal needs to know
     // that it should show the browser's white backdrop rather than its default
@@ -1128,9 +1143,18 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
     if (document) {
         if (auto body = document->body(); body && root_box->node == body) document_body_root = true;
     }
+    // Phase 423: when the html root box exists it is the document root and
+    // document_body_root is false (root_box node is html, not body). Html
+    // still needs viewport-root placement for its own margins, and the body
+    // fallback keeps the legacy root_margin offset for non-html documents.
+    const bool has_html_root = html_root_box != nullptr;
     root_box->dimensions.content.x = 0.0f;
     root_box->dimensions.content.y = 0.0f;
-    if (document_body_root) prepare_document_body(*root_box);
+    if (document_body_root) {
+        prepare_document_body(*root_box);
+    } else if (has_html_root) {
+        prepare_document_body(*root_box);
+    }
     root_box->layout(viewport_width, viewport_height);
     if (document_body_root) {
         // The root's own used margin, for the offset place_document_body adds.
@@ -1155,6 +1179,8 @@ std::shared_ptr<LayoutBox> LayoutTree::build(
         }
         place_document_body(*root_box, viewport_width, viewport_height,
                             has_root_margin ? &root_margin : nullptr);
+    } else if (has_html_root) {
+        place_document_body(*root_box, viewport_width, viewport_height, nullptr);
     }
     LayoutBox::resolve_out_of_flow_positions(root_box, viewport_width, viewport_height);
 

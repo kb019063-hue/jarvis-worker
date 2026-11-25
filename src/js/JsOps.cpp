@@ -1320,6 +1320,13 @@ void close_iterator_quietly(const JsValue& iterator) {
 /// when the loop leaves it unfinished, and not when it failed itself: an
 /// error out of next(), `done` or `value` leaves `return` alone.
 void iterate_with(const JsValue& iterable, const JsValue& method, const std::function<bool(const JsValue&)>& visit) {
+    // The one loop over an iterator this engine has. It was two: this one and
+    // a copy in BuiltinsArray.cpp that `Array.from` used, which had drifted —
+    // it did not tell a generator's abort (where `return` must *not* run) from
+    // an ordinary error (where it must), and every `close_iterator` rule was
+    // written out again by hand. The caller that has to know whether the source
+    // is iterable before it builds the result goes through the same function
+    // now.
     JsValue iterator = method.call_with_this(iterable, {});
     if (!iterator.is_object_like()) js_throw_type_error("Result of the Symbol.iterator method is not an object");
     JsValue next = iterator.get_property("next");
@@ -1441,6 +1448,15 @@ void js_iterate(const JsValue& iterable, const std::function<bool(const JsValue&
         // hands out the installed method, the method assigned back.
         if (is_string) visit_code_points(iterable, visit);
         else visit_elements(iterable, visit);
+        return;
+    }
+    iterate_with(iterable, method, visit);
+}
+
+void iterate_with_method(const JsValue& iterable, const JsValue& method,
+                         const std::function<bool(const JsValue&)>& visit) {
+    if (js_iterates_as_builtin(iterable)) {
+        js_iterate(iterable, visit);
         return;
     }
     iterate_with(iterable, method, visit);

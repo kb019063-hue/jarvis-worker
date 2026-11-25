@@ -256,6 +256,11 @@ verify-css-paint-terminal-safety: $(TARGET) $(BUILD_DIR)/terminal_text_probe
 verify-console-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_console_terminal.py --binary $(TARGET)
 
+## Capture bytecode dump and compiler-diagnostic attacks safely.
+.PHONY: verify-bytecode-terminal-safety
+verify-bytecode-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_bytecode_terminal.py --binary $(TARGET)
+
 $(BUILD_DIR)/terminal_text_probe: tools/security/terminal_text_probe.cpp $(BUILD_DIR)/common/TerminalText.o
 	$(CXX) $(CXXFLAGS) $^ -o $@
 

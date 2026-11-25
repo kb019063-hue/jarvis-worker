@@ -39,8 +39,9 @@ No runtime defect reproduced on this branch, so no implementation change was jus
 - `make -j2 all`: passed.
 - The three named test262 cases: **3/3 passed**.
 - All of `built-ins/Array/prototype/sort`: **49/54 passed**; the five unrelated failures require unsupported BigInt syntax or `BigInt64Array`.
-- `./build/test_suite`: **500/500 engine suites passed**, including this suite. The count includes two tests in the pre-existing tracked `tests/suites/tmp-unforgeable.cpp`.
-- The global `python3 tools/ci/check_suites.py` check still reports the pre-existing `tmp-unforgeable.cpp` name/two-TEST shape violations; this suite itself is one `TEST` in a numbered file with no includes.
+- `make -j2 test`: **499/499 engine suites** and **114/114 cross-origin checks** passed, including this suite.
+- `python3 tools/ci/check_suites.py`: passed; this suite is one `TEST` in a numbered file with no includes.
+- `python3 tools/ci/check_docs.py`: 0 failures.
 
 ## 5. Resolution
 

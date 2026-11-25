@@ -231,6 +231,83 @@ JsValue internalize(JsValue holder, const std::string& key, const JsValue& reviv
 
 // ---------------------------------------------------------------------------
 // Serialising
+/// The text a `JSON.rawJSON` object carries, and whether `value` is one.
+///
+/// The slot is a real internal one, in the heap cell, not a property: a plain
+/// object that happens to have `rawJSON` of its own is not one (Node says
+/// `JSON.isRawJSON({rawJSON: "1"})` is false), nor is one that inherits the
+/// name, nor one a script gives a `%`-prefixed property to. Only the object
+/// `JSON.rawJSON` made has it, which is what §25.5.3.1's `[[IsRawJSON]]`
+/// means by an internal slot.
+struct RawJsonText {
+    std::string text;
+};
+
+/// Whether `value` is an object `JSON.rawJSON` made.
+bool is_raw_json(const JsValue& value) {
+    // `internal` is a `shared_ptr<void>`: the owner names the concrete type,
+    // which is why every other slot in the engine is read the same way — by
+    // knowing what it holds. A cell that some other built-in made has a
+    // different `internal`, and `rawJSON` of its own was never a slot.
+    JsObject* cell = value.object_val;
+    return cell != nullptr && static_cast<bool>(cell->internal) &&
+           cell->raw_json_slot;
+}
+
+/// The text of a raw JSON object; the caller has checked `is_raw_json`.
+const std::string& raw_json_text(const JsValue& value) {
+    return static_cast<const RawJsonText*>(value.object_val->internal.get())->text;
+}
+
+/// §25.5.1.1's grammar, for the text `JSON.rawJSON` accepts.
+///
+/// The standard asks for a JSON *number*, `true`, `false`, `null` or a JSON
+/// *string* — not an object and not an array — with no space around it.
+/// `JsonParser` is not reused for the whole job: it reads any JSON value, so
+/// it would accept `{}` and `[1]`, both of which Node refuses here ("Unexpected
+/// token '{'"). It is not needed for the string case either, where the answer
+/// is the quoted text as it stands.
+bool raw_json_accepts(const std::string& text) {
+    if (text.empty()) return false;
+    if (text == "true" || text == "false" || text == "null") return true;
+    // A JSON string: the escape grammar is `JsonParser`'s, and parsing the
+    // whole text as one value is what holds it to it.
+    if (text.front() == '"') {
+        try {
+            return JsonParser(text).parse().type == JsType::String;
+        } catch (...) {
+            return false;
+        }
+    }
+    // A JSON number: `-?` `0` | `[1-9][0-9]*` (`.` `[0-9]+`)? (`[eE]` `[+-]?` `[0-9]+`)?
+    // `+1`, `01`, `.5`, `5.`, `1e` and `Infinity` are the cases this rejects
+    // and Node rejects too.
+    size_t i = 0;
+    if (text[i] == '-') ++i;
+    if (i >= text.size()) return false;
+    if (text[i] == '0') {
+        ++i;                                    // a leading zero is the whole integer part
+    } else if (text[i] >= '1' && text[i] <= '9') {
+        while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) ++i;
+    } else {
+        return false;
+    }
+    if (i < text.size() && text[i] == '.') {
+        ++i;
+        const size_t digits = i;
+        while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) ++i;
+        if (i == digits) return false;          // `1.` is not a number
+    }
+    if (i < text.size() && (text[i] == 'e' || text[i] == 'E')) {
+        ++i;
+        if (i < text.size() && (text[i] == '+' || text[i] == '-')) ++i;
+        const size_t digits = i;
+        while (i < text.size() && std::isdigit(static_cast<unsigned char>(text[i]))) ++i;
+        if (i == digits) return false;          // `1e` is not a number
+    }
+    return i == text.size();                    // and nothing may follow it
+}
+
 // ---------------------------------------------------------------------------
 
 void quote_into(std::string& out, std::string_view s) {
@@ -307,6 +384,14 @@ public:
         if (m_replacer.is_function()) {
             value = m_replacer.call_with_this(holder, {JsValue::make_string(key), value});
         }
+        // §25.5.2's SerializeJSONProperty asks for `[[IsRawJSON]]` here, after
+        // `toJSON` and the replacer have each had their turn (a replacer that
+        // returns another value replaces the raw object first) and before
+        // `[[IsCallable]]`-style branches. Nothing is quoted and nothing is
+        // reformatted: the text the object was made with is what goes out, so
+        // `1e1000` — a number a `double` cannot hold — survives the round trip.
+        if (is_raw_json(value)) { out += raw_json_text(value); return true; }
+
         // `new String("a")` and friends serialise as the value they wrap.
         if (const JsValue* inner = js_wrapped_primitive(value); inner && inner->type != JsType::Symbol) {
             value = *inner;
@@ -428,6 +513,39 @@ void install_json_builtins(JsIntrinsics& realm) {
         std::string out;
         if (!writer.write_property(wrapper, "", out)) return JsValue::make_undefined();
         return JsValue::make_string(out);
+    });
+
+    // §25.5.3.1. The text is held to the grammar *before* the object is made,
+    // so a rejected call leaves nothing behind: the answer is a SyntaxError
+    // and never a TypeError, which is Node's answer too.
+    js_define_method(json, "rawJSON", 1, [](Args args) {
+        const std::string text = js_to_string(js_arg(args, 0));
+        if (!raw_json_accepts(text)) {
+            js_throw_error(JsErrorKind::SyntaxError, "\"" + text + "\" is not valid JSON");
+        }
+        // The prototype is null: Node answers `Object.getPrototypeOf(JSON.rawJSON("42"))`
+        // with `null`, and it is why `JSON.stringify` spreads one as its own
+        // `rawJSON` property and nothing else.
+        JsValue result = JsValue::make_object();
+        result.object_val->prototype = nullptr;
+        result.define_property("rawJSON", JsValue::make_string(text),
+                               static_cast<unsigned>(PropertyMap::Enumerable));
+        // Non-writable, non-configurable and enumerable, as Node reports it;
+        // sealed against anything being added. The prototype and the cell's
+        // other fields are set directly rather than through `Object.freeze`,
+        // which would ask the realm for the function and could throw.
+        result.object_val->extensible = false;
+        result.object_val->sealed = true;
+        result.object_val->frozen = true;
+        result.object_val->internal = std::make_shared<RawJsonText>(RawJsonText{text});
+        result.object_val->raw_json_slot = true;
+        return result;
+    });
+
+    // §25.5.3.2. Asks the internal slot, never the property: a forged
+    // `{rawJSON: "1"}` is false, and so is one that inherits the name.
+    js_define_method(json, "isRawJSON", 1, [](Args args) {
+        return JsValue::make_boolean(is_raw_json(js_arg(args, 0)));
     });
 
     json.define_property("@@toStringTag", JsValue::make_string("JSON"), PropertyMap::Configurable);

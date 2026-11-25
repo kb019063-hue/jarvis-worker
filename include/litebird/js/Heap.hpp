@@ -203,6 +203,14 @@ public:
     bool has_accessors{false};      // some own property is a getter/setter
     bool has_legacy_getters{false}; // some own property is a "__get_<name>__" host getter
     bool not_constructor{false};    // the cell of a built-in function that `new` refuses (js_is_constructor)
+    /// The cell of a `JSON.rawJSON` object: its text is in `internal` and
+    /// `JSON.stringify` writes that text as it stands (§25.5.3.1's
+    /// [[IsRawJSON]]). A flag rather than a new `ObjectClass`, because the
+    /// standard's tag for one is "Object" — `Object.prototype.toString.call`
+    /// on it answers `[object Object]` — and `internal` alone cannot say
+    /// which built-in filled it. Ninth bool: it sits in the padding before
+    /// `klass`, so `JsObject` does not grow.
+    bool raw_json_slot{false};
     ObjectClass klass{ObjectClass::Plain};
 
     /// Built-in state that is not a property: a Date's time value, a RegExp's

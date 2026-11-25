@@ -7696,6 +7696,36 @@ TEST(subtle_crypto_aes_kw_wrap_and_unwrap) {
     assert(interp.eval("rtHex === '00112233445566778899aabbccddeeff'").is_truthy());
 }
 
+TEST(subtle_crypto_ecdsa_sha384_and_sha512) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var ok384 = null, ok512 = null, mismatch = null;
+        var msg = new Uint8Array([1, 2, 3, 4, 5]);
+        crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+            .then(function(pair) {
+                return Promise.all([
+                    crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-384' }, pair.privateKey, msg),
+                    crypto.subtle.sign({ name: 'ECDSA', hash: { name: 'SHA-512' } }, pair.privateKey, msg)
+                ]).then(function(sigs) {
+                    return Promise.all([
+                        crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-384' }, pair.publicKey, sigs[0], msg),
+                        crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-512' }, pair.publicKey, sigs[1], msg),
+                        crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, sigs[0], msg)
+                    ]);
+                });
+            })
+            .then(function(res) {
+                ok384 = res[0];
+                ok512 = res[1];
+                mismatch = res[2];
+            });
+    )");
+    assert(interp.eval("ok384 === true && ok512 === true && mismatch === false").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36664,6 +36694,7 @@ int main() {
     RUN_TEST(subtle_crypto_ecdh_p256_derive_key);
     RUN_TEST(subtle_crypto_ec_spki_and_pkcs8);
     RUN_TEST(subtle_crypto_aes_kw_wrap_and_unwrap);
+    RUN_TEST(subtle_crypto_ecdsa_sha384_and_sha512);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

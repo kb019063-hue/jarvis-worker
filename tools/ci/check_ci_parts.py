@@ -20,6 +20,11 @@ It fails when
   - a part the recipe names is not a target of the Makefile;
   - a part, `asan-deep` or `tsan` is run by no job, or by two (`asan-build`
     is the exception: every job that runs a part makes the build first);
+  - `asan-unit` is run by two jobs that are not its two halves: one with
+    `UNIT_SUITE_ONLY=early` and one with `UNIT_SUITE_ONLY=late`, both with
+    `ASAN_UNIT_STRETCHES=balanced` (the stretches that are not late and the
+    late ones, tools/ci/run_stretches.py; a half with no other half would
+    leave suites unrun and fail nothing);
   - a job runs a part before it has run `asan-build`;
   - a job runs the whole of `asan-core` or `asan`, which would run every part
     a second time;
@@ -48,6 +53,8 @@ JOB = re.compile(r"^  ([A-Za-z0-9_-]+):\s*$")
 MAKE_CALL = re.compile(r"(?<![\w./-])make(?![\w./-])([^|;&\n]*)")
 UNPACK_CALL = re.compile(r"run_xml_conformance\.py\b[^|;&\n]*--unpack-only\b")
 UNPACKED = "the-xml-suite-unpacked"   # not a target: what a step that unpacks the suite counts as
+UNIT = "asan-unit"                  # the one part two jobs may share, a half each
+HALVES = ("early", "late")          # UNIT_SUITE_ONLY: the stretches that are not late, and the late ones
 
 
 def recipe_of(makefile: str, target: str) -> list[str] | None:
@@ -91,6 +98,60 @@ def jobs_of(workflow: str) -> dict[str, list[str]]:
     return found
 
 
+def unit_calls(workflow: str) -> list[tuple[str, str, bool]]:
+    """Every call of make that runs the unit suites of the sanitizer build:
+    (the job, its UNIT_SUITE_ONLY or "" for all of them, whether it asks for
+    the balanced stretches)."""
+    found: list[tuple[str, str, bool]] = []
+    job = None
+    in_jobs = False
+    for line in workflow.split("\n"):
+        if line.rstrip() == "jobs:":
+            in_jobs = True
+            continue
+        if not in_jobs or line.lstrip().startswith("#"):
+            continue
+        match = JOB.match(line)
+        if match:
+            job = match.group(1)
+            continue
+        if job is None:
+            continue
+        for call in MAKE_CALL.finditer(line):
+            words = call.group(1).split()
+            if UNIT in words:
+                only = next((word.split("=", 1)[1].strip("\"'") for word in words if word.startswith("UNIT_SUITE_ONLY=")), "")
+                found.append((job, only, "ASAN_UNIT_STRETCHES=balanced" in words))
+    return found
+
+
+def unit_halves_wrong(calls: list[tuple[str, str, bool]]) -> list[str] | None:
+    """None when the unit suites are not divided between jobs (every call
+    runs all of them, and the rule for every part holds: one job). Otherwise
+    what is wrong with the division; nothing, when it is one job for each
+    half."""
+    if all(only == "" for _, only, _ in calls):
+        return None
+    wrong: list[str] = []
+    for job, only, balanced in calls:
+        if only == "":
+            wrong.append(f"job `{job}` runs every stretch of `{UNIT}` and another job runs some of them again: "
+                         f"either one job runs them all, or one runs UNIT_SUITE_ONLY=early and one UNIT_SUITE_ONLY=late")
+        elif only not in HALVES:
+            wrong.append(f"job `{job}` runs `{UNIT}` with UNIT_SUITE_ONLY={only}: it is `early` or `late`")
+        elif not balanced:
+            wrong.append(f"job `{job}` runs `{UNIT}` with UNIT_SUITE_ONLY={only} and without ASAN_UNIT_STRETCHES=balanced: "
+                         f"only the balanced stretches have late ones, so every suite would be run there")
+    for half, other in (HALVES, HALVES[::-1]):
+        jobs = [job for job, only, _ in calls if only == half]
+        if len(jobs) > 1:
+            wrong.append(f"UNIT_SUITE_ONLY={half} of `{UNIT}` is run by {len(jobs)} jobs ({', '.join(jobs)}): once is enough")
+        if jobs and not any(only == other for _, only, _ in calls):
+            wrong.append(f"job `{jobs[0]}` runs `{UNIT}` with UNIT_SUITE_ONLY={half} and no job runs it with "
+                         f"UNIT_SUITE_ONLY={other}: those stretches' suites would be run nowhere, and nothing would fail")
+    return wrong
+
+
 def problems(makefile: str, workflow: str) -> tuple[list[str], list[str]]:
     """What is wrong, and the parts the recipe names."""
     wrong: list[str] = []
@@ -125,11 +186,13 @@ def problems(makefile: str, workflow: str) -> tuple[list[str], list[str]]:
         needing = [t for t in targets if t.startswith("asan-") and t not in (BUILD, WHOLE)]
         if needing and (BUILD not in targets or targets.index(BUILD) > targets.index(needing[0])):
             wrong.append(f"job `{job}` runs `{needing[0]}` before it has run `{BUILD}`")
+    halves = unit_halves_wrong(unit_calls(workflow))
+    wrong += halves or []
     for required in [*parts, *ALSO]:
         where = [job for job, targets in jobs.items() if required in targets]
         if not where:
             wrong.append(f"no job of CI runs `{required}`: it is in the Makefile and would not be checked")
-        elif len(where) > 1 and required != BUILD:
+        elif len(where) > 1 and required != BUILD and not (required == UNIT and halves is not None):
             wrong.append(f"`{required}` is run by {len(where)} jobs ({', '.join(where)}): once is enough")
     known = set(parts) | set(ALSO) | {WHOLE, "asan", UNPACKED}
     for job, targets in jobs.items():
@@ -146,6 +209,12 @@ def self_test() -> int:
             "          make -j\"$(nproc)\" asan-build 2>&1 | tee x.log\n          make asan-xml | tee asan-core.log\n"
             "      - run: make asan-fuzz\n  two:\n    steps:\n      # make asan-core\n"
             "      - run: make asan-build && make asan-deep\n")
+    unit_make = make.replace("\t$(MAKE) asan-fuzz\n\n", "\t$(MAKE) asan-fuzz\n\t$(MAKE) asan-unit\n\n") + "\nasan-unit:\n\tunit\n"
+
+    def unit_job(name: str, how: str) -> str:
+        return (f"  {name}:\n    steps:\n      - run: make asan-build\n"
+                f"      - run: |\n          make -j\"$(nproc)\" asan-unit{how} 2>&1 | tee x.log\n")
+
     cases = [
         ("the two agree", make, flow, []),
         ("a check written into asan-core itself",
@@ -197,6 +266,34 @@ def self_test() -> int:
         ("a part the recipe does not name", make, flow.replace("make asan-deep", "make asan-deep asan-gone"),
          ["runs `asan-gone`, which `asan-core` does not name"]),
         ("no such recipe", make.replace("asan-core:", "asan-all:"), flow, ["has no target `asan-core`"]),
+        ("the unit suites in one job", unit_make, flow + unit_job("three", ""), []),
+        ("the unit suites as two halves in two jobs", unit_make,
+         flow + unit_job("three", " ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=early")
+         + unit_job("four", " ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=late"), []),
+        ("the unit suites whole in two jobs", unit_make, flow + unit_job("three", "") + unit_job("four", ""),
+         ["`asan-unit` is run by 2 jobs"]),
+        ("the early half and no late one: the deep suites would be run nowhere", unit_make,
+         flow + unit_job("three", " ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=early"),
+         ["with UNIT_SUITE_ONLY=early and no job runs it with UNIT_SUITE_ONLY=late"]),
+        ("the late half and no early one", unit_make,
+         flow + unit_job("three", " ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=late"),
+         ["with UNIT_SUITE_ONLY=late and no job runs it with UNIT_SUITE_ONLY=early"]),
+        ("the same half twice", unit_make,
+         flow + unit_job("three", " ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=early")
+         + unit_job("four", " ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=early"),
+         ["UNIT_SUITE_ONLY=early of `asan-unit` is run by 2 jobs", "no job runs it with UNIT_SUITE_ONLY=late"]),
+        ("a half beside a job that runs them all", unit_make,
+         flow + unit_job("three", " ASAN_UNIT_STRETCHES=balanced") + unit_job("four", " ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=late"),
+         ["job `three` runs every stretch of `asan-unit` and another job runs some of them again",
+          "with UNIT_SUITE_ONLY=late and no job runs it with UNIT_SUITE_ONLY=early"]),
+        ("a half of stretches that are not the balanced ones", unit_make,
+         flow + unit_job("three", " ASAN_UNIT_STRETCHES=3 UNIT_SUITE_ONLY=early")
+         + unit_job("four", " ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=late"),
+         ["job `three` runs `asan-unit` with UNIT_SUITE_ONLY=early and without ASAN_UNIT_STRETCHES=balanced"]),
+        ("a half that is neither", unit_make,
+         flow + unit_job("three", " ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=first")
+         + unit_job("four", " ASAN_UNIT_STRETCHES=balanced UNIT_SUITE_ONLY=late"),
+         ["with UNIT_SUITE_ONLY=first: it is `early` or `late`", "no job runs it with UNIT_SUITE_ONLY=early"]),
     ]
     failed = 0
     for name, makefile, workflow, expected in cases:
@@ -229,7 +326,9 @@ def main() -> int:
     for job, targets in jobs_of(workflow).items():
         if targets:
             print(f"  {job}: {' '.join(targets)}")
-    print(f"check_ci_parts: the {len(parts)} parts of `{WHOLE}`, `asan-deep` and `tsan` are each run by one job")
+    halves = sorted(job for job, only, _ in unit_calls(workflow) if only)
+    print(f"check_ci_parts: the {len(parts)} parts of `{WHOLE}`, `asan-deep` and `tsan` are each run by one job"
+          + (f" (`{UNIT}` by two, a half of its stretches each: {', '.join(halves)})" if halves else ""))
     return 0
 
 

@@ -4,6 +4,8 @@
     python3 tools/ci/run_stretches.py BINARY N           # N equal stretches of BINARY's suites
     python3 tools/ci/run_stretches.py BINARY a,b,c       # four: from the start, and from the suites a, b, c
     python3 tools/ci/run_stretches.py BINARY a,b,c 1,2   # the same, stretches 1 and 2 after the others
+    python3 tools/ci/run_stretches.py BINARY a,b,c 1,2 early   # stretches 0 and 3, and no others
+    python3 tools/ci/run_stretches.py BINARY a,b,c 1,2 late    # stretches 1 and 2, and no others
     python3 tools/ci/run_stretches.py --self-test
 
 `BINARY` is the test binary (`build/test_suite`, `build-asan/test_suite`).
@@ -44,6 +46,15 @@ of_its_element` at its sixth second (run 45459129005, 24 November). So:
     was and what it had failed with (a warning on the job in CI). A failure
     that is real fails twice. A sanitizer's report is never asked again.
 
+With `early` or `late` as a fourth argument only those stretches are run:
+the ones that are not late, or the late ones. That is for two machines, one
+call each (CI's two jobs for the unit suites since 25 November 2026): the
+late stretches are the deep ones, 72 to 87 seconds there that began when the
+others had taken 102 to 127, on a machine with nothing else to do. The two
+calls share the binary's order and the cuts, so stretch K is the same suites
+in both, and every suite is still some process's; each call checks its own
+stretches, and that they do not add up to more than there are.
+
 A stretch that fails is printed last, so that the end of the output is the
 failure, which is where a person and tools/ci/annotate_failure.py look.
 
@@ -72,12 +83,18 @@ SANITIZER = re.compile(r"ERROR: \w*Sanitizer|SUMMARY: \w*Sanitizer|runtime error
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 
 
-def verdict(results: list[tuple[int, str]]) -> tuple[bool, str]:
-    """(passed, the line to end on) for the (exit status, output) of each stretch, in order."""
-    count = len(results)
+def verdict(results: list[tuple[int, str]], indexes: list[int] | None = None,
+            count: int | None = None) -> tuple[bool, str]:
+    """(passed, the line to end on) for the (exit status, output) of each stretch, in order.
+
+    `indexes` are the stretches the results are of, and `count` how many
+    stretches there are: without them the results are of every stretch.
+    """
+    count = len(results) if count is None else count
+    indexes = list(range(len(results))) if indexes is None else indexes
     totals: set[int] = set()
     ran = 0
-    for index, (status, output) in enumerate(results):
+    for index, (status, output) in zip(indexes, results):
         said = SENTENCE.search(output)
         if status != 0:
             return False, f"stretch {index} of {count} failed (exit status {status})"
@@ -90,27 +107,51 @@ def verdict(results: list[tuple[int, str]]) -> tuple[bool, str]:
     if len(totals) != 1:
         return False, f"the stretches do not agree on how many suites there are: {sorted(totals)}"
     total = totals.pop()
+    if len(indexes) < count:
+        # Some of the stretches: the others are another call's, on another
+        # machine. These may not be all the suites, and cannot be more.
+        if ran >= total:
+            return False, (f"stretches {numbers(indexes)} of {count} ran {ran} suites between them, and there are "
+                           f"{total}: nothing is left for the other stretches")
+        return True, (f"{'Stretch' if len(indexes) == 1 else 'Stretches'} {numbers(indexes)} of {count} passed: "
+                      f"{ran} of the {total} engine test suites. "
+                      f"The other {total - ran} are the other stretches', which another call runs")
     if ran != total:
         return False, f"the stretches ran {ran} suites between them, and there are {total}"
     return True, f"All {total} engine test suites passed successfully, as {count} processes side by side!"
 
 
+def numbers(indexes: list[int]) -> str:
+    """ "0, 1, 4 and 5" """
+    words = [str(index) for index in indexes]
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
 def measured(results: list[tuple[int, str]], seconds: list[float], megabytes: list[int], whole: float,
-             late: frozenset[int] = frozenset()) -> str:
-    """One line: how long each stretch took, its suites, and its most memory."""
+             late: frozenset[int] = frozenset(), indexes: list[int] | None = None) -> str:
+    """One line: how long each stretch took, its suites, and its most memory.
+
+    `indexes` are the stretches the results are of (all of them, without it).
+    A late stretch is said to have run after the others only when the others
+    were run by this call too.
+    """
+    indexes = list(range(len(results))) if indexes is None else indexes
+    waited = late if any(index not in late for index in indexes) else frozenset()
     parts = []
-    for index, (_, output) in enumerate(results):
+    for place, (_, output) in enumerate(results):
         said = SENTENCE.search(output)
         suites = f"{said.group(3)} suites" if said else "no count"
-        after = " (after the others)" if index in late else ""
+        after = " (after the others)" if indexes[place] in waited else ""
         half = HALF.search(output)
         middle = f", half of it over when {half.group(1)} began" if half else ""
-        parts.append(f"stretch {index}{after}: {suites} in {seconds[index]:.0f} s, {megabytes[index]} MB at most{middle}")
-    slowest = max(range(len(seconds)), key=lambda index: seconds[index]) if seconds else 0
+        parts.append(f"stretch {indexes[place]}{after}: {suites} in {seconds[place]:.0f} s, "
+                     f"{megabytes[place]} MB at most{middle}")
+    slowest = max(range(len(seconds)), key=lambda place: seconds[place]) if seconds else 0
     named = SLOWEST.search(results[slowest][1]) if results else None
-    return (f"{len(results)} processes side by side, {whole:.0f} s in all (the slowest is stretch {slowest}); "
+    name = indexes[slowest] if indexes else 0
+    return (f"{len(results)} processes side by side, {whole:.0f} s in all (the slowest is stretch {name}); "
             + "; ".join(parts)
-            + (f". The slowest suites of stretch {slowest}: {named.group(1).strip()}" if named else ""))
+            + (f". The slowest suites of stretch {name}: {named.group(1).strip()}" if named else ""))
 
 
 def stretches_of(argument: str) -> tuple[int, str] | None:
@@ -135,6 +176,12 @@ def late_of(argument: str, count: int) -> frozenset[int] | None:
     if any(index >= count for index in late) or len(late) >= count:
         return None
     return late
+
+
+def only_of(argument: str, late: frozenset[int]) -> str | None:
+    """The fourth argument: "early" or "late", which mean something only when
+    some stretches are late; None for anything else."""
+    return argument if argument in ("early", "late") and late else None
 
 
 def machine() -> str:
@@ -163,11 +210,12 @@ def last_words(output: str) -> str:
     return lines[-1][:300] if lines else "nothing"
 
 
-def phases_of(count: int, late: frozenset[int]) -> list[list[int]]:
+def phases_of(count: int, late: frozenset[int], only: str = "") -> list[list[int]]:
     """Which stretches are started together: the ones that are not late, and
-    when they have ended the late ones."""
-    first = [index for index in range(count) if index not in late]
-    second = [index for index in range(count) if index in late]
+    when they have ended the late ones. `only` leaves one of the two out:
+    "early" the late ones, "late" the others."""
+    first = [index for index in range(count) if index not in late] if only != "late" else []
+    second = [index for index in range(count) if index in late] if only != "early" else []
     return [phase for phase in (first, second) if phase]
 
 
@@ -208,42 +256,46 @@ def side_by_side(binary: str, count: int, cuts: str, indexes: list[int], directo
     return outcome
 
 
-def run(binary: str, count: int, cuts: str = "", late: frozenset[int] = frozenset()) -> int:
+def run(binary: str, count: int, cuts: str = "", late: frozenset[int] = frozenset(), only: str = "") -> int:
     started = time.time()
     outcome: dict[int, tuple[int, str, float, int]] = {}
     again: list[str] = []
+    phases = phases_of(count, late, only)
+    chosen = sorted(index for phase in phases for index in phase)
     with tempfile.TemporaryDirectory(prefix="litebird-stretches-") as directory:
-        for phase in phases_of(count, late):
+        for phase in phases:
             outcome.update(side_by_side(binary, count, cuts, phase, directory))
         # What failed beside the others and was no sanitizer's finding: once
         # more, one at a time, with the machine to itself.
-        for index in range(count):
+        for index in chosen:
             status, output, _, _ = outcome[index]
-            if count > 1 and may_be_run_again(status, output):
+            if len(chosen) > 1 and may_be_run_again(status, output):
                 second = side_by_side(binary, count, cuts, [index], directory, name="again")[index]
                 if second[0] == 0:
                     again.append(f"stretch {index} failed beside the others (exit status {status}; it ended with: "
                                  f"{last_words(output)}) and passed when it was run again by itself, in {second[2]:.0f} s")
                     outcome[index] = second
-    results = [(outcome[index][0], outcome[index][1]) for index in range(count)]
-    seconds = [outcome[index][2] for index in range(count)]
-    megabytes = [outcome[index][3] for index in range(count)]
+    results = [(outcome[index][0], outcome[index][1]) for index in chosen]
+    seconds = [outcome[index][2] for index in chosen]
+    megabytes = [outcome[index][3] for index in chosen]
     # What passed first, what failed last: the end of the output is the failure.
-    order = sorted(range(count), key=lambda index: (results[index][0] != 0, index))
-    for index in order:
-        sys.stdout.write(results[index][1])
-        if not results[index][1].endswith("\n"):
+    order = sorted(range(len(chosen)), key=lambda place: (results[place][0] != 0, place))
+    for place in order:
+        sys.stdout.write(results[place][1])
+        if not results[place][1].endswith("\n"):
             sys.stdout.write("\n")
-    passed, line = verdict(results)
+    passed, line = verdict(results, chosen, count)
     whole = time.time() - started
-    times = measured(results, seconds, megabytes, whole, late) + f". The machine: {machine()}"
+    times = measured(results, seconds, megabytes, whole, late, chosen) + f". The machine: {machine()}"
+    if len(chosen) < count:
+        times = f"{'stretch' if len(chosen) == 1 else 'stretches'} {numbers(chosen)} of {count}: " + times
     print(f"\nThe unit suites as {times}")
     for told in again:
         print(f"\nNOTE: {told}. A suite that measures time can fail beside busy processes; if this was not one, "
               f"it is a suite that does not always pass, and that is a finding.")
     if os.environ.get("GITHUB_ACTIONS") == "true":
         # Notices on the job: read through the API where the log cannot be.
-        print(f"::notice title=the unit suites as {count} processes::{times}")
+        print(f"::notice title=the unit suites as {len(chosen)} processes::{times}")
         for told in again:
             print(f"::warning title=a stretch of the unit suites passed only by itself::{told}")
     colour = "\033[1;32m" if passed else "\033[1;31mFAILED\033[0m: "
@@ -291,6 +343,36 @@ def self_test() -> int:
         ("an empty name is not a name", stretches_of("deep_one,,wide_two"), None),
         ("nor is anything that could not be a suite", stretches_of("deep-one"), None),
         ("the late stretches are a phase of their own, after the others", phases_of(4, frozenset({1, 2})), [[0, 3], [1, 2]]),
+        ("early is the ones that are not late, and nothing after them", phases_of(4, frozenset({1, 2}), "early"), [[0, 3]]),
+        ("late is the late ones, at once", phases_of(4, frozenset({1, 2}), "late"), [[1, 2]]),
+        ("early and late between them are every stretch once",
+         sorted(index for only in ("early", "late") for phase in phases_of(6, frozenset({2, 3}), only) for index in phase),
+         [0, 1, 2, 3, 4, 5]),
+        ("the fourth argument is early or late", (only_of("early", frozenset({1})), only_of("late", frozenset({1}))),
+         ("early", "late")),
+        ("...and nothing else, and nothing at all when no stretch is late",
+         (only_of("both", frozenset({1})), only_of("", frozenset({1})), only_of("late", frozenset())), (None, None, None)),
+        ("some of the stretches pass when each passed, and say what they leave to the other call",
+         verdict([three[0], three[2]], [0, 2], 3),
+         (True, "Stretches 0 and 2 of 3 passed: 280 of the 420 engine test suites. "
+                "The other 140 are the other stretches', which another call runs")),
+        ("one of some stretches, by its own number", verdict([three[1]], [1], 3),
+         (True, "Stretch 1 of 3 passed: 140 of the 420 engine test suites. "
+                "The other 280 are the other stretches', which another call runs")),
+        ("...a stretch that answers for another number fails", verdict([three[0]], [1], 3),
+         (False, "stretch 1 of 3 says it is stretch 0 of 3")),
+        ("...and one that failed fails, under its own number", verdict([three[0], (134, "Assertion failed\n")], [0, 2], 3),
+         (False, "stretch 2 of 3 failed (exit status 134)")),
+        ("some stretches that ran every suite left nothing for the others: the cuts are wrong",
+         verdict([(0, said(0, 3, 210, 420)), (0, said(2, 3, 210, 420))], [0, 2], 3),
+         (False, "stretches 0 and 2 of 3 ran 420 suites between them, and there are 420: nothing is left for the other stretches")),
+        ("the line of some stretches names them by their own numbers",
+         measured([three[0], three[2]], [10.0, 30.0], [1, 3], 30.0, frozenset({1}), [0, 2]),
+         "2 processes side by side, 30 s in all (the slowest is stretch 2); "
+         "stretch 0: 140 suites in 10 s, 1 MB at most; stretch 2: 140 suites in 30 s, 3 MB at most"),
+        ("late stretches run by themselves did not wait for anything",
+         measured([three[1]], [30.0], [2], 30.0, frozenset({1}), [1]),
+         "1 processes side by side, 30 s in all (the slowest is stretch 1); stretch 1: 140 suites in 30 s, 2 MB at most"),
         ("with none late there is one phase", phases_of(3, frozenset()), [[0, 1, 2]]),
         ("late stretches are numbers of stretches there are", late_of("1,2", 4), frozenset({1, 2})),
         ("no late stretch is no late stretch", late_of("", 4), frozenset()),
@@ -328,12 +410,13 @@ def self_test() -> int:
 def main(arguments: list[str]) -> int:
     if arguments == ["--self-test"]:
         return self_test()
-    stretches = stretches_of(arguments[1]) if len(arguments) in (2, 3) else None
-    late = late_of(arguments[2], stretches[0]) if stretches is not None and len(arguments) == 3 else frozenset()
-    if stretches is None or late is None:
+    stretches = stretches_of(arguments[1]) if len(arguments) in (2, 3, 4) else None
+    late = late_of(arguments[2], stretches[0]) if stretches is not None and len(arguments) >= 3 else frozenset()
+    only = only_of(arguments[3], late) if late is not None and len(arguments) == 4 else ""
+    if stretches is None or late is None or only is None:
         print(__doc__.strip(), file=sys.stderr)
         return 2
-    return run(arguments[0], stretches[0], stretches[1], late)
+    return run(arguments[0], stretches[0], stretches[1], late, only)
 
 
 if __name__ == "__main__":

@@ -67,7 +67,7 @@ whole() {  # whole FULLSHA: every check run of it has ended in success, and ther
   local runs; runs="$(runs_of "$1")"
   [[ "$runs" =~ ^completed/success\ x([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" -ge 10 ]
 }
-green() {  # green FULLSHA: `whole`, or the short run of a pull request with the label `lot` passed:
+green() {  # green FULLSHA: `whole`, or the short run of a pull request passed (every push's run):
            # two jobs or more in success and the rest skipped (.github/workflows/ci.yml). Enough for
            # a pull request to be taken into a lot, whose own run is every job; never for the lot.
   local runs; runs="$(runs_of "$1")"
@@ -178,19 +178,12 @@ start)
 look)
   end="$(cat "$STATE/end" 2>/dev/null)"; [ -n "$end" ] || { echo "no hour: tools/watch/watch.sh start \"YYYY-MM-DD HH:MM\" first"; exit 9; }
   timeout 60 python3 tools/ci/check_pr.py watch --beat "$end" >/dev/null 2>&1 || echo "the beat failed"
-  # The label `lot` gives a pull request the short run of CI while a watch is
-  # on (.github/workflows/ci.yml). It is put on once, so that an agent who
-  # took it off to have every job run is not given it back, and only where
-  # the branch has the check_pr.py that knows a short run from a whole one:
-  # an older one says "ready" to a merge on two jobs when no watch is on.
-  timeout 40 gh pr list --state open --limit 100 --json number,title,labels,headRefOid \
-      --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | select(([.labels[].name] | index("lot")) | not) | "\(.number) \(.headRefOid)"' 2>/dev/null \
-    | while read -r n full; do
-        grep -qx "$n" "$STATE/labelled" 2>/dev/null && continue
-        fetch_pr "$n" 2>/dev/null || continue
-        git grep -q 'def short_run_note' "$full" -- tools/ci/check_pr.py 2>/dev/null || continue
-        timeout 20 gh api -X POST "repos/$R/issues/$n/labels" -f 'labels[]=lot' > /dev/null 2>&1 && echo "$n" >> "$STATE/labelled" && echo "label lot: #$n"
-      done
+  # Until 25 November 2026 this put the label `lot` on every open pull
+  # request, which was what made its runs short while a watch was on. Every
+  # run a push starts on a pull request is short now, label or no label
+  # (.github/workflows/ci.yml), so nothing is labelled here: the label is
+  # only what `check_pr.py merge N` puts on and takes off to start every job
+  # when no watch is on.
   if [ -f "$STATE/watch.now" ]; then cp "$STATE/watch.now" "$STATE/watch.before"; else : > "$STATE/watch.before"; fi
   timeout 90 python3 tools/ci/check_pr.py watch > "$STATE/watch.now" 2>&1
   echo "look $(date -u '+%H:%M:%S')  main $(timeout 20 git ls-remote origin refs/heads/main | cut -c1-7)"

@@ -254,7 +254,10 @@ LOT_RE = re.compile(r"^\w+: (?:\*\*)?(?:the last )?lot of ")
 # pair of `tools/next_ids.py` let them do: in one hour of that morning four
 # pull requests of twelve had to be renumbered after they were finished.
 OWN_NUMBER_RE = re.compile(r"^Phase and finding:\s*(?:this|the) pull request'?s?(?: own)? number\b", re.IGNORECASE)
-# The label that gives a pull request the short run of CI (.github/workflows/ci.yml).
+# The label that starts every job of CI on a pull request when it is taken
+# off (.github/workflows/ci.yml). Until 25 November 2026 it was also what
+# made a pull request's runs short while it was on; every run a push starts
+# is short now, with or without it.
 LOT_LABEL = "lot"
 WATCH_ON_TEXT = (
     "While this line says ON and its last look is less than {quiet} minutes old, only the landing session "
@@ -865,11 +868,12 @@ def state_of(latest: list[tuple[str, str, str]]) -> tuple[str, list[str]]:
     """'passed', 'short', 'failed', 'running' or 'none' for the jobs of a commit,
     each (name, status, conclusion) in lower case, and the ones that are not green.
 
-    'short' is the run a pull request with the label `lot` gets while a watch
-    is on (.github/workflows/ci.yml): the build, the unit suites and the
-    documents passed, and every other job was skipped, because the whole
-    of CI runs on the lot the pull request lands in. It is enough to be taken
-    into a lot. It is not enough for anybody to merge on.
+    'short' is the run every push to a pull request gets
+    (.github/workflows/ci.yml): the build, the unit suites, the documents
+    and the corpora passed, and every other job was skipped, because the
+    whole of CI runs on the lot the pull request lands in, or when `merge
+    N` asks for it. It is enough to be taken into a lot. It is not enough
+    for anybody to merge on.
     """
     if not latest:
         return "none", []
@@ -894,9 +898,9 @@ def check_runs(sha: str) -> tuple[str, list[str]]:
 
 def short_run_note(head: str, number: int | None = None) -> str:
     """What to say of a short run to somebody who is about to merge on it."""
-    return (f"only the short run of CI passed on {head[:7]} (build, unit suites, documents, the corpora): its title "
-            "began with WIP: when the run started, or it has the label `lot`, which the landing session puts on "
-            "while a watch is on, and the sanitizer jobs and the deep pages were skipped. Nobody merges on that"
+    return (f"only the short run of CI passed on {head[:7]} (build, unit suites, documents, the corpora): that is "
+            "what every push to a pull request gets, and the sanitizer jobs and the deep pages were skipped. "
+            "Nobody merges on that"
             + ("" if number is None else
                f". The label is off now, which starts every job on {head[:7]}: ask again when they have ended"))
 
@@ -1506,9 +1510,9 @@ def check_merge(number: int, landing: bool = False) -> int:
         (report.ok if ok else report.no)(text)
     if "short" in (head_state, ran_state) and not watch_on and not landing:
         # No watch is on, so this agent merges, and the whole of CI has not
-        # run on what it would merge. A run is short for one of two reasons
-        # (.github/workflows/ci.yml): the label `lot`, or a title that began
-        # with WIP: when the run started.
+        # run on what it would merge. Every run of a pull request is short
+        # (.github/workflows/ci.yml) but the one that taking a label off
+        # starts, when the title has no WIP:.
         labelled = any(label.get("name") == LOT_LABEL for label in pr.get("labels") or [])
         if pr["title"].startswith("WIP"):
             # Any run started now would be short again.
@@ -1518,17 +1522,17 @@ def check_merge(number: int, landing: bool = False) -> int:
             gh("api", "-X", "DELETE", f"{REPO}/issues/{number}/labels/{LOT_LABEL}", check=False)
             report.note(f"the label `{LOT_LABEL}` is off #{number} now, which starts every job of CI on {head[:7]}: "
                         f"ask again when they have ended (`gh pr checks {number}`). If none has started in a minute, "
-                        "push an empty commit")
+                        "ask again, which starts them again: a push would start the short run and no more")
         else:
-            # No label to take off: the title began with WIP: when the run
-            # started. Putting the label on starts nothing; taking it off
-            # starts every job, now that the title has no WIP:.
+            # No label to take off. Putting the label on starts nothing;
+            # taking it off starts every job.
             gh("api", "-X", "POST", f"{REPO}/issues/{number}/labels", "-f", f"labels[]={LOT_LABEL}", check=False)
             gh("api", "-X", "DELETE", f"{REPO}/issues/{number}/labels/{LOT_LABEL}", check=False)
-            report.note(f"the run on {head[:7]} was the short one because the title began with WIP: when it started. "
+            report.note(f"the run on {head[:7]} was the short one, as every run a push starts is. "
                         f"Every job of CI has been started on {head[:7]} now (the label `{LOT_LABEL}` was put on #{number} "
                         f"and taken off, which does it): ask again when they have ended (`gh pr checks {number}`). "
-                        "If none has started in a minute, push an empty commit")
+                        "If none has started in a minute, ask again, which starts them again: a push would start "
+                        "the short run and no more")
     if quick:
         tree, called, why_not = tree_to_merge(number, head, main_sha, behind)
         if tree is None:

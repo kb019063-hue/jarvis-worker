@@ -38,22 +38,38 @@ on:
 # three times over: by its own run, by the lot's, and by the run on `main`
 # after the lot.
 #
-# - **The short run of a pull request that has the label `lot`, or whose
-#   title begins with `WIP:`**: the jobs
+# - **The short run, which is every run of a pull request that nobody asked
+#   more of**: the jobs
 #   of the plain build that take a minute or two ("Build & unit tests",
 #   "Documentation shape", the reftests, and the four corpus jobs: html5lib,
 #   JavaScript, script DOM and URLs, XML and web-platform-tests). The
 #   sanitizer jobs and the deep pages, which are the long ones, are skipped.
-#   The landing session puts the label on while a watch is on
-#   (`tools/watch/watch.sh look`), because the whole of CI then runs on the
-#   lot the pull request lands in, on `main` as it will be, which its own
-#   run never saw. A watch's own pull request (`WATCH:`) always gets every
-#   job. With no watch, `python3 tools/ci/check_pr.py merge N` takes the
-#   label off before it says "ready", which starts every job (`unlabeled`,
-#   above): nothing is merged by its own agent on a short run.
+#   While a watch is on, the whole of CI runs on the lot the pull request
+#   lands in, on `main` as it will be, which its own run never saw. A
+#   watch's own pull request (`WATCH:`) always gets every job. With no
+#   watch, `python3 tools/ci/check_pr.py merge N` asks for every job before
+#   it says "ready": it puts the label `lot` on the pull request and takes
+#   it off, and a run that taking a label off started (`unlabeled`, above)
+#   is every job, unless the title begins with `WIP:`. Nothing is merged
+#   by its own agent on a short run.
 #
-#   `WIP:` in the title is here because the label comes too late for the run
-#   that needs it least. The landing session looks every few minutes, and a
+#   Until 25 November 2026 a run was short only for a pull request that had
+#   the label `lot` (the landing session put it on at its next look) or a
+#   title that began with `WIP:` (below), and every other push was every
+#   job. A pull request opened without `WIP:` therefore started all of
+#   them: #431 was opened finished at 06:53 UTC that morning and began
+#   sixteen jobs (a run of `main`'s workflow was sixteen then), the lot it
+#   went into was pushed four minutes later, and at 06:58 twenty jobs had
+#   a machine and eleven waited, five of them the lot's (no more than
+#   twenty run at once). In the lot before it, eleven of eighteen jobs
+#   had waited 37 to 95 seconds. Nobody reads the long
+#   jobs of a pull request's own run: the lot's run is the one that lands
+#   it, and `merge N` starts its own.
+#
+#   `WIP:` in the title was put here on 24 November because the label came
+#   too late for the run that needed it least (it still decides one thing:
+#   a run started by taking a label off stays short under it). The
+#   landing session looks every few minutes, and a
 #   pull request's first push is before any look: at 18:10 UTC on 24
 #   November three pull requests that had just been opened each started all
 #   fourteen jobs, and the lot of 18:12, which one finished pull request was
@@ -80,7 +96,8 @@ on:
 #   builds twice, keeps them, and runs the unit suites of the plain build.
 #
 # Every other run is every job: a push to `main` that is not that merge, a
-# run started by hand, a pull request without the label.
+# run started by hand, a watch's own pull request, and the run `merge N`
+# starts on a pull request.
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: true
@@ -716,7 +733,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -754,7 +771,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -793,7 +810,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -851,7 +868,7 @@ jobs:
     # Not in the short run of a pull request. After the last merge of a lot it
     # builds and keeps the objects, and leaves the suites out (the top of this
     # file).
-    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -977,7 +994,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, and not after the last merge
     # of a lot (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -1014,7 +1031,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -1076,7 +1093,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -1119,7 +1136,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -1167,7 +1184,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -1208,7 +1225,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run
@@ -1258,7 +1275,7 @@ jobs:
     runs-on: ubuntu-latest
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
-    if: ${{ !(github.event_name == 'pull_request' && (contains(github.event.pull_request.labels.*.name, 'lot') || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
+    if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
     steps:
       - uses: actions/checkout@v4
       - name: Compile through ccache, with the objects of main's last run

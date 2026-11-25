@@ -258,13 +258,12 @@ within the hour, and the first lot was started again four times.
      checks that, and the lot goes on with the new head. In the first
      quarter of an hour of 24 November's watch three heads moved under
      one lot (#305, #313, #321) and none of them cost a run;
-   - **while a watch is on, a pull request's own run is the short one.**
-     The landing session puts the label `lot` on it (`watch.sh look`), and
-     CI then runs on it the jobs of the plain build that take a minute or
-     two: "Build & unit tests", "Documentation shape", the reftests and
-     the four corpus jobs (html5lib, JavaScript, script DOM and URLs, XML
-     and web-platform-tests). The six sanitizer jobs and the deep pages
-     are skipped. The whole of CI runs on the lot it
+   - **a pull request's own run is the short one, watch or no watch.**
+     Every push to it runs the jobs of the plain build that take a
+     minute or two: "Build & unit tests", "Documentation shape", the
+     reftests and the four corpus jobs (html5lib, JavaScript, script DOM
+     and URLs, XML and web-platform-tests). The eight sanitizer jobs and
+     the deep pages are skipped. The whole of CI runs on the lot it
      lands in, on `main` as it will be, which its own run never saw.
      **Jobs "skipped" on your pull request are that, and nothing to mend**;
      `python3 tools/ci/check_pr.py merge N` says so. You still run the
@@ -277,9 +276,10 @@ within the hour, and the first lot was started again four times.
      was not in it, and which member of the lot it was had to be found by
      building each alone, while five others waited. With the corpus jobs in its
      own run, such a pull request fails by itself two minutes after its push.
-     When no watch is on, `merge N` takes the label off, which starts every
-     job, and says "not ready" until they have passed:
-     nobody merges on a short run. The reason is the queue: a run was
+     When no watch is on, `merge N` starts every job on your head (it
+     puts the label `lot` on and takes it off: a run that taking a label
+     off started is the whole one) and says "not ready" until they have
+     passed: nobody merges on a short run. The reason is the queue: a run was
      twelve jobs and no more than twenty were seen running at once. At
      04:57 on 24 November 19 were running and 25 waiting, in
      six runs, and the lot that five finished pull requests were in had
@@ -289,20 +289,25 @@ within the hour, and the first lot was started again four times.
      lot's, and by the run on `main` after the lot. That last one now
      builds, keeps the objects and runs the plain unit suites, no more
      (`[objects only]` in the lot's last merge);
-   - **a pull request whose title begins with `WIP:` gets the short run
-     too, watch or no watch**, from its first push. The label comes with
-     the landing session's next look, which is after that push: at 18:10
-     on 24 November three pull requests that had just been opened each
-     started all fourteen jobs, and the lot of 18:12, which a finished
-     pull request was waiting for, had ten jobs without a runner two and
-     a half minutes after its push. Work in progress is merged on no run
-     at all. When the `WIP:` is off, every job runs before the merge: in
-     the lot while a watch is on, and with no watch because `merge N`
-     starts them on your head (it puts the label on and takes it off).
-     **With no watch, take the `WIP:` off before your last push**, and
-     that push's run is the whole one already. A sanitizer job you want
-     to see on work in progress: `make asan-build` and the part here
-     (`make help` lists them), or the push with the `WIP:` off;
+   - **it was not always every push.** Until 25 November a run was
+     short only under the label `lot`, which the landing session put on
+     at its next look, or under a title that began with `WIP:`; any
+     other push started every job. At 18:10 on 24 November three pull
+     requests that had just been opened each started all fourteen jobs,
+     and the lot of 18:12, which a finished pull request was waiting
+     for, had ten jobs without a runner two and a half minutes after its
+     push: that brought the `WIP:` rule. On 25 November #431 was opened
+     finished, with no `WIP:` to its name, and began all sixteen jobs
+     of a run at 06:53; the lot it went into was pushed at 06:57, and
+     at 06:58 twenty jobs had a machine and eleven waited, five of them
+     the lot's. In the lot before, eleven of eighteen jobs had waited
+     37 to 95 seconds. Nobody reads the long jobs of a pull request's own
+     run, so no push starts them now. Work in progress is merged on no
+     run at all. When the `WIP:` is off, every job runs before the
+     merge: in the lot while a watch is on, and with no watch because
+     `merge N` starts them on your head. A sanitizer job you want to see
+     on work in progress: `make asan-build` and the part here (`make
+     help` lists them);
    - **when a lot's run fails, every member that could be at fault stays
      out of the next lot until it is known which one it was.** The run
      names the job, not the pull request. On 24 November the lot of 08:38
@@ -611,8 +616,7 @@ asan`.
 - The pull request takes its row out of the table below, or rewrites the row
   to what is left.
 - The `WIP:` comes off the title, and CI is green on the head commit
-  (while a watch is on, that is the short run: "Working together",
-  point 4). Then
+  (a push's run is the short one: "Working together", point 4). Then
   `python3 tools/ci/check_pr.py merge N` says who merges ("Working
   together", point 3, above): the landing session while a watch is on, you
   when none is. When it is you: with a merge commit

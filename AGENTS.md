@@ -474,6 +474,14 @@ without one, and leaves the board and a watch out of the claims.
    Claims: #367, #389). What is pushed, the same chat or another agent
    can go on from. **The last push, the one `WIP:` comes off after, has
    no `[skip ci]`**: a head commit without a run is finished for nobody.
+   **When a push fails, the work is still only in the sandbox.** Try
+   again, then try `gh`, which talks to another host than `git push`
+   does: `git diff origin/main > /tmp/p.diff`, and the diff as a comment
+   on your pull request (`gh pr comment N --body-file`, the diff inside
+   a code block). If that fails too, your reply begins by saying so, and
+   carries the diff if it is small: the reply is the one thing that
+   outlives the sandbox for certain, and the next turn can read it
+   ("What has gone wrong", the sandbox: #419).
 
 ## The files every pull request changes
 
@@ -1281,6 +1289,15 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   of #221 and is on `main` (`git log --first-parent origin/main`). When
   `main` looks rewritten, look at `git rev-parse --is-shallow-repository`
   first.
+- **What is committed and not pushed is gone with it.** On 25 November
+  the agent of #419 measured six places where an array's `length` was
+  written through its "not writable", wrote the fix, saw it pass, and
+  committed it. `git push` could not reach GitHub from that sandbox
+  (`curl https://github.com` failed its TLS handshake, while two other
+  hosts answered in the same shell), the turn ended, and the sandbox
+  with it. The next turn found a branch with one commit, the claim, and
+  did the work a second time as #428. A commit is not kept until it is
+  pushed; "Before starting", point 5, says what to do when it cannot be.
 - **It can be suspended, and its clock is not.** When a turn ends, what was
   running stops where it was and goes on when the next turn begins, hours
   later by the clock. A check that measures time then reports nonsense:

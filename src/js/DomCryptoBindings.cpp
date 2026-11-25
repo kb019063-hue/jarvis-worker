@@ -1497,8 +1497,54 @@ void setup_subtle_crypto(Iface& I) {
         const JsValue& alg_val = args[0];
         const std::string alg_name = alg_val.is_object_like()
             ? ascii_lower_str(to_str(alg_val.get_property("name"))) : std::string();
+        if (alg_name == "ecdh") {
+            CryptoKeyState* base_key = state_of<CryptoKeyState>(args[1]);
+            if (!base_key || base_key->hash_alg != "ecdh" || base_key->type != "private" || base_key->key_bytes.size() != 32u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.deriveKey: ECDH requires a private ECDH CryptoKey.");
+            }
+            CryptoKeyState* pub_key = state_of<CryptoKeyState>(alg_val.get_property("public"));
+            if (!pub_key || pub_key->hash_alg != "ecdh" || pub_key->type != "public" || pub_key->key_bytes.size() != 65u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.deriveKey: ECDH public key must be a public ECDH CryptoKey.");
+            }
+            const JsValue& target_alg = args[2];
+            const std::string target_name = target_alg.is_object_like()
+                ? ascii_lower_str(to_str(target_alg.get_property("name"))) : std::string();
+            int len_bits = 0;
+            std::string key_hash_alg;
+            if (target_name == "aes-gcm" || target_name == "aes-cbc" || target_name == "aes-ctr") {
+                len_bits = static_cast<int>(to_double(target_alg.get_property("length")));
+                if (len_bits != 128 && len_bits != 192 && len_bits != 256) {
+                    return reject_with("OperationError", "SubtleCrypto.deriveKey: AES key length must be 128, 192, or 256.");
+                }
+                key_hash_alg = target_name;
+            } else if (target_name == "hmac") {
+                JsValue th = target_alg.get_property("hash");
+                std::string th_name = th.is_object_like() ? ascii_lower_str(to_str(th.get_property("name")))
+                                                          : ascii_lower_str(to_str(th));
+                if (th_name != "sha-1" && th_name != "sha-256" && th_name != "sha-384" && th_name != "sha-512") {
+                    return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: unsupported HMAC hash.");
+                }
+                len_bits = 256;
+                key_hash_alg = th_name;
+            } else {
+                return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: unsupported derivedKeyType '" + target_name + "'.");
+            }
+            p256::Fe px, py, sx, sy;
+            p256::be_to_fe(&pub_key->key_bytes[1], px);
+            p256::be_to_fe(&pub_key->key_bytes[33], py);
+            p256::scalar_mul(base_key->key_bytes.data(), px, py, sx, sy);
+            uint8_t shared[32];
+            p256::fe_to_be(sx, shared);
+            auto state = std::make_shared<CryptoKeyState>();
+            state->extractable = args[3].is_truthy();
+            state->hash_alg = key_hash_alg;
+            state->key_bytes.assign(shared, shared + static_cast<std::size_t>(len_bits / 8));
+            JsValue key = r.make("CryptoKey", state);
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key});
+            return undefined();
+        }
         if (alg_name != "pbkdf2" && alg_name != "hkdf") {
-            return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: only PBKDF2 and HKDF are supported.");
+            return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: only PBKDF2, HKDF, and ECDH are supported.");
         }
         CryptoKeyState* base_key = state_of<CryptoKeyState>(args[1]);
         if (!base_key || base_key->hash_alg != alg_name) {

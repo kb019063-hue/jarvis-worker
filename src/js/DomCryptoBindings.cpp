@@ -1039,8 +1039,8 @@ void setup_subtle_crypto(Iface& I) {
         };
         if (args.size() < 5) return reject_with("TypeError", "SubtleCrypto.importKey: 5 arguments required.");
         std::string fmt = to_str(args[0]);
-        if (fmt != "raw" && fmt != "jwk") {
-            return reject_with("NotSupportedError", "SubtleCrypto.importKey: only 'raw' and 'jwk' formats are supported.");
+        if (fmt != "raw" && fmt != "jwk" && fmt != "spki" && fmt != "pkcs8") {
+            return reject_with("NotSupportedError", "SubtleCrypto.importKey: only 'raw', 'jwk', 'spki', and 'pkcs8' formats are supported.");
         }
         std::vector<uint8_t> key_bytes;
         std::string ec_key_type;
@@ -1087,10 +1087,30 @@ void setup_subtle_crypto(Iface& I) {
         std::string alg_name = alg_val.is_object_like() ? ascii_lower_str(to_str(alg_val.get_property("name")))
                                                         : ascii_lower_str(to_str(alg_val));
         if (alg_name == "ecdh" || alg_name == "ecdsa") {
+            static constexpr uint8_t kSpkiPrefix[26] = {
+                0x30,0x59,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,
+                0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x03,0x42,0x00
+            };
+            static constexpr uint8_t kPkcs8Prefix[35] = {
+                0x30,0x41,0x02,0x01,0x00,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,
+                0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x04,0x27,0x30,0x25,0x02,0x01,0x01,0x04,0x20
+            };
             if (fmt == "jwk") {
                 if (ec_key_type.empty()) {
                     return reject_with("DataError", "SubtleCrypto.importKey: EC algorithm requires kty 'EC' JWK.");
                 }
+            } else if (fmt == "spki") {
+                if (key_bytes.size() != 91u || !std::equal(kSpkiPrefix, kSpkiPrefix + 26u, key_bytes.begin()) || key_bytes[26] != 0x04u) {
+                    return reject_with("DataError", "SubtleCrypto.importKey: invalid P-256 SPKI public key.");
+                }
+                key_bytes.erase(key_bytes.begin(), key_bytes.begin() + 26);
+                ec_key_type = "public";
+            } else if (fmt == "pkcs8") {
+                if (key_bytes.size() != 67u || !std::equal(kPkcs8Prefix, kPkcs8Prefix + 35u, key_bytes.begin())) {
+                    return reject_with("DataError", "SubtleCrypto.importKey: invalid P-256 PKCS8 private key.");
+                }
+                key_bytes.erase(key_bytes.begin(), key_bytes.begin() + 35);
+                ec_key_type = "private";
             } else if (fmt != "raw" || key_bytes.size() != 65u || key_bytes[0] != 0x04u) {
                 return reject_with("DataError", "SubtleCrypto.importKey: EC raw public key must be 65 bytes (0x04 || X || Y).");
             } else {
@@ -1255,13 +1275,47 @@ void setup_subtle_crypto(Iface& I) {
         };
         if (args.size() < 2) return reject_with("TypeError", "SubtleCrypto.exportKey: 2 arguments required.");
         std::string fmt = to_str(args[0]);
-        if (fmt != "raw" && fmt != "jwk") {
-            return reject_with("NotSupportedError", "SubtleCrypto.exportKey: only 'raw' and 'jwk' formats are supported.");
+        if (fmt != "raw" && fmt != "jwk" && fmt != "spki" && fmt != "pkcs8") {
+            return reject_with("NotSupportedError", "SubtleCrypto.exportKey: only 'raw', 'jwk', 'spki', and 'pkcs8' formats are supported.");
         }
         CryptoKeyState* key = state_of<CryptoKeyState>(args[1]);
         if (!key) return reject_with("TypeError", "SubtleCrypto.exportKey: key must be a CryptoKey.");
         if (!key->extractable) {
             return reject_with("InvalidAccessError", "SubtleCrypto.exportKey: key is not extractable.");
+        }
+        if (fmt == "spki") {
+            if ((key->hash_alg != "ecdh" && key->hash_alg != "ecdsa") || key->type != "public" || key->key_bytes.size() != 65u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.exportKey: 'spki' requires a public EC key.");
+            }
+            static constexpr uint8_t kSpkiPrefix[26] = {
+                0x30,0x59,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,
+                0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x03,0x42,0x00
+            };
+            JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
+            JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
+            JsValue out_ab = js_construct(ab_ctor, {num(91.0)});
+            JsValue out_u8 = js_construct(u8_ctor, {out_ab});
+            for (std::size_t i = 0; i < 26u; ++i) out_u8.set_property(std::to_string(i), num(static_cast<double>(kSpkiPrefix[i])));
+            for (std::size_t i = 0; i < 65u; ++i) out_u8.set_property(std::to_string(26u + i), num(static_cast<double>(key->key_bytes[i])));
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {out_ab});
+            return undefined();
+        }
+        if (fmt == "pkcs8") {
+            if ((key->hash_alg != "ecdh" && key->hash_alg != "ecdsa") || key->type != "private" || key->key_bytes.size() != 32u) {
+                return reject_with("InvalidAccessError", "SubtleCrypto.exportKey: 'pkcs8' requires a private EC key.");
+            }
+            static constexpr uint8_t kPkcs8Prefix[35] = {
+                0x30,0x41,0x02,0x01,0x00,0x30,0x13,0x06,0x07,0x2a,0x86,0x48,0xce,0x3d,0x02,0x01,
+                0x06,0x08,0x2a,0x86,0x48,0xce,0x3d,0x03,0x01,0x07,0x04,0x27,0x30,0x25,0x02,0x01,0x01,0x04,0x20
+            };
+            JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
+            JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
+            JsValue out_ab = js_construct(ab_ctor, {num(67.0)});
+            JsValue out_u8 = js_construct(u8_ctor, {out_ab});
+            for (std::size_t i = 0; i < 35u; ++i) out_u8.set_property(std::to_string(i), num(static_cast<double>(kPkcs8Prefix[i])));
+            for (std::size_t i = 0; i < 32u; ++i) out_u8.set_property(std::to_string(35u + i), num(static_cast<double>(key->key_bytes[i])));
+            if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {out_ab});
+            return undefined();
         }
         if (fmt == "jwk") {
             JsValue obj_ctor = r.window.is_object() ? r.window.get_property("Object") : JsValue();

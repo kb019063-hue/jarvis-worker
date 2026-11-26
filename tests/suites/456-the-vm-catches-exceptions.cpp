@@ -34,9 +34,9 @@ TEST(the_bytecode_vm_catches_exceptions) {
     agree("try{throw {x:7}}catch(e){gc();e.x}", "7");
     agree("function f(){try{throw 1}catch(e){return e}}try{throw f()}catch(e){e+1}", "2");
     agree("var it={};it[Symbol.iterator]=function(){throw 'iter'};try{var [x]=it}catch(e){e}", "iter");
-    // These require finalizer completions, pattern binding or control-flow
+    // These require return-through-finalizer, pattern binding or control-flow
     // unwinding that is not implemented, so the compiler refuses them.
-    for (const char* source : {"try{1}finally{2}", "try{throw [1]}catch([e]){e}",
+    for (const char* source : {"function f(){try{}finally{return 2}}f()", "try{throw [1]}catch([e]){e}",
                                "function f(){try{return 1}catch(e){}}f()",
                                "while(true){try{throw 1}catch(e){break}}",
                                "try{throw 3}catch(e){function f(){return e}f()}"}) {

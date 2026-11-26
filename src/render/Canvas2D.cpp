@@ -28,20 +28,23 @@ constexpr int kMaxTextBufferHeight = 512;
 /// DOMPointInit)`. Arrays are also accepted as the engine's existing `[x, y]`
 /// point spelling; the outer array remains the sequence of one to four corners.
 Point canvas_corner_radius(const JsValue& value) {
+    Point radius;
     if (value.is_array()) {
         const auto& pair = value.array_elements();
-        const float rx = pair.empty() ? 0.0f : static_cast<float>(pair[0].to_number());
-        const float ry = pair.size() < 2 ? 0.0f : static_cast<float>(pair[1].to_number());
-        return Point{rx, ry};
-    }
-    if (value.is_object_like()) {
+        radius.x = pair.empty() ? 0.0f : static_cast<float>(pair[0].to_number());
+        radius.y = pair.size() < 2 ? 0.0f : static_cast<float>(pair[1].to_number());
+    } else if (value.is_object_like()) {
         const JsValue x = value.get_property("x");
         const JsValue y = value.get_property("y");
-        return Point{x.is_undefined() ? 0.0f : static_cast<float>(x.to_number()),
-                     y.is_undefined() ? 0.0f : static_cast<float>(y.to_number())};
+        radius.x = x.is_undefined() ? 0.0f : static_cast<float>(x.to_number());
+        radius.y = y.is_undefined() ? 0.0f : static_cast<float>(y.to_number());
+    } else {
+        radius.x = radius.y = static_cast<float>(value.to_number());
     }
-    const float radius = static_cast<float>(value.to_number());
-    return Point{radius, radius};
+    if (radius.x < 0.0f || radius.y < 0.0f) {
+        js_throw_range_error("roundRect radius components must be non-negative");
+    }
+    return radius;
 }
 
 // Strict-ish UTF-8 walker: invalid bytes become U+FFFD and consume at least
@@ -3199,6 +3202,9 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
             const float h = static_cast<float>(args[3].to_number());
             if (args.size() >= 5 && args[4].is_array()) {
                 const auto& a = args[4].array_elements();
+                if (a.empty() || a.size() > 4) {
+                    js_throw_range_error("roundRect requires between one and four radii");
+                }
                 const auto r = [&a](size_t i) -> Point {
                     return i < a.size() ? canvas_corner_radius(a[i]) : Point{};
                 };
@@ -3211,10 +3217,8 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
                 } else if (a.size() == 3) {
                     const Point first = r(0), second = r(1), third = r(2);
                     get_ctx()->round_rect(x, y, w, h, first, second, third, second);
-                } else if (a.size() >= 4) {
-                    get_ctx()->round_rect(x, y, w, h, r(0), r(1), r(2), r(3));
                 } else {
-                    get_ctx()->rect(x, y, w, h);
+                    get_ctx()->round_rect(x, y, w, h, r(0), r(1), r(2), r(3));
                 }
             } else if (args.size() >= 5) {
                 const Point one = canvas_corner_radius(args[4]);

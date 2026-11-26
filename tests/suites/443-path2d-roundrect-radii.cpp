@@ -106,15 +106,13 @@ TEST(a_path2d_round_rect_draws_the_same_four_corners_as_the_context_own) {
     js.eval("gb.clearRect(0, 0, 60, 60); var p4 = new Path2D(); p4.roundRect(5, 5, 40, 40); gb.fill(p4);");
     assert(js.eval("gb.getImageData(6, 6, 1, 1).data[3]").to_string() == "255");
 
-    // --- Part 4: an **empty** sequence is a plain rectangle, not an empty path.
-    // The context's binding falls through `a.size() == 0` to `rect`, so this is the
-    // answer that keeps the two forms together — and drawing nothing was what a
-    // first version did.
-    assert(js.eval("same([[]]).split(':')[2]").to_string() == "true");
-    js.eval("gb.clearRect(0, 0, 60, 60); var p5 = new Path2D();"
-            "p5.roundRect(5, 5, 40, 40, []); gb.fill(p5);");
-    assert(js.eval("gb.getImageData(6, 6, 1, 1).data[3]").to_string() == "255");
-    assert(js.eval("gb.getImageData(25, 25, 1, 1).data[3]").to_string() == "255");
+    // --- Part 4: Phase 466 closes this suite's former empty-sequence fallback.
+    // Omitting radii above is a square rectangle; explicitly supplying `[]` is a
+    // list with an invalid cardinality and throws before either path is changed.
+    assert(js.eval("(function(){try{ga.roundRect(5,5,40,40,[]);return 'none';}"
+                   "catch(e){return e.name;}})()").to_string() == "RangeError");
+    assert(js.eval("(function(){try{var p5=new Path2D();p5.roundRect(5,5,40,40,[]);return 'none';}"
+                   "catch(e){return e.name;}})()").to_string() == "RangeError");
 
     // --- Part 5: **overlapping radii are scaled down**, not clipped. A 20×20 box
     // with 15-pixel corners has 30 pixels of radius across 20 of width; the rule is
@@ -130,11 +128,9 @@ TEST(a_path2d_round_rect_draws_the_same_four_corners_as_the_context_own) {
     // A mixed, non-square case with radii that must shrink unevenly.
     assert(js.eval("same([[12, 3, 7, 1]]).split(':')[2]").to_string() == "true");
 
-    // --- Part 6: a corner given as a **pair** `[x, y]`. `round_rect` is
-    // circular-only and the context's binding reads the pair with `to_number()`,
-    // which is `NaN` and so a square corner. The `Path2D` must answer the same,
-    // because two forms of one shape disagreeing is the finding this phase fixes;
-    // the limitation itself is recorded, not papered over on one side.
+    // --- Part 6: a corner given as a **pair** `[x, y]`. Phase 454 made the
+    // shared geometry elliptical; this suite's relational claim remains that the
+    // context and `Path2D` answer the same pixels for that accepted shape.
     assert(js.eval("same([[[8, 4], [0, 0], [0, 0], [0, 0]]]).split(':')[2]").to_string() == "true");
     assert(js.eval("same([[[6, 3]]]).split(':')[2]").to_string() == "true");
 

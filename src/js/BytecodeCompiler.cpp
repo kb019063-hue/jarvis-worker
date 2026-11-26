@@ -261,6 +261,12 @@ int BytecodeCompiler::resolve_local(const std::string& name) {
 }
 
 std::shared_ptr<BytecodeFunction> BytecodeCompiler::compile(const BlockStmt* program) {
+    // The parser collects script-scoped var names even inside skipped blocks
+    // and empty loops. They must exist before checked global reads run.
+    if (!m_is_function) {
+        if (const auto* script = dynamic_cast<const Program*>(program))
+            m_function->global_vars = script->var_names;
+    }
     // A script whose last statement is not an expression must still return
     // its accumulated completion, including in either arm of a try. Functions
     // return only explicit values and use their ordinary compilation path.
@@ -352,25 +358,59 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         compile_expr(thrown->argument.get());
         emit_opcode(OpCode::OpThrow);
     } else if (auto statement = dynamic_cast<const TryStmt*>(stmt)) {
-        if (!statement->has_handler || statement->finalizer ||
+        if ((!statement->has_handler && !statement->finalizer) ||
             (statement->param && statement->param->kind != Pattern::Kind::Identifier)) {
             throw std::runtime_error("This try form is not supported by the bytecode compiler");
         }
-        const size_t catch_jump = emit_jump(OpCode::OpTry);
-        ++m_protected_depth;
-        compile_stmt(statement->block.get());
-        --m_protected_depth;
-        emit_opcode(OpCode::OpEndTry);
-        const size_t end_jump = emit_jump(OpCode::OpJump);
-        patch_jump(catch_jump);
-        begin_scope();
-        if (statement->param) add_local(statement->param->name);
-        else emit_opcode(OpCode::OpPop);
-        ++m_catch_depth;
-        compile_stmt(statement->handler.get());
-        --m_catch_depth;
-        end_scope();
-        patch_jump(end_jump);
+        // A finalizer wraps the entire try/catch, including exceptions thrown
+        // by the catch. The outer handler is removed before running either
+        // copy of the finalizer so a finalizer throw replaces the pending one.
+        size_t finally_jump = 0;
+        if (statement->finalizer) {
+            finally_jump = emit_jump(OpCode::OpTry);
+            ++m_protected_depth;
+        }
+        if (statement->has_handler) {
+            const size_t catch_jump = emit_jump(OpCode::OpTry);
+            ++m_protected_depth;
+            compile_stmt(statement->block.get());
+            --m_protected_depth;
+            emit_opcode(OpCode::OpEndTry);
+            const size_t end_catch = emit_jump(OpCode::OpJump);
+            patch_jump(catch_jump);
+            begin_scope();
+            if (statement->param) add_local(statement->param->name);
+            else emit_opcode(OpCode::OpPop);
+            ++m_catch_depth;
+            compile_stmt(statement->handler.get());
+            --m_catch_depth;
+            end_scope();
+            patch_jump(end_catch);
+        } else {
+            compile_stmt(statement->block.get());
+        }
+        if (statement->finalizer) {
+            --m_protected_depth;
+            emit_opcode(OpCode::OpEndTry);
+            ++m_finalizer_depth;
+            compile_stmt(statement->finalizer.get());
+            --m_finalizer_depth;
+            const size_t end_finally = emit_jump(OpCode::OpJump);
+            patch_jump(finally_jump);
+            // The thrown value is a hidden local while the finalizer runs. It
+            // remains rooted, and ordinary finalizer locals get correct slots.
+            begin_scope();
+            const size_t pending_slot = m_locals.size();
+            add_local("");
+            ++m_finalizer_depth;
+            compile_stmt(statement->finalizer.get());
+            --m_finalizer_depth;
+            emit_opcode(OpCode::OpGetLocal);
+            emit_byte(static_cast<uint8_t>(pending_slot));
+            emit_opcode(OpCode::OpThrow);
+            end_scope();  // unreachable at runtime, restores compiler locals
+            patch_jump(end_finally);
+        }
     } else if (auto each = dynamic_cast<const ForEachStmt*>(stmt)) {
         // The VM has no per-iteration lexical environments or assignment
         // reference machinery for patterns. Refuse those forms rather than
@@ -521,7 +561,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         patch_jump(exit_jump);
         emit_opcode(OpCode::OpPop);
     } else if (auto break_stmt = dynamic_cast<const BreakStmt*>(stmt)) {
-        if (m_protected_depth || m_catch_depth) throw std::runtime_error("A jump from try or catch is not supported by the bytecode compiler");
+        if (m_protected_depth || m_catch_depth || m_finalizer_depth) throw std::runtime_error("A jump from try, catch or finally is not supported by the bytecode compiler");
         // ECMA-262 13.8. A labelled `break` is left to the tree-walker: labels
         // reach across statements, which this compiler has no table for, and
         // compiling an unlabelled jump for a labelled `break` would jump to
@@ -542,7 +582,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         // loop patches it when its body has been compiled.
         m_loops.back().breaks.push_back(emit_jump(OpCode::OpJump));
     } else if (auto continue_stmt = dynamic_cast<const ContinueStmt*>(stmt)) {
-        if (m_protected_depth || m_catch_depth) throw std::runtime_error("A jump from try or catch is not supported by the bytecode compiler");
+        if (m_protected_depth || m_catch_depth || m_finalizer_depth) throw std::runtime_error("A jump from try, catch or finally is not supported by the bytecode compiler");
         if (!continue_stmt->label.empty()) {
             throw std::runtime_error("A labelled continue is not supported by the bytecode compiler");
         }
@@ -574,7 +614,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             emit_byte(0xFF);
         }
     } else if (auto ret_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
-        if (m_protected_depth) throw std::runtime_error("A return from try is not supported by the bytecode compiler");
+        if (m_protected_depth || m_finalizer_depth) throw std::runtime_error("A return from try or finally is not supported by the bytecode compiler");
         if (ret_stmt->value) {
             compile_expr(ret_stmt->value.get());
         } else {
@@ -587,7 +627,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         }
         emit_opcode(OpCode::OpReturn);
     } else if (auto fn_decl = dynamic_cast<const FunctionDeclStmt*>(stmt)) {
-        if (m_catch_depth) throw std::runtime_error("A function in catch is not supported by the bytecode compiler");
+        if (m_catch_depth || m_finalizer_depth) throw std::runtime_error("A function in catch or finally is not supported by the bytecode compiler");
         const FunctionNode& node = *fn_decl->fn;
         require_simple_function(node);
         const std::vector<std::string> params = node.simple_param_names();
@@ -708,7 +748,8 @@ void BytecodeCompiler::require_simple_function(const FunctionNode& node) {
     }
 }
 
-void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hint) {
+void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hint,
+                                    bool quiet_unresolvable) {
     if (!expr) {
         emit_opcode(OpCode::OpUndefined);
         return;
@@ -729,7 +770,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
             emit_byte(static_cast<uint8_t>(local_slot));
         } else {
             size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(id->name));
-            emit_opcode(OpCode::OpGetGlobal);
+            emit_opcode(quiet_unresolvable ? OpCode::OpGetGlobal : OpCode::OpGetGlobalChecked);
             emit_byte(static_cast<uint8_t>(name_idx));
         }
     } else if (auto assign = dynamic_cast<const AssignExpr*>(expr)) {
@@ -758,7 +799,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
                     emit_byte(static_cast<uint8_t>(local_slot));
                 } else {
                     size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(id_target->name));
-                    emit_opcode(OpCode::OpGetGlobal);
+                    emit_opcode(OpCode::OpGetGlobalChecked);
                     emit_byte(static_cast<uint8_t>(name_idx));
                 }
             } else if (auto mem_target = dynamic_cast<const MemberExpr*>(assign->target.get())) {
@@ -827,7 +868,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
                     emit_byte(static_cast<uint8_t>(slot));
                 } else {
                     size_t name_idx = m_function->chunk.add_constant(JsValue::make_string(id->name));
-                    emit_opcode(OpCode::OpGetGlobal);
+                    emit_opcode(OpCode::OpGetGlobalChecked);
                     emit_byte(static_cast<uint8_t>(name_idx));
                 }
             } else if (auto mem = dynamic_cast<const MemberExpr*>(update->target.get())) {
@@ -873,13 +914,13 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
         // Postfix must yield the pre-change value; discard the new one.
         if (!update->prefix) emit_opcode(OpCode::OpPop);
     } else if (auto unary = dynamic_cast<const UnaryExpr*>(expr)) {
-        // ECMA-262 §13.5.3: `typeof` never throws, not even for an unresolvable
-        // reference. The VM answers an undeclared global with `undefined`
-        // (OpGetGlobal), which is the type such an operand has, so the
-        // operand is compiled the ordinary way and no reference token is
-        // needed here. `void` is still refused: nobody has asked for it.
+        // ECMA-262 §13.5.3 suppresses only an unresolvable reference;
+        // evaluating a compound operand can still throw. `void` is refused.
         if (unary->op == JsTokenType::Typeof) {
-            compile_expr(unary->operand.get());
+            // Only the bare identifier case may suppress an unresolvable
+            // reference; reads inside larger operands still throw.
+            const bool bare = dynamic_cast<const IdentifierExpr*>(unary->operand.get()) != nullptr;
+            compile_expr(unary->operand.get(), nullptr, bare);
             emit_opcode(OpCode::OpTypeOf);
         } else if (unary->op == JsTokenType::Minus || unary->op == JsTokenType::Bang) {
             compile_expr(unary->operand.get());
@@ -1018,7 +1059,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
     } else if (dynamic_cast<const YieldExpr*>(expr)) {
         throw std::runtime_error("Yield compiled via AST interpreter");
     } else if (auto fn_expr = dynamic_cast<const FunctionExpr*>(expr)) {
-        if (m_catch_depth) throw std::runtime_error("A function in catch is not supported by the bytecode compiler");
+        if (m_catch_depth || m_finalizer_depth) throw std::runtime_error("A function in catch or finally is not supported by the bytecode compiler");
         const FunctionNode& node = *fn_expr->fn;
         require_simple_function(node);
         const std::vector<std::string> params = node.simple_param_names();

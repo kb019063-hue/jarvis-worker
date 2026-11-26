@@ -426,6 +426,19 @@ void setup_document(Iface& I) {
     I.node_getter(doc, "styleSheets", [](Realm& r, Node& self) {
         return document_style_sheets(r, static_cast<Document&>(self));
     });
+    // CSSOM, "adopted style sheets": the sheets a script built with
+    // `new CSSStyleSheet()` and gave to the document, which the cascade reads
+    // after the document's own. Handed out once per document, so holding the
+    // list and holding `document.adoptedStyleSheets` are the same list.
+    I.node_accessor(doc, "adoptedStyleSheets",
+        [](Realm& r, Node& self) {
+            auto& document = static_cast<Document&>(self);
+            return cached(wrap(r, self.shared_from_this()), "adoptedStyleSheets",
+                          [&]() { return document_adopted_style_sheets(r, document); });
+        },
+        [](Realm& r, Node& self, const JsValue& value) {
+            set_document_adopted_style_sheets(r, static_cast<Document&>(self), value);
+        });
     I.node_getter(doc, "fonts", [](Realm& r, Node& self) {
         return cached(wrap(r, self.shared_from_this()), "fonts", [&]() { return document_fonts(r); });
     });

@@ -39,9 +39,10 @@ and closure shapes alongside the other pre-existing refused forms.
   WPT, and tree/XML differentials pass; JS is 1,153/1,158 with no timeouts.
   `make fuzz` passed.
 - Before merging main, the new and previous bytecode exception suites passed
-  as isolated ASan/UBSan stretches. Full local `make asan` was stopped after 150 seconds in the
-  existing deep-nesting suite; this is not a full sanitizer pass, so CI is
-  needed.
+  as isolated ASan/UBSan stretches. Full local `make asan` was stopped after
+  150 seconds in the existing deep-nesting suite. After merging main, rebuilding
+  the sanitizer test suite was killed by the sandbox memory limit even at
+  `-j1`; the merged tree requires full sanitizer CI.
 - `tests/suites/464-the-vm-runs-finally.cpp` checks normal, nested and throwing
   finalizers, throw replacement, catch ordering, scoped locals, GC, iterator
   closing, uncaught exceptions, and explicit refusals.

@@ -463,6 +463,11 @@ JsValue VM::interpret(std::shared_ptr<BytecodeFunction> function) {
     m_iterators.clear();
     m_handlers.clear();
 
+    // Script vars exist before execution, including declarations in skipped
+    // blocks and empty loops. Never overwrite an existing global value.
+    for (const auto& name : function->global_vars)
+        m_globals.try_emplace(name, JsValue::make_undefined());
+
     push(JsValue::make_undefined()); // slot 0 for main
     CallFrame frame;
     frame.function = function.get();
@@ -601,7 +606,23 @@ JsValue VM::run(size_t stop_depth) {
                 if (it != m_globals.end()) {
                     push(it->second);
                 } else {
+                    // The quiet answer, for the operand of `typeof` only
+                    // (§13.5.3 forbids that from throwing).
                     push(JsValue::make_undefined());
+                }
+                break;
+            }
+            case OpCode::OpGetGlobalChecked: {
+                const std::string name = read_constant().string_val.str();
+                auto it = m_globals.find(name);
+                if (it != m_globals.end()) {
+                    push(it->second);
+                } else {
+                    // ECMA-262 §6.2.5.5: GetValue on an unresolvable Reference is
+                    // a `ReferenceError`, which is what the tree-walker raises
+                    // (`JsEval.cpp`) and what this pushes `undefined` for
+                    // before Phase 440.
+                    js_throw_error(JsErrorKind::ReferenceError, name + " is not defined");
                 }
                 break;
             }

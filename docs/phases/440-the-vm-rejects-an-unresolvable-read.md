@@ -61,4 +61,7 @@ values and does not yet compare the tree-walker's reported uncaught errors to
 VM throws; the new suite checks those explicitly. No external conformance
 score or speed improvement is claimed.
 
-After merging main, `make test` passed 512/512 engine suites and 114 cross-origin checks, including the for-of and exception suites.
+After merging main, `make test` passed 512/512 engine suites and 114
+cross-origin checks, including the for-of and exception suites. The expanded
+`make verify-bytecode` on that tree reports 119/119 agree and 5/5 still
+refused; the other conformance and shape checks were also re-run successfully.

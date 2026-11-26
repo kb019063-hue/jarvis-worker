@@ -22,7 +22,7 @@ installs the codec globals.
 ## Verification
 
 `python3 tools/ci/check_suites.py` accepts the suite, and `make -j2 test`
-passes 508/508 engine suites and 114/114 cross-origin checks.
+passes 509/509 engine suites and 114/114 cross-origin checks.
 
 ## Scope
 

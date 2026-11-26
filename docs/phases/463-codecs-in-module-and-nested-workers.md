@@ -30,7 +30,7 @@ Streams or document-encoding work noted in the task row.
 ## Verification
 
 - `python3 tools/ci/check_suites.py` accepts the new one-`TEST` suite file.
-- `make -j2 test`: **508/508 engine suites** and **114/114 cross-origin
+- `make -j2 test`: **509/509 engine suites** and **114/114 cross-origin
   checks** pass, including the new worker-realm round trip.
 - `git diff --check` is clean.
 

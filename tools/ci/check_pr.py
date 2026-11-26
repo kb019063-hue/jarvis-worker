@@ -9,6 +9,10 @@
     python3 tools/ci/check_pr.py numbers     # the open pull requests that must change a number first
     python3 tools/ci/check_pr.py --self-test # how a claim and the board are read, on fixed texts; no network
 
+With no argument, with `claim N`, `merge N` and `watch` a line begins `!!`
+when a job of `main`'s own newest CI run has failed: the tree your branch was
+made from may be broken, and by whom is in that run (`run_report.py --run`).
+
 AGENTS.md says what a claim is and what has to be true before a merge. Each
 of those was missed at least once by an agent that had read it, because each
 is a thing to look up at a moment when the work feels finished. This looks
@@ -568,13 +572,18 @@ def quiet_note(title: str, changed: int, hours: float, agent: str | None, wrote:
     own page showed: its agent had written on #416 thirteen minutes before.
     It was reopened a quarter of an hour later. #367, 21 hours after its only
     push, had no word from its agent anywhere: that chat could not go on.
+    The person retired that agent and gave its task to another, which landed
+    it as #432 and left #367 open, as the note then told it to: it was closed
+    ten hours later, when the person asked. The note now says who closes it.
     """
     if hours < QUIET_HOURS or wrote or not title.startswith("WIP"):
         return None
     what = "nothing in it but its claim" if changed == 0 else "work in progress"
     whose = f"no comment in {agent}'s name anywhere" if agent else "it names no agent whose comments could be looked for"
     return (f"QUIET: no push for {hours:.1f} h ({what}), and {whose} in the last {QUIET_HOURS:g} h. It is still a claim, "
-            "and not yours to take or to close: ask in a comment on it, and tell the person you work for")
+            "and not yours to take or to close: ask in a comment on it, and tell the person you work for. "
+            "(Only when the person has told you that its agent is retired and its task is yours: say so on it, "
+            + ("" if changed == 0 else "take its commits, ") + "and close it. AGENTS.md, \"Before starting\", point 1)")
 
 
 def next_pair() -> str:
@@ -748,6 +757,46 @@ def show_number_clashes() -> int:
     return 0
 
 
+def main_note(run: dict | None, jobs: list[dict]) -> str | None:
+    """What an agent is told about the newest CI run on `main`: nothing until a
+    job of it has failed. `run` is an entry of `gh run list --json
+    databaseId,headSha,status,conclusion`, `jobs` the jobs of that run.
+
+    #449 was merged on 25 November at 21:32:51 with no CI run and broke
+    `main` for nine minutes. The first job of `main`'s own run had failed 49
+    seconds after the merge, 7 of 18 in the end, and nothing read that run:
+    a pull request begun at 21:35 (#451) was branched from the broken tree,
+    and its agent was told by hand half an hour later."""
+    if not run:
+        return None
+    bad = sorted(job["name"] for job in jobs if (job.get("conclusion") or "") in ("failure", "timed_out"))
+    if not bad:
+        return None
+    so_far = "" if run.get("status") == "completed" else " so far"
+    names = ", ".join(bad[:3]) + (f" and {len(bad) - 3} more" if len(bad) > 3 else "")
+    return (f"`main` is broken at {run['headSha'][:7]}: {len(bad)} job(s) of its own CI run failed{so_far} ({names}). "
+            f"`python3 tools/ci/run_report.py --run {run['databaseId']}` says why. If a merge did it, a branch made "
+            "from this `main` has it too: AGENTS.md, \"Working together\", point 6, says what to do; "
+            "measure nothing on that tree, and `git fetch origin && git merge origin/main` again when `main` is mended")
+
+
+def main_run_note() -> str | None:
+    """`main_note` for the newest run that a push to `main` started. A lookup
+    that fails says nothing: this is a warning, never a reason to stop."""
+    try:
+        listed = subprocess.run(("gh", "run", "list", "--branch", "main", "--event", "push", "--limit", "1",
+                                 "--json", "databaseId,headSha,status,conclusion"),
+                                capture_output=True, text=True, timeout=30)
+        runs = json.loads(listed.stdout or "[]")
+        if not runs or (runs[0].get("status") == "completed" and runs[0].get("conclusion") == "success"):
+            return None
+        jobs = subprocess.run(("gh", "api", f"{REPO}/actions/runs/{runs[0]['databaseId']}/jobs?per_page=100"),
+                              capture_output=True, text=True, timeout=30)
+        return main_note(runs[0], json.loads(jobs.stdout or "{}").get("jobs", []))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
+        return None
+
+
 def show_claims() -> int:
     prs = open_pull_requests()
     claims = open_claims(prs)
@@ -773,6 +822,9 @@ def show_claims() -> int:
         if NOT_A_CLAIM_RE.match(pr["title"]):
             print(f"\n#{pr['number']}  not a claim: {pr['title'][:100]}")
     print(f"\nnumbers: {next_pair()}")
+    broken = main_run_note()
+    if broken:
+        print(f"\n!! {broken}")
     return 0
 
 
@@ -861,6 +913,9 @@ def check_claim(number: int) -> int:
         report.ok(f"#{number}: {numbers_of(mine)}; no earlier open pull request has its numbers or its files")
     else:
         report.note(next_pair())
+    broken = main_run_note()
+    if broken:
+        report.note(f"!! {broken}")
     return 1 if report.failed else 0
 
 
@@ -1361,6 +1416,10 @@ def show_watch() -> int:
     print("\nnot now" + ("" if left else "\n    (none)"))
     for pr, text in left:
         print(f"    #{pr['number']} [{claim_of(pr).get('agent') or '-'}] {pr['headRefOid'][:7]}  {text}")
+    broken = main_run_note()
+    if broken:
+        # The landing session's `watch.sh look` shows the lines of this that are new.
+        print(f"\n!! {broken}")
     return 0 if watch.on else 1
 
 
@@ -1592,6 +1651,9 @@ def check_merge(number: int, landing: bool = False) -> int:
         if back and head.startswith(back[0]):
             report.no(f"the landing session sent it back at this head commit ({back[0][:7]}); what it wrote is on the "
                       f"board (`python3 tools/ci/check_pr.py landed {number}` prints it)")
+    broken = main_run_note()
+    if broken:
+        report.note(f"!! {broken}")
     if report.failed:
         print("\nnot ready")
         return 1
@@ -1675,6 +1737,12 @@ def self_test() -> int:
         ("a claim with no push and no word from its agent for two hours is called quiet",
          (quiet_note("WIP: a row", 0, 21.3, "Rowan", False) or "")[:112],
          "QUIET: no push for 21.3 h (nothing in it but its claim), and no comment in Rowan's name anywhere in the last 2 h"),
+        ("...and it says who may close it: the agent the person has given its task to, a retired agent's successor (#367)",
+         [(quiet_note("WIP: a row", changed, 21.3, "Rowan", False) or "").split("(Only when ")[-1] for changed in (0, 3)],
+         ["the person has told you that its agent is retired and its task is yours: say so on it, and close it. "
+          "AGENTS.md, \"Before starting\", point 1)",
+          "the person has told you that its agent is retired and its task is yours: say so on it, take its commits, and close it. "
+          "AGENTS.md, \"Before starting\", point 1)"]),
         ("...not one whose agent wrote somewhere in that time: #389, which was closed for its silence and was not silent",
          quiet_note("WIP: a row", 0, 2.6, "Vireo", True), None),
         ("...not one pushed to an hour ago, and not one that is finished and waits to land",
@@ -2029,6 +2097,29 @@ def self_test() -> int:
         ("...a watch does not make a failed run good",
          verdict(**moved, main_files=["src/js/JsEval.cpp"], head_state="failed", head_bad=["Build: failure"],
                  watch_on=True), ([True, False], False)),
+    ]
+
+    run_of_main = {"databaseId": 45705344585, "headSha": "9fd0d22" + "0" * 33, "status": "completed", "conclusion": "failure"}
+    jobs_of_main = [{"name": "Documentation shape", "conclusion": "failure"},
+                    {"name": "Build & unit tests", "conclusion": "failure"},
+                    {"name": "Render reftests (pixels)", "conclusion": "success"},
+                    {"name": "Sanitizers: fuzzing", "conclusion": None},
+                    {"name": "Deep and oversized pages: the dumps", "conclusion": "timed_out"},
+                    {"name": "JavaScript conformance (Node-verified corpus)", "conclusion": "failure"}]
+    broken_main = ("`main` is broken at 9fd0d22: 4 job(s) of its own CI run failed (Build & unit tests, Deep and oversized "
+                   "pages: the dumps, Documentation shape and 1 more). `python3 tools/ci/run_report.py --run 45705344585` says why.")
+    breaking_main = "`main` is broken at 9fd0d22: 1 job(s) of its own CI run failed so far (Documentation shape). `python3"
+    cases += [
+        ("main's newest run with every job passed or going: nothing is said",
+         main_note(run_of_main, [job for job in jobs_of_main if job["conclusion"] in ("success", None)]), None),
+        ("no run on main at all: nothing is said", main_note(None, []), None),
+        ("a job of main's own run failed: the commit, how many, three names, and the run to read",
+         (main_note(run_of_main, jobs_of_main) or "")[:len(broken_main)], broken_main),
+        ("...and while that run is still going it says so: one failed job is enough",
+         (main_note({**run_of_main, "status": "in_progress", "conclusion": None}, jobs_of_main[:1]) or "")[:len(breaking_main)],
+         breaking_main),
+        ("a job that was cancelled or skipped is not a failed one",
+         main_note(run_of_main, [{"name": "a", "conclusion": "cancelled"}, {"name": "b", "conclusion": "skipped"}]), None),
     ]
 
     names_stale = ["a head with main in it: quiet",

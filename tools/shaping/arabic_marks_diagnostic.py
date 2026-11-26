@@ -42,6 +42,26 @@ if __name__ == "__main__":
                  "".join(map(chr, (base, first, second))), "Arab", "rtl")
                 for base, first, second in itertools.product(bases, marks, marks)
             ]
+        elif "--ordering" in sys.argv:
+            sys.argv.remove("--ordering")
+            compare.CASES = [(name, text, "Arab", "rtl") for name, text in [
+                ("alef-madda-hamza-below", "\u0627\u0653\u0655"),
+                ("alef-hamza-above-hamza-below", "\u0627\u0654\u0655"),
+                ("precomposed-madda-hamza-below", "\u0622\u0655"),
+                ("precomposed-hamza-above-hamza-below", "\u0623\u0655"),
+                ("precomposed-madda-fatha-hamza-below", "\u0622\u064e\u0655"),
+                ("precomposed-hamza-above-kasra-hamza-below", "\u0623\u0650\u0655"),
+                ("alef-madda-hamza-above-block", "\u0627\u0653\u0654"),
+                ("waw-madda-fatha-hamza-above-block", "\u0648\u0653\u064e\u0654"),
+                ("beh-fathatan-fatha-shadda", "\u0628\u064b\u064e\u0651"),
+                ("beh-shadda-fatha-fathatan", "\u0628\u0651\u064e\u064b"),
+                ("beh-fatha-kasra-shadda", "\u0628\u064e\u0650\u0651"),
+                ("beh-hamza-above-fatha-shadda", "\u0628\u0654\u064e\u0651"),
+                ("beh-fatha-kasra-hamza-above", "\u0628\u064e\u0650\u0654"),
+                ("yeh-hamza-precomposed-madda-fatha-hamza", "\u0626\u0653\u064e\u0654"),
+                ("yeh-hamza-below-fatha-hamza-above", "\u064a\u0655\u064e\u0654"),
+                ("beh-shadda-fathatan-control", "\u0628\u0651\u064b"),
+            ]]
         sys.exit(compare.main())
     except (OSError, ValueError, subprocess.SubprocessError, ImportError) as exc:
         print(f"Arabic-mark diagnostic error: {exc}", file=sys.stderr)

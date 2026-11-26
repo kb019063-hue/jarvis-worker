@@ -461,6 +461,12 @@ JsValue VM::interpret(std::shared_ptr<BytecodeFunction> function) {
     m_stack.clear();
     m_frames.clear();
     m_iterators.clear();
+    m_handlers.clear();
+
+    // Script vars exist before execution, including declarations in skipped
+    // blocks and empty loops. Never overwrite an existing global value.
+    for (const auto& name : function->global_vars)
+        m_globals.try_emplace(name, JsValue::make_undefined());
 
     push(JsValue::make_undefined()); // slot 0 for main
     CallFrame frame;
@@ -487,6 +493,7 @@ JsValue VM::interpret(std::shared_ptr<BytecodeFunction> function) {
         }
         m_stack.clear();
         m_frames.clear();
+        m_handlers.clear();
         throw;
     }
 }
@@ -502,6 +509,7 @@ JsValue VM::call_compiled(const JsValue& function, const std::vector<JsValue>& a
     const size_t depth = m_frames.size();
     const size_t stack_size = m_stack.size();
     const size_t iterator_count = m_iterators.size();
+    const size_t handler_count = m_handlers.size();
     push(function);
     for (const auto& arg : args) push(arg);
     m_stack.resize(stack_size + 1 + static_cast<size_t>(code->arity), JsValue::make_undefined());
@@ -519,6 +527,7 @@ JsValue VM::call_compiled(const JsValue& function, const std::vector<JsValue>& a
             m_iterators.pop_back();
             if (!cursor->next_threw()) cursor->close_quietly();
         }
+        m_handlers.resize(handler_count);
         m_frames.resize(depth);
         m_stack.resize(stack_size);
         throw;
@@ -543,6 +552,9 @@ JsValue VM::run(size_t stop_depth) {
     };
 
     while (true) {
+        // Native operations may call back into this VM and grow m_frames.
+        // Reacquire the pointer after every instruction before reading the IP.
+        frame = &m_frames.back();
         // Collection stress, served at a bytecode boundary: the stack holds
         // every live value the VM owns, and the heap counts those handles, so
         // a collection here must free only what the script dropped. See
@@ -550,6 +562,7 @@ JsValue VM::run(size_t stop_depth) {
         if (Heap::default_heap().take_gc_stress_request()) {
             collect_garbage();
         }
+        try {
         uint8_t instruction = read_byte();
         auto op = static_cast<OpCode>(instruction);
 
@@ -593,7 +606,23 @@ JsValue VM::run(size_t stop_depth) {
                 if (it != m_globals.end()) {
                     push(it->second);
                 } else {
+                    // The quiet answer, for the operand of `typeof` only
+                    // (§13.5.3 forbids that from throwing).
                     push(JsValue::make_undefined());
+                }
+                break;
+            }
+            case OpCode::OpGetGlobalChecked: {
+                const std::string name = read_constant().string_val.str();
+                auto it = m_globals.find(name);
+                if (it != m_globals.end()) {
+                    push(it->second);
+                } else {
+                    // ECMA-262 §6.2.5.5: GetValue on an unresolvable Reference is
+                    // a `ReferenceError`, which is what the tree-walker raises
+                    // (`JsEval.cpp`) and what this pushes `undefined` for
+                    // before Phase 440.
+                    js_throw_error(JsErrorKind::ReferenceError, name + " is not defined");
                 }
                 break;
             }
@@ -698,6 +727,24 @@ JsValue VM::run(size_t stop_depth) {
             case OpCode::OpIteratorNext: {
                 if (m_iterators.empty()) throw std::runtime_error("OP_ITERATOR_NEXT without OP_ITERATOR_INIT");
                 push(m_iterators.back()->pull());
+                break;
+            }
+            case OpCode::OpIteratorStep: {
+                if (m_iterators.empty()) throw std::runtime_error("OP_ITERATOR_STEP without OP_ITERATOR_INIT");
+                // IteratorStep and IteratorValue happen before the loop body.
+                // A failure here must not close this iterator, even when a
+                // nested caller still has an enclosing iterator to close.
+                auto* cursor = m_iterators.back().get();
+                JsValue value;
+                try {
+                    value = cursor->pull(/*for_of=*/true);
+                } catch (...) {
+                    cursor->abandon();
+                    throw;
+                }
+                const bool yielded = !cursor->done();
+                push(std::move(value));
+                push(JsValue::make_boolean(yielded));
                 break;
             }
             case OpCode::OpIteratorDrain: {
@@ -849,6 +896,17 @@ JsValue VM::run(size_t stop_depth) {
                 break;
             }
 
+            case OpCode::OpTry: {
+                uint16_t offset = read_short();
+                m_handlers.push_back({m_frames.size(), m_stack.size(), m_iterators.size(), frame->ip + offset});
+                break;
+            }
+            case OpCode::OpEndTry:
+                m_handlers.pop_back();
+                break;
+            case OpCode::OpThrow:
+                js_throw(pop());
+
             case OpCode::OpCall: {
                 uint8_t arg_count = read_byte();
                 JsValue callee = peek(arg_count);
@@ -903,6 +961,24 @@ JsValue VM::run(size_t stop_depth) {
                 frame = &m_frames.back();
                 break;
             }
+        }
+        } catch (const std::exception& error) {
+            // A re-entrant run may only handle its own frames. The caller's
+            // C++ invocation must unwind before its handler resumes.
+            if (m_handlers.empty() || m_handlers.back().frame_depth <= stop_depth) throw;
+            JsValue value = js_value_from_exception(error);
+            Handler handler = m_handlers.back();
+            m_handlers.pop_back();
+            while (m_iterators.size() > handler.iterator_count) {
+                auto cursor = std::move(m_iterators.back());
+                m_iterators.pop_back();
+                if (!cursor->next_threw()) cursor->close_quietly();
+            }
+            m_frames.resize(handler.frame_depth);
+            m_stack.resize(handler.stack_size);
+            frame = &m_frames.back();
+            frame->ip = handler.target;
+            push(std::move(value));
         }
     }
 }

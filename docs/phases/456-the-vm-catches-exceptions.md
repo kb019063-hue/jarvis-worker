@@ -1,0 +1,56 @@
+# Phase 456 — the VM catches exceptions
+
+Task: the Phase 259 bytecode oracle's last original refusal, `try`/`catch`.
+Finding 456; agent Arena.
+
+## What was wrong
+
+`try { 1; } catch (e) { 2; }` completes with `1` in the tree-walker but was
+refused by the bytecode compiler. Exception handling cannot simply jump over
+the handler: an exception can cross a function frame, a reentrant native
+callback, or an open iterator, and must restore the right locals and preserve
+the thrown value.
+
+## What changed
+
+`OpTry` records the handler's frame, stack and iterator depths and its target;
+`OpEndTry` removes it on normal completion and `OpThrow` raises the original
+JavaScript value. A caught exception closes cursors opened inside that handler
+quietly, keeps outer cursors, restores the frame and stack, and places the
+caught value in a fresh local binding. Native exceptions are converted by the
+same operation as the tree-walker. A reentrant VM call cannot catch an exception
+in its suspended caller until its C++ invocation has unwound. Reacquiring the
+frame after an instruction avoids a stale pointer when callbacks grow the frame
+vector. Completion tracking makes a script's last statement return the result
+of its executed expression statements, including the original witness.
+
+The original refusal is first in the suite and moves atomically into AGREES,
+with 18 additional witnesses. The new refused cases protect unsupported forms.
+
+## Verification
+
+- `make verify-bytecode`: **119/119 agree and 5/5 still refused**.
+- `python3 tools/conformance/verify_bytecode_agreement.py --self-test`: 6 readings pass.
+- `make -j2 test`: 505/505 engine suites and 114 cross-origin checks pass.
+- Before merging main, `make deep` passed 1,332 runs and `make fuzz` passed. The normal HTML,
+  DOM, URL, XML and WPT checks and tree/XML differentials pass. A clean
+  `make js-conformance` rerun passed 1,153/1,158, with no crashes or timeouts
+  (the earlier concurrent run had 2 timeouts).
+- Before merging main, the new suite passed as an isolated ASan/UBSan stretch. A full local
+  `make asan` was stopped after 150 seconds in the existing deep-nesting
+  suite; this is not a full sanitizer pass, which requires CI.
+- `tests/suites/456-the-vm-catches-exceptions.cpp` covers nested catches,
+  catch shadowing, native errors, frame and callback unwinding, iterator close,
+  garbage collection, completions, and explicit refusals.
+
+## Still open
+
+`finally`, destructuring catch parameters, returns or jumps from a protected
+block, and jumps or nested functions from catch are explicitly refused. Nested
+functions in catch could capture the catch binding; the VM has no closure
+machinery for it. Existing VM operations still diverge independently of the
+handler: `try{null.x}catch(e){e.name}` returns `undefined` in the VM rather
+than `TypeError`, and a non-callable invocation produces `Error` rather than
+`TypeError`. These are not fixed by this phase. More general closure, TDZ and
+receiver semantics remain open, and the bytecode VM is not the page engine. No browser conformance or speed
+improvement is claimed.

@@ -32,6 +32,11 @@ and closure shapes alongside the other pre-existing refused forms.
 
 - `make verify-bytecode`: **134/134 agree, 8/8 still refused**.
 - `python3 tools/conformance/verify_bytecode_agreement.py --self-test`: six readings pass.
+- `make -j2 all test`: 508 engine suites and 114 cross-origin checks passed;
+  the added normal-completion throw witness then passed in an isolated suite.
+- `make deep`: 1,332 runs, 0 failures. HTML, JS, DOM, URL and XML corpora,
+  WPT, and tree/XML differentials pass; JS is 1,153/1,158 with no timeouts.
+  Fuzz and sanitizer validation are in progress.
 - `tests/suites/464-the-vm-runs-finally.cpp` checks normal, nested and throwing
   finalizers, throw replacement, catch ordering, scoped locals, GC, iterator
   closing, uncaught exceptions, and explicit refusals.

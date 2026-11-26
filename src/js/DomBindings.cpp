@@ -747,7 +747,14 @@ JsValue construct_dom_exception(Realm& realm, const InterfaceDef&, Args args, co
 } // namespace
 
 JsValue make_dom_exception(Realm& realm, const std::string& name, const std::string& message) {
-    JsValue error = realm.make("DOMException");
+    Realm* owner = nullptr;
+    if (const JsValue& self = JsValue::current_this(); self.is_object_like()) {
+        if (JsObject* cell = self.object_val.get(); cell && cell->dom_node) {
+            owner = realm_if_any(*cell->dom_node);
+        }
+    }
+    if (!owner || !owner->alive) owner = &realm;
+    JsValue error = owner->make("DOMException");
     fill_dom_exception(error, name, message);
     return error;
 }

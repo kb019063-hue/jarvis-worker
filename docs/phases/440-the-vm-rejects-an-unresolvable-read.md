@@ -31,6 +31,13 @@ reports uncaught errors to stderr and returns `undefined`, while the VM raises
 `JsThrow` to its caller; the suite checks each path according to its interface.
 `make verify-bytecode` reports 75/75 agreeing and 2/2 still refused, and the
 normal engine suite reports 492/492 on this branch before merging main.
+`make conformance` reports 1973/1973, `make js-conformance` 1153/1158,
+`make dom-conformance` 678/678, `make url-conformance` 1188/1188,
+`make xml-conformance` 1718/1718, and `make wpt` 9570/9824 subtests
+with no unlisted failures. `make diff-trees` and `make diff-xml` report zero
+differences; `make deep` passes 1332 runs. `make check-numbers` and
+`make check-suites` pass. These are measurements of this branch, not a claim
+that the experimental VM runs the corpus.
 
 ## Still open
 

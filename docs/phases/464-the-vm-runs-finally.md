@@ -32,7 +32,7 @@ and closure shapes alongside the other pre-existing refused forms.
 
 - `make verify-bytecode`: **136/136 agree, 8/8 still refused**.
 - `python3 tools/conformance/verify_bytecode_agreement.py --self-test`: six readings pass.
-- After merging main, `make -j2 test` passed 516 engine suites and 114
+- After merging main, `make -j2 test` passed 517 engine suites and 114
   cross-origin checks. The two additional witnesses exercise Phase 440's
   unresolvable-read error through finally.
 - Before merging main, `make deep`: 1,332 runs, 0 failures. HTML, JS, DOM, URL and XML corpora,

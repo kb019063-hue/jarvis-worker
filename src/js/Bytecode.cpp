@@ -54,6 +54,7 @@ size_t Chunk::disassemble_instruction(std::ostream& os, size_t offset) const {
     switch (op) {
         case OpCode::OpConstant:
         case OpCode::OpGetGlobal:
+        case OpCode::OpGetGlobalChecked:
         case OpCode::OpSetGlobal:
         case OpCode::OpGetProperty:
         case OpCode::OpSetProperty: {

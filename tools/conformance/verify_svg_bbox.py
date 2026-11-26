@@ -29,6 +29,10 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 
 HTML = '''<!doctype html><svg id="s" width="200" height="100" viewBox="0 0 20 10">
+  <defs><rect id="source" x="1" y="2" width="3" height="4" transform="scale(2)"/><g id="source-group"><rect x="2" y="3" width="4" height="5"/></g><use id="cycle" href="#cycle"/></defs>
+  <use id="instance" href="#source" x="10" y="20"/>
+  <use id="group-instance" href="#source-group" x="4" y="5"/>
+  <use id="bad-instance" href="#cycle"/>
   <g id="g">
     <rect id="r" x="1" y="2" width="3" height="4"/>
     <circle id="c" cx="10" cy="10" r="4"/>
@@ -65,10 +69,33 @@ function box(id) {
   // a curve bound are not what this test is about.
   return [b.x, b.y, b.width, b.height].map(function (v) { return Math.round(v * 1000) / 1000; });
 }
-var ids = ['g', 'r', 'c', 'l', 'e', 'pg', 'pl', 'pa', 'round'];
+var ids = ['instance', 'group-instance', 'bad-instance', 'g', 'r', 'c', 'l', 'e', 'pg', 'pl', 'pa', 'round'];
 for (var i = 0; i < ids.length; ++i) {
   (function (id) { P('shape ' + id, function () { return box(id); }); })(ids[i]);
 }
+
+P('use updates when source changes', function () {
+  var n = document.getElementById('source');
+  n.setAttribute('width', '10');
+  var result = box('instance');
+  n.setAttribute('width', '3');
+  return result;
+});
+P('use missing reference', function () {
+  var n = document.createElementNS(SVG_NS, 'use');
+  n.setAttribute('href', '#absent'); n.setAttribute('x', '15');
+  return attached(n, boxOf);
+});
+P('nested use', function () {
+  var n = document.createElementNS(SVG_NS, 'use');
+  n.setAttribute('href', '#instance'); n.setAttribute('x', '3');
+  return attached(n, boxOf);
+});
+P('use own transform excluded', function () {
+  var n = document.getElementById('instance');
+  n.setAttribute('transform', 'translate(100,0)');
+  var result = boxOf(n); n.removeAttribute('transform'); return result;
+});
 
 P('is an SVGRect', function () { return document.getElementById('r').getBBox().constructor.name; });
 P('is a fresh object', function () {

@@ -394,6 +394,7 @@ public:
     JsEnvironment* parent_raw() const { return m_parent.get(); }
     std::vector<Binding>& bindings() { return m_bindings; }
     const std::vector<Binding>& bindings() const { return m_bindings; }
+    void reserve_bindings(std::size_t capacity) { m_bindings.reserve(capacity); }
 
     void collect_roots(std::vector<JsValue*>& roots) {
         if (m_is_with_scope) roots.push_back(&m_with_object);

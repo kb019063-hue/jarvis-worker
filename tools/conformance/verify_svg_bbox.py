@@ -74,6 +74,29 @@ for (var i = 0; i < ids.length; ++i) {
   (function (id) { P('shape ' + id, function () { return box(id); }); })(ids[i]);
 }
 
+P('use updates when source changes', function () {
+  var n = document.getElementById('source');
+  n.setAttribute('width', '10');
+  var result = box('instance');
+  n.setAttribute('width', '3');
+  return result;
+});
+P('use missing reference', function () {
+  var n = document.createElementNS(SVG_NS, 'use');
+  n.setAttribute('href', '#absent'); n.setAttribute('x', '15');
+  return attached(n, boxOf);
+});
+P('nested use', function () {
+  var n = document.createElementNS(SVG_NS, 'use');
+  n.setAttribute('href', '#instance'); n.setAttribute('x', '3');
+  return attached(n, boxOf);
+});
+P('use own transform excluded', function () {
+  var n = document.getElementById('instance');
+  n.setAttribute('transform', 'translate(100,0)');
+  var result = boxOf(n); n.removeAttribute('transform'); return result;
+});
+
 P('is an SVGRect', function () { return document.getElementById('r').getBBox().constructor.name; });
 P('is a fresh object', function () {
   var r = document.getElementById('r');

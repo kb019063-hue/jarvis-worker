@@ -299,6 +299,7 @@ REFUSES: list[Case] = [
     Case("function f(){try{return 1}finally{}}f()", "return from try through finalizer"),
     Case("function f(){try{}finally{return 2}}f()", "return from finalizer"),
     Case("while(true){try{}finally{break}}", "jump from finalizer"),
+    Case("try{}finally{let x=2;var f=function(){return x};f()}", "closure inside finalizer"),
     Case("try { throw [1]; } catch ([e]) { e; }", "catch pattern"),
     Case("function f(){try{return 1}catch(e){}} f()", "return from protected block"),
     Case("while(true){try{throw 1}catch(e){break}}", "jump from catch"),

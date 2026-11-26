@@ -621,7 +621,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         }
         emit_opcode(OpCode::OpReturn);
     } else if (auto fn_decl = dynamic_cast<const FunctionDeclStmt*>(stmt)) {
-        if (m_catch_depth) throw std::runtime_error("A function in catch is not supported by the bytecode compiler");
+        if (m_catch_depth || m_finalizer_depth) throw std::runtime_error("A function in catch or finally is not supported by the bytecode compiler");
         const FunctionNode& node = *fn_decl->fn;
         require_simple_function(node);
         const std::vector<std::string> params = node.simple_param_names();
@@ -1052,7 +1052,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
     } else if (dynamic_cast<const YieldExpr*>(expr)) {
         throw std::runtime_error("Yield compiled via AST interpreter");
     } else if (auto fn_expr = dynamic_cast<const FunctionExpr*>(expr)) {
-        if (m_catch_depth) throw std::runtime_error("A function in catch is not supported by the bytecode compiler");
+        if (m_catch_depth || m_finalizer_depth) throw std::runtime_error("A function in catch or finally is not supported by the bytecode compiler");
         const FunctionNode& node = *fn_expr->fn;
         require_simple_function(node);
         const std::vector<std::string> params = node.simple_param_names();

@@ -45,6 +45,11 @@ locates a focused element even if its index has changed.
   The sanitized regression, 513 non-deep suites, cross-origin checks,
   verifiers, conformance, generated XML, fuzz and 882 deep-page runs pass
   again; the four memory-intensive sanitizer unit suites remain unrun here.
+- After a second `main` merge, the normal suite passes 519 engine suites and
+  114 cross-origin checks; the conformance, differential, fuzz and deep checks
+  pass again. The sanitizer build, four non-deep stretches (515/519 suites),
+  cross-origin checks, verifiers, conformance, generated XML, fuzz and deep
+  checks pass again. The same four deep sanitizer unit suites remain unrun.
 
 ## What remains open
 

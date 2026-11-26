@@ -77,12 +77,20 @@ TEST(an_undeclared_read_throws_in_the_vm) {
     assert(vm_answer("var g = 7; g += 2; g;") == "9");
     assert(vm_answer("var g = 7; g++; g;") == "8");
     assert(vm_answer("missingName = 3; missingName;") == "3");
+    // Script var declarations exist before control reaches the declaration.
+    assert(vm_answer("pre; var pre = 1;") == "undefined");
+    assert(vm_answer("if (false) { var skipped = 1; } skipped;") == "undefined");
+    assert(vm_answer("for (var empty of []) {} empty;") == "undefined");
+    assert(vm_answer("var keep=7; for (var keep of []) {} keep;") == "7");
+    assert(vm_answer("try { missingName; } catch (e) { e.name; }") == "ReferenceError");
     {
         JsInterpreter js(nullptr);
         VM vm;
         auto result = vm.interpret(js.compile_to_bytecode("typeof missingName;"));
         assert(result.type == JsType::String);
         assert(result.to_string() == "undefined");
+        vm.set_global("already", JsValue::make_number(9));
+        assert(vm.interpret(js.compile_to_bytecode("var already; already;")).to_string() == "9");
         vm.set_global("presentButUndefined", JsValue::make_undefined());
         assert(vm.interpret(js.compile_to_bytecode("presentButUndefined;")).is_undefined());
         try {

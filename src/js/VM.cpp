@@ -463,6 +463,11 @@ JsValue VM::interpret(std::shared_ptr<BytecodeFunction> function) {
     m_iterators.clear();
     m_handlers.clear();
 
+    // Script vars exist before execution, including declarations in skipped
+    // blocks and empty loops. Never overwrite an existing global value.
+    for (const auto& name : function->global_vars)
+        m_globals.try_emplace(name, JsValue::make_undefined());
+
     push(JsValue::make_undefined()); // slot 0 for main
     CallFrame frame;
     frame.function = function.get();

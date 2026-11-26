@@ -261,6 +261,12 @@ int BytecodeCompiler::resolve_local(const std::string& name) {
 }
 
 std::shared_ptr<BytecodeFunction> BytecodeCompiler::compile(const BlockStmt* program) {
+    // The parser collects script-scoped var names even inside skipped blocks
+    // and empty loops. They must exist before checked global reads run.
+    if (!m_is_function) {
+        if (const auto* script = dynamic_cast<const Program*>(program))
+            m_function->global_vars = script->var_names;
+    }
     // A script whose last statement is not an expression must still return
     // its accumulated completion, including in either arm of a try. Functions
     // return only explicit values and use their ordinary compilation path.

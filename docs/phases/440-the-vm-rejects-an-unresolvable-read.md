@@ -21,6 +21,13 @@ Existing global values, including an explicitly present `undefined`, are not
 mistaken for missing bindings. Simple sloppy assignment still creates a global.
 The bytecode disassembler consumes and prints the new opcode's name operand.
 
+After main gained for-of support, its empty-loop test exposed another
+interaction: a script-scoped `var` in a skipped block or empty loop had never
+been inserted into the VM global map. The parser already collects these names;
+the compiled script now carries them, and VM entry inserts missing names as
+`undefined` without overwriting existing globals. Function-local vars use
+their existing local-slot hoisting.
+
 ## Verification
 
 `tests/suites/440-undeclared-read-throws.cpp` covers each read site, missing
@@ -48,8 +55,10 @@ reported as a local pass.
 ## Still open
 
 The VM is experimental, not the engine pages run on. General exception
-handling (`try`/`catch`), lexical TDZ, closures and other semantics listed in
-Phase 421 remain incomplete. The existing bytecode oracle compares returned
+handling (notably `finally`), lexical TDZ, closures and other semantics
+remain incomplete; Phase 456 added basic `try`/`catch` on main. The existing bytecode oracle compares returned
 values and does not yet compare the tree-walker's reported uncaught errors to
 VM throws; the new suite checks those explicitly. No external conformance
 score or speed improvement is claimed.
+
+After merging main, `make test` passed 512/512 engine suites and 114 cross-origin checks, including the for-of and exception suites.

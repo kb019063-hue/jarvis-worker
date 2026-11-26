@@ -17,6 +17,9 @@ the disassembler consumes its constant operand. The regression suite failed
 on the first witness with the fix stashed and passed with it restored;
 `make verify-bytecode` reported 75/75 agreement and 2/2 refusals.
 
-This does not implement VM `try`/`catch` or turn the VM into the page engine.
+Script-level `var` names collected by the parser are now instantiated when
+the VM starts, without overwriting existing values; otherwise checked reads of
+an empty for-of loop's binding incorrectly throw. Phase 456 subsequently added
+basic `try`/`catch`; this change does not make the VM the page engine.
 The existing differential probe cannot directly compare an uncaught error
 reported by `eval` to a VM exception; the new suite checks both interfaces.

@@ -1285,7 +1285,12 @@ void setup_subtle_crypto(Iface& I) {
                                                            : ascii_lower_str(to_str(hash_val));
             if (h_name.empty()) h_name = "sha-256";
             std::vector<uint8_t> digest;
-            if (h_name == "sha-256") { auto a = sha256_bytes(data.data(), data.size()); digest.assign(a.begin(), a.end()); }
+            if (h_name == "sha-1") {
+                auto a = sha1_bytes(data.data(), data.size());
+                digest.assign(32u, 0u);
+                std::copy(a.begin(), a.end(), digest.begin() + 12);
+            }
+            else if (h_name == "sha-256") { auto a = sha256_bytes(data.data(), data.size()); digest.assign(a.begin(), a.end()); }
             else if (h_name == "sha-384") digest = sha512_family_bytes(data.data(), data.size(), true);
             else if (h_name == "sha-512") digest = sha512_family_bytes(data.data(), data.size(), false);
             else return reject_with("NotSupportedError", "SubtleCrypto.sign: unsupported ECDSA hash '" + h_name + "'.");
@@ -1350,7 +1355,12 @@ void setup_subtle_crypto(Iface& I) {
                                                            : ascii_lower_str(to_str(hash_val));
             if (h_name.empty()) h_name = "sha-256";
             std::vector<uint8_t> digest;
-            if (h_name == "sha-256") { auto a = sha256_bytes(data.data(), data.size()); digest.assign(a.begin(), a.end()); }
+            if (h_name == "sha-1") {
+                auto a = sha1_bytes(data.data(), data.size());
+                digest.assign(32u, 0u);
+                std::copy(a.begin(), a.end(), digest.begin() + 12);
+            }
+            else if (h_name == "sha-256") { auto a = sha256_bytes(data.data(), data.size()); digest.assign(a.begin(), a.end()); }
             else if (h_name == "sha-384") digest = sha512_family_bytes(data.data(), data.size(), true);
             else if (h_name == "sha-512") digest = sha512_family_bytes(data.data(), data.size(), false);
             else return reject_with("NotSupportedError", "SubtleCrypto.verify: unsupported ECDSA hash '" + h_name + "'.");

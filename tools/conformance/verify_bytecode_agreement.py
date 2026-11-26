@@ -66,6 +66,25 @@ class Case:
 # Both paths must answer these alike. Each was run on the engine and read
 # before it was written here; none of them is a guess.
 AGREES: list[Case] = [
+    # Phase 464: the finalizer runs for normal and throwing completions.
+    Case("try { 1; } finally { 2; }", "the original finally refusal"),
+    Case("try{1;}finally{}", "empty finalizer preserves completion"),
+    Case("var x=0;try{x=1}finally{x+=2}String(x)", "normal finalizer runs once"),
+    Case("try{try{throw 7}finally{2}}catch(e){e}", "pending throw is resumed"),
+    Case("try{try{throw 7}finally{throw 8}}catch(e){e}", "finalizer throw overrides pending throw"),
+    Case("try{try{1}finally{throw 8}}catch(e){e}", "a finalizer can throw after normal completion"),
+    Case("var s='';try{try{missing_name}finally{s+='f'}}catch(e){s+=e.name}String(s)", "finally preserves the VM's missing-global ReferenceError"),
+    Case("try{try{missing_name}finally{throw 8}}catch(e){e}", "a finalizer throw replaces a missing-global ReferenceError"),
+    Case("var x='';try{throw 1}catch(e){x+=e}finally{x+='f'}String(x)", "finalizer follows catch"),
+    Case("try{try{throw 1}catch(e){throw 3}finally{2}}catch(e){e}", "catch throw passes through finalizer"),
+    Case("try{try{throw 1}catch(e){throw 3}finally{throw 4}}catch(e){e}", "finalizer overrides catch throw"),
+    Case("var x='';try{try{throw 1}finally{x+='a'}}catch(e){x+=e}finally{x+='b'}String(x)", "nested finalizers run inside out"),
+    Case("try{try{throw {v:8}}finally{let a=2;gc();a;}}catch(e){e.v}", "pending object survives finalizer locals and GC"),
+    Case("function f(){try{var x=1}finally{x+=2}return x}String(f())", "finalizer modifies a function local"),
+    Case("try{throw 2}catch(e){e}finally{let e=4;e}", "finalizer has its own lexical scope"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){s+='r';return {}}}};try{try{for(var x of a){throw 1}}finally{s+='f'}}catch(e){s+=e}String(s)", "iterator closes before an enclosing finalizer"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){s+='r';return {}}}};try{for(var x of a){try{throw 1}finally{s+='f'}}}catch(e){s+=e}String(s)", "an inner finalizer precedes iterator close"),
+
     # Phase 456: the protected block either completes or transfers the thrown
     # value to a fresh catch binding; no finalizer or pattern is implied.
     Case("try { 1; } catch (e) { 2; }", "the original try/catch refusal"),
@@ -280,7 +299,10 @@ AGREES: list[Case] = [
 # number, and so the day one of them starts working shows up as a failure
 # rather than as silence.
 REFUSES: list[Case] = [
-    Case("try { 1; } finally { 2; }", "finally"),
+    Case("function f(){try{return 1}finally{}}f()", "return from try through finalizer"),
+    Case("function f(){try{}finally{return 2}}f()", "return from finalizer"),
+    Case("while(true){try{}finally{break}}", "jump from finalizer"),
+    Case("try{}finally{let x=2;var f=function(){return x};f()}", "closure inside finalizer"),
     Case("try { throw [1]; } catch ([e]) { e; }", "catch pattern"),
     Case("function f(){try{return 1}catch(e){}} f()", "return from protected block"),
     Case("while(true){try{throw 1}catch(e){break}}", "jump from catch"),

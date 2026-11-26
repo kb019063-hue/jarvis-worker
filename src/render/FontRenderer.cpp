@@ -3096,50 +3096,50 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             if (run[i].cursive_chain >= 0) resolve_cursive(resolve_cursive, i);
         }
 
-        // Stage 4b: Resolve Mark attachment chains left to right (`mark_base < i`).
+        // Stage 4b: Propagate Mark attachment offsets (`mark_base < i`), matching
+        // HarfBuzz `OT::Layout::propagate_attachment_offsets`:
+        // - Logical / LTR output (`!reverse_rtl`): mark `i` paints after base `j`,
+        //   so subtract advances across `[j, i)`.
+        // - Visual RTL output (`reverse_rtl`): full buffer reversal places mark `i`
+        //   before base `j`, so add advances across `(j, i]`.
+        const bool reverse_rtl = visual_rtl && is_rtl;
         for (std::size_t i = 0; i < n; ++i) {
             const int32_t j = run[i].mark_base;
             if (j >= 0 && static_cast<std::size_t>(j) < i) {
                 int32_t sum_adv_x = 0;
                 int32_t sum_adv_y = 0;
-                for (std::size_t k = static_cast<std::size_t>(j); k < i; ++k) {
-                    sum_adv_x += run[k].x_advance;
-                    sum_adv_y += run[k].y_advance;
+                if (reverse_rtl) {
+                    for (std::size_t k = static_cast<std::size_t>(j) + 1u; k <= i; ++k) {
+                        sum_adv_x += run[k].x_advance;
+                        sum_adv_y += run[k].y_advance;
+                    }
+                    run[i].x_offset += run[static_cast<std::size_t>(j)].x_offset + run[i].cursive_dx + sum_adv_x;
+                    run[i].y_offset += run[static_cast<std::size_t>(j)].y_offset + run[i].cursive_dy + sum_adv_y;
+                } else {
+                    for (std::size_t k = static_cast<std::size_t>(j); k < i; ++k) {
+                        sum_adv_x += run[k].x_advance;
+                        sum_adv_y += run[k].y_advance;
+                    }
+                    run[i].x_offset += run[static_cast<std::size_t>(j)].x_offset + run[i].cursive_dx - sum_adv_x;
+                    run[i].y_offset += run[static_cast<std::size_t>(j)].y_offset + run[i].cursive_dy - sum_adv_y;
                 }
-                run[i].x_offset += run[static_cast<std::size_t>(j)].x_offset + run[i].cursive_dx - sum_adv_x;
-                run[i].y_offset += run[static_cast<std::size_t>(j)].y_offset + run[i].cursive_dy - sum_adv_y;
             }
         }
 
-        if (visual_rtl && is_rtl && n > 1u) {
-            // Reorder base+marks clusters right-to-left while keeping each base
-            // followed immediately by its own marks so pen advances match mark offsets.
-            std::vector<std::pair<std::size_t, std::size_t>> clusters;
-            std::size_t c = 0;
-            while (c < n) {
-                if (run[c].mark_base < 0 && is_mark_glyph(run[c].glyph)) {
-                    clusters.emplace_back(c, c + 1u);
-                    ++c;
-                    continue;
-                }
-                std::size_t ce = c + 1u;
-                while (ce < n && (run[ce].mark_base >= 0 || is_mark_glyph(run[ce].glyph))) {
-                    ++ce;
-                }
-                clusters.emplace_back(c, ce);
-                c = ce;
-            }
-            for (auto it = clusters.rbegin(); it != clusters.rend(); ++it) {
-                for (std::size_t k = it->first; k < it->second; ++k) {
-                    PositionedGlyph pg;
-                    pg.glyph = run[k].glyph;
-                    pg.x_advance = run[k].x_advance;
-                    pg.y_advance = run[k].y_advance;
-                    pg.x_offset = run[k].x_offset;
-                    pg.y_offset = run[k].y_offset;
-                    pg.is_mark = (run[k].mark_base >= 0 || is_mark_glyph(run[k].glyph));
-                    result.push_back(pg);
-                }
+        if (reverse_rtl && n > 1u) {
+            // Match HarfBuzz's final RTL buffer reversal (`[mark_k, ..., mark_1, base]`
+            // within each cluster, clusters ordered right-to-left). Both anchored marks
+            // (via Stage 4b's `(j, i]` advance sum) and unanchored zero-advance marks
+            // precede their base at its visual cell origin.
+            for (std::size_t k = n; k-- > 0;) {
+                PositionedGlyph pg;
+                pg.glyph = run[k].glyph;
+                pg.x_advance = run[k].x_advance;
+                pg.y_advance = run[k].y_advance;
+                pg.x_offset = run[k].x_offset;
+                pg.y_offset = run[k].y_offset;
+                pg.is_mark = (run[k].mark_base >= 0 || is_mark_glyph(run[k].glyph));
+                result.push_back(pg);
             }
         } else {
             for (const ShapingGlyph& st : run) {
@@ -4347,8 +4347,8 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
         prev_script = sc;
     }
 
-    const bool face_visual_rtl = visual_rtl && !pre_reversed;
     for (FaceRun& fr : runs) {
+        const bool face_visual_rtl = visual_rtl && (!pre_reversed || fr.is_rtl);
         if (fr.face) {
             const float upem = static_cast<float>(fr.face->units_per_em());
             const float scale = (upem > 0.0f) ? (font_size / upem) : 0.0f;
@@ -4375,7 +4375,7 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
             for (uint32_t cp : fr.cps) {
                 if (!is_join_control(cp)) vis.push_back(cp);
             }
-            if (face_visual_rtl && fr.is_rtl && vis.size() > 1u) {
+            if (visual_rtl && (pre_reversed || fr.is_rtl) && vis.size() > 1u) {
                 std::reverse(vis.begin(), vis.end());
             }
             for (uint32_t cp : vis) {
@@ -4387,35 +4387,40 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
                 fr.glyphs.push_back(shaped);
             }
         }
-    }
-
-    if (pre_reversed) {
-        std::vector<ShapedGlyph> logical_all;
-        for (const FaceRun& fr : runs) {
-            logical_all.insert(logical_all.end(), fr.glyphs.begin(), fr.glyphs.end());
-        }
-        if (visual_rtl && logical_all.size() > 1u) {
+        if (pre_reversed && visual_rtl && !fr.is_rtl && fr.face && fr.glyphs.size() > 1u) {
             std::vector<std::pair<std::size_t, std::size_t>> clusters;
             std::size_t c = 0;
-            while (c < logical_all.size()) {
-                if (logical_all[c].is_mark) {
+            while (c < fr.glyphs.size()) {
+                if (fr.glyphs[c].is_mark) {
                     clusters.emplace_back(c, c + 1u);
                     ++c;
                     continue;
                 }
                 std::size_t ce = c + 1u;
-                while (ce < logical_all.size() && logical_all[ce].is_mark) ++ce;
+                while (ce < fr.glyphs.size() && fr.glyphs[ce].is_mark) ++ce;
                 clusters.emplace_back(c, ce);
                 c = ce;
             }
-            out.reserve(logical_all.size());
+            std::vector<ShapedGlyph> reordered;
+            reordered.reserve(fr.glyphs.size());
             for (auto it = clusters.rbegin(); it != clusters.rend(); ++it) {
-                out.insert(out.end(),
-                           logical_all.begin() + static_cast<std::ptrdiff_t>(it->first),
-                           logical_all.begin() + static_cast<std::ptrdiff_t>(it->second));
+                reordered.insert(reordered.end(),
+                                 fr.glyphs.begin() + static_cast<std::ptrdiff_t>(it->first),
+                                 fr.glyphs.begin() + static_cast<std::ptrdiff_t>(it->second));
+            }
+            fr.glyphs = std::move(reordered);
+        }
+    }
+
+    if (pre_reversed) {
+        if (visual_rtl) {
+            for (auto it = runs.rbegin(); it != runs.rend(); ++it) {
+                out.insert(out.end(), it->glyphs.begin(), it->glyphs.end());
             }
         } else {
-            out = std::move(logical_all);
+            for (const FaceRun& fr : runs) {
+                out.insert(out.end(), fr.glyphs.begin(), fr.glyphs.end());
+            }
         }
         return out;
     }

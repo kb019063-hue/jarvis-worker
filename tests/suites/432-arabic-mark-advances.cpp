@@ -110,11 +110,11 @@ TEST(arabic_gdef_marks_zero_advances_after_gpos) {
     assert(stacked[1].x_advance == 0 && stacked[1].x_offset == -800 && stacked[1].y_offset == 100);
     assert(stacked[2].x_advance == 0 && stacked[2].x_offset == -800 && stacked[2].y_offset == 320);
 
-    // Visual RTL multi-cluster: `[MEEM + FATHA, BEH]` keeps total pen at 2400 (not 3600).
+    // Visual RTL multi-cluster: `[FATHA, MEEM, BEH]` keeps total pen at 2400 (not 3600).
     const auto rtl_two = mono_arab.shape_glyphs({0x0628, 0x0645, 0x064E}, true, true);
     assert(rtl_two.size() == 3);
-    assert(rtl_two[0].glyph == 2 && rtl_two[0].x_advance == 1200);
-    assert(rtl_two[1].glyph == 3 && rtl_two[1].x_advance == 0 && rtl_two[1].x_offset == -800);
+    assert(rtl_two[0].glyph == 3 && rtl_two[0].x_advance == 0 && rtl_two[0].x_offset == 400);
+    assert(rtl_two[1].glyph == 2 && rtl_two[1].x_advance == 1200);
     assert(rtl_two[2].glyph == 1 && rtl_two[2].x_advance == 1200);
 
     // 2. Timing control (`ZERO_WIDTH_MARKS_BY_GDEF_LATE`):
@@ -179,7 +179,7 @@ TEST(arabic_gdef_marks_zero_advances_after_gpos) {
             const auto marked_beh = host_mono.shape_glyphs({0x0628, 0x064E}, true, true);
             assert(plain_beh.size() == 1 && marked_beh.size() == 2);
             assert(marked_beh[0].x_advance + marked_beh[1].x_advance == plain_beh[0].x_advance);
-            assert(marked_beh[1].x_advance == 0 && marked_beh[1].y_advance == 0);
+            assert(marked_beh[0].is_mark && marked_beh[0].x_advance == 0 && marked_beh[0].y_advance == 0);
 
             const auto greeting = host_mono.shape_glyphs(
                 {0x0627, 0x0644, 0x0633, 0x0651, 0x064E, 0x0644, 0x064E, 0x0627, 0x0645, 0x064F},

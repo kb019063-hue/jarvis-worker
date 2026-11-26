@@ -556,7 +556,14 @@ own now, "Working together", point 2.) So:
    the watch of the evening before that held up six of the twenty-one
    that landed (#261, #281, #292, #293, #296, #298), each for another
    round of CI or to the end of the watch. So:
-   - rewrite your own row and no other line;
+   - rewrite your own row and no other line, **with a patch or `sed`,
+     never by writing the whole file**: a tool that writes a file of
+     1,600 lines can cut it short, or write the copy it read hours ago
+     over what others have added since (#452, under "What has gone
+     wrong"). `git diff origin/main --stat -- AGENTS.md` shows one or two
+     lines for a pull request that is right, and `python3
+     tools/ci/check_docs.py` fails one whose AGENTS.md has more than two
+     rows of the table, or more than 40 other lines, fewer than `main`'s;
    - a new row goes directly under the row of the task it came from, as
      two lines: an empty row, then the new row. The empty row that stood
      under your row then stands under the new one, between it and the
@@ -950,6 +957,25 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   What the repository can do is say so at once: `check_pr.py` now has
   a line that begins `!!` when a job of `main`'s own newest run has
   failed, and "Working together", point 6, says what to do then.
+- **An old copy of AGENTS.md, written over `main`'s.** #452 was finished
+  on 25 November on `main` of 14:12. Its AGENTS.md was that file cut off
+  after line 1442: the last 109 lines of "Open tasks" were gone. It
+  conflicted with `main`, so no run started, and it was sent back that
+  evening with the command that takes `main`'s file. It came back on 26
+  November at 06:05 as one commit on that morning's `main`, with the
+  same file: 206 lines short now, 58 of the 86 rows of the table and six
+  passages these rules had gained since, and three rows that other
+  pull requests had changed had their old text back. It merged
+  cleanly. Its run failed for the `#include` lines of its suite file
+  and for nothing else: no check read AGENTS.md for what was no longer
+  in it, and the 28 rows that were left had an empty row between them.
+  With those lines out every step of "Documentation shape" passes on
+  that tree, and a pull request whose run has passed is merged as it
+  is. `check_docs.py` now compares the file with
+  `main`'s ("The files every pull request changes", point 4), in every
+  run and in `check_pr.py merge N`, and the landing session asks the
+  same of a pull request's merge before it takes it. **Change your row
+  as one line; do not write that file whole.**
 - **A line of README.md cost 28 minutes.** Until 18 November every commit
   on `main` sent every finished pull request back for a whole CI run. That
   morning `main` moved eight times in three hours and twenty minutes, with

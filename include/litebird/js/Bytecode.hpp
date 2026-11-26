@@ -27,6 +27,8 @@ struct BytecodeFunction {
     std::string name;
     int arity{0};
     Chunk chunk;
+    // Script var declarations exist before any statement runs.
+    std::vector<std::string> global_vars;
     std::vector<std::shared_ptr<BytecodeFunction>> sub_functions;
 
     BytecodeFunction(std::string n = "", int a = 0)

@@ -21,7 +21,9 @@ public:
 
 private:
     void compile_stmt(const Stmt* stmt);
-    void compile_expr(const Expr* expr, const std::string* name_hint = nullptr);
+    // Only a bare identifier operand of typeof may quietly miss a global.
+    void compile_expr(const Expr* expr, const std::string* name_hint = nullptr,
+                      bool quiet_unresolvable = false);
     /// `switch (d) { … }` (ECMA-262 14.13): the discriminant is evaluated
     /// once, each clause's test is evaluated in source order until the first
     /// strict equality holds, and the body then runs from that clause to the

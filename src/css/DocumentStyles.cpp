@@ -531,6 +531,26 @@ StyleResolver DocumentStyles::build_resolver(
         return true;
     });
 
+    // What a script built and the document adopted (`document.adoptedStyleSheets`),
+    // in adoption order, after the document's own sheets -- the order CSSOM
+    // gives them, so a later adopted rule wins over an earlier one at equal
+    // specificity and both win over the document's.
+    //
+    // The CSSOM keeps its own model of a sheet, which this file cannot see: the
+    // two models are different types, and the text a sheet was written from is
+    // not kept after `insertRule`. So the record carries the sheet written back
+    // to CSS, and it is parsed here exactly as a `<style>`'s text is. An
+    // `@media` rule inside it needs no wrapper: `add_stylesheet` reads the
+    // media rules the parser found.
+    for (const auto& adopted : doc.adopted_sheets()) {
+        if (sheet_count >= kMaxTotalSheets) break;
+        if (!adopted || adopted->text.empty()) continue;
+        const StyleSheet parsed = CssParser::parse(adopted->text);
+        resolver.add_stylesheet(parsed);
+        register_font_faces(parsed, doc.url(), base_ctx, font_face_count);
+        ++sheet_count;
+    }
+
     return resolver;
 }
 

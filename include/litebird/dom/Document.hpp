@@ -6,6 +6,7 @@
 #include <functional>
 #include <string>
 #include <memory>
+#include <vector>
 #include <unordered_map>
 
 namespace litebird {
@@ -223,6 +224,27 @@ public:
     /// Attaches the default CSS + LayoutTree reflow updater if none is set.
     void install_default_layout_updater();
 
+    // --- Constructable stylesheets ---------------------------------------------
+    /// One sheet a script built (`new CSSStyleSheet()`) and the document
+    /// adopted (`document.adoptedStyleSheets = [...]`).
+    ///
+    /// `text` is the sheet written back to CSS, kept current by the CSSOM
+    /// side on every `replaceSync`/`insertRule`/`deleteRule`; the layout side
+    /// parses it into its own model at cascade build. `generation` is bumped
+    /// with it so a record already built can tell it changed.
+    struct AdoptedStyleSheet {
+        std::string text;
+        uint64_t generation{0};
+    };
+
+    /// The adopted sheets, in adoption order. Empty for a document no script
+    /// has adopted one into.
+    const std::vector<std::shared_ptr<AdoptedStyleSheet>>& adopted_sheets() const { return m_adopted_sheets; }
+    /// Replaces the adopted list, as `document.adoptedStyleSheets = [...]` does.
+    void set_adopted_sheets(std::vector<std::shared_ptr<AdoptedStyleSheet>> sheets) {
+        m_adopted_sheets = std::move(sheets);
+    }
+
     // --- Per-document subresource caches (CSS & images) ------------------------
     StyleSheetCache& stylesheet_cache();
     std::shared_ptr<ImageData> find_cached_image(const std::string& resolved_url, bool& in_cache) const;
@@ -263,6 +285,14 @@ private:
     LayoutUpdater m_layout_updater;
     uint64_t m_layout_tree_version{0};
     bool m_in_layout_update{false};
+
+    /// The stylesheets a script built and the document adopted, in order
+    /// (`document.adoptedStyleSheets`). They live here rather than in the JS
+    /// bindings because the cascade is built from the document, and they are
+    /// CSS **text**: the layout's CSS model and the CSSOM's are separate
+    /// types, and text is what an `insertRule`/`replaceSync` can always be
+    /// written back to. See `Document::adopted_sheets`.
+    std::vector<std::shared_ptr<AdoptedStyleSheet>> m_adopted_sheets;
 
     std::unique_ptr<StyleSheetCache> m_stylesheet_cache;
     std::unordered_map<std::string, std::shared_ptr<ImageData>> m_image_cache;

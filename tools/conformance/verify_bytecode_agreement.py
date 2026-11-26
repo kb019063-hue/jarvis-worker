@@ -73,6 +73,8 @@ AGREES: list[Case] = [
     Case("try{try{throw 7}finally{2}}catch(e){e}", "pending throw is resumed"),
     Case("try{try{throw 7}finally{throw 8}}catch(e){e}", "finalizer throw overrides pending throw"),
     Case("try{try{1}finally{throw 8}}catch(e){e}", "a finalizer can throw after normal completion"),
+    Case("var s='';try{try{missing_name}finally{s+='f'}}catch(e){s+=e.name}String(s)", "finally preserves the VM's missing-global ReferenceError"),
+    Case("try{try{missing_name}finally{throw 8}}catch(e){e}", "a finalizer throw replaces a missing-global ReferenceError"),
     Case("var x='';try{throw 1}catch(e){x+=e}finally{x+='f'}String(x)", "finalizer follows catch"),
     Case("try{try{throw 1}catch(e){throw 3}finally{2}}catch(e){e}", "catch throw passes through finalizer"),
     Case("try{try{throw 1}catch(e){throw 3}finally{throw 4}}catch(e){e}", "finalizer overrides catch throw"),

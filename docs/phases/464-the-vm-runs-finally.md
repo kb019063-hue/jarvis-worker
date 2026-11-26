@@ -24,21 +24,22 @@ loop runs after close. The compiler still refuses return or jumps across any
 protected block or finalizer, and functions declared in a finalizer, rather than
 pretending it can unwind those completions or capture lexical locals.
 
-The original refusal moved atomically to AGREES with 14 related cases and is
+The original refusal moved atomically to AGREES with 16 related cases and is
 first in the numbered suite. Four new refusals expose unsupported control flow
 and closure shapes alongside the other pre-existing refused forms.
 
 ## Verification
 
-- `make verify-bytecode`: **134/134 agree, 8/8 still refused**.
+- `make verify-bytecode`: **136/136 agree, 8/8 still refused**.
 - `python3 tools/conformance/verify_bytecode_agreement.py --self-test`: six readings pass.
-- Before merging main, `make -j2 test` passed 508 engine suites and 114
-  cross-origin checks.
-- `make deep`: 1,332 runs, 0 failures. HTML, JS, DOM, URL and XML corpora,
+- After merging main, `make -j2 test` passed 516 engine suites and 114
+  cross-origin checks. The two additional witnesses exercise Phase 440's
+  unresolvable-read error through finally.
+- Before merging main, `make deep`: 1,332 runs, 0 failures. HTML, JS, DOM, URL and XML corpora,
   WPT, and tree/XML differentials pass; JS is 1,153/1,158 with no timeouts.
   `make fuzz` passed.
-- The new and previous bytecode exception suites passed as isolated ASan/UBSan
-  stretches. Full local `make asan` was stopped after 150 seconds in the
+- Before merging main, the new and previous bytecode exception suites passed
+  as isolated ASan/UBSan stretches. Full local `make asan` was stopped after 150 seconds in the
   existing deep-nesting suite; this is not a full sanitizer pass, so CI is
   needed.
 - `tests/suites/464-the-vm-runs-finally.cpp` checks normal, nested and throwing

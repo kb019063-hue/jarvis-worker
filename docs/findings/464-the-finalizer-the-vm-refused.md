@@ -19,7 +19,7 @@ new suite.
 
 ## Verification
 
-`make verify-bytecode`: **134/134 agree and 8/8 still refused**. The numbered
+`make verify-bytecode`: **136/136 agree and 8/8 still refused**. The numbered
 suite exercises nested handlers, pending objects, iterator-close ordering,
 throw overrides and refused control-flow forms.
 

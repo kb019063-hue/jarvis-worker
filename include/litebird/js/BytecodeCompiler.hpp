@@ -98,6 +98,7 @@ private:
     bool m_is_function{false};
     int m_protected_depth{0};
     int m_catch_depth{0};
+    int m_finalizer_depth{0};
     int m_completion_slot{-1};
     std::vector<Loop> m_loops;
 };

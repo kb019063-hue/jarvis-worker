@@ -40,6 +40,11 @@ locates a focused element even if its index has changed.
   cross-origin checks pass. The four deep unit suites were not run locally:
   previous runs exceeded this sandbox's 3.8 GiB memory. CI's larger runners
   must cover them, so this is not a full local `make asan` pass.
+- After merging the then-current `main`, the same normal checks pass again:
+  517 engine suites, 114 cross-origin checks, fuzz and 1,332 deep-page runs.
+  The sanitized regression, 513 non-deep suites, cross-origin checks,
+  verifiers, conformance, generated XML, fuzz and 882 deep-page runs pass
+  again; the four memory-intensive sanitizer unit suites remain unrun here.
 
 ## What remains open
 

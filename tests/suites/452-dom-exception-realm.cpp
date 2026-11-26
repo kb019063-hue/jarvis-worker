@@ -1,11 +1,6 @@
 // Phase 452 — make_dom_exception asks the receiver's realm first.
 // Covers the borrowed-method case the row describes.
 
-#include "litebird/js/JsInterpreter.hpp"
-#include "litebird/dom/Document.hpp"
-#include "litebird/js/DomBindings.hpp"
-#include "litebird/js/EventLoop.hpp"
-
 TEST(dom_exception_uses_receiver_realm_when_borrowed) {
     using namespace litebird;
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));

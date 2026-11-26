@@ -29,6 +29,17 @@ locates a focused element even if its index has changed.
   invalid and out-of-range values, an HTML integer with whitespace and a
   suffix, legacy candidates, real focus/blur events, reverse navigation and
   changing a value followed by a layout rebuild.
+- Normal conformance and render checks pass; WPT reports 9,570/9,824 with all
+  254 failures already listed. `make diff-xml` has 0 differential failures and
+  3,000/3,000 round trips. `make fuzz` passes; `make deep DEEP_KINDS='--jobs 1'`
+  completes 1,332 runs over 465 pages with 0 failures.
+- ASan/UBSan: the build, verifier and conformance parts, generated XML and
+  fuzz pass; the deep-pages command with `--jobs 1` completes 882 runs over
+  315 pages with 0 failures. With `TEST_OPT=-O0`, four non-deep sanitizer unit
+  stretches pass 502/506 suites, including this regression, and the 114
+  cross-origin checks pass. The four deep unit suites were not run locally:
+  previous runs exceeded this sandbox's 3.8 GiB memory. CI's larger runners
+  must cover them, so this is not a full local `make asan` pass.
 
 ## What remains open
 

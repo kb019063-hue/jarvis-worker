@@ -423,3 +423,23 @@ matches improve **484/486 → 486/486** on `--matrix` and **3/16 → 16/16** on
 order (and unattached zero-advance mark origins on unanchored `DejaVuSansMono`
 composites) remains open; see `docs/phases/442-arabic-mark-ordering.md`.
 
+## RTL mark order and attachment offset propagation (Phase 467)
+
+Replacing the LTR-compensated `(j, i)` advance subtraction + cluster-preserving
+RTL reversal in `TrueTypeFont::shape_glyphs` with HarfBuzz's RTL `(j, i]`
+attachment offset propagation followed by full `std::reverse(run.begin(),
+run.end())` (and aligning `FontRenderer::shape_text` `pre_reversed` odd-level
+Bidi runs so RTL faces reverse inside `shape_glyphs`) emits `[mark_k, ...,
+mark_1, base]` in visual RTL order while preserving every anchored mark's visual
+origin and drawing unattached zero-advance marks at their following base's
+origin. Against HarfBuzz 12.1.0 (`uharfbuzz` 0.52.0), exact raw `match` reaches
+**13/13** supported `compare.py` cases on `DejaVuSans.ttf`/`DejaVuSans-Bold.ttf`
+(`11/11` on `DejaVuSansMono.ttf`/`DejaVuSansMono-Bold.ttf`), **5/5** and
+**12/12** on `hebrew_diagnostic.py` (default and `--permutations`), and
+**23/23**, **16/16**, and **486/486** (**384/384** supported on Mono/Mono-Bold)
+on `arabic_marks_diagnostic.py` (default, `--ordering`, and `--matrix`),
+eliminating all `26` `DejaVuSansMono.ttf` and `14` `DejaVuSansMono-Bold.ttf`
+unanchored-mark origin differences (`0` changed pixels at 16/32/64 px in
+`ink.py`); see `docs/phases/467-rtl-mark-order-and-origins.md`.
+
+

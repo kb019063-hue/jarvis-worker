@@ -44,6 +44,7 @@ enum class OpCode : uint8_t {
     // `[a, ...rest]` drains exactly the remainder.
     OpIteratorInit,     // pop the source, push it as the open cursor
     OpIteratorNext,     // pull one value (undefined once exhausted)
+    OpIteratorStep,     // for-of: push the value and whether it was yielded
     OpIteratorDrain,    // drain the rest into a new array and push it
     OpIteratorClose,    // the normal way out: report a broken `return`, pop it
     OpIsUndefined,      // push whether the top of stack is undefined
@@ -72,6 +73,9 @@ enum class OpCode : uint8_t {
     OpJump,
     OpJumpIfFalse,
     OpLoop,
+    OpTry,          // forward offset to catch; save frame, stack and iterator depths
+    OpEndTry,       // leave the protected block normally
+    OpThrow,        // throw the top value
 
     // Functions
     OpCall,
@@ -103,6 +107,7 @@ inline std::string_view opcode_name(OpCode op) {
     case OpCode::OpDefineTemplateRaw: return "OP_DEFINE_TEMPLATE_RAW";
     case OpCode::OpIteratorInit:     return "OP_ITERATOR_INIT";
     case OpCode::OpIteratorNext:     return "OP_ITERATOR_NEXT";
+    case OpCode::OpIteratorStep:     return "OP_ITERATOR_STEP";
     case OpCode::OpIteratorDrain:    return "OP_ITERATOR_DRAIN";
     case OpCode::OpIteratorClose:    return "OP_ITERATOR_CLOSE";
     case OpCode::OpIsUndefined:      return "OP_IS_UNDEFINED";
@@ -124,6 +129,9 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpTypeOf:       return "OP_TYPE_OF";
         case OpCode::OpJump:         return "OP_JUMP";
         case OpCode::OpJumpIfFalse:  return "OP_JUMP_IF_FALSE";
+        case OpCode::OpTry:          return "OP_TRY";
+        case OpCode::OpEndTry:       return "OP_END_TRY";
+        case OpCode::OpThrow:        return "OP_THROW";
         case OpCode::OpLoop:         return "OP_LOOP";
         case OpCode::OpCall:         return "OP_CALL";
         case OpCode::OpReturn:       return "OP_RETURN";

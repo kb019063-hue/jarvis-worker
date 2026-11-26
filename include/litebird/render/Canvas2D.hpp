@@ -264,6 +264,11 @@ public:
     void rect(float x, float y, float w, float h);
     void round_rect(float x, float y, float w, float h, float r);
     void round_rect(float x, float y, float w, float h, float r_tl, float r_tr, float r_br, float r_bl);
+    /// Four elliptical corner radii in clockwise order from top-left. `Point::x`
+    /// is the horizontal radius and `Point::y` the vertical one; the existing
+    /// scalar overloads end here with x == y so every form shares one geometry.
+    void round_rect(float x, float y, float w, float h,
+                    Point r_tl, Point r_tr, Point r_br, Point r_bl);
     void arc(float cx, float cy, float radius, float start_angle, float end_angle, bool anticlockwise = false);
     void ellipse(float cx, float cy, float rx, float ry, float rotation, float start_angle, float end_angle, bool anticlockwise = false);
     void arc_to(float x1, float y1, float x2, float y2, float radius);

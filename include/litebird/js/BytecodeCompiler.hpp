@@ -90,12 +90,17 @@ private:
         /// inside a switch (ECMA-262 14.13.4.1) targets the enclosing loop,
         /// so a `continue` skips over this context.
         bool is_switch{false};
+        bool is_for_of{false};
+        size_t iteration_locals{0};  ///< stack locals present before this loop's body
     };
 
     std::shared_ptr<BytecodeFunction> m_function;
     std::vector<Local> m_locals;
     int m_scope_depth{0};
     bool m_is_function{false};
+    int m_protected_depth{0};
+    int m_catch_depth{0};
+    int m_completion_slot{-1};
     std::vector<Loop> m_loops;
 };
 

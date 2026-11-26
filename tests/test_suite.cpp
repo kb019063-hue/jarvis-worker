@@ -7748,6 +7748,75 @@ TEST(subtle_crypto_ecdsa_sha384_and_sha512) {
     assert(interp.eval("ok384 === true && ok512 === true && mismatch === false").is_truthy());
 }
 
+TEST(crypto_key_algorithm_and_usages) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var aesAlg = null, aesUsages = null, ecAlg = null, ecUsages = null;
+        Promise.all([
+            crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']),
+            crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign', 'verify'])
+        ]).then(function(res) {
+            aesAlg = res[0].algorithm;
+            aesUsages = res[0].usages;
+            ecAlg = res[1].privateKey.algorithm;
+            ecUsages = res[1].privateKey.usages;
+        });
+    )");
+    assert(interp.eval("aesAlg !== null && aesAlg.name === 'AES-GCM' && aesAlg.length === 256").is_truthy());
+    assert(interp.eval("Array.isArray(aesUsages) && aesUsages.length === 2 && aesUsages[0] === 'encrypt' && aesUsages[1] === 'decrypt'").is_truthy());
+    assert(interp.eval("ecAlg !== null && ecAlg.name === 'ECDSA' && ecAlg.namedCurve === 'P-256'").is_truthy());
+    assert(interp.eval("Array.isArray(ecUsages) && ecUsages.length === 2 && ecUsages[0] === 'sign'").is_truthy());
+}
+
+TEST(subtle_crypto_hmac_length) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var algLen = 0, rawLen = 0;
+        crypto.subtle.generateKey({ name: 'HMAC', hash: 'SHA-256', length: 128 }, true, ['sign', 'verify'])
+            .then(function(k) {
+                algLen = k.algorithm.length;
+                return crypto.subtle.exportKey('raw', k);
+            })
+            .then(function(raw) {
+                rawLen = raw.byteLength;
+            });
+    )");
+    assert(interp.eval("algLen === 128 && rawLen === 16").is_truthy());
+}
+
+TEST(subtle_crypto_ecdsa_sha1) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var ok1 = null, okBad = null;
+        var msg = new Uint8Array([10, 20, 30]);
+        var bad = new Uint8Array([10, 20, 31]);
+        crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+            .then(function(pair) {
+                return crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-1' }, pair.privateKey, msg)
+                    .then(function(sig) {
+                        return Promise.all([
+                            crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-1' }, pair.publicKey, sig, msg),
+                            crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-1' }, pair.publicKey, sig, bad)
+                        ]);
+                    });
+            })
+            .then(function(res) {
+                ok1 = res[0];
+                okBad = res[1];
+            });
+    )");
+    assert(interp.eval("ok1 === true && okBad === false").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36740,6 +36809,9 @@ int main() {
     RUN_TEST(subtle_crypto_ec_spki_and_pkcs8);
     RUN_TEST(subtle_crypto_aes_kw_wrap_and_unwrap);
     RUN_TEST(subtle_crypto_ecdsa_sha384_and_sha512);
+    RUN_TEST(crypto_key_algorithm_and_usages);
+    RUN_TEST(subtle_crypto_hmac_length);
+    RUN_TEST(subtle_crypto_ecdsa_sha1);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

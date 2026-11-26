@@ -460,6 +460,10 @@ JsValue js_make_async_from_sync(const JsValue& sync_iterator) {
 
 } // namespace
 
+JsValue js_create_async_from_sync_iterator(const JsValue& sync_iterator) {
+    return js_make_async_from_sync(sync_iterator);
+}
+
 // ---------------------------------------------------------------------------
 // Programs
 // ---------------------------------------------------------------------------
@@ -1099,6 +1103,22 @@ JsValue JsInterpreter::invoke_function(const std::shared_ptr<const FunctionNode>
     }
 
     auto env = std::make_shared<JsEnvironment>(closure ? closure : m_global_env);
+    // The statically known bindings of a simple function are available before
+    // it runs. Reserve the bounded common frame so its `this`, parameters,
+    // `var` names and hoisted functions do not grow the vector one at a time.
+    // Dynamic declarations (for example, through eval) can still grow it later;
+    // a large estimate or complex parameters do not help the hot small-call case.
+    if (node->simple_params && !node->has_parameter_expressions) {
+        std::size_t capacity = node->params.size() + node->var_names.size();
+        if (!node->is_arrow) {
+            ++capacity; // `this`
+            if (node->uses_arguments) ++capacity;
+            if (node->is_class_constructor || node->uses_new_target) capacity += 2;
+            if (node->uses_super) ++capacity;
+        }
+        if (node->body) capacity += node->body->functions.size();
+        if (capacity > 1 && capacity <= 16) env->reserve_bindings(capacity);
+    }
     env->mark_var_scope();
     env->strict_mode = node->is_strict ? 1 : 0;
     if (!node->is_arrow) {
@@ -2276,7 +2296,19 @@ void JsInterpreter::assign_identifier(const std::string& name, const JsValue& va
         }
     }
     if (JsObject* global = m_global_object.object_val) {
-        if (global->properties.find(name) != global->properties.end()) {
+        if (auto property = global->properties.find(name); property != global->properties.end()) {
+            // `try_assign` above found no environment binding. An own writable
+            // data property on an unfrozen global object is the global-object
+            // record for a script `var`; the WindowExotic and assign-hook would
+            // only repeat that failed binding lookup before ordinary [[Set]]
+            // stores it. Skip those misses on the hot path; accessors,
+            // read-only properties, and frozen globals still need the generic
+            // setter, including its strict-mode refusal.
+            if (!global->frozen && !(property->flags & PropertyMap::Accessor) &&
+                (property->flags & PropertyMap::Writable)) {
+                property->second = value;
+                return;
+            }
             JsValue target = m_global_object;
             if (!target.set_property(name, value) && env->is_strict()) {
                 js_throw_type_error("Cannot set property '" + name + "' of this object");
@@ -3923,13 +3955,13 @@ JsValue JsInterpreter::eval_tagged_template(const TaggedTemplateExpr* expr, cons
 
 JsValue JsInterpreter::eval_update(const UpdateExpr* update, const EnvPtr& env) {
     const double delta = update->op == JsTokenType::PlusPlus ? 1.0 : -1.0;
-    // `i++` is the counter of every loop ever written, and it is almost always
-    // a binding of the scope that is running. The general path resolves a
-    // `Reference` -- copying the name into a std::string and the value into a
-    // JsValue -- reads it, converts it to a number, and walks the scope chain
-    // again to write it. Here the walk happens once and the write lands on
-    // the binding the walk found. The refusals keep the words the general
-    // path's `assign_identifier` gives them.
+    // `i++` is the counter of every loop ever written. For a scope binding,
+    // one lookup finds it and the write lands there instead of constructing a
+    // `Reference` and walking the chain again. A top-level `var` is a global
+    // object's own property in this tree, so its primitive data-property case
+    // gets the same treatment below. With scopes, accessors, read-only
+    // properties, coercions that can call user code and unresolved names keep
+    // the general reference path (and its refusal behavior).
     if (update->target->kind == NodeKind::Identifier && !env->has_with_ancestor()) {
         const std::string& name = static_cast<const IdentifierExpr*>(update->target.get())->name;
         if (JsEnvironment::Binding* binding = env->lookup(name)) {
@@ -3946,6 +3978,36 @@ JsValue JsInterpreter::eval_update(const UpdateExpr* update, const EnvPtr& env) 
             const double after = before + delta;
             binding->value = JsValue::make_number(after);
             return JsValue::make_number(update->prefix ? after : before);
+        }
+        // A global `var` declared by a script is an own property of the
+        // global object, not a JsEnvironment binding. Keep its numeric update
+        // on the one-walk path too, but not when the global is frozen. Only
+        // primitive values are safe here: ToNumeric on an object can call user
+        // code that deletes, replaces or makes the property non-writable, so
+        // those targets take the general Reference path below. Accessors and
+        // read-only properties do too.
+        if (JsObject* global = m_global_object.object_val) {
+            if (auto property = global->properties.find(name); property != global->properties.end() &&
+                !global->frozen && !(property->flags & PropertyMap::Accessor) &&
+                (property->flags & PropertyMap::Writable)) {
+                switch (property->second.type) {
+                    case JsType::Undefined:
+                    case JsType::Null:
+                    case JsType::Boolean:
+                    case JsType::Number:
+                    case JsType::String: {
+                        const double before = js_to_number(property->second);
+                        const double after = before + delta;
+                        property->second = JsValue::make_number(after);
+                        return JsValue::make_number(update->prefix ? after : before);
+                    }
+                    case JsType::Object:
+                    case JsType::Function:
+                    case JsType::NativeFunction:
+                    case JsType::Symbol:
+                        break;
+                }
+            }
         }
     }
     // The target is resolved once, so `a[i++]++` evaluates `i++` once.

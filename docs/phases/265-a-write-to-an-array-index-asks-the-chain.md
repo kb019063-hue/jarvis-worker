@@ -94,11 +94,11 @@ places on their receiver (`reverse`, `sort`, `shift`, `unshift`, `push`,
 
 ## 3. What is still open
 
-`sort` still does not do its `Get`, `Set` and `DeleteProperty` in the
-standard's order when `Array.prototype` has accessors:
-`sort/precise-comparefn-throws.js` and `sort/precise-prototype-element.js`
-remain, though `sort/precise-prototype-accessors.js` now passes. The row in
-`AGENTS.md` keeps that half open.
+At Phase 265, `sort/precise-comparefn-throws.js` and
+`sort/precise-prototype-element.js` were recorded as remaining, while
+`sort/precise-prototype-accessors.js` passed. Phase 453 reran all three on the
+current tree and found them passing; see [Phase 453](453-sort-accessor-order-regression-coverage.md).
+The row in `AGENTS.md` now records that half as closed.
 
 A setter reached this way is called with the array as `this` but is not
 re-entered for the length update that may follow — the ordering the standard

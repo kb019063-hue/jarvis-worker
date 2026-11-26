@@ -70,6 +70,7 @@ size_t Chunk::disassemble_instruction(std::ostream& os, size_t offset) const {
             return offset + 2;
         }
         case OpCode::OpJump:
+        case OpCode::OpTry:
         case OpCode::OpJumpIfFalse: {
             uint16_t jump = (static_cast<uint16_t>(code[offset + 1]) << 8) | code[offset + 2];
             os << " -> " << (offset + 3 + jump) << "\n";

@@ -2093,6 +2093,25 @@ struct Path2DState : JsExotic {
 
 Path2DState& this_path2d() { return this_state<Path2DState>("Path2D"); }
 
+/// The `(unrestricted double or DOMPointInit)` member used by `roundRect`.
+/// Inner arrays retain this engine's `[x, y]` point spelling as well.
+Point path_corner_radius(const JsValue& value) {
+    if (value.is_array()) {
+        const auto& pair = value.array_elements();
+        const float rx = pair.empty() ? 0.0f : static_cast<float>(to_double(pair[0]));
+        const float ry = pair.size() < 2 ? 0.0f : static_cast<float>(to_double(pair[1]));
+        return Point{rx, ry};
+    }
+    if (value.is_object_like()) {
+        const JsValue x = value.get_property("x");
+        const JsValue y = value.get_property("y");
+        return Point{x.is_undefined() ? 0.0f : static_cast<float>(to_double(x)),
+                     y.is_undefined() ? 0.0f : static_cast<float>(to_double(y))};
+    }
+    const float radius = static_cast<float>(to_double(value));
+    return Point{radius, radius};
+}
+
 /// One recorded call, from an argument list. Written once and used by every
 /// method so the offsets cannot drift between them.
 bool op_from_args(const std::string& name, Args args, Path2D::Op& op) {
@@ -2129,14 +2148,52 @@ bool op_from_args(const std::string& name, Args args, Path2D::Op& op) {
     }
     if (name == "rect") { need(4, "Path2D.rect"); op.kind = Path2D::Kind::Rect; op.a = number(0); op.b = number(1); op.c = number(2); op.d = number(3); return true; }
     if (name == "roundRect") {
-        need(4, "Path2D.roundRect"); op.kind = Path2D::Kind::RoundRect;
+        need(4, "Path2D.roundRect");
         op.a = number(0); op.b = number(1); op.c = number(2); op.d = number(3);
-        // One radius or four; the context's `round_rect` takes one, so four are
-        // averaged here rather than silently using the first. That is a
-        // limitation, not a decision, and the finding says so.
-        float r = 0.0f;
-        if (args.size() > 4 && !args[4].is_nullish()) r = static_cast<float>(to_double(args[4]));
-        op.e = r;
+        // `radii` is one number or a sequence of up to four, each of which may be
+        // itself a pair `[x, y]` for an elliptical corner. The context's binding
+        // already reads that grammar for its own `roundRect`; this records the
+        // same four corners so the replay goes through the same overload, and the
+        // two cannot drift. A single number, or no argument, stays the one-radius
+        // kind, which is what the context's own no-argument case does.
+        if (args.size() <= 4 || args[4].is_nullish()) {
+            op.kind = Path2D::Kind::RoundRect;
+            op.e = 0.0f;
+            return true;
+        }
+        std::vector<Point> corners;  // top-left, top-right, bottom-right, bottom-left
+        const JsValue& radii = args[4];
+        if (radii.is_array()) {
+            const auto& a = radii.array_elements();
+            std::vector<Point> given;
+            given.reserve(a.size());
+            for (const JsValue& value : a) given.push_back(path_corner_radius(value));
+            if (given.empty()) {
+                // Keep Phase 443's direct-binding-compatible empty-sequence answer.
+                op.kind = Path2D::Kind::Rect;
+                return true;
+            }
+            // CSS's clockwise spreading rule, now spreading both ellipse axes.
+            if (given.size() == 1) corners = {given[0], given[0], given[0], given[0]};
+            else if (given.size() == 2) corners = {given[0], given[1], given[0], given[1]};
+            else if (given.size() == 3) corners = {given[0], given[1], given[2], given[1]};
+            else corners = {given[0], given[1], given[2], given[3]};
+        } else {
+            const Point radius = path_corner_radius(radii);
+            corners = {radius, radius, radius, radius};
+        }
+        const auto same = [](Point left, Point right) {
+            return left.x == right.x && left.y == right.y;
+        };
+        // A circular radius common to all four keeps the compact one-radius kind.
+        if (corners[0].x == corners[0].y && same(corners[0], corners[1]) &&
+            same(corners[1], corners[2]) && same(corners[2], corners[3])) {
+            op.kind = Path2D::Kind::RoundRect;
+            op.e = corners[0].x;
+            return true;
+        }
+        op.kind = Path2D::Kind::RoundRectRadii;
+        for (int i = 0; i < 4; ++i) op.rr[i] = corners[static_cast<std::size_t>(i)];
         return true;
     }
     return false;

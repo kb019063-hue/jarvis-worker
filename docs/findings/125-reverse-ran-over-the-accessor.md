@@ -111,9 +111,10 @@ python3 tools/conformance/run_test262.py \
   (`shift|unshift/set-length-array-is-frozen.js`.)
 - **`Symbol.species`** is not consulted by `splice` (ten `create-species-*`
   cases); this engine has no `Symbol.species` at all.
-- **`sort`'s exact `get`/`set` order against `Array.prototype` accessors**
-  still differs in three `precise-*` cases: the values are right, the count and
-  order of the calls is not.
+- **`sort`'s exact `get`/`set` order against `Array.prototype` accessors** was
+  recorded as a remaining difference in three `precise-*` cases. A later rerun
+  found all three passing on the current tree; Phase 453 documents the evidence
+  and adds a standalone regression suite.
 - **`Proxy` and typed arrays** account for 15 of the 40 remaining failures in
   these ten directories; nothing about them is this task.
 - The copying methods keep a dense fast path only for a hole-free plain array

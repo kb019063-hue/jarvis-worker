@@ -24,6 +24,26 @@ constexpr int kMaxImageDataPixels = 16 * 1024 * 1024; // 16M pixels cap for JS I
 constexpr int kMaxTextBufferWidth = 16384;            // px cap for one rasterised text run
 constexpr int kMaxTextBufferHeight = 512;
 
+/// One `roundRect` radius from Web IDL's `(unrestricted double or
+/// DOMPointInit)`. Arrays are also accepted as the engine's existing `[x, y]`
+/// point spelling; the outer array remains the sequence of one to four corners.
+Point canvas_corner_radius(const JsValue& value) {
+    if (value.is_array()) {
+        const auto& pair = value.array_elements();
+        const float rx = pair.empty() ? 0.0f : static_cast<float>(pair[0].to_number());
+        const float ry = pair.size() < 2 ? 0.0f : static_cast<float>(pair[1].to_number());
+        return Point{rx, ry};
+    }
+    if (value.is_object_like()) {
+        const JsValue x = value.get_property("x");
+        const JsValue y = value.get_property("y");
+        return Point{x.is_undefined() ? 0.0f : static_cast<float>(x.to_number()),
+                     y.is_undefined() ? 0.0f : static_cast<float>(y.to_number())};
+    }
+    const float radius = static_cast<float>(value.to_number());
+    return Point{radius, radius};
+}
+
 // Strict-ish UTF-8 walker: invalid bytes become U+FFFD and consume at least
 // one byte, so any input terminates.
 uint32_t canvas_utf8_next(std::string_view s, std::size_t& pos) {
@@ -1972,45 +1992,66 @@ void CanvasRenderingContext2D::rect(float x, float y, float w, float h) {
 }
 
 void CanvasRenderingContext2D::round_rect(float x, float y, float w, float h, float r) {
-    round_rect(x, y, w, h, r, r, r, r);
+    round_rect(x, y, w, h, Point{r, r}, Point{r, r}, Point{r, r}, Point{r, r});
 }
 
 void CanvasRenderingContext2D::round_rect(
     float x, float y, float w, float h,
     float r_tl, float r_tr, float r_br, float r_bl
 ) {
+    round_rect(x, y, w, h,
+               Point{r_tl, r_tl}, Point{r_tr, r_tr},
+               Point{r_br, r_br}, Point{r_bl, r_bl});
+}
+
+void CanvasRenderingContext2D::round_rect(
+    float x, float y, float w, float h,
+    Point r_tl, Point r_tr, Point r_br, Point r_bl
+) {
     if (!is_finite_f(x) || !is_finite_f(y) || !is_finite_f(w) || !is_finite_f(h)) return;
     if (w < 0.0f) { x += w; w = -w; }
     if (h < 0.0f) { y += h; h = -h; }
     if (w == 0.0f || h == 0.0f) return;
 
-    r_tl = std::max(0.0f, is_finite_f(r_tl) ? r_tl : 0.0f);
-    r_tr = std::max(0.0f, is_finite_f(r_tr) ? r_tr : 0.0f);
-    r_br = std::max(0.0f, is_finite_f(r_br) ? r_br : 0.0f);
-    r_bl = std::max(0.0f, is_finite_f(r_bl) ? r_bl : 0.0f);
+    // One zero axis makes a square corner. Keeping a non-zero other axis would
+    // leave a diagonal where the degenerate ellipse should have met the edge.
+    const auto normalize = [](Point& r) {
+        r.x = std::max(0.0f, is_finite_f(r.x) ? r.x : 0.0f);
+        r.y = std::max(0.0f, is_finite_f(r.y) ? r.y : 0.0f);
+        if (r.x == 0.0f || r.y == 0.0f) r = Point{};
+    };
+    normalize(r_tl);
+    normalize(r_tr);
+    normalize(r_br);
+    normalize(r_bl);
 
-    // Clamp overlapping corner radii proportionally per HTML Canvas spec
-    float f = 1.0f;
-    if (r_tl + r_tr > 0.0f) f = std::min(f, w / (r_tl + r_tr));
-    if (r_bl + r_br > 0.0f) f = std::min(f, w / (r_bl + r_br));
-    if (r_tl + r_bl > 0.0f) f = std::min(f, h / (r_tl + r_bl));
-    if (r_tr + r_br > 0.0f) f = std::min(f, h / (r_tr + r_br));
-    if (f < 1.0f) {
-        r_tl *= f;
-        r_tr *= f;
-        r_br *= f;
-        r_bl *= f;
+    // HTML's overlap factor uses horizontal radii against the width and vertical
+    // radii against the height. One common factor preserves every ellipse's ratio.
+    float scale = 1.0f;
+    if (r_tl.x + r_tr.x > 0.0f) scale = std::min(scale, w / (r_tl.x + r_tr.x));
+    if (r_bl.x + r_br.x > 0.0f) scale = std::min(scale, w / (r_bl.x + r_br.x));
+    if (r_tl.y + r_bl.y > 0.0f) scale = std::min(scale, h / (r_tl.y + r_bl.y));
+    if (r_tr.y + r_br.y > 0.0f) scale = std::min(scale, h / (r_tr.y + r_br.y));
+    if (scale < 1.0f) {
+        for (Point* r : {&r_tl, &r_tr, &r_br, &r_bl}) {
+            r->x *= scale;
+            r->y *= scale;
+        }
     }
 
-    move_to(x + r_tl, y);
-    line_to(x + w - r_tr, y);
-    if (r_tr > 0.0f) arc(x + w - r_tr, y + r_tr, r_tr, -kPi * 0.5f, 0.0f, false);
-    line_to(x + w, y + h - r_br);
-    if (r_br > 0.0f) arc(x + w - r_br, y + h - r_br, r_br, 0.0f, kPi * 0.5f, false);
-    line_to(x + r_bl, y + h);
-    if (r_bl > 0.0f) arc(x + r_bl, y + h - r_bl, r_bl, kPi * 0.5f, kPi, false);
-    line_to(x, y + r_tl);
-    if (r_tl > 0.0f) arc(x + r_tl, y + r_tl, r_tl, kPi, kPi * 1.5f, false);
+    move_to(x + r_tl.x, y);
+    line_to(x + w - r_tr.x, y);
+    if (r_tr.x > 0.0f) ellipse(x + w - r_tr.x, y + r_tr.y,
+                               r_tr.x, r_tr.y, 0.0f, -kPi * 0.5f, 0.0f, false);
+    line_to(x + w, y + h - r_br.y);
+    if (r_br.x > 0.0f) ellipse(x + w - r_br.x, y + h - r_br.y,
+                               r_br.x, r_br.y, 0.0f, 0.0f, kPi * 0.5f, false);
+    line_to(x + r_bl.x, y + h);
+    if (r_bl.x > 0.0f) ellipse(x + r_bl.x, y + h - r_bl.y,
+                               r_bl.x, r_bl.y, 0.0f, kPi * 0.5f, kPi, false);
+    line_to(x, y + r_tl.y);
+    if (r_tl.x > 0.0f) ellipse(x + r_tl.x, y + r_tl.y,
+                               r_tl.x, r_tl.y, 0.0f, kPi, kPi * 1.5f, false);
     close_path();
 }
 
@@ -2660,10 +2701,15 @@ void CanvasRenderingContext2D::replay_into(const Path2D& path) {
                 rect(op.a, op.b, op.c, op.d);
                 break;
             case Path2D::Kind::RoundRect:
-                // The radii were kept as the page wrote them, because
-                // `roundRect` takes either one value or four; `op.a`..`op.d` are
-                // the rectangle and the four radii follow in `radii`.
+                // One radius: the context's overload spreads it to all four corners.
                 round_rect(op.a, op.b, op.c, op.d, op.e);
+                break;
+            case Path2D::Kind::RoundRectRadii:
+                // Four radii, through the same overload the context's own
+                // `roundRect` uses — so the proportional clamping of overlapping
+                // corners (§4.12.5.1's rule for a rectangle too small for its
+                // radii) happens in one place and cannot differ between the two.
+                round_rect(op.a, op.b, op.c, op.d, op.rr[0], op.rr[1], op.rr[2], op.rr[3]);
                 break;
             case Path2D::Kind::ClosePath:
                 close_path();
@@ -3153,15 +3199,28 @@ JsValue CanvasRenderingContext2D::to_js_value(std::shared_ptr<CanvasRenderingCon
             const float h = static_cast<float>(args[3].to_number());
             if (args.size() >= 5 && args[4].is_array()) {
                 const auto& a = args[4].array_elements();
-                auto r = [&](size_t i) -> float { return i < a.size() ? static_cast<float>(a[i].to_number()) : 0.0f; };
-                if (a.size() == 1) get_ctx()->round_rect(x, y, w, h, r(0));
-                else if (a.size() == 2) get_ctx()->round_rect(x, y, w, h, r(0), r(1), r(0), r(1));
-                else if (a.size() == 3) get_ctx()->round_rect(x, y, w, h, r(0), r(1), r(2), r(1));
-                else if (a.size() >= 4) get_ctx()->round_rect(x, y, w, h, r(0), r(1), r(2), r(3));
-                else get_ctx()->rect(x, y, w, h);
+                const auto r = [&a](size_t i) -> Point {
+                    return i < a.size() ? canvas_corner_radius(a[i]) : Point{};
+                };
+                if (a.size() == 1) {
+                    const Point one = r(0);
+                    get_ctx()->round_rect(x, y, w, h, one, one, one, one);
+                } else if (a.size() == 2) {
+                    const Point first = r(0), second = r(1);
+                    get_ctx()->round_rect(x, y, w, h, first, second, first, second);
+                } else if (a.size() == 3) {
+                    const Point first = r(0), second = r(1), third = r(2);
+                    get_ctx()->round_rect(x, y, w, h, first, second, third, second);
+                } else if (a.size() >= 4) {
+                    get_ctx()->round_rect(x, y, w, h, r(0), r(1), r(2), r(3));
+                } else {
+                    get_ctx()->rect(x, y, w, h);
+                }
+            } else if (args.size() >= 5) {
+                const Point one = canvas_corner_radius(args[4]);
+                get_ctx()->round_rect(x, y, w, h, one, one, one, one);
             } else {
-                const float rad = (args.size() >= 5) ? static_cast<float>(args[4].to_number()) : 0.0f;
-                get_ctx()->round_rect(x, y, w, h, rad);
+                get_ctx()->round_rect(x, y, w, h, 0.0f);
             }
         }
         return JsValue::make_undefined();

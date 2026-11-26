@@ -261,6 +261,15 @@ int BytecodeCompiler::resolve_local(const std::string& name) {
 }
 
 std::shared_ptr<BytecodeFunction> BytecodeCompiler::compile(const BlockStmt* program) {
+    // A script whose last statement is not an expression must still return
+    // its accumulated completion, including in either arm of a try. Functions
+    // return only explicit values and use their ordinary compilation path.
+    if (!m_is_function && program && !program->statements.empty() &&
+        !dynamic_cast<const ExprStmt*>(program->statements.back().get())) {
+        emit_opcode(OpCode::OpUndefined);
+        m_completion_slot = static_cast<int>(m_locals.size());
+        add_local("");
+    }
     if (program && !program->statements.empty()) {
         for (size_t i = 0; i < program->statements.size(); ++i) {
             const auto& stmt = program->statements[i];
@@ -276,7 +285,12 @@ std::shared_ptr<BytecodeFunction> BytecodeCompiler::compile(const BlockStmt* pro
         }
     }
 
-    emit_opcode(OpCode::OpUndefined);
+    if (m_completion_slot >= 0) {
+        emit_opcode(OpCode::OpGetLocal);
+        emit_byte(static_cast<uint8_t>(m_completion_slot));
+    } else {
+        emit_opcode(OpCode::OpUndefined);
+    }
     emit_opcode(OpCode::OpReturn);
     return m_function;
 }
@@ -285,8 +299,23 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
     if (!stmt) return;
     js_check_stack();
 
+    // The tree-walker clears the script completion on entering a loop or
+    // switch, including one nested inside a try.
+    if (m_completion_slot >= 0 &&
+        (dynamic_cast<const ForEachStmt*>(stmt) || dynamic_cast<const ForStmt*>(stmt) ||
+         dynamic_cast<const WhileStmt*>(stmt) || dynamic_cast<const DoWhileStmt*>(stmt) ||
+         dynamic_cast<const SwitchStmt*>(stmt))) {
+        emit_opcode(OpCode::OpUndefined);
+        emit_opcode(OpCode::OpSetLocal);
+        emit_byte(static_cast<uint8_t>(m_completion_slot));
+        emit_opcode(OpCode::OpPop);
+    }
     if (auto expr_stmt = dynamic_cast<const ExprStmt*>(stmt)) {
         compile_expr(expr_stmt->expression.get());
+        if (m_completion_slot >= 0) {
+            emit_opcode(OpCode::OpSetLocal);
+            emit_byte(static_cast<uint8_t>(m_completion_slot));
+        }
         emit_opcode(OpCode::OpPop);
     } else if (dynamic_cast<const EmptyStmt*>(stmt)) {
         // nothing to emit
@@ -319,6 +348,59 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             }
             compile_pattern(*declarator.target, var_decl->kind);
         }
+    } else if (auto thrown = dynamic_cast<const ThrowStmt*>(stmt)) {
+        compile_expr(thrown->argument.get());
+        emit_opcode(OpCode::OpThrow);
+    } else if (auto statement = dynamic_cast<const TryStmt*>(stmt)) {
+        if (!statement->has_handler || statement->finalizer ||
+            (statement->param && statement->param->kind != Pattern::Kind::Identifier)) {
+            throw std::runtime_error("This try form is not supported by the bytecode compiler");
+        }
+        const size_t catch_jump = emit_jump(OpCode::OpTry);
+        ++m_protected_depth;
+        compile_stmt(statement->block.get());
+        --m_protected_depth;
+        emit_opcode(OpCode::OpEndTry);
+        const size_t end_jump = emit_jump(OpCode::OpJump);
+        patch_jump(catch_jump);
+        begin_scope();
+        if (statement->param) add_local(statement->param->name);
+        else emit_opcode(OpCode::OpPop);
+        ++m_catch_depth;
+        compile_stmt(statement->handler.get());
+        --m_catch_depth;
+        end_scope();
+        patch_jump(end_jump);
+    } else if (auto each = dynamic_cast<const ForEachStmt*>(stmt)) {
+        // The VM has no per-iteration lexical environments or assignment
+        // reference machinery for patterns. Refuse those forms rather than
+        // quietly give let/const or a property target the wrong lifetime.
+        if (!each->is_of || each->is_await || !each->target ||
+            each->target->kind != Pattern::Kind::Identifier ||
+            (each->declares && each->decl_kind != JsDeclKind::Var)) {
+            throw std::runtime_error("This for-in/of form is not supported by the bytecode compiler");
+        }
+        compile_expr(each->iterable.get());
+        emit_opcode(OpCode::OpIteratorInit);
+        const size_t loop_start = m_function->chunk.code.size();
+        emit_opcode(OpCode::OpIteratorStep);           // [value, yielded]
+        const size_t exhausted = emit_jump(OpCode::OpJumpIfFalse);
+        emit_opcode(OpCode::OpPop);                    // [value]
+        // Assignment to a simple name and a var declaration both update the
+        // existing local when there is one, otherwise the VM global.
+        compile_binding(each->target->name, JsDeclKind::Var);
+        m_loops.push_back({loop_start, false, {}, {}, false, true, m_locals.size()});
+        compile_stmt(each->body.get());
+        for (size_t at : m_loops.back().continues) patch_back_jump(at, loop_start);
+        auto breaks = std::move(m_loops.back().breaks);
+        m_loops.pop_back();
+        emit_loop(loop_start);
+        patch_jump(exhausted);
+        emit_opcode(OpCode::OpPop);                    // yielded = false
+        emit_opcode(OpCode::OpPop);                    // exhausted value
+        // A break skips those two pops, but must still close the iterator.
+        for (size_t at : breaks) patch_jump(at);
+        emit_opcode(OpCode::OpIteratorClose);
     } else if (auto for_stmt = dynamic_cast<const ForStmt*>(stmt)) {
         if (!for_stmt->per_iteration_names.empty()) {
             throw std::runtime_error("Per-iteration loop bindings are not supported by the bytecode compiler");
@@ -439,6 +521,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         patch_jump(exit_jump);
         emit_opcode(OpCode::OpPop);
     } else if (auto break_stmt = dynamic_cast<const BreakStmt*>(stmt)) {
+        if (m_protected_depth || m_catch_depth) throw std::runtime_error("A jump from try or catch is not supported by the bytecode compiler");
         // ECMA-262 13.8. A labelled `break` is left to the tree-walker: labels
         // reach across statements, which this compiler has no table for, and
         // compiling an unlabelled jump for a labelled `break` would jump to
@@ -449,10 +532,17 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         if (m_loops.empty()) {
             throw std::runtime_error("`break` outside a loop or a switch is not supported by the bytecode compiler");
         }
+        // A jump out of a for-of body skips block epilogues; remove the
+        // locals those epilogues would have removed before closing the cursor.
+        if (m_loops.back().is_for_of) {
+            for (size_t i = m_loops.back().iteration_locals; i < m_locals.size(); ++i)
+                emit_opcode(OpCode::OpPop);
+        }
         // The jump's target is the loop's exit, which is not known yet; the
         // loop patches it when its body has been compiled.
         m_loops.back().breaks.push_back(emit_jump(OpCode::OpJump));
     } else if (auto continue_stmt = dynamic_cast<const ContinueStmt*>(stmt)) {
+        if (m_protected_depth || m_catch_depth) throw std::runtime_error("A jump from try or catch is not supported by the bytecode compiler");
         if (!continue_stmt->label.empty()) {
             throw std::runtime_error("A labelled continue is not supported by the bytecode compiler");
         }
@@ -467,6 +557,10 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         if (target == static_cast<size_t>(-1)) {
             throw std::runtime_error("`continue` outside a loop is not supported by the bytecode compiler");
         }
+        if (m_loops[target].is_for_of) {
+            for (size_t i = m_loops[target].iteration_locals; i < m_locals.size(); ++i)
+                emit_opcode(OpCode::OpPop);
+        }
         // To the loop's test (a `while`) or its update/test (a `for`, a
         // `do`/`while`). Which way that is decides the opcode: OpLoop carries
         // a distance backwards, OpJump one forwards, and the loop fills in
@@ -480,13 +574,20 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             emit_byte(0xFF);
         }
     } else if (auto ret_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
+        if (m_protected_depth) throw std::runtime_error("A return from try is not supported by the bytecode compiler");
         if (ret_stmt->value) {
             compile_expr(ret_stmt->value.get());
         } else {
             emit_opcode(OpCode::OpUndefined);
         }
+        // Return leaves every for-of in this function, inside out. Unlike a
+        // throw, a return completion is replaced by a failing IteratorClose.
+        for (auto it = m_loops.rbegin(); it != m_loops.rend(); ++it) {
+            if (it->is_for_of) emit_opcode(OpCode::OpIteratorClose);
+        }
         emit_opcode(OpCode::OpReturn);
     } else if (auto fn_decl = dynamic_cast<const FunctionDeclStmt*>(stmt)) {
+        if (m_catch_depth) throw std::runtime_error("A function in catch is not supported by the bytecode compiler");
         const FunctionNode& node = *fn_decl->fn;
         require_simple_function(node);
         const std::vector<std::string> params = node.simple_param_names();
@@ -918,6 +1019,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
     } else if (dynamic_cast<const YieldExpr*>(expr)) {
         throw std::runtime_error("Yield compiled via AST interpreter");
     } else if (auto fn_expr = dynamic_cast<const FunctionExpr*>(expr)) {
+        if (m_catch_depth) throw std::runtime_error("A function in catch is not supported by the bytecode compiler");
         const FunctionNode& node = *fn_expr->fn;
         require_simple_function(node);
         const std::vector<std::string> params = node.simple_param_names();

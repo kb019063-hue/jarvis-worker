@@ -16,6 +16,16 @@ enum class PromiseState {
     Rejected
 };
 
+struct PromiseData;
+
+/// The state shared by one Promise resolving pair. A resolver a script has
+/// handed to native code is the promise's owner until the promise settles;
+/// after that the pair is inert and should not keep the settled promise alive.
+struct ResolverState {
+    std::shared_ptr<PromiseData> data;
+    bool called{false};
+};
+
 /// One reaction registered on a promise: either the script callbacks passed to
 /// then(), or an engine-internal continuation (await, Promise.all, ...).
 struct PromiseHandler {
@@ -50,6 +60,12 @@ struct PromiseData {
     /// Resolved with a thenable: the outcome now belongs to that thenable and
     /// further resolve()/reject() calls are ignored.
     bool locked{false};
+    /// The resolving pairs made for this promise. Kept weakly here so the
+    /// state and its cells do not form a cycle; `settle()` empties the strong
+    /// side of each pair when it settles.
+    std::vector<std::weak_ptr<ResolverState>> resolver_states;
+    /// Drops the state from every resolving pair made for this promise.
+    void release_resolvers();
 };
 
 /// A PromiseCapability record (ECMA-262 §27.2.1.1): the object a constructor

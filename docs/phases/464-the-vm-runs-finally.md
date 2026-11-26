@@ -24,13 +24,13 @@ loop runs after close. The compiler still refuses return or jumps across any
 protected block or finalizer, and functions declared in a finalizer, rather than
 pretending it can unwind those completions or capture lexical locals.
 
-The original refusal moved atomically to AGREES with 13 related cases and is
+The original refusal moved atomically to AGREES with 14 related cases and is
 first in the numbered suite. Four new refusals expose unsupported control flow
 and closure shapes alongside the other pre-existing refused forms.
 
 ## Verification
 
-- `make verify-bytecode`: **133/133 agree, 8/8 still refused**.
+- `make verify-bytecode`: **134/134 agree, 8/8 still refused**.
 - `python3 tools/conformance/verify_bytecode_agreement.py --self-test`: six readings pass.
 - `tests/suites/464-the-vm-runs-finally.cpp` checks normal, nested and throwing
   finalizers, throw replacement, catch ordering, scoped locals, GC, iterator

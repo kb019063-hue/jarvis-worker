@@ -12,6 +12,7 @@ TEST(the_bytecode_vm_runs_finally) {
     agree("var x=0;try{x=1}finally{x+=2}String(x)", "3");
     agree("try{try{throw 7}finally{2}}catch(e){e}", "7");
     agree("try{try{throw 7}finally{throw 8}}catch(e){e}", "8");
+    agree("try{try{1}finally{throw 8}}catch(e){e}", "8");
     agree("var x='';try{throw 1}catch(e){x+=e}finally{x+='f'}String(x)", "1f");
     agree("try{try{throw 1}catch(e){throw 3}finally{2}}catch(e){e}", "3");
     agree("try{try{throw 1}catch(e){throw 3}finally{throw 4}}catch(e){e}", "4");

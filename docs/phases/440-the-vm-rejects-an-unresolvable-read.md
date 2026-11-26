@@ -36,8 +36,14 @@ normal engine suite reports 492/492 on this branch before merging main.
 `make xml-conformance` 1718/1718, and `make wpt` 9570/9824 subtests
 with no unlisted failures. `make diff-trees` and `make diff-xml` report zero
 differences; `make deep` passes 1332 runs. `make check-numbers` and
-`make check-suites` pass. These are measurements of this branch, not a claim
-that the experimental VM runs the corpus.
+`make check-suites` pass, as does `make fuzz`. These are measurements of this
+branch, not a claim that the experimental VM runs the corpus.
+
+The sanitizer build succeeded and the new suite passed under ASan/UBSan.
+The full `make asan` did not finish locally: its existing deep-nesting suite
+consumed the available 3.8 GiB during the unit run, which was stopped to
+avoid stalling the sandbox. Full sanitizer coverage is left to CI; it is not
+reported as a local pass.
 
 ## Still open
 

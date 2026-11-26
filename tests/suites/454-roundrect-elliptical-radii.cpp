@@ -133,19 +133,23 @@ TEST(round_rect_preserves_the_horizontal_and_vertical_radius_of_each_corner) {
     assert(js.eval("!equal454(wideOver, tallOver)").to_string() == "true");
 
     // --- Part 6: circular numbers still go through the old compact operation and
-    // remain pixel-identical to an equal-axis point. Phase 443's empty-sequence
-    // square fallback also remains intact.
+    // remain pixel-identical to an equal-axis point. Phase 466 closes the former
+    // empty-sequence fallback: explicitly supplying `[]` is a RangeError on both
+    // routes, while omitting radii remains the valid zero-radius form.
     js.eval(
         "var circleD = direct454(8, 5, 5, 50, 40);"
         "var circleP = path454(8, 5, 5, 50, 40);"
         "var circlePoint = direct454({x:8,y:8}, 5, 5, 50, 40);"
-        "var emptyD = direct454([], 5, 5, 50, 40);"
-        "var emptyP = path454([], 5, 5, 50, 40);"
         "var zeroD = direct454(0, 5, 5, 50, 40);");
     assert(js.eval("equal454(circleD, circleP)").to_string() == "true");
     assert(js.eval("equal454(circleD, circlePoint)").to_string() == "true");
-    assert(js.eval("equal454(emptyD, emptyP)").to_string() == "true");
-    assert(js.eval("equal454(emptyD, zeroD)").to_string() == "true");
+    assert(js.eval("(function(){try{direct454([],5,5,50,40);return 'none';}"
+                   "catch(e){return e.name;}})()").to_string() == "RangeError");
+    assert(js.eval("(function(){try{path454([],5,5,50,40);return 'none';}"
+                   "catch(e){return e.name;}})()").to_string() == "RangeError");
+    js.eval("var omitted454=canvas454(80,70); omitted454.beginPath();"
+            "omitted454.roundRect(5,5,50,40); omitted454.fill();");
+    assert(js.eval("equal454(omitted454, zeroD)").to_string() == "true");
 
     // --- Part 7: a recorded ellipse remains in user space. The CTM at use doubles
     // both axes; sampling beyond the unscaled 50px right edge proves replay still

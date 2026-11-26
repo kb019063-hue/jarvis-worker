@@ -2096,20 +2096,23 @@ Path2DState& this_path2d() { return this_state<Path2DState>("Path2D"); }
 /// The `(unrestricted double or DOMPointInit)` member used by `roundRect`.
 /// Inner arrays retain this engine's `[x, y]` point spelling as well.
 Point path_corner_radius(const JsValue& value) {
+    Point radius;
     if (value.is_array()) {
         const auto& pair = value.array_elements();
-        const float rx = pair.empty() ? 0.0f : static_cast<float>(to_double(pair[0]));
-        const float ry = pair.size() < 2 ? 0.0f : static_cast<float>(to_double(pair[1]));
-        return Point{rx, ry};
-    }
-    if (value.is_object_like()) {
+        radius.x = pair.empty() ? 0.0f : static_cast<float>(to_double(pair[0]));
+        radius.y = pair.size() < 2 ? 0.0f : static_cast<float>(to_double(pair[1]));
+    } else if (value.is_object_like()) {
         const JsValue x = value.get_property("x");
         const JsValue y = value.get_property("y");
-        return Point{x.is_undefined() ? 0.0f : static_cast<float>(to_double(x)),
-                     y.is_undefined() ? 0.0f : static_cast<float>(to_double(y))};
+        radius.x = x.is_undefined() ? 0.0f : static_cast<float>(to_double(x));
+        radius.y = y.is_undefined() ? 0.0f : static_cast<float>(to_double(y));
+    } else {
+        radius.x = radius.y = static_cast<float>(to_double(value));
     }
-    const float radius = static_cast<float>(to_double(value));
-    return Point{radius, radius};
+    if (radius.x < 0.0f || radius.y < 0.0f) {
+        js_throw_range_error("Path2D.roundRect radius components must be non-negative");
+    }
+    return radius;
 }
 
 /// One recorded call, from an argument list. Written once and used by every
@@ -2165,14 +2168,12 @@ bool op_from_args(const std::string& name, Args args, Path2D::Op& op) {
         const JsValue& radii = args[4];
         if (radii.is_array()) {
             const auto& a = radii.array_elements();
+            if (a.empty() || a.size() > 4) {
+                js_throw_range_error("Path2D.roundRect requires between one and four radii");
+            }
             std::vector<Point> given;
             given.reserve(a.size());
             for (const JsValue& value : a) given.push_back(path_corner_radius(value));
-            if (given.empty()) {
-                // Keep Phase 443's direct-binding-compatible empty-sequence answer.
-                op.kind = Path2D::Kind::Rect;
-                return true;
-            }
             // CSS's clockwise spreading rule, now spreading both ellipse axes.
             if (given.size() == 1) corners = {given[0], given[0], given[0], given[0]};
             else if (given.size() == 2) corners = {given[0], given[1], given[0], given[1]};

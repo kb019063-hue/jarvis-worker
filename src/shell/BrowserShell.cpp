@@ -307,7 +307,11 @@ void BrowserShell::scan_interactive_elements() {
     m_interactive_elements.clear();
     if (!m_document || !m_layout_root) return;
 
-    std::vector<std::shared_ptr<Element>> candidates;
+    struct Candidate {
+        std::shared_ptr<Element> element;
+        long priority;
+    };
+    std::vector<Candidate> candidates;
 
     // Every element of the document, in tree order, without recursion.
     //
@@ -322,16 +326,28 @@ void BrowserShell::scan_interactive_elements() {
     // The three that are not themselves focusable stay, because they are what
     // the ring was built for: a `btn`-classed `div` or a `div` with a click
     // listener is what an old page's button is. They are appended after the
-    // focusable ones rather than mixed into tree order, so widening the ring
-    // cannot reorder the stops a page already had. The list is a *tab order*
-    // now, not a list of click targets: `element_at` does the hit testing.
+    // focusable ones. The list is a *tab order* now, not a list of click
+    // targets: `element_at` does the hit testing.
     for_each_descendant(*m_document, [&](Node& n) {
         if (!n.is_element()) return true;
         auto el = std::static_pointer_cast<Element>(n.shared_from_this());
         if (dom::is_focusable(*el)) {
-            candidates.push_back(el);
+            long value = 0;
+            const std::string* attribute = el->attribute("tabindex");
+            if (!attribute || !dom::parse_html_integer(*attribute, value) || value < 0) value = 0;
+            candidates.push_back({el, value});
         }
         return true;
+    });
+
+    // Positive tabindex values precede the zero/default group, lowest first.
+    // Use the same HTML integer parser as the reflected tabIndex property, and
+    // keep tree order for ties and for missing, invalid, zero or negative
+    // values. Negative tabindex exclusion is a separate focus-navigation gap.
+    // Parse once per element, not once per comparison during the sort.
+    std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.priority == 0) return false;
+        return b.priority == 0 || a.priority < b.priority;
     });
 
     // The legacy click targets, in tree order, after the focusable ones.
@@ -344,11 +360,12 @@ void BrowserShell::scan_interactive_elements() {
         std::string id = el->id();
         bool is_btn = (tag == "button" || cls.find("btn") != std::string::npos ||
                        id.find("btn") != std::string::npos || el->has_listeners("click"));
-        if (is_btn) candidates.push_back(el);
+        if (is_btn) candidates.push_back({el, 0});
         return true;
     });
 
-    for (const auto& el : candidates) {
+    for (const auto& candidate : candidates) {
+        const auto& el = candidate.element;
         // Tab cannot leave a modal dialog: what is behind it is not a tab stop
         // while it is open.
         if (m_document->is_inert(*el)) continue;

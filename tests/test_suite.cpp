@@ -4972,11 +4972,11 @@ TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs) {
     }
     assert(pos1 >= 0 && pos1 + 1 == pos2 && pos2 + 1 == pos3);
 
-    // 4. Combining marks stay AFTER their base after visual RTL cluster reversal ([base, mark], not [mark, base])!
+    // 4. Visual RTL buffer reversal emits `[mark, base]` per cluster with propagated attachment offsets!
     const auto rtl_mark = fr.shape_text("\xD8\xA8\xD9\x8E\xD8\xB3", 24.0f, 400, "TestArabicSans", false, true);
     assert(rtl_mark.size() == 3);
-    assert(rtl_mark[1].glyph != ar_font.glyph_index(0x064E)); // base Beh comes before Fatha!
-    assert(rtl_mark[2].glyph == ar_font.glyph_index(0x064E)); // Fatha follows Beh in same cluster!
+    assert(rtl_mark[1].glyph == ar_font.glyph_index(0x064E)); // Fatha precedes Beh in visual RTL!
+    assert(rtl_mark[2].glyph != ar_font.glyph_index(0x064E)); // base Beh follows Fatha with propagated offset!
 
     // 5. Fallback preservation across common spaces: a Latin-only primary webfont (covering ASCII)
     //    falling back via system fallbacks to TestArabicSans must keep "سلام عليكم" as one coherent Arabic run!

@@ -457,6 +457,9 @@ public:
 JsValue style_sheet(Realm& realm, Element& element);
 /// `document.styleSheets`: the sheets of the document's <style> elements.
 JsValue document_style_sheets(Realm& realm, Document& document);
+/// `document.adoptedStyleSheets` and its setter (CSSOM, adopted style sheets).
+JsValue document_adopted_style_sheets(Realm& realm, Document& document);
+void set_document_adopted_style_sheets(Realm& realm, Document& document, const JsValue& value);
 /// `document.fonts`: the FontFaceSet, whose `ready` is already resolved.
 JsValue document_fonts(Realm& realm);
 

@@ -130,6 +130,19 @@ takeable() {  # takeable N FULLSHA; says why in $WHY
   wrong="$(git diff --name-only --diff-filter=A "origin/main...$2" -- docs/phases docs/findings tests/suites 2>/dev/null \
            | grep -Ev "^(docs/phases|docs/findings|tests/suites)/$1-" | head -2 | tr '\n' ' ')"
   [ -z "$wrong" ] || { WHY="it adds ${wrong}and a file added there is called by its own number ($1-...)"; return 1; }
+  # What its merge with main would take out of AGENTS.md (check_docs.py,
+  # MAY_LOSE_ROWS). #452 came back on 26 November with a copy of the file
+  # from the afternoon before on top of that morning's main, 206 lines short
+  # (58 rows of "Open tasks" and six passages of the rules), and it merged
+  # cleanly. Its own run asks the same since that day, but a pull request
+  # that was green before, or one taken while its run is going, has not been
+  # asked. $CHECK_DOCS is for a copy of this script outside the clone.
+  local tree lost
+  tree="$(git merge-tree --write-tree origin/main "$2" 2>/dev/null | head -1)"
+  if [ -n "$tree" ]; then
+    lost="$(python3 "${CHECK_DOCS:-tools/ci/check_docs.py}" --base origin/main --kept "$tree" 2>&1 | sed -n 's/^ *FAIL *AGENTS.md: //p' | head -1)"
+    [ -z "$lost" ] || { WHY="its merge takes out of AGENTS.md what main has: ${lost:0:170}"; return 1; }
+  fi
   WHY="green"; green "$2" && return 0
   # Its own run failed, the landing session has read why (`run_report.py N`),
   # and what failed was not its change: `main` was broken under it, or a
@@ -228,7 +241,8 @@ cands)
       echo "#$n ${full:0:7}: not taken, it has a number to change: $(echo "$clashes" | grep "^#$n: " | head -1 | cut -d' ' -f2-)" >&2; continue
     fi
     fetch_pr "$n" || continue
-    if takeable "$n" "$full"; then printf '%s ' "$n"; [ "$WHY" = "green" ] || echo "#$n ${full:0:7}: $WHY" >&2; fi
+    if takeable "$n" "$full"; then printf '%s ' "$n"; [ "$WHY" = "green" ] || echo "#$n ${full:0:7}: $WHY" >&2
+    else case "$WHY" in "its merge takes out"*|"it adds "*) echo "#$n ${full:0:7}: NOT taken, and its agent has to be told: $WHY" >&2 ;; esac; fi
   done; echo ;;
 
 plan)
@@ -268,7 +282,7 @@ build)
     full="$(git rev-parse "origin/pr$n")"
     st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title,isDraft --jq '"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"')"
     [ "$st" = "OPEN $full finished" ] || { echo "#$n: '$st' is not OPEN and finished at ${full:0:7}"; exit 6; }
-    takeable "$n" "$full" || { echo "#$n ${full:0:7} is not green: $(runs_of "$full")"; exit 6; }
+    takeable "$n" "$full" || { echo "#$n ${full:0:7} is not taken: $WHY ($(runs_of "$full"))"; exit 6; }
     echo "$n ${full:0:7}" >> "$STATE/lot.heads.new"
   done
   git checkout -q -B "$BRANCH" origin/main || exit 9

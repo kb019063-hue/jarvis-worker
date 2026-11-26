@@ -1,4 +1,5 @@
 #include "litebird/render/SvgRenderer.hpp"
+#include "litebird/dom/Document.hpp"
 #include "litebird/render/Canvas2D.hpp"
 #include "litebird/render/RasterBudget.hpp"
 #include "litebird/common/Geometry.hpp"
@@ -2240,34 +2241,63 @@ BBox svg_own_geometry(const std::shared_ptr<Element>& el, float ref_w, float ref
     return box;
 }
 
+// Transform the four corners of a box, as the container walk does for a child.
+BBox svg_map_bbox(const BBox& box, const TransformMatrix2D& matrix) {
+    if (!box.valid()) return box;
+    BBox mapped;
+    for (float x : {box.min_x, box.max_x}) {
+        for (float y : {box.min_y, box.max_y}) {
+            const Point p = matrix.map_point(x, y);
+            mapped.include(p.x, p.y);
+        }
+    }
+    return mapped;
+}
+
 // The box of `el` and everything it draws below it, with every descendant's
 // `transform` applied and `el`'s own excluded.
-BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h, int depth) {
+BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h, int depth,
+                   std::unordered_set<const Element*>& active) {
     if (!el || depth > 64) return BBox();
     const std::string tag = to_lower_ascii(el->tag_name());
     if (svg_is_unrendered_container(tag)) return BBox();
 
     BBox box = svg_own_geometry(el, ref_w, ref_h);
+    if (tag == "use") {
+        std::string href;
+        auto document = el->owner_document();
+        if (!document || !get_href_attr(el, href)) return box;
+        const std::string id = extract_fragment_id(href);
+        auto target = id.empty() ? nullptr : document->get_element_by_id(id);
+        // Symbols and nested SVG viewports need their own viewBox handling.
+        if (!target || to_lower_ascii(target->tag_name()) == "symbol" ||
+            to_lower_ascii(target->tag_name()) == "svg") return box;
+        if (!active.insert(target.get()).second) return box;
+        BBox target_box = svg_bbox_walk(target, ref_w, ref_h, depth + 1, active);
+        active.erase(target.get());
+        std::string value;
+        if (get_attr_ci(target, "transform", value))
+            target_box = svg_map_bbox(target_box, parse_svg_transform(value));
+        float x = 0, y = 0;
+        if (get_attr_ci(el, "x", value)) parse_float_value(value, x, ref_w);
+        if (get_attr_ci(el, "y", value)) parse_float_value(value, y, ref_h);
+        if (target_box.valid()) {
+            target_box.min_x += x; target_box.max_x += x;
+            target_box.min_y += y; target_box.max_y += y;
+        }
+        return target_box;
+    }
     for (const auto& child : el->children()) {
         auto child_el = std::dynamic_pointer_cast<Element>(child);
         if (!child_el) continue;
-        BBox child_box = svg_bbox_walk(child_el, ref_w, ref_h, depth + 1);
+        BBox child_box = svg_bbox_walk(child_el, ref_w, ref_h, depth + 1, active);
         if (!child_box.valid()) continue;
         std::string transform_text;
         if (get_attr_ci(child_el, "transform", transform_text)) {
             const TransformMatrix2D matrix = parse_svg_transform(transform_text);
             const TransformMatrix2D identity = TransformMatrix2D::identity();
             if (!(matrix == identity)) {
-                BBox mapped;
-                const Point p1 = matrix.map_point(child_box.min_x, child_box.min_y);
-                const Point p2 = matrix.map_point(child_box.max_x, child_box.min_y);
-                const Point p3 = matrix.map_point(child_box.min_x, child_box.max_y);
-                const Point p4 = matrix.map_point(child_box.max_x, child_box.max_y);
-                mapped.include(p1.x, p1.y);
-                mapped.include(p2.x, p2.y);
-                mapped.include(p3.x, p3.y);
-                mapped.include(p4.x, p4.y);
-                child_box = mapped;
+                child_box = svg_map_bbox(child_box, matrix);
             }
         }
         box = svg_union_bbox(box, child_box);
@@ -2321,7 +2351,8 @@ SvgUserBBox svg_element_bbox(const std::shared_ptr<Element>& element) {
         }
     }
 
-    const BBox box = svg_bbox_walk(element, ref_w, ref_h, 0);
+    std::unordered_set<const Element*> active{element.get()};
+    const BBox box = svg_bbox_walk(element, ref_w, ref_h, 0, active);
     if (!box.valid()) return answer;
     answer.x = box.min_x;
     answer.y = box.min_y;

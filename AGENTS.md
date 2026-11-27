@@ -957,6 +957,16 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   What the repository can do is say so at once: `check_pr.py` now has
   a line that begins `!!` when a job of `main`'s own newest run has
   failed, and "Working together", point 6, says what to do then.
+  Who ran the merge is on no record. Every session is the person's one
+  login, and a merge keeps the login and nothing more: not even that
+  it came through Arena's app, which a comment does keep. Its commit has
+  the default message (the title as its body), which is what a bare
+  `gh pr merge 449 --merge` writes, and the button on the page; the
+  landing session's merges carry a text of their own. Only the
+  transcript of the session that ran it says more, and only the person
+  can read that. And no session can set GitHub's rule for the person:
+  a session's access does not reach the repository's settings (asking
+  for the protection of `main` is answered with 403).
 - **An old copy of AGENTS.md, written over `main`'s.** #452 was finished
   on 25 November on `main` of 14:12. Its AGENTS.md was that file cut off
   after line 1442: the last 109 lines of "Open tasks" were gone. It

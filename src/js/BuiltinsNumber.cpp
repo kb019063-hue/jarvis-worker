@@ -178,6 +178,31 @@ std::string format_exponent(int exponent) {
     return std::string(exponent < 0 ? "e-" : "e+") + std::to_string(std::abs(exponent));
 }
 
+// Format the exact binary64 magnitude with enough decimal places to expose
+// every nonzero digit (a binary64 denominator is at most 2^1074). Round its
+// significant digits ourselves: printf rounds exact ties to even, whereas
+// ECMAScript chooses the larger decimal magnitude at a tie.
+std::pair<std::string, int> rounded_scientific(double magnitude, int fraction_digits) {
+    constexpr int exact_digits = 1100;
+    char buffer[1200];
+    const int written = std::snprintf(buffer, sizeof(buffer), "%.*e", exact_digits, magnitude);
+    std::string full(buffer, static_cast<size_t>(written));
+    const size_t e_pos = full.find('e');
+    int exponent = std::atoi(full.c_str() + e_pos + 1);
+    const size_t end = fraction_digits == 0 ? 1 : 2 + static_cast<size_t>(fraction_digits);
+    std::string mantissa = full.substr(0, end);
+    const size_t next = fraction_digits == 0 ? 2 : end;
+    if (full[next] >= '5') {
+        increment_decimal(mantissa);
+        if (mantissa.size() > end) {
+            ++exponent;
+            mantissa = "1";
+            if (fraction_digits) mantissa += "." + std::string(static_cast<size_t>(fraction_digits), '0');
+        }
+    }
+    return {mantissa, exponent};
+}
+
 std::string to_exponential(double x, int fraction_digits, bool shortest) {
     if (std::isnan(x)) return "NaN";
     if (std::isinf(x)) return x < 0 ? "-Infinity" : "Infinity";
@@ -202,25 +227,18 @@ std::string to_exponential(double x, int fraction_digits, bool shortest) {
         if (digits.size() > 1) out += "." + digits.substr(1);
         return out + format_exponent(x == 0 ? 0 : exponent);
     }
-    char buffer[160];
-    int written = std::snprintf(buffer, sizeof(buffer), "%.*e", fraction_digits, std::fabs(x));
-    std::string sci(buffer, static_cast<size_t>(written));
-    size_t e_pos = sci.find('e');
-    int exponent = std::atoi(sci.c_str() + e_pos + 1);
-    return (x < 0 ? "-" : "") + sci.substr(0, e_pos) + format_exponent(exponent);
+    auto [mantissa, exponent] = rounded_scientific(std::fabs(x), fraction_digits);
+    return (x < 0 ? "-" : "") + mantissa + format_exponent(exponent);
 }
 
 std::string to_precision(double x, int precision) {
     if (std::isnan(x)) return "NaN";
     if (std::isinf(x)) return x < 0 ? "-Infinity" : "Infinity";
-    char buffer[160];
-    int written = std::snprintf(buffer, sizeof(buffer), "%.*e", precision - 1, std::fabs(x));
-    std::string sci(buffer, static_cast<size_t>(written));
-    size_t e_pos = sci.find('e');
-    int exponent = x == 0 ? 0 : std::atoi(sci.c_str() + e_pos + 1);
+    auto [mantissa, exponent] = rounded_scientific(std::fabs(x), precision - 1);
+    if (x == 0) exponent = 0;
     std::string digits;
-    for (size_t i = 0; i < e_pos; ++i) {
-        if (sci[i] != '.') digits += sci[i];
+    for (char c : mantissa) {
+        if (c != '.') digits += c;
     }
     std::string out = (x < 0) ? "-" : "";
     if (exponent < -6 || exponent >= precision) {

@@ -58,6 +58,19 @@ bool parse_index(const std::string& key, size_t& out) {
     return true;
 }
 
+bool parse_array_index(const std::string& name, size_t& out) {
+    if (name.empty() || name.size() > 10) return false;
+    if (name[0] == '0' && name.size() > 1) return false;
+    size_t value = 0;
+    for (char c : name) {
+        if (c < '0' || c > '9') return false;
+        value = value * 10 + static_cast<size_t>(c - '0');
+    }
+    if (value >= 4294967295u) return false;
+    out = value;
+    return true;
+}
+
 /// `object.own_keys()` with the cross-origin Window/Location rule applied:
 /// when the object is a cross-origin WindowProxy or Location (HTML §7.2.3),
 /// only its exposed keys are reported, in the spec's order — the indices,
@@ -445,7 +458,7 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     // place is a hole (JsValue::define_accessor makes it one). Under an
     // element or past the end it is not looked at.
     size_t index = 0;
-    const bool array_index = cell && cell->is_array && parse_index(key, index);
+    const bool array_index = cell && cell->is_array && parse_array_index(key, index);
     const bool in_range = array_index && index < cell->array_elements.size();
     const bool element_there = in_range && !object.is_array_hole(index);
     const bool mapped_hole = in_range && !element_there && cell->properties.find(key) != cell->properties.end();
@@ -460,11 +473,29 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     // elements so that the map's entry is what a read finds, the way
     // JsValue::define_accessor leaves it; one that is not there grows the
     // elements to cover it, for the same reason.
-    const bool plain_attributes =
-        (!writable.present || writable.value.is_truthy()) &&
-        (!enumerable.present || enumerable.value.is_truthy()) &&
-        (!configurable.present || (key == "length" ? !configurable.value.is_truthy()
-                                                   : configurable.value.is_truthy()));
+    // Whether the descriptor asks for the \"plain\" attributes an array's
+    // dense element carries (writable/enumerable/configurable all true).
+    // A missing field means \"keep the existing\" for an existing element
+    // (true), but \"default to false\" for a new property (§7.3.7 step 3) —
+    // `Object.defineProperty(arr,'0',{value:1})` must become non-writable.
+    // `length` itself is non-configurable/false enumerable, so its plain
+    // check is different: missing there means \"do not change\".
+    auto plain_for_index = [&](bool exists) {
+        bool w_plain = writable.present ? writable.value.is_truthy() : exists;
+        bool e_plain = enumerable.present ? enumerable.value.is_truthy() : exists;
+        bool c_plain = configurable.present ? configurable.value.is_truthy() : exists;
+        return w_plain && e_plain && c_plain;
+    };
+    auto plain_for_length = [&]() {
+        bool w_plain = !writable.present || writable.value.is_truthy();
+        bool e_plain = !enumerable.present || !enumerable.value.is_truthy();
+        bool c_plain = !configurable.present || !configurable.value.is_truthy();
+        return w_plain && e_plain && c_plain;
+    };
+    // Provisional plain: will be refined after we know if the index exists.
+    // For length the answer is just plain_for_length(); for an array index
+    // it depends on whether the place already exists as dense element or in
+    // the map.
     // A host object answers for its own places, and this shortcut writes the
     // elements and never asks: an arguments place that is still mapped is its
     // parameter's binding, and a descriptor on it has to go through the
@@ -475,7 +506,7 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
     // array length, and a negative one is a RangeError before any attribute is
     // looked at (finding 253).
     if (array_length && value.present) {
-        const double asked = value.value.to_number();
+        const double asked = js_to_number(value.value);
         if (!(asked >= 0) || asked != std::floor(asked) || asked > 4294967295.0) {
             js_throw_range_error("Invalid array length");
         }
@@ -545,8 +576,7 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
             std::vector<std::string> lost;
             for (const auto& entry : cell->properties) {
                 size_t at = 0;
-                if (!parse_index(entry.first, at) || at < asked_length || at >= previous) continue;
-                if (entry.flags & PropertyMap::Accessor) continue;   // handled below
+                if (!parse_array_index(entry.first, at) || at < asked_length || at >= previous) continue;
                 if (entry.flags & PropertyMap::Configurable) {
                     lost.push_back(entry.first);
                     continue;
@@ -555,17 +585,62 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
             }
             if (refused) {
                 // §10.4.2.4 step 4.c.iii: the length ends up just after the
-                // last place that could not be deleted.
+                // last place that could not be deleted. Also delete the
+                // configurable places that were before the failure.
                 size_t keep = asked_length;
                 for (const auto& entry : cell->properties) {
                     size_t at = 0;
-                    if (!parse_index(entry.first, at) || at < asked_length) continue;
+                    if (!parse_array_index(entry.first, at) || at < asked_length) continue;
                     if (entry.flags & PropertyMap::Configurable) continue;
                     keep = std::max(keep, at + 1);
                 }
+                // Writable comes from the descriptor if present, else the
+                // old length's writability (which is what the later
+                // array_length block would have kept).
+                bool final_writable = true;
+                if (writable.present) final_writable = writable.value.is_truthy();
+                else {
+                    bool lw = !cell->frozen;
+                    if (auto e = cell->properties.find("length"); e != cell->properties.end()) lw = (e->flags & PropertyMap::Writable) != 0;
+                    final_writable = lw;
+                }
+                uint8_t flags = final_writable ? PropertyMap::Writable : 0;
+                // Delete configurable map entries that are at or above keep
+                // (those that were successfully deleted before the failure).
+                for (const auto& k : lost) {
+                    size_t at = 0;
+                    if (parse_array_index(k, at) && at >= keep) cell->properties.erase(k);
+                    else if (parse_array_index(k, at) && at < keep) {
+                        // Configurable entry that is kept (below keep) was
+                        // already in lost but should stay; it was only lost
+                        // because asked_length < at, but keep > at.
+                        // Actually lost only contains entries with at >= asked_length,
+                        // so those with at < keep are kept.
+                    }
+                }
+                // Actually remove all configurable entries that are >= keep
+                // (simpler: re-collect)
+                std::vector<std::string> to_delete;
+                for (const auto& entry : cell->properties) {
+                    size_t at = 0;
+                    if (!parse_array_index(entry.first, at) || at < keep || at >= previous) continue;
+                    if (entry.flags & PropertyMap::Configurable) to_delete.push_back(entry.first);
+                }
+                for (auto &k : to_delete) cell->properties.erase(k);
+                // Shrink dense elements to keep (deleting configurable dense
+                // places). Holes for deleted indices are cleared.
+                if (keep < cell->array_elements.size()) {
+                    size_t from = cell->array_elements.size();
+                    cell->array_elements.resize(keep, JsValue::make_undefined());
+                    if (cell->array_holes) {
+                        for (size_t i = keep; i < from; ++i) cell->array_holes->clear(i);
+                        for (size_t i = keep; i < previous; ++i) cell->array_holes->clear(i);
+                    }
+                } else if (cell->array_holes) {
+                    for (size_t i = keep; i < previous; ++i) cell->array_holes->clear(i);
+                }
                 object.define_property(
-                    "length", JsValue::make_number(static_cast<double>(keep)),
-                    static_cast<uint8_t>(PropertyMap::Writable));
+                    "length", JsValue::make_number(static_cast<double>(keep)), flags);
                 js_throw_type_error("Cannot delete property of an array");
             }
             for (const auto& entry : lost) cell->properties.erase(entry);
@@ -660,6 +735,16 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         }
     }
     const bool host_keeps = cell && cell->exotic && array_index && cell->exotic->owns_place(cell, key);
+    // Decide if the descriptor is plain for this specific place: new array
+    // indices need explicit true, existing ones treat missing as keep.
+    bool plain_attributes = false;
+    if (key == "length") plain_attributes = plain_for_length();
+    else if (array_index) {
+        bool index_exists = element_there || (cell && cell->properties.find(key) != cell->properties.end());
+        plain_attributes = plain_for_index(index_exists);
+    } else {
+        plain_attributes = plain_for_index(false);
+    }
     if (cell && cell->is_array && !host_keeps && !wants_accessor && (array_index || key == "length") &&
         !mapped_hole && plain_attributes && (!array_index || cell->extensible || element_there)) {
         if (value.present) object.set_property(key, value.value);
@@ -689,11 +774,48 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
             // A place past the end is one the array does not have yet, and
             // defining an accessor on it materialises it: the descriptor goes
             // in the map below, and the place it sits on has to exist for
-            // `index in arr` to say so.
+            // `index in arr` to say so. For very sparse indices (more than
+            // kMaxDenseGap past the end) the dense vector is not grown; the
+            // length is tracked via the property map entry created below.
             const size_t previous = cell->array_elements.size();
-            cell->array_elements.resize(index + 1, JsValue::make_undefined());
-            if (!cell->array_holes) cell->array_holes = std::make_unique<JsObject::Holes>();
-            for (size_t i = previous; i <= index; ++i) cell->array_holes->set(i);
+            constexpr size_t kMaxDenseGapLocal = 1u << 16;
+            if (index > previous + kMaxDenseGapLocal) {
+                if (!cell->array_holes) cell->array_holes = std::make_unique<JsObject::Holes>();
+                for (size_t i = previous; i < previous + kMaxDenseGapLocal && i < index; ++i) cell->array_holes->set(i);
+                // Length for sparse place goes to the map; defining it below
+                // will create the entry, but we must ensure the length entry
+                // will be at least index+1. The array `length` update is handled
+                // via the length property write that defineProperty triggers
+                // through ArraySetLength (already handled above for length, but
+                // for index we need to remember length separately when past the
+                // elements). The `define_property` for the index will create
+                // the map entry, and the dense vector stays small.
+                // Record length if no length entry exists or it is smaller.
+                auto len_entry = cell->properties.find("length");
+                size_t length_now = cell->array_elements.size();
+                if (len_entry != cell->properties.end()) length_now = std::max(length_now, static_cast<size_t>(js_to_number(len_entry->second)));
+                if (index + 1 > length_now) {
+                    if (len_entry == cell->properties.end()) {
+                        auto &le = cell->properties.entry("length");
+                        le.second = JsValue::make_number(static_cast<double>(index + 1));
+                        le.flags = PropertyMap::Writable;
+                    } else {
+                        len_entry->second = JsValue::make_number(static_cast<double>(index + 1));
+                    }
+                }
+            } else {
+                cell->array_elements.resize(index + 1, JsValue::make_undefined());
+                if (!cell->array_holes) cell->array_holes = std::make_unique<JsObject::Holes>();
+                for (size_t i = previous; i <= index; ++i) cell->array_holes->set(i);
+                // Length must grow to index+1 when defining a new index past
+                // the old length (ArraySetLength step 4.e.ii). The dense size
+                // is now the length, but an existing length entry with an old
+                // value (e.g. after `arr.length = 3`) would still read as old.
+                if (auto len_entry2 = cell->properties.find("length"); len_entry2 != cell->properties.end()) {
+                    size_t len_val = static_cast<size_t>(js_to_number(len_entry2->second));
+                    if (index + 1 > len_val) len_entry2->second = JsValue::make_number(static_cast<double>(index + 1));
+                }
+            }
         }
         cell->has_accessors = true;
     }
@@ -1311,6 +1433,7 @@ void install_object_builtins(JsIntrinsics& realm) {
         return make_string_array(reflected_own_keys(js_arg(args, 0), true));
     });
     js_define_method(object_ctor, "getOwnPropertySymbols", 1, [](Args args) {
+        if (js_arg(args, 0).is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
         std::vector<JsValue> symbols;
         if (PropertyMap* table = own_table(js_arg(args, 0), false)) {
             for (const auto& entry : *table) {
@@ -1457,8 +1580,9 @@ void install_object_builtins(JsIntrinsics& realm) {
         JsValue object = JsValue::make_object();
         object.object_val->prototype = proto.type == JsType::Null ? nullptr : proto.as_prototype();
         const JsValue& props = js_arg(args, 1);
-        if (props.is_object_like()) {
-            for (const auto& key : reflected_own_keys(props, false)) define_from_descriptor(object, key, props.get_property(key));
+        if (!props.is_undefined()) {
+            JsValue propsObj = js_to_object(props);
+            for (const auto& key : reflected_own_keys(propsObj, false)) define_from_descriptor(object, key, propsObj.get_property(key));
         }
         return object;
     });
@@ -1480,6 +1604,7 @@ void install_object_builtins(JsIntrinsics& realm) {
     });
     js_define_method(object_ctor, "getOwnPropertyDescriptors", 1, [](Args args) {
         const JsValue& object = js_arg(args, 0);
+        if (object.is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
         JsValue result = JsValue::make_object();
         // §20.1.2.9 walks `[[OwnPropertyKeys]]`, so a symbol key gets a
         // symbol-keyed descriptor entry: the same list `Reflect.ownKeys`
@@ -1510,12 +1635,16 @@ void install_object_builtins(JsIntrinsics& realm) {
         return JsValue::make_boolean(js_same_value(js_arg(args, 0), js_arg(args, 1)));
     });
     js_define_method(object_ctor, "hasOwn", 2, [](Args args) {
-        return JsValue::make_boolean(js_arg(args, 0).has_own_property(js_to_property_key(js_arg(args, 1))));
+        const JsValue& O = js_arg(args, 0);
+        if (O.is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
+        (void)js_to_object(O);
+        return JsValue::make_boolean(O.has_own_property(js_to_property_key(js_arg(args, 1))));
     });
     js_define_method(object_ctor, "groupBy", 2, [](Args args) {
+        const JsValue& callback = js_arg(args, 1);
+        if (!callback.is_function()) js_throw_type_error("callback is not a function");
         JsValue result = JsValue::make_object();
         result.object_val->prototype = nullptr;
-        const JsValue callback = js_arg(args, 1);
         double index = 0;
         js_iterate(js_arg(args, 0), [&](const JsValue& item) {
             std::string key = js_to_property_key(js_call(callback, JsValue(), {item, JsValue::make_number(index++)}));

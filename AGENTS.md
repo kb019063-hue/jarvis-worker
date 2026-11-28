@@ -1050,7 +1050,12 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   Request is still a draft", from the page, from `gh pr merge` and from
   the API alike. So a claim is opened as a draft since that day
   ("Before starting", point 2), and `check_pr.py claim N` says so of
-  one that is not.
+  one that is not. The other side of it: a finished draft that nobody
+  made ready is in no list (#425, thirteen hours; #508, eleven minutes
+  of that same watch, renamed and not made ready). `merge N` says so to
+  the agent that asks. `watch.sh cands` says so to the landing session,
+  which reads it, runs `gh pr ready N` when nothing was pushed for some
+  minutes, writes that on it, and takes it.
 - **An old copy of AGENTS.md, written over `main`'s.** #452 was finished
   on 25 November on `main` of 14:12. Its AGENTS.md was that file cut off
   after line 1442: the last 109 lines of "Open tasks" were gone. It

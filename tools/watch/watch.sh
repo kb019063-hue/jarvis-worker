@@ -227,12 +227,12 @@ note() {  # note N FILE -> "#N COMMENTID"
   local url; url="$(timeout 40 gh pr comment "$1" --body-file "$2" 2>&1 | tail -1)"
   echo "#$1 ${url##*-}"
 }
-open_ones() {  # "N FULLSHA fin|WIP MERGEABLE..." of every open pull request that is a claim
+open_ones() {  # "N FULLSHA fin|WIP|draft MERGEABLE..." of every open pull request that is a claim
   # A draft is work in progress whatever its title says, as it is for
   # check_pr.py: GitHub does not merge one. On 24 November #385, a draft
   # whose title had lost its WIP:, was taken into a lot for three minutes.
   timeout 40 gh pr list --state open --limit 100 --json number,title,headRefOid,mergeable,isDraft \
-    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "fin" end) \(.mergeable)"' | sort -n
+    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.title | test("^WIP")) then "WIP" elif .isDraft then "draft" else "fin" end) \(.mergeable)"' | sort -n
 }
 fetch_pr() { timeout 60 git fetch -q origin "+refs/pull/$1/head:refs/remotes/origin/pr$1"; }
 agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^Agent: *(\\w+)") | .captures[0].string] | first) // "-"' 2>/dev/null; }
@@ -311,6 +311,18 @@ cands)
   # when it has moved. To take one all the same, give its number to `plan`.
   clashes="$(timeout 90 python3 tools/ci/check_pr.py numbers 2>/dev/null)"
   open_ones | while read -r n full wip mergeable; do
+    if [ "$wip" = "draft" ]; then
+      # A draft whose title has lost its WIP: is in no list, and GitHub
+      # merges none. Either its agent is not finished and took the WIP: off
+      # early, or it is finished and `gh pr ready` did not happen: #425
+      # stood so for thirteen hours on 25 November, and #508 for eleven
+      # minutes of a watch on 28 November, renamed at 07:52:18 like its
+      # agent's two before it, which had been made ready in the same second.
+      # Since that day every claim is a draft, so this is said every time.
+      runs="$(runs_of "$full" 2>/dev/null)"; case "$runs" in ""|"{"*) runs="its runs could not be read" ;; esac
+      echo "#$n ${full:0:7}: NOT taken: a draft whose title has no WIP: ($runs). Finished and not made ready? Read it and its events; when nothing was pushed for some minutes, \`gh pr ready $n\`, a note on it, and it is taken" >&2
+      continue
+    fi
     [ "$wip" = "fin" ] || continue
     grep -q "^$n ${full:0:7}$" "$STATE/sentback" 2>/dev/null && continue   # sent back, and has not moved
     grep -qx "$n" "$STATE/ignore" 2>/dev/null && continue                     # nobody's: left alone

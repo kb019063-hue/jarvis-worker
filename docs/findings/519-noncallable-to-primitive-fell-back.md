@@ -29,8 +29,18 @@ mutation and collection in a getter. Node v22.22.3 with `--expose-gc`
 returns **`ok 223`** for the same script. C++ asserts the explicit final
 result so failed script evaluation cannot accidentally pass the suite.
 
+The baseline fails **157** focused checks; fixed plain and explicit -O0
+ASan/UBSan builds pass all **223**. Same-base pinned test262 comparisons
+improve **2,596 → 2,600 / 2,725** conversion cases and **15,236 → 15,240 /
+15,686** default helper-regression cases: **eight distinct gains, zero
+losses**. All eight gained cases also pass ASan/UBSan. Plain units pass
+**560/560**, plus **114/114** cross-origin checks.
+
 See [Phase 519](../phases/519-noncallable-to-primitive.md) for reproducible
-commands, before/after evidence and broader validation.
+commands and broader validation, including limits: the broader explicit
+-O0 sanitizer run has one unrelated empty-string-repeat timeout, local
+deep validation was interrupted without a final result, and full default
+sanitizer/deep CI must pass in the landing session before merge.
 
 ## What is still open
 

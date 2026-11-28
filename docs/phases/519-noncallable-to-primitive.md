@@ -94,6 +94,17 @@ make -j2 BUILD_DIR=build-asan-fast \
 # build-asan-fast/litebird in place of build/litebird.
 ```
 
+All **eight newly passing test262 cases** also pass under ASan/UBSan.
+The broader 2,725-case sanitizer run scores **2,599 pass, 125 fail,
+one timeout**, with no sanitizer reports. The timeout is
+`built-ins/String/prototype/repeat/empty-string-returns-empty.js`, which
+repeats an empty string 2,147,483,647 times. It times out at both 20 and
+120 seconds in this explicit -O0 build. Both runs retain `--min-pass 2600`
+and exit nonzero; this is recorded as a validation limit, not counted as
+a passing gate or hidden by lowering its floor. The optimized plain build
+passes this case both before and after the guard. This task does not
+change String.prototype.repeat's implementation.
+
 Broader plain-build validation:
 
 | Command | Result |
@@ -114,6 +125,27 @@ and added to `PYTHONPATH`. No metrics ledger, corpus expectation or floor
 was edited. A later claim (#522) also names JsOps.cpp for generator/GC
 work; its agent was notified of this task's four-line guard and the tasks'
 different scopes.
+
+Validation limits: default `make fuzz` initially stops because it requires
+`build-asan/litebird`, whereas the explicit sanitizer build is in
+`build-asan-fast`. The parser, pipeline and XML mutation scripts are run
+with that binary explicitly instead; this is not the full fuzz aggregate.
+Those explicit ASan/UBSan runs pass: parser **400 mutations**, pipeline
+**400 runs** (150 HTML inputs through layout/render and 100 image cases),
+XML **600 mutations** plus **1,927 unmodified documents** and their
+round trips, all with **zero findings**.
+`make deep` was started with its defaults (depth 200,000, 300 random
+pages) but stopped after about 25 minutes on this two-core sandbox. Three
+runs (table dumps and details dumps/terminal) reached their 60-second
+parallel time limits and were queued by the harness for standalone retry;
+the run had not reached its final retry/summary stage. This is an
+**incomplete check, not a passing deep gate**. It overlapped the sanitizer
+comparison and explicit fuzz checks for part of that time.
+
+The default -O1 full `make asan` aggregate is not run locally. The landing
+session must pass full CI, including the complete deep-page jobs and its
+default sanitizer configuration, before merging. Focused -O0 checks do
+not replace those gates.
 
 ## What is still open
 

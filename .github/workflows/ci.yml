@@ -382,6 +382,10 @@ jobs:
         # in it would stop a merge: tested on rulesets written down, the
         # person's own among them. takeable_test.sh asks watch.sh's
         # `takeable` what it takes into a lot, with and without that rule.
+        # land_test.sh runs watch.sh's `build` and `land` in a repository
+        # it makes, against a `gh` that answers what each case says: what
+        # is merged, in which order, and that nothing is when one of the
+        # lot cannot be.
         run: |
           python3 tools/watch/carry_rows.py --self-test
           python3 tools/watch/rule.py --self-test
@@ -389,6 +393,7 @@ jobs:
           python3 tools/ci/run_report.py --self-test
           bash -n tools/watch/watch.sh
           bash tools/watch/takeable_test.sh
+          bash tools/watch/land_test.sh
           bash tools/ci/logged.sh --self-test
           python3 tools/ci/annotate_failure.py --self-test
       - name: The documents keep their shape and stay under their budgets

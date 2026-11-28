@@ -248,6 +248,11 @@ takeable() {  # takeable N FULLSHA; says why in $WHY
   [ "${WATCH_EAGER:-1}" = "1" ] && [ -n "$runs" ] && return 0
   WHY="no run on its head, and its code was never green"; return 1
 }
+# What a pull request of a lot is now, as one line: "OPEN FULLSHA finished",
+# or WIP in the place of the last word when its title begins with WIP or it
+# is a draft. Asked by `build`, `lot`, `rehead` and `land`.
+MEMBER_JQ='"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"'
+member_now() { timeout 30 gh pr view "$1" --json state,headRefOid,title,isDraft --jq "$MEMBER_JQ"; }
 note() {  # note N FILE -> "#N COMMENTID"
   local url; url="$(timeout 40 gh pr comment "$1" --body-file "$2" 2>&1 | tail -1)"
   echo "#$1 ${url##*-}"
@@ -410,7 +415,7 @@ build)
   for n in $nums; do
     fetch_pr "$n" || { echo "could not fetch #$n"; exit 9; }
     full="$(git rev-parse "origin/pr$n")"
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title,isDraft --jq '"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"')"
+    st="$(member_now "$n")"
     [ "$st" = "OPEN $full finished" ] || { echo "#$n: '$st' is not OPEN and finished at ${full:0:7}"; exit 6; }
     takeable "$n" "$full" || { echo "#$n ${full:0:7} is not taken: $WHY ($(runs_of "$full"))"; exit 6; }
     echo "$n ${full:0:7}" >> "$STATE/lot.heads.new"
@@ -534,10 +539,18 @@ lot)
   main_now="$(timeout 20 git ls-remote origin refs/heads/main | cut -c1-7)"
   [ -n "$main_now" ] || { echo "lot: could not read main"; exit 4; }
   if [ "$main_now" != "$(cat "$STATE/lot.main")" ]; then echo "lot: MAIN MOVED $(cat "$STATE/lot.main") -> $main_now"; exit 2; fi
+  # Every member is open, at the head the lot holds, and finished still. An
+  # agent that finds something after its last push makes its pull request a
+  # draft again and puts `WIP:` back (#523 did, 28 November, 13:06, with no
+  # watch on). Until that day nothing here asked: GitHub says CLEAN of a
+  # draft whose run passed, so `land` would have merged the members before
+  # it and been refused at the draft, with a part of the lot on main; and
+  # one that only had its `WIP:` back would have been merged as it was.
+  # (tools/watch/land_test.sh has both.)
   while read -r n sha; do
     [ -n "$n" ] || continue
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid --jq '"\(.state) \(.headRefOid[0:7])"')"
-    if [ "$st" != "OPEN $sha" ]; then echo "lot: #$n is '$st', the lot holds $sha"; exit 3; fi
+    read -r is at word <<< "$(member_now "$n")"; st="$is ${at:0:7} $word"
+    if [ "$st" != "OPEN $sha finished" ]; then echo "lot: #$n is '$st', the lot holds it finished at $sha"; exit 3; fi
   done < "$STATE/lot.heads"
   while read -r n sha; do   # a member that was taken while its own run was going: has that run failed?
     [ -n "$n" ] || continue
@@ -566,7 +579,7 @@ rehead)
   while read -r n sha; do
     fetch_pr "$n" || exit 9
     full="$(git rev-parse "origin/pr$n")"
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title,isDraft --jq '"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"')"
+    st="$(member_now "$n")"
     [ "$st" = "OPEN $full finished" ] || { echo "#$n: '$st' is not OPEN and finished at ${full:0:7}"; exit 3; }
     if [ "${full:0:7}" != "$sha" ]; then
       takeable "$n" "$full" || { echo "#$n moved to ${full:0:7}, and that head cannot be taken: $(runs_of "$full")"; exit 3; }
@@ -597,6 +610,8 @@ wait)
   exit $rc ;;
 
 land)
+  # tools/watch/land_test.sh runs this in a made-up repository: what is
+  # merged, in which order and under which mark, and each way of stopping.
   last="${1:-}"
   "$0" lot > "$STATE/lot.out" 2>&1; rc=$?
   if [ $rc -eq 3 ] && "$0" rehead; then "$0" lot > "$STATE/lot.out" 2>&1; rc=$?; fi
@@ -607,9 +622,9 @@ land)
   all="$(echo $nums | sed -E 's/([0-9]+)/#\1/g; s/ /, /g')"
   while read -r n sha; do
     full="$(git rev-parse "origin/pr$n")"
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid --jq '"\(.state) \(.headRefOid)"')"
-    [ "$st" = "OPEN $full" ] || { echo "STOP: #$n is '$st'"; exit 3; }
-    takeable "$n" "$full" || { echo "STOP: #$n is not green on ${full:0:7}: $(runs_of "$full")"; exit 3; }
+    st="$(member_now "$n")"
+    [ "$st" = "OPEN $full finished" ] || { echo "STOP, nothing merged: #$n is '$st', the lot holds it finished at ${full:0:7}"; exit 3; }
+    takeable "$n" "$full" || { echo "STOP, nothing merged: #$n is not green on ${full:0:7}: $(runs_of "$full")"; exit 3; }
     # Asked of every one before the first is merged: a lot of which GitHub
     # merges the first and refuses the second leaves main with a tree that no
     # run passed on. An own run that is still going under a rule on main is

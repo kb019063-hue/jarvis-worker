@@ -156,7 +156,11 @@ within the hour, and the first lot was started again four times.
      far `main` has moved: either would start a run of your own and move
      the head under the one that is testing it. That goes for an empty
      commit "to start CI" as well: when the last comment on #N says it is
-     taken, it is, run or no run. Wait with
+     taken, it is, run or no run. **If you find a fault in it after
+     that, take it back before you push**: `gh pr ready N --undo`, and
+     `WIP:` in front of its title again. The landing session's next
+     look puts it out of its lot, and nothing of it is merged; a push
+     alone may come a second after the merge. Wait with
      `python3 tools/ci/check_pr.py landed N`, which looks for up to four
      minutes and says one of four things:
      - it has landed: tell the person, and end the turn. Your next task
@@ -296,6 +300,16 @@ within the hour, and the first lot was started again four times.
      checks that, and the lot goes on with the new head. In the first
      quarter of an hour of 24 November's watch three heads moved under
      one lot (#305, #313, #321) and none of them cost a run;
+   - **a pull request that is a draft again, or has `WIP:` back, is out
+     of its lot.** Its agent found a fault after the last push (#523,
+     28 November, with no watch on). `watch.sh lot` and `land` ask it
+     of every pull request of a lot before anything is merged, and the
+     lot is built again without that one. Until that day nothing asked.
+     Of a draft whose run passed GitHub says CLEAN: the ones before it
+     would have been merged and the draft refused, a part of the lot
+     on `main`. One with only `WIP:` back would have been merged as
+     it was. `tools/watch/land_test.sh` runs both, and every other
+     way `land` stops, in a repository it makes;
    - **a pull request's own run is the short one, watch or no watch.**
      Every push to it runs the jobs of the plain build that take a
      minute or two: "Build & unit tests", "Documentation shape", the

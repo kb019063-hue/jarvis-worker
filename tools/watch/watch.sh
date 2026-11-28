@@ -158,8 +158,11 @@ ruled_out() {  # ruled_out N FULLSHA [STATE]: GitHub refuses to merge #N as it i
   # merged, whatever the lot's run said: one that came back with main merged
   # under the mark that skips CI, one whose code was green a commit earlier,
   # one whose own run failed for a reason that is not its change. Written on
-  # 28 November, before any rule was on: tried with a `gh` that made the
-  # answers up, never against a rule.
+  # 28 November in the morning, against a `gh` that made the answers up. The
+  # person's rule was on main from 11:28 UTC that day, and BLOCKED was seen
+  # for the first time: of every draft, and of the watch's own pull request
+  # when it was ready with no run on its head, which `gh pr merge` then
+  # refused ("the base branch policy prohibits the merge", 11:34).
   local gs runs; gs="${3:-$(github_says "$1")}"
   case "$gs" in
     BLOCKED)
@@ -213,8 +216,15 @@ takeable() {  # takeable N FULLSHA; says why in $WHY
   runs="$(runs_of "$2")"
   case "$runs" in *failure*|*timed_out*) WHY="its own run failed"; return 1 ;; esac
   if came_back_without_a_run "$1" "$2" || code_was_green "$2"; then
-    ruled_out "$1" "$2" && return 1   # no passed run on this head, and a rule on main wants one
-    WHY="its code was green"; return 0
+    if ! ruled_out "$1" "$2"; then WHY="its code was green"; return 0; fi
+    # A rule on main wants a passed run on this head. With none at all it is
+    # not taken, and its agent is told to push without the mark ($WHY).
+    # With one that is going it is taken as any finished pull request is
+    # (below), and `land` waits for that run: a merge of main pushed without
+    # the mark, which is how a pull request comes back since the rule is on.
+    # (As this was written on the morning of 28 November, such a head was
+    # refused here with "wait for it", in a list of things to tell its agent.)
+    [[ "$runs" == *in_progress* || "$runs" == *queued* || "$runs" == *pending* ]] || return 1
   fi
   # A finished pull request whose own run is still going is taken as well
   # (WATCH_EAGER=0 turns that off): its run and the lot's go side by side, and

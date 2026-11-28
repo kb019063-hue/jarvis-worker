@@ -855,6 +855,224 @@ bool preflight_entry_covers(
     return true;
 }
 
+struct HttpProxyConfig {
+    bool enabled{false};
+    bool invalid{false};
+    std::string error;
+    std::string host;       // bare IP/host (no brackets)
+    uint16_t port{80};
+    std::string authority;  // host:port or [ipv6]:port
+};
+
+bool read_nonempty_proxy_env(std::initializer_list<const char*> names, std::string& value) {
+    for (const char* name : names) {
+        const char* raw = std::getenv(name);
+        if (raw && *raw) {
+            value = raw;
+            return true;
+        }
+    }
+    value.clear();
+    return false;
+}
+
+std::string normalized_proxy_host(std::string host) {
+    host = ascii_lower(host);
+    if (host.size() > 1 && host.back() == '.') host.pop_back();
+    return host;
+}
+
+bool parse_proxy_port(std::string_view text, uint16_t& port) {
+    if (text.empty()) return false;
+    unsigned value = 0;
+    for (unsigned char c : text) {
+        if (c < '0' || c > '9') return false;
+        value = value * 10u + static_cast<unsigned>(c - '0');
+        if (value > 65535u) return false;
+    }
+    if (value == 0) return false;
+    port = static_cast<uint16_t>(value);
+    return true;
+}
+
+bool split_no_proxy_entry(std::string_view entry,
+                          std::string& host,
+                          bool& has_port,
+                          uint16_t& port) {
+    has_port = false;
+    if (entry.empty()) return false;
+    if (entry.front() == '[') {
+        const std::size_t close = entry.find(']');
+        if (close == std::string::npos || close == 1) return false;
+        host.assign(entry.substr(1, close - 1));
+        const std::string_view suffix = entry.substr(close + 1);
+        if (!suffix.empty()) {
+            if (suffix.front() != ':' || !parse_proxy_port(suffix.substr(1), port)) return false;
+            has_port = true;
+        }
+        return true;
+    }
+
+    const std::size_t first_colon = entry.find(':');
+    const std::size_t last_colon = entry.rfind(':');
+    if (first_colon != std::string::npos && first_colon == last_colon) {
+        host.assign(entry.substr(0, first_colon));
+        if (!parse_proxy_port(entry.substr(first_colon + 1), port)) return false;
+        has_port = true;
+    } else {
+        // An unbracketed IPv6 literal has several colons and no port suffix.
+        host.assign(entry);
+    }
+    return !host.empty();
+}
+
+bool no_proxy_matches(std::string_view list, const std::string& target_host, uint16_t target_port) {
+    const std::string target = normalized_proxy_host(target_host);
+    std::size_t pos = 0;
+    while (pos <= list.size()) {
+        const std::size_t comma = list.find(',', pos);
+        const std::size_t end = comma == std::string_view::npos ? list.size() : comma;
+        const std::string entry = trim_http_ws(list.substr(pos, end - pos));
+        if (entry == "*") return true;
+
+        std::string candidate;
+        bool has_port = false;
+        uint16_t port = 0;
+        if (split_no_proxy_entry(entry, candidate, has_port, port) &&
+            (!has_port || port == target_port)) {
+            if (candidate.rfind("*.", 0) == 0) {
+                candidate.erase(0, 2);
+            } else if (!candidate.empty() && candidate.front() == '.') {
+                candidate.erase(0, 1);
+            }
+            candidate = normalized_proxy_host(std::move(candidate));
+            if (candidate == "*") return true;
+            if (candidate == target) return true;
+            if (!is_ip_literal(candidate) && !is_ip_literal(target) &&
+                target.size() > candidate.size() &&
+                target.compare(target.size() - candidate.size(), candidate.size(), candidate) == 0 &&
+                target[target.size() - candidate.size() - 1] == '.') {
+                return true;
+            }
+        }
+        if (comma == std::string_view::npos) break;
+        pos = comma + 1;
+    }
+    return false;
+}
+
+HttpProxyConfig http_proxy_for(const Url& target_url) {
+    HttpProxyConfig out;
+    if (target_url.scheme != "http" && target_url.scheme != "https") return out;
+    const bool use_tls = (target_url.scheme == "https");
+
+    std::string raw_proxy;
+    if (use_tls) {
+        if (!read_nonempty_proxy_env({"HTTPS_PROXY", "https_proxy"}, raw_proxy) &&
+            !read_nonempty_proxy_env({"ALL_PROXY", "all_proxy"}, raw_proxy)) {
+            return out;
+        }
+    } else {
+        if (!read_nonempty_proxy_env({"HTTP_PROXY", "http_proxy"}, raw_proxy) &&
+            !read_nonempty_proxy_env({"ALL_PROXY", "all_proxy"}, raw_proxy)) {
+            return out;
+        }
+    }
+
+    std::string target_host = target_url.host;
+    if (target_host.size() >= 2 && target_host.front() == '[' && target_host.back() == ']') {
+        target_host = target_host.substr(1, target_host.size() - 2);
+    }
+    const int default_port = use_tls ? 443 : 80;
+    const int raw_port = (target_url.port >= 0) ? target_url.port : default_port;
+    if (raw_port <= 0 || raw_port > 65535) return out;
+
+    std::string no_proxy;
+    (void)read_nonempty_proxy_env({"NO_PROXY", "no_proxy"}, no_proxy);
+    if (no_proxy_matches(no_proxy, target_host, static_cast<uint16_t>(raw_port))) return out;
+
+    out.enabled = true;
+    Url parsed;
+    if (!Url::parse(raw_proxy, nullptr, parsed) || parsed.scheme != "http" ||
+        !parsed.has_host || parsed.host.empty() || parsed.port == 0 || parsed.port > 65535 ||
+        raw_proxy.find('@') != std::string::npos || !parsed.username.empty() || !parsed.password.empty() ||
+        parsed.has_query || parsed.has_fragment ||
+        (!parsed.pathname().empty() && parsed.pathname() != "/")) {
+        out.invalid = true;
+        out.error = "Invalid HTTP proxy URL";
+        return out;
+    }
+
+    out.host = parsed.host;
+    if (out.host.size() >= 2 && out.host.front() == '[' && out.host.back() == ']') {
+        out.host = out.host.substr(1, out.host.size() - 2);
+    }
+    out.port = parsed.port > 0 ? static_cast<uint16_t>(parsed.port) : static_cast<uint16_t>(80);
+    out.authority = parsed.host + ":" + std::to_string(out.port);
+    return out;
+}
+
+std::string absolute_http_request_target(const Url& url) {
+    const int default_port = (url.scheme == "https") ? 443 : 80;
+    std::string host_header = url.host;
+    if (url.port >= 0 && url.port != default_port) {
+        host_header += ":" + std::to_string(url.port);
+    }
+    std::string target_path = url.pathname();
+    if (target_path.empty()) target_path = "/";
+    target_path += url.search();
+    return url.scheme + "://" + host_header + target_path;
+}
+
+bool validate_connect_response(std::string_view response,
+                               int& status_code,
+                               std::vector<std::pair<std::string, std::string>>& out_headers) {
+    out_headers.clear();
+    const std::size_t line_end = response.find("\r\n");
+    const std::string_view status_line = line_end == std::string_view::npos
+        ? response
+        : response.substr(0, line_end);
+    if (status_line.size() < 12 ||
+        (status_line.substr(0, 9) != "HTTP/1.0 " && status_line.substr(0, 9) != "HTTP/1.1 ") ||
+        status_line[9] < '0' || status_line[9] > '9' ||
+        status_line[10] < '0' || status_line[10] > '9' ||
+        status_line[11] < '0' || status_line[11] > '9' ||
+        (status_line.size() > 12 && status_line[12] != ' ')) {
+        return false;
+    }
+    status_code = (status_line[9] - '0') * 100 + (status_line[10] - '0') * 10 +
+                  (status_line[11] - '0');
+    for (unsigned char c : status_line.substr(12)) {
+        if ((c < 0x20 && c != '\t') || c == 0x7f) return false;
+    }
+
+    if (line_end == std::string_view::npos) return true;
+    std::size_t pos = line_end + 2;
+    while (pos < response.size()) {
+        const std::size_t next = response.find("\r\n", pos);
+        const std::string_view line = next == std::string_view::npos
+            ? response.substr(pos)
+            : response.substr(pos, next - pos);
+        const std::size_t colon = line.find(':');
+        if (colon == std::string_view::npos || !is_http_token(line.substr(0, colon))) return false;
+        const std::string_view val_sv = line.substr(colon + 1);
+        for (unsigned char c : val_sv) {
+            if ((c < 0x20 && c != '\t') || c == 0x7f) return false;
+        }
+        out_headers.emplace_back(ascii_lower(line.substr(0, colon)), trim_http_ws(val_sv));
+        if (next == std::string_view::npos) break;
+        pos = next + 2;
+    }
+    return true;
+}
+
+void retry_http_407_if_authorized(
+    const std::string& hop_address,
+    const std::string& method,
+    const std::unordered_map<std::string, std::string>& base_wire_headers,
+    const std::string& body,
+    ResourceResponse& resp);
+
 bool ensure_cors_preflight(
     const std::string& target_url,
     const std::string& origin,
@@ -900,6 +1118,9 @@ bool ensure_cors_preflight(
     ResourceResponse preflight = ResourceLoader::load_http_single_hop(
         target_url, "OPTIONS", preflight_headers, ""
     );
+    if (preflight.network_ok && preflight.status_code == 407) {
+        retry_http_407_if_authorized(target_url, "OPTIONS", preflight_headers, "", preflight);
+    }
     if (!preflight.network_ok || preflight.status_code < 200 || preflight.status_code >= 300) {
         error_out = "Blocked by CORS preflight policy: preflight OPTIONS response did not succeed";
         return false;
@@ -1338,6 +1559,9 @@ ResourceResponse execute_http_hop_with_cache(
     ResourceResponse net_resp = ResourceLoader::load_http_single_hop(
         hop_address, method, wire_headers, body
     );
+    if (net_resp.network_ok && net_resp.status_code == 407) {
+        retry_http_407_if_authorized(hop_address, method, wire_headers, body, net_resp);
+    }
     if (!net_resp.network_ok) {
         return net_resp;
     }
@@ -1377,7 +1601,7 @@ ResourceResponse execute_http_hop_with_cache(
         return denied;
     }
 
-    if (ingest_cookies) {
+    if (ingest_cookies && net_resp.status_code != 407) {
         ingest_response_cookies(net_resp, hop_address);
     }
 
@@ -1834,15 +2058,22 @@ struct AuthNonceState {
 std::mutex g_nonce_mutex;
 std::unordered_map<std::string, AuthNonceState> g_nonce_store;
 
-std::string auth_next_nonce_for(std::string_view origin, std::string_view realm) {
+std::string nonce_space_key(std::string_view origin_or_authority, bool is_proxy) {
+    if (!is_proxy) return std::string(origin_or_authority);
+    return "\x01proxy:" + std::string(origin_or_authority);
+}
+
+std::string auth_next_nonce_for(std::string_view origin, std::string_view realm,
+                                bool is_proxy = false) {
     std::lock_guard<std::mutex> lock(g_nonce_mutex);
-    auto it = g_nonce_store.find(auth_store_key(origin, realm));
+    auto it = g_nonce_store.find(auth_store_key(nonce_space_key(origin, is_proxy), realm));
     return it == g_nonce_store.end() ? std::string() : it->second.nonce;
 }
 
-void auth_remember_next_nonce(std::string_view origin, std::string_view realm, std::string nonce) {
+void auth_remember_next_nonce(std::string_view origin, std::string_view realm,
+                              std::string nonce, bool is_proxy = false) {
     std::lock_guard<std::mutex> lock(g_nonce_mutex);
-    AuthNonceState& state = g_nonce_store[auth_store_key(origin, realm)];
+    AuthNonceState& state = g_nonce_store[auth_store_key(nonce_space_key(origin, is_proxy), realm)];
     if (state.nonce != nonce) {
         state.nonce = std::move(nonce);
         state.used = 0;    // a different nonce is a different count
@@ -1852,9 +2083,10 @@ void auth_remember_next_nonce(std::string_view origin, std::string_view realm, s
 /// RFC 7616 §3.3.1: `stale=true` says the nonce, not the password, was refused.
 /// Even if the server repeats the same nonce, a stale challenge starts a fresh
 /// count for the challenge's nonce.
-void auth_reset_stale_nonce(std::string_view origin, std::string_view realm, std::string nonce) {
+void auth_reset_stale_nonce(std::string_view origin, std::string_view realm,
+                            std::string nonce, bool is_proxy = false) {
     std::lock_guard<std::mutex> lock(g_nonce_mutex);
-    AuthNonceState& state = g_nonce_store[auth_store_key(origin, realm)];
+    AuthNonceState& state = g_nonce_store[auth_store_key(nonce_space_key(origin, is_proxy), realm)];
     state.nonce = std::move(nonce);
     state.used = 0;
 }
@@ -1862,9 +2094,9 @@ void auth_reset_stale_nonce(std::string_view origin, std::string_view realm, std
 /// The `nc` for the next request that uses `nonce` in this space: the count of
 /// requests already sent with it, plus one, as eight lower-case hex digits.
 std::string auth_nonce_count(std::string_view origin, std::string_view realm,
-                             const std::string& nonce) {
+                             const std::string& nonce, bool is_proxy = false) {
     std::lock_guard<std::mutex> lock(g_nonce_mutex);
-    AuthNonceState& state = g_nonce_store[auth_store_key(origin, realm)];
+    AuthNonceState& state = g_nonce_store[auth_store_key(nonce_space_key(origin, is_proxy), realm)];
     if (state.nonce != nonce) {
         state.nonce = nonce;
         state.used = 0;
@@ -1961,10 +2193,11 @@ std::vector<AuthChallenge> auth_stale_digest_challenges(
 
 /// A `407` is the proxy's challenge, not the document's (RFC 9110 §15.5.8),
 /// and it is answered with `Proxy-Authorization` rather than `Authorization`.
-/// This client does not send to proxies; what it does is report what the proxy
-/// asked for, so an embedder can tell a proxy that wants credentials from a
-/// server that does.
+/// Populate what the proxy asked for so an embedder can tell a proxy challenge
+/// from an origin challenge.
 void auth_note_proxy_challenge(ResourceResponse& resp) {
+    resp.proxy_auth_schemes.clear();
+    resp.proxy_auth_realm.clear();
     if (resp.status_code != 407) return;
     for (const auto& [name, value] : resp.header_list) {
         if (ascii_lower(name) != "proxy-authenticate") continue;
@@ -2133,7 +2366,8 @@ bool auth_digest_value(const AuthChallenge& challenge,
                        const AuthCredentials& creds,
                        std::string_view entity_body,
                        std::string& out,
-                       bool retrying_stale = false) {
+                       bool retrying_stale = false,
+                       bool is_proxy = false) {
     std::string algorithm = "MD5";
     if (auto it = challenge.params.find("algorithm"); it != challenge.params.end()) {
         algorithm = it->second;
@@ -2178,15 +2412,15 @@ bool auth_digest_value(const AuthChallenge& challenge,
         // The server's stale challenge carries the replacement nonce. It must
         // beat an older Authentication-Info nextnonce and start its own nc.
         if (!is_safe_header_value(nonce)) return false;
-        auth_reset_stale_nonce(origin, realm, nonce);
-    } else if (std::string remembered = auth_next_nonce_for(origin, realm); !remembered.empty()) {
+        auth_reset_stale_nonce(origin, realm, nonce, is_proxy);
+    } else if (std::string remembered = auth_next_nonce_for(origin, realm, is_proxy); !remembered.empty()) {
         // RFC 7616 §3.5: a nextnonce this protection space handed us last time
         // replaces the challenge's nonce, which may be spent.
         nonce = std::move(remembered);
     }
 
     const std::string cnonce = auth_client_nonce();
-    const std::string nc = auth_nonce_count(origin, realm, nonce);
+    const std::string nc = auth_nonce_count(origin, realm, nonce, is_proxy);
 
     return auth_digest_build(algorithm, creds.username, creds.password, realm, nonce, opaque,
                              method, request_target, chosen_qop, cnonce, nc,
@@ -2220,7 +2454,8 @@ std::vector<const AuthChallenge*> auth_ranked_digest_challenges(
 }
 
 void auth_remember_stale_nonce(const std::vector<AuthChallenge>& challenges,
-                               const std::string& origin, std::string_view realm) {
+                               const std::string& origin, std::string_view realm,
+                               bool is_proxy = false) {
     for (const AuthChallenge* challenge : auth_ranked_digest_challenges(challenges)) {
         const auto realm_it = challenge->params.find("realm");
         const std::string_view challenge_realm = realm_it == challenge->params.end()
@@ -2228,7 +2463,7 @@ void auth_remember_stale_nonce(const std::vector<AuthChallenge>& challenges,
         const auto nonce_it = challenge->params.find("nonce");
         if (challenge_realm != realm || nonce_it == challenge->params.end() ||
             nonce_it->second.empty() || !is_safe_header_value(nonce_it->second)) continue;
-        auth_reset_stale_nonce(origin, realm, nonce_it->second);
+        auth_reset_stale_nonce(origin, realm, nonce_it->second, is_proxy);
         return;
     }
 }
@@ -2298,17 +2533,75 @@ bool auth_authorization_for(const std::vector<AuthChallenge>& challenges,
 ///
 /// Same ranking and the same refusal rules as the origin's helper above, but
 /// it reads the *proxy* store and only ever matches a challenge against the
-/// credential held for that challenge's own realm. RFC 9110 §11.7: the proxy's
-/// protection space is not the origin's, so a credential the document set can
-/// never be offered here even when the realm names match.
-///
-/// The realm a challenge names goes back to the caller so that a refusal can
-/// forget exactly the pair that was refused, the way a `401` does.
+bool auth_proxy_lookup(const std::string& proxy_authority,
+                       const std::string& realm,
+                       AuthCredentials& creds_out,
+                       std::string& matched_authority_out) {
+    std::lock_guard<std::mutex> lock(g_auth_mutex);
+    auto found = g_proxy_auth_store.find(auth_store_key(proxy_authority, realm));
+    if (found != g_proxy_auth_store.end()) {
+        creds_out = found->second;
+        matched_authority_out = proxy_authority;
+        return true;
+    }
+    if (proxy_authority.size() > 3 &&
+        proxy_authority.compare(proxy_authority.size() - 3, 3, ":80") == 0) {
+        const std::string bare = proxy_authority.substr(0, proxy_authority.size() - 3);
+        found = g_proxy_auth_store.find(auth_store_key(bare, realm));
+        if (found != g_proxy_auth_store.end()) {
+            creds_out = found->second;
+            matched_authority_out = bare;
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<AuthChallenge> auth_collect_proxy_challenges(
+    const std::vector<std::pair<std::string, std::string>>& header_list) {
+    std::vector<AuthChallenge> challenges;
+    for (const auto& [name, value] : header_list) {
+        if (ascii_lower(name) != "proxy-authenticate") continue;
+        for (auto& challenge : auth_parse_challenges(value)) {
+            challenges.push_back(std::move(challenge));
+        }
+    }
+    return challenges;
+}
+
+void auth_note_proxy_authentication_info(
+    const std::vector<std::pair<std::string, std::string>>& header_list,
+    const std::string& matched_authority,
+    const std::string& realm) {
+    if (matched_authority.empty()) return;
+    for (const auto& [name, value] : header_list) {
+        if (ascii_lower(name) != "proxy-authentication-info") continue;
+        AuthChallenge info;
+        info.scheme = "Digest";
+        for (const AuthChallenge& parsed : auth_parse_challenges("Digest " + value)) {
+            info.params = parsed.params;
+            break;
+        }
+        auto it = info.params.find("nextnonce");
+        if (it != info.params.end() && !it->second.empty() && is_safe_header_value(it->second)) {
+            auth_remember_next_nonce(matched_authority, realm, it->second, /*is_proxy=*/true);
+        }
+    }
+}
+
+/// RFC 9110 §11.7.1: `407` answers from the proxy store only, never the
+/// document store, using exact proxy authority, method, request-target, and
+/// entity body for Digest challenges.
 bool auth_proxy_authorization_for(const std::vector<AuthChallenge>& challenges,
                                   const std::string& proxy_authority,
+                                  const std::string& method,
+                                  const std::string& request_target,
+                                  std::string_view entity_body,
                                   std::string& out,
                                   std::string* authorized_realm = nullptr,
-                                  std::string* authorized_scheme = nullptr) {
+                                  std::string* authorized_scheme = nullptr,
+                                  bool retrying_stale = false,
+                                  std::string* matched_authority_out = nullptr) {
     const std::vector<const AuthChallenge*> digests = auth_ranked_digest_challenges(challenges);
     const AuthChallenge* basic = nullptr;
     for (const AuthChallenge& challenge : challenges) {
@@ -2322,20 +2615,14 @@ bool auth_proxy_authorization_for(const std::vector<AuthChallenge>& challenges,
         auto it = challenge->params.find("realm");
         const std::string realm = it == challenge->params.end() ? std::string() : it->second;
         AuthCredentials creds;
-        {
-            std::lock_guard<std::mutex> lock(g_auth_mutex);
-            auto found = g_proxy_auth_store.find(auth_store_key(proxy_authority, realm));
-            if (found == g_proxy_auth_store.end()) continue;
-            creds = found->second;
-        }
+        std::string matched_authority;
+        if (!auth_proxy_lookup(proxy_authority, realm, creds, matched_authority)) continue;
         if (!auth_is_header_safe(creds.username) || !auth_is_header_safe(creds.password)) continue;
-        // `auth_digest_value` keys its nonce bookkeeping by (origin, realm); a
-        // proxy's protection space is keyed by its authority instead, which is
-        // what `proxy_authority` is here, so the two never share a nonce.
-        if (!auth_digest_value(*challenge, proxy_authority, std::string(), std::string(), creds,
-                               std::string_view(), out)) continue;
+        if (!auth_digest_value(*challenge, matched_authority, method, request_target, creds,
+                               entity_body, out, retrying_stale, /*is_proxy=*/true)) continue;
         if (authorized_realm) *authorized_realm = realm;
         if (authorized_scheme) *authorized_scheme = challenge->scheme;
+        if (matched_authority_out) *matched_authority_out = std::move(matched_authority);
         return true;
     }
 
@@ -2343,19 +2630,117 @@ bool auth_proxy_authorization_for(const std::vector<AuthChallenge>& challenges,
         auto it = basic->params.find("realm");
         const std::string realm = it == basic->params.end() ? std::string() : it->second;
         AuthCredentials creds;
-        {
-            std::lock_guard<std::mutex> lock(g_auth_mutex);
-            auto found = g_proxy_auth_store.find(auth_store_key(proxy_authority, realm));
-            if (found == g_proxy_auth_store.end()) return false;
-            creds = found->second;
-        }
+        std::string matched_authority;
+        if (!auth_proxy_lookup(proxy_authority, realm, creds, matched_authority)) return false;
         if (!auth_is_header_safe(creds.username) || !auth_is_header_safe(creds.password) ||
             !auth_basic_value(creds, out)) return false;
         if (authorized_realm) *authorized_realm = realm;
         if (authorized_scheme) *authorized_scheme = basic->scheme;
+        if (matched_authority_out) *matched_authority_out = std::move(matched_authority);
         return true;
     }
     return false;
+}
+
+void retry_http_407_if_authorized(
+    const std::string& hop_address,
+    const std::string& method,
+    const std::unordered_map<std::string, std::string>& base_wire_headers,
+    const std::string& body,
+    ResourceResponse& resp) {
+    if (!resp.network_ok || resp.status_code != 407) return;
+    auth_note_proxy_challenge(resp);
+
+    Url parsed_url;
+    if (!Url::parse(hop_address, nullptr, parsed_url) || parsed_url.scheme != "http") return;
+
+    const HttpProxyConfig proxy = http_proxy_for(parsed_url);
+    std::string proxy_authority;
+    std::string digest_target;
+    if (proxy.enabled && !proxy.invalid) {
+        proxy_authority = proxy.authority;
+        digest_target = absolute_http_request_target(parsed_url);
+    } else {
+        const int proxy_port = parsed_url.port >= 0 ? parsed_url.port : 80;
+        proxy_authority = parsed_url.host + ":" + std::to_string(proxy_port);
+        digest_target = auth_request_target(parsed_url);
+    }
+    const std::string wire_method = method.empty() ? "GET" : method;
+
+    const std::vector<AuthChallenge> challenges = auth_collect_proxy_challenges(resp.header_list);
+    if (challenges.empty()) return;
+
+    std::string proxy_authorization;
+    std::string attempted_realm;
+    std::string attempted_scheme;
+    std::string matched_authority;
+    if (!auth_proxy_authorization_for(challenges, proxy_authority, wire_method, digest_target,
+                                      body, proxy_authorization, &attempted_realm,
+                                      &attempted_scheme, /*retrying_stale=*/false,
+                                      &matched_authority) ||
+        !is_safe_header_value(proxy_authorization)) {
+        return;
+    }
+
+    std::unordered_map<std::string, std::string> retry_headers = base_wire_headers;
+    retry_headers["Proxy-Authorization"] = std::move(proxy_authorization);
+    resp = ResourceLoader::load_http_single_hop(hop_address, method, retry_headers, body);
+    if (!resp.network_ok) return;
+
+    if (resp.status_code == 407) {
+        const std::vector<AuthChallenge> retried_challenges =
+            auth_collect_proxy_challenges(resp.header_list);
+        const std::vector<AuthChallenge> stale_challenges =
+            ascii_lower(attempted_scheme) == "digest"
+                ? auth_stale_digest_challenges(retried_challenges, attempted_realm)
+                : std::vector<AuthChallenge>{};
+        if (!stale_challenges.empty()) {
+            auth_remember_stale_nonce(stale_challenges, matched_authority, attempted_realm,
+                                      /*is_proxy=*/true);
+            std::string stale_authorization;
+            if (auth_proxy_authorization_for(stale_challenges, proxy_authority, wire_method,
+                                             digest_target, body, stale_authorization,
+                                             nullptr, nullptr, /*retrying_stale=*/true,
+                                             nullptr) &&
+                is_safe_header_value(stale_authorization)) {
+                retry_headers["Proxy-Authorization"] = std::move(stale_authorization);
+                resp = ResourceLoader::load_http_single_hop(hop_address, method, retry_headers, body);
+                if (!resp.network_ok) return;
+                if (resp.status_code == 407) {
+                    const std::vector<AuthChallenge> final_challenges =
+                        auth_collect_proxy_challenges(resp.header_list);
+                    const std::vector<AuthChallenge> still_stale =
+                        auth_stale_digest_challenges(final_challenges, attempted_realm);
+                    if (still_stale.empty()) {
+                        {
+                            std::lock_guard<std::mutex> lock(g_auth_mutex);
+                            g_proxy_auth_store.erase(auth_store_key(matched_authority, attempted_realm));
+                        }
+                        std::lock_guard<std::mutex> nlock(g_nonce_mutex);
+                        g_nonce_store.erase(auth_store_key(
+                            nonce_space_key(matched_authority, /*is_proxy=*/true), attempted_realm));
+                    } else {
+                        auth_remember_stale_nonce(still_stale, matched_authority, attempted_realm,
+                                                  /*is_proxy=*/true);
+                    }
+                }
+            }
+        } else {
+            {
+                std::lock_guard<std::mutex> lock(g_auth_mutex);
+                g_proxy_auth_store.erase(auth_store_key(matched_authority, attempted_realm));
+            }
+            std::lock_guard<std::mutex> nlock(g_nonce_mutex);
+            g_nonce_store.erase(auth_store_key(
+                nonce_space_key(matched_authority, /*is_proxy=*/true), attempted_realm));
+        }
+        auth_note_proxy_challenge(resp);
+    }
+
+    if (resp.status_code >= 200 && resp.status_code < 300 &&
+        ascii_lower(attempted_scheme) == "digest") {
+        auth_note_proxy_authentication_info(resp.header_list, matched_authority, attempted_realm);
+    }
 }
 
 } // namespace
@@ -2408,8 +2793,12 @@ bool ResourceLoader::has_credentials(const std::string& origin, const std::strin
 
 void ResourceLoader::set_proxy_credentials(const std::string& authority, const std::string& realm,
                                            const std::string& username, const std::string& password) {
-    std::lock_guard<std::mutex> lock(g_auth_mutex);
-    g_proxy_auth_store[auth_store_key(authority, realm)] = AuthCredentials{username, password};
+    {
+        std::lock_guard<std::mutex> lock(g_auth_mutex);
+        g_proxy_auth_store[auth_store_key(authority, realm)] = AuthCredentials{username, password};
+    }
+    std::lock_guard<std::mutex> nlock(g_nonce_mutex);
+    g_nonce_store.erase(auth_store_key(nonce_space_key(authority, /*is_proxy=*/true), realm));
 }
 
 bool ResourceLoader::has_proxy_credentials(const std::string& authority, const std::string& realm) {
@@ -2418,8 +2807,18 @@ bool ResourceLoader::has_proxy_credentials(const std::string& authority, const s
 }
 
 void ResourceLoader::clear_proxy_credentials() {
-    std::lock_guard<std::mutex> lock(g_auth_mutex);
-    g_proxy_auth_store.clear();
+    {
+        std::lock_guard<std::mutex> lock(g_auth_mutex);
+        g_proxy_auth_store.clear();
+    }
+    std::lock_guard<std::mutex> lock(g_nonce_mutex);
+    for (auto it = g_nonce_store.begin(); it != g_nonce_store.end(); ) {
+        if (it->first.rfind("\x01proxy:", 0) == 0) {
+            it = g_nonce_store.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 std::size_t ResourceLoader::proxy_credential_count() {
@@ -2432,10 +2831,87 @@ void ResourceLoader::clear_auth_credentials() {
         std::lock_guard<std::mutex> lock(g_auth_mutex);
         g_auth_store.clear();
     }
-    // A nonce belongs to a protection space, and a space with no credentials
-    // has no next request to spend one on.
+    // A nonce belongs to a protection space; clear only origin nonces here so
+    // proxy Digest nonces stay isolated under clear_proxy_credentials().
     std::lock_guard<std::mutex> lock(g_nonce_mutex);
-    g_nonce_store.clear();
+    for (auto it = g_nonce_store.begin(); it != g_nonce_store.end(); ) {
+        if (it->first.rfind("\x01proxy:", 0) == 0) {
+            ++it;
+        } else {
+            it = g_nonce_store.erase(it);
+        }
+    }
+}
+
+bool ResourceLoader::resolve_proxy_connect_407(
+    const std::string& proxy_authority,
+    const std::string& target_authority,
+    const std::vector<std::pair<std::string, std::string>>& response_headers,
+    int attempt,
+    std::string& attempted_realm,
+    std::string& attempted_scheme,
+    std::string& matched_authority,
+    std::string& out_authorization) {
+    out_authorization.clear();
+    const std::vector<AuthChallenge> challenges = auth_collect_proxy_challenges(response_headers);
+    if (attempt == 0) {
+        if (challenges.empty()) return false;
+        std::string auth_val;
+        std::string realm;
+        std::string scheme;
+        std::string matched;
+        if (!auth_proxy_authorization_for(challenges, proxy_authority, "CONNECT", target_authority,
+                                          std::string_view(), auth_val, &realm, &scheme,
+                                          /*retrying_stale=*/false, &matched) ||
+            !is_safe_header_value(auth_val)) {
+            return false;
+        }
+        attempted_realm = std::move(realm);
+        attempted_scheme = std::move(scheme);
+        matched_authority = std::move(matched);
+        out_authorization = std::move(auth_val);
+        return true;
+    }
+
+    const std::vector<AuthChallenge> stale_challenges =
+        ascii_lower(attempted_scheme) == "digest"
+            ? auth_stale_digest_challenges(challenges, attempted_realm)
+            : std::vector<AuthChallenge>{};
+    if (attempt == 1 && !stale_challenges.empty() && !matched_authority.empty()) {
+        auth_remember_stale_nonce(stale_challenges, matched_authority, attempted_realm,
+                                  /*is_proxy=*/true);
+        std::string auth_val;
+        if (auth_proxy_authorization_for(stale_challenges, proxy_authority, "CONNECT",
+                                         target_authority, std::string_view(), auth_val,
+                                         nullptr, nullptr, /*retrying_stale=*/true, nullptr) &&
+            is_safe_header_value(auth_val)) {
+            out_authorization = std::move(auth_val);
+            return true;
+        }
+    }
+
+    if (!matched_authority.empty()) {
+        if (stale_challenges.empty()) {
+            {
+                std::lock_guard<std::mutex> lock(g_auth_mutex);
+                g_proxy_auth_store.erase(auth_store_key(matched_authority, attempted_realm));
+            }
+            std::lock_guard<std::mutex> nlock(g_nonce_mutex);
+            g_nonce_store.erase(auth_store_key(
+                nonce_space_key(matched_authority, /*is_proxy=*/true), attempted_realm));
+        } else {
+            auth_remember_stale_nonce(stale_challenges, matched_authority, attempted_realm,
+                                      /*is_proxy=*/true);
+        }
+    }
+    return false;
+}
+
+void ResourceLoader::note_proxy_connect_success(
+    const std::string& matched_authority,
+    const std::string& realm,
+    const std::vector<std::pair<std::string, std::string>>& response_headers) {
+    auth_note_proxy_authentication_info(response_headers, matched_authority, realm);
 }
 
 std::string ResourceLoader::auth_next_nonce_for_testing(const std::string& origin,
@@ -2984,9 +3460,6 @@ ResourceResponse ResourceLoader::load_http(
     // Digest stale=true challenge, allow one bounded retry with its replacement
     // nonce; a repeated stale response stops without treating the password as bad.
     bool auth_attempted = false;
-    // The same, for a proxy's challenge (RFC 9110 §11.7.1), counted apart
-    // from the origin's because they are different protection spaces.
-    bool proxy_auth_attempted = false;
 
     for (int hop = 0; hop <= MaxRedirects; ++hop) {
         const std::string hop_address = cur_url.href(true);
@@ -3098,68 +3571,9 @@ ResourceResponse ResourceLoader::load_http(
                 }
             }
         }
-        // RFC 9110 §11.7.1. A `407` is the proxy's challenge, answered in
-        // `Proxy-Authorization` and out of the *proxy* store: a credential the
-        // document set is never offered here, whatever realm the proxy names,
-        // because §11.7 keeps the two protection spaces apart. Nothing is sent
-        // pre-emptively, and this is bounded to one attempt per hop, exactly
-        // like the `401` above. A non-stale `407` after the attempt forgets the
-        // pair that was refused; a stale Digest nonce keeps it.
-        if (resp.status_code == 407 && !proxy_auth_attempted) {
-            std::vector<AuthChallenge> proxy_challenges;
-            for (const auto& [name, value] : resp.header_list) {
-                if (ascii_lower(name) != "proxy-authenticate") continue;
-                for (auto& challenge : auth_parse_challenges(value)) {
-                    proxy_challenges.push_back(std::move(challenge));
-                }
-            }
-            // The authority the credential was set against: the host and port
-            // the request went to, which is the proxy that answered it here.
-            // Keyed the way the `Host` header is written, so a URL that leaves
-            // the scheme's own port out and one that names it are one proxy.
-            const int proxy_port = cur_url.port >= 0 ? cur_url.port
-                                                     : (cur_url.scheme == "https" ? 443 : 80);
-            const std::string proxy_authority =
-                cur_url.host + ":" + std::to_string(proxy_port);
-            std::string proxy_authorization;
-            std::string attempted_proxy_realm;
-            std::string attempted_proxy_scheme;
-            if (!proxy_challenges.empty() &&
-                auth_proxy_authorization_for(proxy_challenges, proxy_authority, proxy_authorization,
-                                             &attempted_proxy_realm, &attempted_proxy_scheme) &&
-                is_safe_header_value(proxy_authorization)) {
-                proxy_auth_attempted = true;
-                hop_headers["Proxy-Authorization"] = proxy_authorization;
-                resp = execute_http_hop_with_cache(
-                    hop_address, cur_method, hop_headers, cur_body,
-                    CacheMode::Default, "nav:cred", /*ingest_cookies=*/true, nullptr);
-                if (!resp.network_ok) return resp;
-
-                if (resp.status_code == 407) {
-                    std::vector<AuthChallenge> retried_challenges;
-                    for (const auto& [name, value] : resp.header_list) {
-                        if (ascii_lower(name) != "proxy-authenticate") continue;
-                        for (auto& challenge : auth_parse_challenges(value)) {
-                            retried_challenges.push_back(std::move(challenge));
-                        }
-                    }
-                    const std::vector<AuthChallenge> stale_challenges =
-                        ascii_lower(attempted_proxy_scheme) == "digest"
-                            ? auth_stale_digest_challenges(retried_challenges, attempted_proxy_realm)
-                            : std::vector<AuthChallenge>{};
-                    if (stale_challenges.empty()) {
-                        // The proxy refused the credential itself. Forget only
-                        // the pair that was attempted, so a proxy's wrong
-                        // password is not replayed for the life of the process.
-                        std::lock_guard<std::mutex> lock(g_auth_mutex);
-                        g_proxy_auth_store.erase(auth_store_key(proxy_authority, attempted_proxy_realm));
-                    }
-                    // A stale nonce is not a refusal: the credential stays, and
-                    // the 407 carries the replacement nonce for the next load.
-                    auth_note_proxy_challenge(resp);
-                }
-            }
-        }
+        // Proxy 407 challenges (including Digest stale=true and
+        // Proxy-Authentication-Info) are handled inside
+        // execute_http_hop_with_cache before response gating/caching.
         auth_note_proxy_challenge(resp);
 
         if (is_redirect_status(resp.status_code)) {
@@ -3364,6 +3778,12 @@ ResourceResponse ResourceLoader::load_http_single_hop(
         return resp;
     }
 
+    const HttpProxyConfig proxy = http_proxy_for(parsed_url);
+    if (proxy.invalid) {
+        resp.error_message = proxy.error;
+        return resp;
+    }
+
     std::string target_path = parsed_url.pathname();
     if (target_path.empty()) target_path = "/";
     target_path += parsed_url.search();
@@ -3376,7 +3796,17 @@ ResourceResponse ResourceLoader::load_http_single_hop(
                                     ((parsed_url.port >= 0 && parsed_url.port != default_port)
                                          ? (":" + std::to_string(parsed_url.port))
                                          : "");
-    std::string request = req_method + " " + target_path + " HTTP/1.1\r\n" +
+    const std::string wire_target = (!use_tls && proxy.enabled)
+        ? ("http://" + host_header + target_path)
+        : target_path;
+    for (unsigned char c : wire_target) {
+        if (c <= 0x20 || c == 0x7f) {
+            resp.error_message = "Invalid HTTP request target";
+            return resp;
+        }
+    }
+
+    std::string request = req_method + " " + wire_target + " HTTP/1.1\r\n" +
                           "Host: " + host_header + "\r\n";
     if (!has_user_agent) {
         request += "User-Agent: Litebird/1.0 (Native Engine)\r\n";
@@ -3388,6 +3818,7 @@ ResourceResponse ResourceLoader::load_http_single_hop(
         request += "Accept-Encoding: gzip, deflate, br\r\n";
     }
     for (const auto& [hk, hv] : headers) {
+        if (use_tls && ascii_lower(hk) == "proxy-authorization") continue;
         request += hk + ": " + hv + "\r\n";
     }
     if (!has_content_length && !body.empty()) {
@@ -3404,15 +3835,137 @@ ResourceResponse ResourceLoader::load_http_single_hop(
     ensure_sigpipe_ignored();
 
     const std::string custom_ca = use_tls ? get_test_ca_bundle() : std::string();
-    const std::string pool_key =
-        std::string(use_tls ? "https|" : "http|") +
-        ascii_lower(connect_host) + ":" + std::to_string(port) +
-        (use_tls ? ("|" + custom_ca) : "");
+    const std::string pool_key = proxy.enabled
+        ? (std::string(use_tls ? "https-proxy|" : "http-proxy|") +
+           ascii_lower(proxy.host) + ":" + std::to_string(proxy.port) + "|" +
+           ascii_lower(connect_host) + ":" + std::to_string(port) +
+           (use_tls ? ("|" + custom_ca) : ""))
+        : (std::string(use_tls ? "https|" : "http|") +
+           ascii_lower(connect_host) + ":" + std::to_string(port) +
+           (use_tls ? ("|" + custom_ca) : ""));
     const std::string proto_label = use_tls ? "HTTPS" : "HTTP";
 
-    auto dial_connection = [&](HttpConnection& out, std::string& err_out) -> bool {
-        const int sockfd = connect_with_timeout(connect_host, port, 1500, err_out);
-        if (sockfd < 0) return false;
+    auto establish_https_connect_tunnel = [&](int& sock_out, ResourceResponse& err_resp) -> bool {
+        const std::string target_authority = parsed_url.host + ":" + std::to_string(port);
+        for (unsigned char c : target_authority) {
+            if (c <= 0x20 || c == 0x7f) {
+                err_resp.error_message = "Invalid HTTPS proxy CONNECT target";
+                return false;
+            }
+        }
+
+        std::string proxy_authorization;
+        std::string attempted_realm;
+        std::string attempted_scheme;
+        std::string matched_authority;
+
+        for (int auth_attempt = 0; auth_attempt < 3; ++auth_attempt) {
+            int sockfd = connect_with_timeout(proxy.host, proxy.port, 1500, err_resp.error_message);
+            if (sockfd < 0) return false;
+
+            std::string connect_req =
+                "CONNECT " + target_authority + " HTTP/1.1\r\n" +
+                "Host: " + target_authority + "\r\n";
+            if (!proxy_authorization.empty()) {
+                connect_req += "Proxy-Authorization: " + proxy_authorization + "\r\n";
+            }
+            connect_req += "\r\n";
+
+            std::size_t sent = 0;
+            while (sent < connect_req.size()) {
+                const ssize_t n = ::send(sockfd, connect_req.data() + sent,
+                                         connect_req.size() - sent, MSG_NOSIGNAL);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) {
+                    ::close(sockfd);
+                    err_resp.error_message = "HTTPS proxy CONNECT write failed";
+                    return false;
+                }
+                sent += static_cast<std::size_t>(n);
+            }
+
+            std::string raw_connect;
+            std::size_t header_end = std::string::npos;
+            while (raw_connect.size() < MaxHttpHeaderBytes) {
+                char ch = 0;
+                const ssize_t n = ::recv(sockfd, &ch, 1, 0);
+                if (n < 0 && errno == EINTR) continue;
+                if (n <= 0) {
+                    ::close(sockfd);
+                    err_resp.error_message = "HTTPS proxy CONNECT closed prematurely";
+                    return false;
+                }
+                raw_connect.push_back(ch);
+                if (raw_connect.size() >= 4 &&
+                    raw_connect.compare(raw_connect.size() - 4, 4, "\r\n\r\n") == 0) {
+                    header_end = raw_connect.size() - 4;
+                    break;
+                }
+            }
+            if (header_end == std::string::npos) {
+                ::close(sockfd);
+                err_resp.error_message = "HTTPS proxy CONNECT response exceeded 64 KiB header limit";
+                return false;
+            }
+
+            int status_code = 0;
+            std::vector<std::pair<std::string, std::string>> connect_headers;
+            if (!validate_connect_response(std::string_view(raw_connect).substr(0, header_end),
+                                           status_code, connect_headers)) {
+                ::close(sockfd);
+                err_resp.error_message = "Malformed HTTPS proxy CONNECT response";
+                return false;
+            }
+
+            if (status_code >= 200 && status_code < 300) {
+                if (!attempted_realm.empty() && ascii_lower(attempted_scheme) == "digest") {
+                    ResourceLoader::note_proxy_connect_success(
+                        matched_authority, attempted_realm, connect_headers);
+                }
+                sock_out = sockfd;
+                return true;
+            }
+
+            ::close(sockfd);
+            if (status_code == 407) {
+                if (ResourceLoader::resolve_proxy_connect_407(
+                        proxy.authority, target_authority, connect_headers, auth_attempt,
+                        attempted_realm, attempted_scheme, matched_authority,
+                        proxy_authorization)) {
+                    continue;
+                }
+                err_resp.status_code = 407;
+                err_resp.status_text = "Proxy Authentication Required";
+                err_resp.header_list = std::move(connect_headers);
+                auth_note_proxy_challenge(err_resp);
+                err_resp.header_list.clear();
+                err_resp.error_message = "HTTPS proxy CONNECT failed (407)";
+                return false;
+            }
+
+            err_resp.status_code = status_code;
+            err_resp.error_message = "HTTPS proxy CONNECT failed (" + std::to_string(status_code) + ")";
+            return false;
+        }
+
+        err_resp.status_code = 407;
+        err_resp.status_text = "Proxy Authentication Required";
+        err_resp.error_message = "HTTPS proxy CONNECT failed (407)";
+        return false;
+    };
+
+    auto dial_connection = [&](HttpConnection& out, ResourceResponse& err_resp) -> bool {
+        std::string& err_out = err_resp.error_message;
+        int sockfd = -1;
+        if (use_tls && proxy.enabled) {
+            if (!establish_https_connect_tunnel(sockfd, err_resp)) return false;
+        } else if (!use_tls && proxy.enabled) {
+            sockfd = connect_with_timeout(proxy.host, proxy.port, 1500, err_out);
+            if (sockfd < 0) return false;
+        } else {
+            sockfd = connect_with_timeout(connect_host, port, 1500, err_out);
+            if (sockfd < 0) return false;
+        }
 
         out = HttpConnection{};
         out.is_tls = use_tls;
@@ -3583,13 +4136,15 @@ ResourceResponse ResourceLoader::load_http_single_hop(
         resp.content_type.clear();
         resp.headers.clear();
         resp.header_list.clear();
+        resp.proxy_auth_schemes.clear();
+        resp.proxy_auth_realm.clear();
         resp.error_message.clear();
         body_part.clear();
 
         HttpConnection conn;
         const bool from_pool = (attempt == 0) && http_connection_pool().acquire(pool_key, conn);
         if (!from_pool) {
-            if (!dial_connection(conn, resp.error_message)) {
+            if (!dial_connection(conn, resp)) {
                 return resp;
             }
         }

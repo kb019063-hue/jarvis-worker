@@ -1077,6 +1077,7 @@ const char* unsupported_clone_kind(const JsValue& value) {
         case ObjectClass::WeakMap: return "WeakMap";
         case ObjectClass::WeakSet: return "WeakSet";
         case ObjectClass::Error: return "Error";
+        case ObjectClass::DOMException: return "DOMException";
         case ObjectClass::Promise: return "Promise";
         case ObjectClass::Generator: return "Generator";
         case ObjectClass::Iterator: return "iterator";
@@ -1606,7 +1607,7 @@ void install_error_stack_accessor(JsIntrinsics& realm) {
             js_throw_type_error("get Error.prototype.stack called on non-object");
         }
         JsObject* cell = receiver.object_val;
-        if (!cell || cell->klass != ObjectClass::Error) return JsValue::make_undefined();
+        if (!cell || (cell->klass != ObjectClass::Error && cell->klass != ObjectClass::DOMException)) return JsValue::make_undefined();
         return JsValue::make_string(js_error_stack_text(receiver));
     });
     JsValue setter = js_make_method("set stack", 1, [](const std::vector<JsValue>& args) {

@@ -412,14 +412,21 @@ double arg_or(Args args, size_t index, double fallback) {
 }
 
 double time_from_components(Args args, bool local) {
+    // ToNumber can run script or throw. Sequence each conversion explicitly:
+    // C++ function arguments do not guarantee JavaScript's left-to-right order.
     double year = js_to_number(args[0]);
+    const double month = arg_or(args, 1, 0);
+    const double day = arg_or(args, 2, 1);
+    const double hour = arg_or(args, 3, 0);
+    const double minute = arg_or(args, 4, 0);
+    const double second = arg_or(args, 5, 0);
+    const double ms = arg_or(args, 6, 0);
     // Two-digit years mean 19xx, a compatibility rule from the first browsers.
     if (std::isfinite(year)) {
         double truncated = std::trunc(year);
         if (truncated >= 0 && truncated <= 99) year = 1900 + truncated;
     }
-    double t = make_time(year, arg_or(args, 1, 0), arg_or(args, 2, 1), arg_or(args, 3, 0),
-                         arg_or(args, 4, 0), arg_or(args, 5, 0), arg_or(args, 6, 0));
+    double t = make_time(year, month, day, hour, minute, second, ms);
     return time_clip(local ? from_local(t) : t);
 }
 

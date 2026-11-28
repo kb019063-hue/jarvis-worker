@@ -1858,6 +1858,39 @@ bool parse_color_mix_func(std::string_view args, CssColor& out, const ColorResol
     return true;
 }
 
+// CSS Color 5 §8: contrast-color() takes one <color> and returns whichever of
+// white or black has the greater contrast against it. The contrast is the
+// WCAG 2.1 relative-luminance ratio ((Y_light + 0.05) / (Y_dark + 0.05)), and a
+// tie returns white, matching MDN and the CSS Color 5 MVP. Alpha is ignored:
+// the comparison is defined on opaque colours, so the argument is read as
+// opaque. If the argument is a currentcolor and no context resolves it, the
+// function fails, exactly like color-mix(): it has no value to compare
+// without knowing the inherited color.
+bool parse_contrast_color_func(std::string_view args, CssColor& out, const ColorResolveContext& ctx, int depth) {
+    std::vector<std::string_view> parts;
+    if (!split_top_level_commas(args, parts) || parts.size() != 1) return false;
+    CssColor input;
+    if (!parse_color_impl(parts[0], input, ctx, depth + 1)) return false;
+    if (input.is_currentcolor) return false;
+    // Gamut-map to in-gamut sRGB and quantize like any other color the engine
+    // paints; WCAG's formula is defined on 8-bit sRGB channels.
+    const Color q = input.to_srgb8();
+    const double lin_r = srgb_to_linear_channel(q.r / 255.0);
+    const double lin_g = srgb_to_linear_channel(q.g / 255.0);
+    const double lin_b = srgb_to_linear_channel(q.b / 255.0);
+    const double y = 0.2126 * lin_r + 0.7152 * lin_g + 0.0722 * lin_b;
+    const double contrast_black = (y + 0.05) / 0.05;   // (Y_l + 0.05) / (Y_d + 0.05), black Y = 0
+    const double contrast_white = 1.05 / (y + 0.05);  // white Y = 1
+    const double w = (contrast_white >= contrast_black) ? 1.0 : 0.0;
+    out = CssColor{};
+    out.space = ColorSpace::Srgb;
+    out.legacy_srgb = true;
+    out.from_8bit_alpha = false;
+    out.alpha = 1.0;
+    out.c[0] = out.c[1] = out.c[2] = w;
+    return true;
+}
+
 bool parse_light_dark_func(std::string_view args, CssColor& out, const ColorResolveContext& ctx, int depth) {
     std::vector<std::string_view> parts;
     if (!split_top_level_commas(args, parts) || parts.size() != 2) return false;
@@ -1921,6 +1954,7 @@ bool parse_color_impl(std::string_view text, CssColor& out, const ColorResolveCo
         if (fn == "color") return parse_color_func(args, out, ctx, depth);
         if (fn == "color-mix") return parse_color_mix_func(args, out, ctx, depth);
         if (fn == "light-dark") return parse_light_dark_func(args, out, ctx, depth);
+        if (fn == "contrast-color") return parse_contrast_color_func(args, out, ctx, depth);
         return false;
     }
 
@@ -2037,7 +2071,8 @@ bool Color::is_color_function_name(std::string_view lower_name) {
            lower_name == "hwb" || lower_name == "lab" ||
            lower_name == "lch" || lower_name == "oklab" ||
            lower_name == "oklch" || lower_name == "color" ||
-           lower_name == "color-mix" || lower_name == "light-dark";
+           lower_name == "color-mix" || lower_name == "light-dark" ||
+           lower_name == "contrast-color";
 }
 
 bool Color::looks_like_color(std::string_view token) {

@@ -3283,7 +3283,7 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
                 (val_lower == "initial" || val_lower == "unset") ? std::optional<BorderStyle>(BorderStyle::None)
                                                                  : border_style_of(val_lower);
             if (style_edge) {
-                if (prop.compare(7, 4, "top") == 0) style.border_style.top = *style_edge;
+                if (prop.compare(7, 3, "top") == 0) style.border_style.top = *style_edge;
                 else if (prop.compare(7, 5, "right") == 0) style.border_style.right = *style_edge;
                 else if (prop.compare(7, 6, "bottom") == 0) style.border_style.bottom = *style_edge;
                 else style.border_style.left = *style_edge;
@@ -4377,8 +4377,6 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
     if (style.has_transform && !style.transform_str.empty()) {
         style.transform_matrix = parse_transform_matrix(style.transform_str);
     }
-
-
     return style;
 }
 

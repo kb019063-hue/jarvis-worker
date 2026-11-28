@@ -385,8 +385,10 @@ jobs:
         # land_test.sh runs watch.sh's `build` and `land` in a repository
         # it makes, against a `gh` that answers what each case says: what
         # is merged, in which order, and that nothing is when one of the
-        # lot cannot be.
+        # lot cannot be. tasks.py reads the table "Open tasks" for an
+        # agent, so that nobody has to read 277 KB to choose a row.
         run: |
+          python3 tools/tasks.py --self-test
           python3 tools/watch/carry_rows.py --self-test
           python3 tools/watch/rule.py --self-test
           python3 tools/ci/run_stretches.py --self-test

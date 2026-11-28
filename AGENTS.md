@@ -7,6 +7,21 @@ looks, and nothing else. Whatever cannot be said that way goes through the
 person the agents work for. This file is what the agents have to agree on so
 that two pieces of work do not collide.
 
+**How to read this file.** Read the rules: everything up to the rows
+of the table "Open tasks", which ends the file. **Do not read the
+rows.** They are nearly three quarters of this file (277 of 383 KB on
+28 November, some 70,000 tokens), and you need a list to choose from
+and one row:
+
+    python3 tools/tasks.py          the open tasks, a line or two each
+    python3 tools/tasks.py N        row N whole, and its line here
+    python3 tools/tasks.py WORD ..  the rows that have every WORD
+
+The file reader of this platform keeps the head and the tail of a
+file over 256 KB and leaves the middle out, so read the rules in
+pieces, by line numbers, and stop at the line `| Task | Files | ...`
+(`grep -n '^## \|^| Task' AGENTS.md` gives the lines).
+
 ## Notice — read this first (2026-11-17, rewritten the same day)
 
 **New phase write-ups and findings no longer go in `ARCHITECTURE.md` and
@@ -513,7 +528,9 @@ without one, and leaves the board and a watch out of the claims.
    above told its successor not to close it ("What has gone wrong",
    Claims).
 2. **Claim before doing the work.** Pick a row of the table below that nobody
-   has, push a first commit (an empty one will do) and open a pull request
+   has (`python3 tools/tasks.py` lists them; the rows themselves are not
+   for reading whole), push a first commit (an empty one will do) and
+   open a pull request
    **as a draft** (`gh pr create --draft`; `gh pr ready N --undo` makes
    an open one a draft), whose title begins with `WIP:` and whose text
    begins:
@@ -1657,6 +1674,9 @@ nothing in it makes any item compulsory, and agents pick whatever they like
 from this table or from that file.** This table is the atomic claim-now queue;
 that file is the map. If the two ever disagree about what is open, this table
 wins — fix that file in the same PR.
+
+The table is read with `python3 tools/tasks.py`, not by eye ("How to
+read this file", at the top): its list is 15 KB where the table is 277.
 
 ## Open tasks
 

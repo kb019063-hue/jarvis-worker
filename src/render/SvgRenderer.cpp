@@ -2257,12 +2257,17 @@ BBox svg_map_bbox(const BBox& box, const TransformMatrix2D& matrix) {
 // The box of `el` and everything it draws below it, with every descendant's
 // `transform` applied and `el`'s own excluded.
 BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h, int depth,
-                   std::unordered_set<const Element*>& active, bool referenced_symbol = false) {
+                   std::unordered_set<const Element*>& active, bool referenced_symbol = false,
+                   bool in_symbol_instance = false) {
     if (!el || depth > 64) return BBox();
     const std::string tag = to_lower_ascii(el->tag_name());
     if (svg_is_unrendered_container(tag) && !(referenced_symbol && tag == "symbol")) return BBox();
 
     BBox box = svg_own_geometry(el, ref_w, ref_h);
+    // A zero-sided rectangle has a box when queried directly, but it does
+    // not contribute geometry to an instanced symbol's container box.
+    if (in_symbol_instance && tag == "rect" && box.valid() &&
+        (box.width() <= 0.0f || box.height() <= 0.0f)) box = BBox();
     if (tag == "use") {
         std::string href;
         auto document = el->owner_document();
@@ -2282,19 +2287,23 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
             float w = ref_w, h = ref_h;
             if (get_attr_ci(el, "width", value)) parse_float_value(value, w, ref_w);
             if (get_attr_ci(el, "height", value)) parse_float_value(value, h, ref_h);
-            float inner_w = w, inner_h = h;
+            float inner_w = std::max(0.0f, w), inner_h = std::max(0.0f, h);
             ViewBox vb;
             if (get_attr_ci(target, "viewBox", value)) vb = parse_viewbox(value);
             const bool maps_viewbox = vb.valid && w > 0 && h > 0;
             if (vb.valid) { inner_w = vb.width; inner_h = vb.height; }
-            target_box = svg_bbox_walk(target, inner_w, inner_h, depth + 1, active, true);
+            target_box = svg_bbox_walk(target, inner_w, inner_h, depth + 1, active, true, true);
             if (maps_viewbox) {
                 std::string par;
                 get_attr_ci(target, "preserveAspectRatio", par);
                 target_box = svg_map_bbox(target_box, compute_viewbox_matrix(vb, w, h, par));
             }
+            // An all-zero point is treated as an empty symbol box by Chromium
+            // before the use translation; non-origin points remain geometry.
+            if (target_box.valid() && target_box.min_x == 0 && target_box.min_y == 0 &&
+                target_box.max_x == 0 && target_box.max_y == 0) target_box = BBox();
         } else {
-            target_box = svg_bbox_walk(target, ref_w, ref_h, depth + 1, active);
+            target_box = svg_bbox_walk(target, ref_w, ref_h, depth + 1, active, false, in_symbol_instance);
             if (get_attr_ci(target, "transform", value))
                 target_box = svg_map_bbox(target_box, parse_svg_transform(value));
         }
@@ -2311,7 +2320,7 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
     for (const auto& child : el->children()) {
         auto child_el = std::dynamic_pointer_cast<Element>(child);
         if (!child_el) continue;
-        BBox child_box = svg_bbox_walk(child_el, ref_w, ref_h, depth + 1, active);
+        BBox child_box = svg_bbox_walk(child_el, ref_w, ref_h, depth + 1, active, false, in_symbol_instance);
         if (!child_box.valid()) continue;
         std::string transform_text;
         if (get_attr_ci(child_el, "transform", transform_text)) {

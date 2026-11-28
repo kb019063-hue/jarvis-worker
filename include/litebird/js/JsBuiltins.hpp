@@ -10,6 +10,7 @@ namespace litebird {
 void install_object_builtins(JsIntrinsics& realm);      // Object, Function.prototype, Boolean, Symbol, Reflect, globals
 void install_error_builtins(JsIntrinsics& realm);       // Error and its subclasses
 void install_array_builtins(JsIntrinsics& realm);       // Array, Array.prototype, array iterators
+void install_iterator_builtins(JsIntrinsics& realm);    // Iterator, Iterator.from, %IteratorPrototype% helpers
 void install_string_builtins(JsIntrinsics& realm);      // String, String.prototype
 void install_number_builtins(JsIntrinsics& realm);      // Number, Math, parseInt and friends
 void install_collection_builtins(JsIntrinsics& realm);  // Map, Set, WeakMap, WeakSet

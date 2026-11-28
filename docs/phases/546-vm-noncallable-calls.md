@@ -52,3 +52,5 @@ suite; the Phase 546 suite passed. The full unit run was stopped during the
 unrelated deep-nesting suite after it reached approximately 3.8 GB in this
 3.8 GB sandbox, and is not a full local pass. A 3.3 GB limit was applied to
 the suite compiler. Full sanitizer and deep checks remain required in CI.
+A local `make deep` run was stopped at a six-minute limit before completion;
+`make fuzz` passed with the instrumented engine.

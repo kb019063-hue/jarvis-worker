@@ -624,6 +624,28 @@ WPT_VALID_VECTORS = [
     ("light-dark(white, black)", "rgb(0, 0, 0)", "-", 1),
     ("light-dark(oklch(0.3 0.1 240), oklch(0.9 0.05 240))", "oklch(0.3 0.1 240)", "-", 0),
     ("light-dark(oklch(0.3 0.1 240), oklch(0.9 0.05 240))", "oklch(0.9 0.05 240)", "-", 1),
+
+    # contrast-color() (CSS Color 5 §8): the better-contrasting of white and
+    # black by the WCAG 2.1 relative-luminance ratio; a tie returns white.
+    ("contrast-color(white)", "rgb(0, 0, 0)", "-", 0),
+    ("contrast-color(black)", "rgb(255, 255, 255)", "-", 0),
+    ("contrast-color(red)", "rgb(0, 0, 0)", "-", 0),
+    ("contrast-color(yellow)", "rgb(0, 0, 0)", "-", 0),
+    ("contrast-color(navy)", "rgb(255, 255, 255)", "-", 0),
+    ("contrast-color(rebeccapurple)", "rgb(255, 255, 255)", "-", 0),
+    ("contrast-color(#ffd700)", "rgb(0, 0, 0)", "-", 0),
+    ("contrast-color(rgb(117, 117, 117))", "rgb(255, 255, 255)", "-", 0),
+    ("contrast-color(rgb(118, 118, 118))", "rgb(0, 0, 0)", "-", 0),
+    ("contrast-color(hsl(0 100% 50%))", "rgb(0, 0, 0)", "-", 0),
+    ("contrast-color(oklch(0.55 0.2 240))", "rgb(255, 255, 255)", "-", 0),
+    ("contrast-color(oklch(0.9 0.05 240))", "rgb(0, 0, 0)", "-", 0),
+    ("contrast-color(oklch(0.3 0.1 240))", "rgb(255, 255, 255)", "-", 0),
+    ("contrast-color(light-dark(white, navy))", "rgb(0, 0, 0)", "-", 0),
+    ("contrast-color(light-dark(white, navy))", "rgb(255, 255, 255)", "-", 1),
+    ("contrast-color(currentcolor)", "rgb(0, 0, 0)", "red", 0),
+    ("contrast-color(currentcolor)", "rgb(255, 255, 255)", "navy", 0),
+    ("color-mix(in srgb, contrast-color(red) 50%, white)", "color(srgb 0.5 0.5 0.5)", "-", 0),
+    ("contrast-color(contrast-color(yellow))", "rgb(255, 255, 255)", "-", 0),
 ]
 
 WPT_INVALID_VECTORS = [
@@ -658,6 +680,12 @@ WPT_INVALID_VECTORS = [
     "light-dark(white, black, red)",
     "light-dark(white, notacolor)",
     "light-dark(notacolor, black)",
+    "contrast-color()",
+    "contrast-color(red, blue)",
+    "contrast-color(contrast-color())",
+    "contrast-color(notacolor)",
+    "contrast-color(contrast-color(notacolor))",
+    "contrast-color(currentcolor)",
     "rgb(calc(10 + 20px) 0 0)",
     "rgb(calc(10% * 20%) 0 0)",
     "rgb(calc(10+20) 0 0)",
@@ -695,7 +723,7 @@ def verify_wpt_vectors(binary):
 def run_fuzzer(binary, count, seed):
     rng = random.Random(seed)
     spaces = ALL_SPACES + ["xyz", "bogus"]
-    funcs = ["rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color", "color-mix", "light-dark"]
+    funcs = ["rgb", "rgba", "hsl", "hsla", "hwb", "lab", "lch", "oklab", "oklch", "color", "color-mix", "light-dark", "contrast-color"]
     math_fns = ["calc", "min", "max", "clamp", "abs", "sign", "sin", "cos", "tan", "asin", "acos", "atan",
                 "atan2", "sqrt", "exp", "pow", "log", "hypot", "mod", "rem", "round"]
     atoms = [
@@ -729,6 +757,8 @@ def run_fuzzer(binary, count, seed):
             return f"color-mix(in {sp}{hm}, {gen_color(depth + 1)}{p1}, {gen_color(depth + 1)}{p2})"
         if fn == "light-dark":
             return f"light-dark({gen_color(depth + 1)}, {gen_color(depth + 1)})"
+        if fn == "contrast-color":
+            return f"contrast-color({gen_color(depth + 1)})"
         rel = f"from {gen_color(depth + 1)} " if rng.random() < 0.35 else ""
         sp_prefix = f"{rng.choice(spaces)} " if fn == "color" else ""
         sep = ", " if (not rel and fn in ("rgb", "rgba", "hsl", "hsla") and rng.random() < 0.3) else " "
@@ -745,6 +775,7 @@ def run_fuzzer(binary, count, seed):
         "rgb(from " * 50 + "red" + " r g b)" * 50,
         "color-mix(in oklch, " * 50 + "red, blue" + ")" * 50,
         "light-dark(" * 50 + "white, black" + ")" * 50,
+        "contrast-color(" * 50 + "red" + ")" * 50,
         "oklch(calc(1 / 0) calc(-1 / 0) calc(0 / 0) / calc(0 / 0))",
         "color(srgb 1e308 -1e308 1e-308 / 1e308)",
         "lab(999999999999999999999 -999999999999999999999 999999999999999999999)",

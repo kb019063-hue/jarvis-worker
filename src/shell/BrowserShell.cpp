@@ -315,9 +315,10 @@ void BrowserShell::scan_interactive_elements() {
 
     // Every element of the document, in tree order, without recursion.
     //
-    // What stands in the ring is what the Tab key can reach, and the answer to
-    // that is the bindings' own `is_focusable` -- the predicate `focus()` obeys
-    // -- not a list of three tag names. The scan used to take `a[href]`,
+    // What stands in the ring includes what the bindings' own `is_focusable`
+    // allows `focus()` to reach. Negative tabindex entries stay as positions
+    // for programmatically focused elements, but the Tab walk skips them.
+    // The scan used to take only `a[href]`,
     // `button` (or a `btn`-ish class or id, or any element with a click
     // listener) and `input`, which left `select`, `textarea`, a `summary` in a
     // `details`, a `[contenteditable]` region and any `[tabindex]` element
@@ -343,7 +344,7 @@ void BrowserShell::scan_interactive_elements() {
     // Positive tabindex values precede the zero/default group, lowest first.
     // Use the same HTML integer parser as the reflected tabIndex property, and
     // keep tree order for ties and for missing, invalid, zero or negative
-    // values. Negative tabindex exclusion is a separate focus-navigation gap.
+    // values. Negative entries provide a starting position but are not stops.
     // Parse once per element, not once per comparison during the sort.
     std::stable_sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
         if (a.priority == 0) return false;
@@ -409,19 +410,39 @@ int ring_index_of(const std::vector<InteractiveElement>& items, const Element* e
     return -1;
 }
 
+// Keep negative entries in the ring to locate a script-focused element, but
+// never land on one via Tab. Read the attribute at the keypress: a sign change
+// need not wait for a layout rebuild. Invalid integers keep existing behavior.
+int next_tab_index(const std::vector<InteractiveElement>& items, int current, bool forward) {
+    if (items.empty()) return -1;
+    const std::size_t count = items.size();
+    std::size_t index = current < 0 ? (forward ? 0 : count - 1)
+        : (forward ? (static_cast<std::size_t>(current) + 1) % count
+                   : (static_cast<std::size_t>(current) + count - 1) % count);
+    for (std::size_t checked = 0; checked < count; ++checked) {
+        const auto& el = items[index].element;
+        const std::string* attribute = el->attribute("tabindex");
+        long value = 0;
+        if (!attribute || !dom::parse_html_integer(*attribute, value) || value >= 0)
+            return static_cast<int>(index);
+        index = forward ? (index + 1) % count : (index + count - 1) % count;
+    }
+    return -1;
+}
+
 } // namespace
 
 void BrowserShell::forget_focus_if_gone() {
-    if (m_focused_index < 0 || m_focused_index >= static_cast<int>(m_interactive_elements.size())) {
-        m_focused_index = -1;
-        return;
-    }
     // A script can move the focus with `element.focus()`, and a modal dialog
     // makes the rest of the document inert without relaying it out, so the
     // index can name an element that no longer has the focus. The document's
-    // own focus is the authority: adopt it when it is a stop, and otherwise
-    // start again from nothing.
-    if (!m_document) return;
+    // own focus is the authority: adopt it when it is in the ring, even when
+    // the previous index was -1, and otherwise start again from nothing.
+    if (!m_document) {
+        if (m_focused_index < 0 || m_focused_index >= static_cast<int>(m_interactive_elements.size()))
+            m_focused_index = -1;
+        return;
+    }
     auto focused = m_document->focused_element();
     const int actual = focused ? ring_index_of(m_interactive_elements, focused.get()) : -1;
     if (actual == m_focused_index) return;
@@ -435,16 +456,9 @@ void BrowserShell::forget_focus_if_gone() {
 void BrowserShell::focus_next() {
     if (m_interactive_elements.empty()) return;
     forget_focus_if_gone();
-    if (m_focused_index < 0) {
-        // No focus yet: start at the first stop, and let this press take it.
-        m_focused_index = 0;
-        const auto& item = m_interactive_elements[0];
-        m_status_message = "Focused: <" + item.tag + "> \"" + item.text + "\"";
-        set_document_focus(item.element);
-        m_dirty = true;
-        return;
-    }
-    m_focused_index = (m_focused_index + 1) % m_interactive_elements.size();
+    const int next = next_tab_index(m_interactive_elements, m_focused_index, true);
+    if (next < 0) return; // Every candidate is programmatic-only.
+    m_focused_index = next;
     const auto& item = m_interactive_elements[m_focused_index];
     m_status_message = "Focused: <" + item.tag + "> \"" + item.text + "\"";
     set_document_focus(item.element);
@@ -454,16 +468,9 @@ void BrowserShell::focus_next() {
 void BrowserShell::focus_prev() {
     if (m_interactive_elements.empty()) return;
     forget_focus_if_gone();
-    if (m_focused_index < 0) {
-        // Shift+Tab with nothing focused enters at the last stop.
-        m_focused_index = static_cast<int>(m_interactive_elements.size()) - 1;
-        const auto& item = m_interactive_elements[m_focused_index];
-        m_status_message = "Focused: <" + item.tag + "> \"" + item.text + "\"";
-        set_document_focus(item.element);
-        m_dirty = true;
-        return;
-    }
-    m_focused_index = (m_focused_index - 1 + m_interactive_elements.size()) % m_interactive_elements.size();
+    const int next = next_tab_index(m_interactive_elements, m_focused_index, false);
+    if (next < 0) return;
+    m_focused_index = next;
     const auto& item = m_interactive_elements[m_focused_index];
     m_status_message = "Focused: <" + item.tag + "> \"" + item.text + "\"";
     set_document_focus(item.element);

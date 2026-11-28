@@ -419,13 +419,13 @@ int main(int argc, char* argv[]) {
         std::string text, encoding, out;
         litebird::xml::XmlError error;
         if (!litebird::xml::decode_xml(html_content, text, encoding, error)) {
-            std::cerr << error.describe() << "\n";
+            std::cerr << litebird::terminal_safe(error.describe()) << "\n";
             return error.unsupported_encoding ? 3 : 1;
         }
         const bool well_formed = xml_dump == "canonical" ? litebird::xml::xml_canonical_form(text, out, error)
                                                          : litebird::xml::xml_event_dump(text, out, error);
         if (!well_formed) {
-            std::cerr << error.describe() << "\n";
+            std::cerr << litebird::terminal_safe(error.describe()) << "\n";
             return 1;
         }
         std::cout << out;

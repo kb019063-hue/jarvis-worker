@@ -213,7 +213,12 @@ within the hour, and the first lot was started again four times.
    GitHub can end under it at any moment ("The turn, and what a merge does
    to it", below). Its commands are `tools/watch/watch.sh` (`look`, `st`,
    `cands`, `build`, `push`, `wait`, `land`, `once`, `taken`, `landed`,
-   `sendback`; the file's first lines say what each does). At every look,
+   `sendback`; the file's first lines say what each does). Beside it in
+   `tools/watch/`: `setup.sh` puts back what a watch works with in a
+   sandbox that is new, `poll.sh` is one look at everything that can
+   change, `readpr.sh N` is the reading of a pull request before it is
+   taken, and `mkbody.sh` writes the text of the watch's own pull
+   request at the end. At every look,
    five minutes apart or less:
    - `python3 tools/ci/check_pr.py watch --beat "YYYY-MM-DD HH:MM"` writes
      the time of the look into the status comment of the board;

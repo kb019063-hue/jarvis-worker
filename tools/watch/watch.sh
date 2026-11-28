@@ -272,7 +272,10 @@ wip_off_at() {  # wip_off_at N -> HH:MM:SS (UTC; with the day when it was not to
   timeout 30 gh api "repos/$R/issues/$1/events?per_page=100" \
     --jq '[.[] | select(.event == "renamed")] | last | select(. != null) | select((.rename.from | test("^WIP")) and ((.rename.to | test("^WIP")) | not)) | .created_at as $t | if $t[0:10] == (now | strftime("%Y-%m-%d")) then $t[11:19] else $t[0:10] + " " + $t[11:16] end' 2>/dev/null
 }
-agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^Agent: *(\\w+)") | .captures[0].string] | first) // "-"' 2>/dev/null; }
+# The name in the `Agent:` line of #N's text. "no name given" where there is
+# none, which the board's line and the table then say (#536 and #544 on 28
+# November; #533 that day gave its name in a sentence, and stood as "-").
+agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^Agent: *(\\w+)") | .captures[0].string] | first) // "no name given"' 2>/dev/null; }
 
 beat() {  # beat [due]: write the look into the status comment of the board; `due`: only when the last is five minutes old
   # A watch counts as none 30 minutes after its last look (AGENTS.md,

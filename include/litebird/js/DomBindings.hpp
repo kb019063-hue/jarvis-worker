@@ -877,6 +877,8 @@ void after_click(Realm& realm, Activation& activation, const JsValue& event, boo
 std::shared_ptr<JsExotic> element_exotic(Realm& realm, Element& element);
 /// Focus, as `element.focus()` and `blur()` do it.
 void focus_element(Realm& realm, Element* element, const std::shared_ptr<Document>& blur_in = nullptr);
+/// Run HTML's dialog close steps without dispatching an author-overridable method.
+void close_dialog(Realm& realm, Element& dialog, const JsValue& return_value);
 bool is_focusable(const Element& element);
 /// form.reset() and form.requestSubmit(submitter).
 void reset_form(Realm& realm, Element& form);

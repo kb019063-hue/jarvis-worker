@@ -4645,29 +4645,7 @@ void setup_dialog(Iface& I) {
         return undefined();
     });
     D.method("close", 0, [](Realm& r, Element& el, Args args) {
-        if (!el.has_attribute("open")) return undefined();
-        JsValue self = wrap(r, el);
-        if (!js_arg(args, 0).is_undefined()) set_slot(self, "returnValue", str(to_str(args[0])));
-        const bool was_modal = el.is_modal_dialog();
-        auto previous = el.dialog_previously_focused();
-        el.set_modal_dialog(false);
-        el.set_dialog_previously_focused(nullptr);
-        auto document = document_of(r, el);
-        if (document && document->modal_dialog().get() == &el) document->set_modal_dialog(nullptr);
-        el.remove_attribute("open");
-        // A modal dialog gives the focus back to the element that had it when
-        // it opened. Anything else unfocuses: the dialog's own control is
-        // hidden now, so keeping the focus on it would be a focus on nothing.
-        if (was_modal && previous && previous->is_connected() && is_focusable(*previous)) {
-            focus_element(r, previous.get());
-        } else {
-            focus_element(r, nullptr, document);
-        }
-        // The close event comes as a task, after the caller has finished.
-        Realm* realm = &r;
-        EventLoop::default_loop().post_task([realm, self]() {
-            if (realm->alive) fire(*realm, self, "close");
-        });
+        close_dialog(r, el, js_arg(args, 0));
         return undefined();
     });
 }
@@ -4784,6 +4762,32 @@ void setup_link_element(Iface& I) {
 }
 
 } // namespace
+
+void close_dialog(Realm& r, Element& el, const JsValue& return_value) {
+    if (!el.has_attribute("open")) return;
+    JsValue self = wrap(r, el);
+    if (!return_value.is_undefined()) set_slot(self, "returnValue", str(to_str(return_value)));
+    const bool was_modal = el.is_modal_dialog();
+    auto previous = el.dialog_previously_focused();
+    el.set_modal_dialog(false);
+    el.set_dialog_previously_focused(nullptr);
+    auto document = document_of(r, el);
+    if (document && document->modal_dialog().get() == &el) document->set_modal_dialog(nullptr);
+    el.remove_attribute("open");
+    // A modal dialog gives the focus back to the element that had it when it
+    // opened. Anything else unfocuses: the dialog's own control is hidden now,
+    // so keeping the focus on it would be a focus on nothing.
+    if (was_modal && previous && previous->is_connected() && is_focusable(*previous)) {
+        focus_element(r, previous.get());
+    } else {
+        focus_element(r, nullptr, document);
+    }
+    // The close event comes as a task, after the caller has finished.
+    Realm* realm = &r;
+    EventLoop::default_loop().post_task([realm, self]() {
+        if (realm->alive) fire(*realm, self, "close");
+    });
+}
 
 void note_svg_view_box_changed(Element& element, const AttributeChange& change) {
     if (element.element_namespace() != ElementNamespace::SVG || element.tag_name() != "svg" ||

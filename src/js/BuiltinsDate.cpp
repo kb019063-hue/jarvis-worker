@@ -226,6 +226,12 @@ bool parse_iso(const std::string& s, double& out) {
     if (i != s.size()) return false;
     if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 24 || minute > 59 || second > 59) return false;
     if (hour == 24 && (minute || second || ms)) return false;
+    // A recognized ISO form with the forbidden expanded year -000000 is
+    // invalid, not a request to try the legacy parser after losing the sign.
+    if (sign < 0 && year == 0) {
+        out = kNaN;
+        return true;
+    }
 
     double t = make_time(year, month - 1, day, hour, minute, second, ms);
     // A date-only form is UTC; a date-time without an offset is local time.

@@ -1074,6 +1074,9 @@ JsValue js_get_from_chain(JsObject* start, const std::string& name, const JsValu
 bool js_set_prototype(JsObject* cell, JsObject* proto) {
     if (!cell) return true;
     if (cell->prototype == proto) return true;       // nothing changes, so nothing can refuse it
+    // 9.4.7.1 immutable prototype exotic: Object.prototype's [[SetPrototypeOf]] only
+    // succeeds when V == current (null). Otherwise false even though extensible.
+    if (cell == JsIntrinsics::get().object_proto) return false;
     if (!cell->extensible) return false;             // Object.preventExtensions, seal, freeze
     for (JsObject* p = proto; p; p = p->prototype) {
         if (p == cell) return false;

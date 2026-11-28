@@ -1200,6 +1200,9 @@ void setup_subtle_crypto(Iface& I) {
                 if (ec_key_type.empty()) {
                     return reject_with("DataError", "SubtleCrypto.importKey: EC algorithm requires kty 'EC' JWK.");
                 }
+                if (!jwk_alg.empty() && alg_name == "ecdsa" && jwk_alg != "ES256") {
+                    return reject_with("DataError", "SubtleCrypto.importKey: JWK alg '" + jwk_alg + "' does not match ES256.");
+                }
             } else if (fmt == "spki") {
                 if (key_bytes.size() != 91u || !std::equal(kSpkiPrefix, kSpkiPrefix + 26u, key_bytes.begin()) || key_bytes[26] != 0x04u) {
                     return reject_with("DataError", "SubtleCrypto.importKey: invalid P-256 SPKI public key.");
@@ -1474,6 +1477,7 @@ void setup_subtle_crypto(Iface& I) {
             if (key->hash_alg == "ecdh" || key->hash_alg == "ecdsa") {
                 jwk.set_property("kty", str("EC"));
                 jwk.set_property("crv", str("P-256"));
+                if (key->hash_alg == "ecdsa") jwk.set_property("alg", str("ES256"));
                 jwk.set_property("ext", boolean(key->extractable));
                 if (key->type == "public" && key->key_bytes.size() == 65u) {
                     jwk.set_property("x", str(base64url_encode(std::vector<uint8_t>(key->key_bytes.begin() + 1, key->key_bytes.begin() + 33))));

@@ -44,3 +44,7 @@ harness compiler reached 3.8 GiB and was stopped under severe memory pressure;
 the full sanitizer run has not passed. The ASan engine independently matched
 **1254/1254** of the viewport box differential. CI's full sanitizer job remains
 an independent required gate, not a substitute for claiming a local pass.
+
+`make fuzz` passed, including all 2400 media mutations and 2000 Brotli
+mutations. With `TEST_OPT="-O0 -g1"` the sanitizer harness compiled and the
+Phase 525 suite passed; this focused run is not a full sanitizer pass.

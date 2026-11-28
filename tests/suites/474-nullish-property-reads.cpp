@@ -33,6 +33,10 @@ TEST(the_bytecode_vm_rejects_nullish_property_reads) {
     // converts it too soon, so this asserts the VM against Node separately.
     TestPage page;
     assert(page.js.eval_bytecode("var s=''; var key={toString:function(){s+='c';return 'x'}}; try{null[key]}catch(e){s+=e.name}String(s)").to_string() == "TypeError");
+    TestPage throwing_key;
+    assert(throwing_key.js.eval_bytecode("var k={toString:function(){throw 'converted'}};try{undefined[k]}catch(e){e.name}").to_string() == "TypeError");
+    TestPage throwing_expression;
+    assert(throwing_expression.js.eval_bytecode("function key(){throw 'expression'}try{null[key()]}catch(e){e}").to_string() == "expression");
 
     // An uncaught read escapes as an actual JavaScript throw.
     TestPage uncaught;

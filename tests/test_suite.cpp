@@ -32715,6 +32715,11 @@ TEST(automatic_gc_reclaims_churn_without_calling_gc) {
 
         // Bytecode VM safe point: allocate >10,000 objects in a VM loop without
         // calling gc() and verify automatic collection fires there as well.
+        // Re-apply the floor because the interpreter loop's own collections
+        // above reset `threshold` to `max(min_threshold, agent_alive)`, which
+        // already exceeds 12,000 whenever earlier suites leave live cells on
+        // the main agent.
+        heap.set_auto_gc_min_threshold(Heap::kDefaultAutoGcMinThreshold);
         const uint64_t auto_before_vm = heap.auto_gc_collections();
         auto fn = js.compile_to_bytecode(
             "let i = 0; let last = 0; while (i < 12000) { let o = {}; last = i; i = i + 1; } last;");

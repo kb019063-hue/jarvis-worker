@@ -36,7 +36,18 @@ side effect, `typeof`, a call, catch, an uncaught JavaScript throw, iterator
 cleanup and the object-key order against Node. `make verify-bytecode` reports
 143/143 agreement and 8/8 still refused; seven new independently observed
 cases are included. `python3 tools/conformance/verify_bytecode_agreement.py
---self-test` passes.
+--self-test` passes. After merging main, `make test` passes 524/524 suites
+and 114 cross-origin checks; HTML, JS, DOM, URL and XML conformance, WPT,
+`diff-trees`, `diff-xml`, `check-numbers` and `check-suites` pass.
+
+A 1332-run deep-page check had one timeout while a sanitizer compilation was
+running at the same time. The timed-out terminal case passed by itself in
+13.4 seconds. A sanitizer build of the engine and an ASan/UBSan probe for
+three nullish-read cases passed; the full local `make asan` could not compile
+the very large test suite while the deep check was running, because this
+3.8 GiB sandbox killed the compiler for lack of memory. The complete
+sanitizer and deep checks must also run in CI; neither is claimed as a full
+local pass here.
 
 ## Still open
 

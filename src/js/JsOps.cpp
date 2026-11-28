@@ -590,7 +590,11 @@ std::string js_to_property_key(const JsValue& value) {
             }
             return js_number_to_string(n);
         }
-        default: return js_to_string(value);
+        default: {
+            // ToPropertyKey preserves a Symbol produced by object conversion.
+            JsValue key = js_to_primitive(value, JsPrimitiveHint::String);
+            return key.type == JsType::Symbol ? key.string_val.str() : js_to_string(key);
+        }
     }
 }
 

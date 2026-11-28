@@ -2263,6 +2263,30 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
     const std::string tag = to_lower_ascii(el->tag_name());
     if (svg_is_unrendered_container(tag) && !(referenced_symbol && tag == "symbol")) return BBox();
 
+    // Nested viewports in an instance have their own child coordinate system.
+    // The referenced SVG itself is mapped by its <use> caller instead.
+    const bool nested_svg = tag == "svg" && in_symbol_instance && !referenced_symbol;
+    float child_w = ref_w, child_h = ref_h, nested_x = 0, nested_y = 0;
+    TransformMatrix2D viewport_matrix = TransformMatrix2D::identity();
+    if (nested_svg) {
+        std::string value;
+        float w = ref_w, h = ref_h;
+        if (get_attr_ci(el, "x", value)) parse_float_value(value, nested_x, ref_w);
+        if (get_attr_ci(el, "y", value)) parse_float_value(value, nested_y, ref_h);
+        if (get_attr_ci(el, "width", value)) parse_float_value(value, w, ref_w);
+        if (get_attr_ci(el, "height", value)) parse_float_value(value, h, ref_h);
+        child_w = std::max(0.0f, w); child_h = std::max(0.0f, h);
+        ViewBox vb;
+        if (get_attr_ci(el, "viewBox", value)) vb = parse_viewbox(value);
+        if (vb.valid) {
+            child_w = vb.width; child_h = vb.height;
+            if (w > 0 && h > 0) {
+                std::string par;
+                get_attr_ci(el, "preserveAspectRatio", par);
+                viewport_matrix = compute_viewbox_matrix(vb, w, h, par);
+            }
+        }
+    }
     BBox box = svg_own_geometry(el, ref_w, ref_h);
     // A zero-sided rectangle has a box when queried directly, but it does
     // not contribute geometry to an instanced symbol's container box.
@@ -2276,15 +2300,18 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
         auto target = id.empty() ? nullptr : document->get_element_by_id(id);
         if (!target) return box;
         const std::string target_tag = to_lower_ascii(target->tag_name());
-        // An <svg> target needs its own nested viewport handling.
-        if (target_tag == "svg") return box;
         if (!active.insert(target.get()).second) return box;
         std::string value;
         BBox target_box;
-        if (target_tag == "symbol") {
-            // Match the painter's use viewport: percentages inside a valid
-            // viewBox resolve in that box, then its matrix maps into use space.
+        if (target_tag == "symbol" || target_tag == "svg") {
+            // Percentages inside a valid viewBox resolve in that box, then
+            // its matrix maps into the use viewport's coordinate space.
             float w = ref_w, h = ref_h;
+            // <use> dimensions override an SVG target's own viewport dimensions.
+            if (target_tag == "svg") {
+                if (get_attr_ci(target, "width", value)) parse_float_value(value, w, ref_w);
+                if (get_attr_ci(target, "height", value)) parse_float_value(value, h, ref_h);
+            }
             if (get_attr_ci(el, "width", value)) parse_float_value(value, w, ref_w);
             if (get_attr_ci(el, "height", value)) parse_float_value(value, h, ref_h);
             float inner_w = std::max(0.0f, w), inner_h = std::max(0.0f, h);
@@ -2304,6 +2331,13 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
             // before the use translation; non-origin points remain geometry.
             if (zero_source && target_box.valid() && target_box.min_x == 0 && target_box.min_y == 0 &&
                 target_box.max_x == 0 && target_box.max_y == 0) target_box = BBox();
+            if (target_tag == "svg" && target_box.valid()) {
+                float x = 0, y = 0;
+                if (get_attr_ci(target, "x", value)) parse_float_value(value, x, ref_w);
+                if (get_attr_ci(target, "y", value)) parse_float_value(value, y, ref_h);
+                target_box.min_x += x; target_box.max_x += x;
+                target_box.min_y += y; target_box.max_y += y;
+            }
         } else {
             target_box = svg_bbox_walk(target, ref_w, ref_h, depth + 1, active, false, in_symbol_instance);
             if (get_attr_ci(target, "transform", value))
@@ -2322,10 +2356,13 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
     for (const auto& child : el->children()) {
         auto child_el = std::dynamic_pointer_cast<Element>(child);
         if (!child_el) continue;
-        BBox child_box = svg_bbox_walk(child_el, ref_w, ref_h, depth + 1, active, false, in_symbol_instance);
+        BBox child_box = svg_bbox_walk(child_el, child_w, child_h, depth + 1, active, false, in_symbol_instance);
         if (!child_box.valid()) continue;
         std::string transform_text;
-        if (get_attr_ci(child_el, "transform", transform_text)) {
+        // Chromium does not apply the <svg> viewport element's transform
+        // inside an instance box; its nested contents still have theirs.
+        if (!(in_symbol_instance && to_lower_ascii(child_el->tag_name()) == "svg") &&
+            get_attr_ci(child_el, "transform", transform_text)) {
             const TransformMatrix2D matrix = parse_svg_transform(transform_text);
             const TransformMatrix2D identity = TransformMatrix2D::identity();
             if (!(matrix == identity)) {
@@ -2333,6 +2370,11 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
             }
         }
         box = svg_union_bbox(box, child_box);
+    }
+    if (nested_svg && box.valid()) {
+        box = svg_map_bbox(box, viewport_matrix);
+        box.min_x += nested_x; box.max_x += nested_x;
+        box.min_y += nested_y; box.max_y += nested_y;
     }
     return box;
 }

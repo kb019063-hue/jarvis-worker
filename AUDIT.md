@@ -455,3 +455,12 @@ moves here and out. (Everything below is in the repository's history too.)
 - **Finding 399** — [399. ✅ A symbol's description was one of its own properties (Phase 399)](docs/findings/399-the-description-was-an-own-property.md)
 - **Finding 403** — [403. ✅ `extends` read the parent's prototype and shrugged (Phase 403)](docs/findings/403-the-extends-clause-ignored-a-missing-prototype.md)
 - **Finding 412** — [412. ✅ `Array.fromAsync` was only ever a promise away (Phase 412)](docs/findings/412-from-async-was-only-ever-a-promise-away.md)
+
+## SVG instance viewport geometry (Phase 525)
+
+Referenced SVG viewport `getBBox()` is no longer always zero; 1254/1254
+measured Chromium cases agree ([phase](docs/phases/525-use-viewport-boxes.md)).
+This is not a paint fix: the `<use>` width and height override is ignored by
+the SVG painter (2/6 pixels match Chromium in the phase's paint reproducer).
+External references, non-instanced nested SVG viewport boxes, text, stroke
+options and exact transformed curve extrema remain open.

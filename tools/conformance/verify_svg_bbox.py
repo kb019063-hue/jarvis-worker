@@ -29,7 +29,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 
 HTML = '''<!doctype html><svg id="s" width="200" height="100" viewBox="0 0 20 10">
-  <defs><rect id="source" x="1" y="2" width="3" height="4" transform="scale(2)"/><g id="source-group"><rect x="2" y="3" width="4" height="5"/></g><use id="cycle" href="#cycle"/><symbol id="sym" viewBox="0 0 10 10"><rect x="1" y="2" width="3" height="4"/></symbol><symbol id="sym-pct" viewBox="0 0 10 10"><rect x="10%" y="20%" width="30%" height="40%"/></symbol><symbol id="sym-plain"><rect x="1" y="2" width="3" height="4"/></symbol></defs>
+  <defs><rect id="source" x="1" y="2" width="3" height="4" transform="scale(2)"/><g id="source-group"><rect x="2" y="3" width="4" height="5"/></g><use id="cycle" href="#cycle"/><symbol id="sym" viewBox="0 0 10 10"><rect x="1" y="2" width="3" height="4"/></symbol><symbol id="sym-pct" viewBox="0 0 10 10"><rect x="10%" y="20%" width="30%" height="40%"/></symbol><symbol id="sym-plain"><rect x="1" y="2" width="3" height="4"/></symbol><symbol id="sym-novb-pct"><rect x="10%" y="20%" width="30%" height="40%"/></symbol><symbol id="sym-offset" viewBox="10 20 10 10"><rect x="11" y="22" width="3" height="4"/></symbol></defs>
   <use id="instance" href="#source" x="10" y="20"/>
   <use id="group-instance" href="#source-group" x="4" y="5"/>
   <use id="bad-instance" href="#cycle"/>
@@ -121,6 +121,9 @@ P('symbol zero height', function(){return symbolProbe('sym','20','0',null,'5','7
 P('symbol negative width', function(){return symbolProbe('sym','-1','10',null,'5','7');});
 P('symbol percentages', function(){return symbolProbe('sym-pct','20','10',null,'5','7');});
 P('symbol no viewBox', function(){return symbolProbe('sym-plain','20','10',null,'5','7');});
+P('symbol no viewBox percentage', function(){return symbolProbe('sym-novb-pct','20','10',null,'5','7');});
+P('symbol no viewBox zero percentage', function(){return symbolProbe('sym-novb-pct','0','10',null,'5','7');});
+P('symbol offset viewBox', function(){return symbolProbe('sym-offset','20','10',null,'5','7');});
 P('symbol transform', function(){var t=document.getElementById('sym');t.setAttribute('transform','translate(2,3)');var r=symbolProbe('sym','20','10',null,'5','7');t.removeAttribute('transform');return r;});
 
 P('is an SVGRect', function () { return document.getElementById('r').getBBox().constructor.name; });

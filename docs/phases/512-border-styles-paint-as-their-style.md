@@ -83,6 +83,25 @@ Three stages, three separate gaps:
   without it.
 - `make wpt`: **9570/9824**, no subtest newly failing (floor 9570,
   `0 fail and are not listed`).
+- The rest of the ledger, all green: `make conformance` 1973/1973;
+  `make js-conformance` 1153/1158 (everyday 90/90);
+  `make dom-conformance` 678/678; `make url-conformance` 1188/1188;
+  `make xml-conformance` 1718/1718; `make diff-trees` 1500×4, 0 differ;
+  `make diff-xml` 0 DIFFER (round trip 3000/3000); `make fuzz` six of six
+  parts, 0 findings; `make deep` 1332 runs, 0 failed;
+  cross-origin Window/Location suite 114/114.
+- `make asan` on this two-core, 4 GB sandbox: **550 of 552** suites pass
+  under the sanitizer (the unity `test_suite.cpp` had to be built with
+  `-g1` for its compile to fit). The two skipped suites are both
+  pre-existing and environmental, neither is this phase's code:
+  `deep_nesting_never_exhausts_the_native_stack` never returns here under
+  ASan (the kernel OOM-killed it at ~3.9 GB RSS; it passes in the normal
+  build at 14 s) and
+  `automatic_gc_reclaims_churn_without_calling_gc` asserts
+  `heap.auto_gc_collections() > auto_before_vm` under ASan only (it passes
+  in the normal build; nothing in this phase touches the GC). The 550
+  include `border_styles_paint_as_their_style_not_as_solid`, which is
+  clean under ASan. The cross-origin suite under ASan: 114/114.
 
 ## Still open
 

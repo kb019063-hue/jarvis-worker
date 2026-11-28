@@ -49,3 +49,8 @@ nullish indexed write is also wrong: the probe `null[key] = (s += 'r')`
 returns `rc` rather than Node's `rTypeError`. Non-callable VM calls and other
 VM refusals remain separate work. No external conformance improvement or
 performance improvement is claimed.
+
+The local `make asan` built the instrumented engine but its unit-suite
+compiler was killed for memory even without a concurrent depth run, so it is
+not a full local sanitizer pass. The full sanitizer suite remains a CI
+requirement.

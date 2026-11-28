@@ -26,7 +26,7 @@ TEST(the_bytecode_vm_returns_through_finally) {
 
     // General completion unwinding is not implemented; refuse rather than
     // miss an outer handler, cursor close or return from a finalizer.
-    for (const char* source : {"function f(){for(var x of [1]){try{return x}finally{}}}f()",
+    for (const char* source : {"function f(){try{for(var x of [1]){try{return x}finally{}}}finally{}}f()",
                                "function f(){try{}finally{return 2}}f()"}) {
         TestPage page;
         bool refused = false;

@@ -24,9 +24,9 @@ TEST(the_bytecode_vm_returns_through_catch_and_finally) {
     agree("var s='';function f(){try{try{return 1}catch(e){s+='c'}finally{s+='i'}}finally{s+='o'}}var o={};Object.defineProperty(o,'x',{get:f});String(o.x+'/'+s)", "1/io");
     agree("var s='';function f(){try{try{return 1}finally{throw 7}}catch(e){s+=e}return 9}String(f()+'/'+s)", "9/7");
     agree("var s='';function f(){try{try{return 1}catch(e){s+='a'}finally{s+='i'}}catch(e){s+='b'}finally{s+='o'}}String(f()+'/'+s)", "1/io");
-    // Iterator cleanup and return from a finalizer have distinct
+    // Interleaved iterator cleanup and return from a finalizer have distinct
     // completion rules and stay refused.
-    for (const char* source : {"function f(){for(var x of [1]){try{return x}catch(e){}}}f()",
+    for (const char* source : {"function f(){try{for(var x of [1]){try{return x}finally{}}}catch(e){}}f()",
                                "function f(){try{}finally{return 2}}f()"}) {
         TestPage page;
         bool refused = false;

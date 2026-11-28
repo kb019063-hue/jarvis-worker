@@ -477,5 +477,41 @@ matching at 16/32/64 px (`0` changed pixels). Without `hebr` `GPOS`,
 fallback positioning (`_hb_ot_shape_fallback_mark_position`) remains unimplemented;
 see `docs/phases/476-hebrew-normalization-and-cgj.md`.
 
+## General OpenType normalization and alternate partial decomposition (Phase 501)
+
+Generalizing `TrueTypeFont::shape_glyphs` normalization to match HarfBuzz's
+`_hb_ot_shape_normalize` (`COMPOSED_DIACRITICS`), `hb_ucd_decompose`,
+`_hb_modified_combining_class`, and `_hb_ot_shaper_thai` across non-Indic
+scripts (`grek`, `cyrl`, `kana`, `thai`, `lao `, `armn`, `geor`, `syrc`,
+`thaa`, `nko `, `latn`, `arab`, `hebr`, and `Common`-resolved starters):
+
+1. Exact Unicode 17.0 1-step binary `(a, b)` canonical decomposition across all
+   `2,081` `kCanonDecomp` entries (`kComposePairs` prefix folding plus the `29`
+   `CompositionExclusions` singletons and 3-leaf Hebrew/Musical entries), with
+   HarfBuzz's `shortest = true` 1-step short-circuit on missing standalone
+   composites and `has_a` partial decomposition fallback when leaf marks are
+   absent;
+2. Per-run cluster scanning (`script != kTagDev2`) that preserves standalone
+   1-codepoint covered marks (`U+0341`, `U+0344`) while decomposing all members
+   (bases and decomposable marks `U+0340`, `U+0341`, `U+0343`, `U+0344`) in
+   multi-codepoint clusters without variation selectors;
+3. Shared `modified_combining_class` (`CCC 10..26` Hebrew, `27..33` Arabic,
+   `84 -> 4` / `91 -> 5` Telugu, `103 -> 3` Thai, `130 -> 132` / `132 -> 131`
+   Tibetan, `0x0F39 -> 127`, `0x0FC6`/`0x1A60 -> 254`), `Common`-starter
+   recomposition (`=\u0338 -> ≠`, `<\u0338 -> ≮`, `\u2190\u0338 -> ↚`), and
+   `ZERO_WIDTH_MARKS_BY_GDEF_LATE` for `thai` and `lao `.
+
+`normalization_diagnostic.py` (`30` default cases covering Greek polytonic,
+Cyrillic, Latin decomposable marks, and `Common` math overlays, plus `--with-lao`
+adding `2` Lao mark-ordering cases) improves from **5/30 → 30/30** (**6/32 →
+32/32** with `--with-lao`) on `DejaVuSans.ttf`, **5/30 → 30/30** on
+`DejaVuSans-Bold.ttf`, **5/30 → 30/30** (`8` `.notdef` eliminated) on
+`DejaVuSerif.ttf`, and **4/30 → 30/30** (**4/32 → 32/32** with `--with-lao`,
+`8` `.notdef` eliminated) on `DejaVuSansMono.ttf`, with `0` changed pixels at
+16/32/64 px in `ink.py`. Indic (`dev2`) two-part matra reordering, algorithmic
+Hangul normalization, and public source clusters remain separate; see
+`docs/phases/501-general-opentype-normalization.md`.
+
+
 
 

@@ -73,9 +73,11 @@ properties appear there automatically.
 
 ## Verification
 
-After merging `main` at `40018532`:
+The comprehensive gate ran after merging `main` at `40018532`. The required
+second integration with `main` at `bd666593` then repeated the normal unit gate:
 
-* `make test`: **576/576** engine suites and **114/114** cross-origin checks;
+* final integrated `make test`: **582/582** engine suites and **114/114**
+  cross-origin checks;
 * conformance: tree construction **1,973/1,973**, DOM **678/678**, URL
   **1,188/1,188**, XML **1,718/1,718**, JavaScript **1,154/1,158**, and WPT
   **9,570/9,824** with no unlisted failure;

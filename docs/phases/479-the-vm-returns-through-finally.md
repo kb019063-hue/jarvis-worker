@@ -33,7 +33,9 @@ completion unwinding explicit.
 - `make -j2 all test`: 524 engine suites and 114 cross-origin checks pass.
 - HTML, JS, DOM, URL and XML corpora, WPT, and tree/XML differentials pass.
   A 56-case combination probe for returns, scopes and finalizers agrees.
-  Deep, fuzz and sanitizer checks are in progress.
+- `make fuzz` passes. An ASan/UBSan build with the suite compiled at `-O0`
+  passed the isolated 13-suite stretch and all **150/150** bytecode oracle
+  cases; deep and full sanitizer checks remain in progress.
 - `tests/suites/479-the-vm-returns-through-finally.cpp` checks evaluation
   order, scope cleanup, returned objects, GC, throws, callbacks and refusals.
 

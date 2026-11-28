@@ -1066,6 +1066,10 @@ bool StyleResolver::matches_simple_selector(const std::shared_ptr<Element>& elem
                 if (!forms::is_disabled(*element)) return false;
             } else if (name == "enabled") {
                 if (!forms::can_be_disabled(*element) || forms::is_disabled(*element)) return false;
+            } else if (name == "valid") {
+                if (forms::validity_for_selector(*element) != 1) return false;
+            } else if (name == "invalid") {
+                if (forms::validity_for_selector(*element) != 2) return false;
             } else if (name == "checked") {
                 // The control's state now, not its `checked` attribute.
                 if (!forms::matches_checked(*element)) return false;

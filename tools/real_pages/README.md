@@ -68,6 +68,12 @@ python3 tools/real_pages/strict_frames.py "$R/results"     # after the full reru
 
 **Visual: 0 exact matches in 19 comparable post-action frames**, using strict full-RGBA equality at 800×600 (no tolerance). Task 16 is excluded because its board is independently randomized. Task 17 differs on 102,333 pixels. We reviewed the frame pairs: the article and utility pages show material layout/color differences, the 2048 board is offset, and game/editor page styling and text layout differ. The interaction score is not a visual-parity claim. Chromium's new after-frames match rerun-06's committed fresh references exactly for tasks 1–15 and 18–20; only the randomized 2048 and animated Hextris frames changed.
 
+## Rerun 08: strict visual check after Phase 491 (2026-11-21)
+
+[Detailed report and per-task probe logs](rerun-08/README.md) · [20 Litebird outcomes](rerun-08/litebird.json) · [fresh Chromium outcomes](rerun-08/reference.json) · [strict RGBA counts](rerun-08/strict-frames.json). The five pinned source revisions were unchanged. Chromium validated 20/20 tasks and Litebird completed 20/20.
+
+**Visual: still 0 exact matches in 19 comparable frames.** The fixed defect was specific: the CSS layout matcher ignored `:valid` and `:invalid`, so the Mothereff `.invalid, :invalid` rule painted the canvas and non-controls pink. After adding real validation-state matching, tasks 13, 14, 15 and 19 improve by **131,317 / 132,620 / 133,467 / 135,452** fewer different pixels respectively (**532,856 fewer total**). The pink tint is gone. Remaining differences include the tool pages’ textarea dimensions and page width, spacing and text metrics; this is not a parity claim. Task 16 remains excluded only for its independently randomized board.
+
 ## Rerun on Linux (from repository root)
 
 Use an empty or trusted local scratch directory. Pinned snapshots, browsers, logs and full-resolution PNGs belong outside Git. Use an isolated disposable environment, not a machine with personal browser data. The network restriction in the probe is for repeatability, not a general-purpose security sandbox.

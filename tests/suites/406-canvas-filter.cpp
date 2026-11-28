@@ -125,12 +125,11 @@ TEST(canvas_filter_applies_to_the_whole_drawing_and_ignores_what_it_cannot_parse
     js.eval("ck.filter = 'blur(2px)'; ck.fillStyle = '#000000'; ck.fillRect(2, 4, 10, 8);"
             "var ba = function(x, y) { var d = ck.getImageData(0, 0, 24, 24).data;"
             "var i = (y*24+x)*4; return d[i+3]; };");
-    // The middle of a box this wide is still fully covered, so the blur softens
-    // the edge without eating the shape. A 4-wide box does **not** reach 255 in
-    // its middle — measured at 204 — for the same reason Phase 391's shadow does
-    // not: the kernel reaches outside the shape. That is the rasteriser's
-    // behaviour, not a filter bug, so the assertion uses a box where it is 255.
-    assert(js.eval("ba(6,8)").to_string() == "255");
+    // A Gaussian reaches beyond the primitive, so even this interior pixel is
+    // below full coverage: for sigma=2 and the 10x8 source, the normalized
+    // 13-tap kernel yields 239. The box blur used to return 255 here because its
+    // flat window did not reach either edge at this point.
+    assert(js.eval("ba(6,8)").to_string() == "239");
     assert(js.eval("Number(ba(12,8)) > 0").to_string() == "true");
     assert(js.eval("Number(ba(12,8)) > Number(ba(13,8))").to_string() == "true");
     assert(js.eval("Number(ba(13,8)) > Number(ba(14,8))").to_string() == "true");

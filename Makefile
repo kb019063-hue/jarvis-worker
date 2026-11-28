@@ -241,6 +241,11 @@ verify-js-error-terminal-safety: $(TARGET)
 verify-cli-error-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_cli_error_terminal.py --binary $(TARGET)
 
+## Check XML parser and decoding diagnostics without displaying attack bytes.
+.PHONY: verify-xml-diagnostic-terminal-safety
+verify-xml-diagnostic-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_xml_diagnostic_terminal.py --binary $(TARGET)
+
 ## Check that a page's own text cannot command the terminal through a dump.
 .PHONY: verify-page-text-terminal-safety
 verify-page-text-terminal-safety: $(TARGET)

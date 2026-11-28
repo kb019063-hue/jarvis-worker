@@ -1726,7 +1726,7 @@ void setup_subtle_crypto(Iface& I) {
                 ? ascii_lower_str(to_str(target_alg.get_property("name"))) : std::string();
             int len_bits = 0;
             std::string key_hash_alg;
-            if (target_name == "aes-gcm" || target_name == "aes-cbc" || target_name == "aes-ctr") {
+            if (target_name == "aes-gcm" || target_name == "aes-cbc" || target_name == "aes-ctr" || target_name == "aes-kw") {
                 len_bits = static_cast<int>(to_double(target_alg.get_property("length")));
                 if (len_bits != 128 && len_bits != 192 && len_bits != 256) {
                     return reject_with("OperationError", "SubtleCrypto.deriveKey: AES key length must be 128, 192, or 256.");
@@ -1777,19 +1777,31 @@ void setup_subtle_crypto(Iface& I) {
             return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: unsupported hash '" + hash_alg + "'.");
         }
         const JsValue& derived_type = args[2];
-        if (!derived_type.is_object_like() || ascii_lower_str(to_str(derived_type.get_property("name"))) != "hmac") {
-            return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: only HMAC derivedKeyType is supported.");
+        std::string derived_name = derived_type.is_object_like() ? ascii_lower_str(to_str(derived_type.get_property("name"))) : std::string();
+        if (derived_name != "hmac" && derived_name != "aes-kw") {
+            return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: only HMAC and AES-KW derivedKeyType are supported.");
         }
-        JsValue dhash_val = derived_type.get_property("hash");
-        std::string dhash_alg = dhash_val.is_object_like() ? ascii_lower_str(to_str(dhash_val.get_property("name")))
-                                                           : ascii_lower_str(to_str(dhash_val));
-        if (dhash_alg != "sha-1" && dhash_alg != "sha-256" && dhash_alg != "sha-384" && dhash_alg != "sha-512") {
-            return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: unsupported HMAC hash '" + dhash_alg + "'.");
-        }
-        std::size_t dk_len = (dhash_alg == "sha-384" || dhash_alg == "sha-512") ? 128u : 64u;
-        JsValue len_val = derived_type.get_property("length");
-        if (len_val.type == JsType::Number && to_double(len_val) > 0) {
-            dk_len = static_cast<std::size_t>((static_cast<int>(to_double(len_val)) + 7) / 8);
+        std::string dhash_alg;
+        std::size_t dk_len = 0;
+        if (derived_name == "aes-kw") {
+            const int len_bits = static_cast<int>(to_double(derived_type.get_property("length")));
+            if (len_bits != 128 && len_bits != 192 && len_bits != 256) {
+                return reject_with("OperationError", "SubtleCrypto.deriveKey: AES-KW key length must be 128, 192, or 256.");
+            }
+            dhash_alg = "aes-kw";
+            dk_len = static_cast<std::size_t>(len_bits / 8);
+        } else {
+            JsValue dhash_val = derived_type.get_property("hash");
+            dhash_alg = dhash_val.is_object_like() ? ascii_lower_str(to_str(dhash_val.get_property("name")))
+                                                   : ascii_lower_str(to_str(dhash_val));
+            if (dhash_alg != "sha-1" && dhash_alg != "sha-256" && dhash_alg != "sha-384" && dhash_alg != "sha-512") {
+                return reject_with("NotSupportedError", "SubtleCrypto.deriveKey: unsupported HMAC hash '" + dhash_alg + "'.");
+            }
+            dk_len = (dhash_alg == "sha-384" || dhash_alg == "sha-512") ? 128u : 64u;
+            JsValue len_val = derived_type.get_property("length");
+            if (len_val.type == JsType::Number && to_double(len_val) > 0) {
+                dk_len = static_cast<std::size_t>((static_cast<int>(to_double(len_val)) + 7) / 8);
+            }
         }
         auto state = std::make_shared<CryptoKeyState>();
         state->extractable = args[3].is_truthy();

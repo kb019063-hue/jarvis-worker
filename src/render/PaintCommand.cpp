@@ -185,7 +185,11 @@ if (!skip_cell_chrome && (bw.top > 0 || bw.right > 0 || bw.bottom > 0 || bw.left
     cmd.width = bw;
     cmd.color = s.border_color;
     cmd.border_radius = s.border_radius;
-    if (box->border_color_override) cmd.edge_colors = *box->border_color_override;
+    cmd.styles = s.border_style;
+    if (box->border_override) {
+        cmd.edge_colors = box->border_paint_override.colors;
+        cmd.styles = box->border_paint_override.styles;
+    }
     list.add(cmd);
 }
 
@@ -195,13 +199,14 @@ if (!skip_cell_chrome && (bw.top > 0 || bw.right > 0 || bw.bottom > 0 || bw.left
 // still 100px. It is drawn on top of the border, so a zero offset puts it
 // over the border's own pixels; a positive offset lifts it clear, and a
 // negative one pulls it in over the padding.
-if (s.outline_drawn && s.outline_width > 0.0f && !s.outline_color.is_transparent()) {
+if (border_style_draws(s.outline_style) && s.outline_width > 0.0f && !s.outline_color.is_transparent()) {
     const Rect box_rect = box->dimensions.border_box();
     const float grow = s.outline_offset + s.outline_width;
     DrawBorderCommand ring;
     ring.rect = Rect{box_rect.x - grow, box_rect.y - grow, box_rect.width + 2 * grow, box_rect.height + 2 * grow};
     ring.width = EdgeSizes(s.outline_width);
     ring.color = s.outline_color;
+    ring.styles = EdgeStyles(s.outline_style);
     list.add(ring);
 }
 }
@@ -296,6 +301,7 @@ if (!box->line_boxes.empty()) {
                 b_cmd.width = fbw;
                 b_cmd.color = fs.border_color;
                 b_cmd.border_radius = fs.border_radius;
+                b_cmd.styles = fs.border_style;
                 list.add(b_cmd);
             }
 

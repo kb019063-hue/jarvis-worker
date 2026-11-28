@@ -452,18 +452,199 @@ void BitmapRenderer::execute_command(const PaintCommand& cmd) {
             int w = static_cast<int>(tr.width);
             int h = static_cast<int>(tr.height);
 
-            const Color top_color = arg.edge_colors ? arg.edge_colors->top : arg.color;
-            const Color right_color = arg.edge_colors ? arg.edge_colors->right : arg.color;
-            const Color bottom_color = arg.edge_colors ? arg.edge_colors->bottom : arg.color;
-            const Color left_color = arg.edge_colors ? arg.edge_colors->left : arg.color;
+            // Border/outline styles (phase 512). The band of one edge is
+            // painted in its own colour, and the styles that shade one edge
+            // differently from another (`inset`/`outset`) or split a band in
+            // two (`groove`/`ridge`) derive their tones from that same colour:
+            // halfway towards black for the dark side, halfway towards white
+            // for the light one. Corners overlap (the horizontal edges own
+            // them, being painted first), which is the same compromise the
+            // solid painter always made with overlapping opaque bands.
+            const auto darken = [](Color c) {
+                return Color{static_cast<uint8_t>(c.r * 0.5f), static_cast<uint8_t>(c.g * 0.5f),
+                            static_cast<uint8_t>(c.b * 0.5f), c.a};
+            };
+            const auto lighten = [](Color c) {
+                return Color{static_cast<uint8_t>(c.r + (255 - c.r) * 0.5f), static_cast<uint8_t>(c.g + (255 - c.g) * 0.5f),
+                            static_cast<uint8_t>(c.b + (255 - c.b) * 0.5f), c.a};
+            };
+            // The full-band tone for `inset`/`outset` and the band pair for
+            // `groove`/`ridge`. `outer`/`inner` are only read by the two-tone
+            // styles. `dark_side` is true for the top and left edges, the
+            // sides `inset` makes dark.
+            struct EdgePaint {
+                Color full;
+                Color outer;
+                Color inner;
+            };
+            const auto edge_paint = [&](bool dark_side, BorderStyle style, Color base) {
+                EdgePaint p{base, base, base};
+                switch (style) {
+                    case BorderStyle::Inset:
+                        p.full = dark_side ? darken(base) : lighten(base);
+                        break;
+                    case BorderStyle::Outset:
+                        p.full = dark_side ? lighten(base) : darken(base);
+                        break;
+                    case BorderStyle::Groove:
+                        // Carved in: the outer half of each top/left edge is
+                        // dark and its inner half light; bottom/right reverse.
+                        if (dark_side) { p.outer = darken(base); p.inner = lighten(base); }
+                        else { p.outer = lighten(base); p.inner = darken(base); }
+                        break;
+                    case BorderStyle::Ridge:
+                        // The exact inverse of `groove`.
+                        if (dark_side) { p.outer = lighten(base); p.inner = darken(base); }
+                        else { p.outer = darken(base); p.inner = lighten(base); }
+                        break;
+                    default:
+                        break;
+                }
+                return p;
+            };
+            // A horizontal band (top/bottom edges). `outer_at_top` is true for
+            // the top edge, where "outside" is the smaller y.
+            const auto paint_h = [&](int bx, int by, int length, int t, Color base, BorderStyle style,
+                                     bool outer_at_top, bool dark_side) {
+                if (t <= 0 || length <= 0 || !border_style_draws(style)) return;
+                const EdgePaint paint = edge_paint(dark_side, style, base);
+                switch (style) {
+                    case BorderStyle::Double: {
+                        if (t < 3) { fill_rect(bx, by, length, t, paint.full); break; }
+                        const int band = t / 3;
+                        fill_rect(bx, by, length, band, paint.full);
+                        fill_rect(bx, by + t - band, length, band, paint.full);
+                        break;
+                    }
+                    case BorderStyle::Dashed: {
+                        const float dash = std::max(2.0f, static_cast<float>(t) * 3.0f);
+                        const float gap = std::max(2.0f, static_cast<float>(t) * 2.0f);
+                        for (float at = 0.0f; at < static_cast<float>(length); at += dash + gap) {
+                            const int seg = std::min(static_cast<int>(dash), length - static_cast<int>(at));
+                            if (seg > 0) fill_rect(bx + static_cast<int>(at), by, seg, t, paint.full);
+                        }
+                        break;
+                    }
+                    case BorderStyle::Dotted: {
+                        const float spacing = std::max(2.0f, static_cast<float>(t) * 2.0f);
+                        const float r = static_cast<float>(t) * 0.5f;
+                        const float cy = static_cast<float>(by) + r;
+                        for (float cx = static_cast<float>(bx) + r; cx < static_cast<float>(bx + length);
+                             cx += spacing) {
+                            const int iy0 = static_cast<int>(std::floor(cy - r));
+                            const int iy1 = static_cast<int>(std::ceil(cy + r));
+                            for (int py = iy0; py < iy1; ++py) {
+                                const float dy = static_cast<float>(py) + 0.5f - cy;
+                                const float dy2 = dy * dy;
+                                const int ix0 = static_cast<int>(std::floor(cx - r));
+                                const int ix1 = static_cast<int>(std::ceil(cx + r));
+                                for (int px = ix0; px < ix1; ++px) {
+                                    const float dx = static_cast<float>(px) + 0.5f - cx;
+                                    if (dx * dx + dy2 <= r * r) set_pixel(px, py, paint.full);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    case BorderStyle::Groove:
+                    case BorderStyle::Ridge: {
+                        const int outer_t = std::max(1, t / 2);
+                        if (outer_at_top) {
+                            fill_rect(bx, by, length, outer_t, paint.outer);
+                            fill_rect(bx, by + outer_t, length, t - outer_t, paint.inner);
+                        } else {
+                            fill_rect(bx, by, length, t - outer_t, paint.inner);
+                            fill_rect(bx, by + t - outer_t, length, outer_t, paint.outer);
+                        }
+                        break;
+                    }
+                    default:
+                        fill_rect(bx, by, length, t, paint.full);
+                        break;
+                }
+            };
+            // A vertical band (left/right edges). `outer_at_left` is true for
+            // the left edge, where "outside" is the smaller x.
+            const auto paint_v = [&](int bx, int by, int length, int t, Color base, BorderStyle style,
+                                     bool outer_at_left, bool dark_side) {
+                if (t <= 0 || length <= 0 || !border_style_draws(style)) return;
+                const EdgePaint paint = edge_paint(dark_side, style, base);
+                switch (style) {
+                    case BorderStyle::Double: {
+                        if (t < 3) { fill_rect(bx, by, t, length, paint.full); break; }
+                        const int band = t / 3;
+                        fill_rect(bx, by, band, length, paint.full);
+                        fill_rect(bx + t - band, by, band, length, paint.full);
+                        break;
+                    }
+                    case BorderStyle::Dashed: {
+                        const float dash = std::max(2.0f, static_cast<float>(t) * 3.0f);
+                        const float gap = std::max(2.0f, static_cast<float>(t) * 2.0f);
+                        for (float at = 0.0f; at < static_cast<float>(length); at += dash + gap) {
+                            const int seg = std::min(static_cast<int>(dash), length - static_cast<int>(at));
+                            if (seg > 0) fill_rect(bx, by + static_cast<int>(at), t, seg, paint.full);
+                        }
+                        break;
+                    }
+                    case BorderStyle::Dotted: {
+                        const float spacing = std::max(2.0f, static_cast<float>(t) * 2.0f);
+                        const float r = static_cast<float>(t) * 0.5f;
+                        const float cx = static_cast<float>(bx) + r;
+                        for (float cy = static_cast<float>(by) + r; cy < static_cast<float>(by + length);
+                             cy += spacing) {
+                            const int ix0 = static_cast<int>(std::floor(cx - r));
+                            const int ix1 = static_cast<int>(std::ceil(cx + r));
+                            for (int px = ix0; px < ix1; ++px) {
+                                const float dx = static_cast<float>(px) + 0.5f - cx;
+                                const float dx2 = dx * dx;
+                                const int iy0 = static_cast<int>(std::floor(cy - r));
+                                const int iy1 = static_cast<int>(std::ceil(cy + r));
+                                for (int py = iy0; py < iy1; ++py) {
+                                    const float dy = static_cast<float>(py) + 0.5f - cy;
+                                    if (dx2 + dy * dy <= r * r) set_pixel(px, py, paint.full);
+                                }
+                            }
+                        }
+                        break;
+                    }
+                    case BorderStyle::Groove:
+                    case BorderStyle::Ridge: {
+                        const int outer_t = std::max(1, t / 2);
+                        if (outer_at_left) {
+                            fill_rect(bx, by, outer_t, length, paint.outer);
+                            fill_rect(bx + outer_t, by, t - outer_t, length, paint.inner);
+                        } else {
+                            fill_rect(bx, by, t - outer_t, length, paint.inner);
+                            fill_rect(bx + t - outer_t, by, outer_t, length, paint.outer);
+                        }
+                        break;
+                    }
+                    default:
+                        fill_rect(bx, by, t, length, paint.full);
+                        break;
+                }
+            };
+
+            const BorderStyle top_style = arg.styles.top;
+            const BorderStyle right_style = arg.styles.right;
+            const BorderStyle bottom_style = arg.styles.bottom;
+            const BorderStyle left_style = arg.styles.left;
             // Top
-            fill_rect(x, y, w, static_cast<int>(arg.width.top), top_color);
-            // Bottom
-            fill_rect(x, y + h - static_cast<int>(arg.width.bottom), w, static_cast<int>(arg.width.bottom), bottom_color);
+            paint_h(x, y, w, static_cast<int>(arg.width.top),
+                    arg.edge_colors ? arg.edge_colors->top : arg.color, top_style, /*outer_at_top=*/true,
+                    /*dark_side=*/true);
+            // Bottom (outside is the larger y, so outer_at_top=false; dark_side=false)
+            paint_h(x, y + h - static_cast<int>(arg.width.bottom), w, static_cast<int>(arg.width.bottom),
+                    arg.edge_colors ? arg.edge_colors->bottom : arg.color, bottom_style, /*outer_at_top=*/false,
+                    /*dark_side=*/false);
             // Left
-            fill_rect(x, y, static_cast<int>(arg.width.left), h, left_color);
+            paint_v(x, y, h, static_cast<int>(arg.width.left),
+                    arg.edge_colors ? arg.edge_colors->left : arg.color, left_style, /*outer_at_left=*/true,
+                    /*dark_side=*/true);
             // Right
-            fill_rect(x + w - static_cast<int>(arg.width.right), y, static_cast<int>(arg.width.right), h, right_color);
+            paint_v(x + w - static_cast<int>(arg.width.right), y, h, static_cast<int>(arg.width.right),
+                    arg.edge_colors ? arg.edge_colors->right : arg.color, right_style, /*outer_at_left=*/false,
+                    /*dark_side=*/false);
 
         } else if constexpr (std::is_same_v<T, DrawTextCommand>) {
             Point tp = current_transform().map_point(arg.position);

@@ -194,9 +194,20 @@ void settle(const std::shared_ptr<PromiseData>& data, PromiseState state, JsValu
         // Nothing is listening yet. Give the script until the end of the
         // current task to attach a handler, then report it: a rejection that
         // vanishes silently is the hardest kind of bug to find.
-        EventLoop::default_loop().post_task([data]() {
-            if (!data->handled) js_report_unhandled_rejection(data->result);
-        }, {js_roots({data->result})});
+        //
+        // The task holds the promise weakly and roots nothing. It used to
+        // capture the state and root the result, which pinned a rejected
+        // promise's whole graph for the life of the process: the loop
+        // outlives every interpreter, and a host that never ticks again (a
+        // unit test, an embedder, a page torn down without settling) never
+        // runs the task, so the capture kept the promise, its result and
+        // everything they reach marked for ever. A report for a promise the
+        // program can no longer reach says nothing worth reading: when the
+        // weak state has gone, the promise has gone, and the report with it.
+        EventLoop::default_loop().post_task([weak = std::weak_ptr<PromiseData>(data)]() {
+            if (auto held = weak.lock(); held && !held->handled)
+                js_report_unhandled_rejection(held->result);
+        });
     }
 }
 

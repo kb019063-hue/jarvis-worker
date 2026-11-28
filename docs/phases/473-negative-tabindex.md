@@ -38,6 +38,12 @@ checks pass. The four deep unit suites were not run locally because previous
 runs exceeded the 3.8 GiB sandbox's memory; CI must cover them. This is not a
 full local `make asan` pass.
 
+After merging the then-current `main`, normal checks pass again with 527
+engine suites, 114 cross-origin checks and 1,332 deep-page runs. The
+sanitizer build, 523 non-deep suites, cross-origin checks, verifiers, corpora,
+generated XML, fuzz and 882 deep-page runs also pass again. The same four
+memory-intensive sanitizer unit suites remain unrun locally.
+
 ## What remains open
 
 The candidate list intentionally still contains negative entries as navigation

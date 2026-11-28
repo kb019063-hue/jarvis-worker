@@ -520,7 +520,8 @@ without one, and leaves the board and a watch out of the claims.
    (`tools/watch/watch.sh drafts`), which says so on it; nothing else
    changes for its agent until the last push.
    (`python3 tools/next_ids.py --pr-body` prints the four lines, and
-   `python3 tools/ci/check_pr.py claim N` says the numbers back.) Until
+   `python3 tools/ci/check_pr.py claim N` says the numbers back, and
+   refuses a claim that is no draft until it is one.) Until
    24 November 2026 the two came from `python3 tools/next_ids.py`, the
    next free number of each, and two agents who asked in the same minute
    took the same pair: in one hour of that morning five pull requests had
@@ -1081,7 +1082,12 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   Request is still a draft", from the page, from `gh pr merge` and from
   the API alike. So a claim is opened as a draft since that day
   ("Before starting", point 2), and `check_pr.py claim N` says so of
-  one that is not. The other side of it: a finished draft that nobody
+  one that is not. (As a note at first, under lines that began "ok".
+  Five claims of the next six hours were opened ready all the same,
+  four of them one agent's: #515, #521, #532, #539. Since then it is
+  a refusal: an agent in a long chat knows the routine as it was when
+  the chat began, and reads every time what the tools answer.) The
+  other side of it: a finished draft that nobody
   made ready is in no list (#425, thirteen hours; #508, eleven minutes
   of that same watch, renamed and not made ready). `merge N` says so to
   the agent that asks. `watch.sh cands` says so to the landing session,

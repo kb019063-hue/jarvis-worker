@@ -514,9 +514,34 @@ def draft_note(number: int, title: str, is_draft: bool) -> str | None:
     """
     if not title.startswith("WIP") or is_draft:
         return None
-    return (f"#{number} is work in progress and no draft: GitHub would merge it as it is for whoever asked. "
-            f"`gh pr ready {number} --undo` makes it a draft, which nobody can merge; "
-            f"`gh pr ready {number}` again with your last push, when `WIP:` comes off")
+    return (f"#{number} is work in progress and no draft. Make it one now, `gh pr ready {number} --undo`, and ask "
+            "again. A claim is a draft (AGENTS.md, \"Before starting\", point 2): GitHub merges a draft for "
+            f"nobody, and work under `WIP:` for whoever asks. `gh pr ready {number}` again with your last push, "
+            "when `WIP:` comes off")
+
+
+def claim_end(number: int, numbers: str, claim_failed: bool, not_a_draft: str | None, next_numbers) -> list[tuple[str, str]]:
+    """The last lines of `claim N`, each (`ok`, `no` or `note`, the text).
+
+    A claim that is no draft is refused, with what to do (`draft_note`).
+    It was a note at first, from 28 November 2026, 08:22 UTC, under lines
+    that began "ok", and `claim N` ended with status 0. Of the claims opened
+    in the six hours after that, five were opened ready all the same, four
+    of them by one agent (#515, #521, #532, #539). Each was made a draft by
+    the landing session, which its agent did not see: two of them then
+    took their `WIP:` off and waited, finished drafts, for somebody to
+    make them ready. An agent in a long chat knows the routine as it was
+    when the chat began; what it reads every time is what the tools answer.
+
+    `next_numbers()` is asked only when the claim itself fails (its
+    numbers or its files are somebody else's): a claim that is right and no
+    draft is not told to take other numbers.
+    """
+    lines = [("note", next_numbers())] if claim_failed else [
+        ("ok", f"#{number}: {numbers}; no earlier open pull request has its numbers or its files")]
+    if not_a_draft:
+        lines.append(("no", not_a_draft))
+    return lines
 
 
 def open_claims(prs: list[dict] | None = None) -> list[dict]:
@@ -1093,12 +1118,8 @@ def check_claim(number: int) -> int:
         (report.no if blocking else report.ok)(problem)
     its = next(pr for pr in prs if pr["number"] == number)
     not_a_draft = draft_note(number, its["title"], bool(its.get("isDraft")))
-    if not_a_draft:
-        report.note(not_a_draft)
-    if not report.failed:
-        report.ok(f"#{number}: {numbers_of(mine)}; no earlier open pull request has its numbers or its files")
-    else:
-        report.note(next_pair())
+    for kind, text in claim_end(number, numbers_of(mine), report.failed, not_a_draft, next_pair):
+        getattr(report, kind)(text)
     broken = main_run_note()
     if broken:
         report.note(f"!! {broken}")
@@ -2519,9 +2540,20 @@ def self_test() -> int:
          [why_not_taken(waiting(title=t), board) for t in ("BOARD: hand-overs", "WATCH: 23 November")],
          ["it is the board or a watch"] * 2),
         ("work in progress that is no draft is told how to become one (#449, #491); a draft and a finished one are told nothing",
-         [(draft_note(7, title, is_draft) or "")[:44] for title, is_draft in (("WIP: a change", False), ("WIP: a change", True),
+         [(draft_note(7, title, is_draft) or "")[:76] for title, is_draft in (("WIP: a change", False), ("WIP: a change", True),
                                                                                ("A change", False), ("A change", True))],
-         ["#7 is work in progress and no draft: GitHub ", "", "", ""]),
+         ["#7 is work in progress and no draft. Make it one now, `gh pr ready 7 --undo`", "", "", ""]),
+        ("claim N of a claim that is right and a draft: ok, and nothing else",
+         claim_end(7, "Phase 7, finding 7", False, None, lambda: 1 // 0),
+         [("ok", "#7: Phase 7, finding 7; no earlier open pull request has its numbers or its files")]),
+        ("...of one that is right and no draft: ok for the numbers, refused for the draft, and no other numbers offered "
+         "(#515, #521, #532, #539: four claims of one agent, each told so in a note under \"ok\")",
+         [(kind, text[:36]) for kind, text in claim_end(7, "Phase 7, finding 7", False, "#7 is work in progress and no draft.", lambda: 1 // 0)],
+         [("ok", "#7: Phase 7, finding 7; no earlier o"), ("no", "#7 is work in progress and no draft.")]),
+        ("...of one whose numbers are somebody else's: the next numbers, and the draft is still said",
+         (claim_end(7, "Phase 6, finding 6", True, None, lambda: "the next pair"),
+          claim_end(7, "Phase 6, finding 6", True, "no draft", lambda: "the next pair")),
+         ([("note", "the next pair")], [("note", "the next pair"), ("no", "no draft")])),
         ("no run on the head of an engine change that is a green commit with main merged in by git alone: taken (#492)",
          why_not_taken(waiting(checks=[]), board, lambda pr: "b" * 40), ""),
         ("...not when it is no such head",

@@ -132,7 +132,11 @@ within the hour, and the first lot was started again four times.
    a lot and two caught by `main`. A file that only your pull request has
    is in conflict with nothing. The suites that are in
    `tests/test_suite.cpp` stay there, each with its line, and an assertion
-   more for one of them is still written there. (Two pull requests that
+   more for one of them is still written there. **A new suite written
+   there fails "Documentation shape" since 28 November**
+   (`check_suites.py`; its line says what to move where): from the day of
+   this rule to that day 26 pull requests had done it, twenty of them one
+   agent's, #470 the last, and nothing had said so. (Two pull requests that
    rewrote neighbouring rows of "Open tasks" were in conflict too, as #244
    and #257 were. Since 24 November an empty row stands between the rows:
    "The files every pull request changes", point 4.)

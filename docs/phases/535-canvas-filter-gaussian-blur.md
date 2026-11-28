@@ -64,7 +64,41 @@ keep returning a box-shaped filter.
 
 ## Verification
 
-`make test` passes all 562 engine suites and the 114 cross-origin
-Window/Location/MessageChannel checks. `python3 tools/ci/check_suites.py`,
-`git diff --check`, `make render-conformance`, and the Documentation shape
-checks are recorded on the pull request once their final runs complete.
+- `make -j2 test`: all **562 engine suites** and **114** cross-origin
+  Window/Location/MessageChannel checks passed.
+- `make render-conformance`: **67/68** reftests matched (the remaining AVIF
+  decoder case is the corpus's recorded known failure), **41/41** body-origin
+  pages matched, and the Canvas `toDataURL` harness passed **45,016/45,016**
+  checks.
+- `make conformance`: **1,973/1,973** HTML tree-construction cases passed.
+- `make js-conformance`: **1,154/1,158** passed, with 0 crashes/timeouts and
+  the same four corpus failures; the fixed 90-case probe passed 90/90.
+- `make dom-conformance`: **678/678**; `make url-conformance`: **1,188/1,188**;
+  `make xml-conformance`: **1,718/1,718**.
+- `make wpt`: **9,570/9,824** subtests passed; all 254 failures are recorded
+  in the repository's expected-failure list, with no unlisted failures.
+- `make diff-trees`: four batches of 1,500 random pages had 0 differences from
+  the corrected parse5 reference. `make diff-xml` (with lxml installed in a
+  local venv): 3,958/4,000 documents agreed with both Expat and libxml2, and
+  all 3,000 XML round trips preserved their trees.
+- `python3 tools/ci/check_suites.py`, `python3 tools/ci/check_docs.py`, and
+  `git diff --check` passed.
+
+The full `make asan` run did **not** finish: its initial attempt timed out while
+compiling the large sanitizer test translation unit. A retry with debug info
+disabled built the test binary and reached the ASan runner, but timed out at
+`deep_nesting_never_exhausts_the_native_stack` without a final summary. No full
+sanitizer-suite pass is claimed. The Phase 535 test itself did pass in that
+sanitizer binary using a single-suite stretch:
+
+```sh
+ASAN_OPTIONS=detect_leaks=0 LITEBIRD_SUITE_SHARD=1/3 \
+LITEBIRD_SUITE_CUTS=canvas_filter_blur_and_drop_shadow_use_gaussian_weights_and_premultiplied_alpha,color_parsing \
+./build-asan/test_suite
+```
+
+`make deep` passed **1,332 runs over 465 pages** with 0 failures;
+`make asan-deep` passed **882 runs over 315 pages** with 0 failures. After
+`build-asan/litebird` was available, `ASAN_OPTIONS=detect_leaks=0 make fuzz`
+passed: 400 parser mutations, 400 pipeline runs, 600 XML mutations, 2,400 media
+cases, 5,009 CSS Color inputs, and 2,000 Brotli mutations, all with 0 findings.

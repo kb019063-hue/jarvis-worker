@@ -66,6 +66,15 @@ class Case:
 # Both paths must answer these alike. Each was run on the engine and read
 # before it was written here; none of them is a guess.
 AGREES: list[Case] = [
+    # Phase 474: a nullish property read throws rather than producing undefined.
+    Case("try { null.foo; } catch (e) { e.name; }", "null dot read throws"),
+    Case("try { undefined.foo; } catch (e) { e.name; }", "undefined dot read throws"),
+    Case("try { null['foo']; } catch (e) { e.name; }", "null index read throws"),
+    Case("try { undefined['foo']; } catch (e) { e.message; }", "undefined index read reports the property"),
+    Case("try { typeof null.foo; } catch (e) { e.name; }", "typeof does not suppress a property error"),
+    Case("var s=''; try { null[(s += 'k')]; } catch(e) { s += e.name; } String(s)", "computed key expression runs before the error"),
+    Case("function f(){return null.foo;} try{f()}catch(e){e.name}", "a TypeError unwinds a call"),
+
     # Phase 479: a simple return carries its value through a finalizer.
     Case("function f(){try{return 1}finally{}}f()", "the original return-through-finally refusal"),
     Case("var s='';function f(){try{return 1}finally{s+='f'}}String(f()+'/'+s)", "finalizer runs before return"),

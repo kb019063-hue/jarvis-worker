@@ -634,6 +634,10 @@ JsValue VM::run(size_t stop_depth) {
             case OpCode::OpGetProperty: {
                 const std::string prop = read_constant().string_val.str();
                 JsValue obj = pop();
+                if (obj.is_nullish()) {
+                    js_throw_type_error(std::string("Cannot read properties of ") +
+                        (obj.type == JsType::Null ? "null" : "undefined") + " (reading '" + prop + "')");
+                }
                 JsValue value = obj.get_property(prop);
                 // OpCall has no receiver operand, and built-in methods now read
                 // `this`; bind it here so `array.push(x)` still works on the VM.
@@ -651,6 +655,16 @@ JsValue VM::run(size_t stop_depth) {
             case OpCode::OpGetIndex: {
                 JsValue idx = pop();
                 JsValue obj = pop();
+                // The key expression has already run, but RequireObjectCoercible
+                // precedes ToPropertyKey: an object key's conversion must not
+                // execute if the base is null or undefined.
+                if (obj.is_nullish()) {
+                    std::string message = std::string("Cannot read properties of ") +
+                        (obj.type == JsType::Null ? "null" : "undefined");
+                    if (idx.type == JsType::String)
+                        message += " (reading '" + idx.string_val.str() + "')";
+                    js_throw_type_error(message);
+                }
                 // Symbol.iterator is a symbol, not its display string.
                 std::string prop = js_to_property_key(idx);
                 push(obj.get_property(prop));

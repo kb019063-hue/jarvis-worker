@@ -276,7 +276,10 @@ public:
 private:
     /// Records the value just parsed under the holder it has been put into.
     void remember(const JsValue& holder, const std::string& key) {
-        if (const void* id = holder.identity()) m_sources[SourceKey{id, key}] = last_source;
+        if (const void* id = holder.identity()) {
+            SourceKey k{id, key};
+            if (m_sources.find(k) == m_sources.end()) m_sources[k] = last_source;
+        }
     }
 
     SourceMap m_sources;

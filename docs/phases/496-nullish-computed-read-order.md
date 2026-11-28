@@ -54,3 +54,10 @@ The local `make asan` built the instrumented engine but its unit-suite
 compiler was killed for memory even without a concurrent depth run, so it is
 not a full local sanitizer pass. The full sanitizer suite remains a CI
 requirement.
+
+A full CI run on the pre-merge head passed the sanitizer and deep jobs. The
+local deep run was stopped before completion after that CI run, rather than
+claimed as a pass. After merging main, `make test` passes 542 suites and 114
+cross-origin checks; `verify-bytecode` remains 160/160, JS conformance remains
+1153/1158, and `diff-xml`, `fuzz`, `check-numbers`, `check-suites`, and
+`check_docs.py` pass.

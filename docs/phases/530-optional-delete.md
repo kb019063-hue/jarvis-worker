@@ -46,3 +46,4 @@ killed while running the unrelated deep-nesting suite, after it printed a
 RangeError, so it is not a full local pass. The compiler was limited to
 3.3 GB to avoid exhausting the 3.8 GB sandbox. A subsequent local `make
 deep` was started but stopped before completion; CI must run both full checks.
+`make fuzz` subsequently passed with the instrumented engine.

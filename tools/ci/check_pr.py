@@ -891,6 +891,19 @@ def required_checks() -> list[str]:
         return []
 
 
+def taken_while_it_runs(state: str | None, head_state: str, watch_on: bool) -> bool:
+    """Under the rule on `main` a head whose own run is going reports BLOCKED.
+    While a watch is on that is no refusal of its own: the landing session
+    takes a finished pull request while its run goes ("Working together",
+    point 4), and merges it when that run and the lot's have both passed.
+    The answer is "not ready" all the same, for the run that is going (the
+    line `CI on ...: in_progress`), as it was before the rule. This keeps
+    the rule's line from saying it a second time, as "GitHub will not merge
+    #N as it is", of a pull request that is in a lot by then (#528, 28
+    November, 12:04)."""
+    return bool(watch_on) and state == "BLOCKED" and head_state == "running"
+
+
 def rule_note(state: str | None, number: int, head: str, head_state: str, required: list[str],
               unfinished: bool = False) -> str | None:
     """What a rule of GitHub's on `main` has against merging #N as it is, as a
@@ -1880,7 +1893,10 @@ def check_merge(number: int, landing: bool = False) -> int:
     unfinished = pr["title"].startswith("WIP") or bool(pr.get("isDraft"))
     refusal = rule_note(github, number, head, head_state,
                         required_checks() if github in ("BLOCKED", "BEHIND") and not unfinished else [], unfinished)
-    if refusal:
+    if refusal and taken_while_it_runs(github, head_state, watch_on):
+        report.note(f"GitHub reports BLOCKED until the run on {head[:7]} has passed: the rule on `main`. The landing "
+                    f"session takes #{number} while that run goes, and merges it when it and the lot's have passed")
+    elif refusal:
         report.no(refusal)
     if "short" in (head_state, ran_state) and not watch_on and not landing:
         # No watch is on, so this agent merges, and the whole of CI has not
@@ -2619,6 +2635,11 @@ def self_test() -> int:
          "(#487, 28 November: told to push an empty commit in the middle of its work)",
          [rule_note(state, 7, "abc1234" * 5, head_state, two, unfinished=True)
           for state in ("BLOCKED", "BEHIND") for head_state in ("none", "running", "passed")], [None] * 6),
+        ("a watch is on and the head's own run is going: BLOCKED is no refusal, the landing session takes it meanwhile",
+         [taken_while_it_runs(state, head_state, watch_on) for state, head_state, watch_on in (
+             ("BLOCKED", "running", True), ("BLOCKED", "running", False), ("BLOCKED", "none", True), ("BLOCKED", "failed", True),
+             ("BLOCKED", "passed", True), ("BEHIND", "running", True), ("CLEAN", "running", True), (None, "running", True))],
+         [True] + [False] * 7),
         ("the mark that skips CI, as GitHub reads it: anywhere in the message, in five spellings, or as a trailer",
          [carries_skip_mark(message) for message in (
              "WATCH: the lot of 11:33 UTC, 28 November [skip ci]\n\nThe landing session's branch.",

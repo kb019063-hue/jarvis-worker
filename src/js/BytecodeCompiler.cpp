@@ -358,25 +358,61 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         compile_expr(thrown->argument.get());
         emit_opcode(OpCode::OpThrow);
     } else if (auto statement = dynamic_cast<const TryStmt*>(stmt)) {
-        if (!statement->has_handler || statement->finalizer ||
+        if ((!statement->has_handler && !statement->finalizer) ||
             (statement->param && statement->param->kind != Pattern::Kind::Identifier)) {
             throw std::runtime_error("This try form is not supported by the bytecode compiler");
         }
-        const size_t catch_jump = emit_jump(OpCode::OpTry);
-        ++m_protected_depth;
-        compile_stmt(statement->block.get());
-        --m_protected_depth;
-        emit_opcode(OpCode::OpEndTry);
-        const size_t end_jump = emit_jump(OpCode::OpJump);
-        patch_jump(catch_jump);
-        begin_scope();
-        if (statement->param) add_local(statement->param->name);
-        else emit_opcode(OpCode::OpPop);
-        ++m_catch_depth;
-        compile_stmt(statement->handler.get());
-        --m_catch_depth;
-        end_scope();
-        patch_jump(end_jump);
+        // A finalizer wraps the entire try/catch, including exceptions thrown
+        // by the catch. The outer handler is removed before running either
+        // copy of the finalizer so a finalizer throw replaces the pending one.
+        size_t finally_jump = 0;
+        if (statement->finalizer) {
+            m_return_finalizers.push_back({statement->finalizer.get(), m_locals.size(), m_scope_depth});
+            finally_jump = emit_jump(OpCode::OpTry);
+            ++m_protected_depth;
+        }
+        if (statement->has_handler) {
+            const size_t catch_jump = emit_jump(OpCode::OpTry);
+            ++m_protected_depth;
+            compile_stmt(statement->block.get());
+            --m_protected_depth;
+            emit_opcode(OpCode::OpEndTry);
+            const size_t end_catch = emit_jump(OpCode::OpJump);
+            patch_jump(catch_jump);
+            begin_scope();
+            if (statement->param) add_local(statement->param->name);
+            else emit_opcode(OpCode::OpPop);
+            ++m_catch_depth;
+            compile_stmt(statement->handler.get());
+            --m_catch_depth;
+            end_scope();
+            patch_jump(end_catch);
+        } else {
+            compile_stmt(statement->block.get());
+        }
+        if (statement->finalizer) {
+            m_return_finalizers.pop_back();
+            --m_protected_depth;
+            emit_opcode(OpCode::OpEndTry);
+            ++m_finalizer_depth;
+            compile_stmt(statement->finalizer.get());
+            --m_finalizer_depth;
+            const size_t end_finally = emit_jump(OpCode::OpJump);
+            patch_jump(finally_jump);
+            // The thrown value is a hidden local while the finalizer runs. It
+            // remains rooted, and ordinary finalizer locals get correct slots.
+            begin_scope();
+            const size_t pending_slot = m_locals.size();
+            add_local("");
+            ++m_finalizer_depth;
+            compile_stmt(statement->finalizer.get());
+            --m_finalizer_depth;
+            emit_opcode(OpCode::OpGetLocal);
+            emit_byte(static_cast<uint8_t>(pending_slot));
+            emit_opcode(OpCode::OpThrow);
+            end_scope();  // unreachable at runtime, restores compiler locals
+            patch_jump(end_finally);
+        }
     } else if (auto each = dynamic_cast<const ForEachStmt*>(stmt)) {
         // The VM has no per-iteration lexical environments or assignment
         // reference machinery for patterns. Refuse those forms rather than
@@ -527,7 +563,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         patch_jump(exit_jump);
         emit_opcode(OpCode::OpPop);
     } else if (auto break_stmt = dynamic_cast<const BreakStmt*>(stmt)) {
-        if (m_protected_depth || m_catch_depth) throw std::runtime_error("A jump from try or catch is not supported by the bytecode compiler");
+        if (m_protected_depth || m_catch_depth || m_finalizer_depth) throw std::runtime_error("A jump from try, catch or finally is not supported by the bytecode compiler");
         // ECMA-262 13.8. A labelled `break` is left to the tree-walker: labels
         // reach across statements, which this compiler has no table for, and
         // compiling an unlabelled jump for a labelled `break` would jump to
@@ -548,7 +584,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         // loop patches it when its body has been compiled.
         m_loops.back().breaks.push_back(emit_jump(OpCode::OpJump));
     } else if (auto continue_stmt = dynamic_cast<const ContinueStmt*>(stmt)) {
-        if (m_protected_depth || m_catch_depth) throw std::runtime_error("A jump from try or catch is not supported by the bytecode compiler");
+        if (m_protected_depth || m_catch_depth || m_finalizer_depth) throw std::runtime_error("A jump from try, catch or finally is not supported by the bytecode compiler");
         if (!continue_stmt->label.empty()) {
             throw std::runtime_error("A labelled continue is not supported by the bytecode compiler");
         }
@@ -580,11 +616,54 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             emit_byte(0xFF);
         }
     } else if (auto ret_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
-        if (m_protected_depth) throw std::runtime_error("A return from try is not supported by the bytecode compiler");
+        // Every active handler must be a try/finally, with no intervening
+        // catch or loop needing a different abrupt-completion unwind.
+        const bool through_finally = !m_return_finalizers.empty() &&
+            static_cast<size_t>(m_protected_depth) == m_return_finalizers.size() &&
+            !m_finalizer_depth && !m_catch_depth && m_loops.empty();
+        if ((m_protected_depth || m_finalizer_depth) && !through_finally)
+            throw std::runtime_error("This return from try or finally is not supported by the bytecode compiler");
         if (ret_stmt->value) {
             compile_expr(ret_stmt->value.get());
         } else {
             emit_opcode(OpCode::OpUndefined);
+        }
+        if (through_finally) {
+            // Evaluate first, under all handlers. Remove one handler at a
+            // time and run its finalizer inside out. An inner finalizer throw
+            // is still caught by each enclosing finalizer's handler.
+            const auto targets = m_return_finalizers;
+            const auto saved_locals = m_locals;
+            const int saved_scope = m_scope_depth;
+            const int saved_protected = m_protected_depth;
+            for (size_t i = targets.size(); i-- > 0;) {
+                const ReturnFinally& target = targets[i];
+                if (m_locals.size() > target.locals) {
+                    emit_opcode(OpCode::OpSetLocal);
+                    emit_byte(static_cast<uint8_t>(target.locals));
+                    emit_opcode(OpCode::OpPop);
+                    for (size_t j = target.locals + 1; j < m_locals.size(); ++j)
+                        emit_opcode(OpCode::OpPop);
+                }
+                emit_opcode(OpCode::OpEndTry);
+                m_locals.resize(target.locals);
+                m_scope_depth = target.scope_depth;
+                m_return_finalizers.resize(i);
+                m_protected_depth = static_cast<int>(i);
+                // The pending value is a hidden rooted slot while this
+                // finalizer executes; the next unwind sees it as an operand.
+                add_local("");
+                ++m_finalizer_depth;
+                compile_stmt(target.body);
+                --m_finalizer_depth;
+                m_locals.resize(target.locals);
+            }
+            emit_opcode(OpCode::OpReturn);
+            m_return_finalizers = targets;
+            m_protected_depth = saved_protected;
+            m_locals = saved_locals;
+            m_scope_depth = saved_scope;
+            return;
         }
         // Return leaves every for-of in this function, inside out. Unlike a
         // throw, a return completion is replaced by a failing IteratorClose.
@@ -593,7 +672,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         }
         emit_opcode(OpCode::OpReturn);
     } else if (auto fn_decl = dynamic_cast<const FunctionDeclStmt*>(stmt)) {
-        if (m_catch_depth) throw std::runtime_error("A function in catch is not supported by the bytecode compiler");
+        if (m_catch_depth || m_finalizer_depth) throw std::runtime_error("A function in catch or finally is not supported by the bytecode compiler");
         const FunctionNode& node = *fn_decl->fn;
         require_simple_function(node);
         const std::vector<std::string> params = node.simple_param_names();
@@ -1025,7 +1104,7 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
     } else if (dynamic_cast<const YieldExpr*>(expr)) {
         throw std::runtime_error("Yield compiled via AST interpreter");
     } else if (auto fn_expr = dynamic_cast<const FunctionExpr*>(expr)) {
-        if (m_catch_depth) throw std::runtime_error("A function in catch is not supported by the bytecode compiler");
+        if (m_catch_depth || m_finalizer_depth) throw std::runtime_error("A function in catch or finally is not supported by the bytecode compiler");
         const FunctionNode& node = *fn_expr->fn;
         require_simple_function(node);
         const std::vector<std::string> params = node.simple_param_names();

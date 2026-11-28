@@ -423,3 +423,95 @@ matches improve **484/486 → 486/486** on `--matrix` and **3/16 → 16/16** on
 order (and unattached zero-advance mark origins on unanchored `DejaVuSansMono`
 composites) remains open; see `docs/phases/442-arabic-mark-ordering.md`.
 
+## RTL mark order and attachment offset propagation (Phase 467)
+
+Replacing the LTR-compensated `(j, i)` advance subtraction + cluster-preserving
+RTL reversal in `TrueTypeFont::shape_glyphs` with HarfBuzz's RTL `(j, i]`
+attachment offset propagation followed by full `std::reverse(run.begin(),
+run.end())` (and aligning `FontRenderer::shape_text` `pre_reversed` odd-level
+Bidi runs so RTL faces reverse inside `shape_glyphs`) emits `[mark_k, ...,
+mark_1, base]` in visual RTL order while preserving every anchored mark's visual
+origin and drawing unattached zero-advance marks at their following base's
+origin. Against HarfBuzz 12.1.0 (`uharfbuzz` 0.52.0), exact raw `match` reaches
+**13/13** supported `compare.py` cases on `DejaVuSans.ttf`/`DejaVuSans-Bold.ttf`
+(`11/11` on `DejaVuSansMono.ttf`/`DejaVuSansMono-Bold.ttf`), **5/5** and
+**12/12** on `hebrew_diagnostic.py` (default and `--permutations`), and
+**23/23**, **16/16**, and **486/486** (**384/384** supported on Mono/Mono-Bold)
+on `arabic_marks_diagnostic.py` (default, `--ordering`, and `--matrix`),
+eliminating all `26` `DejaVuSansMono.ttf` and `14` `DejaVuSansMono-Bold.ttf`
+unanchored-mark origin differences (`0` changed pixels at 16/32/64 px in
+`ink.py`); see `docs/phases/467-rtl-mark-order-and-origins.md`.
+
+## Hebrew normalization, cantillation/meteg ordering, presentation-form fallback, and CGJ (Phase 476)
+
+Extending `kTagHebr` shaping in `TrueTypeFont::shape_glyphs` to match HarfBuzz's
+`_hb_ot_shaper_hebrew` and `_hb_ot_shape_normalize`:
+
+1. Covered canonical decomposition of missing or mark-followed Hebrew composites
+   (`U+FB1D`, `U+FB1F`, `U+FB2A..U+FB4E`, with 1-step `FB2A`/`FB2B` fallback on
+   `FB2C`/`FB2D`; compatibility ligature `U+FB4F` stays intact) and suppression
+   of canonical pair recomposition when the font has an explicit `hebr` `GPOS`
+   `mark` lookup;
+2. Unified mark-span ordering across all `hebr` marks (`CCC 10..26` mapped to
+   `{22, 15, 16, 17, 23, 18, 19, 20, 21, 14, 24, 12, 25, 13, 10, 11, 26}` plus
+   cantillation `CCC 220`/`222`/`228`/`230`/`232` and non-Hebrew combining
+   marks) followed by `reorder_marks_hebrew` (`[patah/qamats, sheva/hiriq,
+   meteg/CCC220] -> [patah/qamats, meteg/CCC220, sheva/hiriq]`);
+3. `gpos_tag = 'hebr'` script guard (refusing `DFLT` `GPOS` fallback on Hebrew),
+   `compose_hebrew` presentation-form synthesis (`FB1D`, `FB1F`, `FB2A..FB4E`)
+   when `!has_hebrew_gpos_mark`, and `ZERO_WIDTH_MARKS_BY_GDEF_LATE`;
+4. Default-ignorable (`U+034F` `CGJ`, `U+061C` `ALM`, `U+200B..U+200F`, etc.)
+   zero-advance space hiding, `GPOS`/`kern` skipping, and `CGJ` pre-mark
+   decomposition + selective `GSUB` blocking when `CGJ` prevented mark
+   reordering.
+
+`hebrew_diagnostic.py --extended` adds 24 probes covering non-Hebrew `CCC
+220`/`230` + `U+FB1E` ordering, `reorder_marks_hebrew` swaps and controls,
+standalone vs mark-followed presentation forms (`FB1D`, `FB1F`, `FB2A`, `FB2C`,
+`FB30`, `FB4B`, `FB4F`), and `U+034F` `CGJ` barriers. Against HarfBuzz 12.1.0 on
+`DejaVuSans.ttf` (`abdc775b...`) and `DejaVuSans-Bold.ttf` (`0d977336...`),
+`--extended` improves from **9/24 → 24/24** exact raw `match` (**16/24 →
+24/24** `same-placement`, `exit 0`), with **72/72** `ink.py` case/size pairs
+matching at 16/32/64 px (`0` changed pixels). Without `hebr` `GPOS`,
+`compose_hebrew` matches HarfBuzz glyph IDs, while geometric bounding-box
+fallback positioning (`_hb_ot_shape_fallback_mark_position`) remains unimplemented;
+see `docs/phases/476-hebrew-normalization-and-cgj.md`.
+
+## General OpenType normalization and alternate partial decomposition (Phase 501)
+
+Generalizing `TrueTypeFont::shape_glyphs` normalization to match HarfBuzz's
+`_hb_ot_shape_normalize` (`COMPOSED_DIACRITICS`), `hb_ucd_decompose`,
+`_hb_modified_combining_class`, and `_hb_ot_shaper_thai` across non-Indic
+scripts (`grek`, `cyrl`, `kana`, `thai`, `lao `, `armn`, `geor`, `syrc`,
+`thaa`, `nko `, `latn`, `arab`, `hebr`, and `Common`-resolved starters):
+
+1. Exact Unicode 17.0 1-step binary `(a, b)` canonical decomposition across all
+   `2,081` `kCanonDecomp` entries (`kComposePairs` prefix folding plus the `29`
+   `CompositionExclusions` singletons and 3-leaf Hebrew/Musical entries), with
+   HarfBuzz's `shortest = true` 1-step short-circuit on missing standalone
+   composites and `has_a` partial decomposition fallback when leaf marks are
+   absent;
+2. Per-run cluster scanning (`script != kTagDev2`) that preserves standalone
+   1-codepoint covered marks (`U+0341`, `U+0344`) while decomposing all members
+   (bases and decomposable marks `U+0340`, `U+0341`, `U+0343`, `U+0344`) in
+   multi-codepoint clusters without variation selectors;
+3. Shared `modified_combining_class` (`CCC 10..26` Hebrew, `27..33` Arabic,
+   `84 -> 4` / `91 -> 5` Telugu, `103 -> 3` Thai, `130 -> 132` / `132 -> 131`
+   Tibetan, `0x0F39 -> 127`, `0x0FC6`/`0x1A60 -> 254`), `Common`-starter
+   recomposition (`=\u0338 -> ≠`, `<\u0338 -> ≮`, `\u2190\u0338 -> ↚`), and
+   `ZERO_WIDTH_MARKS_BY_GDEF_LATE` for `thai` and `lao `.
+
+`normalization_diagnostic.py` (`30` default cases covering Greek polytonic,
+Cyrillic, Latin decomposable marks, and `Common` math overlays, plus `--with-lao`
+adding `2` Lao mark-ordering cases) improves from **5/30 → 30/30** (**6/32 →
+32/32** with `--with-lao`) on `DejaVuSans.ttf`, **5/30 → 30/30** on
+`DejaVuSans-Bold.ttf`, **5/30 → 30/30** (`8` `.notdef` eliminated) on
+`DejaVuSerif.ttf`, and **4/30 → 30/30** (**4/32 → 32/32** with `--with-lao`,
+`8` `.notdef` eliminated) on `DejaVuSansMono.ttf`, with `0` changed pixels at
+16/32/64 px in `ink.py`. Indic (`dev2`) two-part matra reordering, algorithmic
+Hangul normalization, and public source clusters remain separate; see
+`docs/phases/501-general-opentype-normalization.md`.
+
+
+
+

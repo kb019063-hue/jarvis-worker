@@ -500,7 +500,23 @@ def on_main() -> Main:
 
 def open_pull_requests() -> list[dict]:
     return gh_json("pr", "list", "--state", "open", "--limit", "100",
-                   "--json", "number,title,body,headRefOid,files")
+                   "--json", "number,title,body,headRefOid,files,isDraft")
+
+
+def draft_note(number: int, title: str, is_draft: bool) -> str | None:
+    """What `claim N` says of work in progress that is no draft.
+
+    GitHub merges a pull request with `WIP:` in its title for whoever asks,
+    and twice somebody asked: #449 on 25 November 2026, 59 seconds after it
+    was opened and with no CI run, and #491 on 28 November, during a watch.
+    A draft it merges for nobody ("Pull Request is still a draft"), so a
+    claim is opened as one (AGENTS.md, "Before starting", point 2).
+    """
+    if not title.startswith("WIP") or is_draft:
+        return None
+    return (f"#{number} is work in progress and no draft: GitHub would merge it as it is for whoever asked. "
+            f"`gh pr ready {number} --undo` makes it a draft, which nobody can merge; "
+            f"`gh pr ready {number}` again with your last push, when `WIP:` comes off")
 
 
 def open_claims(prs: list[dict] | None = None) -> list[dict]:
@@ -780,21 +796,131 @@ def main_note(run: dict | None, jobs: list[dict]) -> str | None:
             "measure nothing on that tree, and `git fetch origin && git merge origin/main` again when `main` is mended")
 
 
+def newest_run_on_main(answer: dict | None) -> dict | None:
+    """The newest run a push to `main` started, as `main_note` takes it, from
+    what `gh api repos/.../actions/runs?branch=main&event=push&per_page=1`
+    answers; None when it lists none."""
+    runs = (answer or {}).get("workflow_runs") or []
+    if not runs or not isinstance(runs[0], dict):
+        return None
+    run = runs[0]
+    return {"databaseId": run.get("id"), "headSha": run.get("head_sha") or "",
+            "status": run.get("status"), "conclusion": run.get("conclusion")}
+
+
+def unread_main_note(why: str) -> str:
+    """The line for a lookup that failed: it says so, and how to look."""
+    said = " ".join((why or "no answer").split())[:140]
+    return (f"whether `main` is broken could not be read here ({said}). Look yourself before you branch from it or "
+            "measure on it: `gh run list --branch main --limit 3`")
+
+
 def main_run_note() -> str | None:
     """`main_note` for the newest run that a push to `main` started. A lookup
-    that fails says nothing: this is a warning, never a reason to stop."""
+    that fails says that it failed: this is a warning, never a reason to stop.
+
+    Asked of the API. Until 28 November it was asked with `gh run list
+    --event push`, and a lookup that failed said nothing. In the sandbox of
+    that day `gh` is 2.23.0, which has no `--event`: the command ended with
+    "unknown flag", and this line, which is how an agent learns that `main`
+    is broken (AGENTS.md, "Working together", point 6), told nobody anything.
+    Since when is not known. It was found by typing the same flag by hand.
+    """
     try:
-        listed = subprocess.run(("gh", "run", "list", "--branch", "main", "--event", "push", "--limit", "1",
-                                 "--json", "databaseId,headSha,status,conclusion"),
+        listed = subprocess.run(("gh", "api", f"{REPO}/actions/runs?branch=main&event=push&per_page=1"),
                                 capture_output=True, text=True, timeout=30)
-        runs = json.loads(listed.stdout or "[]")
-        if not runs or (runs[0].get("status") == "completed" and runs[0].get("conclusion") == "success"):
+        if listed.returncode != 0:
+            return unread_main_note(listed.stderr or listed.stdout)
+        run = newest_run_on_main(json.loads(listed.stdout or "{}"))
+        if not run or (run.get("status") == "completed" and run.get("conclusion") == "success"):
             return None
-        jobs = subprocess.run(("gh", "api", f"{REPO}/actions/runs/{runs[0]['databaseId']}/jobs?per_page=100"),
+        jobs = subprocess.run(("gh", "api", f"{REPO}/actions/runs/{run['databaseId']}/jobs?per_page=100"),
                               capture_output=True, text=True, timeout=30)
-        return main_note(runs[0], json.loads(jobs.stdout or "{}").get("jobs", []))
+        if jobs.returncode != 0:
+            return unread_main_note(jobs.stderr or jobs.stdout)
+        return main_note(run, json.loads(jobs.stdout or "{}").get("jobs", []))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
+        return unread_main_note(f"{type(error).__name__}: {error}")
+
+
+def required_from(branch: dict | None, rules: list | None) -> list[str]:
+    """The checks a rule of GitHub's on `main` wants passed on a head commit,
+    from what a session may read: `gh api repos/.../branches/main` (a rule
+    set under Settings, Branches) and `gh api repos/.../rules/branches/main`
+    (a ruleset). None of either: no names."""
+    names: list[str] = []
+    protection = (branch or {}).get("protection") or {}
+    names += [str(name) for name in (protection.get("required_status_checks") or {}).get("contexts") or []]
+    for rule in rules or []:
+        if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
+            wanted = (rule.get("parameters") or {}).get("required_status_checks") or []
+            names += [str(check.get("context")) for check in wanted if isinstance(check, dict) and check.get("context")]
+    return sorted(set(names))
+
+
+def required_checks() -> list[str]:
+    """`required_from` for this repository. A lookup that fails gives no
+    names: the names are for the line that is printed, and what decides is
+    GitHub's verdict on the pull request (`rule_note`)."""
+    try:
+        branch = subprocess.run(("gh", "api", f"{REPO}/branches/main"), capture_output=True, text=True, timeout=30)
+        rules = subprocess.run(("gh", "api", f"{REPO}/rules/branches/main"), capture_output=True, text=True, timeout=30)
+        got_branch = json.loads(branch.stdout or "{}") if branch.returncode == 0 else {}
+        got_rules = json.loads(rules.stdout or "[]") if rules.returncode == 0 else []
+        return required_from(got_branch if isinstance(got_branch, dict) else {},
+                             got_rules if isinstance(got_rules, list) else [])
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
-        return None
+        return []
+
+
+def rule_note(state: str | None, number: int, head: str, head_state: str, required: list[str]) -> str | None:
+    """What a rule of GitHub's on `main` has against merging #N as it is, as a
+    line for the report; None when GitHub has nothing against it. `state` is
+    the pull request's `mergeStateStatus`, `head_state` what `check_runs`
+    says of the head commit, `required` the checks the rule names (none when
+    they could not be read).
+
+    Nothing in this repository can stop a merge: #449 was merged on 25
+    November with no CI run, 59 seconds after it was opened. A rule on `main`
+    that wants a passed run of named checks on the head commit can, and only
+    the person can set it: a session can neither set it nor read it whole
+    (403). What a session can read is GitHub's verdict on one pull request,
+    and this goes by that: BLOCKED is such a rule saying no, BEHIND is a rule
+    that wants `main` in the branch.
+
+    It matters because several answers below are "ready" for a head commit
+    with no run of its own (pushed with the mark that skips CI: "since then
+    only documents changed", "it changes documents only", the same tree).
+    Under such a rule GitHub refuses those, and the message `gh` then prints
+    offers `--admin`, which is the one thing never to do: it is the rule
+    being switched off for one merge.
+
+    Written on 28 November 2026, when the person had said they would try to
+    set the rule and none was on yet: tried against made-up answers only
+    (the self-test), never against a rule.
+    """
+    if state == "BLOCKED":
+        names = ", ".join(f"`{name}`" for name in required) or "the checks it names"
+        start = (f"GitHub will not merge #{number} as it is (it reports BLOCKED): the rule the person set on `main` "
+                 f"wants a passed run of {names} on the head commit {head[:7]}")
+        never = " Never `gh pr merge --admin`"
+        if head_state == "none":
+            return start + (", and that commit has no run: it was pushed with the mark that skips CI. Push a commit "
+                            "without the mark (an empty one will do: `git commit --allow-empty -m \"Start CI on "
+                            "the head\"`) and ask again when its run has passed." + never)
+        if head_state == "running":
+            return start + ", and its run is still going: ask again when it has ended." + never
+        if head_state == "failed":
+            return start + ", and its run failed (the line above)." + never
+        return start + (f", and the run on that commit did not give it that: `gh pr checks {number} --required` shows "
+                        "what the rule wants and what it got. Tell the person." + never)
+    if state == "BEHIND":
+        return (f"GitHub will not merge #{number} as it is (it reports BEHIND): a rule on `main` wants `main` in the "
+                f"branch. Merge it (`git fetch origin && git merge origin/main`), push without the mark that skips "
+                "CI and let that run pass. And tell the person: with \"Require branches to be up to date before "
+                "merging\" on, a landing session cannot land a lot of several pull requests. "
+                "Never `gh pr merge --admin`")
+    return None
 
 
 def show_claims() -> int:
@@ -909,6 +1035,10 @@ def check_claim(number: int) -> int:
         (report.no if blocking else report.note)(problem)
     for blocking, problem in staleness_problems(mine, main_commit()):
         (report.no if blocking else report.ok)(problem)
+    its = next(pr for pr in prs if pr["number"] == number)
+    not_a_draft = draft_note(number, its["title"], bool(its.get("isDraft")))
+    if not_a_draft:
+        report.note(not_a_draft)
     if not report.failed:
         report.ok(f"#{number}: {numbers_of(mine)}; no earlier open pull request has its numbers or its files")
     else:
@@ -985,6 +1115,9 @@ def some(files: list[str] | None, limit: int = 6) -> str:
     return ", ".join(files[:limit]) + (f" and {len(files) - limit} more" if len(files) > limit else "")
 
 
+UNMARKED_END = "Push a commit without the mark (an empty one will do), and ask again"
+
+
 class Evidence(NamedTuple):
     """What `merge N` found out about CI and `main`, before it decides."""
     head: str
@@ -997,6 +1130,7 @@ class Evidence(NamedTuple):
     ran_state: str                  # ...and what that run says
     since: list[str] | None         # the files changed from that commit to the head
     same_tree: bool = False         # merged with main, the tree is the tree of `ran_on`, file for file
+    merged_alone: bool = False      # no run on the head, which is `ran_on` with main merged in by git alone, documents apart
 
 
 def ci_verdict(e: Evidence, watch_on: bool = False) -> tuple[list[tuple[bool, str]], bool]:
@@ -1011,6 +1145,12 @@ def ci_verdict(e: Evidence, watch_on: bool = False) -> tuple[list[tuple[bool, st
     head = e.head[:7]
     lines: list[tuple[bool, str]] = []
     quick = False
+    # What to do about a head that is a green commit with main merged in and
+    # has no run, when no watch is on and somebody is to merge on it.
+    unmarked = "" if not (e.merged_alone and e.ran_on) else (
+        f". {head} is {e.ran_on[:7]} with main merged in by git alone, documents apart, and no run started on it: "
+        "its message carries the mark that skips CI, or it was in conflict with main when it was pushed. "
+        + UNMARKED_END)
     documents_only = all_of(DOCUMENT, e.pr_files)
     quick_only = all_of(QUICK, e.pr_files)
 
@@ -1067,7 +1207,7 @@ def ci_verdict(e: Evidence, watch_on: bool = False) -> tuple[list[tuple[bool, st
     elif e.ran_on is None:
         lines.append((False, f"no CI run on {head} or on the 30 commits before it"))
     elif e.ran_state == "short" and not watch_on:
-        lines.append((False, f"no CI run on {head}, and " + short_run_note(e.ran_on)))
+        lines.append((False, f"no CI run on {head}, and " + short_run_note(e.ran_on) + unmarked))
     elif e.ran_state not in ("passed", "short"):
         lines.append((False, f"no CI run on {head}; the last one, on {e.ran_on[:7]}, {e.ran_state}"))
     elif all_of(DOCUMENT, e.since):
@@ -1082,9 +1222,20 @@ def ci_verdict(e: Evidence, watch_on: bool = False) -> tuple[list[tuple[bool, st
         own = [f for f in e.pr_files if not DOCUMENT.search(f)]
         lines.append((True, f"CI passed on {e.ran_on[:7]}; since then main was merged in, and the checks this pull "
                             f"request changes ({some(own)}) are as they were. Say so in the pull request"))
+    elif e.merged_alone and watch_on:
+        # AGENTS.md, "Working together", point 3: a pull request that went
+        # back for a conflict in documents comes back as `main` merged into
+        # the head that was green, under the mark that skips CI, and is taken
+        # with no run of its own. The landing session's tool has taken such
+        # heads since 24 November (tools/watch/watch.sh, `code_was_green`);
+        # until 28 November this one said "not ready" of them.
+        lines.append((True, f"CI passed on {e.ran_on[:7]}, and {head} is that commit with main merged in by git alone, "
+                            "documents apart: while a watch is on it needs no run of its own. The landing session "
+                            "takes it as it is, and every job of CI runs on the lot it lands in"))
     else:
         code = None if e.since is None else [f for f in e.since if not DOCUMENT.search(f)]
-        lines.append((False, f"no CI run on {head}; since the last one, on {e.ran_on[:7]}, these changed: {some(code)}"))
+        lines.append((False, f"no CI run on {head}; since the last one, on {e.ran_on[:7]}, these changed: {some(code)}"
+                             + unmarked))
 
     return lines, quick and all(ok for ok, _text in lines)
 
@@ -1150,6 +1301,108 @@ def merges_to_the_tree_of(number: int, head: str, main_sha: str, behind: int, ra
         return False
     merged, ran = git("rev-parse", f"{made}^{{tree}}"), git("rev-parse", f"{ran_on}^{{tree}}")
     return merged.returncode == 0 and ran.returncode == 0 and merged.stdout.strip() == ran.stdout.strip() != ""
+
+
+def run_says(runs: list[dict]) -> str:
+    """'green', 'failed' or '' for the check runs of a commit, as the landing
+    session's tool reads them (tools/watch/watch.sh, `green`): green when
+    every one has ended and passed, ten or more, or two or more passed and
+    the rest were skipped, which is the short run of a push. Failed when
+    one failed or ran out of time. A run the next push cancelled, one that
+    is still going and no run at all say nothing.
+    """
+    ended = [(run.get("conclusion") or "").lower() for run in runs if (run.get("status") or "").lower() == "completed"]
+    if any(conclusion in ("failure", "timed_out") for conclusion in ended):
+        return "failed"
+    if len(ended) != len(runs) or any(conclusion not in ("success", "skipped") for conclusion in ended):
+        return ""
+    passed = ended.count("success")
+    return "green" if passed >= (2 if "skipped" in ended else 10) else ""
+
+
+def code_was_green(head: str, main_sha: str, says, run_git=None) -> str | None:
+    """For a head commit with no CI run of its own: the commit before it on
+    its branch whose run passed and whose code the head's code is, or None.
+
+    The head's code is that commit's when the head is that commit with
+    `main` merged in by git alone, where `main` was merged since, and with
+    documents only changed on top: a conflict in ROADMAP.md put right, a
+    write-up finished, an empty commit. The landing session asks this before
+    it takes such a head (tools/watch/watch.sh, `code_was_green`, the same
+    steps), and the run on the lot is the head's test.
+
+    Asked here since 28 November 2026, so that an agent is told what the
+    landing session does. That morning #492 was in conflict with `main` in
+    one row of ROADMAP.md; its agent merged `main` and put the row right
+    under the mark that skips CI, as "Working together" says to, and `landed
+    492` answered "the landing session does not take #492 as it is: no CI
+    run on its head commit". The agent pushed an empty commit for a run. The
+    lot was built half a minute after that push; built before it, the push
+    would have moved the head under the lot. `merge N` said "not ready" of
+    such a head as well.
+
+    `says(commit)` is `run_says` of a commit's check runs. Only the clone is
+    asked otherwise: the caller has fetched the head and `main`. Whatever
+    git cannot tell here (a clone too shallow to hold the commits) is a no.
+    """
+    run_git = run_git or git
+    chain = run_git("rev-list", "--first-parent", "-8", head)
+    if chain.returncode != 0:
+        return None
+    green = None
+    for sha in chain.stdout.split()[1:]:
+        if run_git("merge-base", "--is-ancestor", sha, main_sha).returncode == 0:
+            return None                 # a commit of main: nothing of the branch's own was ever tested
+        said = says(sha)
+        if said == "failed":
+            return None
+        if said == "green":
+            green = sha
+            break
+    if green is None:
+        return None
+    base = run_git("merge-base", head, main_sha)
+    if base.returncode != 0 or not base.stdout.strip():
+        return None
+    if run_git("merge-base", "--is-ancestor", base.stdout.strip(), green).returncode == 0:
+        made = run_git("rev-parse", f"{green}^{{tree}}")        # main was not merged in since the run
+    else:
+        # What git alone makes of the two. With a conflict it ends in 1 and
+        # still names a tree, the conflict's marks in it: the head may differ
+        # from that in the document the conflict was in.
+        made = run_git("merge-tree", "--write-tree", green, base.stdout.strip())
+    if made.returncode not in (0, 1) or not made.stdout.split():
+        return None
+    differ = run_git("diff", "--name-only", made.stdout.split()[0], f"{head}^{{tree}}")
+    if differ.returncode != 0 or not all_of(DOCUMENT, [name for name in differ.stdout.splitlines() if name]):
+        return None
+    return green
+
+
+LEANS: dict[tuple[str, str], str | None] = {}
+
+
+def leans_on(number: int, head: str, main_sha: str) -> str | None:
+    """`code_was_green` of #number's head commit, which has no run: the head
+    and `main` are fetched first, and the answer is kept, because `landed N`
+    asks once a minute."""
+    key = (head, main_sha)
+    if key in LEANS:
+        return LEANS[key]
+    found = None
+    if fetched(f"refs/pull/{number}/head") == head:
+        if git("cat-file", "-e", f"{main_sha}^{{commit}}").returncode != 0:
+            fetched("main")
+        for _ in range(4):      # a sandbox's clone is shallow: go back until the two have an ancestor in common
+            if git("merge-base", main_sha, head).returncode == 0:
+                break
+            if git("rev-parse", "--is-shallow-repository").stdout.strip() != "true":
+                break
+            git("fetch", "--quiet", "--deepen=500", "origin", "main", f"refs/pull/{number}/head")
+        found = code_was_green(head, main_sha, lambda sha: run_says(
+            (gh_json("api", f"{REPO}/commits/{sha}/check-runs?per_page=100") or {}).get("check_runs", [])))
+    LEANS[key] = found
+    return found
 
 
 def quick_checks(tree: str, main_sha: str) -> list[str]:
@@ -1285,7 +1538,7 @@ def rollup(checks: list[dict] | None) -> tuple[str, list[str]]:
                      for name, check in latest.items()])
 
 
-def why_not_taken(pr: dict, comments: list[dict]) -> str:
+def why_not_taken(pr: dict, comments: list[dict], leans=None) -> str:
     """Why the landing session leaves a pull request alone during a watch; "" when it takes it.
 
     Taken is: finished, green on the head, not in conflict with `main`, and
@@ -1293,6 +1546,10 @@ def why_not_taken(pr: dict, comments: list[dict]) -> str:
     November three finished and green pull requests stood for up to an hour
     and three quarters while a watch was on, because their agents were to try
     twice themselves first and then write a line, and their turns had ended.
+
+    `leans(pr)` says whether a head with no run is a green commit with
+    `main` merged in by git alone (`leans_on`): the landing session takes
+    such a head, and since 28 November 2026 this says so too.
     """
     if NOT_A_CLAIM_RE.match(pr["title"]):
         return "it is the board or a watch"
@@ -1320,7 +1577,8 @@ def why_not_taken(pr: dict, comments: list[dict]) -> str:
     if state == "none":
         files = [entry["path"] for entry in pr.get("files") or []]
         if not (files and all_of(DOCUMENT, files)):     # documents only: the lot's run is its run
-            return "no CI run on its head commit"
+            if leans is None or not leans(pr):
+                return "no CI run on its head commit"
     elif state == "running":
         # Taken all the same, since 24 November 2026: its own run and the
         # lot's go side by side, and it lands when the lot's has passed.
@@ -1394,7 +1652,7 @@ def show_watch() -> int:
     for pr in sorted(prs, key=lambda pr: pr["number"]):
         if NOT_A_CLAIM_RE.match(pr["title"]):
             continue
-        why = why_not_taken(pr, comments)
+        why = why_not_taken(pr, comments, lambda pr: leans_on(pr["number"], pr["headRefOid"], main_sha))
         how = ""
         if not why:
             # GitHub says UNKNOWN for most pull requests it has not been asked
@@ -1491,7 +1749,7 @@ def check_landed(number: int, wait: int) -> int:
         if not watch.on:
             print(f"{watch.says()}. Merge #{number} yourself: python3 tools/ci/check_pr.py merge {number}")
             return 2
-        why = why_not_taken(pr, comments)
+        why = why_not_taken(pr, comments, lambda pr: leans_on(pr["number"], pr["headRefOid"], main_commit()))
         if why and not why.startswith("CI is still running"):
             print(f"{watch.says()}, and the landing session does not take #{number} as it is: {why}")
             return 1
@@ -1506,7 +1764,8 @@ def check_merge(number: int, landing: bool = False) -> int:
     """`landing` is the landing session asking, about a pull request it is about
     to merge during its own watch: the answer is then the one given when no
     watch is on."""
-    pr = gh_json("pr", "view", str(number), "--json", "number,title,body,state,mergeable,headRefOid,files,labels,isDraft")
+    pr = gh_json("pr", "view", str(number), "--json",
+                 "number,title,body,state,mergeable,mergeStateStatus,headRefOid,files,labels,isDraft")
     report = Report()
     if pr["state"] != "OPEN":
         sys.exit(f"#{number} is {pr['state'].lower()}")
@@ -1545,7 +1804,15 @@ def check_merge(number: int, landing: bool = False) -> int:
     _ahead, pr_files = delta(main_sha, head)
     head_state, head_bad = check_runs(head)
     ran_on, ran_state, since = (None, "none", None) if head_state == "none" else (head, head_state, [])
-    if head_state == "none":
+    leaned = leans_on(number, head, main_sha) if head_state == "none" else None
+    if leaned:
+        # No run on the head, and its code is the code of a commit before it
+        # whose run passed: `main` was merged in by git alone since, and
+        # documents changed. (Some of that commit's jobs may have been
+        # cancelled by a later push and passed in another run: "short" then.)
+        there, _bad = check_runs(leaned)
+        ran_on, ran_state, since = leaned, (there if there in ("passed", "short") else "short"), delta(leaned, head)[1]
+    elif head_state == "none":
         # No run on the head: it was pushed with [skip ci], or the pull request
         # conflicted with main when it was pushed. Walk back along the branch
         # to the last commit that has one.
@@ -1564,9 +1831,15 @@ def check_merge(number: int, landing: bool = False) -> int:
     same_tree = (ran_on is not None and ran_state == "passed" and (behind > 0 or ran_on != head)
                  and merges_to_the_tree_of(number, head, main_sha, behind, ran_on))
     lines, quick = ci_verdict(Evidence(head, behind, main_files, pr_files, head_state, head_bad,
-                                       ran_on, ran_state, since, same_tree), watch_on)
+                                       ran_on, ran_state, since, same_tree, bool(leaned)), watch_on)
     for ok, text in lines:
         (report.ok if ok else report.no)(text)
+    # A rule of GitHub's on `main`, if the person has set one: asked of GitHub,
+    # and the rule's own names only when it says no.
+    github = pr.get("mergeStateStatus")
+    refusal = rule_note(github, number, head, head_state, required_checks() if github in ("BLOCKED", "BEHIND") else [])
+    if refusal:
+        report.no(refusal)
     if "short" in (head_state, ran_state) and not watch_on and not landing:
         # No watch is on, so this agent merges, and the whole of CI has not
         # run on what it would merge. Every run of a pull request is short
@@ -1669,6 +1942,93 @@ def check_merge(number: int, landing: bool = False) -> int:
     print(f"\nready: gh pr merge {number} --merge, then watch `gh run list --branch main --limit 3` to the end "
           "(once a minute is enough)")
     return 0
+
+
+LEANING_HEADS = [
+    ("main merged in by git alone under the mark", True),
+    ("...and an empty commit on top, for a run that has not come", True),
+    ("...and a write-up finished on top", True),
+    ("a conflict in ROADMAP.md put right in the merge", True),
+    ("documents changed on the green commit, main not merged in", True),
+    ("the merge changed a source file as well", False),
+    ("a source file changed after the merge", False),
+    ("a source file changed on the green commit, no run since", False),
+    ("the run on the commit before it failed", False),
+    ("no commit of the branch ever had a run", False),
+    ("the run was two commits back and the one between was cancelled", True),
+]
+
+
+def leaning_heads() -> list[tuple[str, bool]]:
+    """`code_was_green` asked of heads made for it, in a repository of its
+    own: `main` with one commit after the fork, and a branch whose commit
+    `green` has a run that passed."""
+    with tempfile.TemporaryDirectory(prefix="check_pr-") as where:
+        def run(*arguments: str) -> subprocess.CompletedProcess[str]:
+            identity = {"GIT_AUTHOR_NAME": "check_pr", "GIT_AUTHOR_EMAIL": "check_pr@localhost",
+                        "GIT_COMMITTER_NAME": "check_pr", "GIT_COMMITTER_EMAIL": "check_pr@localhost",
+                        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+            return subprocess.run(("git", *arguments), cwd=where, capture_output=True, text=True,
+                                  env={**os.environ, **identity})
+
+        def write(name: str, text: str) -> None:
+            path = Path(where) / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
+
+        def commit(message: str, **files: str) -> str:
+            for name, text in files.items():
+                write(name.replace("__", "/").replace("_md", ".md").replace("_cpp", ".cpp"), text)
+            run("add", "-A")
+            run("commit", "-q", "--allow-empty", "-m", message)
+            return run("rev-parse", "HEAD").stdout.strip()
+
+        def branch(name: str, at: str) -> None:
+            run("checkout", "-q", "-B", name, at)
+
+        def merge_main(message: str = "Merge main [skip ci]") -> bool:
+            return run("merge", "-q", "--no-ff", "-m", message, "main").returncode == 0
+
+        run("init", "-q", "-b", "main")
+        fork = commit("the fork", src__a_cpp="a\n", ROADMAP_md="| 23 | open: bodies, proxies |\n", README_md="readme\n")
+        branch("work", fork)
+        green = commit("the change", src__b_cpp="b\n")
+        branch("main", fork)
+        main = commit("another pull request lands", src__c_cpp="c\n", ROADMAP_md="| 23 | open: proxies |\n")
+        says = {green: "green"}
+
+        def asked(head: str, said: dict[str, str] | None = None) -> bool:
+            found = code_was_green(head, main, lambda sha: (says if said is None else said).get(sha, ""), run)
+            return found == green
+
+        heads: list[bool] = []
+        branch("merged", green)
+        merge_main()
+        merged = run("rev-parse", "HEAD").stdout.strip()
+        heads.append(asked(merged))
+        heads.append(asked(commit("Run CI over merged main")))
+        heads.append(asked(commit("The write-up", docs__phases__5_md="done\n")))
+        # both sides rewrote the row: git alone leaves the conflict's marks, the agent wrote the row
+        branch("row", green)
+        row = commit("The row [skip ci]", ROADMAP_md="| 23 | open: bodies |\n")
+        conflict = not merge_main()
+        heads.append(conflict and asked(commit("Merge main, the row put right [skip ci]", ROADMAP_md="| 23 | open: nothing |\n")))
+        heads.append(asked(row))
+        branch("evil", green)
+        run("merge", "-q", "--no-ff", "--no-commit", "main")
+        heads.append(asked(commit("Merge main [skip ci]", src__b_cpp="b, and more\n")))
+        branch("later", merged)
+        heads.append(asked(commit("One more thing [skip ci]", src__b_cpp="b, and more\n")))
+        branch("more", green)
+        heads.append(asked(commit("More [skip ci]", src__b_cpp="b, and more\n")))
+        heads.append(asked(merged, {green: "failed"}))
+        heads.append(asked(merged, {}))
+        # a push that cancelled the run on the commit under it, then main merged in
+        branch("cancelled", green)
+        between = commit("A line of the write-up", docs__phases__5_md="begun\n")
+        merge_main()
+        heads.append(asked(run("rev-parse", "HEAD").stdout.strip(), {green: "green", between: ""}))
+        return list(zip([name for name, _wanted in LEANING_HEADS], heads))
 
 
 def self_test() -> int:
@@ -2090,6 +2450,45 @@ def self_test() -> int:
         ("the board and a watch are never taken",
          [why_not_taken(waiting(title=t), board) for t in ("BOARD: hand-overs", "WATCH: 23 November")],
          ["it is the board or a watch"] * 2),
+        ("work in progress that is no draft is told how to become one (#449, #491); a draft and a finished one are told nothing",
+         [(draft_note(7, title, is_draft) or "")[:44] for title, is_draft in (("WIP: a change", False), ("WIP: a change", True),
+                                                                               ("A change", False), ("A change", True))],
+         ["#7 is work in progress and no draft: GitHub ", "", "", ""]),
+        ("no run on the head of an engine change that is a green commit with main merged in by git alone: taken (#492)",
+         why_not_taken(waiting(checks=[]), board, lambda pr: "b" * 40), ""),
+        ("...not when it is no such head",
+         why_not_taken(waiting(checks=[]), board, lambda pr: None), "no CI run on its head commit"),
+        ("...and git is not asked about a head that has a run, nor about one with WIP: in its title",
+         [why_not_taken(pr, board, lambda pr: 1 // 0) for pr in (waiting(), waiting(title="WIP: a change", checks=[]))],
+         ["", "its title still begins with WIP:"]),
+        ("such a head while a watch is on: `merge N` says it is taken as it is, with no run of its own",
+         verdict(**no_run, since=["ROADMAP.md", "src/js/JsEval.cpp"], merged_alone=True, watch_on=True), ([True, True], False)),
+        ("...the same when the run on the commit before it was the short one",
+         verdict(**no_run, ran_state="short", since=["ROADMAP.md", "src/js/JsEval.cpp"], merged_alone=True, watch_on=True),
+         ([True, True], False)),
+        ("...a watch does not take a head whose code changed since the run",
+         verdict(**no_run, since=["ROADMAP.md", "src/js/JsEval.cpp"], watch_on=True), ([True, False], False)),
+        ("...with no watch on somebody merges on it, so it needs its run, and the agent is told how to get one",
+         [(ok, text[-len(UNMARKED_END):]) for state in ("passed", "short") for ok, text in ci_verdict(Evidence(
+             head="a" * 40, behind=0, main_files=[], pr_files=["src/a.cpp", "README.md"], head_state="none", head_bad=[],
+             ran_on="b" * 40, ran_state=state, since=["ROADMAP.md", "src/js/JsEval.cpp"], merged_alone=True))[0]],
+         [(True, "main is in the head commit aaaaaaa"[-len(UNMARKED_END):]), (False, UNMARKED_END)] * 2),
+        ("what the check runs of a commit say, as the landing session's tool reads them",
+         [run_says([{"status": status, "conclusion": conclusion} for status, conclusion in runs])
+          for runs in ([("completed", "success")] * 18,
+                       [("completed", "success")] * 7 + [("completed", "skipped")] * 11,
+                       [("completed", "success")] * 25 + [("completed", "skipped")] * 11,
+                       [("completed", "success")] * 2 + [("completed", "skipped")] * 16,
+                       [("completed", "success")] + [("completed", "skipped")] * 17,
+                       [("completed", "success")] * 9,
+                       [("completed", "success")] * 17 + [("completed", "failure")],
+                       [("completed", "success")] * 6 + [("completed", "timed_out")] + [("completed", "skipped")] * 11,
+                       [("completed", "success")] * 7 + [("completed", "skipped")] * 11 + [("completed", "cancelled")] * 18,
+                       [("completed", "success")] * 6 + [("in_progress", None)] + [("completed", "skipped")] * 11,
+                       [])],
+         ["green", "green", "green", "green", "", "", "failed", "failed", "", "", ""]),
+        ("a head with no run whose code is the code of a commit that was green (a repository made for the question)",
+         leaning_heads(), LEANING_HEADS),
         ("while a watch is on, a main that moved by engine code is the landing session's: the agent is not told to merge it",
          verdict(**moved, main_files=["src/js/JsEval.cpp"], watch_on=True), ([True, True], False)),
         ("...and with no watch on it is still the agent's, as it was",
@@ -2120,6 +2519,62 @@ def self_test() -> int:
          breaking_main),
         ("a job that was cancelled or skipped is not a failed one",
          main_note(run_of_main, [{"name": "a", "conclusion": "cancelled"}, {"name": "b", "conclusion": "skipped"}]), None),
+        ("the newest run on main, as the API lists it, is read as main_note takes it",
+         newest_run_on_main({"total_count": 2, "workflow_runs": [
+             {"id": 45705344585, "head_sha": "9fd0d22" + "0" * 33, "status": "completed", "conclusion": "failure", "event": "push"},
+             {"id": 1, "head_sha": "a" * 40, "status": "completed", "conclusion": "success"}]}), run_of_main),
+        ("...and the note it gives is the same one",
+         (main_note(newest_run_on_main({"workflow_runs": [{"id": 45705344585, "head_sha": "9fd0d22" + "0" * 33,
+                                                             "status": "completed", "conclusion": "failure"}]}),
+                    jobs_of_main) or "")[:len(broken_main)], broken_main),
+        ("the API lists no run, or answers something else: no run", 
+         [newest_run_on_main(answer) for answer in ({}, {"workflow_runs": []}, None, {"message": "Not Found"})], [None] * 4),
+        ("a lookup that failed says that it failed, in one line, and how to look",
+         unread_main_note("unknown flag: --event\n\nUsage:  gh run list [flags]\n")[:101],
+         "whether `main` is broken could not be read here (unknown flag: --event Usage: gh run list [flags]). L"),
+    ]
+
+    blocked = "GitHub will not merge #7 as it is (it reports BLOCKED): the rule the person set on `main` wants a passed run of "
+    two = ["Build & unit tests", "Documentation shape"]
+    both = "`Build & unit tests`, `Documentation shape` on the head commit abc1234"
+    no_run = ", and that commit has no run: it was pushed with the mark that skips CI. Push a commit without the mark"
+    behind = "GitHub will not merge #7 as it is (it reports BEHIND): a rule on `main` wants `main` in the branch. Merge it"
+    unnamed = blocked + "the checks it names on the head commit abc1234"
+    classic = {"name": "main", "protected": True,
+               "protection": {"enabled": True, "required_status_checks": {"enforcement_level": "everyone", "contexts": list(reversed(two)), "checks": []}}}
+    ruleset = [{"type": "deletion"},
+               {"type": "required_status_checks", "ruleset_id": 1,
+                "parameters": {"strict_required_status_checks_policy": False,
+                               "required_status_checks": [{"context": "Build & unit tests", "integration_id": 15368}]}}]
+    cases += [
+        ("no rule on main (the branch as GitHub gives it today, no ruleset): no names",
+         required_from({"name": "main", "protected": False,
+                        "protection": {"enabled": False, "required_status_checks": {"enforcement_level": "off", "contexts": [], "checks": []}}}, []), []),
+        ("a rule set under Settings, Branches: its names, in order", required_from(classic, []), two),
+        ("a ruleset: its names; a rule of another kind has none", required_from({}, ruleset), ["Build & unit tests"]),
+        ("both at once: each name once", required_from(classic, ruleset), two),
+        ("nothing could be read: no names", required_from(None, None), []),
+        ("GitHub has nothing against the merge: nothing is said", rule_note("CLEAN", 7, "abc1234" * 5, "none", two), None),
+        ("a check that is not required fails or is going (UNSTABLE): not the rule's business",
+         rule_note("UNSTABLE", 7, "abc1234" * 5, "running", two), None),
+        ("GitHub does not know yet, or was not asked: nothing is said",
+         (rule_note("UNKNOWN", 7, "abc1234" * 5, "none", two), rule_note(None, 7, "abc1234" * 5, "none", [])), (None, None)),
+        ("BLOCKED and the head has no run: the rule's names, the commit, and a push without the mark",
+         (rule_note("BLOCKED", 7, "abc1234" * 5, "none", two) or "")[:len(blocked + both + no_run)],
+         blocked + both + no_run),
+        ("...and never --admin, whatever the head's run says",
+         [(rule_note("BLOCKED", 7, "abc1234" * 5, state, two) or "").endswith("Never `gh pr merge --admin`")
+          for state in ("none", "running", "failed", "passed", "short")], [True] * 5),
+        ("BLOCKED while the head's run is going: ask again",
+         "its run is still going: ask again when it has ended" in (rule_note("BLOCKED", 7, "abc1234" * 5, "running", two) or ""), True),
+        ("BLOCKED though the head's run passed: the rule wants something else, and the person is told",
+         "`gh pr checks 7 --required` shows" in (rule_note("BLOCKED", 7, "abc1234" * 5, "passed", two) or ""), True),
+        ("BLOCKED and the names could not be read: it still says what is wanted",
+         (rule_note("BLOCKED", 7, "abc1234" * 5, "none", []) or "")[:len(unnamed)], unnamed),
+        ("BEHIND: main is wanted in the branch, and the person is told what that does to a lot",
+         ((rule_note("BEHIND", 7, "abc1234" * 5, "passed", two) or "")[:len(behind)],
+          "cannot land a lot of several pull requests" in (rule_note("BEHIND", 7, "abc1234" * 5, "passed", two) or "")),
+         (behind, True)),
     ]
 
     names_stale = ["a head with main in it: quiet",

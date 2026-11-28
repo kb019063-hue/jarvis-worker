@@ -696,6 +696,9 @@ constexpr uint32_t kTagThaa = ot_tag('t', 'h', 'a', 'a');
 constexpr uint32_t kTagNko  = ot_tag('n', 'k', 'o', ' ');
 constexpr uint32_t kTagCyrl = ot_tag('c', 'y', 'r', 'l');
 constexpr uint32_t kTagGrek = ot_tag('g', 'r', 'e', 'k');
+constexpr uint32_t kTagArmn = ot_tag('a', 'r', 'm', 'n');
+constexpr uint32_t kTagGeor = ot_tag('g', 'e', 'o', 'r');
+constexpr uint32_t kTagKana = ot_tag('k', 'a', 'n', 'a');
 constexpr uint32_t kTagThai = ot_tag('t', 'h', 'a', 'i');
 constexpr uint32_t kTagLao  = ot_tag('l', 'a', 'o', ' ');
 constexpr uint32_t kTagDev2 = ot_tag('d', 'e', 'v', '2');
@@ -712,16 +715,46 @@ bool is_digit_codepoint(uint32_t cp) {
            (cp >= 0x06F0u && cp <= 0x06F9u);
 }
 
+constexpr uint32_t kDefaultIgnorableBit = 1u << 31;
+constexpr uint32_t kSkipIgnorableBit = 1u << 30;
+
 bool is_join_control(uint32_t cp) {
     return cp == 0x200Cu || cp == 0x200Du;
 }
 
+bool is_default_ignorable(uint32_t cp) {
+    const uint32_t plane = cp >> 16;
+    if (plane == 0u) {
+        switch (cp >> 8) {
+        case 0x00u: return cp == 0x00ADu;
+        case 0x03u: return cp == 0x034Fu;
+        case 0x06u: return cp == 0x061Cu;
+        case 0x17u: return cp >= 0x17B4u && cp <= 0x17B5u;
+        case 0x18u: return cp >= 0x180Bu && cp <= 0x180Eu;
+        case 0x20u: return (cp >= 0x200Bu && cp <= 0x200Fu) ||
+                           (cp >= 0x202Au && cp <= 0x202Eu) ||
+                           (cp >= 0x2060u && cp <= 0x206Fu);
+        case 0xFEu: return (cp >= 0xFE00u && cp <= 0xFE0Fu) || cp == 0xFEFFu;
+        case 0xFFu: return cp >= 0xFFF0u && cp <= 0xFFF8u;
+        default: return false;
+        }
+    }
+    if (plane == 1u) return cp >= 0x1D173u && cp <= 0x1D17Au;
+    if (plane == 14u) return cp <= 0xE0FFFu;
+    return false;
+}
+
 uint32_t classify_codepoint_script(uint32_t cp) {
     if ((cp >= 0x0300u && cp <= 0x036Fu) ||
+        (cp >= 0x0485u && cp <= 0x0486u) ||
+        (cp >= 0x0951u && cp <= 0x0954u) ||
         (cp >= 0x1AB0u && cp <= 0x1AFFu) ||
         (cp >= 0x1DC0u && cp <= 0x1DFFu) ||
         (cp >= 0x20D0u && cp <= 0x20FFu) ||
+        (cp >= 0x3099u && cp <= 0x309Au) ||
+        (cp >= 0xFE00u && cp <= 0xFE0Fu) ||
         (cp >= 0xFE20u && cp <= 0xFE2Fu) ||
+        (cp >= 0xE0100u && cp <= 0xE01EFu) ||
         is_join_control(cp)) {
         return kTagInherited;
     }
@@ -729,7 +762,7 @@ uint32_t classify_codepoint_script(uint32_t cp) {
         (cp >= 0x0750u && cp <= 0x077Fu) ||
         (cp >= 0x0870u && cp <= 0x08FFu) ||
         (cp >= 0xFB50u && cp <= 0xFDFFu) ||
-        (cp >= 0xFE70u && cp <= 0xFEFFu)) {
+        (cp >= 0xFE70u && cp <= 0xFEFEu)) {
         if (is_digit_codepoint(cp)) return kTagCommon;
         return kTagArab;
     }
@@ -741,14 +774,24 @@ uint32_t classify_codepoint_script(uint32_t cp) {
         (cp >= 0xA640u && cp <= 0xA69Fu)) {
         return kTagCyrl;
     }
+    if ((cp >= 0x0530u && cp <= 0x058Fu) || (cp >= 0xFB13u && cp <= 0xFB17u)) return kTagArmn;
+    if ((cp >= 0x10A0u && cp <= 0x10FFu) || (cp >= 0x1C90u && cp <= 0x1CBFu) ||
+        (cp >= 0x2D00u && cp <= 0x2D2Fu)) {
+        return kTagGeor;
+    }
     if ((cp >= 0x0370u && cp <= 0x03FFu) || (cp >= 0x1F00u && cp <= 0x1FFFu)) return kTagGrek;
+    if ((cp >= 0x3040u && cp <= 0x30FFu) || (cp >= 0x31F0u && cp <= 0x31FFu) ||
+        (cp >= 0xFF66u && cp <= 0xFF9Fu)) {
+        return kTagKana;
+    }
     if (cp >= 0x0E00u && cp <= 0x0E7Fu) return kTagThai;
     if (cp >= 0x0E80u && cp <= 0x0EFFu) return kTagLao;
     if (cp >= 0x0900u && cp <= 0x097Fu) return kTagDev2;
     if ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z') ||
         cp == 0x00AAu || cp == 0x00BAu ||
         (cp >= 0x00C0u && cp <= 0x00D6u) || (cp >= 0x00D8u && cp <= 0x00F6u) ||
-        (cp >= 0x00F8u && cp <= 0x024Fu) || (cp >= 0x1E00u && cp <= 0x1EFFu) ||
+        (cp >= 0x00F8u && cp <= 0x02AFu) || (cp >= 0x1D00u && cp <= 0x1DBFu) ||
+        (cp >= 0x1E00u && cp <= 0x1EFFu) || cp == 0x212Au || cp == 0x212Bu ||
         (cp >= 0x2C60u && cp <= 0x2C7Fu) || (cp >= 0xA720u && cp <= 0xA7FFu)) {
         return kTagLatn;
     }
@@ -816,6 +859,7 @@ ArabicJoinType classify_arabic_joining(uint32_t cp) {
     }
     if ((cp >= 0x0300u && cp <= 0x036Fu) ||
         (cp >= 0x0610u && cp <= 0x061Au) ||
+        cp == 0x061Cu ||
         (cp >= 0x064Bu && cp <= 0x065Fu) ||
         cp == 0x0670u ||
         (cp >= 0x06D6u && cp <= 0x06DCu) ||
@@ -826,7 +870,10 @@ ArabicJoinType classify_arabic_joining(uint32_t cp) {
         cp == 0x07FDu ||
         (cp >= 0x08D3u && cp <= 0x08E1u) ||
         (cp >= 0x08E3u && cp <= 0x08FFu) ||
-        (cp >= 0xFE20u && cp <= 0xFE2Fu)) {
+        (cp >= 0xFE00u && cp <= 0xFE0Fu) ||
+        (cp >= 0xFE20u && cp <= 0xFE2Fu) ||
+        cp == 0xFEFFu ||
+        (cp >= 0xE0100u && cp <= 0xE01EFu)) {
         return ArabicJoinType::Transparent;
     }
     if (cp == 0x0640u || cp == 0x07FAu) return ArabicJoinType::Causing;
@@ -2216,6 +2263,10 @@ const TrueTypeFont::GposScriptPlan* TrueTypeFont::find_gpos_script(uint32_t scri
         if (plan.script_tag == kTagDflt) dflt = &plan;
         if (script_tag == kTagDev2 && plan.script_tag == kTagDeva) deva = &plan;
     }
+    // HarfBuzz's Hebrew shaper sets `gpos_tag = 'hebr'`: faces with a `DFLT`
+    // GPOS table but no `hebr` GPOS script disable GPOS and use presentation
+    // forms rather than running unrelated `DFLT` positioning on Hebrew runs.
+    if (script_tag == kTagHebr) return nullptr;
     if (deva) return deva;
     return dflt;
 }
@@ -2223,7 +2274,8 @@ const TrueTypeFont::GposScriptPlan* TrueTypeFont::find_gpos_script(uint32_t scri
 int32_t TrueTypeFont::next_unignored(const std::vector<ShapingGlyph>& run, std::size_t idx,
                                      uint16_t flag, uint16_t mark_filtering_set) const {
     for (std::size_t k = idx + 1; k < run.size(); ++k) {
-        if (!is_ignored_by_lookup(run[k].glyph, flag, mark_filtering_set)) {
+        if ((run[k].feature_mask & kSkipIgnorableBit) == 0u &&
+            !is_ignored_by_lookup(run[k].glyph, flag, mark_filtering_set)) {
             return static_cast<int32_t>(k);
         }
     }
@@ -2235,7 +2287,8 @@ int32_t TrueTypeFont::prev_unignored(const std::vector<ShapingGlyph>& run, std::
     std::size_t k = idx;
     while (k > 0) {
         --k;
-        if (!is_ignored_by_lookup(run[k].glyph, flag, mark_filtering_set)) {
+        if ((run[k].feature_mask & kSkipIgnorableBit) == 0u &&
+            !is_ignored_by_lookup(run[k].glyph, flag, mark_filtering_set)) {
             return static_cast<int32_t>(k);
         }
     }
@@ -2366,10 +2419,12 @@ bool TrueTypeFont::apply_gsub_lookup_at(uint16_t lookup_index,
             if (st.format == 1) {
                 run[pos].glyph = static_cast<uint16_t>(
                     (static_cast<int32_t>(run[pos].glyph) + st.delta) & 0xFFFF);
+                run[pos].feature_mask &= ~(kDefaultIgnorableBit | kSkipIgnorableBit);
                 return true;
             }
             if (st.format == 2 && static_cast<std::size_t>(ci) < st.substitutes.size()) {
                 run[pos].glyph = st.substitutes[static_cast<std::size_t>(ci)];
+                run[pos].feature_mask &= ~(kDefaultIgnorableBit | kSkipIgnorableBit);
                 return true;
             }
         } else if (ref.kind == GsubSubRef::Kind::Multiple) {
@@ -2383,8 +2438,10 @@ bool TrueTypeFont::apply_gsub_lookup_at(uint16_t lookup_index,
                 return true;
             }
             if (run.size() - 1u + seq.size() > max_glyphs) return false;
-            const ShapingGlyph base = run[pos];
+            ShapingGlyph base = run[pos];
+            base.feature_mask &= ~(kDefaultIgnorableBit | kSkipIgnorableBit);
             run[pos].glyph = seq[0];
+            run[pos].feature_mask = base.feature_mask;
             if (seq.size() > 1u) {
                 std::vector<ShapingGlyph> extra(seq.size() - 1u, base);
                 for (std::size_t k = 1; k < seq.size(); ++k) extra[k - 1u].glyph = seq[k];
@@ -2400,6 +2457,7 @@ bool TrueTypeFont::apply_gsub_lookup_at(uint16_t lookup_index,
             const auto& alts = st.alternates[static_cast<std::size_t>(ci)];
             if (alts.empty()) continue;
             run[pos].glyph = alts[0];
+            run[pos].feature_mask &= ~(kDefaultIgnorableBit | kSkipIgnorableBit);
             return true;
         } else if (ref.kind == GsubSubRef::Kind::Ligature) {
             const auto& st = m_gsub_ligatures[ref.index];
@@ -2446,6 +2504,7 @@ bool TrueTypeFont::apply_gsub_lookup_at(uint16_t lookup_index,
                 }
 
                 run[pos].glyph = lig.glyph;
+                run[pos].feature_mask &= ~(kDefaultIgnorableBit | kSkipIgnorableBit);
                 run[pos].lig_id = lid;
                 run[pos].lig_comp = 0;
                 run.erase(run.begin() + static_cast<std::ptrdiff_t>(pos + 1u),
@@ -2556,7 +2615,10 @@ bool TrueTypeFont::apply_gpos_lookup_at(uint16_t lookup_index,
     if (pos >= run.size() || lookup_index >= m_gpos_lookups.size()) return false;
     const GposLookup& lk = m_gpos_lookups[lookup_index];
     if (lk.subtables.empty()) return false;
-    if (is_ignored_by_lookup(run[pos].glyph, lk.flag, lk.mark_filtering_set)) return false;
+    if ((run[pos].feature_mask & kSkipIgnorableBit) != 0u ||
+        is_ignored_by_lookup(run[pos].glyph, lk.flag, lk.mark_filtering_set)) {
+        return false;
+    }
 
     const auto apply_value = [](const GposValue& v, ShapingGlyph& st) {
         st.x_offset += v.x_placement;
@@ -2642,7 +2704,9 @@ bool TrueTypeFont::apply_gpos_lookup_at(uint16_t lookup_index,
         bool found_base = false;
         while (j > 0) {
             --j;
-            if (is_mark_glyph(run[j].glyph)) continue;
+            if (is_mark_glyph(run[j].glyph) || (run[j].feature_mask & kSkipIgnorableBit) != 0u) {
+                continue;
+            }
             found_base = true;
             break;
         }
@@ -2775,14 +2839,61 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             cp, [](const CccRange& range, uint32_t c) { return range.hi < c; });
         return r != kCccRanges + kCccRangesCount && r->lo <= cp ? r->ccc : 0;
     };
-    // HarfBuzz / OpenType Arabic modified combining classes: shadda (CCC 33)
-    // precedes vowels and tanwin (CCC 27..32 -> 28..33); sukun (34) and
-    // superscript alef (35) stay in place.
-    auto arabic_modified_class = [&](uint32_t cp) -> uint8_t {
+    // HarfBuzz `modified_combining_class` (`hb-unicode.hh:318`, `hb-unicode.cc:287`):
+    // SBL Hebrew ordering (`CCC 10..26`), Arabic shadda/vowel ordering (`CCC 27..33`),
+    // Telugu (`84 -> 4`, `91 -> 5`), Thai (`103 -> 3`), Tibetan (`130 -> 132`,
+    // `132 -> 131`, `0x0F39 -> 127`, `0x0FC6 -> 254`), and Tai Tham (`0x1A60 -> 254`).
+    auto modified_combining_class = [&](uint32_t cp) -> uint8_t {
+        static constexpr uint8_t kHebrMap[17] = {
+            22u, // 10: sheva
+            15u, // 11: hataf segol
+            16u, // 12: hataf patah
+            17u, // 13: hataf qamats
+            23u, // 14: hiriq
+            18u, // 15: tsere
+            19u, // 16: segol
+            20u, // 17: patah
+            21u, // 18: qamats & qamats qatan
+            14u, // 19: holam & holam haser for vav
+            24u, // 20: qubuts
+            12u, // 21: dagesh
+            25u, // 22: meteg
+            13u, // 23: rafe
+            10u, // 24: shin dot
+            11u, // 25: sin dot
+            26u, // 26: point varika (U+FB1E)
+        };
+        if (cp == 0x1A60u || cp == 0x0FC6u) return 254u;
+        if (cp == 0x0F39u) return 127u;
         const uint8_t ccc = combining_class(cp);
+        if (ccc >= 10u && ccc <= 26u) return kHebrMap[ccc - 10u];
         if (ccc >= 27u && ccc <= 32u) return static_cast<uint8_t>(ccc + 1u);
         if (ccc == 33u) return 27u;
+        if (ccc == 84u) return 4u;
+        if (ccc == 91u) return 5u;
+        if (ccc == 103u) return 3u;
+        if (ccc == 130u) return 132u;
+        if (ccc == 132u) return 131u;
         return ccc;
+    };
+    auto is_variation_selector = [](uint32_t cp) -> bool {
+        return (cp >= 0x180Bu && cp <= 0x180Du) || cp == 0x180Fu ||
+               (cp >= 0xFE00u && cp <= 0xFE0Fu) ||
+               (cp >= 0xE0100u && cp <= 0xE01EFu);
+    };
+    // Cluster mark predicate (`_hb_ot_shape_normalize` cluster boundary):
+    // nonzero-CCC marks plus non-Brahmic `CCC == 0` combining/enclosing marks
+    // (`U+034F` CGJ, Cyrillic enclosing signs, Thaana vowels, `U+20DD..U+20E4`)
+    // and variation selectors.
+    auto is_cluster_mark = [&](uint32_t cp) -> bool {
+        return combining_class(cp) != 0u ||
+               cp == 0x034Fu ||
+               (cp >= 0x0488u && cp <= 0x0489u) ||
+               (cp >= 0x07A6u && cp <= 0x07B0u) ||
+               (cp >= 0x20DDu && cp <= 0x20E0u) ||
+               (cp >= 0x20E2u && cp <= 0x20E4u) ||
+               (cp >= 0xA670u && cp <= 0xA672u) ||
+               is_variation_selector(cp);
     };
     // UTR #53 Modifier Combining Marks (MCM): move to the front of an Arabic
     // mark span (before shadda and vowels) without crossing equal-CCC non-MCM
@@ -2808,70 +2919,280 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             return false;
         }
     };
-    const auto original_scripts = itemize_codepoint_scripts(original);
-    // A missing Latin or Arabic composite can use canonical parts in this same
-    // face. Preserve standalone glyphs. Before a following combining mark of
-    // the same script, expose canonical components even for a supported
-    // composite so ordering can interleave that mark. Never substitute a partly
-    // covered expansion. Recursion follows only the generated canonical table,
-    // not compatibility mappings. Bounds are defensive; Unicode's decomposition
-    // depth is small.
-    std::vector<uint32_t> input;
-    input.reserve(original.size());
-    auto expand = [&](auto& self, uint32_t cp, std::vector<uint32_t>& parts, unsigned depth, bool fully) -> bool {
-        if (parts.size() >= 32 || depth > 16) return false;
-        if (!fully && glyph_index(cp) != 0) { parts.push_back(cp); return true; }
+    bool has_hebrew_gpos_mark = false;
+    if (const GposScriptPlan* hebr_gpos = find_gpos_script(kTagHebr)) {
+        for (const auto& [li, feat] : hebr_gpos->lookups) {
+            (void)li;
+            if (feat == GposLookup::Feature::Mark) {
+                has_hebrew_gpos_mark = true;
+                break;
+            }
+        }
+    }
+    auto compose_hebrew_fallback = [](uint32_t a, uint32_t b) -> uint32_t {
+        static constexpr uint16_t kDageshForms[27] = {
+            0xFB30u, // 05D0 ALEF
+            0xFB31u, // 05D1 BET
+            0xFB32u, // 05D2 GIMEL
+            0xFB33u, // 05D3 DALET
+            0xFB34u, // 05D4 HE
+            0xFB35u, // 05D5 VAV
+            0xFB36u, // 05D6 ZAYIN
+            0x0000u, // 05D7 HET
+            0xFB38u, // 05D8 TET
+            0xFB39u, // 05D9 YOD
+            0xFB3Au, // 05DA FINAL KAF
+            0xFB3Bu, // 05DB KAF
+            0xFB3Cu, // 05DC LAMED
+            0x0000u, // 05DD FINAL MEM
+            0xFB3Eu, // 05DE MEM
+            0x0000u, // 05DF FINAL NUN
+            0xFB40u, // 05E0 NUN
+            0xFB41u, // 05E1 SAMEKH
+            0x0000u, // 05E2 AYIN
+            0xFB43u, // 05E3 FINAL PE
+            0xFB44u, // 05E4 PE
+            0x0000u, // 05E5 FINAL TSADI
+            0xFB46u, // 05E6 TSADI
+            0xFB47u, // 05E7 QOF
+            0xFB48u, // 05E8 RESH
+            0xFB49u, // 05E9 SHIN
+            0xFB4Au, // 05EA TAV
+        };
+        switch (b) {
+        case 0x05B4u: return (a == 0x05D9u) ? 0xFB1Du : 0u;
+        case 0x05B7u:
+            if (a == 0x05F2u) return 0xFB1Fu;
+            if (a == 0x05D0u) return 0xFB2Eu;
+            return 0u;
+        case 0x05B8u: return (a == 0x05D0u) ? 0xFB2Fu : 0u;
+        case 0x05B9u: return (a == 0x05D5u) ? 0xFB4Bu : 0u;
+        case 0x05BCu:
+            if (a >= 0x05D0u && a <= 0x05EAu) return kDageshForms[a - 0x05D0u];
+            if (a == 0xFB2Au) return 0xFB2Cu;
+            if (a == 0xFB2Bu) return 0xFB2Du;
+            return 0u;
+        case 0x05BFu:
+            if (a == 0x05D1u) return 0xFB4Cu;
+            if (a == 0x05DBu) return 0xFB4Du;
+            if (a == 0x05E4u) return 0xFB4Eu;
+            return 0u;
+        case 0x05C1u:
+            if (a == 0x05E9u) return 0xFB2Au;
+            if (a == 0xFB49u) return 0xFB2Cu;
+            return 0u;
+        case 0x05C2u:
+            if (a == 0x05E9u) return 0xFB2Bu;
+            if (a == 0xFB49u) return 0xFB2Du;
+            return 0u;
+        default:
+            return 0u;
+        }
+    };
+    // Unicode 17.0 1-step canonical binary decomposition (`hb_ucd_decompose`):
+    // recovers exact UCD `(a, b)` (`b == 0` for singletons) from `kCanonDecomp`
+    // + `kComposePairs`, handling the 29 Unicode 17.0 CompositionExclusions
+    // singletons and 3-leaf Hebrew/Musical entries.
+    auto decompose_one_step = [](uint32_t cp, uint32_t& a, uint32_t& b) -> bool {
+        switch (cp) {
+        case 0x1F71u: a = 0x03ACu; b = 0u; return true;
+        case 0x1F73u: a = 0x03ADu; b = 0u; return true;
+        case 0x1F75u: a = 0x03AEu; b = 0u; return true;
+        case 0x1F77u: a = 0x03AFu; b = 0u; return true;
+        case 0x1F79u: a = 0x03CCu; b = 0u; return true;
+        case 0x1F7Bu: a = 0x03CDu; b = 0u; return true;
+        case 0x1F7Du: a = 0x03CEu; b = 0u; return true;
+        case 0x1FBBu: a = 0x0386u; b = 0u; return true;
+        case 0x1FC9u: a = 0x0388u; b = 0u; return true;
+        case 0x1FCBu: a = 0x0389u; b = 0u; return true;
+        case 0x1FD3u: a = 0x0390u; b = 0u; return true;
+        case 0x1FDBu: a = 0x038Au; b = 0u; return true;
+        case 0x1FE3u: a = 0x03B0u; b = 0u; return true;
+        case 0x1FEBu: a = 0x038Eu; b = 0u; return true;
+        case 0x1FEEu: a = 0x0385u; b = 0u; return true;
+        case 0x1FF9u: a = 0x038Cu; b = 0u; return true;
+        case 0x1FFBu: a = 0x038Fu; b = 0u; return true;
+        case 0x212Bu: a = 0x00C5u; b = 0u; return true;
+        case 0xFB2Cu: a = 0xFB49u; b = 0x05C1u; return true;
+        case 0xFB2Du: a = 0xFB49u; b = 0x05C2u; return true;
+        case 0x1D160u: a = 0x1D15Fu; b = 0x1D16Eu; return true;
+        case 0x1D161u: a = 0x1D15Fu; b = 0x1D16Fu; return true;
+        case 0x1D162u: a = 0x1D15Fu; b = 0x1D170u; return true;
+        case 0x1D163u: a = 0x1D15Fu; b = 0x1D171u; return true;
+        case 0x1D164u: a = 0x1D15Fu; b = 0x1D172u; return true;
+        case 0x1D1BDu: a = 0x1D1BBu; b = 0x1D16Eu; return true;
+        case 0x1D1BEu: a = 0x1D1BBu; b = 0x1D16Fu; return true;
+        case 0x1D1BFu: a = 0x1D1BCu; b = 0x1D16Eu; return true;
+        case 0x1D1C0u: a = 0x1D1BCu; b = 0x1D16Fu; return true;
+        default: break;
+        }
         using namespace unicode::tables;
         const auto* entry = std::lower_bound(kCanonDecomp, kCanonDecomp + kCanonDecompCount,
             cp, [](const DecompEntry& d, uint32_t c) { return d.cp < c; });
-        if (entry == kCanonDecomp + kCanonDecompCount || entry->cp != cp) {
-            if (glyph_index(cp) == 0) return false;
-            parts.push_back(cp);
+        if (entry == kCanonDecomp + kCanonDecompCount || entry->cp != cp || entry->len == 0u) {
+            return false;
+        }
+        if (entry->len == 1u) {
+            a = kDecompPool[entry->offset];
+            b = 0u;
             return true;
         }
-        for (unsigned j = 0; j < entry->len; ++j) {
-            if (!self(self, kDecompPool[entry->offset + j], parts, depth + 1, fully)) return false;
+        uint32_t cur = kDecompPool[entry->offset];
+        for (unsigned j = 1u; j + 1u < entry->len; ++j) {
+            const uint64_t key = (uint64_t(cur) << 21) | kDecompPool[entry->offset + j];
+            const auto* pair = std::lower_bound(kComposePairs, kComposePairs + kComposePairsCount,
+                key, [](const ComposePair& p, uint64_t k) { return p.key < k; });
+            if (pair == kComposePairs + kComposePairsCount || pair->key != key) return false;
+            cur = pair->composite;
         }
+        a = cur;
+        b = kDecompPool[entry->offset + entry->len - 1u];
         return true;
     };
-    for (std::size_t i = 0; i < original.size(); ++i) {
-        const uint32_t cp = original[i];
-        const uint32_t strong = classify_codepoint_script(cp);
-        const bool before_mark = i + 1 < original.size() && combining_class(original[i + 1]) != 0 &&
-                                 original_scripts[i + 1] == strong;
-        if ((strong == kTagLatn || strong == kTagArab) && (before_mark || glyph_index(cp) == 0)) {
-            std::vector<uint32_t> parts;
-            if (expand(expand, cp, parts, 0, before_mark)) {
-                input.insert(input.end(), parts.begin(), parts.end());
-                continue;
-            }
+    // HarfBuzz `decompose` (`hb-ot-shape-normalize.cc:97-137`): checks `b` glyph
+    // coverage first, short-circuits `[a]`/`[a, b]` when `shortest && has_a`,
+    // otherwise recurses on `a` (`shortest = false`) and falls back to `[a]`/`[a, b]`
+    // when leaf recursion fails (`has_a` partial decomposition).
+    auto decompose_codepoint = [&](auto& self, uint32_t cp, bool shortest,
+                                   std::vector<uint32_t>& out, unsigned depth) -> bool {
+        if (out.size() >= 32u || depth > 16u) return false;
+        uint32_t a = 0u;
+        uint32_t b = 0u;
+        if (!decompose_one_step(cp, a, b)) return false;
+        if (b != 0u && glyph_index(b) == 0) return false;
+        const bool has_a = glyph_index(a) != 0;
+        if (shortest && has_a) {
+            out.push_back(a);
+            if (b != 0u) out.push_back(b);
+            return true;
         }
-        input.push_back(cp);
-    }
+        const std::size_t saved = out.size();
+        if (self(self, a, false, out, depth + 1u)) {
+            if (b != 0u) {
+                if (out.size() >= 32u) {
+                    out.resize(saved);
+                    return false;
+                }
+                out.push_back(b);
+            }
+            return true;
+        }
+        out.resize(saved);
+        if (has_a) {
+            out.push_back(a);
+            if (b != 0u) out.push_back(b);
+            return true;
+        }
+        return false;
+    };
 
-    // Order nonzero-class mark spans resolved to Latin (canonical CCC) or
-    // Arabic (modified CCC + UTR #53 MCM promotion), including leading marks
-    // and marks following Common characters. Keep equal classes stable and do
-    // not cross a starter or script boundary.
-    const auto input_scripts = itemize_codepoint_scripts(input);
-    std::vector<uint8_t> effective_class(input.size(), 0);
-    for (std::size_t i = 0; i < input.size(); ++i) {
-        effective_class[i] = (input_scripts[i] == kTagArab)
-            ? arabic_modified_class(input[i])
-            : combining_class(input[i]);
-    }
-    for (std::size_t i = 0; i < input.size();) {
-        const uint32_t script = input_scripts[i];
-        if ((script != kTagLatn && script != kTagArab) || !effective_class[i]) {
+    const auto original_scripts = itemize_codepoint_scripts(original);
+    // Round 1 (`_hb_ot_shape_normalize`): per itemized script run (excluding
+    // deferred `dev2` Indic two-part matra runs), scan clusters `[i, end)`.
+    // Simple 1-char clusters keep covered glyphs and use `shortest = true` only
+    // when missing; multi-char clusters without variation selectors decompose
+    // every member (base and decomposable marks such as `U+0341`/`U+0344`) with
+    // `shortest = false`, falling back to covered partial intermediates or the
+    // original codepoint when leaf glyphs are absent.
+    std::vector<uint32_t> input;
+    std::vector<uint32_t> input_scripts;
+    input.reserve(original.size());
+    input_scripts.reserve(original.size());
+    for (std::size_t i = 0; i < original.size();) {
+        const uint32_t script = original_scripts[i];
+        if (script == kTagDev2) {
+            input.push_back(original[i]);
+            input_scripts.push_back(script);
             ++i;
             continue;
         }
-        std::size_t end = i + 1;
+        std::size_t end = i + 1u;
+        bool has_vs = is_variation_selector(original[i]);
+        while (end < original.size() && original_scripts[end] == script &&
+               is_cluster_mark(original[end])) {
+            if (is_variation_selector(original[end])) has_vs = true;
+            ++end;
+        }
+        if (has_vs) {
+            for (std::size_t j = i; j < end; ++j) {
+                input.push_back(original[j]);
+                input_scripts.push_back(script);
+            }
+        } else if (end - i == 1u) {
+            const uint32_t cp = original[i];
+            std::vector<uint32_t> parts;
+            if (glyph_index(cp) == 0 && decompose_codepoint(decompose_codepoint, cp, true, parts, 0u)) {
+                for (uint32_t p : parts) {
+                    input.push_back(p);
+                    input_scripts.push_back(script);
+                }
+            } else if (glyph_index(cp) == 0 && (cp == 0xFB2Cu || cp == 0xFB2Du) &&
+                       glyph_index(0x05BCu) != 0) {
+                const uint32_t shin_form = (cp == 0xFB2Cu) ? 0xFB2Au : 0xFB2Bu;
+                if (glyph_index(shin_form) != 0) {
+                    input.push_back(shin_form);
+                    input.push_back(0x05BCu);
+                    input_scripts.push_back(script);
+                    input_scripts.push_back(script);
+                } else {
+                    input.push_back(cp);
+                    input_scripts.push_back(script);
+                }
+            } else {
+                input.push_back(cp);
+                input_scripts.push_back(script);
+            }
+        } else {
+            for (std::size_t j = i; j < end; ++j) {
+                const uint32_t cp = original[j];
+                std::vector<uint32_t> parts;
+                if (decompose_codepoint(decompose_codepoint, cp, false, parts, 0u)) {
+                    for (uint32_t p : parts) {
+                        input.push_back(p);
+                        input_scripts.push_back(script);
+                    }
+                } else if ((cp == 0xFB2Cu || cp == 0xFB2Du) && glyph_index(0x05BCu) != 0) {
+                    const uint32_t shin_form = (cp == 0xFB2Cu) ? 0xFB2Au : 0xFB2Bu;
+                    if (glyph_index(shin_form) != 0) {
+                        input.push_back(shin_form);
+                        input.push_back(0x05BCu);
+                        input_scripts.push_back(script);
+                        input_scripts.push_back(script);
+                    } else {
+                        input.push_back(cp);
+                        input_scripts.push_back(script);
+                    }
+                } else {
+                    input.push_back(cp);
+                    input_scripts.push_back(script);
+                }
+            }
+        }
+        i = end;
+    }
+
+    // Round 2: order nonzero-modified-class mark spans across all normalized
+    // scripts (`script != kTagDev2`), plus script-specific `reorder_marks`
+    // hooks for Arabic (UTR #53 MCM promotion) and Hebrew (meteg swap).
+    // Equal classes stay stable and starters / U+034F CGJ (CCC 0) are barriers.
+    std::vector<uint8_t> effective_class(input.size(), 0);
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        effective_class[i] = (input_scripts[i] == kTagDev2)
+            ? combining_class(input[i])
+            : modified_combining_class(input[i]);
+    }
+    for (std::size_t i = 0; i < input.size();) {
+        const uint32_t script = input_scripts[i];
+        if (script == kTagDev2 || !effective_class[i]) {
+            ++i;
+            continue;
+        }
+        std::size_t end = i + 1u;
         while (end < input.size() && input_scripts[end] == script && effective_class[end]) ++end;
+        std::stable_sort(input.begin() + i, input.begin() + end,
+            [&](uint32_t a, uint32_t b) { return modified_combining_class(a) < modified_combining_class(b); });
+        for (std::size_t k = i; k < end; ++k) effective_class[k] = modified_combining_class(input[k]);
         if (script == kTagArab) {
-            std::stable_sort(input.begin() + i, input.begin() + end,
-                [&](uint32_t a, uint32_t b) { return arabic_modified_class(a) < arabic_modified_class(b); });
-            for (std::size_t k = i; k < end; ++k) effective_class[k] = arabic_modified_class(input[k]);
             std::size_t start = i;
             std::size_t m = start;
             for (const uint8_t cc : {uint8_t(220), uint8_t(230)}) {
@@ -2893,48 +3214,83 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                 start = next_start;
                 m = j;
             }
-        } else {
-            std::stable_sort(input.begin() + i, input.begin() + end,
-                [&](uint32_t a, uint32_t b) { return combining_class(a) < combining_class(b); });
-            for (std::size_t k = i; k < end; ++k) effective_class[k] = combining_class(input[k]);
+        } else if (script == kTagHebr) {
+            for (std::size_t k = i + 2; k < end; ++k) {
+                const uint8_t c0 = effective_class[k - 2];
+                const uint8_t c1 = effective_class[k - 1];
+                const uint8_t c2 = effective_class[k];
+                if ((c0 == 20u || c0 == 21u) &&
+                    (c1 == 22u || c1 == 23u) &&
+                    (c2 == 25u || c2 == 220u)) {
+                    std::swap(input[k - 1], input[k]);
+                    std::swap(effective_class[k - 1], effective_class[k]);
+                    break;
+                }
+            }
         }
         i = end;
     }
 
-    // Font-aware Latin and Arabic canonical composition. An intervening unconsumed mark blocks
-    // when its effective class is equal or greater; lower classes may be crossed. A
-    // consumed mark does not become a blocker. Never choose a missing glyph.
+    // HarfBuzz `hb-ot-shape-normalize.cc` (#554): a U+034F CGJ that did NOT
+    // prevent any mark reordering (`0 < i < n - 1` and either the next char is
+    // class 0 or `cc[i - 1] <= cc[i + 1]`) is unhidden so GSUB ligatures can
+    // skip across it, whereas a CGJ that prevented reordering stays non-skippable
+    // during GSUB. Evaluate before Round 3 recomposition consumes `input[i - 1]`.
+    std::vector<uint8_t> cgj_blocks_gsub(input.size(), 0);
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        if (input[i] != 0x034Fu) continue;
+        const bool unhide = (i > 0 && i + 1 < input.size()) &&
+                            (effective_class[i + 1] == 0u ||
+                             effective_class[i - 1] <= effective_class[i + 1]);
+        if (!unhide) cgj_blocks_gsub[i] = 1u;
+    }
+
+    // Round 3: font-aware starter + mark recomposition across all normalized
+    // scripts (`COMPOSED_DIACRITICS`). An intervening unconsumed mark blocks
+    // when its effective class is equal or greater; lower classes may be crossed.
+    // Hebrew presentation forms are Excluded from Unicode NFC, so
+    // `compose_hebrew_fallback` runs only when the face has no `hebr` GPOS `mark`.
     std::vector<uint32_t> codepoints;
+    std::vector<uint32_t> scripts;
+    std::vector<uint8_t> codepoint_cgj_blocks;
     codepoints.reserve(input.size());
+    scripts.reserve(input.size());
+    codepoint_cgj_blocks.reserve(input.size());
     const std::size_t no_starter = input.size();
     std::size_t starter = no_starter;
     uint8_t last_class = 0;
     uint32_t starter_script = 0;
     for (std::size_t i = 0; i < input.size(); ++i) {
         const uint8_t cls = effective_class[i];
+        const uint32_t script = input_scripts[i];
         bool composed = false;
-        if (starter != no_starter && cls && input_scripts[i] == starter_script && last_class < cls) {
+        if (starter != no_starter && cls && script == starter_script && last_class < cls) {
             using namespace unicode::tables;
+            uint32_t candidate = 0u;
             const uint64_t key = (uint64_t(codepoints[starter]) << 21) | input[i];
             const auto* pair = std::lower_bound(kComposePairs, kComposePairs + kComposePairsCount,
                 key, [](const ComposePair& p, uint64_t k) { return p.key < k; });
-            if (pair != kComposePairs + kComposePairsCount && pair->key == key &&
-                glyph_index(pair->composite) != 0) {
-                codepoints[starter] = pair->composite;
+            if (pair != kComposePairs + kComposePairsCount && pair->key == key) {
+                candidate = pair->composite;
+            } else if (starter_script == kTagHebr && !has_hebrew_gpos_mark) {
+                candidate = compose_hebrew_fallback(codepoints[starter], input[i]);
+            }
+            if (candidate != 0u && glyph_index(candidate) != 0) {
+                codepoints[starter] = candidate;
                 composed = true;
             }
         }
         if (!composed) {
-            if (!cls || input_scripts[i] != starter_script) {
-                const uint32_t strong = classify_codepoint_script(input[i]);
-                starter_script = !cls && (strong == kTagLatn || strong == kTagArab) ? strong : 0;
+            if (!cls || script != starter_script) {
+                starter_script = (!cls && script != kTagDev2) ? script : 0u;
                 starter = starter_script ? codepoints.size() : no_starter;
             }
             codepoints.push_back(input[i]);
+            scripts.push_back(script);
+            codepoint_cgj_blocks.push_back(cgj_blocks_gsub[i]);
             last_class = cls;
         }
     }
-    const std::vector<uint32_t> scripts = itemize_codepoint_scripts(codepoints);
     uint16_t next_lig_id = 1;
 
     std::size_t run_start = 0;
@@ -2951,49 +3307,19 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             feat_masks.assign(run_end - run_start, kGsubFeatGlobal);
         }
 
-        // Hebrew fixed-position marks have a shaping order, not their Unicode
-        // canonical combining-class order: shin/sin dots precede vowels. Apply
-        // it before GSUB (ccmp can inspect adjacency), not after positioning.
-        // SBL Hebrew ordering, also used by HarfBuzz's modified CCC 10..25.
-        // Scope is deliberately contiguous Hebrew points; other marks and
-        // controls are barriers until general normalization is implemented.
-        std::vector<uint32_t> hebrew;
-        if (script_tag == kTagHebr) {
-            auto rank = [](uint32_t cp) -> unsigned {
-                switch (cp) {
-                case 0x05C1: return 10; case 0x05C2: return 11;
-                case 0x05BC: return 12; case 0x05BF: return 13;
-                case 0x05B9: case 0x05BA: return 14;
-                case 0x05B1: return 15; case 0x05B2: return 16;
-                case 0x05B3: return 17; case 0x05B5: return 18;
-                case 0x05B6: return 19; case 0x05B7: return 20;
-                case 0x05B8: case 0x05C7: return 21;
-                case 0x05B0: return 22; case 0x05B4: return 23;
-                case 0x05BB: return 24; case 0x05BD: return 25;
-                default: return 0;
-                }
-            };
-            hebrew.assign(codepoints.begin() + run_start, codepoints.begin() + run_end);
-            for (std::size_t start = 0; start < hebrew.size();) {
-                if (!rank(hebrew[start])) { ++start; continue; }
-                std::size_t end = start + 1;
-                while (end < hebrew.size() && rank(hebrew[end])) ++end;
-                std::stable_sort(hebrew.begin() + start, hebrew.begin() + end,
-                                 [&](uint32_t a, uint32_t b) { return rank(a) < rank(b); });
-                start = end;
-            }
-        }
-
         std::vector<ShapingGlyph> run;
         run.reserve(run_end - run_start);
         for (std::size_t i = run_start; i < run_end; ++i) {
-            const uint32_t cp = hebrew.empty() ? codepoints[i] : hebrew[i - run_start];
+            const uint32_t cp = codepoints[i];
             ShapingGlyph sg;
             sg.glyph = glyph_index(cp);
             sg.feature_mask = feat_masks[i - run_start];
-            // Borrow `lig_comp` bit flag sentinel? No — track join control explicitly via codepoint
-            // check? Wait: use feature_mask bit (1<<31) temporarily to strip surviving join controls!
-            if (is_join_control(cp)) sg.feature_mask |= (1u << 31);
+            if (is_default_ignorable(cp)) {
+                sg.feature_mask |= kDefaultIgnorableBit;
+                if (cp != 0x200Cu && !codepoint_cgj_blocks[i]) {
+                    sg.feature_mask |= kSkipIgnorableBit;
+                }
+            }
             run.push_back(sg);
         }
 
@@ -3009,21 +3335,15 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             run[i].x_advance = static_cast<int32_t>(adv);
         }
 
-        // A surviving default-ignorable join control (`U+200C`/`U+200D`) paints
-        // nothing and advances nothing -- but it stays in the stream, with the
-        // glyph its font maps it to and a zero advance, the way HarfBuzz emits
-        // it. It used to be erased here instead, which was wrong twice over:
-        // the glyph count then differed from the reference for any text holding
-        // one, and `mark_base` is an *index into this vector*, so erasing an
-        // element slid every later mark onto the base before its own.
+        // Surviving default-ignorables (`U+200C`/`U+200D`, `U+034F` CGJ, bidi
+        // marks, variation selectors, etc.) keep their slot as a zero-advance
+        // space glyph (`hb_ot_hide_default_ignorables`) and become skippable
+        // across GPOS lookups so `mark_base` indices, `MarkToBase` base search,
+        // and glyph counts match HarfBuzz.
         for (ShapingGlyph& sg : run) {
-            if ((sg.feature_mask & (1u << 31)) == 0u) continue;
-            // OpenType makes a default-ignorable an *invisible glyph*: it keeps
-            // its slot in the stream so that `mark_base` indices and the glyph
-            // count stay right, and it reports the space glyph rather than the
-            // font's own `cmap` entry for the control. Nothing paints and
-            // nothing advances.
+            if ((sg.feature_mask & kDefaultIgnorableBit) == 0u) continue;
             sg.glyph = glyph_index(0x0020u);
+            sg.feature_mask |= kSkipIgnorableBit;
             sg.x_advance = 0;
             sg.y_advance = 0;
             sg.x_offset = 0;
@@ -3060,16 +3380,28 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         // Legacy `kern` fallback when this script has no `GPOS` `kern` lookup.
         if (kerning && !script_has_kern && m_kern_pairs > 0) {
             for (std::size_t i = 0; i + 1u < n; ++i) {
-                run[i].x_advance += kerning_units_for_glyphs(run[i].glyph, run[i + 1u].glyph);
+                if ((run[i].feature_mask & kDefaultIgnorableBit) != 0u) continue;
+                std::size_t j = i + 1u;
+                while (j < n && (run[j].feature_mask & kDefaultIgnorableBit) != 0u) ++j;
+                if (j < n) {
+                    run[i].x_advance += kerning_units_for_glyphs(run[i].glyph, run[j].glyph);
+                }
             }
         }
 
-        // HarfBuzz's Arabic shaper (`ZERO_WIDTH_MARKS_BY_GDEF_LATE`) zeroes
-        // `GDEF` mark advances (`GlyphClassDef == 3`) after positioning lookups
-        // and before attachment offset propagation. Monospaced faces such as
-        // `DejaVuSansMono` give combining marks full-cell `hmtx` advances and
-        // include no `SinglePos` zeroing lookup under `arab`.
-        if (script_tag == kTagArab && m_has_gdef_glyph_class) {
+        for (ShapingGlyph& sg : run) {
+            if ((sg.feature_mask & kDefaultIgnorableBit) == 0u) continue;
+            sg.x_advance = 0;
+            sg.y_advance = 0;
+            sg.x_offset = 0;
+        }
+
+        // HarfBuzz's Arabic, Hebrew, and Thai/Lao shapers (`ZERO_WIDTH_MARKS_BY_GDEF_LATE`)
+        // zero `GDEF` mark advances (`GlyphClassDef == 3`) after positioning
+        // lookups and before attachment offset propagation. Monospaced faces
+        // give combining marks full-cell `hmtx` advances without `SinglePos` zeroing.
+        if ((script_tag == kTagArab || script_tag == kTagHebr ||
+             script_tag == kTagThai || script_tag == kTagLao) && m_has_gdef_glyph_class) {
             for (ShapingGlyph& sg : run) {
                 if (m_gdef_glyph_class.class_of(sg.glyph) == 3) {
                     sg.x_advance = 0;
@@ -3096,50 +3428,50 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             if (run[i].cursive_chain >= 0) resolve_cursive(resolve_cursive, i);
         }
 
-        // Stage 4b: Resolve Mark attachment chains left to right (`mark_base < i`).
+        // Stage 4b: Propagate Mark attachment offsets (`mark_base < i`), matching
+        // HarfBuzz `OT::Layout::propagate_attachment_offsets`:
+        // - Logical / LTR output (`!reverse_rtl`): mark `i` paints after base `j`,
+        //   so subtract advances across `[j, i)`.
+        // - Visual RTL output (`reverse_rtl`): full buffer reversal places mark `i`
+        //   before base `j`, so add advances across `(j, i]`.
+        const bool reverse_rtl = visual_rtl && is_rtl;
         for (std::size_t i = 0; i < n; ++i) {
             const int32_t j = run[i].mark_base;
             if (j >= 0 && static_cast<std::size_t>(j) < i) {
                 int32_t sum_adv_x = 0;
                 int32_t sum_adv_y = 0;
-                for (std::size_t k = static_cast<std::size_t>(j); k < i; ++k) {
-                    sum_adv_x += run[k].x_advance;
-                    sum_adv_y += run[k].y_advance;
+                if (reverse_rtl) {
+                    for (std::size_t k = static_cast<std::size_t>(j) + 1u; k <= i; ++k) {
+                        sum_adv_x += run[k].x_advance;
+                        sum_adv_y += run[k].y_advance;
+                    }
+                    run[i].x_offset += run[static_cast<std::size_t>(j)].x_offset + run[i].cursive_dx + sum_adv_x;
+                    run[i].y_offset += run[static_cast<std::size_t>(j)].y_offset + run[i].cursive_dy + sum_adv_y;
+                } else {
+                    for (std::size_t k = static_cast<std::size_t>(j); k < i; ++k) {
+                        sum_adv_x += run[k].x_advance;
+                        sum_adv_y += run[k].y_advance;
+                    }
+                    run[i].x_offset += run[static_cast<std::size_t>(j)].x_offset + run[i].cursive_dx - sum_adv_x;
+                    run[i].y_offset += run[static_cast<std::size_t>(j)].y_offset + run[i].cursive_dy - sum_adv_y;
                 }
-                run[i].x_offset += run[static_cast<std::size_t>(j)].x_offset + run[i].cursive_dx - sum_adv_x;
-                run[i].y_offset += run[static_cast<std::size_t>(j)].y_offset + run[i].cursive_dy - sum_adv_y;
             }
         }
 
-        if (visual_rtl && is_rtl && n > 1u) {
-            // Reorder base+marks clusters right-to-left while keeping each base
-            // followed immediately by its own marks so pen advances match mark offsets.
-            std::vector<std::pair<std::size_t, std::size_t>> clusters;
-            std::size_t c = 0;
-            while (c < n) {
-                if (run[c].mark_base < 0 && is_mark_glyph(run[c].glyph)) {
-                    clusters.emplace_back(c, c + 1u);
-                    ++c;
-                    continue;
-                }
-                std::size_t ce = c + 1u;
-                while (ce < n && (run[ce].mark_base >= 0 || is_mark_glyph(run[ce].glyph))) {
-                    ++ce;
-                }
-                clusters.emplace_back(c, ce);
-                c = ce;
-            }
-            for (auto it = clusters.rbegin(); it != clusters.rend(); ++it) {
-                for (std::size_t k = it->first; k < it->second; ++k) {
-                    PositionedGlyph pg;
-                    pg.glyph = run[k].glyph;
-                    pg.x_advance = run[k].x_advance;
-                    pg.y_advance = run[k].y_advance;
-                    pg.x_offset = run[k].x_offset;
-                    pg.y_offset = run[k].y_offset;
-                    pg.is_mark = (run[k].mark_base >= 0 || is_mark_glyph(run[k].glyph));
-                    result.push_back(pg);
-                }
+        if (reverse_rtl && n > 1u) {
+            // Match HarfBuzz's final RTL buffer reversal (`[mark_k, ..., mark_1, base]`
+            // within each cluster, clusters ordered right-to-left). Both anchored marks
+            // (via Stage 4b's `(j, i]` advance sum) and unanchored zero-advance marks
+            // precede their base at its visual cell origin.
+            for (std::size_t k = n; k-- > 0;) {
+                PositionedGlyph pg;
+                pg.glyph = run[k].glyph;
+                pg.x_advance = run[k].x_advance;
+                pg.y_advance = run[k].y_advance;
+                pg.x_offset = run[k].x_offset;
+                pg.y_offset = run[k].y_offset;
+                pg.is_mark = (run[k].mark_base >= 0 || is_mark_glyph(run[k].glyph));
+                result.push_back(pg);
             }
         } else {
             for (const ShapingGlyph& st : run) {
@@ -4347,8 +4679,8 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
         prev_script = sc;
     }
 
-    const bool face_visual_rtl = visual_rtl && !pre_reversed;
     for (FaceRun& fr : runs) {
+        const bool face_visual_rtl = visual_rtl && (!pre_reversed || fr.is_rtl);
         if (fr.face) {
             const float upem = static_cast<float>(fr.face->units_per_em());
             const float scale = (upem > 0.0f) ? (font_size / upem) : 0.0f;
@@ -4375,7 +4707,7 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
             for (uint32_t cp : fr.cps) {
                 if (!is_join_control(cp)) vis.push_back(cp);
             }
-            if (face_visual_rtl && fr.is_rtl && vis.size() > 1u) {
+            if (visual_rtl && (pre_reversed || fr.is_rtl) && vis.size() > 1u) {
                 std::reverse(vis.begin(), vis.end());
             }
             for (uint32_t cp : vis) {
@@ -4387,35 +4719,40 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
                 fr.glyphs.push_back(shaped);
             }
         }
-    }
-
-    if (pre_reversed) {
-        std::vector<ShapedGlyph> logical_all;
-        for (const FaceRun& fr : runs) {
-            logical_all.insert(logical_all.end(), fr.glyphs.begin(), fr.glyphs.end());
-        }
-        if (visual_rtl && logical_all.size() > 1u) {
+        if (pre_reversed && visual_rtl && !fr.is_rtl && fr.face && fr.glyphs.size() > 1u) {
             std::vector<std::pair<std::size_t, std::size_t>> clusters;
             std::size_t c = 0;
-            while (c < logical_all.size()) {
-                if (logical_all[c].is_mark) {
+            while (c < fr.glyphs.size()) {
+                if (fr.glyphs[c].is_mark) {
                     clusters.emplace_back(c, c + 1u);
                     ++c;
                     continue;
                 }
                 std::size_t ce = c + 1u;
-                while (ce < logical_all.size() && logical_all[ce].is_mark) ++ce;
+                while (ce < fr.glyphs.size() && fr.glyphs[ce].is_mark) ++ce;
                 clusters.emplace_back(c, ce);
                 c = ce;
             }
-            out.reserve(logical_all.size());
+            std::vector<ShapedGlyph> reordered;
+            reordered.reserve(fr.glyphs.size());
             for (auto it = clusters.rbegin(); it != clusters.rend(); ++it) {
-                out.insert(out.end(),
-                           logical_all.begin() + static_cast<std::ptrdiff_t>(it->first),
-                           logical_all.begin() + static_cast<std::ptrdiff_t>(it->second));
+                reordered.insert(reordered.end(),
+                                 fr.glyphs.begin() + static_cast<std::ptrdiff_t>(it->first),
+                                 fr.glyphs.begin() + static_cast<std::ptrdiff_t>(it->second));
+            }
+            fr.glyphs = std::move(reordered);
+        }
+    }
+
+    if (pre_reversed) {
+        if (visual_rtl) {
+            for (auto it = runs.rbegin(); it != runs.rend(); ++it) {
+                out.insert(out.end(), it->glyphs.begin(), it->glyphs.end());
             }
         } else {
-            out = std::move(logical_all);
+            for (const FaceRun& fr : runs) {
+                out.insert(out.end(), fr.glyphs.begin(), fr.glyphs.end());
+            }
         }
         return out;
     }

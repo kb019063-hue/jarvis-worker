@@ -4972,11 +4972,11 @@ TEST(multiscript_itemization_visual_rtl_and_bidi_mixed_runs) {
     }
     assert(pos1 >= 0 && pos1 + 1 == pos2 && pos2 + 1 == pos3);
 
-    // 4. Combining marks stay AFTER their base after visual RTL cluster reversal ([base, mark], not [mark, base])!
+    // 4. Visual RTL buffer reversal emits `[mark, base]` per cluster with propagated attachment offsets!
     const auto rtl_mark = fr.shape_text("\xD8\xA8\xD9\x8E\xD8\xB3", 24.0f, 400, "TestArabicSans", false, true);
     assert(rtl_mark.size() == 3);
-    assert(rtl_mark[1].glyph != ar_font.glyph_index(0x064E)); // base Beh comes before Fatha!
-    assert(rtl_mark[2].glyph == ar_font.glyph_index(0x064E)); // Fatha follows Beh in same cluster!
+    assert(rtl_mark[1].glyph == ar_font.glyph_index(0x064E)); // Fatha precedes Beh in visual RTL!
+    assert(rtl_mark[2].glyph != ar_font.glyph_index(0x064E)); // base Beh follows Fatha with propagated offset!
 
     // 5. Fallback preservation across common spaces: a Latin-only primary webfont (covering ASCII)
     //    falling back via system fallbacks to TestArabicSans must keep "سلام عليكم" as one coherent Arabic run!
@@ -5198,10 +5198,12 @@ TEST(hebrew_fixed_points_are_ordered_before_shaping) {
     assert((ids({0x05E9, 0x05B8, 0x05BC, 0x05C1}) == std::vector<uint16_t>{1, 3, 4, 2}));
     // Equal-ranked qamats/qamats-qatan stay stable, including repeated marks.
     assert((ids({0x05E9, 0x05C7, 0x05B8, 0x05B8}) == std::vector<uint16_t>{1, 5, 2, 2}));
-    // Neither a base, space, nor an unhandled combining mark is crossed.
+    // Neither a base nor a space is crossed; non-Hebrew combining marks sort
+    // inside the same mark span (Phase 476), while U+034F CGJ is a CCC=0 barrier.
     assert((ids({0x05E9, 0x05B8, 0x05E9, 0x05C1}) == std::vector<uint16_t>{1, 2, 1, 3}));
     assert((ids({0x05E9, 0x05B8, ' ', 0x05C1}) == std::vector<uint16_t>{1, 2, 6, 3}));
-    assert((ids({0x05E9, 0x05B8, 0x0301, 0x05C1}) == std::vector<uint16_t>{1, 2, 7, 3}));
+    assert((ids({0x05E9, 0x05B8, 0x0301, 0x05C1}) == std::vector<uint16_t>{1, 3, 2, 7}));
+    assert((ids({0x05E9, 0x05B8, 0x034F, 0x05C1}) == std::vector<uint16_t>{1, 2, 6, 3}));
     assert(ids({}).empty());
 }
 
@@ -7815,6 +7817,35 @@ TEST(subtle_crypto_ecdsa_sha1) {
             });
     )");
     assert(interp.eval("ok1 === true && okBad === false").is_truthy());
+}
+
+TEST(subtle_crypto_wrap_and_unwrap_jwk) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var iv = new Uint8Array([1,2,3,4,5,6,7,8,9,10,11,12]);
+        var ok = null;
+        var msg = new Uint8Array([9, 8, 7, 6]);
+        Promise.all([
+            crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['wrapKey', 'unwrapKey']),
+            crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+        ]).then(function(res) {
+            var kek = res[0], pair = res[1];
+            return crypto.subtle.wrapKey('jwk', pair.privateKey, kek, { name: 'AES-GCM', iv: iv })
+                .then(function(wrapped) {
+                    return crypto.subtle.unwrapKey('jwk', wrapped, kek, { name: 'AES-GCM', iv: iv }, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+                })
+                .then(function(priv) {
+                    return crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, priv, msg);
+                })
+                .then(function(sig) {
+                    return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, sig, msg);
+                });
+        }).then(function(v) { ok = v; });
+    )");
+    assert(interp.eval("ok === true").is_truthy());
 }
 
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
@@ -36827,6 +36858,7 @@ int main() {
     RUN_TEST(crypto_key_algorithm_and_usages);
     RUN_TEST(subtle_crypto_hmac_length);
     RUN_TEST(subtle_crypto_ecdsa_sha1);
+    RUN_TEST(subtle_crypto_wrap_and_unwrap_jwk);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

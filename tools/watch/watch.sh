@@ -5,7 +5,9 @@
 # until 24 November 2026.
 #
 #   tools/watch/watch.sh start "YYYY-MM-DD HH:MM"   the hour the status comment names; the first look
-#   tools/watch/watch.sh look            the beat, and what changed since the look before
+#   tools/watch/watch.sh look            the beat, and what changed since the look before. (The beat
+#                                        is also written by `cands`, `lot`, `full`, `land`, `taken`,
+#                                        `landed` and `sendback`, when the last is five minutes old.)
 #   tools/watch/watch.sh st              a look, the lot, and the CI state of every open pull request
 #   tools/watch/watch.sh cands           the pull requests that can be taken now, one line of numbers
 #                                        (why not, and why without a green run of its own, on stderr)
@@ -30,7 +32,9 @@
 #   tools/watch/watch.sh wait [SECONDS]  `lot` every 20 s, until it is not 4 or the time is up; a look
 #   tools/watch/watch.sh land [last]     merge each pull request of the lot as it is, in number order.
 #                                        `last`: the watch's own merge follows, so no merge starts a
-#                                        run on main, and the tree to reach is $STATE/lot.asis
+#                                        run on main, and the tree to reach is $STATE/lot.asis.
+#                                        6, and nothing merged: GitHub refuses one of them (a rule
+#                                        the person set on main)
 #   tools/watch/watch.sh once N          #N is green with main in its head and no lot is in test:
 #                                        merge it at once
 #   tools/watch/watch.sh taken HH:MM     a "taken" note in each pull request of the lot, a board line
@@ -41,8 +45,16 @@
 #                                        request ends with: when each run began and passed, when it
 #                                        was merged, whose pull requests, the run and its length
 #   tools/watch/watch.sh sendback N "why, and what to do"   the line that sends #N back, in #N and
-#                                        on the board; #N is then left alone until its head moves
+#                                        on the board; #N is then left alone until its head moves.
+#                                        Status 3 and nothing posted when #N's head is not the one
+#                                        that was read here (origin/prN); `anyway` as a third word
+#                                        posts all the same
 #   tools/watch/watch.sh note N FILE     comment FILE on #N, print the comment's id
+#   tools/watch/watch.sh rule            what rule GitHub has on main, read back, and what in it would
+#                                        stop a merge or a lot (tools/watch/rule.py; 0 as asked for,
+#                                        1 none, 3 something to change)
+#   tools/watch/watch.sh off "what it did"   the watch has ended: the status comment says OFF, and
+#                                        nothing here writes a beat after it
 #   tools/watch/watch.sh notits N        #N's own run failed and its change is not why (read
 #                                        `python3 tools/ci/run_report.py N` first): it is taken at the
 #                                        head it has now all the same; the lot's run does every job
@@ -121,6 +133,44 @@ code_was_green() {  # code_was_green FULLSHA
   changed="$(git diff --name-only "$auto" "$head^{tree}" | grep -vE '^([^/]+\.md|docs/.+|tests/[^/]+/README\.md)$')"
   [ -z "$changed" ]
 }
+github_says() {  # github_says N -> what GitHub says of merging #N now: CLEAN, UNSTABLE, BLOCKED, BEHIND, DIRTY
+  # (UNKNOWN for some seconds after a push or a merge: asked three times)
+  local s="" i
+  for i in 1 2 3; do
+    s="$(timeout 30 gh pr view "$1" --json mergeStateStatus --jq .mergeStateStatus 2>/dev/null)"
+    [ -n "$s" ] && [ "$s" != "UNKNOWN" ] && break
+    sleep 4
+  done
+  echo "${s:-UNKNOWN}"
+}
+ruled_out() {  # ruled_out N FULLSHA [STATE]: GitHub refuses to merge #N as it is; why in $WHY (left alone otherwise)
+  # Nothing in the repository can stop a merge (#449, 25 November: no run, 59
+  # seconds). A rule on main that wants a passed run of named checks on the
+  # head commit can, and only the person can set it. No session can read
+  # such a rule whole (403); what GitHub says of one pull request it can:
+  # BLOCKED is the rule saying no, BEHIND is a rule that wants main in the
+  # branch. Under such a rule a head with no passed run of its own is not
+  # merged, whatever the lot's run said: one that came back with main merged
+  # under the mark that skips CI, one whose code was green a commit earlier,
+  # one whose own run failed for a reason that is not its change. Written on
+  # 28 November, before any rule was on: tried with a `gh` that made the
+  # answers up, never against a rule.
+  local gs runs; gs="${3:-$(github_says "$1")}"
+  case "$gs" in
+    BLOCKED)
+      runs="$(runs_of "$2")"
+      if green "$2"; then
+        WHY="GitHub reports BLOCKED though the run on its head ${2:0:7} passed: the rule on main wants something that run does not give (\`gh pr checks $1 --required\` shows what). The person has to be told"
+      elif [[ "$runs" == *in_progress* || "$runs" == *queued* || "$runs" == *pending* ]]; then
+        WHY="GitHub reports BLOCKED: the rule on main wants a passed run on its head ${2:0:7}, and that run is still going (${runs:0:90}). Wait for it"
+      else
+        WHY="GitHub reports BLOCKED: the rule on main wants a passed run on its head ${2:0:7}, which has: ${runs:-no run at all}. It needs a push without the mark that skips CI (an empty commit will do) and that push's run to pass"
+      fi
+      return 0 ;;
+    BEHIND) WHY="GitHub reports BEHIND: a rule on main wants main in the branch. No lot can land under that: the person has to take \"Require branches to be up to date before merging\" off"; return 0 ;;
+  esac
+  return 1
+}
 takeable() {  # takeable N FULLSHA; says why in $WHY
   local runs wrong
   # What it adds where every pull request adds its own files is called by its
@@ -130,6 +180,19 @@ takeable() {  # takeable N FULLSHA; says why in $WHY
   wrong="$(git diff --name-only --diff-filter=A "origin/main...$2" -- docs/phases docs/findings tests/suites 2>/dev/null \
            | grep -Ev "^(docs/phases|docs/findings|tests/suites)/$1-" | head -2 | tr '\n' ' ')"
   [ -z "$wrong" ] || { WHY="it adds ${wrong}and a file added there is called by its own number ($1-...)"; return 1; }
+  # What its merge with main would take out of AGENTS.md (check_docs.py,
+  # MAY_LOSE_ROWS). #452 came back on 26 November with a copy of the file
+  # from the afternoon before on top of that morning's main, 206 lines short
+  # (58 rows of "Open tasks" and six passages of the rules), and it merged
+  # cleanly. Its own run asks the same since that day, but a pull request
+  # that was green before, or one taken while its run is going, has not been
+  # asked. $CHECK_DOCS is for a copy of this script outside the clone.
+  local tree lost
+  tree="$(git merge-tree --write-tree origin/main "$2" 2>/dev/null | head -1)"
+  if [ -n "$tree" ]; then
+    lost="$(python3 "${CHECK_DOCS:-tools/ci/check_docs.py}" --base origin/main --kept "$tree" 2>&1 | sed -n 's/^ *FAIL *AGENTS.md: //p' | head -1)"
+    [ -z "$lost" ] || { WHY="its merge takes out of AGENTS.md what main has: ${lost:0:170}"; return 1; }
+  fi
   WHY="green"; green "$2" && return 0
   # Its own run failed, the landing session has read why (`run_report.py N`),
   # and what failed was not its change: `main` was broken under it, or a
@@ -139,12 +202,15 @@ takeable() {  # takeable N FULLSHA; says why in $WHY
   # (an `npm install` failed on CI's machine), and #450, whose run was a
   # run on `main` as #449 had left it.
   if grep -qx "$1 ${2:0:7}" "$STATE/notits" 2>/dev/null; then
+    ruled_out "$1" "$2" && return 1
     WHY="its own run failed for a reason that is not its change"; return 0
   fi
   runs="$(runs_of "$2")"
   case "$runs" in *failure*|*timed_out*) WHY="its own run failed"; return 1 ;; esac
-  WHY="its code was green"; came_back_without_a_run "$1" "$2" && return 0
-  code_was_green "$2" && return 0
+  if came_back_without_a_run "$1" "$2" || code_was_green "$2"; then
+    ruled_out "$1" "$2" && return 1   # no passed run on this head, and a rule on main wants one
+    WHY="its code was green"; return 0
+  fi
   # A finished pull request whose own run is still going is taken as well
   # (WATCH_EAGER=0 turns that off): its run and the lot's go side by side, and
   # it lands when the lot's has passed. Waiting for its own run first cost
@@ -161,17 +227,41 @@ note() {  # note N FILE -> "#N COMMENTID"
   local url; url="$(timeout 40 gh pr comment "$1" --body-file "$2" 2>&1 | tail -1)"
   echo "#$1 ${url##*-}"
 }
-open_ones() {  # "N FULLSHA fin|WIP MERGEABLE..." of every open pull request that is a claim
+open_ones() {  # "N FULLSHA fin|WIP|draft MERGEABLE..." of every open pull request that is a claim
   # A draft is work in progress whatever its title says, as it is for
   # check_pr.py: GitHub does not merge one. On 24 November #385, a draft
   # whose title had lost its WIP:, was taken into a lot for three minutes.
   timeout 40 gh pr list --state open --limit 100 --json number,title,headRefOid,mergeable,isDraft \
-    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "fin" end) \(.mergeable)"' | sort -n
+    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.title | test("^WIP")) then "WIP" elif .isDraft then "draft" else "fin" end) \(.mergeable)"' | sort -n
 }
 fetch_pr() { timeout 60 git fetch -q origin "+refs/pull/$1/head:refs/remotes/origin/pr$1"; }
 agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^Agent: *(\\w+)") | .captures[0].string] | first) // "-"' 2>/dev/null; }
 
+beat() {  # beat [due]: write the look into the status comment of the board; `due`: only when the last is five minutes old
+  # A watch counts as none 30 minutes after its last look (AGENTS.md,
+  # "Working together"), so that a landing session whose login has ended
+  # holds nobody up. Until 28 November 2026 only `look` wrote the look. That
+  # day a watch went on for half an hour with `cands`, `lot` and `land`
+  # alone, landing four pull requests, and at 04:43 `check_pr.py` told the
+  # agents that no watch was on: within a minute two of them had merged
+  # `main` into pull requests that were finished, one of them under the lot
+  # it was being tested in, and both had put `WIP:` back (#478, #481).
+  local end now last
+  end="$(cat "$STATE/end" 2>/dev/null)"; [ -n "$end" ] || return 0   # no watch: `start` was not run, or `off` was
+  now="$(date +%s)"; last="$(cat "$STATE/beat.at" 2>/dev/null)"
+  if [ "${1:-}" = "due" ] && [ -n "$last" ] && [ $((now - last)) -lt "${WATCH_BEAT_SECONDS:-300}" ]; then return 0; fi
+  if timeout 60 python3 tools/ci/check_pr.py watch --beat "$end" > /dev/null 2>&1; then echo "$now" > "$STATE/beat.at"
+  else echo "the beat failed" >&2; fi
+  # The hour the comment names is the watch's end as well: past it, a look
+  # that is fresh still says "over".
+  local ends; ends="$(date -u -d "$end" +%s 2>/dev/null)"
+  if [ -n "$ends" ] && [ $((ends - now)) -lt 600 ]; then
+    echo "the watch is announced until $end UTC, $(( (ends - now) / 60 )) minute(s) from now: \`start \"YYYY-MM-DD HH:MM\"\` again to go on past it" >&2
+  fi
+}
+
 cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in cands|lot|full|land|taken|landed|sendback) beat due ;; esac
 case "$cmd" in
 start)
   echo "$1" > "$STATE/end"
@@ -192,7 +282,7 @@ start)
 
 look)
   end="$(cat "$STATE/end" 2>/dev/null)"; [ -n "$end" ] || { echo "no hour: tools/watch/watch.sh start \"YYYY-MM-DD HH:MM\" first"; exit 9; }
-  timeout 60 python3 tools/ci/check_pr.py watch --beat "$end" >/dev/null 2>&1 || echo "the beat failed"
+  beat
   # Until 25 November 2026 this put the label `lot` on every open pull
   # request, which was what made its runs short while a watch was on. Every
   # run a push starts on a pull request is short now, label or no label
@@ -221,6 +311,18 @@ cands)
   # when it has moved. To take one all the same, give its number to `plan`.
   clashes="$(timeout 90 python3 tools/ci/check_pr.py numbers 2>/dev/null)"
   open_ones | while read -r n full wip mergeable; do
+    if [ "$wip" = "draft" ]; then
+      # A draft whose title has lost its WIP: is in no list, and GitHub
+      # merges none. Either its agent is not finished and took the WIP: off
+      # early, or it is finished and `gh pr ready` did not happen: #425
+      # stood so for thirteen hours on 25 November, and #508 for eleven
+      # minutes of a watch on 28 November, renamed at 07:52:18 like its
+      # agent's two before it, which had been made ready in the same second.
+      # Since that day every claim is a draft, so this is said every time.
+      runs="$(runs_of "$full" 2>/dev/null)"; case "$runs" in ""|"{"*) runs="its runs could not be read" ;; esac
+      echo "#$n ${full:0:7}: NOT taken: a draft whose title has no WIP: ($runs). Finished and not made ready? Read it and its events; when nothing was pushed for some minutes, \`gh pr ready $n\`, a note on it, and it is taken" >&2
+      continue
+    fi
     [ "$wip" = "fin" ] || continue
     grep -q "^$n ${full:0:7}$" "$STATE/sentback" 2>/dev/null && continue   # sent back, and has not moved
     grep -qx "$n" "$STATE/ignore" 2>/dev/null && continue                     # nobody's: left alone
@@ -228,7 +330,8 @@ cands)
       echo "#$n ${full:0:7}: not taken, it has a number to change: $(echo "$clashes" | grep "^#$n: " | head -1 | cut -d' ' -f2-)" >&2; continue
     fi
     fetch_pr "$n" || continue
-    if takeable "$n" "$full"; then printf '%s ' "$n"; [ "$WHY" = "green" ] || echo "#$n ${full:0:7}: $WHY" >&2; fi
+    if takeable "$n" "$full"; then printf '%s ' "$n"; [ "$WHY" = "green" ] || echo "#$n ${full:0:7}: $WHY" >&2
+    else case "$WHY" in "its merge takes out"*|"it adds "*|"GitHub reports "*) echo "#$n ${full:0:7}: NOT taken, and its agent has to be told: $WHY" >&2 ;; esac; fi
   done; echo ;;
 
 plan)
@@ -268,7 +371,7 @@ build)
     full="$(git rev-parse "origin/pr$n")"
     st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title,isDraft --jq '"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"')"
     [ "$st" = "OPEN $full finished" ] || { echo "#$n: '$st' is not OPEN and finished at ${full:0:7}"; exit 6; }
-    takeable "$n" "$full" || { echo "#$n ${full:0:7} is not green: $(runs_of "$full")"; exit 6; }
+    takeable "$n" "$full" || { echo "#$n ${full:0:7} is not taken: $WHY ($(runs_of "$full"))"; exit 6; }
     echo "$n ${full:0:7}" >> "$STATE/lot.heads.new"
   done
   git checkout -q -B "$BRANCH" origin/main || exit 9
@@ -466,6 +569,14 @@ land)
     st="$(timeout 30 gh pr view "$n" --json state,headRefOid --jq '"\(.state) \(.headRefOid)"')"
     [ "$st" = "OPEN $full" ] || { echo "STOP: #$n is '$st'"; exit 3; }
     takeable "$n" "$full" || { echo "STOP: #$n is not green on ${full:0:7}: $(runs_of "$full")"; exit 3; }
+    # Asked of every one before the first is merged: a lot of which GitHub
+    # merges the first and refuses the second leaves main with a tree that no
+    # run passed on. An own run that is still going under a rule on main is
+    # BLOCKED too: wait for it, and land again. (DIRTY is not asked for: one
+    # that carries the head of the one before it can be in conflict with
+    # main until that one is merged.)
+    gs="$(github_says "$n")"
+    case "$gs" in BLOCKED|BEHIND) ruled_out "$n" "$full" "$gs"; echo "STOP, nothing merged: #$n: $WHY"; exit 6 ;; esac
     title="$(timeout 30 gh pr view "$n" --json title --jq .title)"
     if [ "$n" = "$final" ] && [ "$last" != "last" ]; then
       printf '%s\n\nLanded by the landing session (%s) as it is at %s: the last of this lot (%s), tested together with main %s in one CI run on %s, every job passed. With this merge main has the tree that run passed on, and its own run is there to save the compiled objects for the runs that follow: [objects only] (.github/workflows/ci.yml).\n' "$title" "$NAME" "${full:0:7}" "$all" "$main7" "${head:0:7}" > "$STATE/land/body$n.txt"
@@ -498,6 +609,8 @@ once)
   git merge-base --is-ancestor origin/main "$full" || { echo "STOP: main is not in #$n's head"; exit 2; }
   out="$(timeout 90 python3 tools/ci/check_pr.py merge "$n" --landing 2>&1)"; echo "$out" | tail -3
   echo "$out" | grep -q '^ready' || { echo "STOP: check_pr.py does not say ready"; exit 3; }
+  gs="$(github_says "$n")"
+  case "$gs" in BLOCKED|BEHIND) ruled_out "$n" "$full" "$gs"; echo "STOP: #$n: $WHY"; exit 6 ;; esac
   title="$(timeout 30 gh pr view "$n" --json title --jq .title)"
   printf '%s\n\nLanded by the landing session (%s) as it is at %s: green on its own head with main %s in it, so its own CI run was a run on the tree this merge puts on main.\n' "$title" "$NAME" "${full:0:7}" "$(git rev-parse --short=7 origin/main)" > "$STATE/land/once$n.txt"
   want="$(git rev-parse "$full^{tree}")"
@@ -555,9 +668,29 @@ table)
 sendback)
   n="$1"; why="$2"
   full="$(timeout 30 gh pr view "$n" --json headRefOid --jq .headRefOid)"; [ -n "$full" ] || exit 9
+  # The line names the head it is about, and `landed N` tells the agent "it
+  # is yours again" for as long as #N's head is that one. So nothing is
+  # posted unless the head is the one that was read here: `cands` and `plan`
+  # fetch it to origin/prN. On 28 November #492 was read at 1fe58a6, in
+  # conflict with main in one row of ROADMAP.md. A minute later this posted
+  # "#492 is yours again (head c681b16): it is in conflict", and c681b16,
+  # pushed ten seconds before, was the agent's own merge of main with the
+  # row put right. Both comments were changed by hand half a minute later.
+  read_at="$(git rev-parse -q --verify "refs/remotes/origin/pr$n" 2>/dev/null)"
+  if [ "$read_at" != "$full" ] && [ "${3:-}" != "anyway" ]; then
+    was="${read_at:0:7}"
+    echo "sendback: nothing is posted. #$n is at ${full:0:7} now, and what was read here is ${was:-nothing}: read it again (\`plan $n\` fetches it and says whether it still conflicts), or give \`anyway\` as a third word" >&2
+    exit 3
+  fi
   printf '%s: #%s is yours again (head %s): %s\n' "$NAME" "$n" "${full:0:7}" "$why" > "$STATE/land/back$n.md"
   note "$n" "$STATE/land/back$n.md"; [ -n "$BOARD" ] && note "$BOARD" "$STATE/land/back$n.md"
   echo "$n ${full:0:7}" >> "$STATE/sentback" ;;
+
+off)
+  # The end of a watch. The hour is taken away first: a `cands` or a `lot`
+  # after this would otherwise write "WATCH ON" again.
+  rm -f "$STATE/end" "$STATE/beat.at"
+  timeout 60 python3 tools/ci/check_pr.py watch --off "${1:?off \"what the watch did\"}" ;;
 
 notits)
   n="$1"
@@ -568,6 +701,9 @@ notits)
 
 note)
   note "$1" "$2" ;;
+
+rule)
+  python3 tools/watch/rule.py ;;
 
 *)
   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 9 ;;

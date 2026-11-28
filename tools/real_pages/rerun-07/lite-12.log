@@ -1,0 +1,5 @@
+stage: opening snapshot
+stage: painting initial frame
+stage: driving task
+BENCH pass: input=x-sample; output=That’s a valid custom element name.
+

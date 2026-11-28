@@ -29,6 +29,31 @@ namespace {
 
 const std::vector<const std::string*> kNoLabels;
 
+// A computed read evaluates its key expression first, then requires a
+// coercible base, and only then performs ToPropertyKey. In particular, an
+// object key's conversion can run arbitrary script and must not run when the
+// base is nullish. Primitive keys need no user code and can still appear in
+// the engine's diagnostic, preserving the familiar error message.
+std::string computed_read_key(const JsValue& base, const JsValue& key) {
+    if (base.is_nullish()) {
+        std::string message = std::string("Cannot read properties of ") +
+            (base.type == JsType::Null ? "null" : "undefined");
+        if (!key.is_object_like())
+            message += " (reading '" + js_to_property_key(key) + "')";
+        js_throw_type_error(message);
+    }
+    return js_to_property_key(key);
+}
+
+// A nullish computed reference still evaluates its key expression, but never
+// converts an object key. Plain assignment may defer the base error until
+// after its RHS (or a destructuring iterator step/default), so make only a
+// diagnostic label here; do not call user code to obtain a property name.
+std::string computed_reference_key(const JsValue& base, const JsValue& key) {
+    if (base.is_nullish() && key.is_object_like()) return "<computed>";
+    return js_to_property_key(key);
+}
+
 bool label_matches(const std::string* label, const std::vector<const std::string*>& own) {
     if (!label) return true;                 // an unlabelled break/continue targets the nearest loop
     for (const auto* candidate : own) {
@@ -2393,7 +2418,7 @@ JsInterpreter::Reference JsInterpreter::resolve_reference(const Expr* target, co
             auto* index = static_cast<const IndexExpr*>(target);
             ref.is_property = true;
             ref.base = evaluate(index->object.get(), env);
-            ref.name = js_to_property_key(evaluate(index->index.get(), env));
+            ref.name = computed_reference_key(ref.base, evaluate(index->index.get(), env));
             break;
         }
         case NodeKind::SuperMember: {
@@ -3358,7 +3383,7 @@ JsValue JsInterpreter::eval_unary(const UnaryExpr* expr, const EnvPtr& env) {
                 } else {
                     auto* index = static_cast<const IndexExpr*>(operand);
                     base = evaluate(index->object.get(), env);
-                    key = js_to_property_key(evaluate(index->index.get(), env));
+                    key = computed_reference_key(base, evaluate(index->index.get(), env));
                 }
                 if (base.is_nullish()) {
                     js_throw_type_error("Cannot convert undefined or null to object");
@@ -3532,7 +3557,11 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
                 m_chain_short_circuit = true;
                 return JsValue::make_undefined();
             }
-            computed_name = js_to_property_key(evaluate(index->index.get(), env));
+            // Reuse the receiver slot for the evaluated key until the read
+            // succeeds; a further JsValue local enlarges every recursive call
+            // frame, even calls with no computed member.
+            this_val = evaluate(index->index.get(), env);
+            computed_name = computed_read_key(base, this_val);
             fn = get_member(base, computed_name);
             this_val = std::move(base);
             callee_name = &computed_name;
@@ -4054,7 +4083,7 @@ JsValue JsInterpreter::eval_index(const IndexExpr* index, const EnvPtr& env) {
             if (!base.is_array_hole(i)) return elements[i];
         }
     }
-    return get_member(base, js_to_property_key(key));
+    return get_member(base, computed_read_key(base, key));
 }
 
 JsValue JsInterpreter::eval_private_in(const PrivateInExpr* private_in, const EnvPtr& env) {

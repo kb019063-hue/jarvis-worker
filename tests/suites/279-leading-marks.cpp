@@ -13,6 +13,8 @@ TEST(leading_latin_resolved_marks_sort_without_inventing_a_base) {
         {'a', 600, true, 0, 0, 500, 500},
         {0x05E9, 600, true, 0, 0, 500, 500},
         {0x034F, 0, false, 0, 0, 0, 0}, // CGJ has class zero
+        {0x03B1, 600, true, 0, 0, 500, 500},
+        {0x0915, 600, true, 0, 0, 500, 500},
     };
     TrueTypeFont f;
     assert(f.load_memory(build_synthetic_sfnt(1000, 800, -200, glyphs, {})));
@@ -28,11 +30,17 @@ TEST(leading_latin_resolved_marks_sort_without_inventing_a_base) {
     assert((ids({' ', 0x0301, 0x0323}) == std::vector<uint16_t>{5, 2, 1}));
     assert((ids({0x200C, 0x0301, 0x0323}) == std::vector<uint16_t>{5, 2, 1}));
     assert((ids({0x25CC, 0x0301, 0x0323}) == std::vector<uint16_t>{7, 2, 1}));
-    // No crossing a class-zero character, and no reordering of a Hebrew run.
-    assert((ids({0x0301, 0x034F, 0x0323}) == std::vector<uint16_t>{1, 10, 2}));
+    // No crossing a class-zero character (CGJ hides to zero-advance space);
+    // Hebrew and Greek runs order (Phase 476/501), while deferred `dev2` stays unchanged.
+    assert((ids({0x0301, 0x034F, 0x0323}) == std::vector<uint16_t>{1, 5, 2}));
+    assert((f.shape_glyphs({0x0301, 0x034F, 0x0323})[1].x_advance == 0));
     assert((ids({0x0301, ' ', 0x0323}) == std::vector<uint16_t>{1, 5, 2}));
-    assert((ids({0x05E9, 0x0301, 0x0323}) == std::vector<uint16_t>{9, 1, 2}));
-    assert((ids({0x0301, 0x0323, 0x05E9}) == std::vector<uint16_t>{1, 2, 9}));
+    assert((ids({0x05E9, 0x0301, 0x0323}) == std::vector<uint16_t>{9, 2, 1}));
+    assert((ids({0x0301, 0x0323, 0x05E9}) == std::vector<uint16_t>{2, 1, 9}));
+    assert((ids({0x03B1, 0x0301, 0x0323}) == std::vector<uint16_t>{11, 2, 1}));
+    assert((ids({0x0301, 0x0323, 0x03B1}) == std::vector<uint16_t>{2, 1, 11}));
+    assert((ids({0x0915, 0x0301, 0x0323}) == std::vector<uint16_t>{12, 1, 2}));
+    assert((ids({0x0301, 0x0323, 0x0915}) == std::vector<uint16_t>{1, 2, 12}));
     // Covered dotted circle is not inserted for an isolated Latin-resolved mark.
     auto single = f.shape_glyphs({0x0301});
     assert(single.size() == 1 && single[0].glyph == 1 && single[0].x_advance == 0);

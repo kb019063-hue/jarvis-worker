@@ -60,7 +60,19 @@ python3 tools/real_pages/strict_frames.py "$R/results"     # after the full reru
 
 **HEXTRIS and Punycode remain the visual outliers**: the pause button is reported at 60×60 rather than 72×72, and the Punycode page is narrower and shifted left with no selection/caret painting (26,928 pixels differed at rerun-04; 82,636 now — see the caveat above before calling that a change). No process exited prematurely; no task timed out.
 
+## Rerun 07: current Litebird checkout (2026-11-21)
 
+[Detailed report and probe logs](rerun-07/README.md) · [20 Litebird outcomes](rerun-07/litebird.json) · [fresh Chromium outcomes](rerun-07/reference.json) · [strict visual results](rerun-07/strict-frames.json). Measured on `main` at `698aa75cdb3d6febb87d33736bdab00a15823dae`, with the five pinned source revisions unchanged and HeadlessChrome/131.0.6778.0.
+
+**Interaction: 20/20** — all Chromium reference tasks validated, all Litebird tasks completed, and all 20 before/after frames and logs were present. No reference blocks, timeouts or premature exits. Task 16 is one legal 2048 move (not a playthrough); task 17 is only Hextris' start transition (not gameplay).
+
+**Visual: 0 exact matches in 19 comparable post-action frames**, using strict full-RGBA equality at 800×600 (no tolerance). Task 16 is excluded because its board is independently randomized. Task 17 differs on 102,333 pixels. We reviewed the frame pairs: the article and utility pages show material layout/color differences, the 2048 board is offset, and game/editor page styling and text layout differ. The interaction score is not a visual-parity claim. Chromium's new after-frames match rerun-06's committed fresh references exactly for tasks 1–15 and 18–20; only the randomized 2048 and animated Hextris frames changed.
+
+## Rerun 08: strict visual check after Phase 491 (2026-11-21)
+
+[Detailed report and per-task probe logs](rerun-08/README.md) · [20 Litebird outcomes](rerun-08/litebird.json) · [fresh Chromium outcomes](rerun-08/reference.json) · [strict RGBA counts](rerun-08/strict-frames.json). The five pinned source revisions were unchanged. Chromium validated 20/20 tasks and Litebird completed 20/20.
+
+**Visual: still 0 exact matches in 19 comparable frames.** The fixed defect was specific: the CSS layout matcher ignored `:valid` and `:invalid`, so the Mothereff `.invalid, :invalid` rule painted the canvas and non-controls pink. After adding real validation-state matching, tasks 13, 14, 15 and 19 improve by **131,317 / 132,620 / 133,467 / 135,452** fewer different pixels respectively (**532,856 fewer total**). The pink tint is gone. Remaining differences include the tool pages’ textarea dimensions and page width, spacing and text metrics; this is not a parity claim. Task 16 remains excluded only for its independently randomized board.
 
 ## Rerun on Linux (from repository root)
 

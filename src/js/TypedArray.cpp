@@ -214,6 +214,7 @@ struct ArrayBufferData {
     std::vector<uint8_t> bytes;
     std::size_t max_byte_length{0};
     bool resizable{false};
+    bool immutable{false};
     bool detached{false};
     /// The one script object for these bytes, once one has been made: a buffer
     /// and the `buffer` of a view of it are the same object, as they are in a
@@ -378,6 +379,9 @@ public:
         (void)self;
         const auto index = parse_index(name);
         if (!index) return SetResult::NotHandled;
+        // An immutable backing store makes the indexed properties read-only;
+        // return the refusal before coercing the assigned value.
+        if (m_data->buffer->immutable) return SetResult::Refused;
         // A canonical index past the end is dealt with and dropped, as the
         // standard says: `ta[5] = 9` on a length-2 view does not make a
         // property, so `ta[5]` stays undefined. Re-check after js_to_number
@@ -422,7 +426,7 @@ public:
         const auto index = parse_index(name);
         if (!index || *index >= effective_length(*m_data)) return false;
         enumerable = true;
-        writable = true;
+        writable = !m_data->buffer->immutable;
         return true;
     }
 
@@ -1052,6 +1056,8 @@ void install_data_view(JsIntrinsics& intrinsics, JsEnvironment& global) {
     auto define_set = [&](const char* name, ElementType type) {
         js_define_method(proto, name, 2, [type, name](Args args) {
             auto data = require_dataview_slot(JsValue::current_this(), name);
+            if (data->buffer->immutable)
+                js_throw_type_error(std::string(name) + ": the buffer is immutable");
             const std::size_t offset = to_index(js_arg(args, 0), name);
             const double value = js_to_number(js_arg(args, 1));
             const std::size_t width = static_cast<std::size_t>(element_size(type));
@@ -1088,15 +1094,18 @@ void install_data_view(JsIntrinsics& intrinsics, JsEnvironment& global) {
 
 // ECMA-262 §25.1.3.10 ArrayBufferCopyAndDetach(arrayBuffer, newLength, preserveResizability)
 JsValue array_buffer_copy_and_detach(const JsValue& receiver, Args args,
-                                     bool preserve_resizability, const char* what) {
+                                     bool preserve_resizability, const char* what,
+                                     bool make_immutable = false) {
     auto buffer = buffer_of(receiver);
     if (!buffer) js_throw_type_error(std::string(what) + ": receiver is not an ArrayBuffer");
     const bool has_new_length = !args.empty() && !args[0].is_undefined();
     const std::size_t parsed_length = has_new_length ? to_index(args[0], what) : 0;
     if (buffer->detached)
         js_throw_type_error(std::string(what) + ": the buffer is already detached");
+    if (buffer->immutable)
+        js_throw_type_error(std::string(what) + ": the buffer is immutable");
     const std::size_t new_byte_length = has_new_length ? parsed_length : buffer->bytes.size();
-    const bool new_resizable = preserve_resizability && buffer->resizable;
+    const bool new_resizable = !make_immutable && preserve_resizability && buffer->resizable;
     const std::size_t new_max_byte_length =
         new_resizable ? buffer->max_byte_length : new_byte_length;
     if (new_byte_length > new_max_byte_length)
@@ -1104,6 +1113,7 @@ JsValue array_buffer_copy_and_detach(const JsValue& receiver, Args args,
 
     auto next = std::make_shared<ArrayBufferData>();
     next->resizable = new_resizable;
+    next->immutable = make_immutable;
     next->max_byte_length = new_max_byte_length;
     const std::size_t copy_len = std::min(new_byte_length, buffer->bytes.size());
     if (new_byte_length == buffer->bytes.size()) {
@@ -1183,6 +1193,12 @@ void install_array_buffer(JsIntrinsics& intrinsics, JsEnvironment& global) {
             js_throw_type_error("get ArrayBuffer.prototype.detached: receiver is not an ArrayBuffer");
         return JsValue::make_boolean(buffer->detached);
     });
+    define_proto_accessor(proto, "immutable", [](Args) {
+        auto buffer = buffer_of(JsValue::current_this());
+        if (!buffer)
+            js_throw_type_error("get ArrayBuffer.prototype.immutable: receiver is not an ArrayBuffer");
+        return JsValue::make_boolean(buffer->immutable);
+    });
 
     define_non_ctor_method(proto, "resize", 1, [](Args args) {
         auto buffer = buffer_of(JsValue::current_this());
@@ -1192,6 +1208,8 @@ void install_array_buffer(JsIntrinsics& intrinsics, JsEnvironment& global) {
         const std::size_t new_byte_length = to_index(js_arg(args, 0), "ArrayBuffer.prototype.resize");
         if (buffer->detached)
             js_throw_type_error("ArrayBuffer.prototype.resize: the buffer was detached");
+        if (buffer->immutable)
+            js_throw_type_error("ArrayBuffer.prototype.resize: the buffer is immutable");
         if (new_byte_length > buffer->max_byte_length)
             js_throw_range_error("ArrayBuffer.prototype.resize: newByteLength exceeds maxByteLength");
         buffer->bytes.resize(new_byte_length, 0);
@@ -1206,6 +1224,11 @@ void install_array_buffer(JsIntrinsics& intrinsics, JsEnvironment& global) {
     define_non_ctor_method(proto, "transferToFixedLength", 0, [](Args args) {
         return array_buffer_copy_and_detach(JsValue::current_this(), args, false,
                                             "ArrayBuffer.prototype.transferToFixedLength");
+    });
+
+    define_non_ctor_method(proto, "transferToImmutable", 0, [](Args args) {
+        return array_buffer_copy_and_detach(JsValue::current_this(), args, false,
+                                            "ArrayBuffer.prototype.transferToImmutable", true);
     });
 
     js_define_method(proto, "slice", 2, [](Args args) {
@@ -1286,6 +1309,8 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
     js_define_method(proto, "set", 1, [](Args args) {
         auto target = view_of(JsValue::current_this());
         if (!target) js_throw_type_error("TypedArray.prototype.set: receiver is not a typed array");
+        if (target->buffer->immutable)
+            js_throw_type_error("TypedArray.prototype.set: the buffer is immutable");
         const double offset_number = args.size() > 1 ? to_integer_or_infinity(js_to_number(args[1])) : 0;
         if (offset_number < 0)
             js_throw_range_error("TypedArray.prototype.set: the offset must not be negative");
@@ -1378,6 +1403,8 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
 
     js_define_method(proto, "fill", 3, [](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.fill");
+        if (data->buffer->immutable)
+            js_throw_type_error("TypedArray.prototype.fill: the buffer is immutable");
         const std::size_t len = effective_length(*data);
         const double value = js_to_number(js_arg(args, 0));
         std::size_t begin = 0;
@@ -1393,6 +1420,8 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
 
     js_define_method(proto, "copyWithin", 3, [](Args args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.copyWithin");
+        if (data->buffer->immutable)
+            js_throw_type_error("TypedArray.prototype.copyWithin: the buffer is immutable");
         // A negative relative index counts from the end and is then clamped:
         // copyWithin(0, -2) copies the last two elements to the front.
         const std::size_t len = effective_length(*data);
@@ -1565,6 +1594,8 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
 
     js_define_method(proto, "reverse", 0, [](Args) {
         auto data = require_view(JsValue::current_this(), "TypedArray.prototype.reverse");
+        if (data->buffer->immutable)
+            js_throw_type_error("TypedArray.prototype.reverse: the buffer is immutable");
         const std::size_t len = effective_length(*data);
         const std::size_t size = static_cast<std::size_t>(element_size(data->type));
         for (std::size_t i = 0, j = len ? len - 1 : 0; i < j; ++i, --j) {
@@ -1829,6 +1860,8 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
     js_define_method(proto, "sort", 1, [typed_sort, collect](Args args) {
         const JsValue self = JsValue::current_this();
         auto data = require_view(self, "TypedArray.prototype.sort");
+        if (data->buffer->immutable)
+            js_throw_type_error("TypedArray.prototype.sort: the buffer is immutable");
         const JsValue comparator = js_arg(args, 0);
         if (!comparator.is_undefined() && !comparator.is_function())
             js_throw_type_error("TypedArray.prototype.sort: the comparator is not callable");
@@ -1887,11 +1920,229 @@ void install_typed_array_prototype(JsIntrinsics& intrinsics, JsEnvironment& glob
         return make_iterator(require_view(JsValue::current_this(), "TypedArray.prototype[Symbol.iterator]"), 1);
     });
 
+
     realm().typed_array_ctor_cell = constructor.function_cell();
+}
+
+static bool is_ascii_whitespace(char c) {
+    return c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == ' ';
+}
+
+static const std::string& base64_standard_alphabet() {
+    static const std::string s = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    return s;
+}
+
+static int base64_char_value(char c) {
+    if (c >= 'A' && c <= 'Z') return c - 'A';
+    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+    if (c >= '0' && c <= '9') return c - '0' + 52;
+    if (c == '+') return 62;
+    if (c == '/') return 63;
+    return -1;
+}
+
+static std::string base64_encode_bytes(const uint8_t* data, std::size_t len, bool url, bool omit_padding) {
+    std::string alpha = url ? "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_" : base64_standard_alphabet();
+    std::string out;
+    out.reserve(((len + 2) / 3) * 4);
+    for (std::size_t i = 0; i < len; i += 3) {
+        uint32_t b0 = data[i];
+        uint32_t b1 = (i + 1 < len) ? data[i + 1] : 0;
+        uint32_t b2 = (i + 2 < len) ? data[i + 2] : 0;
+        uint32_t triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push_back(alpha[(triple >> 18) & 0x3F]);
+        out.push_back(alpha[(triple >> 12) & 0x3F]);
+        if (i + 1 < len) out.push_back(alpha[(triple >> 6) & 0x3F]);
+        else if (!omit_padding) out.push_back('=');
+        if (i + 2 < len) out.push_back(alpha[triple & 0x3F]);
+        else if (!omit_padding) out.push_back('=');
+    }
+    return out;
+}
+
+struct FromBase64Result {
+    std::vector<uint8_t> bytes;
+    std::size_t read{0};
+    std::string error;
+    bool has_error{false};
+};
+
+static std::size_t skip_ascii_whitespace(const std::string& s, std::size_t idx) {
+    while (idx < s.size() && is_ascii_whitespace(s[idx])) ++idx;
+    return idx;
+}
+
+static FromBase64Result decode_base64_chunk(const std::string& chunk, bool throw_on_extra_bits) {
+    FromBase64Result r;
+    std::size_t chunk_len = chunk.size();
+    std::string padded = chunk;
+    if (chunk_len == 2) padded += "AA";
+    else if (chunk_len == 3) padded += "A";
+    int vals[4];
+    for (int i = 0; i < 4; ++i) vals[i] = base64_char_value(padded[i]);
+    uint32_t triple = (static_cast<uint32_t>(vals[0]) << 18) | (static_cast<uint32_t>(vals[1]) << 12) | (static_cast<uint32_t>(vals[2]) << 6) | static_cast<uint32_t>(vals[3]);
+    uint8_t b0 = (triple >> 16) & 0xFF;
+    uint8_t b1 = (triple >> 8) & 0xFF;
+    uint8_t b2 = triple & 0xFF;
+    if (chunk_len == 2) {
+        if (throw_on_extra_bits && b1 != 0) { r.has_error = true; r.error = "extra bits"; return r; }
+        r.bytes.push_back(b0);
+    } else if (chunk_len == 3) {
+        if (throw_on_extra_bits && b2 != 0) { r.has_error = true; r.error = "extra bits"; return r; }
+        r.bytes.push_back(b0); r.bytes.push_back(b1);
+    } else {
+        r.bytes.push_back(b0); r.bytes.push_back(b1); r.bytes.push_back(b2);
+    }
+    return r;
+}
+
+static FromBase64Result from_base64_impl(const std::string& input, const std::string& alphabet, const std::string& last_chunk_handling, std::size_t max_length) {
+    FromBase64Result res;
+    res.read = 0;
+    if (max_length == 0) return res;
+    std::size_t read = 0;
+    std::vector<uint8_t> bytes;
+    std::string chunk;
+    std::size_t chunk_len = 0;
+    std::size_t index = 0;
+    std::size_t length = input.size();
+    while (true) {
+        index = skip_ascii_whitespace(input, index);
+        if (index == length) {
+            if (chunk_len > 0) {
+                if (last_chunk_handling == "stop-before-partial") {
+                    return FromBase64Result{bytes, read, "", false};
+                } else if (last_chunk_handling == "loose") {
+                    if (chunk_len == 1) {
+                        return FromBase64Result{bytes, read, "SyntaxError: base64", true};
+                    }
+                    auto decoded = decode_base64_chunk(chunk, false);
+                    if (decoded.has_error) return FromBase64Result{bytes, read, decoded.error, true};
+                    bytes.insert(bytes.end(), decoded.bytes.begin(), decoded.bytes.end());
+                } else {
+                    return FromBase64Result{bytes, read, "SyntaxError: base64", true};
+                }
+            }
+            res.bytes = bytes;
+            res.read = length;
+            res.has_error = false;
+            return res;
+        }
+        char ch = input[index];
+        std::string char_str(1, ch);
+        index += 1;
+        if (ch == '=') {
+            if (chunk_len < 2) {
+                return FromBase64Result{bytes, read, "SyntaxError: base64", true};
+            }
+            index = skip_ascii_whitespace(input, index);
+            if (chunk_len == 2) {
+                if (index == length) {
+                    if (last_chunk_handling == "stop-before-partial") {
+                        return FromBase64Result{bytes, read, "", false};
+                    }
+                    return FromBase64Result{bytes, read, "SyntaxError: base64 padding", true};
+                }
+                char next_ch = input[index];
+                if (next_ch == '=') {
+                    index = skip_ascii_whitespace(input, index + 1);
+                } else {
+                    return FromBase64Result{bytes, read, "SyntaxError: base64", true};
+                }
+            }
+            if (index < length) {
+                return FromBase64Result{bytes, read, "SyntaxError: base64", true};
+            }
+            bool throw_on_extra = (last_chunk_handling == "strict");
+            auto decoded = decode_base64_chunk(chunk, throw_on_extra);
+            if (decoded.has_error) return FromBase64Result{bytes, read, decoded.error, true};
+            bytes.insert(bytes.end(), decoded.bytes.begin(), decoded.bytes.end());
+            res.bytes = bytes;
+            res.read = length;
+            return res;
+        }
+        if (alphabet == "base64url") {
+            if (ch == '+' || ch == '/') {
+                return FromBase64Result{bytes, read, "SyntaxError: base64url", true};
+            } else if (ch == '-') {
+                ch = '+'; char_str[0] = '+';
+            } else if (ch == '_') {
+                ch = '/'; char_str[0] = '/';
+            }
+        }
+        if (base64_char_value(ch) < 0) {
+            return FromBase64Result{bytes, read, "SyntaxError: base64", true};
+        }
+        std::size_t remaining = (max_length > bytes.size()) ? (max_length - bytes.size()) : 0;
+        if ((remaining == 1 && chunk_len == 2) || (remaining == 2 && chunk_len == 3)) {
+            return FromBase64Result{bytes, read, "", false};
+        }
+        chunk += char_str;
+        chunk_len = chunk.size();
+        if (chunk_len == 4) {
+            auto decoded = decode_base64_chunk(chunk, false);
+            if (decoded.has_error) return FromBase64Result{bytes, read, decoded.error, true};
+            bytes.insert(bytes.end(), decoded.bytes.begin(), decoded.bytes.end());
+            chunk.clear(); chunk_len = 0;
+            read = index;
+            if (bytes.size() == max_length) {
+                return FromBase64Result{bytes, read, "", false};
+            }
+            if (bytes.size() > max_length) {
+                bytes.resize(max_length);
+                return FromBase64Result{bytes, read, "", false};
+            }
+        }
+    }
+}
+
+struct FromHexResult {
+    std::vector<uint8_t> bytes;
+    std::size_t read{0};
+    std::string error;
+    bool has_error{false};
+};
+
+static FromHexResult from_hex_impl(const std::string& s, std::size_t max_length) {
+    FromHexResult res;
+    std::size_t length = s.size();
+    if (length % 2 != 0) {
+        res.has_error = true; res.error = "SyntaxError: hex odd length"; res.read = 0; return res;
+    }
+    std::size_t read = 0;
+    std::vector<uint8_t> bytes;
+    auto hex_val = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    while (read < length && bytes.size() < max_length) {
+        std::string hexits = s.substr(read, 2);
+        int hi = hex_val(hexits[0]);
+        int lo = hex_val(hexits[1]);
+        if (hi < 0 || lo < 0) {
+            res.has_error = true; res.error = "SyntaxError: hex"; res.bytes = bytes; res.read = read; return res;
+        }
+        read += 2;
+        bytes.push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
+    res.bytes = bytes; res.read = read; return res;
+}
+
+static JsValue get_options_object(const JsValue& options) {
+    if (options.is_undefined()) {
+        JsObject* obj = Heap::default_heap().allocate_object();
+        return JsValue::make_object(obj);
+    }
+    if (!options.is_object_like()) js_throw_type_error("options is not an object");
+    return options;
 }
 
 // ---------------------------------------------------------------------------
 // Each typed-array constructor
+
 // ---------------------------------------------------------------------------
 
 void install_one(JsEnvironment& global, ElementType type) {
@@ -1922,7 +2173,119 @@ void install_one(JsEnvironment& global, ElementType type) {
     js_define_hidden(proto, "@@toStringTag", JsValue::make_string(name));
     proto_value.define_property("BYTES_PER_ELEMENT", JsValue::make_number(element_size(type)), 0);
 
+    if (type == ElementType::Uint8) {
+        js_define_method(proto, "toHex", 0, [](Args) {
+            auto data = require_view(JsValue::current_this(), "Uint8Array.prototype.toHex");
+            if (data->type != ElementType::Uint8) js_throw_type_error("Uint8Array.prototype.toHex: receiver is not a Uint8Array");
+            if (is_out_of_bounds(*data)) js_throw_type_error("Uint8Array.prototype.toHex: the buffer was detached or resized out of bounds");
+            std::size_t len = effective_length(*data);
+            const uint8_t* bytes = elements_of_const(*data);
+            std::string out; out.reserve(len * 2);
+            const char* hex = "0123456789abcdef";
+            for (std::size_t i = 0; i < len; ++i) { out.push_back(hex[(bytes[i] >> 4) & 0xF]); out.push_back(hex[bytes[i] & 0xF]); }
+            return JsValue::make_string(out);
+        });
+        js_define_method(proto, "toBase64", 1, [](Args args) {
+            auto data = require_view(JsValue::current_this(), "Uint8Array.prototype.toBase64");
+            if (data->type != ElementType::Uint8) js_throw_type_error("Uint8Array.prototype.toBase64: receiver is not a Uint8Array");
+            if (is_out_of_bounds(*data)) js_throw_type_error("Uint8Array.prototype.toBase64: the buffer was detached or resized out of bounds");
+            JsValue opts_val = args.size() >= 1 ? args[0] : JsValue::make_undefined();
+            JsValue opts = get_options_object(opts_val);
+            std::string alphabet = "base64";
+            JsValue alpha_v = opts.get_property("alphabet");
+            if (!alpha_v.is_undefined()) { alphabet = js_to_string(alpha_v); if (alphabet != "base64" && alphabet != "base64url") js_throw_type_error("toBase64: alphabet must be 'base64' or 'base64url'"); }
+            bool omit_padding = opts.get_property("omitPadding").is_truthy();
+            std::size_t len = effective_length(*data);
+            const uint8_t* bytes = elements_of_const(*data);
+            std::string out = base64_encode_bytes(bytes, len, alphabet == "base64url", omit_padding);
+            return JsValue::make_string(out);
+        });
+        js_define_method(proto, "setFromHex", 1, [](Args args) {
+            auto data = require_view(JsValue::current_this(), "Uint8Array.prototype.setFromHex");
+            if (data->type != ElementType::Uint8) js_throw_type_error("Uint8Array.prototype.setFromHex: receiver is not a Uint8Array");
+            if (is_out_of_bounds(*data)) js_throw_type_error("Uint8Array.prototype.setFromHex: the buffer was detached or resized out of bounds");
+            if (data->buffer->immutable) js_throw_type_error("Uint8Array.prototype.setFromHex: the buffer is immutable");
+            if (js_arg(args, 0).type != JsType::String) js_throw_type_error("Uint8Array.prototype.setFromHex: argument is not a string");
+            std::string s = js_to_string(js_arg(args, 0));
+            std::size_t byte_len = effective_length(*data);
+            auto res = from_hex_impl(s, byte_len);
+            if (!res.bytes.empty()) {
+                uint8_t* out = elements_of(*data);
+                std::memcpy(out, res.bytes.data(), res.bytes.size());
+            }
+            if (res.has_error) js_throw_error(JsErrorKind::SyntaxError, res.error);
+            JsObject* obj = Heap::default_heap().allocate_object();
+            JsValue ret = JsValue::make_object(obj);
+            ret.define_property("read", JsValue::make_number(static_cast<double>(res.read)), 0);
+            ret.define_property("written", JsValue::make_number(static_cast<double>(res.bytes.size())), 0);
+            return ret;
+        });
+        js_define_method(proto, "setFromBase64", 2, [](Args args) {
+            auto data = require_view(JsValue::current_this(), "Uint8Array.prototype.setFromBase64");
+            if (data->type != ElementType::Uint8) js_throw_type_error("Uint8Array.prototype.setFromBase64: receiver is not a Uint8Array");
+            if (is_out_of_bounds(*data)) js_throw_type_error("Uint8Array.prototype.setFromBase64: the buffer was detached or resized out of bounds");
+            if (data->buffer->immutable) js_throw_type_error("Uint8Array.prototype.setFromBase64: the buffer is immutable");
+            if (js_arg(args, 0).type != JsType::String) js_throw_type_error("Uint8Array.prototype.setFromBase64: argument is not a string");
+            std::string s = js_to_string(js_arg(args, 0));
+            JsValue opts_val = args.size() >= 2 ? args[1] : JsValue::make_undefined();
+            JsValue opts = get_options_object(opts_val);
+            std::string alphabet = "base64";
+            JsValue alpha_v = opts.get_property("alphabet");
+            if (!alpha_v.is_undefined()) { alphabet = js_to_string(alpha_v); if (alphabet != "base64" && alphabet != "base64url") js_throw_type_error("setFromBase64: alphabet must be 'base64' or 'base64url'"); }
+            std::string last_chunk = "loose";
+            JsValue lch_v = opts.get_property("lastChunkHandling");
+            if (!lch_v.is_undefined()) { last_chunk = js_to_string(lch_v); if (last_chunk != "loose" && last_chunk != "strict" && last_chunk != "stop-before-partial") js_throw_type_error("setFromBase64: lastChunkHandling must be 'loose', 'strict' or 'stop-before-partial'"); }
+            std::size_t byte_len = effective_length(*data);
+            auto res = from_base64_impl(s, alphabet, last_chunk, byte_len);
+            if (!res.bytes.empty()) {
+                uint8_t* out = elements_of(*data);
+                std::memcpy(out, res.bytes.data(), res.bytes.size());
+            }
+            if (res.has_error) js_throw_error(JsErrorKind::SyntaxError, res.error);
+            JsObject* obj = Heap::default_heap().allocate_object();
+            JsValue ret = JsValue::make_object(obj);
+            ret.define_property("read", JsValue::make_number(static_cast<double>(res.read)), 0);
+            ret.define_property("written", JsValue::make_number(static_cast<double>(res.bytes.size())), 0);
+            return ret;
+        });
+        constructor.define_property("fromHex", js_make_native("fromHex", 1, [](Args args) {
+            if (args.empty()) js_throw_type_error("Uint8Array.fromHex: missing argument");
+            if (args[0].type != JsType::String) js_throw_type_error("Uint8Array.fromHex: argument is not a string");
+            std::string s = js_to_string(args[0]);
+            auto res = from_hex_impl(s, SIZE_MAX);
+            if (res.has_error) js_throw_error(JsErrorKind::SyntaxError, res.error);
+            auto data = std::make_shared<TypedArrayData>();
+            data->buffer = make_fixed_buffer(res.bytes.size());
+            data->length = res.bytes.size();
+            data->type = ElementType::Uint8;
+            if (!res.bytes.empty()) std::memcpy(elements_of(*data), res.bytes.data(), res.bytes.size());
+            return make_view_object(std::move(data), realm().protos[static_cast<int>(ElementType::Uint8)]);
+        }), 0);
+        constructor.define_property("fromBase64", js_make_native("fromBase64", 1, [](Args args) {
+            if (args.empty()) js_throw_type_error("Uint8Array.fromBase64: missing argument");
+            if (args[0].type != JsType::String) js_throw_type_error("Uint8Array.fromBase64: argument is not a string");
+            std::string s = js_to_string(args[0]);
+            JsValue opts_val = args.size() >= 2 ? args[1] : JsValue::make_undefined();
+            JsValue opts = get_options_object(opts_val);
+            std::string alphabet = "base64";
+            JsValue alpha_v = opts.get_property("alphabet");
+            if (!alpha_v.is_undefined()) { alphabet = js_to_string(alpha_v); if (alphabet != "base64" && alphabet != "base64url") js_throw_type_error("fromBase64: alphabet must be 'base64' or 'base64url'"); }
+            std::string last_chunk = "loose";
+            JsValue lch_v = opts.get_property("lastChunkHandling");
+            if (!lch_v.is_undefined()) { last_chunk = js_to_string(lch_v); if (last_chunk != "loose" && last_chunk != "strict" && last_chunk != "stop-before-partial") js_throw_type_error("fromBase64: lastChunkHandling must be 'loose', 'strict' or 'stop-before-partial'"); }
+            auto res = from_base64_impl(s, alphabet, last_chunk, SIZE_MAX);
+            if (res.has_error) js_throw_error(JsErrorKind::SyntaxError, res.error);
+            auto data = std::make_shared<TypedArrayData>();
+            data->buffer = make_fixed_buffer(res.bytes.size());
+            data->length = res.bytes.size();
+            data->type = ElementType::Uint8;
+            if (!res.bytes.empty()) std::memcpy(elements_of(*data), res.bytes.data(), res.bytes.size());
+            return make_view_object(std::move(data), realm().protos[static_cast<int>(ElementType::Uint8)]);
+        }), 0);
+    }
+
     constructor.define_property("from", js_make_native("from", 1, [type](Args args) {
+
         const JsValue& source = js_arg(args, 0);
         std::vector<double> values;
         if (source.is_array() || source.get_property("@@iterator").is_function()) {
@@ -1981,6 +2344,18 @@ bool view_is_typed_array(const JsValue& value) {
     return value.is_object() && view_of(value) != nullptr;
 }
 
+bool typed_array_immutable_index(const JsValue& value, const std::string& key) {
+    auto view = view_of(value);
+    if (!view || !view->buffer->immutable) return false;
+    const auto index = parse_index(key);
+    return index && *index < effective_length(*view);
+}
+
+bool typed_array_has_immutable_buffer(const JsValue& value) {
+    auto view = view_of(value);
+    return view && view->buffer->immutable;
+}
+
 bool typed_array_bytes(const JsValue& value, std::string& out) {
     out.clear();
     // A view: its live window of the buffer, in bytes, whatever its element type.
@@ -2007,7 +2382,7 @@ bool typed_array_bytes(const JsValue& value, std::string& out) {
 
 bool typed_array_write(const JsValue& view, const uint8_t* bytes, std::size_t count) {
     auto data = view_of(view);
-    if (!data || is_out_of_bounds(*data)) return false;
+    if (!data || data->buffer->immutable || is_out_of_bounds(*data)) return false;
     const auto capacity = effective_byte_length(*data);
     if (count > capacity) return false;
     if (count) std::memcpy(elements_of(*data), bytes, count);
@@ -2100,7 +2475,7 @@ JsObject* typed_array_prototype_for(int element_type) {
 
 bool array_buffer_transfer(const JsValue& value, JsValue& out) {
     auto buffer = buffer_of(value);
-    if (!buffer || buffer->detached) return false;
+    if (!buffer || buffer->detached || buffer->immutable) return false;
     auto next = std::make_shared<ArrayBufferData>();
     next->bytes = std::move(buffer->bytes);
     next->max_byte_length = next->bytes.size();

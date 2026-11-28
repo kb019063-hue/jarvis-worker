@@ -61,6 +61,37 @@ size_t skip_leading_space(const std::string& s) {
     return i;
 }
 
+// Power-of-two radices are exact bit strings. Keep the first 53 significant
+// bits plus a guard and sticky bit, then round once to nearest, ties to even.
+// Repeated floating-point multiply/add can instead round every digit.
+double parse_power_of_two_integer(const std::string& s, size_t first, size_t last, int radix) {
+    int width = 0;
+    for (int r = radix; r > 1; r >>= 1) ++width;
+    uint64_t significand = 0;
+    int bits = 0;
+    bool guard = false, sticky = false, started = false;
+    for (size_t pos = first; pos < last; ++pos) {
+        const char c = s[pos];
+        const int digit = c >= '0' && c <= '9' ? c - '0'
+                        : c >= 'a' && c <= 'z' ? c - 'a' + 10 : c - 'A' + 10;
+        for (int shift = width - 1; shift >= 0; --shift) {
+            const bool bit = (digit & (1 << shift)) != 0;
+            if (!started) {
+                if (!bit) continue;
+                started = true;
+            }
+            ++bits;
+            if (bits <= 53) significand = (significand << 1) | static_cast<uint64_t>(bit);
+            else if (bits == 54) guard = bit;
+            else sticky = sticky || bit;
+            if (bits > 1024) return kInfinity;
+        }
+    }
+    if (bits <= 53) return static_cast<double>(significand);
+    if (guard && (sticky || (significand & 1))) ++significand;
+    return std::ldexp(static_cast<double>(significand), bits - 53);
+}
+
 JsValue parse_int(Args args) {
     std::string s = js_to_string(js_arg(args, 0));
     size_t i = skip_leading_space(s);
@@ -99,6 +130,8 @@ JsValue parse_int(Args args) {
     // same number as the literal.
     if (radix == 10 && i - first_digit > 15) {
         value = js_string_to_number(s.substr(first_digit, i - first_digit));
+    } else if ((radix & (radix - 1)) == 0) {
+        value = parse_power_of_two_integer(s, first_digit, i, radix);
     }
     return JsValue::make_number(negative ? -value : value);
 }
@@ -178,6 +211,31 @@ std::string format_exponent(int exponent) {
     return std::string(exponent < 0 ? "e-" : "e+") + std::to_string(std::abs(exponent));
 }
 
+// Format the exact binary64 magnitude with enough decimal places to expose
+// every nonzero digit (a binary64 denominator is at most 2^1074). Round its
+// significant digits ourselves: printf rounds exact ties to even, whereas
+// ECMAScript chooses the larger decimal magnitude at a tie.
+std::pair<std::string, int> rounded_scientific(double magnitude, int fraction_digits) {
+    constexpr int exact_digits = 1100;
+    char buffer[1200];
+    const int written = std::snprintf(buffer, sizeof(buffer), "%.*e", exact_digits, magnitude);
+    std::string full(buffer, static_cast<size_t>(written));
+    const size_t e_pos = full.find('e');
+    int exponent = std::atoi(full.c_str() + e_pos + 1);
+    const size_t end = fraction_digits == 0 ? 1 : 2 + static_cast<size_t>(fraction_digits);
+    std::string mantissa = full.substr(0, end);
+    const size_t next = fraction_digits == 0 ? 2 : end;
+    if (full[next] >= '5') {
+        increment_decimal(mantissa);
+        if (mantissa.size() > end) {
+            ++exponent;
+            mantissa = "1";
+            if (fraction_digits) mantissa += "." + std::string(static_cast<size_t>(fraction_digits), '0');
+        }
+    }
+    return {mantissa, exponent};
+}
+
 std::string to_exponential(double x, int fraction_digits, bool shortest) {
     if (std::isnan(x)) return "NaN";
     if (std::isinf(x)) return x < 0 ? "-Infinity" : "Infinity";
@@ -202,25 +260,18 @@ std::string to_exponential(double x, int fraction_digits, bool shortest) {
         if (digits.size() > 1) out += "." + digits.substr(1);
         return out + format_exponent(x == 0 ? 0 : exponent);
     }
-    char buffer[160];
-    int written = std::snprintf(buffer, sizeof(buffer), "%.*e", fraction_digits, std::fabs(x));
-    std::string sci(buffer, static_cast<size_t>(written));
-    size_t e_pos = sci.find('e');
-    int exponent = std::atoi(sci.c_str() + e_pos + 1);
-    return (x < 0 ? "-" : "") + sci.substr(0, e_pos) + format_exponent(exponent);
+    auto [mantissa, exponent] = rounded_scientific(std::fabs(x), fraction_digits);
+    return (x < 0 ? "-" : "") + mantissa + format_exponent(exponent);
 }
 
 std::string to_precision(double x, int precision) {
     if (std::isnan(x)) return "NaN";
     if (std::isinf(x)) return x < 0 ? "-Infinity" : "Infinity";
-    char buffer[160];
-    int written = std::snprintf(buffer, sizeof(buffer), "%.*e", precision - 1, std::fabs(x));
-    std::string sci(buffer, static_cast<size_t>(written));
-    size_t e_pos = sci.find('e');
-    int exponent = x == 0 ? 0 : std::atoi(sci.c_str() + e_pos + 1);
+    auto [mantissa, exponent] = rounded_scientific(std::fabs(x), precision - 1);
+    if (x == 0) exponent = 0;
     std::string digits;
-    for (size_t i = 0; i < e_pos; ++i) {
-        if (sci[i] != '.') digits += sci[i];
+    for (char c : mantissa) {
+        if (c != '.') digits += c;
     }
     std::string out = (x < 0) ? "-" : "";
     if (exponent < -6 || exponent >= precision) {
@@ -573,10 +624,16 @@ void install_number_builtins(JsIntrinsics& realm) {
         if (has_nan) return JsValue::make_number(kNaN);
         if (largest == 0.0) return JsValue::make_number(0.0);
         if (values.size() == 2) return JsValue::make_number(std::hypot(values[0], values[1]));
-        double sum = 0.0;
+        // Keep the low-order contribution of each square instead of losing
+        // it when many small arguments follow the largest. Kahan summation
+        // also reduces the dependence on the order of the arguments.
+        double sum = 0.0, compensation = 0.0;
         for (double v : values) {
-            double scaled = v / largest;
-            sum += scaled * scaled;
+            const double scaled = v / largest;
+            const double term = scaled * scaled - compensation;
+            const double next = sum + term;
+            compensation = (next - sum) - term;
+            sum = next;
         }
         return JsValue::make_number(largest * std::sqrt(sum));
     }));

@@ -2,6 +2,7 @@
 """How a suite in tests/test_suite.cpp begins, and whether a merge can resolve it.
 
     python3 tools/ci/check_suites.py            # the count, and any suite that would merge badly
+    python3 tools/ci/check_suites.py --base REF # the same, held to REF (default: origin/main)
     python3 tools/ci/check_suites.py --list     # every suite that still writes the boilerplate
     python3 tools/ci/check_suites.py --self-test  # how a suite is read, on fixed texts; no network
 
@@ -53,8 +54,23 @@ tool holds such a file to is what makes that work:
 And of tests/test_suite.cpp it now says what nothing did: a `TEST(name)` there
 with no `RUN_TEST(name)` line is a suite that is never run. (`make test` ends
 with status 1 for it too; this says it without a build.)
+
+And since 28 November 2026 it holds the one file to the base: a pull request
+adds no suite to tests/test_suite.cpp. The rule reached `main` on 23 November
+at 09:55, and of the 173 merges and commits `main` got from then to 28
+November, 26 wrote a new suite and its `RUN_TEST` line into the one file all
+the same: six on 23 November, and twenty of one agent's (the suites of
+SubtleCrypto, #290 on 23 November to #470 on 28 November), nineteen of those
+after the last of anyone else's. Nothing said so: it was seen by reading
+#470's changes while its lot ran.
+What the file had where the branch left the base (`git merge-base HEAD REF`)
+stays; in CI the working tree is the merge with the base, so that is the base
+itself. Where the two have no commit in common in this clone, nothing is
+compared and it says so: CI asks again.
 """
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -163,7 +179,62 @@ def twice(names: list[str]) -> list[str]:
     return out
 
 
-def report(list_only: bool) -> int:
+def in_the_one_file(text: str) -> list[str]:
+    """Every suite tests/test_suite.cpp has, by name: a `TEST(name) {`, or a
+    `RUN_TEST(name)` line of `main()` (13 of the oldest are written
+    `void test_name() {` and have only the line)."""
+    out: list[str] = []
+    for name in [n for n, _body in suites(text)] + LISTED.findall(text):
+        if name not in out:
+            out.append(name)
+    return out
+
+
+def added_to_the_one_file(before: str, now: str) -> list[str]:
+    """The suites tests/test_suite.cpp has now and had not on the base, by
+    name; none when it has no more suites than it had (one that was renamed
+    is not a new one)."""
+    had, has = in_the_one_file(before), in_the_one_file(now)
+    if len(has) <= len(had):
+        return []
+    return [name for name in has if name not in set(had)]
+
+
+def added_problem(names: list[str]) -> str:
+    """The line that says so, and what to do."""
+    listed = ", ".join(f"`{name}`" for name in names[:3]) + (f" and {len(names) - 3} more" if len(names) > 3 else "")
+    return (f"tests/test_suite.cpp: {len(names)} new suite(s) written into the one file ({listed}). A new suite is a "
+            "file of its own: cut the whole `TEST(name) { ... }` out into tests/suites/N-a-few-words.cpp (N is this "
+            "pull request's number), take its `RUN_TEST(name);` line out of `main()`, and add nothing else: the file "
+            "is run without a line anywhere (AGENTS.md, \"Working together\", point 2; tests/suites/README.md)")
+
+
+def base_of_the_one_file(base: str | None) -> tuple[str | None, str]:
+    """(tests/test_suite.cpp as the base has it, what that base is called),
+    or (None, why nothing is compared). The base is where this branch left
+    REF, so a branch that is only behind is held to nothing `main` did since."""
+    def git(*arguments: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(("git", *arguments), cwd=ROOT, capture_output=True, text=True)
+
+    candidates = [ref for ref in (base, f"origin/{os.environ['GITHUB_BASE_REF']}" if os.environ.get("GITHUB_BASE_REF") else None,
+                                  "origin/main") if ref]
+    ref = next((r for r in candidates if git("rev-parse", "--verify", "--quiet", f"{r}^{{commit}}").returncode == 0), None)
+    if ref is None:
+        return None, f"no base to compare with (tried {', '.join(candidates)})"
+    fork = git("merge-base", "HEAD", ref).stdout.strip()
+    tip = git("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}").stdout.strip()
+    if not fork:
+        # Held to the tip of REF instead, a branch that is only behind would be
+        # told that a suite REF has since moved out of the file is its own.
+        return None, f"this clone has no commit that HEAD and {ref} share (a shallow clone): CI asks again"
+    against, called = (fork, f"{ref} as this branch left it ({fork[:7]})") if fork != tip else (ref, ref)
+    shown = git("show", f"{against}:tests/test_suite.cpp")
+    if shown.returncode != 0:
+        return None, f"tests/test_suite.cpp could not be read at {called}"
+    return shown.stdout, called
+
+
+def report(list_only: bool, base: str | None = None) -> int:
     if not SUITE_FILE.is_file():
         print(f"check_suites: {SUITE_FILE} is not here")
         return 1
@@ -178,7 +249,15 @@ def report(list_only: bool) -> int:
         problems += own_file_problems(path.name, own_text)
         own_names += [n for n, _body in suites(own_text)]
     problems += [f"two suites are called {name}" for name in twice([n for n, _b in found] + own_names)]
+    before, called = base_of_the_one_file(base)
+    added = added_to_the_one_file(before, text) if before is not None else []
+    if added:
+        problems.append(added_problem(added))
     if not list_only:
+        if before is None:
+            print(f"  skip  whether tests/test_suite.cpp has a suite the base has not: {called}")
+        elif not added:
+            print(f"  ok    tests/test_suite.cpp has no suite that {called} has not")
         if problems:
             print(f"  NO    {len(problems)} thing(s) wrong with where the suites are (tests/suites/README.md):")
             for problem in problems:
@@ -247,6 +326,10 @@ def self_test() -> int:
     js.load_page("<p>");
 }
 """
+    one_file = ("void test_old() {\n}\nTEST(one) {\n}\nTEST(two) {\n}\n"
+                "int main() {\n    RUN_TEST(one);\n    RUN_TEST(two);\n    RUN_TEST(old);\n}\n")
+    with_a_new_one = (one_file.replace("int main() {\n", "TEST(three) {\n}\nint main() {\n")
+                      .replace("    RUN_TEST(old);\n", "    RUN_TEST(old);\n    RUN_TEST(three);\n"))
     cases = [
         ("a suite that writes the shared prologue is one that merges badly",
          (writes_its_own_prologue(inline), through_the_helper(inline)), (True, False)),
@@ -288,6 +371,22 @@ def self_test() -> int:
          ["two"]),
         ("...and with it, it is", never_run("TEST(one) {\n}\nint main() {\n    RUN_TEST(one);\n}\n"), []),
         ("a name two suites have is found once", twice(["a", "b", "a", "c", "a", "b"]), ["a", "b"]),
+        ("the suites of the one file: a TEST, and an old one that has only its RUN_TEST line",
+         in_the_one_file(one_file), ["one", "two", "old"]),
+        ("a new TEST and its line in the one file: it is named", added_to_the_one_file(one_file, with_a_new_one), ["three"]),
+        ("the file as the base has it: nothing", added_to_the_one_file(one_file, one_file), []),
+        ("an assertion more in a suite that was there: nothing",
+         added_to_the_one_file(one_file, one_file.replace("TEST(two) {\n", "TEST(two) {\n    assert(1);\n")), []),
+        ("a suite called something else, and no more of them than before: nothing",
+         added_to_the_one_file(one_file, one_file.replace("two", "second")), []),
+        ("a suite taken out of the one file: nothing",
+         added_to_the_one_file(with_a_new_one, one_file), []),
+        ("a new one that has only its line, as the oldest are written: it is named",
+         added_to_the_one_file(one_file, one_file.replace("    RUN_TEST(old);\n", "    RUN_TEST(old);\n    RUN_TEST(older);\n")),
+         ["older"]),
+        ("the line that says so names them, three at the most, and where they go",
+         (added_problem(["a", "b", "c", "d"])[:90], "tests/suites/N-a-few-words.cpp" in added_problem(["a"])),
+         ("tests/test_suite.cpp: 4 new suite(s) written into the one file (`a`, `b`, `c` and 1 more).", True)),
     ]
     failed = 0
     for name, got, wanted in cases:
@@ -307,6 +406,8 @@ def main() -> int:
         return self_test()
     if arguments == ["--list"]:
         return report(list_only=True)
+    if len(arguments) == 2 and arguments[0] == "--base":
+        return report(list_only=False, base=arguments[1])
     if arguments:
         sys.exit(__doc__)
     return report(list_only=False)

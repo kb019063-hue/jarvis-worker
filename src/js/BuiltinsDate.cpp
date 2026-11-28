@@ -412,14 +412,21 @@ double arg_or(Args args, size_t index, double fallback) {
 }
 
 double time_from_components(Args args, bool local) {
+    // ToNumber can run script or throw. Sequence each conversion explicitly:
+    // C++ function arguments do not guarantee JavaScript's left-to-right order.
     double year = js_to_number(args[0]);
+    const double month = arg_or(args, 1, 0);
+    const double day = arg_or(args, 2, 1);
+    const double hour = arg_or(args, 3, 0);
+    const double minute = arg_or(args, 4, 0);
+    const double second = arg_or(args, 5, 0);
+    const double ms = arg_or(args, 6, 0);
     // Two-digit years mean 19xx, a compatibility rule from the first browsers.
     if (std::isfinite(year)) {
         double truncated = std::trunc(year);
         if (truncated >= 0 && truncated <= 99) year = 1900 + truncated;
     }
-    double t = make_time(year, arg_or(args, 1, 0), arg_or(args, 2, 1), arg_or(args, 3, 0),
-                         arg_or(args, 4, 0), arg_or(args, 5, 0), arg_or(args, 6, 0));
+    double t = make_time(year, month, day, hour, minute, second, ms);
     return time_clip(local ? from_local(t) : t);
 }
 
@@ -449,13 +456,31 @@ JsValue::NativeFn getter(const char* name, Field field, bool local) {
 JsValue::NativeFn setter(const char* name, Field first, int max_args, bool local) {
     return [name, first, max_args, local](Args args) {
         auto slot = time_slot(self(), name);
-        double t = *slot;
-        // setFullYear on an invalid date starts from the epoch; the others stay invalid.
-        if (std::isnan(t)) {
-            if (first != Field::Year) return JsValue::make_number(kNaN);
-            t = 0;
+        double t = *slot; // Snapshot before ToNumber: conversion hooks can mutate the Date.
+        if (args.empty()) {
+            *slot = kNaN;
+            return JsValue::make_number(kNaN);
         }
-        Civil c = civil_from_time(local ? to_local(t) : t);
+
+        // The largest setter is setHours (four arguments). Even an invalid
+        // Date must convert every supplied argument before the NaN return.
+        double converted[4];
+        converted[0] = js_to_number(args[0]);
+        if (first == Field::Year) {
+            // FullYear recovers from NaN with calendar +0, NOT LocalTime(+0).
+            // For local FullYear, LocalTime precedes optional month/day conversion.
+            t = std::isnan(t) ? 0 : (local ? to_local(t) : t);
+        }
+        size_t count = 1;
+        for (; count < static_cast<size_t>(max_args) && count < args.size(); ++count) {
+            converted[count] = js_to_number(args[count]);
+        }
+        if (first != Field::Year) {
+            // Do not overwrite a mutation made by a hook if the snapshot was NaN.
+            if (std::isnan(t)) return JsValue::make_number(kNaN);
+            if (local) t = to_local(t);
+        }
+        Civil c = civil_from_time(t);
         double fields[7] = {c.year, static_cast<double>(c.month), static_cast<double>(c.day),
                             static_cast<double>(c.hour), static_cast<double>(c.minute),
                             static_cast<double>(c.second), static_cast<double>(c.ms)};
@@ -470,12 +495,8 @@ JsValue::NativeFn setter(const char* name, Field first, int max_args, bool local
             case Field::Ms: start = 6; break;
             default: break;
         }
-        if (args.empty()) {
-            *slot = kNaN;
-            return JsValue::make_number(kNaN);
-        }
-        for (int i = 0; i < max_args && static_cast<size_t>(i) < args.size(); ++i) {
-            fields[start + i] = js_to_number(args[static_cast<size_t>(i)]);
+        for (size_t i = 0; i < count; ++i) {
+            fields[start + i] = converted[i];
         }
         double result = make_time(fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]);
         *slot = time_clip(local ? from_local(result) : result);
@@ -576,10 +597,14 @@ void install_date_builtins(JsIntrinsics& realm) {
         return JsValue::make_string(to_iso_string(t));
     });
     js_define_method(dp, "toJSON", 1, [](Args) {
-        JsValue me = self();
-        double t = *time_slot(me, "toJSON");
-        if (std::isnan(t)) return JsValue::make_null();
-        return JsValue::make_string(to_iso_string(t));
+        // §21.4.4.37 is deliberately generic: conversion precedes looking up
+        // toISOString, and only a non-finite *Number* suppresses that call.
+        JsValue object = js_to_object(self());
+        JsValue primitive = js_to_primitive(object, JsPrimitiveHint::Number);
+        if (primitive.type == JsType::Number && !std::isfinite(primitive.number_val)) {
+            return JsValue::make_null();
+        }
+        return js_call(object.get_property("toISOString"), object, {});
     });
     js_define_method(dp, "toString", 0, [](Args) {
         return JsValue::make_string(to_date_string(*time_slot(self(), "toString")));

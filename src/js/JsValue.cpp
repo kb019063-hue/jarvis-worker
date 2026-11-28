@@ -272,19 +272,6 @@ void PropertyMap::clear() {
 // Call context: how `this` reaches a native function
 // ---------------------------------------------------------------------------
 
-thread_local const JsValue* t_setter_receiver = nullptr;
-
-SetterReceiverScope::SetterReceiverScope(const JsValue* receiver)
-    : m_previous(t_setter_receiver) {
-    t_setter_receiver = receiver;
-}
-
-SetterReceiverScope::~SetterReceiverScope() { t_setter_receiver = m_previous; }
-
-const JsValue& setter_receiver(const JsValue& on) {
-    return t_setter_receiver ? *t_setter_receiver : on;
-}
-
 namespace {
 
 struct CallContext {
@@ -1116,17 +1103,12 @@ bool JsValue::has_own_property(const std::string& name) const {
         if (cell->is_array) {
             if (name == "length") return true;
             if (parse_array_index(name, index)) {
-                // An element is an own property, and a place past the end is
-                // none. A hole is not one either, which is the whole of
-                // `1 in a`, unless `Object.defineProperty` has made
-                // something of the index: an accessor, or a data property
-                // written over one. Those are kept in the property map, with
-                // the place left a hole (define_accessor), so a hole asks the
-                // map. Only an array that has had an accessor defined on it
-                // can have one, and no other pays for the lookup.
-                if (index >= cell->array_elements.size()) return false;
-                if (!is_array_hole(index)) return true;
-                return cell->has_accessors && cell->properties.find(name) != cell->properties.end();
+                // Dense elements carry no attributes. A place in the vector
+                // is own unless it is a hole; properties with explicit
+                // descriptors (and very sparse elements, which live only in
+                // the map) are found there instead.
+                if (index < cell->array_elements.size() && !is_array_hole(index)) return true;
+                return cell->properties.find(name) != cell->properties.end();
             }
         }
         if (is_wrapped_string_index(cell, name)) return true;
@@ -1790,7 +1772,7 @@ bool set_through_prototype(const JsValue& receiver, const std::string& name, con
         if (found->flags & PropertyMap::Accessor) {
             handled = true;
             if (found->setter && found->setter->is_function()) {
-                found->setter->call_with_this(setter_receiver(receiver), {val});
+                found->setter->call_with_this(receiver, {val});
                 return true;
             }
             return false;      // an accessor with no setter: refused
@@ -2014,7 +1996,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
                             // Held here: the setter may delete the property it is.
                             const std::shared_ptr<JsValue> setter = mapped->setter;
                             if (!setter || !setter->is_function()) return false;
-                            setter->call_with_this(setter_receiver(*this), {val});
+                            setter->call_with_this(*this, {val});
                             return true;
                         }
                         if (!(mapped->flags & PropertyMap::Writable)) return false;
@@ -2115,7 +2097,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
         auto it = obj->properties.find(name);
         if (it != obj->properties.end()) {
             if (it->flags & PropertyMap::Accessor) {
-                if (it->setter && it->setter->is_function()) { it->setter->call_with_this(setter_receiver(*this), {val}); return true; }
+                if (it->setter && it->setter->is_function()) { it->setter->call_with_this(*this, {val}); return true; }
                 return false;
             }
             if (obj->frozen || !(it->flags & PropertyMap::Writable)) return false;
@@ -2144,7 +2126,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
             auto pit = proto->properties.find(name);
             if (pit == proto->properties.end()) continue;
             if (pit->flags & PropertyMap::Accessor) {
-                if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(setter_receiver(*this), {val}); return true; }
+                if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(*this, {val}); return true; }
                 return false;
             }
             break;
@@ -2164,7 +2146,7 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
     auto it = map->find(name);
     if (it != map->end()) {
         if (it->flags & PropertyMap::Accessor) {
-            if (it->setter && it->setter->is_function()) { it->setter->call_with_this(setter_receiver(*this), {val}); return true; }
+            if (it->setter && it->setter->is_function()) { it->setter->call_with_this(*this, {val}); return true; }
             return false;
         }
         if (!(it->flags & PropertyMap::Writable)) return false;
@@ -2172,6 +2154,87 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
         return true;
     }
     (*map)[name] = std::move(val);
+    return true;
+}
+
+bool JsValue::create_data_property(const std::string& name, JsValue val) {
+    // This is CreateDataProperty, not [[Set]]: an inherited setter on this
+    // object must not run, and an inherited non-writable property does not
+    // prevent the new own property from shadowing it. The ordinary caller has
+    // already asked [[GetOwnProperty]] and found no descriptor.
+    if (!is_object_like()) return false;
+
+    JsObject* cell = property_cell(true);
+    if (cell && (!cell->extensible || cell->frozen)) return false;
+
+    // Array indices are stored in the dense vector when close enough, and in
+    // the map for a very sparse write. Both paths also advance the logical
+    // length, but neither walks Array.prototype: this operation is a define,
+    // not an assignment that may be intercepted by an inherited setter.
+    size_t index = 0;
+    if (cell && cell->is_array && parse_array_index(name, index)) {
+        const auto mapped = cell->properties.find(name);
+        if (index < cell->array_elements.size()) {
+            if (!is_array_hole(index) || mapped != cell->properties.end()) return false;
+        } else if (mapped != cell->properties.end()) {
+            // A sparse index already in the map is an own property even though
+            // the dense element vector does not reach it.
+            return false;
+        }
+
+        size_t length_now = cell->array_elements.size();
+        bool length_writable = !cell->frozen;
+        const auto length_entry = cell->properties.find("length");
+        if (length_entry != cell->properties.end()) {
+            length_now = std::max(length_now, static_cast<size_t>(js_to_number(length_entry->second)));
+            if (!(length_entry->flags & PropertyMap::Writable)) length_writable = false;
+        }
+        if (index >= length_now && !length_writable) return false;
+
+        if (cell->exotic && cell->exotic->owns_place(cell, name)) {
+            define_property(name, std::move(val), PropertyMap::Default);
+            return true;
+        }
+
+        const size_t previous = cell->array_elements.size();
+        if (index >= previous) {
+            if (index > previous + kMaxDenseGap) {
+                if (!cell->array_holes) cell->array_holes = std::make_unique<JsObject::Holes>();
+                for (size_t i = previous; i < previous + kMaxDenseGap && i < index; ++i) {
+                    cell->array_holes->set(i);
+                }
+            } else {
+                cell->array_elements.resize(index + 1, JsValue::make_undefined());
+                if (!cell->array_holes) cell->array_holes = std::make_unique<JsObject::Holes>();
+                for (size_t i = previous; i < index; ++i) cell->array_holes->set(i);
+            }
+        }
+
+        if (index < cell->array_elements.size()) {
+            cell->array_elements[index] = std::move(val);
+            if (cell->array_holes) cell->array_holes->clear(index);
+        } else {
+            PropertyMap::Entry& entry = cell->properties.entry(name);
+            entry.second = std::move(val);
+            entry.setter.reset();
+            entry.flags = PropertyMap::Default;
+        }
+
+        const double wanted = static_cast<double>(index + 1);
+        auto current_length = cell->properties.find("length");
+        if (current_length != cell->properties.end()) {
+            if (js_to_number(current_length->second) < wanted) {
+                current_length->second = JsValue::make_number(wanted);
+            }
+        } else if (wanted > static_cast<double>(cell->array_elements.size())) {
+            PropertyMap::Entry& made = cell->properties.entry("length");
+            made.second = JsValue::make_number(wanted);
+            made.flags = PropertyMap::Writable;
+        }
+        return true;
+    }
+
+    define_property(name, std::move(val), PropertyMap::Default);
     return true;
 }
 

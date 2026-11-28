@@ -533,6 +533,8 @@ void setup_encoder(JsObject* proto, JsValue& constructor) {
         // the one place this file writes through a view rather than answering a
         // new one.
         if (written > 0 && !typed_array_write(destination, out.data(), out.size())) {
+            if (typed_array_has_immutable_buffer(destination))
+                js_throw_type_error("Failed to execute 'encodeInto' on 'TextEncoder': The destination buffer is immutable.");
             js_throw_type_error("Failed to execute 'encodeInto' on 'TextEncoder': The destination is detached.");
         }
         JsValue result = JsValue::make_object(Heap::default_heap().allocate_object());

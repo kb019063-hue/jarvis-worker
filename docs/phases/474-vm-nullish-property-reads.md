@@ -58,3 +58,7 @@ computed nullish read still coerces object keys too early. The VM remains an
 experimental engine and optional chaining, full receiver handling and the
 other differential-oracle refusals remain incomplete. No external
 conformance score or speed improvement is claimed.
+
+After resolving the merge with Phase 479, the combined oracle reports
+157/157 agree and 10/10 refused; `make test` passes 527/527 engine suites
+and 114 cross-origin checks.

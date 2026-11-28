@@ -5789,15 +5789,15 @@ TEST(browser_shell_navigation_and_hit_testing) {
     assert(!items.empty());
     assert(shell.focused_element_index() == 0);
 
-    // Cycle focus
-    int idx0 = shell.focused_element_index();
+    // This page's click target is a div with no tabindex, not a focusable
+    // button. It remains a click target but neither Tab direction can focus it.
+    auto target = items[0].element;
+    assert(target->id() == "click-btn");
     shell.focus_next();
     shell.focus_prev();
-    assert(shell.focused_element_index() == idx0);
-
-    // Activate focused element (simulates pressing Enter on button)
-    bool activated = shell.activate_focused();
-    assert(activated);
+    assert(shell.focused_element_index() == -1);
+    assert(shell.document()->focused_element() == nullptr);
+    assert(shell.dispatch_click(target));
 
     // 7. Hit testing
     auto el = shell.element_at(100.0f, 50.0f);

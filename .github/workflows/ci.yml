@@ -106,6 +106,20 @@ jobs:
   build-and-test:
     name: Build & unit tests
     runs-on: ubuntu-latest
+    # No job runs longer than this (the same line in every job below).
+    # Without it GitHub ends a job after six hours and nothing else does:
+    # one suite that never returned would hold a pull request, and the lot
+    # it is in, for that long. Of the last 437 runs that ended (23 to 28
+    # November 2026) the longest took 27.5 minutes from its start to its
+    # end, every job and the wait for machines included; in the slowest lot
+    # of 28 November the longest job took 8.5.
+    # At the limit GitHub cancels the job. Whether its last step, `if:
+    # failure()`, still runs then has not been tried here, so a step that
+    # runs through tools/ci/logged.sh is stopped by that first, after 30
+    # minutes, as a failure, with the end of what it printed in the
+    # annotations. The steps of the deep-pages and sanitizer jobs do not
+    # run through it: for them this line is the only limit.
+    timeout-minutes: 45
     defaults:
       run:
         # A step that fails keeps what it printed, for the last step of the
@@ -302,6 +316,7 @@ jobs:
   docs:
     name: Documentation shape
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not after the last merge of a lot (the top of this file). It is part of
     # the short run.
     if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -334,9 +349,12 @@ jobs:
         # "take ours" and "take theirs" each produce a function with the other's
         # body. These are the shapes it is trusted for, and it builds nothing.
         run: python3 tools/ci/check_suites.py --self-test
-      - name: Every suite that runs script takes its page from TestPage
-        # Not a failure while suites are being converted: the count is printed so
-        # it can be watched. A suite that uses TestPage *and* sets its own URL is
+      - name: Where the suites are, and how each begins
+        # A suite is a file of its own in tests/suites/, in the form its README
+        # gives; a new one written into tests/test_suite.cpp fails here (26
+        # were, from 23 to 28 November 2026, and nothing said so). A suite of
+        # that file that writes its own page is counted, not failed, while they
+        # are being converted. One that uses TestPage *and* sets its own URL is
         # a failure, because that is the helper's page used for another document.
         run: python3 tools/ci/check_suites.py
       - name: check_numbers reads a marked figure the way the documents write one
@@ -384,6 +402,7 @@ jobs:
   render-conformance:
     name: Render reftests (pixels)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not after the last merge of a lot (the top of this file). It is part of
     # the short run.
     if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -424,6 +443,7 @@ jobs:
   conformance:
     name: DOM conformance (html5lib corpus)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not after the last merge of a lot (the top of this file). It is part of
     # the short run.
     if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -490,6 +510,7 @@ jobs:
   js-conformance:
     name: JavaScript conformance (Node-verified corpus)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not after the last merge of a lot (the top of this file). It is part of
     # the short run.
     if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -609,6 +630,7 @@ jobs:
   dom-conformance:
     name: Script DOM conformance (jsdom-verified corpus) and URLs (web-platform-tests)
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not after the last merge of a lot (the top of this file). It is part of
     # the short run.
     if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -666,6 +688,7 @@ jobs:
   xml-and-wpt:
     name: XML (W3C suite, Expat and libxml2) and web-platform-tests
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not after the last merge of a lot (the top of this file). It is part of
     # the short run.
     if: ${{ !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -734,6 +757,7 @@ jobs:
   deep-pages:
     name: "Deep and oversized pages: the dumps (stack, memory and time limits)"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
     if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -772,6 +796,7 @@ jobs:
   deep-pages-terminal:
     name: "Deep and oversized pages: the terminal (stack, memory and time limits)"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
     if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -811,6 +836,7 @@ jobs:
   deep-pages-rest:
     name: "Deep and oversized pages: html5lib (stack, memory and time limits)"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
     if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -868,6 +894,7 @@ jobs:
   sanitizers-unit:
     name: "Sanitizers: unit suites"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not in the short run of a pull request. After the last merge of a lot it
     # builds and keeps the objects, and leaves the suites out (the top of this
     # file).
@@ -995,6 +1022,7 @@ jobs:
   sanitizers-unit-deep:
     name: "Sanitizers: unit suites, the deep ones"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not in the short run of a pull request, and not after the last merge
     # of a lot (the top of this file).
     if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -1032,6 +1060,7 @@ jobs:
   sanitizers-fuzz:
     name: "Sanitizers: fuzzing"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
     if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -1094,6 +1123,7 @@ jobs:
   sanitizers-wpt:
     name: "Sanitizers: web-platform-tests"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
     if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -1137,6 +1167,7 @@ jobs:
   sanitizers-xml:
     name: "Sanitizers: the XML suite"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
     if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -1185,6 +1216,7 @@ jobs:
   sanitizers-deep:
     name: "Sanitizers: deep and oversized pages"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
     if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -1226,6 +1258,7 @@ jobs:
   sanitizers-corpora:
     name: "Sanitizers: script corpora"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
     if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}
@@ -1276,6 +1309,7 @@ jobs:
   sanitizers-verifiers:
     name: "Sanitizers: verifiers, generated XML, string stress tests"
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     # Not in the short run of a pull request, nor after the last merge of a lot
     # (the top of this file).
     if: ${{ !(github.event_name == 'pull_request' && (github.event.action != 'unlabeled' || startsWith(github.event.pull_request.title, 'WIP:')) && !startsWith(github.event.pull_request.title, 'WATCH:')) && !(github.event_name == 'push' && contains(github.event.head_commit.message, '[objects only]')) }}

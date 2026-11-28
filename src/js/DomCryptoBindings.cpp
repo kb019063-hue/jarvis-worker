@@ -1138,6 +1138,7 @@ void setup_subtle_crypto(Iface& I) {
         }
         std::vector<uint8_t> key_bytes;
         std::string ec_key_type;
+        std::string jwk_alg;
         if (fmt == "jwk") {
             if (!args[1].is_object_like()) {
                 return reject_with("TypeError", "SubtleCrypto.importKey: jwk keyData must be an object.");
@@ -1146,6 +1147,8 @@ void setup_subtle_crypto(Iface& I) {
             if (ext_val.type == JsType::Boolean && !ext_val.is_truthy() && args[3].is_truthy()) {
                 return reject_with("DataError", "SubtleCrypto.importKey: JWK ext is false but extractable is true.");
             }
+            JsValue jwk_alg_val = args[1].get_property("alg");
+            jwk_alg = (!jwk_alg_val.is_undefined() && !jwk_alg_val.is_nullish()) ? to_str(jwk_alg_val) : "";
             std::string kty = to_str(args[1].get_property("kty"));
             if (kty == "EC") {
                 if (to_str(args[1].get_property("crv")) != "P-256") {
@@ -1237,6 +1240,13 @@ void setup_subtle_crypto(Iface& I) {
         if (alg_name == "aes-ctr" || alg_name == "aes-gcm" || alg_name == "aes-cbc" || alg_name == "aes-kw") {
             if (key_bytes.size() != 16u && key_bytes.size() != 24u && key_bytes.size() != 32u) {
                 return reject_with("DataError", "SubtleCrypto.importKey: AES key must be 128, 192, or 256 bits.");
+            }
+            if (fmt == "jwk" && !jwk_alg.empty()) {
+                std::string bits = std::to_string(key_bytes.size() * 8u);
+                std::string expected = "A" + bits + (alg_name == "aes-gcm" ? "GCM" : alg_name == "aes-cbc" ? "CBC" : alg_name == "aes-ctr" ? "CTR" : "KW");
+                if (jwk_alg != expected) {
+                    return reject_with("DataError", "SubtleCrypto.importKey: JWK alg '" + jwk_alg + "' does not match " + expected + ".");
+                }
             }
             auto state = std::make_shared<CryptoKeyState>();
             state->extractable = args[3].is_truthy();

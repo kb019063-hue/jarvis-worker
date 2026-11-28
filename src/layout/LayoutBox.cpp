@@ -2232,6 +2232,43 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
 
     const float estimated_line_height = s.effective_line_height();
 
+    auto text_baseline = [](const ComputedStyle& text_style) {
+        const float font_size = text_style.font_size > 0.0f ? text_style.font_size : 16.0f;
+        const auto [ascent, descent] = FontRenderer::instance().em_ascent_descent(
+            font_size, text_style.font_weight, text_style.font_family,
+            text_style.font_style != FontStyle::Normal);
+        // draw_text positions the face baseline inside its 1.25em ink box. The
+        // fragment's top is moved during line placement; keep that same face
+        // metric here so layout and paint agree about where the baseline is.
+        const float leading = std::max(0.0f, font_size * 1.25f - (ascent + descent));
+        return ascent + leading * 0.5f;
+    };
+
+    auto inline_block_baseline = [](const LayoutBox& box) {
+        const auto& d = box.dimensions;
+        if (!box.line_boxes.empty()) {
+            const auto& last_line = box.line_boxes.back();
+            return d.margin.top + d.border.top + d.padding.top +
+                   (last_line.rect.y - d.content.y) + last_line.baseline;
+        }
+        // CSS 2.1 §10.8.1: an inline-block without an in-flow line box has
+        // its baseline at the bottom margin edge.
+        return d.margin_box().height;
+    };
+
+    auto fragment_baseline = [&](const InlineFragment& fragment) -> std::optional<float> {
+        if (fragment.style && fragment.style->vertical_align != VerticalAlign::Baseline) {
+            return std::nullopt;
+        }
+        if (fragment.box && fragment.box->style && fragment.box->style->is_inline_block()) {
+            return inline_block_baseline(*fragment.box);
+        }
+        if (fragment.is_text && fragment.style) {
+            return text_baseline(*fragment.style);
+        }
+        return std::nullopt;
+    };
+
     auto finish_line = [&](LineBox& line, float width) {
         while (!line.fragments.empty() && line.fragments.back().is_space &&
                !line.fragments.back().preserve_space) {
@@ -2241,13 +2278,21 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
         if (!line.fragments.empty()) {
             line.rect.width = width;
             float max_h = s.effective_line_height();
+            const float strut_baseline = text_baseline(s);
+            float ascent = strut_baseline;
+            float descent = std::max(0.0f, s.effective_line_height() - strut_baseline);
             for (const auto& f : line.fragments) {
                 // CSS 2.1, 10.8.1: the line box's height is at least the
                 // largest of the inline boxes on it, strut included.
                 max_h = std::max(max_h, f.style->effective_line_height());
                 max_h = std::max(max_h, f.rect.height);
+                if (const auto baseline = fragment_baseline(f)) {
+                    ascent = std::max(ascent, *baseline);
+                    descent = std::max(descent, std::max(0.0f, f.rect.height - *baseline));
+                }
             }
-            line.rect.height = max_h;
+            line.baseline = ascent;
+            line.rect.height = std::max(max_h, ascent + descent);
             line_boxes.push_back(std::move(line));
         }
         line = LineBox();
@@ -2362,7 +2407,12 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
         for (auto& frag : line.fragments) {
             frag.rect.x = dimensions.content.x + x_offset + frag.rect.x;
             frag.rect.y = dimensions.content.y + y_cursor;
-            if (frag.rect.height < line.rect.height) {
+            if (const auto baseline = fragment_baseline(frag)) {
+                // A taller inline-block can move the line baseline away from
+                // its old centered position. Recompute the sink from the final
+                // line metrics, including the inline-block's own top padding.
+                frag.rect.y += line.baseline - *baseline;
+            } else if (frag.rect.height < line.rect.height) {
                 const VerticalAlign va = frag.style ? frag.style->vertical_align : VerticalAlign::Baseline;
                 switch (va) {
                     case VerticalAlign::Top:

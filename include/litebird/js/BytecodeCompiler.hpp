@@ -101,14 +101,14 @@ private:
     int m_protected_depth{0};
     int m_catch_depth{0};
     int m_finalizer_depth{0};
-    // The one simple try/finally whose protected body can return. Nested
-    // handlers, loops and returns from catch/finally remain refused.
+    // Active try/finally scopes, outermost first. Catch handlers, loops and
+    // returns from catch/finally remain refused.
     struct ReturnFinally {
         const BlockStmt* body{nullptr};
         size_t locals{0};
         int scope_depth{0};
     };
-    ReturnFinally m_return_finally;
+    std::vector<ReturnFinally> m_return_finalizers;
     int m_completion_slot{-1};
     std::vector<Loop> m_loops;
 };

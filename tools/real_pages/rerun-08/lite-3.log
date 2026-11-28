@@ -1,0 +1,4 @@
+stage: opening snapshot
+stage: painting initial frame
+stage: driving task
+BENCH pass: Scrolled to #rationale-and-goals; heading y=0.000000

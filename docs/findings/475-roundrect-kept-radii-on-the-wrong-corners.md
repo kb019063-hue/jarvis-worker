@@ -33,8 +33,8 @@ uses this geometry.
 
 ## Verification
 
-`make -j2 test` — **524/524 engine suites passed; 114/114 cross-origin checks
-passed**.
+After merging the current `main`, `make -j2 test` — **532/532 engine suites
+passed; 114/114 cross-origin checks passed**.
 
 ## Still open
 

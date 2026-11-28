@@ -40,6 +40,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.parse
 import zlib
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
@@ -540,6 +541,7 @@ class HttpConnectProxy:
                     headers[name.strip().lower()] = value.strip()
             target = words[1] if len(words) >= 2 else ""
             record = {
+                "method": words[0] if words else "",
                 "request_line": lines[0],
                 "target": target,
                 "host": headers.get("host"),
@@ -563,6 +565,42 @@ class HttpConnectProxy:
                         "Content-Length: 0\r\nConnection: close\r\n\r\n"
                     )
                 conn.sendall(response.encode("ascii"))
+                return
+
+            if (len(words) == 3 and words[0] in ("GET", "HEAD", "POST", "OPTIONS") and
+                    words[2] == "HTTP/1.1" and target.startswith("http://")):
+                parsed_http = urllib.parse.urlsplit(target)
+                dest_host = parsed_http.hostname or ""
+                dest_port = parsed_http.port or 80
+                if not dest_host:
+                    record["status"] = 400
+                    conn.sendall(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
+                origin_path = parsed_http.path or "/"
+                if parsed_http.query:
+                    origin_path += "?" + parsed_http.query
+                try:
+                    upstream = socket.create_connection((dest_host, dest_port), timeout=3.0)
+                except OSError:
+                    record["status"] = 502
+                    conn.sendall(b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    return
+                record["status"] = 200
+                fwd = [f"{words[0]} {origin_path} HTTP/1.1"]
+                for hline in lines[1:]:
+                    if not hline:
+                        continue
+                    hname = hline.split(":", 1)[0].strip().lower()
+                    if hname in ("connection", "proxy-connection"):
+                        continue
+                    fwd.append(hline)
+                fwd.append("Connection: close")
+                upstream.sendall(("\r\n".join(fwd) + "\r\n\r\n").encode("latin-1"))
+                while not self.stop_event.is_set():
+                    data = upstream.recv(65536)
+                    if not data:
+                        return
+                    conn.sendall(data)
                 return
 
             destination = self._split_authority(target)
@@ -1235,17 +1273,19 @@ setTimeout(pump, 1);
             lower_checks = parse_checks(lower_result.stdout + "\n" + lower_result.stderr)
             with lower_proxy.lock:
                 lower_requests = list(lower_proxy.requests)
+            lower_ws_requests = [r for r in lower_requests if r["target"] == valid_ip_authority]
             check("lower-case https_proxy and no_proxy route through CONNECT or bypass by host and port",
                   lower_result.returncode == 0 and lower_checks.get("done") == "1"
                   and lower_checks.get("lower_proxy_msg") == "echo:lowercase-proxy"
                   and lower_checks.get("lower_proxy_close") == "1000:true"
                   and lower_checks.get("lower_bypass_msg") == "echo:lowercase-no-proxy"
                   and lower_checks.get("lower_bypass_close") == "1000:true"
-                  and len(lower_requests) == 1
-                  and lower_requests[0]["target"] == valid_ip_authority
-                  and lower_requests[0]["status"] == 200
-                  and lower_requests[0]["host"] == valid_ip_authority
-                  and lower_requests[0]["headers"] == {"host": valid_ip_authority},
+                  and len(lower_ws_requests) == 1
+                  and f"localhost:{wss_valid.port}" not in [r["target"] for r in lower_requests]
+                  and all(r["request_line"] == f"CONNECT {r['target']} HTTP/1.1"
+                          and r["host"] == r["target"]
+                          and set(r["headers"]) == {"host"}
+                          and r["status"] == 200 for r in lower_requests),
                   f"checks={lower_checks} requests={lower_requests}")
             lower_proxy.stop()
             lower_proxy = None
@@ -1379,15 +1419,19 @@ setTimeout(pump, 1);
             with connect_proxy.lock:
                 all_proxy_requests = list(connect_proxy.requests)
             all_proxy_record = all_proxy_requests[all_proxy_before:] if len(all_proxy_requests) > all_proxy_before else []
+            all_proxy_ws = [r for r in all_proxy_record if r["target"] == valid_ip_authority]
             with wss_valid.lock:
                 all_proxy_upgrade = next((u for u in wss_valid.upgrades if u["path"] == "/all-proxy"), None)
             check("ALL_PROXY is the fallback for wss:// and completes the TLS WebSocket handshake",
                   all_proxy_result.returncode == 0 and all_proxy_checks.get("done") == "1"
                   and all_proxy_checks.get("all_proxy_msg") == "echo:all-proxy"
                   and all_proxy_checks.get("all_proxy_close") == "1000:true"
-                  and len(all_proxy_record) == 1
-                  and all_proxy_record[0]["target"] == valid_ip_authority
-                  and all_proxy_record[0]["status"] == 200
+                  and len(all_proxy_ws) == 1
+                  and all_proxy_ws[0]["status"] == 200
+                  and all(r["request_line"] == f"CONNECT {r['target']} HTTP/1.1"
+                          and r["host"] == r["target"]
+                          and set(r["headers"]) == {"host"}
+                          and r["status"] == 200 for r in all_proxy_record)
                   and all_proxy_upgrade is not None,
                   f"checks={all_proxy_checks} records={all_proxy_record} upgrade={all_proxy_upgrade is not None}")
 
@@ -1421,18 +1465,164 @@ setTimeout(pump, 1);
             refused_checks = parse_checks(refused_result.stdout + "\n" + refused_result.stderr)
             with refusing_proxy.lock:
                 refused_requests = list(refusing_proxy.requests)
+            refused_ws = [r for r in refused_requests if r["target"] == valid_ip_authority]
             with wss_valid.lock:
                 refused_upgrade = next((u for u in wss_valid.upgrades if u["path"] == "/proxy-407"), None)
             check("HTTP proxy 407 fails closed before TLS/Upgrade and sends no Proxy-Authorization",
                   refused_result.returncode == 0 and refused_checks.get("done") == "1"
                   and refused_checks.get("proxy_407") == "WebSocket HTTP proxy CONNECT failed (407)|1006:false"
-                  and len(refused_requests) == 1 and refused_requests[0]["status"] == 407
-                  and refused_requests[0]["request_line"] == f"CONNECT {valid_ip_authority} HTTP/1.1"
-                  and "proxy-authorization" not in refused_requests[0]["headers"]
+                  and len(refused_ws) == 1
+                  and all(r["status"] == 407
+                          and r["request_line"] == f"CONNECT {r['target']} HTTP/1.1"
+                          and "proxy-authorization" not in r["headers"]
+                          for r in refused_requests)
                   and refused_upgrade is None,
                   f"checks={refused_checks} requests={refused_requests} upgrade={refused_upgrade is not None}")
             refusing_proxy.stop()
             refusing_proxy = None
+
+            # 2b. Plain ws:// proxy routing via HTTP_PROXY / all_proxy / NO_PROXY and fail-closed 407
+            plain_authority = f"127.0.0.1:{plain_srv.port}"
+            plain_proxy = HttpConnectProxy()
+            ws_proxy_html = f"""<!doctype html><meta charset="utf-8"><script>
+var pending = 2;
+function log(k, v) {{ console.log('WSCHECK:' + k + '=' + v); }}
+function pump() {{ if (pending <= 0) {{ log('done', '1'); return; }} fetch('/yield').then(pump, pump); }}
+var pws = new WebSocket('ws://127.0.0.1:{plain_srv.port}/ws-proxy');
+pws.onopen = function() {{ pws.send('ws-via-http-proxy'); }};
+pws.onmessage = function(e) {{ log('ws_proxy_msg', e.data); pws.close(1000); }};
+pws.onclose = function(e) {{ log('ws_proxy_close', e.code + ':' + e.wasClean); pending--; }};
+var bws = new WebSocket('ws://localhost:{plain_srv.port}/ws-noproxy');
+bws.onopen = function() {{ bws.send('ws-bypass'); }};
+bws.onmessage = function(e) {{ log('ws_bypass_msg', e.data); bws.close(1000); }};
+bws.onclose = function(e) {{ log('ws_bypass_close', e.code + ':' + e.wasClean); pending--; }};
+setTimeout(pump, 1);
+</script>"""
+            ws_proxy_page = root / "ws_proxy_page.html"
+            ws_proxy_page.write_text(ws_proxy_html, encoding="utf-8")
+            ws_proxy_env = {
+                **env_ca,
+                "HTTP_PROXY": plain_proxy.url,
+                "http_proxy": "",
+                "HTTPS_PROXY": "",
+                "https_proxy": "",
+                "NO_PROXY": f"localhost:{plain_srv.port}",
+                "no_proxy": "",
+                "ALL_PROXY": "",
+                "all_proxy": "",
+            }
+            ws_proxy_res = run_cli(
+                str(binary),
+                [str(ws_proxy_page), f"--url={http_origin}/ws-proxy-page", "--virtual-time-budget=2000"],
+                args.timeout,
+                env_extra=ws_proxy_env,
+            )
+            ws_proxy_checks = parse_checks(ws_proxy_res.stdout + "\n" + ws_proxy_res.stderr)
+            with plain_proxy.lock:
+                ws_proxy_requests = list(plain_proxy.requests)
+            ws_connects = [r for r in ws_proxy_requests if r["method"] == "CONNECT"]
+            http_forwards = [r for r in ws_proxy_requests if r["method"] == "GET"]
+            check("HTTP_PROXY routes plain ws:// through CONNECT while NO_PROXY bypasses direct",
+                  ws_proxy_res.returncode == 0 and ws_proxy_checks.get("done") == "1"
+                  and ws_proxy_checks.get("ws_proxy_msg") == "echo:ws-via-http-proxy"
+                  and ws_proxy_checks.get("ws_proxy_close") == "1000:true"
+                  and ws_proxy_checks.get("ws_bypass_msg") == "echo:ws-bypass"
+                  and ws_proxy_checks.get("ws_bypass_close") == "1000:true"
+                  and len(ws_connects) == 1
+                  and ws_connects[0]["target"] == plain_authority
+                  and ws_connects[0]["headers"] == {"host": plain_authority}
+                  and ws_connects[0]["status"] == 200
+                  and len(http_forwards) >= 1
+                  and all(r["target"] == f"http://{plain_authority}/yield" and r["status"] == 200
+                          for r in http_forwards),
+                  f"checks={ws_proxy_checks} requests={ws_proxy_requests}")
+
+            ws_all_before = len(ws_proxy_requests)
+            ws_all_html = f"""<!doctype html><meta charset="utf-8"><script>
+var pending = 1;
+function log(k, v) {{ console.log('WSCHECK:' + k + '=' + v); }}
+function pump() {{ if (pending <= 0) {{ log('done', '1'); return; }} fetch('/yield').then(pump, pump); }}
+var aws = new WebSocket('ws://127.0.0.1:{plain_srv.port}/ws-all-proxy');
+aws.onopen = function() {{ aws.send('ws-via-all-proxy'); }};
+aws.onmessage = function(e) {{ log('ws_all_msg', e.data); aws.close(1000); }};
+aws.onclose = function(e) {{ log('ws_all_close', e.code + ':' + e.wasClean); pending--; }};
+setTimeout(pump, 1);
+</script>"""
+            ws_all_page = root / "ws_all_proxy_page.html"
+            ws_all_page.write_text(ws_all_html, encoding="utf-8")
+            ws_all_env = {
+                **env_ca,
+                "HTTP_PROXY": "",
+                "http_proxy": "",
+                "HTTPS_PROXY": "",
+                "https_proxy": "",
+                "NO_PROXY": "",
+                "no_proxy": "",
+                "ALL_PROXY": "",
+                "all_proxy": plain_proxy.url,
+            }
+            ws_all_res = run_cli(
+                str(binary),
+                [str(ws_all_page), f"--url={http_origin}/ws-all-page", "--virtual-time-budget=2000"],
+                args.timeout,
+                env_extra=ws_all_env,
+            )
+            ws_all_checks = parse_checks(ws_all_res.stdout + "\n" + ws_all_res.stderr)
+            with plain_proxy.lock:
+                ws_all_reqs = list(plain_proxy.requests)[ws_all_before:]
+            ws_all_connects = [r for r in ws_all_reqs if r["method"] == "CONNECT"]
+            check("all_proxy is the fallback for plain ws:// through CONNECT",
+                  ws_all_res.returncode == 0 and ws_all_checks.get("done") == "1"
+                  and ws_all_checks.get("ws_all_msg") == "echo:ws-via-all-proxy"
+                  and ws_all_checks.get("ws_all_close") == "1000:true"
+                  and len(ws_all_connects) == 1
+                  and ws_all_connects[0]["target"] == plain_authority
+                  and ws_all_connects[0]["status"] == 200,
+                  f"checks={ws_all_checks} reqs={ws_all_reqs}")
+            plain_proxy.stop()
+
+            refusing_ws_proxy = HttpConnectProxy(response_code=407)
+            ws_407_html = f"""<!doctype html><meta charset="utf-8"><script>
+var pending = 1, errorMessage = '';
+function log(k, v) {{ console.log('WSCHECK:' + k + '=' + v); }}
+function pump() {{ if (pending <= 0) {{ log('done', '1'); return; }} fetch('/yield').then(pump, pump); }}
+var ws = new WebSocket('ws://127.0.0.1:{plain_srv.port}/ws-proxy-407');
+ws.onerror = function(e) {{ errorMessage = e.message || ''; }};
+ws.onclose = function(e) {{ log('ws_proxy_407', errorMessage + '|' + e.code + ':' + e.wasClean); pending--; }};
+setTimeout(pump, 1);
+</script>"""
+            ws_407_page = root / "ws_407_page.html"
+            ws_407_page.write_text(ws_407_html, encoding="utf-8")
+            ws_407_res = run_cli(
+                str(binary),
+                [str(ws_407_page), f"--url={http_origin}/ws-proxy-407", "--virtual-time-budget=2000"],
+                args.timeout,
+                env_extra={
+                    **env_ca,
+                    "HTTP_PROXY": refusing_ws_proxy.url,
+                    "http_proxy": "",
+                    "HTTPS_PROXY": "",
+                    "https_proxy": "",
+                    "NO_PROXY": "",
+                    "no_proxy": "",
+                    "ALL_PROXY": "",
+                    "all_proxy": "",
+                },
+            )
+            ws_407_checks = parse_checks(ws_407_res.stdout + "\n" + ws_407_res.stderr)
+            with refusing_ws_proxy.lock:
+                ws_407_reqs = list(refusing_ws_proxy.requests)
+            with plain_srv.lock:
+                ws_407_up = next((u for u in plain_srv.upgrades if u["path"] == "/ws-proxy-407"), None)
+            check("Plain ws:// HTTP_PROXY 407 fails closed before Upgrade and sends no Proxy-Authorization",
+                  ws_407_res.returncode == 0 and ws_407_checks.get("done") == "1"
+                  and ws_407_checks.get("ws_proxy_407") == "WebSocket HTTP proxy CONNECT failed (407)|1006:false"
+                  and any(r["method"] == "CONNECT" and r["target"] == plain_authority and r["status"] == 407
+                          for r in ws_407_reqs)
+                  and all("proxy-authorization" not in r["headers"] for r in ws_407_reqs)
+                  and ws_407_up is None,
+                  f"checks={ws_407_checks} reqs={ws_407_reqs} upgrade={ws_407_up is not None}")
+            refusing_ws_proxy.stop()
 
             # 3. file:// document sends Origin: null and rejects relative WebSocket URL
             file_html = f"""<!doctype html><meta charset="utf-8"><script>

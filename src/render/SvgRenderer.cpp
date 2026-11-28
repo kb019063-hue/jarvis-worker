@@ -2276,15 +2276,18 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
         auto target = id.empty() ? nullptr : document->get_element_by_id(id);
         if (!target) return box;
         const std::string target_tag = to_lower_ascii(target->tag_name());
-        // An <svg> target needs its own nested viewport handling.
-        if (target_tag == "svg") return box;
         if (!active.insert(target.get()).second) return box;
         std::string value;
         BBox target_box;
-        if (target_tag == "symbol") {
+        if (target_tag == "symbol" || target_tag == "svg") {
             // Match the painter's use viewport: percentages inside a valid
             // viewBox resolve in that box, then its matrix maps into use space.
             float w = ref_w, h = ref_h;
+            // <use> dimensions override an SVG target's own viewport dimensions.
+            if (target_tag == "svg") {
+                if (get_attr_ci(target, "width", value)) parse_float_value(value, w, ref_w);
+                if (get_attr_ci(target, "height", value)) parse_float_value(value, h, ref_h);
+            }
             if (get_attr_ci(el, "width", value)) parse_float_value(value, w, ref_w);
             if (get_attr_ci(el, "height", value)) parse_float_value(value, h, ref_h);
             float inner_w = std::max(0.0f, w), inner_h = std::max(0.0f, h);
@@ -2304,6 +2307,13 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
             // before the use translation; non-origin points remain geometry.
             if (zero_source && target_box.valid() && target_box.min_x == 0 && target_box.min_y == 0 &&
                 target_box.max_x == 0 && target_box.max_y == 0) target_box = BBox();
+            if (target_tag == "svg" && target_box.valid()) {
+                float x = 0, y = 0;
+                if (get_attr_ci(target, "x", value)) parse_float_value(value, x, ref_w);
+                if (get_attr_ci(target, "y", value)) parse_float_value(value, y, ref_h);
+                target_box.min_x += x; target_box.max_x += x;
+                target_box.min_y += y; target_box.max_y += y;
+            }
         } else {
             target_box = svg_bbox_walk(target, ref_w, ref_h, depth + 1, active, false, in_symbol_instance);
             if (get_attr_ci(target, "transform", value))

@@ -50,6 +50,14 @@
 #                                        that was read here (origin/prN); `anyway` as a third word
 #                                        posts all the same
 #   tools/watch/watch.sh note N FILE     comment FILE on #N, print the comment's id
+#   tools/watch/watch.sh drafts          every claim under WIP: that is no draft is made one, with a
+#                                        note on it that says so and what its agent does at the end
+#   tools/watch/watch.sh ready N         #N is finished (no WIP: in its title) and still a draft:
+#                                        `gh pr ready N` and a note on it; `cands` then takes it.
+#                                        3 and nothing done when its title is still under WIP:
+#   tools/watch/watch.sh rule            what rule GitHub has on main, read back, and what in it would
+#                                        stop a merge or a lot (tools/watch/rule.py; 0 as asked for,
+#                                        1 none, 3 something to change)
 #   tools/watch/watch.sh off "what it did"   the watch has ended: the status comment says OFF, and
 #                                        nothing here writes a beat after it
 #   tools/watch/watch.sh notits N        #N's own run failed and its change is not why (read
@@ -73,9 +81,17 @@ R="$(git remote get-url origin | sed -E 's#^.*github\.com[:/]##; s#\.git$##')"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 BOARD="${CHECK_PR_BOARD:-$(timeout 30 gh pr list --state open --limit 100 --json number,title --jq '[.[] | select(.title | test("^BOARD:"))][0].number' 2>/dev/null)}"
 
+# What the check runs of a commit say, as one line: of each job the check run
+# that came last. A job that ran twice on one commit leaves two, and GitHub
+# goes by the later one. On 28 November two runs began on #522's head in one
+# second and the one cancelled the other (one run for a pull request,
+# .github/workflows/ci.yml): seven jobs cancelled, the same seven passed.
+# GitHub reported CLEAN. Counted all together they were "not green" here for
+# good, and on the head of a lot the same would have read as a job that
+# failed. (tools/watch/takeable_test.sh asks this of what GitHub answered.)
+RUNS_JQ='[.check_runs | group_by(.name)[] | max_by(.id) | "\(.status)/\(.conclusion)"] | group_by(.) | map("\(.[0]) x\(length)") | join(", ")'
 runs_of() {  # runs_of FULLSHA -> "completed/success x12" and the like
-  timeout 30 gh api "repos/$R/commits/$1/check-runs?per_page=100" \
-    --jq '[.check_runs[] | "\(.status)/\(.conclusion)"] | group_by(.) | map("\(.[0]) x\(length)") | join(", ")'
+  timeout 30 gh api "repos/$R/commits/$1/check-runs?per_page=100" --jq "$RUNS_JQ"
 }
 whole() {  # whole FULLSHA: every check run of it has ended in success, and there are ten or more
   local runs; runs="$(runs_of "$1")"
@@ -150,8 +166,13 @@ ruled_out() {  # ruled_out N FULLSHA [STATE]: GitHub refuses to merge #N as it i
   # merged, whatever the lot's run said: one that came back with main merged
   # under the mark that skips CI, one whose code was green a commit earlier,
   # one whose own run failed for a reason that is not its change. Written on
-  # 28 November, before any rule was on: tried with a `gh` that made the
-  # answers up, never against a rule.
+  # 28 November in the morning, against a `gh` that made the answers up. The
+  # person's rule was on main from 11:28 UTC that day, and BLOCKED was seen
+  # for the first time: of every head with no run on it, which was each
+  # claim, and the watch's own pull request when it was ready with no run,
+  # which `gh pr merge` then refused ("the base branch policy prohibits the
+  # merge", 11:34). #521, taken at 11:45 while its own run was going, was
+  # BLOCKED then and CLEAN a minute later, and `land` merged it at 11:51.
   local gs runs; gs="${3:-$(github_says "$1")}"
   case "$gs" in
     BLOCKED)
@@ -205,8 +226,15 @@ takeable() {  # takeable N FULLSHA; says why in $WHY
   runs="$(runs_of "$2")"
   case "$runs" in *failure*|*timed_out*) WHY="its own run failed"; return 1 ;; esac
   if came_back_without_a_run "$1" "$2" || code_was_green "$2"; then
-    ruled_out "$1" "$2" && return 1   # no passed run on this head, and a rule on main wants one
-    WHY="its code was green"; return 0
+    if ! ruled_out "$1" "$2"; then WHY="its code was green"; return 0; fi
+    # A rule on main wants a passed run on this head. With none at all it is
+    # not taken, and its agent is told to push without the mark ($WHY).
+    # With one that is going it is taken as any finished pull request is
+    # (below), and `land` waits for that run: a merge of main pushed without
+    # the mark, which is how a pull request comes back since the rule is on.
+    # (As this was written on the morning of 28 November, such a head was
+    # refused here with "wait for it", in a list of things to tell its agent.)
+    [[ "$runs" == *in_progress* || "$runs" == *queued* || "$runs" == *pending* ]] || return 1
   fi
   # A finished pull request whose own run is still going is taken as well
   # (WATCH_EAGER=0 turns that off): its run and the lot's go side by side, and
@@ -224,14 +252,21 @@ note() {  # note N FILE -> "#N COMMENTID"
   local url; url="$(timeout 40 gh pr comment "$1" --body-file "$2" 2>&1 | tail -1)"
   echo "#$1 ${url##*-}"
 }
-open_ones() {  # "N FULLSHA fin|WIP MERGEABLE..." of every open pull request that is a claim
+open_ones() {  # "N FULLSHA fin|WIP|WIP-no-draft|draft MERGEABLE..." of every open pull request that is a claim
   # A draft is work in progress whatever its title says, as it is for
   # check_pr.py: GitHub does not merge one. On 24 November #385, a draft
   # whose title had lost its WIP:, was taken into a lot for three minutes.
   timeout 40 gh pr list --state open --limit 100 --json number,title,headRefOid,mergeable,isDraft \
-    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "fin" end) \(.mergeable)"' | sort -n
+    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.title | test("^WIP")) then (if .isDraft then "WIP" else "WIP-no-draft" end) elif .isDraft then "draft" else "fin" end) \(.mergeable)"' | sort -n
 }
 fetch_pr() { timeout 60 git fetch -q origin "+refs/pull/$1/head:refs/remotes/origin/pr$1"; }
+wip_off_at() {  # wip_off_at N -> HH:MM:SS (UTC; with the day when it was not today) at which the last change of #N's title took WIP: off; nothing when it did not
+  # A title that loses its WIP: is its agent's word that the work is
+  # finished ("Working together", point 3). The first 100 events of the pull
+  # request are read; no claim here has had that many.
+  timeout 30 gh api "repos/$R/issues/$1/events?per_page=100" \
+    --jq '[.[] | select(.event == "renamed")] | last | select(. != null) | select((.rename.from | test("^WIP")) and ((.rename.to | test("^WIP")) | not)) | .created_at as $t | if $t[0:10] == (now | strftime("%Y-%m-%d")) then $t[11:19] else $t[0:10] + " " + $t[11:16] end' 2>/dev/null
+}
 agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^Agent: *(\\w+)") | .captures[0].string] | first) // "-"' 2>/dev/null; }
 
 beat() {  # beat [due]: write the look into the status comment of the board; `due`: only when the last is five minutes old
@@ -308,6 +343,27 @@ cands)
   # when it has moved. To take one all the same, give its number to `plan`.
   clashes="$(timeout 90 python3 tools/ci/check_pr.py numbers 2>/dev/null)"
   open_ones | while read -r n full wip mergeable; do
+    if [ "$wip" = "draft" ]; then
+      # A draft whose title has lost its WIP: is in no list, and GitHub
+      # merges none. Either its agent is not finished and took the WIP: off
+      # early, or it is finished and `gh pr ready` did not happen: #425
+      # stood so for thirteen hours on 25 November, and #508 for eleven
+      # minutes of a watch on 28 November, renamed at 07:52:18 like its
+      # agent's two before it, which had been made ready in the same second.
+      # Since that day every claim is a draft, so this is said every time.
+      runs="$(runs_of "$full" 2>/dev/null)"; case "$runs" in ""|"{"*) runs="its runs could not be read" ;; esac
+      off="$(wip_off_at "$n")"
+      if [ -n "$off" ]; then
+        echo "#$n ${full:0:7}: NOT taken: a draft, and the WIP: came off its title at $off UTC ($runs): finished and not made ready. \`tools/watch/watch.sh ready $n\` makes it ready and says so on it; it is taken at the next look" >&2
+      else
+        echo "#$n ${full:0:7}: NOT taken: a draft whose title has no WIP: and never lost one ($runs). Opened without WIP:, or finished? Read it; \`tools/watch/watch.sh ready $n\` when it is finished" >&2
+      fi
+      continue
+    fi
+    if [ "$wip" = "WIP-no-draft" ]; then
+      echo "#$n ${full:0:7}: a claim under WIP: that is no draft, which GitHub would merge for whoever asked: \`tools/watch/watch.sh drafts\` makes it one and says so on it" >&2
+      continue
+    fi
     [ "$wip" = "fin" ] || continue
     grep -q "^$n ${full:0:7}$" "$STATE/sentback" 2>/dev/null && continue   # sent back, and has not moved
     grep -qx "$n" "$STATE/ignore" 2>/dev/null && continue                     # nobody's: left alone
@@ -686,6 +742,47 @@ notits)
 
 note)
   note "$1" "$2" ;;
+
+rule)
+  python3 tools/watch/rule.py ;;
+
+ready)
+  # A finished draft that its agent did not make ready: the landing session
+  # does, and says so on it. Twice on 28 November: #508, whose agent had
+  # made its two before ready in the second it renamed them and not this
+  # one, and #515, which the landing session itself had made a draft 25
+  # seconds before its last push. Not for a draft whose work is going on:
+  # ready and without WIP: is "land this".
+  n="${1:?ready N}"
+  read -r state draft full title <<< "$(timeout 30 gh pr view "$n" --json state,isDraft,headRefOid,title --jq '"\(.state) \(.isDraft) \(.headRefOid) \(.title)"')"
+  [ "$state" = "OPEN" ] || { echo "ready: #$n is not open (${state:-no answer})" >&2; exit 9; }
+  [ "$draft" = "true" ] || { echo "ready: #$n is no draft: nothing to do"; exit 0; }
+  case "$title" in WIP*) echo "ready: nothing is done. #$n is still under WIP: ($title): its agent has not said it is finished" >&2; exit 3 ;; esac
+  off="$(wip_off_at "$n")"
+  if [ -n "$off" ]; then when="Its \`WIP:\` came off at $off UTC"; else when="Its title has no \`WIP:\`"; fi
+  timeout 30 gh pr ready "$n" > "$STATE/land/ready$n.out" 2>&1 || { echo "ready: gh pr ready $n failed: $(tail -1 "$STATE/land/ready$n.out" | cut -c1-160)" >&2; exit 9; }
+  printf '%s: #%s is ready now: I ran `gh pr ready %s` at %s UTC. %s, and it had stayed a draft: a draft is in no list, and GitHub merges it for nobody. It is taken as it is at `%s`; say so here and push if it was not finished. The next one: `gh pr ready N` with the last push, when the `WIP:` comes off.\n' \
+    "$NAME" "$n" "$n" "$(date -u +%H:%M)" "$when" "${full:0:7}" > "$STATE/land/ready$n.md"
+  note "$n" "$STATE/land/ready$n.md" ;;
+
+drafts)
+  # A claim is a draft since 28 November 2026 (AGENTS.md, "Before starting",
+  # point 2): GitHub merges a draft for nobody, and `WIP:` in a title stops
+  # nobody (#449, #491). A chat that began before that day, or did not read
+  # the point, opens its claim as before: of the first four claims opened
+  # after the rule was on main, three were drafts and one was not. The landing
+  # session makes such a claim a draft and says so on it, which is also
+  # where its agent reads what to do with its last push. Nothing is said
+  # twice: a claim that is a draft is not touched.
+  timeout 40 gh pr list --state open --limit 100 --json number,title,isDraft \
+    --jq '.[] | select((.title | test("^WIP")) and (.isDraft | not)) | .number' | sort -n | while read -r n; do
+    if timeout 30 gh pr ready "$n" --undo > "$STATE/land/draft$n.out" 2>&1; then
+      printf '%s: #%s is a draft now: I ran `gh pr ready %s --undo`. Every claim is one since 28 November (AGENTS.md, "Before starting", point 2), because GitHub merges a draft for nobody and `WIP:` in a title stops nobody. Nothing else changes for you, and no run was started or stopped. With your last push, when `WIP:` comes off the title: `gh pr ready %s`, then `python3 tools/ci/check_pr.py merge %s` as before.\n' "$NAME" "$n" "$n" "$n" "$n" > "$STATE/land/draft$n.md"
+      note "$n" "$STATE/land/draft$n.md"
+    else
+      echo "#$n could not be made a draft: $(tail -1 "$STATE/land/draft$n.out" | cut -c1-160)" >&2
+    fi
+  done ;;
 
 *)
   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 9 ;;

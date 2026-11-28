@@ -129,12 +129,28 @@ std::vector<std::size_t> reorder_by_level(const std::vector<int>& levels) {
 /// characters of the odd ones. A line with no right-to-left character in it
 /// returns here without touching anything, which is why 99% of pages are
 /// unaffected by this pass.
-void apply_bidi_to_line(LineBox& line) {
+///
+/// The paragraph's level comes from the owning block: `unicode-bidi:
+/// plaintext` asks rules P2/P3 for the line's first strong character, every
+/// other value takes `direction` outright — so `direction: rtl` on a block
+/// whose first strong character is Latin still runs the paragraph right to
+/// left. Each fragment's own `unicode-bidi` decides whether it is wrapped in
+/// the initiator/terminator pair that gives it its own base (or forces its
+/// characters' direction) before the levels are computed.
+void apply_bidi_to_line(LineBox& line, const ComputedStyle& para_style) {
     if (line.fragments.empty()) return;
-    // Every right-to-left script is above U+0080, and the Latin pages that
-    // make up almost all of what this engine lays out are pure ASCII. One
-    // scan of the bytes answers for them without decoding anything.
+
+    // Whether the pass can possibly change anything. Every right-to-left
+    // script is above U+0080, and the Latin pages that make up almost all of
+    // what this engine lays out are pure ASCII — but an ASCII line still
+    // reorders when the paragraph is right-to-left (a trailing space moves to
+    // the other end of the line) or when a fragment carries an override
+    // (`bdo` forces its characters' direction) or an isolate/embed at the
+    // right edge of its own direction, which resolves `!?` as `?!` against
+    // that direction. One scan of the bytes answers the first question
+    // without decoding anything; the styles answer the rest.
     bool non_ascii = false;
+    bool force_pass = para_style.direction == Direction::Rtl;
     for (const InlineFragment& fragment : line.fragments) {
         for (char c : fragment.text) {
             if (static_cast<unsigned char>(c) >= 0x80) {
@@ -142,14 +158,98 @@ void apply_bidi_to_line(LineBox& line) {
                 break;
             }
         }
-        if (non_ascii) break;
+        const ComputedStyle& fs = fragment.style ? *fragment.style : para_style;
+        if (fs.unicode_bidi == UnicodeBidi::BidiOverride ||
+            fs.unicode_bidi == UnicodeBidi::IsolateOverride ||
+            (fs.unicode_bidi != UnicodeBidi::Normal && fs.direction == Direction::Rtl)) {
+            force_pass = true;
+        }
+        if (non_ascii && force_pass) break;
     }
-    if (!non_ascii) return;
+    if (!non_ascii && !force_pass) return;
 
     std::vector<DecodedFragment> decoded(line.fragments.size());
     std::u32string text;
     std::vector<std::size_t> fragment_of;
     std::vector<std::size_t> char_in;
+    std::vector<bool> synthetic;  // the control characters injected below
+
+    // The wraps form a stack. The paragraph's own wrap — when the block has
+    // a `unicode-bidi` other than `normal` or `plaintext` — sits at the
+    // bottom and spans the whole line, so everything the block itself holds
+    // is inside it; a fragment whose (unicode-bidi, direction) pair differs
+    // from what is open nests its own wrap, and a `Normal` fragment rides
+    // whatever is open (it belongs to the element whose wrap that is) while
+    // closing any nested group a previous fragment left open. The
+    // paragraph's wrap alone shifts every level inside it by the same two,
+    // which rule L2 cannot see; what it provides is the context the nested
+    // wraps resolve against. `plaintext` on the block is answered by the
+    // paragraph level (rules P2/P3 over the whole line), so it wraps nothing.
+    struct WrapKey {
+        UnicodeBidi bidi;
+        Direction dir;
+        bool operator==(const WrapKey& o) const { return bidi == o.bidi && dir == o.dir; }
+    };
+    std::vector<WrapKey> open_wraps;
+    const bool para_wraps = para_style.unicode_bidi != UnicodeBidi::Normal &&
+                            para_style.unicode_bidi != UnicodeBidi::Plaintext;
+
+    auto push_synthetic = [&](uint32_t cp, std::size_t f) {
+        text.push_back(cp);
+        fragment_of.push_back(f);
+        char_in.push_back(0);  // never read: synthetic characters are skipped
+        synthetic.push_back(true);
+    };
+    auto close_wrap = [&](std::size_t f) {
+        if (open_wraps.empty()) return;
+        const WrapKey key = open_wraps.back();
+        open_wraps.pop_back();
+        switch (key.bidi) {
+            case UnicodeBidi::Embed:
+            case UnicodeBidi::BidiOverride:
+                push_synthetic(0x202C, f);  // PDF
+                break;
+            case UnicodeBidi::Isolate:
+            case UnicodeBidi::Plaintext:
+                push_synthetic(0x2069, f);  // PDI
+                break;
+            case UnicodeBidi::IsolateOverride:
+                push_synthetic(0x202C, f);  // PDF closes the override...
+                push_synthetic(0x2069, f);  // ...PDI closes the isolate
+                break;
+            default:
+                break;
+        }
+    };
+    auto open_wrap = [&](const WrapKey& key, std::size_t f) {
+        const bool rtl = key.dir == Direction::Rtl;
+        switch (key.bidi) {
+            case UnicodeBidi::Embed:
+                push_synthetic(rtl ? 0x202B : 0x202A, f);  // RLE / LRE
+                break;
+            case UnicodeBidi::Isolate:
+                push_synthetic(rtl ? 0x2067 : 0x2066, f);  // RLI / LRI
+                break;
+            case UnicodeBidi::BidiOverride:
+                push_synthetic(rtl ? 0x202E : 0x202D, f);  // RLO / LRO
+                break;
+            case UnicodeBidi::IsolateOverride:
+                push_synthetic(rtl ? 0x2067 : 0x2066, f);  // RLI / LRI
+                push_synthetic(rtl ? 0x202E : 0x202D, f);  // RLO / LRO
+                break;
+            case UnicodeBidi::Plaintext:
+                push_synthetic(0x2068, f);  // FSI
+                break;
+            default:
+                break;
+        }
+        open_wraps.push_back(key);
+    };
+
+    if (para_wraps) {
+        open_wrap(WrapKey{para_style.unicode_bidi, para_style.direction}, 0);
+    }
+
     for (std::size_t f = 0; f < line.fragments.size(); ++f) {
         const InlineFragment& fragment = line.fragments[f];
         if (fragment.is_text) {
@@ -160,23 +260,61 @@ void apply_bidi_to_line(LineBox& line) {
             decoded[f].codepoints.push_back(0xFFFC);
             decoded[f].byte_at.push_back(0);
         }
+        // An empty fragment has nothing to wrap and nothing to close around;
+        // skipping it leaves the group open across the gap, which costs
+        // nothing because the group key is the fragments' own style.
+        if (decoded[f].codepoints.empty()) continue;
+        const ComputedStyle& fs = fragment.style ? *fragment.style : para_style;
+        // A `Normal` fragment, and a `plaintext` fragment of a `plaintext`
+        // block, ride whatever is open: the first belongs to the element
+        // whose wrap that is, the second is answered by the paragraph level.
+        const bool rides =
+            fs.unicode_bidi == UnicodeBidi::Normal ||
+            (fs.unicode_bidi == UnicodeBidi::Plaintext &&
+             para_style.unicode_bidi == UnicodeBidi::Plaintext);
+        if (rides) {
+            while (open_wraps.size() > (para_wraps ? 1u : 0u)) close_wrap(f);
+        } else {
+            const WrapKey key{fs.unicode_bidi, fs.direction};
+            const std::size_t para_depth = para_wraps ? 1u : 0u;
+            while (open_wraps.size() > para_depth && !(open_wraps.back() == key)) {
+                close_wrap(f);
+            }
+            if (open_wraps.empty() || !(open_wraps.back() == key)) open_wrap(key, f);
+        }
         for (std::size_t k = 0; k < decoded[f].codepoints.size(); ++k) {
             text.push_back(decoded[f].codepoints[k]);
             fragment_of.push_back(f);
             char_in.push_back(k);
+            synthetic.push_back(false);
         }
+    }
+    while (!open_wraps.empty()) {
+        close_wrap(line.fragments.empty() ? 0 : line.fragments.size() - 1);
     }
     if (text.empty()) return;
 
-    const BidiParagraph paragraph = bidi_paragraph(text);
-    // UAX #9 X9 marks BN as removed for bidi resolution, including ZWNJ/ZWJ,
-    // which OpenType shaping still needs inside Arabic/Indic runs.
-    auto is_bidi_removed = [&](std::size_t idx) {
+    // The paragraph level: `plaintext` asks P2/P3 for the first strong
+    // character of the line (falling back to `direction` when there is none,
+    // which is what the paragraph's direction means for P3), everything else
+    // takes the direction outright.
+    const int direction_level = para_style.direction == Direction::Rtl ? 1 : 0;
+    const BidiParagraph paragraph = bidi_paragraph(
+        text, para_style.unicode_bidi == UnicodeBidi::Plaintext ? -1 : direction_level,
+        direction_level);
+
+    // What the run pass does not see: rule X9's removed characters — ZWNJ/ZWJ
+    // excepted, which OpenType shaping still needs inside Arabic/Indic runs —
+    // and the control characters just injected to wrap the groups. The
+    // injected isolate initiators and PDIs are not X9-removed (they carry
+    // levels of their own), so they need the first half of the test too.
+    auto bidi_skip = [&](std::size_t idx) {
+        if (synthetic[idx]) return true;
         return paragraph.removed[idx] && text[idx] != 0x200C && text[idx] != 0x200D;
     };
     bool right_to_left = false;
     for (std::size_t k = 0; k < text.size(); ++k) {
-        if (is_bidi_removed(k)) continue;
+        if (bidi_skip(k)) continue;
         if (paragraph.levels[k] % 2 == 1) {
             right_to_left = true;
             break;
@@ -193,14 +331,14 @@ void apply_bidi_to_line(LineBox& line) {
     };
     std::vector<Run> runs;
     for (std::size_t k = 0; k < text.size();) {
-        if (is_bidi_removed(k)) {
+        if (bidi_skip(k)) {
             ++k;
             continue;
         }
         const std::size_t f = fragment_of[k];
         const int level = paragraph.levels[k];
         std::size_t end = k + 1;
-        while (end < text.size() && !is_bidi_removed(end) && fragment_of[end] == f &&
+        while (end < text.size() && !bidi_skip(end) && fragment_of[end] == f &&
                paragraph.levels[end] == level) {
             ++end;
         }
@@ -256,18 +394,26 @@ void apply_bidi_to_line(LineBox& line) {
         piece.rect.x = cursor;
         piece.rect.width = run.width;
         cursor += run.width;
-        if (source.is_text && run.level % 2 == 1) {
-            // The painter draws a run's characters left to right, so an
-            // odd-level run is written out backwards (that is L2 inside the
-            // run) with each character mirrored (that is L4). `is_rtl_visual`
-            // lets the OpenType shaper reverse back to logical order before
+        if (source.is_text) {
+            // A run is a slice of its fragment, so the piece must carry just
+            // that slice. An even run is copied in logical order; an odd run
+            // is written out backwards (that is L2 inside the run) with each
+            // character mirrored (that is L4). `is_rtl_visual` lets the
+            // OpenType shaper reverse back to logical order before
             // joining/anchoring Arabic/Hebrew glyphs and then reorder clusters.
             const DecodedFragment& decoded_source = decoded[run.fragment];
             piece.text.clear();
-            for (std::size_t k = run.last_char; k-- > run.first_char;) {
-                append_utf8(piece.text, bidi_mirror(decoded_source.codepoints[k]));
+            if (run.level % 2 == 1) {
+                for (std::size_t k = run.last_char; k-- > run.first_char;) {
+                    append_utf8(piece.text, bidi_mirror(decoded_source.codepoints[k]));
+                }
+                piece.is_rtl_visual = true;
+            } else {
+                for (std::size_t k = run.first_char; k < run.last_char; ++k) {
+                    append_utf8(piece.text, decoded_source.codepoints[k]);
+                }
+                piece.is_rtl_visual = false;
             }
-            piece.is_rtl_visual = true;
         } else {
             piece.is_rtl_visual = false;
         }
@@ -2393,9 +2539,15 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
         float free_space = std::max(0.0f, capacity - line.rect.width);
         float x_offset = left;
 
+        // `start` and `end` follow `direction`; `left` and `right` are
+        // physical and never do. `justify` has no distribution pass yet and
+        // stays at the left edge, as it always has.
+        const bool rtl_align = s.direction == Direction::Rtl;
         if (s.text_align == TextAlign::Center) {
             x_offset = left + free_space / 2.0f;
-        } else if (s.text_align == TextAlign::Right || s.text_align == TextAlign::End) {
+        } else if (s.text_align == TextAlign::Right ||
+                   (s.text_align == TextAlign::End && !rtl_align) ||
+                   (s.text_align == TextAlign::Start && rtl_align)) {
             x_offset = left + free_space;
         }
 
@@ -2434,7 +2586,7 @@ void LayoutBox::layout_inline_formatting_context(float containing_width) {
                 }
             }
         }
-        apply_bidi_to_line(line);
+        apply_bidi_to_line(line, s);
 
         for (auto& frag : line.fragments) {
             if (frag.box && frag.box->style->is_inline_block()) {

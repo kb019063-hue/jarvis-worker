@@ -5789,15 +5789,15 @@ TEST(browser_shell_navigation_and_hit_testing) {
     assert(!items.empty());
     assert(shell.focused_element_index() == 0);
 
-    // Cycle focus
-    int idx0 = shell.focused_element_index();
+    // This page's click target is a div with no tabindex, not a focusable
+    // button. It remains a click target but neither Tab direction can focus it.
+    auto target = items[0].element;
+    assert(target->id() == "click-btn");
     shell.focus_next();
     shell.focus_prev();
-    assert(shell.focused_element_index() == idx0);
-
-    // Activate focused element (simulates pressing Enter on button)
-    bool activated = shell.activate_focused();
-    assert(activated);
+    assert(shell.focused_element_index() == -1);
+    assert(shell.document()->focused_element() == nullptr);
+    assert(shell.dispatch_click(target));
 
     // 7. Hit testing
     auto el = shell.element_at(100.0f, 50.0f);
@@ -27143,7 +27143,11 @@ TEST(text_align_and_text_decoration_enums_parse_cleanly) {
     assert(!s_c.has_text_decoration());
 
     auto s_d = resolver.resolve_style(doc->get_element_by_id("d"));
-    assert(s_d.text_align == TextAlign::Left);
+    // `bogus` is not a text-align keyword, so the declaration is dropped and
+    // the computed value is the initial one — `start`, which is also what
+    // every style starts from since Phase 109-direction made the default
+    // direction-aware rather than a physical left.
+    assert(s_d.text_align == TextAlign::Start);
     assert(s_d.text_decoration == TextDecoration::None);
 }
 
@@ -29712,12 +29716,23 @@ TEST(bidi_reorders_hebrew_and_arabic_runs) {
         assert(line.fragments.back().text == "gamma");
     }
 
-    // Parentheses around a Hebrew word in a right-to-left line: rule L4 mirrors
-    // the glyphs, so the painted text opens with the closing bracket's glyph.
+    // Parentheses around a Hebrew word: rule L4 mirrors the glyphs, so the
+    // painted text opens with the opening bracket's glyph and the word
+    // inside is written backwards. The paragraph's direction is ltr (no
+    // `dir` anywhere), so rule N0 keeps the brackets on the left-to-right
+    // level while the word sits at the odd one: three fragments, left to
+    // right, whose concatenation is the painting one reversed fragment used
+    // to carry — the levels moved, the ink did not.
     {
         const LineBox line = layout_line("(" + shalom + ")", 600.0f);
-        assert(!line.fragments.empty());
-        const std::string& painted = line.fragments.front().text;
+        assert(line.fragments.size() >= 3);
+        std::string painted;
+        float prev_x = -1.0f;
+        for (const InlineFragment& fragment : line.fragments) {
+            assert(fragment.rect.x >= prev_x);  // visual order, left to right
+            prev_x = fragment.rect.x;
+            painted += fragment.text;
+        }
         assert(painted.front() == '(');
         assert(painted.back() == ')');
         // The word inside is reversed, so the last letter of `shalom` comes

@@ -234,6 +234,27 @@ enum class TextAlign : uint8_t {
     End
 };
 
+/// `direction`: the paragraph direction the bidi pass runs with, instead of
+/// the first-strong detection it had to do by itself. Inherited.
+enum class Direction : uint8_t {
+    Ltr,
+    Rtl
+};
+
+/// `unicode-bidi`: how an element's text joins the bidirectional algorithm.
+/// Not inherited per CSS Writing Modes 2.1 — but `resolve_style` seeds the
+/// two override values into a child whose parent has them, so an ancestor's
+/// forced direction still reaches the text inside it (and an author
+/// declaration on the child wins over that seed, as it would over anything).
+enum class UnicodeBidi : uint8_t {
+    Normal,
+    Embed,
+    Isolate,
+    BidiOverride,
+    IsolateOverride,
+    Plaintext
+};
+
 enum class WhiteSpace : uint8_t {
     Normal,
     Nowrap,
@@ -409,8 +430,12 @@ struct ComputedStyle {
     // length or percentage is inherited as a length.
     float line_height{-1.0f};
     float line_height_number{-1.0f};
-    TextAlign text_align{TextAlign::Left};
+    /// `text-align: start` is the initial value (CSS Text 3 §2.1) and what a
+    /// `dir`-aware line resolves: `Start` follows `direction`, `Left` does not.
+    TextAlign text_align{TextAlign::Start};
     TextDecoration text_decoration{TextDecoration::None};
+    Direction direction{Direction::Ltr};
+    UnicodeBidi unicode_bidi{UnicodeBidi::Normal};
     WhiteSpace white_space{WhiteSpace::Normal};
     VerticalAlign vertical_align{VerticalAlign::Baseline};
     Visibility visibility{Visibility::Visible};

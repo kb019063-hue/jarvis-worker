@@ -512,6 +512,75 @@ adding `2` Lao mark-ordering cases) improves from **5/30 → 30/30** (**6/32 →
 Hangul normalization, and public source clusters remain separate; see
 `docs/phases/501-general-opentype-normalization.md`.
 
+## Thai and Lao SARA AM and legacy PUA shaping (Phase 513)
+
+Implementing HarfBuzz's `_hb_ot_shaper_thai` (`hb-ot-shaper-thai.cc` and
+GDEF-less mark width/offset handling in `hb-ot-shape.cc`) in
+`TrueTypeFont::shape_glyphs`:
+
+1. `preprocess_text_thai` across `thai` and `lao ` script runs before
+   `_hb_ot_shape_normalize`: decomposes `SARA AM` (`U+0E33`, `U+0EB3`) into
+   `NIKHAHIT` (`U+0E4D`, `U+0ECD`) + `SARA AA` (`U+0E32`, `U+0EB2`) and shifts
+   the `SARA AM`-derived `NIKHAHIT` backwards across contiguous preceding
+   above-base marks (`(u & ~0x0080)` in `0x0E31`, `0x0E34..0x0E37`, `0x0E3B`,
+   `0x0E47..0x0E4E`);
+2. `do_thai_pua_shaping` on `thai` runs when no explicit `'thai'` `ScriptRecord`
+   exists in `GSUB`: runs HarfBuzz's `4 x 3` above-state (`T0..T3`) and `3 x 3`
+   below-state (`B0..B2`) machines across consonant classes (`NC`, `AC`, `RC`,
+   `DC`, `NOT_CONSONANT`) and mark classes (`AV`, `BV`, `T`), remapping `SD`,
+   `SDL`, `SL`, and base `RD` actions to covered Windows (`U+F700..U+F71A`) or
+   Macintosh (`U+F884..U+F89E`) PUA glyphs while preserving each slot's
+   pre-PUA `prop_cp` Unicode properties through normalization;
+3. `ZERO_WIDTH_MARKS_BY_GDEF_LATE` fallback mark synthesis and GPOS-less offset
+   compensation on `thai` and `lao `: synthesizes `MARK` (`kSynthesizedMarkBit`)
+   from non-default-ignorable `Mn` codepoints (including `U+0ECE` `LAO YAMAKKAN`)
+   when `GDEF` lacks `GlyphClassDef`, and subtracts `x_advance` / `y_advance`
+   from `x_offset` / `y_offset` when zeroing Thai/Lao marks on faces without a
+   `GPOS` table.
+
+`thai_lao_diagnostic.py` (`20` default Lao `SARA AM` cases across all four
+DejaVu faces, `--extended` adding `4` Sans-only ligature/pre-base cases, and
+`--synthetic-thai-pua` / `--synthetic-thai-mac-pua` testing `16` Thai `SARA AM`,
+PUA `SD`/`SDL`/`SL`/`RD`, and post-PUA mark-reordering cases) improves from
+**2/20 → 20/20** default (**2/24 → 24/24** `--extended`) exact raw `match` and
+`same-placement` on `DejaVuSans.ttf` (`51/60` and `63/72` `ink.py` diffs → `0`)
+and `DejaVuSans-Bold.ttf` (`6/60` and `15/72` `ink.py` diffs → `0`), **2/20 →
+20/20** on `DejaVuSansMono.ttf` and `DejaVuSansMono-Bold.ttf` (`54/60` `ink.py`
+diffs → `0`), and **0/16 → 16/16** (`48/48` `ink.py` pairs with `0` changed
+pixels) on both Windows and Macintosh synthetic Thai PUA faces; see
+`docs/phases/513-thai-lao-shaping.md`.
+
+## OpenType Hangul syllable, jamo, and tone-mark shaping (Phase 534)
+
+Implementing HarfBuzz's `_hb_ot_shaper_hangul` (`hb-ot-shaper-hangul.cc`,
+`NORMALIZATION_MODE_NONE`, `ZERO_WIDTH_MARKS_NONE`) in `FontRenderer`:
+
+1. `'hang'` (`kTagHang`) script itemization across all 14 Unicode
+   `Script=Hangul` blocks (`U+1100..U+11FF`, `U+302E..U+302F`,
+   `U+3131..U+318E`, `U+3200..U+321E`, `U+3260..U+327E`, `U+A960..U+A97C`,
+   `U+AC00..U+D7A3`, `U+D7B0..U+D7C6`, `U+D7CB..U+D7FB`, `U+FFA0..U+FFDC`),
+   plus 1-glyph-scoped `ljmo` / `vjmo` / `tjmo` / `calt` feature masks in both
+   `GSUB` and `GPOS` with `calt` cleared specifically on conjoining jamo
+   (`isL || isV || isT`);
+2. `preprocess_text_hangul` before Round 1 normalization: font-aware `<L,V>` /
+   `<L,V,T>` and `<LV,T>` composition to `U+AC00..U+D7A3`, fallback
+   decomposition of missing `<LV>`/`<LVT>` or `<covered LV, T>` and Old Hangul
+   jamo sequences with `ljmo`/`vjmo`/`tjmo` tags (including visible Hangul
+   fillers `U+115F`, `U+1160`, `U+3164`, `U+FFA0`), and Middle Korean
+   `U+302E`/`U+302F` spacing rotation + `U+25CC` dotted-circle insertion;
+3. `NORMALIZATION_MODE_NONE` (`always_short_circuit` in Round 1, Round 2 CCC
+   mark sorting, no Round 3 recomposition) and `ZERO_WIDTH_MARKS_NONE` on
+   `kTagHang`.
+
+`hangul_diagnostic.py` (`24` default hybrid `'hang'` cases, `12`
+`--zero-width-tones` cases, and `8` `--dflt-no-dotted-circle` cases) improves
+from **3/24 → 24/24**, **1/12 → 12/12**, and **2/8 → 8/8** exact raw `match`
+and `same-placement` against HarfBuzz 15.0.0 (`uharfbuzz` 0.57.0), with
+**132/132** `ink.py` case/size pairs (`72/72`, `36/36`, `24/24` at 16/32/64 px)
+reaching `same-ink-and-advance` (`0` changed pixels); see
+`docs/phases/534-hangul-shaping.md`.
+
+
 
 
 

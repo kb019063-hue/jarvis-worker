@@ -410,10 +410,12 @@ int ring_index_of(const std::vector<InteractiveElement>& items, const Element* e
     return -1;
 }
 
-// Keep negative entries in the ring to locate a script-focused element, but
-// never land on one via Tab. Read the attribute at the keypress: a sign change
-// need not wait for a layout rebuild. Invalid integers keep existing behavior.
-int next_tab_index(const std::vector<InteractiveElement>& items, int current, bool forward) {
+// Keep negative and legacy entries in the list, but only land on candidates
+// the DOM focus path accepts. Read the current state at the keypress: a sign
+// change, disabled control, removed element or modal need not wait for a
+// layout rebuild. Invalid tabindex integers keep existing behavior.
+int next_tab_index(const std::vector<InteractiveElement>& items, const Document* document,
+                   int current, bool forward) {
     if (items.empty()) return -1;
     const std::size_t count = items.size();
     std::size_t index = current < 0 ? (forward ? 0 : count - 1)
@@ -423,7 +425,8 @@ int next_tab_index(const std::vector<InteractiveElement>& items, int current, bo
         const auto& el = items[index].element;
         const std::string* attribute = el->attribute("tabindex");
         long value = 0;
-        if (!attribute || !dom::parse_html_integer(*attribute, value) || value >= 0)
+        if ((!attribute || !dom::parse_html_integer(*attribute, value) || value >= 0) &&
+            dom::is_focusable(*el) && (!document || !document->is_inert(*el)))
             return static_cast<int>(index);
         index = forward ? (index + 1) % count : (index + count - 1) % count;
     }
@@ -456,8 +459,8 @@ void BrowserShell::forget_focus_if_gone() {
 void BrowserShell::focus_next() {
     if (m_interactive_elements.empty()) return;
     forget_focus_if_gone();
-    const int next = next_tab_index(m_interactive_elements, m_focused_index, true);
-    if (next < 0) return; // Every candidate is programmatic-only.
+    const int next = next_tab_index(m_interactive_elements, m_document.get(), m_focused_index, true);
+    if (next < 0) return; // No candidate can take sequential focus.
     m_focused_index = next;
     const auto& item = m_interactive_elements[m_focused_index];
     m_status_message = "Focused: <" + item.tag + "> \"" + item.text + "\"";
@@ -468,7 +471,7 @@ void BrowserShell::focus_next() {
 void BrowserShell::focus_prev() {
     if (m_interactive_elements.empty()) return;
     forget_focus_if_gone();
-    const int next = next_tab_index(m_interactive_elements, m_focused_index, false);
+    const int next = next_tab_index(m_interactive_elements, m_document.get(), m_focused_index, false);
     if (next < 0) return;
     m_focused_index = next;
     const auto& item = m_interactive_elements[m_focused_index];

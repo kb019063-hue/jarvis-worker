@@ -37,8 +37,8 @@ getOwnPropertyDescriptor; Object.fromEntries; and computed object/class
 names.
 
 Each caller tests exotic, ordinary-first and ordinary-fallback Symbol
-results, null-prototype key objects and direct Symbols, seven non-Symbol primitives, getter
-and call exception identity, object results, noncallable hooks and
+results, null-prototype key objects and direct Symbols, seven non-Symbol
+primitives, getter and call exception identity, object results, noncallable hooks and
 collection during the hook. It checks hint, receiver, arguments, order,
 exactly-once conversion, Symbol identity, well-known Symbols and the
 fact that String(objectReturningSymbol) still throws.
@@ -106,6 +106,7 @@ Broader plain-build results on 28 November 2026:
 | `make diff-trees` | **6,000/6,000** match corrected parse5 |
 | `make diff-xml` | 4,000 documents with no discrepancies where both references agree; **3,000/3,000** round trips |
 | `make render-conformance` | **67/68** original pages (recorded AVIF decoder gap), **41/41** body-origin pages, **45,016/45,016** canvas checks |
+| `make fuzz` | **400** parser mutations; **400** pipeline runs; **600** XML mutations plus **1,927** original documents; **2,400** media mutations; **5,009** color inputs; Brotli **53 valid / 49 bomb-cap / 6 invalid / 2,000 mutations**, all clean |
 
 `diff-xml` used lxml installed only in ignored `build/538-python-deps`
 and added to PYTHONPATH. No corpus, metrics ledger or floor changed.
@@ -118,7 +119,7 @@ from the comparison JSON to `run_test262.py`, with
 `--binary asan=build-asan/litebird --min-pass 11` and
 `ASAN_OPTIONS=detect_leaks=0`.
 
-### Unfinished validation / workspace interruption
+### Local validation limits and workspace recovery
 
 `make -j1 asan-unit TEST_OPT='-O0 -g0'` was started after the plain units
 finished. Engine objects used the canonical -O1 -g sanitizer flags; only
@@ -131,16 +132,29 @@ sanitizer-unit run.**
 
 Execution subsequently recovered. The log ended with `test` killed and
 `asan-unit` exiting 2, and no old `test_suite` process survived. The six
-standard balanced-suite cuts are being rerun sequentially, each as a
-fresh process, to avoid carrying accumulated sanitizer memory into the
-deep tests. This rerun's result is recorded below once complete.
+standard balanced-suite cuts were retried as fresh sequential processes.
+Stretches **0, 1, 4 and 5 pass: 303 + 38 + 70 + 155 = 566 suites**, plus
+**114/114** cross-origin checks. These include the new suite and its VM
+probes. Stretch 2 reached **3,845,340 KB RSS** in the same deep-nesting
+test even in a fresh process; it was explicitly killed to avoid another
+sandbox lock-up. Stretch 3 was not attempted after that. Thus **four deep
+suites remain unvalidated locally under sanitizers**; 566/570 is a partial
+result, not a passing full sanitizer-unit gate.
 
-Full local fuzz/deep and the remaining sanitizer aggregate parts have
-not run. Complete full CI in the active landing watch before merging;
-the focused checks do not replace those gates.
+The rerun used the exact cuts from Makefile's UNIT_SUITE_CUTS, with
+`ASAN_OPTIONS=detect_leaks=0` and `LITEBIRD_SUITE_SHARD=K/6`, running each
+K in a fresh process. No cut, expectation, depth or CI floor was changed.
+A full default sanitizer/deep CI run must pass before merge, either on
+this pull request when no watch is active or in the active landing lot. The canonical engine build and focused checks do not replace it.
+The remaining sanitizer aggregate parts and full local CLI deep-page gate
+have not run.
 
 ## What is still open
 
+Symbol.prototype[Symbol.toPrimitive] is absent. An unmodified boxed Symbol
+therefore returns a display string via ordinary string-first conversion;
+this is recorded as a separate open AGENTS.md task for prototype
+installation, not fixed in another agent's BuiltinsObject.cpp claim.
 Symbols are still backed by string keys internally; user strings can
 collide with internal well-known Symbol spellings. Other built-in-specific
 conversion fast paths, Proxy support and unimplemented language features

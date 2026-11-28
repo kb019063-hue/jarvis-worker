@@ -26,8 +26,18 @@ Four more indexed read/write scripts are tested through both interpreter
 and bytecode VM. C++ asserts the explicit script result, not merely that
 the script evaluation returned.
 
-See [Phase 538](../phases/538-symbol-property-key-conversion.md) for
-reproducible commands, broader comparisons and validation limits.
+Same-base pinned test262 default directories improve **15,253 → 15,264 /
+15,686**, **11 gained, zero lost**. The canonical -O1 -g ASan/UBSan engine
+passes all **309** focused checks and all **11** gained test262 cases.
+Plain full units pass **570/570** plus **114/114** cross-origin checks.
+
+Local sanitizer units have an explicit limit: **566/570** suites and
+**114/114** cross-origin checks pass in fresh sequential stretches (test
+harness only built with -O0 -g0). The deep-nesting suite exhausts this
+4 GB sandbox even in isolation, so this is **not** a passing full
+sanitizer-unit gate. Full default sanitizer/deep CI must pass before
+merge. See [Phase 538](../phases/538-symbol-property-key-conversion.md)
+for commands, broader comparisons and the interruption/recovery record.
 
 ## What is still open
 

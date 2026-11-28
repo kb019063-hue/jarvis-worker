@@ -45,9 +45,11 @@ running at the same time. The timed-out terminal case passed by itself in
 13.4 seconds. A sanitizer build of the engine and an ASan/UBSan probe for
 three nullish-read cases passed; the full local `make asan` could not compile
 the very large test suite while the deep check was running, because this
-3.8 GiB sandbox killed the compiler for lack of memory. The complete
-sanitizer and deep checks must also run in CI; neither is claimed as a full
-local pass here.
+3.8 GiB sandbox killed the compiler for lack of memory. With no deep run in
+parallel the sanitizer engine and suite built on the merged tree, and the
+new suite passed in its own ASan/UBSan stretch. `make fuzz` then passed.
+The complete sanitizer and deep checks must also run in CI; neither is
+claimed as a full local pass here.
 
 ## Still open
 

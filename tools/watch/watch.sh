@@ -50,6 +50,8 @@
 #                                        that was read here (origin/prN); `anyway` as a third word
 #                                        posts all the same
 #   tools/watch/watch.sh note N FILE     comment FILE on #N, print the comment's id
+#   tools/watch/watch.sh drafts          every claim under WIP: that is no draft is made one, with a
+#                                        note on it that says so and what its agent does at the end
 #   tools/watch/watch.sh rule            what rule GitHub has on main, read back, and what in it would
 #                                        stop a merge or a lot (tools/watch/rule.py; 0 as asked for,
 #                                        1 none, 3 something to change)
@@ -704,6 +706,25 @@ note)
 
 rule)
   python3 tools/watch/rule.py ;;
+
+drafts)
+  # A claim is a draft since 28 November 2026 (AGENTS.md, "Before starting",
+  # point 2): GitHub merges a draft for nobody, and `WIP:` in a title stops
+  # nobody (#449, #491). A chat that began before that day, or did not read
+  # the point, opens its claim as before: of the first four claims opened
+  # after the rule was on main, three were drafts and one was not. The landing
+  # session makes such a claim a draft and says so on it, which is also
+  # where its agent reads what to do with its last push. Nothing is said
+  # twice: a claim that is a draft is not touched.
+  timeout 40 gh pr list --state open --limit 100 --json number,title,isDraft \
+    --jq '.[] | select((.title | test("^WIP")) and (.isDraft | not)) | .number' | sort -n | while read -r n; do
+    if timeout 30 gh pr ready "$n" --undo > "$STATE/land/draft$n.out" 2>&1; then
+      printf '%s: #%s is a draft now: I ran `gh pr ready %s --undo`. Every claim is one since 28 November (AGENTS.md, "Before starting", point 2), because GitHub merges a draft for nobody and `WIP:` in a title stops nobody. Nothing else changes for you, and no run was started or stopped. With your last push, when `WIP:` comes off the title: `gh pr ready %s`, then `python3 tools/ci/check_pr.py merge %s` as before.\n' "$NAME" "$n" "$n" "$n" "$n" > "$STATE/land/draft$n.md"
+      note "$n" "$STATE/land/draft$n.md"
+    else
+      echo "#$n could not be made a draft: $(tail -1 "$STATE/land/draft$n.out" | cut -c1-160)" >&2
+    fi
+  done ;;
 
 *)
   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 9 ;;

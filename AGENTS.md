@@ -500,7 +500,10 @@ without one, and leaves the board and a watch out of the claims.
    **A draft is merged by nobody**: GitHub answers "Pull Request is
    still a draft" to whoever asks, until `gh pr ready N`. `WIP:` in a
    title stops nobody: #449 and #491 were both merged with it ("Merged
-   59 seconds after it was opened", below).
+   59 seconds after it was opened", below). A claim that was opened
+   under `WIP:` and is no draft is made one by the landing session
+   (`tools/watch/watch.sh drafts`), which says so on it; nothing else
+   changes for its agent until the last push.
    (`python3 tools/next_ids.py --pr-body` prints the four lines, and
    `python3 tools/ci/check_pr.py claim N` says the numbers back.) Until
    24 November 2026 the two came from `python3 tools/next_ids.py`, the

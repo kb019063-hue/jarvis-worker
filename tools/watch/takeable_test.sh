@@ -54,6 +54,29 @@ G=0 WAS=0 BACK=0 GS=CLEAN   RUNS="in_progress/null x7" try "no rule; the same he
 G=0 WAS=0 BACK=0 GS=BLOCKED RUNS="" try "no run on the head and its code never green (a claim's empty commit): not taken" 1 "no run on its head, and its code was never green"
 G=0 WAS=1 BACK=0 GS=BLOCKED RUNS="completed/failure x1, completed/success x6" try "its own run failed: not taken, whatever was green before" 1 "its own run failed"
 G=0 WAS=1 BACK=0 GS=BEHIND  RUNS="" try "a rule that wants main in the branch: not taken, and the person has to be told" 1 "GitHub reports BEHIND: a rule on main wants main in the branch. No lot can land under that"
-echo "$STATE" > /dev/null
+
+# `runs_of`: what it makes of the check runs GitHub lists for a commit. Asked
+# with `jq`, which is what `gh api --jq` is; where there is none, not asked.
+eval "$(sed -n "/^RUNS_JQ='/p" "$script")"
+said() {  # said "what the case is" "the line wanted" "the answer of .../check-runs"
+  local got; got="$(jq -r "$RUNS_JQ" <<< "$3")"; cases=$((cases + 1))
+  if [ "$got" = "$2" ]; then echo "  [ok  ] $1"
+  else echo "  [FAIL] $1"; echo "         wanted '$2'"; echo "         got    '$got'"; failed=$((failed + 1)); fi
+}
+run() { printf '{"id": %s, "name": "%s", "status": "%s", "conclusion": %s}' "$1" "$2" "$3" "$4"; }
+if [ -z "${RUNS_JQ:-}" ]; then echo "  [FAIL] RUNS_JQ was not found in $script"; failed=$((failed + 1)); cases=$((cases + 1))
+elif command -v jq > /dev/null; then
+  said "one run: its jobs" "completed/skipped x1, completed/success x2" \
+    "{\"check_runs\": [$(run 1 Build completed '"success"'), $(run 2 Documents completed '"success"'), $(run 3 Deep completed '"skipped"')]}"
+  # #522 on 28 November: the run that was cancelled (ids 11 to 13) and the one that passed (21 to 23)
+  said "two runs on one commit, the first cancelled by the second: the second's jobs" "completed/skipped x1, completed/success x2" \
+    "{\"check_runs\": [$(run 21 Build completed '"success"'), $(run 22 Documents completed '"success"'), $(run 23 Deep completed '"skipped"'),
+                       $(run 11 Build completed '"cancelled"'), $(run 12 Documents completed '"cancelled"'), $(run 13 Deep completed '"skipped"')]}"
+  said "a job that failed and is being run again: going, not failed" "completed/success x1, in_progress/null x1" \
+    "{\"check_runs\": [$(run 1 Build completed '"failure"'), $(run 2 Documents completed '"success"'), $(run 5 Build in_progress null)]}"
+  said "a job that passed and then failed when it ran again: failed" "completed/failure x1" \
+    "{\"check_runs\": [$(run 1 Build completed '"success"'), $(run 5 Build completed '"failure"')]}"
+  said "no check run at all: nothing" "" '{"check_runs": []}'
+else echo "  (no jq here: runs_of was not asked)"; fi
 echo; echo "$((cases - failed))/$cases pass"
 [ "$failed" -eq 0 ]

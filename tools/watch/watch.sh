@@ -81,9 +81,17 @@ R="$(git remote get-url origin | sed -E 's#^.*github\.com[:/]##; s#\.git$##')"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 BOARD="${CHECK_PR_BOARD:-$(timeout 30 gh pr list --state open --limit 100 --json number,title --jq '[.[] | select(.title | test("^BOARD:"))][0].number' 2>/dev/null)}"
 
+# What the check runs of a commit say, as one line: of each job the check run
+# that came last. A job that ran twice on one commit leaves two, and GitHub
+# goes by the later one. On 28 November two runs began on #522's head in one
+# second and the one cancelled the other (one run for a pull request,
+# .github/workflows/ci.yml): seven jobs cancelled, the same seven passed.
+# GitHub reported CLEAN. Counted all together they were "not green" here for
+# good, and on the head of a lot the same would have read as a job that
+# failed. (tools/watch/takeable_test.sh asks this of what GitHub answered.)
+RUNS_JQ='[.check_runs | group_by(.name)[] | max_by(.id) | "\(.status)/\(.conclusion)"] | group_by(.) | map("\(.[0]) x\(length)") | join(", ")'
 runs_of() {  # runs_of FULLSHA -> "completed/success x12" and the like
-  timeout 30 gh api "repos/$R/commits/$1/check-runs?per_page=100" \
-    --jq '[.check_runs[] | "\(.status)/\(.conclusion)"] | group_by(.) | map("\(.[0]) x\(length)") | join(", ")'
+  timeout 30 gh api "repos/$R/commits/$1/check-runs?per_page=100" --jq "$RUNS_JQ"
 }
 whole() {  # whole FULLSHA: every check run of it has ended in success, and there are ten or more
   local runs; runs="$(runs_of "$1")"

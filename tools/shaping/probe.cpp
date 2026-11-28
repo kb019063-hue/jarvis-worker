@@ -24,7 +24,7 @@ int main(int argc, char** argv) {
             if (!first) std::cout << ",";
             first = false;
             std::cout << "[" << g.glyph << "," << g.x_advance << "," << g.y_advance
-                      << "," << g.x_offset << "," << g.y_offset << "]";
+                      << "," << g.x_offset << "," << g.y_offset << "," << g.cluster << "]";
         }
         std::cout << "]\n";
     } catch (const std::exception& e) {

@@ -22,9 +22,13 @@ out of Git. Supply other fonts by rerunning the same command.
 Each of 14 cases is a single directional script run. HarfBuzz uses OpenType
 font functions, default features, language `und`, and a scale equal to units
 per em; Litebird uses kerning and visual RTL for RTL runs. Arrays compare
-exactly: glyph ID, x/y advance, x/y offset, in font units, without rounding
-or tolerance. Missing glyph zero in either output is **unsupported**, never
-credited as a match. Empty input is deliberately included as an adapter check.
+exactly: glyph ID, x/y advance, x/y offset and source cluster, in font units,
+without rounding or tolerance. Missing glyph zero in either output is
+**unsupported**, never credited as a match. Empty input is deliberately
+included as an adapter check. The cluster is the source-cluster index
+HarfBuzz reports under `HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`, which is
+the index of the codepoint in the run; `placement_signature` deliberately
+ignores it so that placement-only equivalence stays a separate measurement.
 
 Exit codes: 0 means every case matches; 1 means a mismatch or unsupported
 case; 2 means a missing dependency/font, failed probe, malformed response or
@@ -93,9 +97,11 @@ runs. These controls run in the existing CI self-test step without HarfBuzz.
 ## Limits
 
 No bidi paragraph algorithm, fallback, CSS layout, rasterization, language
-selection, feature switches or variable-font axes are tested. Litebird's
-public result has no source-cluster indices, so cluster correspondence is
-not compared. The small hand-selected corpus is a starting point, not broad
+selection, feature switches or variable-font axes are tested. Source-cluster
+correspondence is compared since Phase 547 (`cluster_diagnostic.py`), but only
+as the index the engine reports: caret affinity, selection semantics and
+cluster-level hit testing are not exercised. The small hand-selected corpus is
+a starting point, not broad
 script coverage. A font lacking a script cannot test that script. Run with
 additional covered fonts before drawing conclusions about Indic or other
 scripts. Engine fixes, broader font fixtures and visual equivalence checks
@@ -580,7 +586,36 @@ and `same-placement` against HarfBuzz 15.0.0 (`uharfbuzz` 0.57.0), with
 reaching `same-ink-and-advance` (`0` changed pixels); see
 `docs/phases/534-hangul-shaping.md`.
 
+## OpenType public source-cluster indices (Phase 547)
 
+Publishing `HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES` clusters from
+`TrueTypeFont::shape_glyphs` and `FontRenderer::shape_text`:
 
+1. `uint32_t cluster` on `TrueTypeFont::PositionedGlyph` (the 0-based index of
+   the source codepoint in the vector given to `shape_glyphs`) and on
+   `FontRenderer::ShapedGlyph` (the 0-based UTF-8 byte offset in the caller's
+   original string, across multi-byte UTF-8, ligatures, fallback runs, visual
+   RTL and `pre_reversed` Bidi runs);
+2. `hb_form_clusters` on the two Unicode 17.0 tables `kGraphemeContinuationRanges`
+   (`331` ranges of `Mn`/`Mc`/`Me`, `U+1F3FB..U+1F3FF`, `U+FF9E..U+FF9F`,
+   `U+E0020..U+E007F`, `U+E0100..U+E01EF`) and `kExtendedPictographicRanges`
+   (`156` ranges) applied per script slice before `preprocess_text_hangul` /
+   `preprocess_text_thai`, with `U+200C` keeping its own cluster;
+3. `merge_slot_clusters` (`hb_buffer_t::merge_clusters_impl`) through `GSUB`
+   `Multiple` 1→N and 1→0, `Ligature`, both preprocessors, normalization Rounds
+   1–3 (including HarfBuzz's stable insertion sort in Round 2), the Arabic MCM
+   promotion, and the RTL reversal.
 
+The probe emits six fields, `[glyph, x_advance, y_advance, x_offset, y_offset,
+cluster]`, and `compare.py` compares all six; `ink.py`, `outlines.py` and
+`test_ink.py` accept five- and six-field rows and reject a negative or absurd
+cluster. `cluster_diagnostic.py` adds `20` DejaVu multi-script cases
+(ligatures with intervening/trailing marks and joiners, combining sequences,
+Greek polytonic, Cyrillic, Hebrew/Arabic RTL, `ZWNJ` vs `ZWJ` versus MCM
+reordering, Lao `SARA AM`) and `--synthetic`, `16` cases against a synthetic
+`GSUB` face. They improve from **3/20 → 20/20** and from **exit 1 → 16/16**,
+`compare.py` from **1/13 → 13/13** on `DejaVuSans.ttf` and
+`DejaVuSans-Bold.ttf`, and all `292/292` supported cases across the six
+differentials agree on all six fields with `ink.py` **60/60** and `outlines.py`
+**20/20** unchanged; see `docs/phases/547-opentype-source-clusters.md`.
 

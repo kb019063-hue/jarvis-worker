@@ -22719,8 +22719,7 @@ TEST(module_worker_static_graph_loading_and_refusal) {
     {
         std::ofstream live_entry(root / "live_entry.js");
         // A plain named import, with no `export *` anywhere in the graph:
-        // this is what shows the limitation below is the engine's, not the
-        // star's. `before` and `after` are both 1.
+        // its binding now follows the exported `let` across `bump()`.
         live_entry << "import { n, bump } from './counter.js';\n"
                       "var before = n;\n"
                       "bump();\n"
@@ -22769,16 +22768,11 @@ TEST(module_worker_static_graph_loading_and_refusal) {
     assert(js.eval("unsupportedReply.label").to_string() == "module");
     assert(js.eval("unsupportedReply.hasDefault").is_truthy() == false);
     assert(js.eval("unsupportedReply.keys").to_string() == "add,answer,base,label");
-    // The star is live: `n` reads 1 before `bump()` and 2 after it.
+    // Both the star and the ordinary named import are live: `n` reads 1
+    // before `bump()` and 2 after it.
     assert(js.eval("liveError").to_string().empty());
     assert(js.eval("liveReply.before").to_number() == 1.0);
-    assert(js.eval("liveReply.after").to_number() == 1.0);
-    // `after` is still 1: see the write-up. The imported `bump` closed over
-    // the evaluating interpreter's copy of `counter.js`, so it increments
-    // that copy, not the one `s.n` reads. This is the Phase 66 module-instance
-    // limitation and it applies to a plain `import { bump }` too; it is not
-    // caused by `export *` and is written down as still open.
-    (void)0;
+    assert(js.eval("liveReply.after").to_number() == 2.0);
 
     js.eval("moduleWorker.terminate(); starWorker.terminate(); liveWorker.terminate();");
     WorkerObject::shutdown_all_workers();

@@ -23,7 +23,8 @@ class Node;
 /// and lets built-in methods check that `this` is the right kind of object.
 enum class ObjectClass : uint8_t {
     Plain, Array, Function, Error, DOMException, Date, RegExp, Map, Set, WeakMap, WeakSet,
-    Boolean, Number, String, Symbol, Arguments, Promise, Generator, Iterator
+    Boolean, Number, String, Symbol, Arguments, Promise, Generator, Iterator,
+    ModuleImportEnvironment
 };
 
 /// What a host object does beyond storing properties.

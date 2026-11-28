@@ -2209,7 +2209,17 @@ bool JsInterpreter::try_lookup_identifier(const std::string& name, const EnvPtr&
         for (JsEnvironment* cur = env.get(); cur; cur = cur->parent_raw()) {
             if (cur->is_with_scope()) {
                 if (with_object_has_binding(cur->with_object(), name)) {
-                    if (out_with_base) *out_with_base = cur->with_object();
+                    if (out_with_base) {
+                        // Module workers use an object environment to supply
+                        // live imported bindings, but it is not a source-level
+                        // `with` environment and must not become a bare call's
+                        // `this` value (ECMA-262 module imports are references
+                        // to immutable bindings).
+                        const JsObject* object = cur->with_object().property_cell();
+                        const bool module_imports =
+                            object && object->klass == ObjectClass::ModuleImportEnvironment;
+                        *out_with_base = module_imports ? JsValue::make_undefined() : cur->with_object();
+                    }
                     out_value = cur->with_object().get_property(name);
                     return true;
                 }

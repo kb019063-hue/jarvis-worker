@@ -223,18 +223,16 @@ std::optional<std::string> load_worker_script(
 //
 // Supported forms are side-effect imports, default/named/namespace imports,
 // `export` declarations, `export default`, local named export lists, and named
-// re-exports. The engine does not yet have module-record/live-binding
-// machinery, so bindings/re-exports are snapshots; `export *`, dynamic
-// import(), import.meta, cycles, and top-level await are rejected explicitly
-// rather than receiving subtly wrong semantics.
+// re-exports. The module map is still a conservative subset rather than full
+// module records, but imported names resolve through live namespace getters;
+// `export *`, dynamic import(), import.meta, cycles, and top-level await are
+// rejected explicitly rather than receiving subtly wrong semantics.
 
 struct ModuleImportBinding {
     /// The exported name for an ordinary import. Empty for a namespace import.
     std::string imported_name;
     /// A valid local binding name (or a generated private one for a re-export).
     std::string local_name;
-    /// Private key in the native-created import bag passed to the wrapper.
-    std::string slot;
     bool namespace_import{false};
 };
 
@@ -381,8 +379,7 @@ void module_add_import(ModuleTransform& transform,
                        ModuleDependency& dependency,
                        std::string imported_name,
                        std::string local_name,
-                       bool namespace_import,
-                       std::size_t& slot_serial) {
+                       bool namespace_import) {
     for (const auto& prior_dependency : transform.dependencies) {
         for (const auto& prior : prior_dependency.bindings) {
             if (prior.local_name == local_name) {
@@ -398,15 +395,13 @@ void module_add_import(ModuleTransform& transform,
     ModuleImportBinding binding;
     binding.imported_name = std::move(imported_name);
     binding.local_name = std::move(local_name);
-    binding.slot = "i" + std::to_string(slot_serial++);
     binding.namespace_import = namespace_import;
     dependency.bindings.push_back(std::move(binding));
 }
 
 std::size_t parse_module_import(const std::vector<JsToken>& tokens,
                                 std::size_t begin,
-                                ModuleTransform& transform,
-                                std::size_t& slot_serial) {
+                                ModuleTransform& transform) {
     const JsToken& import_token = tokens[begin];
     std::size_t pos = begin + 1;
     if (pos >= tokens.size()) module_syntax_error(import_token, "incomplete import declaration");
@@ -420,7 +415,7 @@ std::size_t parse_module_import(const std::vector<JsToken>& tokens,
             if (!module_binding_token(local)) {
                 module_syntax_error(local, "expected an identifier after import");
             }
-            module_add_import(transform, local, dependency, "default", module_token_name(local), false, slot_serial);
+            module_add_import(transform, local, dependency, "default", module_token_name(local), false);
             ++pos;
         };
         auto add_namespace = [&] {
@@ -434,7 +429,7 @@ std::size_t parse_module_import(const std::vector<JsToken>& tokens,
                 module_syntax_error(tokens[std::min(pos, tokens.size() - 1)], "expected namespace binding after import * as");
             }
             const JsToken& local = tokens[pos++];
-            module_add_import(transform, local, dependency, {}, module_token_name(local), true, slot_serial);
+            module_add_import(transform, local, dependency, {}, module_token_name(local), true);
         };
         auto add_named = [&] {
             ++pos; // {
@@ -458,7 +453,7 @@ std::size_t parse_module_import(const std::vector<JsToken>& tokens,
                 if (!module_binding_token(*local_where)) {
                     module_syntax_error(*local_where, "an imported binding must be an identifier");
                 }
-                module_add_import(transform, *local_where, dependency, imported_name, local_name, false, slot_serial);
+                module_add_import(transform, *local_where, dependency, imported_name, local_name, false);
                 if (pos < tokens.size() && tokens[pos].type == JsTokenType::Comma) {
                     ++pos;
                     continue;
@@ -547,8 +542,7 @@ std::size_t parse_module_export(const std::vector<JsToken>& tokens,
                                 std::size_t begin,
                                 ModuleTransform& transform,
                                 std::vector<ModuleSourceEdit>& edits,
-                                std::size_t& name_serial,
-                                std::size_t& slot_serial) {
+                                std::size_t& name_serial) {
     const JsToken& export_token = tokens[begin];
     std::size_t pos = begin + 1;
     if (pos >= tokens.size()) module_syntax_error(export_token, "incomplete export declaration");
@@ -640,7 +634,7 @@ std::size_t parse_module_export(const std::vector<JsToken>& tokens,
             dependency.specifier = tokens[pos++].text;
             for (const auto& name : names) {
                 const std::string generated = module_fresh_identifier(source, name_serial, "reexport");
-                module_add_import(transform, *name.export_where, dependency, name.local, generated, false, slot_serial);
+                module_add_import(transform, *name.export_where, dependency, name.local, generated, false);
                 module_add_export(transform, *name.export_where, name.exported, generated);
             }
             transform.dependencies.push_back(std::move(dependency));
@@ -702,7 +696,6 @@ ModuleTransform transform_module_source(const std::string& source, std::size_t& 
     const std::vector<JsToken> tokens = lexer.tokenize_all();
     ModuleTransform transform;
     std::vector<ModuleSourceEdit> edits;
-    std::size_t slot_serial = 0;
     int paren = 0;
     int bracket = 0;
     int brace = 0;
@@ -719,14 +712,14 @@ ModuleTransform transform_module_source(const std::string& source, std::size_t& 
             module_syntax_error(token, "dynamic import() and import.meta are not supported");
         }
         if (paren == 0 && bracket == 0 && brace == 0 && !keyword_property && token.type == JsTokenType::Import) {
-            const std::size_t end = parse_module_import(tokens, i, transform, slot_serial);
+            const std::size_t end = parse_module_import(tokens, i, transform);
             const std::size_t end_byte = end > i ? tokens[end - 1].end : token.end;
             edits.push_back({token.start, end_byte, {}});
             i = end == 0 ? i : end - 1;
             continue;
         }
         if (paren == 0 && bracket == 0 && brace == 0 && !keyword_property && token.type == JsTokenType::Export) {
-            const std::size_t next = parse_module_export(tokens, source, i, transform, edits, name_serial, slot_serial);
+            const std::size_t next = parse_module_export(tokens, source, i, transform, edits, name_serial);
             i = next == 0 ? i : next - 1;
             continue;
         }
@@ -859,38 +852,46 @@ private:
         try {
             ModuleTransform module = transform_module_source(source, m_name_serial);
             JsValue imports = JsValue::make_object(Heap::default_heap().allocate_object());
+            // This generated object is a module environment, not a source-level
+            // `with` object: bare imported calls must keep undefined `this`.
+            imports.object_val->klass = ObjectClass::ModuleImportEnvironment;
             for (const ModuleDependency& dependency : module.dependencies) {
                 const JsValue dependency_exports = evaluate_dependency(dependency.specifier, key);
                 for (const ModuleImportBinding& binding : dependency.bindings) {
                     if (binding.namespace_import) {
-                        imports.set_property(binding.slot, dependency_exports);
+                        imports.set_property(binding.local_name, dependency_exports);
                     } else {
                         if (!dependency_exports.has_own_property(binding.imported_name)) {
                             js_throw_error(JsErrorKind::SyntaxError,
                                            "Module '" + dependency.specifier + "' does not export '" +
                                                binding.imported_name + "'.");
                         }
-                        imports.set_property(binding.slot, dependency_exports.get_property(binding.imported_name));
+                        const std::string imported_name = binding.imported_name;
+                        auto getter = js_make_native("get", 0,
+                            [dependency_exports, imported_name](const std::vector<JsValue>&) {
+                                return dependency_exports.get_property(imported_name);
+                            });
+                        // The wrapper's outer object environment consults this
+                        // getter on every identifier read. Its strict inner
+                        // function keeps module semantics while the imported
+                        // binding remains live and immutable.
+                        imports.define_accessor(binding.local_name, getter,
+                                                JsValue::make_undefined(), 0);
                     }
                 }
             }
 
             const std::string imports_name = module_fresh_identifier(source, m_name_serial, "imports");
+            const std::string exports_name = module_fresh_identifier(source, m_name_serial, "exports");
             std::string wrapper;
-            wrapper.reserve(module.body.size() + module.exports.size() * 56 + 256);
-            // `imports` is a global because the wrapper's parameters cannot be
-            // passed any other way; `exports` is not, and must not be: the
-            // getters below close over this module's scope, and a global
-            // holding them keeps every module this worker ever evaluated
-            // alive. `run()` hands the object back instead.
+            wrapper.reserve(module.body.size() + module.exports.size() * 64 + 320);
+            // `exports` remains local so its getter closures do not root every
+            // module through the global environment. The temporary import
+            // object surrounds a strict module function as its outer lexical
+            // environment, providing live imported bindings via accessors.
             m_interpreter.global_env()->define(imports_name, imports);
-            wrapper += "(function(" + imports_name + "){\n\"use strict\";\nvar exports = {};\n";
-            for (const ModuleDependency& dependency : module.dependencies) {
-                for (const ModuleImportBinding& binding : dependency.bindings) {
-                    wrapper += "const " + binding.local_name + " = " + imports_name + "[" +
-                               module_quote(binding.slot) + "];\n";
-                }
-            }
+            wrapper += "(function(" + imports_name + "){\nvar " + exports_name + " = {};\nwith(" + imports_name + "){\n";
+            wrapper += "return (function(){\n\"use strict\";\n";
             wrapper += module.body;
             wrapper += "\n";
             // A module's exported bindings are live: §16.2.1.6 makes the
@@ -904,12 +905,12 @@ private:
             // module's own scope: the wrapper returns, but the thunk keeps
             // the scope alive and answers with the binding as it is now.
             for (const ModuleExportBinding& binding : module.exports) {
-                wrapper += "Object.defineProperty(exports, " +
+                wrapper += "Object.defineProperty(" + exports_name + ", " +
                            module_quote(binding.exported_name) + ", {" +
                            " get: function(){ return " + binding.local_name + "; }," +
                            " enumerable: true, configurable: true });\n";
             }
-            wrapper += "return exports;\n})(" + imports_name + ");";
+            wrapper += "return " + exports_name + ";\n})();\n}\n})(" + imports_name + ");";
             JsValue exports = m_interpreter.run(wrapper);
             m_interpreter.global_env()->define(imports_name, JsValue::make_undefined());
 

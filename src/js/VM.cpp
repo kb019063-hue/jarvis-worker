@@ -15,6 +15,7 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <utility>
 
 namespace litebird {
 // ECMA-262 §7.3.24, the same routine the tree-walker's object literal and
@@ -589,6 +590,9 @@ JsValue VM::run(size_t stop_depth) {
             case OpCode::OpDup:
                 push(peek(0));
                 break;
+            case OpCode::OpSwap:
+                std::swap(m_stack[m_stack.size() - 1], m_stack[m_stack.size() - 2]);
+                break;
 
             case OpCode::OpGetLocal: {
                 uint8_t slot = read_byte();
@@ -649,6 +653,10 @@ JsValue VM::run(size_t stop_depth) {
                 const std::string prop = read_constant().string_val.str();
                 JsValue obj = pop();
                 JsValue val = peek(0);
+                if (obj.is_nullish()) {
+                    js_throw_type_error(std::string("Cannot set properties of ") +
+                        (obj.type == JsType::Null ? "null" : "undefined") + " (setting '" + prop + "')");
+                }
                 obj.set_property(prop, val);
                 break;
             }

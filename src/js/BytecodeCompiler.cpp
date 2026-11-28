@@ -839,6 +839,22 @@ void BytecodeCompiler::compile_expr(const Expr* expr, const std::string* name_hi
             default:
                 throw std::runtime_error("This assignment operator is not supported by the bytecode compiler");
         }
+        // A simple dotted assignment evaluates its base before the RHS, but
+        // rejects a nullish base only when the RHS is ready. Keep the base on
+        // the VM stack (and rooted) while compiling the RHS, then swap into
+        // OpSetProperty's [value, base] order. Other target forms retain their
+        // existing paths.
+        if (assign->op == JsTokenType::Equal) {
+            if (auto mem_target = dynamic_cast<const MemberExpr*>(assign->target.get())) {
+                compile_expr(mem_target->object.get());
+                compile_expr(assign->value.get());
+                emit_opcode(OpCode::OpSwap);
+                size_t prop_idx = m_function->chunk.add_constant(JsValue::make_string(mem_target->property));
+                emit_opcode(OpCode::OpSetProperty);
+                emit_byte(static_cast<uint8_t>(prop_idx));
+                return;
+            }
+        }
         // For `x op= v`: load x, evaluate v, apply the operator, then store.
         // The Set* opcodes leave the stored value on the stack, so this yields
         // the value of the expression as required.

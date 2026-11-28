@@ -365,10 +365,9 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         // A finalizer wraps the entire try/catch, including exceptions thrown
         // by the catch. The outer handler is removed before running either
         // copy of the finalizer so a finalizer throw replaces the pending one.
-        const ReturnFinally saved_return_finally = m_return_finally;
         size_t finally_jump = 0;
         if (statement->finalizer) {
-            m_return_finally = {statement->finalizer.get(), m_locals.size(), m_scope_depth};
+            m_return_finalizers.push_back({statement->finalizer.get(), m_locals.size(), m_scope_depth});
             finally_jump = emit_jump(OpCode::OpTry);
             ++m_protected_depth;
         }
@@ -392,6 +391,7 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             compile_stmt(statement->block.get());
         }
         if (statement->finalizer) {
+            m_return_finalizers.pop_back();
             --m_protected_depth;
             emit_opcode(OpCode::OpEndTry);
             ++m_finalizer_depth;
@@ -413,7 +413,6 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             end_scope();  // unreachable at runtime, restores compiler locals
             patch_jump(end_finally);
         }
-        m_return_finally = saved_return_finally;
     } else if (auto each = dynamic_cast<const ForEachStmt*>(stmt)) {
         // The VM has no per-iteration lexical environments or assignment
         // reference machinery for patterns. Refuse those forms rather than
@@ -617,11 +616,11 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             emit_byte(0xFF);
         }
     } else if (auto ret_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
-        // Only one enclosing try/finally, with no other handler, catch or
-        // loop to unwind, can use this inline return path. More general
-        // abrupt-completion ordering remains explicitly refused.
-        const bool through_finally = m_protected_depth == 1 && m_return_finally.body &&
-                                     !m_finalizer_depth && !m_catch_depth && m_loops.empty();
+        // Every active handler must be a try/finally, with no intervening
+        // catch or loop needing a different abrupt-completion unwind.
+        const bool through_finally = !m_return_finalizers.empty() &&
+            static_cast<size_t>(m_protected_depth) == m_return_finalizers.size() &&
+            !m_finalizer_depth && !m_catch_depth && m_loops.empty();
         if ((m_protected_depth || m_finalizer_depth) && !through_finally)
             throw std::runtime_error("This return from try or finally is not supported by the bytecode compiler");
         if (ret_stmt->value) {
@@ -630,29 +629,38 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             emit_opcode(OpCode::OpUndefined);
         }
         if (through_finally) {
-            // The expression runs with the handler still active. Move its
-            // result down over block locals, then remove the handler before
-            // running the finalizer: a finalizer throw must escape this try.
-            const ReturnFinally target = m_return_finally;
+            // Evaluate first, under all handlers. Remove one handler at a
+            // time and run its finalizer inside out. An inner finalizer throw
+            // is still caught by each enclosing finalizer's handler.
+            const auto targets = m_return_finalizers;
             const auto saved_locals = m_locals;
             const int saved_scope = m_scope_depth;
-            if (m_locals.size() > target.locals) {
-                emit_opcode(OpCode::OpSetLocal);
-                emit_byte(static_cast<uint8_t>(target.locals));
-                emit_opcode(OpCode::OpPop);
-                for (size_t i = target.locals + 1; i < m_locals.size(); ++i)
+            const int saved_protected = m_protected_depth;
+            for (size_t i = targets.size(); i-- > 0;) {
+                const ReturnFinally& target = targets[i];
+                if (m_locals.size() > target.locals) {
+                    emit_opcode(OpCode::OpSetLocal);
+                    emit_byte(static_cast<uint8_t>(target.locals));
                     emit_opcode(OpCode::OpPop);
+                    for (size_t j = target.locals + 1; j < m_locals.size(); ++j)
+                        emit_opcode(OpCode::OpPop);
+                }
+                emit_opcode(OpCode::OpEndTry);
+                m_locals.resize(target.locals);
+                m_scope_depth = target.scope_depth;
+                m_return_finalizers.resize(i);
+                m_protected_depth = static_cast<int>(i);
+                // The pending value is a hidden rooted slot while this
+                // finalizer executes; the next unwind sees it as an operand.
+                add_local("");
+                ++m_finalizer_depth;
+                compile_stmt(target.body);
+                --m_finalizer_depth;
+                m_locals.resize(target.locals);
             }
-            emit_opcode(OpCode::OpEndTry);
-            // Only locals visible at the try statement are in scope for the
-            // finalizer. The saved return value is a hidden rooted stack slot.
-            m_locals.resize(target.locals);
-            m_scope_depth = target.scope_depth;
-            add_local("");
-            ++m_finalizer_depth;
-            compile_stmt(target.body);
-            --m_finalizer_depth;
             emit_opcode(OpCode::OpReturn);
+            m_return_finalizers = targets;
+            m_protected_depth = saved_protected;
             m_locals = saved_locals;
             m_scope_depth = saved_scope;
             return;

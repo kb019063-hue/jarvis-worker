@@ -66,6 +66,20 @@ class Case:
 # Both paths must answer these alike. Each was run on the engine and read
 # before it was written here; none of them is a guess.
 AGREES: list[Case] = [
+    # Phase 504: a return runs nested finalizers from inside out.
+    Case("function f(){try{try{return 1}finally{}}finally{}}f()", "the original nested-finally return refusal"),
+    Case("var s='';function f(){try{try{return 4}finally{s+='i'}}finally{s+='o'}}String(f()+'/'+s)", "inner finalizer precedes outer"),
+    Case("var s='';function f(){try{try{try{return 7}finally{s+='a'}}finally{s+='b'}}finally{s+='c'}}String(f()+'/'+s)", "three finalizers run inside out"),
+    Case("var s='';function f(){try{let a=3;try{let b=4;return a+b}finally{s+=a}}finally{s+='o'}}String(f()+'/'+s)", "each finalizer sees its lexical scope"),
+    Case("var s='';function f(){let x=1;try{let x=2;try{let x=3;return x}finally{s+=x}}finally{s+=x}}String(f()+'/'+s)", "shadowed locals unwind between finalizers"),
+    Case("var s='';function f(){try{try{return 1}finally{s+='i';throw 7}}finally{s+='o'}}try{f()}catch(e){s+=e}String(s)", "outer finalizer runs after inner throw"),
+    Case("var s='';function f(){try{try{return 1}finally{s+='i'}}finally{s+='o';throw 8}}try{f()}catch(e){s+=e}String(s)", "outer finalizer throw replaces return"),
+    Case("var s='';function f(){try{try{return missing_name}finally{s+='i'}}finally{s+='o'}}try{f()}catch(e){s+=e.name}String(s)", "throw in return expression runs both finalizers"),
+    Case("function f(){try{try{return {x:2}}finally{gc()}}finally{gc()}}String(f().x)", "return value survives GC in each finalizer"),
+    Case("function f(){var x={v:1};try{try{return x}finally{x.v=2}}finally{x.v+=3}}String(f().v)", "both finalizers can mutate returned object"),
+    Case("function f(v){try{try{if(v)return 1;return 2}finally{v=3}}finally{v=4}}String(f(true)+'/'+f(false))", "branch returns survive both finalizers"),
+    Case("function f(){try{try{return 1}finally{try{throw 2}catch(e){}}}finally{}}String(f())", "inner finalizer can catch its own throw"),
+
     # Phase 474: a nullish property read throws rather than producing undefined.
     Case("try { null.foo; } catch (e) { e.name; }", "null dot read throws"),
     Case("try { undefined.foo; } catch (e) { e.name; }", "undefined dot read throws"),
@@ -324,7 +338,7 @@ AGREES: list[Case] = [
 # number, and so the day one of them starts working shows up as a failure
 # rather than as silence.
 REFUSES: list[Case] = [
-    Case("function f(){try{try{return 1}finally{}}finally{}}f()", "return through nested finalizers"),
+    Case("function f(){try{try{return 1}catch(e){}finally{}}finally{}}f()", "nested return across catch handler"),
     Case("function f(){for(var x of [1]){try{return x}finally{}}}f()", "return through finalizer and iterator"),
     Case("function f(){try{return 1}catch(e){}finally{}}f()", "return through catch and finalizer"),
     Case("function f(){try{}finally{return 2}}f()", "return from finalizer"),

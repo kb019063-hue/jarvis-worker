@@ -527,11 +527,13 @@ def claim_end(number: int, numbers: str, claim_failed: bool, not_a_draft: str | 
     It was a note at first, from 28 November 2026, 08:22 UTC, under lines
     that began "ok", and `claim N` ended with status 0. Of the claims opened
     in the six hours after that, five were opened ready all the same, four
-    of them by one agent (#515, #521, #532, #539). Each was made a draft by
-    the landing session, which its agent did not see: two of them then
-    took their `WIP:` off and waited, finished drafts, for somebody to
-    make them ready. An agent in a long chat knows the routine as it was
-    when the chat began; what it reads every time is what the tools answer.
+    of them by one agent (#515, #521, #532, #539; #549 was its fifth, an
+    hour later, before this had landed). Each was made a draft by the
+    landing session, with a note. Each of that agent's was then finished
+    with its `WIP:` off and the pull request still a draft, and waited
+    for the landing session to make it ready. An agent in a long chat
+    knows the routine as it was when the chat began; what it reads every
+    time is what the tools answer.
 
     `next_numbers()` is asked only when the claim itself fails (its
     numbers or its files are somebody else's): a claim that is right and no

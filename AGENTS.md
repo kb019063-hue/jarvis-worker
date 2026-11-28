@@ -972,6 +972,13 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   What the repository can do is say so at once: `check_pr.py` now has
   a line that begins `!!` when a job of `main`'s own newest run has
   failed, and "Working together", point 6, says what to do then.
+  (That line was silent on 28 November, and since when is not known:
+  it asked with `gh run list --event push`, the `gh` of that day's
+  sandboxes, 2.23.0, has no `--event`, and a lookup that failed said
+  nothing. It asks the API now, and a lookup that fails says that it
+  failed. A warning that says nothing when it cannot look is no
+  warning: try it on a `main` that is broken, and with a `gh` that
+  fails.)
   Who ran the merge is on no record. Every session is the person's one
   login, and a merge keeps the login and nothing more: not even that
   it came through Arena's app, which a comment does keep. Its commit has

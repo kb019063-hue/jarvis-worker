@@ -780,21 +780,51 @@ def main_note(run: dict | None, jobs: list[dict]) -> str | None:
             "measure nothing on that tree, and `git fetch origin && git merge origin/main` again when `main` is mended")
 
 
+def newest_run_on_main(answer: dict | None) -> dict | None:
+    """The newest run a push to `main` started, as `main_note` takes it, from
+    what `gh api repos/.../actions/runs?branch=main&event=push&per_page=1`
+    answers; None when it lists none."""
+    runs = (answer or {}).get("workflow_runs") or []
+    if not runs or not isinstance(runs[0], dict):
+        return None
+    run = runs[0]
+    return {"databaseId": run.get("id"), "headSha": run.get("head_sha") or "",
+            "status": run.get("status"), "conclusion": run.get("conclusion")}
+
+
+def unread_main_note(why: str) -> str:
+    """The line for a lookup that failed: it says so, and how to look."""
+    said = " ".join((why or "no answer").split())[:140]
+    return (f"whether `main` is broken could not be read here ({said}). Look yourself before you branch from it or "
+            "measure on it: `gh run list --branch main --limit 3`")
+
+
 def main_run_note() -> str | None:
     """`main_note` for the newest run that a push to `main` started. A lookup
-    that fails says nothing: this is a warning, never a reason to stop."""
+    that fails says that it failed: this is a warning, never a reason to stop.
+
+    Asked of the API. Until 28 November it was asked with `gh run list
+    --event push`, and a lookup that failed said nothing. In the sandbox of
+    that day `gh` is 2.23.0, which has no `--event`: the command ended with
+    "unknown flag", and this line, which is how an agent learns that `main`
+    is broken (AGENTS.md, "Working together", point 6), told nobody anything.
+    Since when is not known. It was found by typing the same flag by hand.
+    """
     try:
-        listed = subprocess.run(("gh", "run", "list", "--branch", "main", "--event", "push", "--limit", "1",
-                                 "--json", "databaseId,headSha,status,conclusion"),
+        listed = subprocess.run(("gh", "api", f"{REPO}/actions/runs?branch=main&event=push&per_page=1"),
                                 capture_output=True, text=True, timeout=30)
-        runs = json.loads(listed.stdout or "[]")
-        if not runs or (runs[0].get("status") == "completed" and runs[0].get("conclusion") == "success"):
+        if listed.returncode != 0:
+            return unread_main_note(listed.stderr or listed.stdout)
+        run = newest_run_on_main(json.loads(listed.stdout or "{}"))
+        if not run or (run.get("status") == "completed" and run.get("conclusion") == "success"):
             return None
-        jobs = subprocess.run(("gh", "api", f"{REPO}/actions/runs/{runs[0]['databaseId']}/jobs?per_page=100"),
+        jobs = subprocess.run(("gh", "api", f"{REPO}/actions/runs/{run['databaseId']}/jobs?per_page=100"),
                               capture_output=True, text=True, timeout=30)
-        return main_note(runs[0], json.loads(jobs.stdout or "{}").get("jobs", []))
-    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
-        return None
+        if jobs.returncode != 0:
+            return unread_main_note(jobs.stderr or jobs.stdout)
+        return main_note(run, json.loads(jobs.stdout or "{}").get("jobs", []))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
+        return unread_main_note(f"{type(error).__name__}: {error}")
 
 
 def required_from(branch: dict | None, rules: list | None) -> list[str]:
@@ -2207,6 +2237,19 @@ def self_test() -> int:
          breaking_main),
         ("a job that was cancelled or skipped is not a failed one",
          main_note(run_of_main, [{"name": "a", "conclusion": "cancelled"}, {"name": "b", "conclusion": "skipped"}]), None),
+        ("the newest run on main, as the API lists it, is read as main_note takes it",
+         newest_run_on_main({"total_count": 2, "workflow_runs": [
+             {"id": 45705344585, "head_sha": "9fd0d22" + "0" * 33, "status": "completed", "conclusion": "failure", "event": "push"},
+             {"id": 1, "head_sha": "a" * 40, "status": "completed", "conclusion": "success"}]}), run_of_main),
+        ("...and the note it gives is the same one",
+         (main_note(newest_run_on_main({"workflow_runs": [{"id": 45705344585, "head_sha": "9fd0d22" + "0" * 33,
+                                                             "status": "completed", "conclusion": "failure"}]}),
+                    jobs_of_main) or "")[:len(broken_main)], broken_main),
+        ("the API lists no run, or answers something else: no run", 
+         [newest_run_on_main(answer) for answer in ({}, {"workflow_runs": []}, None, {"message": "Not Found"})], [None] * 4),
+        ("a lookup that failed says that it failed, in one line, and how to look",
+         unread_main_note("unknown flag: --event\n\nUsage:  gh run list [flags]\n")[:101],
+         "whether `main` is broken could not be read here (unknown flag: --event Usage: gh run list [flags]). L"),
     ]
 
     blocked = "GitHub will not merge #7 as it is (it reports BLOCKED): the rule the person set on `main` wants a passed run of "

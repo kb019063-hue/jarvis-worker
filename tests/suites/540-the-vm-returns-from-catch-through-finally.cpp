@@ -26,8 +26,8 @@ TEST(the_bytecode_vm_returns_from_catch_through_finally) {
     agree("var s='';function f(){try{throw 1}catch(e){let x={v:e};return x}finally{gc()}}var a=f();String(a.v+'/'+s)", "1/");
     agree("var s='';function f(){try{throw 5}catch(e){if(e==5)return e;return 7}finally{s+='f'}}String(f()+'/'+s)", "5/f");
     agree("var s='';function f(){try{throw 1}catch(e){try{return missing_name}catch(x){s+=x.name}finally{s+='i'}}finally{s+='o'}return 9}String(f()+'/'+s)", "9/ReferenceErrorio");
-    // These require iterator or finalizer-completion unwinding, not done here.
-    for (const char* source : {"function f(){for(var x of [1]){try{throw x}catch(e){return e}finally{}}}f()",
+    // Interleaved iterator/finalizer and finalizer-return unwinding remain refused.
+    for (const char* source : {"function f(){try{for(var x of [1]){try{throw x}catch(e){return e}finally{}}}finally{}}f()",
                                "function f(){try{throw 1}catch(e){return e}finally{return 2}}f()"}) {
         TestPage page;
         bool refused = false;

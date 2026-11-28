@@ -66,6 +66,30 @@ class Case:
 # Both paths must answer these alike. Each was run on the engine and read
 # before it was written here; none of them is a guess.
 AGREES: list[Case] = [
+    # Phase 558: finalizers nested inside loops run before iterator close.
+    Case("function f(){for(var x of [1]){try{throw x}catch(e){return e}finally{}}}f()", "original catch return through finalizer and for-of"),
+    Case("function f(){for(var x of [1]){try{return x}finally{}}}f()", "original try return through finalizer and for-of"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';return {}}}};function f(){for(var x of a){try{throw x}catch(e){s+='c';return e}finally{s+='f'}}}String(f()+'/'+s)", "catch then finalizer then close"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';return {}}}};function f(){for(var x of a){try{return x}finally{s+='f'}}}String(f()+'/'+s)", "try return finalizer then close"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';return {}}}};function f(){for(var x of a){try{try{throw x}catch(e){return e}finally{s+='i'}}finally{s+='o'}}}String(f()+'/'+s)", "nested finalizers before iterator close"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';return {}}}};function f(){for(var x of a){try{throw x}catch(e){return {v:e}}finally{gc();s+='f'}}}String(f().v+'/'+s)", "returned object survives finalizer collection"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';return {}}}};function f(){for(var x of a){try{throw x}catch(e){return missing_name}finally{s+='f'}}}try{f()}catch(e){s+=e.name}String(s)", "throw in return expression still closes"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';throw 'close'}}};function f(){for(var x of a){try{throw x}catch(e){return e}finally{s+='f'}}}try{f()}catch(e){s+=e}String(s)", "close throw replaces return"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';throw 'close'}}};function f(){for(var x of a){try{throw x}catch(e){return e}finally{s+='f';throw 'fin'}}}try{f()}catch(e){s+=e}String(s)", "finalizer throw wins over close throw"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';return {}}}};var b={};b[Symbol.iterator]=function(){return {next:function(){return {value:7,done:false}},return:function(){s+='b';return {}}}};function f(){for(var x of a){for(var y of b){try{throw y}catch(e){return e}finally{s+='f'}}}}String(f()+'/'+s)", "nested cursors close inside out"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';return {}}}};function f(){for(var x of a){try{throw x}catch(e){try{return e}finally{s+='i'}}finally{s+='o'}}}String(f()+'/'+s)", "inner and outer finalizers precede close"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';return {}}}};function f(){for(var x of a){try{throw x}catch(e){return e}finally{s+='f'}}}var o={};Object.defineProperty(o,'x',{get:f});String(o.x+'/'+s)", "reentrant getter return and close"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';return {}}}};function f(){for(var x of a){let k=2;try{throw x}catch(e){let v=e+k;return v}finally{s+=k}}}String(f()+'/'+s)", "locals visible in finalizer"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';return {}}}};function f(){for(var x of a){try{throw x}catch(e){return e}finally{let [u,v]=[3,4];s+=u+v}}}String(f()+'/'+s)", "finalizer destructuring cursor before loop close"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:5,done:false}},return:function(){s+='r';return {}}}};function f(){for(var x of a){try{throw x}catch(e){return e}finally{try{throw 3}catch(q){s+=q}}}}String(f()+'/'+s)", "handled finalizer throw"),
+    Case("var s='';function f(){while(true){try{throw 1}catch(e){return e}finally{s+='f'}}}String(f()+'/'+s)", "while encloses finalizer"),
+    Case("var s='';function f(){switch(1){case 1:try{throw 1}catch(e){return e}finally{s+='f'}}}String(f()+'/'+s)", "switch encloses finalizer"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){s+='a';return {}}}};var b={};b[Symbol.iterator]=function(){return {next:function(){return {value:2,done:false}},return:function(){s+='b';throw 'B'}}};function f(){for(var x of a){for(var y of b){try{throw y}catch(e){return e}finally{s+='f'}}}}try{f()}catch(e){s+=e}String(s)", "nested close failure keeps first throw"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){s+='r';gc();return {}}}};function f(){for(var x of a){try{throw {v:x}}catch(e){return e}finally{s+='f';gc()}}}String(f().v+'/'+s)", "GC during finalizer and close keeps result"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){s+='r';return 3}}};function f(){for(var x of a){try{throw x}catch(e){return e}finally{s+='f'}}}try{f()}catch(e){s+=e.name}String(s)", "invalid close result replaces return"),
+    Case("var s='';var a={};a[Symbol.iterator]=function(){return {next:function(){s+='n';throw 4},return:function(){s+='r';return {}}}};function f(){for(var x of a){try{throw x}catch(e){return e}finally{s+='f'}}}try{f()}catch(e){s+=e}String(s)", "failing iterator step does not close"),
+    Case("var s='';function f(){for(var x of [2]){try{return missing_name}catch(e){s+=e.name;return 7}finally{s+='f'}}}String(f()+'/'+s)", "catch handles return expression throw"),
+
     # Phase 540: a catch return runs its surrounding finalizers.
     Case("function f(){try{throw 1}catch(e){return e}finally{}}f()", "original catch return through finalizer"),
     Case("var s='';function f(){try{throw 3}catch(e){s+='c';return e}finally{s+='f'}}String(f()+'/'+s)", "catch and finalizer order"),
@@ -395,8 +419,8 @@ AGREES: list[Case] = [
 # number, and so the day one of them starts working shows up as a failure
 # rather than as silence.
 REFUSES: list[Case] = [
-    Case("function f(){for(var x of [1]){try{throw x}catch(e){return e}finally{}}}f()", "return from catch through finalizer and iterator"),
-    Case("function f(){for(var x of [1]){try{return x}finally{}}}f()", "return through finalizer and iterator"),
+    Case("function f(){try{for(var x of [1]){try{throw x}catch(e){return e}finally{}}}finally{}}f()", "return with loop between finalizers"),
+    Case("function f(){try{for(var x of [1]){try{return x}finally{}}}catch(e){}}f()", "return with loop between catch and finalizer"),
     Case("function f(){try{}finally{return 2}}f()", "return from finalizer"),
     Case("while(true){try{}finally{break}}", "jump from finalizer"),
     Case("try{}finally{let x=2;var f=function(){return x};f()}", "closure inside finalizer"),

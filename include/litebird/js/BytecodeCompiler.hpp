@@ -101,12 +101,14 @@ private:
     int m_protected_depth{0};
     int m_catch_depth{0};
     int m_finalizer_depth{0};
-    // Active runtime handlers, outermost first. A null body denotes catch;
-    // loops and returns from finalizers remain restricted.
+    // Active runtime handlers, outermost first. A null body denotes catch.
+    // Loop depth distinguishes handlers inside all loops from interleaved
+    // handlers, whose completion ordering is not yet implemented.
     struct ReturnHandler {
         const BlockStmt* body{nullptr};
         size_t locals{0};
         int scope_depth{0};
+        size_t loop_depth{0};
     };
     std::vector<ReturnHandler> m_return_handlers;
     int m_completion_slot{-1};

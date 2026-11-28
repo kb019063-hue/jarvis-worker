@@ -367,13 +367,13 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
         // copy of the finalizer so a finalizer throw replaces the pending one.
         size_t finally_jump = 0;
         if (statement->finalizer) {
-            m_return_handlers.push_back({statement->finalizer.get(), m_locals.size(), m_scope_depth});
+            m_return_handlers.push_back({statement->finalizer.get(), m_locals.size(), m_scope_depth, m_loops.size()});
             finally_jump = emit_jump(OpCode::OpTry);
             ++m_protected_depth;
         }
         if (statement->has_handler) {
             const size_t catch_jump = emit_jump(OpCode::OpTry);
-            m_return_handlers.push_back({nullptr, m_locals.size(), m_scope_depth});
+            m_return_handlers.push_back({nullptr, m_locals.size(), m_scope_depth, m_loops.size()});
             ++m_protected_depth;
             compile_stmt(statement->block.get());
             --m_protected_depth;
@@ -618,13 +618,16 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             emit_byte(0xFF);
         }
     } else if (auto ret_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
-        // A return leaves active catch and finalizer handlers. A catch body
-        // has already left its own catch handler; its binding is trimmed at
-        // the next handler boundary, like any other lexical local. Loops and
-        // returns from finalizers still need separate unwind rules.
+        // A catch body has already left its own handler. If every active
+        // handler was entered inside all active loops/switches, their unwind
+        // is entirely before the loops' IteratorClose operations. Interleaved
+        // handlers and loops need a different completion order and are refused.
+        const bool handlers_inside_loops = std::all_of(
+            m_return_handlers.begin(), m_return_handlers.end(),
+            [this](const ReturnHandler& handler) { return handler.loop_depth == m_loops.size(); });
         const bool through_handlers = !m_return_handlers.empty() &&
             static_cast<size_t>(m_protected_depth) == m_return_handlers.size() &&
-            !m_finalizer_depth && m_loops.empty();
+            !m_finalizer_depth && handlers_inside_loops;
         if ((m_protected_depth || m_finalizer_depth) && !through_handlers)
             throw std::runtime_error("This return from try or finally is not supported by the bytecode compiler");
         if (ret_stmt->value) {
@@ -663,6 +666,11 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
                     --m_finalizer_depth;
                     m_locals.resize(target.locals);
                 }
+            }
+            // All loops enclose the handlers just unwound. A return closes
+            // their for-of cursors inside out only after the finalizers run.
+            for (auto it = m_loops.rbegin(); it != m_loops.rend(); ++it) {
+                if (it->is_for_of) emit_opcode(OpCode::OpIteratorClose);
             }
             emit_opcode(OpCode::OpReturn);
             m_return_handlers = targets;

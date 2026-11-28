@@ -232,12 +232,12 @@ note() {  # note N FILE -> "#N COMMENTID"
   local url; url="$(timeout 40 gh pr comment "$1" --body-file "$2" 2>&1 | tail -1)"
   echo "#$1 ${url##*-}"
 }
-open_ones() {  # "N FULLSHA fin|WIP|draft MERGEABLE..." of every open pull request that is a claim
+open_ones() {  # "N FULLSHA fin|WIP|WIP-no-draft|draft MERGEABLE..." of every open pull request that is a claim
   # A draft is work in progress whatever its title says, as it is for
   # check_pr.py: GitHub does not merge one. On 24 November #385, a draft
   # whose title had lost its WIP:, was taken into a lot for three minutes.
   timeout 40 gh pr list --state open --limit 100 --json number,title,headRefOid,mergeable,isDraft \
-    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.title | test("^WIP")) then "WIP" elif .isDraft then "draft" else "fin" end) \(.mergeable)"' | sort -n
+    --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.title | test("^WIP")) then (if .isDraft then "WIP" else "WIP-no-draft" end) elif .isDraft then "draft" else "fin" end) \(.mergeable)"' | sort -n
 }
 fetch_pr() { timeout 60 git fetch -q origin "+refs/pull/$1/head:refs/remotes/origin/pr$1"; }
 wip_off_at() {  # wip_off_at N -> HH:MM:SS (UTC; with the day when it was not today) at which the last change of #N's title took WIP: off; nothing when it did not
@@ -338,6 +338,10 @@ cands)
       else
         echo "#$n ${full:0:7}: NOT taken: a draft whose title has no WIP: and never lost one ($runs). Opened without WIP:, or finished? Read it; \`tools/watch/watch.sh ready $n\` when it is finished" >&2
       fi
+      continue
+    fi
+    if [ "$wip" = "WIP-no-draft" ]; then
+      echo "#$n ${full:0:7}: a claim under WIP: that is no draft, which GitHub would merge for whoever asked: \`tools/watch/watch.sh drafts\` makes it one and says so on it" >&2
       continue
     fi
     [ "$wip" = "fin" ] || continue

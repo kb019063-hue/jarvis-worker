@@ -1,5 +1,13 @@
 # Phase 471 — JSON reviver keeps the first span on duplicate keys
 
+> **Corrected in Phase 541** ([finding 541](docs/findings/541-the-suite-cited-node-against-node.md)):
+> this phase's rule — first span wins — is the opposite of what Node v22.22.3
+> answers, which is the last writer's span (`{"a":1,"a":22}` gives the reviver
+> value 22 with source "22" in every shape probed). The suite this phase
+> wrote cited Node against Node; its expectations were rewritten and the
+> `remember` overwrite this phase removed is back. This document stands as
+> the record of what was done, wrong rule included.
+
 Finding 471. Task: `A JSON.parse reviver is told the text it read, since Phase 405` — still open: duplicate key's span wins by insertion order (unasserted). The parser recorded the span after each `parse_value` into `SourceMap` keyed by `(holder identity, key)` with `m_sources[key] = span`. For `{"a":1,"a":2}` the second write overwrote the first, so the reviver's `context.source` for `a` was `"2"` and not the first occurrence's `"1"`.
 
 What the standard does: an object's members are added in textual order; a duplicate key replaces the property's value but the *source* that the reviver's `InternalizeJSONProperty` walk later looks up is the one that was filed when the member was first created. The first span is the one the text establishes; the second is the value that survives. The map should keep the first insertion and ignore later overwrites for the same `(holder,key)` pair.

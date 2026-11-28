@@ -72,39 +72,73 @@ struct PlacedCell {
     std::size_t colspan{1};
 };
 
-/// CSS 2.1 17.6.2.1, the border-conflict resolution, reduced to what this
-/// engine can express: on a shared edge the wider used border wins and every
-/// cell touching the edge paints half of the winner's border, colour included
-/// (the two halves add up to the winning border). Positional priority
-/// (cell > row > table) and style-based priority (double > solid > …) are
-/// not modeled — borders carry a single solid style here, and row borders
-/// are not painted at all. Outer edges resolve against nothing and keep the
-/// cell's own width; the table's own border stays the table's.
+/// CSS 2.1 17.6.2.1, for conflicts between visible cell borders: the wider
+/// border wins; at equal width, `hidden` wins, followed by double > solid >
+/// dashed > dotted > ridge > outset > groove > inset > none. Every cell
+/// touching a shared edge receives the winning width, colour and style, then
+/// paints half. Border-origin precedence (cell > row > table) and hidden-border
+/// suppression are separate, still-unmodeled parts of the table algorithm.
+/// Outer edges resolve against nothing and keep their cell's own border; the
+/// table's own border stays the table's.
 struct ResolvedBorders {
     std::vector<EdgeSizes> widths;
     std::vector<EdgeColors> colors;
+    std::vector<EdgeStyles> styles;
 };
 
 ResolvedBorders resolve_collapsed_borders(const std::vector<PlacedCell>& placed,
                                           std::size_t row_count,
                                           std::size_t column_count) {
     const std::size_t n = placed.size();
+    auto style_priority = [](BorderStyle style) {
+        switch (style) {
+            case BorderStyle::Double: return 8;
+            case BorderStyle::Solid: return 7;
+            case BorderStyle::Dashed: return 6;
+            case BorderStyle::Dotted: return 5;
+            case BorderStyle::Ridge: return 4;
+            case BorderStyle::Outset: return 3;
+            case BorderStyle::Groove: return 2;
+            case BorderStyle::Inset: return 1;
+            case BorderStyle::Hidden: return 9;
+            case BorderStyle::None: return 0;
+        }
+        return 0;
+    };
+    auto style_ref = [](EdgeStyles& edges, int side) -> BorderStyle& {
+        return (side == 0) ? edges.top
+             : (side == 1) ? edges.right
+             : (side == 2) ? edges.bottom
+                           : edges.left;
+    };
+    auto candidate_wins = [&](float width, BorderStyle style,
+                              float current_width, BorderStyle current_style) {
+        return width > current_width ||
+               (width == current_width && style_priority(style) >= style_priority(current_style));
+    };
+
     std::vector<EdgeSizes> used;
     std::vector<EdgeColors> used_colors;
+    std::vector<EdgeStyles> used_styles;
     used.reserve(n);
     used_colors.reserve(n);
+    used_styles.reserve(n);
     for (const auto& entry : placed) {
         used.push_back(entry.box->style->border_width);
         used_colors.push_back(EdgeColors(entry.box->style->border_color));
+        used_styles.push_back(entry.box->style->border_style);
     }
 
-    auto relax = [&](std::size_t index, int side, float width, const Color& color) {
+    auto relax = [&](std::size_t index, int side, float width, const Color& color,
+                     BorderStyle style) {
         float& edge = (side == 0) ? used[index].top
                     : (side == 1) ? used[index].right
                     : (side == 2) ? used[index].bottom
                                   : used[index].left;
-        if (width >= edge) {
+        BorderStyle& edge_style = style_ref(used_styles[index], side);
+        if (candidate_wins(width, style, edge, edge_style)) {
             edge = width;
+            edge_style = style;
             Color& colored = (side == 0) ? used_colors[index].top
                            : (side == 1) ? used_colors[index].right
                            : (side == 2) ? used_colors[index].bottom
@@ -118,29 +152,34 @@ ResolvedBorders resolve_collapsed_borders(const std::vector<PlacedCell>& placed,
         for (std::size_t r = 0; r < row_count; ++r) {
             float winner = 0.0f;
             Color winner_color = Color::black();
+            BorderStyle winning_style = BorderStyle::None;
             std::vector<std::pair<std::size_t, int>> members;
             for (std::size_t i = 0; i < n; ++i) {
                 const auto& entry = placed[i];
                 if (r < entry.row || r >= entry.row + entry.rowspan) continue;
                 float width = -1.0f;
                 Color color = Color::black();
+                BorderStyle style = BorderStyle::None;
                 if (entry.col + entry.colspan == b) {
                     width = entry.box->style->border_width.right;
                     color = entry.box->style->border_color;
+                    style = entry.box->style->border_style.right;
                     members.emplace_back(i, 1);
                 } else if (entry.col == b) {
                     width = entry.box->style->border_width.left;
                     color = entry.box->style->border_color;
+                    style = entry.box->style->border_style.left;
                     members.emplace_back(i, 3);
                 } else {
                     continue;
                 }
-                if (width >= winner) {
+                if (candidate_wins(width, style, winner, winning_style)) {
                     winner = width;
                     winner_color = color;
+                    winning_style = style;
                 }
             }
-            for (const auto& [i, side] : members) relax(i, side, winner, winner_color);
+            for (const auto& [i, side] : members) relax(i, side, winner, winner_color, winning_style);
         }
     }
 
@@ -149,32 +188,37 @@ ResolvedBorders resolve_collapsed_borders(const std::vector<PlacedCell>& placed,
         for (std::size_t c = 0; c < column_count; ++c) {
             float winner = 0.0f;
             Color winner_color = Color::black();
+            BorderStyle winning_style = BorderStyle::None;
             std::vector<std::pair<std::size_t, int>> members;
             for (std::size_t i = 0; i < n; ++i) {
                 const auto& entry = placed[i];
                 if (c < entry.col || c >= entry.col + entry.colspan) continue;
                 float width = -1.0f;
                 Color color = Color::black();
+                BorderStyle style = BorderStyle::None;
                 if (entry.row + entry.rowspan == b) {
                     width = entry.box->style->border_width.bottom;
                     color = entry.box->style->border_color;
+                    style = entry.box->style->border_style.bottom;
                     members.emplace_back(i, 2);
                 } else if (entry.row == b) {
                     width = entry.box->style->border_width.top;
                     color = entry.box->style->border_color;
+                    style = entry.box->style->border_style.top;
                     members.emplace_back(i, 0);
                 } else {
                     continue;
                 }
-                if (width >= winner) {
+                if (candidate_wins(width, style, winner, winning_style)) {
                     winner = width;
                     winner_color = color;
+                    winning_style = style;
                 }
             }
-            for (const auto& [i, side] : members) relax(i, side, winner, winner_color);
+            for (const auto& [i, side] : members) relax(i, side, winner, winner_color, winning_style);
         }
     }
-    return {used, used_colors};
+    return {used, used_colors, used_styles};
 }
 
 bool LayoutBox::establishes_bfc() const {
@@ -632,7 +676,8 @@ void LayoutBox::layout_table(float containing_width) {
         const ResolvedBorders resolved = resolve_collapsed_borders(placed, row_count, column_count);
         for (std::size_t i = 0; i < placed.size(); ++i) {
             placed[i].box->border_override = resolved.widths[i];
-            placed[i].box->border_color_override = resolved.colors[i];
+            placed[i].box->border_paint_override = LayoutBox::BorderPaintOverride{
+                resolved.colors[i], resolved.styles[i]};
         }
     }
     for (auto& entry : placed) entry.box->border_scale = collapsed ? 0.5f : 1.0f;

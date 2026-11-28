@@ -618,11 +618,13 @@ void BytecodeCompiler::compile_stmt(const Stmt* stmt) {
             emit_byte(0xFF);
         }
     } else if (auto ret_stmt = dynamic_cast<const ReturnStmt*>(stmt)) {
-        // A return leaves catch handlers as well as finalizer handlers.
-        // Loops, catch bodies and finalizers need separate unwind rules.
+        // A return leaves active catch and finalizer handlers. A catch body
+        // has already left its own catch handler; its binding is trimmed at
+        // the next handler boundary, like any other lexical local. Loops and
+        // returns from finalizers still need separate unwind rules.
         const bool through_handlers = !m_return_handlers.empty() &&
             static_cast<size_t>(m_protected_depth) == m_return_handlers.size() &&
-            !m_finalizer_depth && !m_catch_depth && m_loops.empty();
+            !m_finalizer_depth && m_loops.empty();
         if ((m_protected_depth || m_finalizer_depth) && !through_handlers)
             throw std::runtime_error("This return from try or finally is not supported by the bytecode compiler");
         if (ret_stmt->value) {

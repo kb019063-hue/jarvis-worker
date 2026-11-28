@@ -35,7 +35,10 @@ completion unwinding explicit.
   A 56-case combination probe for returns, scopes and finalizers agrees.
 - `make fuzz` passes. An ASan/UBSan build with the suite compiled at `-O0`
   passed the isolated 13-suite stretch and all **150/150** bytecode oracle
-  cases; deep and full sanitizer checks remain in progress.
+  cases. `make deep`: 1,332 runs, 0 failures.
+- A full `make asan TEST_OPT=-O0` attempt was stopped after 150 seconds in the
+  pre-existing deep-nesting suite. This is not a full sanitizer pass; CI must
+  run every sanitizer job with its normal flags.
 - `tests/suites/479-the-vm-returns-through-finally.cpp` checks evaluation
   order, scope cleanup, returned objects, GC, throws, callbacks and refusals.
 

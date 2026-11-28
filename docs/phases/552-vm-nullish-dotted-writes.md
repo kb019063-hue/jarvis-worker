@@ -28,8 +28,16 @@ Node v22.22.3 independently checked the differential traces: null and
 undefined, exact diagnostics, base and RHS effects and exceptions, nullish
 compound writes and updates, ordinary and nested assignments, frame and
 finalizer unwinding, and iterator cleanup. The suite also checks an uncaught
-JavaScript throw. Thirteen cases extend `make verify-bytecode` to 231/231
-agreements and 8/8 still refused after Phase 540.
+JavaScript throw and the TypeError prototype. All 16 differential traces
+matched Node. Thirteen cases extend `make verify-bytecode` to 231/231
+agreements and 8/8 still refused after Phase 540. After merging Phases 547
+and 553, `make test` passed 586 suites and 114 cross-origin checks. HTML conformance
+was 1973/1973, JS 1154/1158 and everyday 90/90, DOM 678/678, URL
+1188/1188, XML 1718/1718, and WPT 9570/9824 with no unlisted failures.
+`diff-trees`, `diff-xml`, `check-numbers`, `check-suites` and `check_docs.py`
+passed. An earlier test run was killed during the deep-nesting suite while
+concurrent conformance checks were running; the subsequent isolated run passed.
+Full sanitizer and deep checks are required in CI.
 
 ## Still open
 

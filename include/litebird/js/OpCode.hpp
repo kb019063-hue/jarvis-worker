@@ -79,7 +79,11 @@ enum class OpCode : uint8_t {
 
     // Functions
     OpCall,
-    OpReturn
+    OpReturn,
+
+    // Swap the top two values, e.g. [base, value] -> [value, base] for
+    // OpSetProperty while keeping the base rooted across RHS evaluation.
+    OpSwap
 };
 
 inline std::string_view opcode_name(OpCode op) {
@@ -135,6 +139,7 @@ inline std::string_view opcode_name(OpCode op) {
         case OpCode::OpLoop:         return "OP_LOOP";
         case OpCode::OpCall:         return "OP_CALL";
         case OpCode::OpReturn:       return "OP_RETURN";
+        case OpCode::OpSwap:         return "OP_SWAP";
     }
     return "UNKNOWN_OPCODE";
 }

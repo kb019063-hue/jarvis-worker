@@ -389,6 +389,21 @@ AGREES: list[Case] = [
     Case("var o={toString:function(){throw 'converted'}};try{o()}catch(e){e.name}", "conversion cannot replace TypeError"),
     Case("function f(){(0)()}try{f()}catch(e){e.name}", "TypeError unwinds a VM frame"),
     Case("var s='';try{try{(0)()}finally{s+='f'}}catch(e){s+=e.name}String(s)", "TypeError runs finalizer"),
+    # Phase 552: dotted assignment evaluates its base before the RHS, then
+    # rejects a nullish base at the store rather than discarding the write.
+    Case("try{null.x=1}catch(e){e.name}", "null dotted write throws"),
+    Case("try{undefined.x=1}catch(e){e.name}", "undefined dotted write throws"),
+    Case("try{null.x=1}catch(e){e.message}", "null dotted write diagnostic"),
+    Case("var s='';function base(){s+='b';return null}function rhs(){s+='r';return 1}try{base().x=rhs()}catch(e){s+=e.name}String(s)", "base then RHS then TypeError"),
+    Case("var s='';function base(){s+='b';throw 'base'}function rhs(){s+='r';return 1}try{base().x=rhs()}catch(e){s+=e}String(s)", "base throw prevents RHS"),
+    Case("var s='';function base(){s+='b';return null}function rhs(){s+='r';throw 'rhs'}try{base().x=rhs()}catch(e){s+=e}String(s)", "RHS throw precedes nullish store"),
+    Case("var s='';function base(){s+='b';return undefined}try{base().x+=(s+='r')}catch(e){s+=e.name}String(s)", "compound nullish read precedes RHS"),
+    Case("var s='';function base(){s+='b';return null}try{base().x++}catch(e){s+=e.name}String(s)", "nullish update reads first"),
+    Case("var s='',o={x:1},saved=o;function base(){s+='b';return o}function rhs(){s+='r';o=null;gc();return 7}var v=(base().x=rhs());String(s+'/'+saved.x+'/'+v)", "original base survives RHS mutation and GC"),
+    Case("var a={},b={};var v=(a.x=b.y=4);String(a.x+'/'+b.y+'/'+v)", "nested dotted assignment values"),
+    Case("function f(){null.x=1}try{f()}catch(e){e.name}", "nullish store unwinds a frame"),
+    Case("var s='';try{try{undefined.x=(s+='r')}finally{s+='f'}}catch(e){s+=e.name}String(s)", "nullish store runs finally"),
+    Case("var s='',it={};it[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){s+='c';return {}}}};try{for(var x of it){null.x=1}}catch(e){s+=e.name}String(s)", "nullish store closes iterator"),
 ]
 
 # The compiler refuses these. Kept here so the count of what is left has a

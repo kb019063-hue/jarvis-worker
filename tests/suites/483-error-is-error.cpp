@@ -56,8 +56,8 @@ TEST(error_is_error_answers_whether_value_has_error_data) {
         EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));
     }
 
-    // 9. DOMException in this engine shares klass Error — documented limitation.
-    assert(is_true("Error.isError(new DOMException('m','SyntaxError'))"));
+    // 9. DOMException is not an Error (Phase 495 separates the klass).
+    assert(run("Error.isError(new DOMException('m','SyntaxError'))") == "false");
 
     // 10. The method is on Error, not on instances.
     assert(run("typeof (new Error('x')).isError") == "undefined");

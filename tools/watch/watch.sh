@@ -74,6 +74,9 @@
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 9
+# This is the landing session: check_pr.py writes the watch's status on the
+# board for nobody else (`not_the_landing_session` there says why).
+export CHECK_PR_LANDING=1
 STATE="${WATCH_STATE:-/tmp/watch}"
 NAME="${WATCH_NAME:-Lander}"
 mkdir -p "$STATE/land"

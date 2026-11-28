@@ -235,8 +235,11 @@ within the hour, and the first lot was started again four times.
    taken, and `mkbody.sh` writes the text of the watch's own pull
    request at the end. At every look,
    five minutes apart or less:
-   - `python3 tools/ci/check_pr.py watch --beat "YYYY-MM-DD HH:MM"` writes
-     the time of the look into the status comment of the board;
+   - its `watch.sh` writes the time of the look into the status comment
+     of the board. **Nobody else writes that comment**: every agent's
+     answer hangs on its last line, and `check_pr.py watch --beat` and
+     `--off` refuse outside the landing session's tool ("A status
+     that was not the landing session's", below);
    - `python3 tools/ci/check_pr.py watch` lists what is finished, green and
      mergeable, and for the rest why not;
    - **a pull request with `main` in its head is merged at once**, as it
@@ -1448,18 +1451,31 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   went round CI once more in another. #481 was waiting for the next
   lot. Every command of the loop writes the look now when the last is
   five minutes old, and `watch.sh off` ends the watch.
+- **A status that was not the landing session's.** On 28 November,
+  with a watch on until 17:50, a session that was not the landing
+  session ran `check_pr.py watch --beat` twice, at 17:06 and 17:12,
+  with the hour it was (17:00, 17:10) where the command takes the
+  hour the watch ends: these rules had worded it as a thing done "at
+  every look", by nobody in particular. Each wrote a new status
+  under the real one, "ON until" an hour that was past, and for 91
+  seconds and then for three minutes and a half every agent that
+  asked was told that the watch was over. #547's agent started every
+  job on a head that was in a lot, which under the rule on `main`
+  held the lot until the build had passed again, and merged `main`
+  into it; #553's merged `main` too. The command now refuses whoever
+  is not the landing session's tool, and an hour that is not ahead;
+  a status that was over when it was written is read as nobody's.
 - **A board that could not be read was "no watch".** Every agent that
   waits reads the whole board once a minute (some 450 comments on 28
   November). When one read failed, `landed N` said "Merge it
   yourself" and `merge N` started every job of CI and could say
-  "ready", watch or no watch. That day at 17:07:46 the label that
-  starts every job was put on #547 and taken off, five minutes after
-  it was taken into a lot; under the rule on `main` GitHub reported
-  BLOCKED until the build had passed on it again, and the lot, which
-  had passed, waited three minutes and a half. Whether a failed read
-  was the cause is not known. Now the board is asked three times,
-  and a board that is there and was not read is "ask again in a
-  minute": nothing is started and nothing is merged on it.
+  "ready", watch or no watch. It was found on 28 November while
+  looking for what had told #547's agent that no watch was on (the
+  entry above was that), and tried against a `gh` that fails the one
+  read: `merge N` asked for the label that starts every job. Now the
+  board is asked three times, and a board that is there and was not
+  read is "ask again in a minute": nothing is started and nothing is
+  merged on it.
 - **A watch that stopped without saying so.** On 25 November the landing
   session's turn ended at 07:22 with a lot in test and the status line
   promising a watch until 08:15. #433 had been told at 07:22 that it would

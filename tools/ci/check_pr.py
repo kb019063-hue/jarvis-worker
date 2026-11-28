@@ -1556,6 +1556,13 @@ def watch_state(comments: list[dict], now: datetime) -> Watch:
         if on:
             until = datetime.strptime(on.group(2), STAMP).replace(tzinfo=timezone.utc)
             looked = datetime.strptime(on.group(3), STAMP).replace(tzinfo=timezone.utc)
+            if until <= looked:
+                # "ON until 17:00, last look 17:06": written when its own end
+                # was past, which the landing session's tool refuses to do. A
+                # session that was not the landing session did, twice, on 28
+                # November (`not_the_landing_session`). It is nobody's watch:
+                # the status before it counts.
+                continue
             if now >= until:
                 state = "over"
             elif now - looked > timedelta(minutes=QUIET_AFTER_MINUTES):
@@ -1736,12 +1743,11 @@ def board_state(board: int | None, comments: list[dict] | None) -> str:
     and said "ready", and `landed N` said "Merge it yourself". The board is
     one pull request with some 450 comments, read whole by every agent that
     waits, once a minute; one such read that fails is not a watch that has
-    ended. At 17:07:46 that day the label that starts every job was put on
-    #547 and taken off while a watch was on and #547 was in a lot, by a
-    command that does so only when it sees no watch, and the board said ON
-    with a look a minute old. Under the rule on `main` the run it started
-    held the lot for three minutes and a half. Whether a failed read was
-    why is not known; that it could have been was enough.
+    ended. It was found while looking for what had told #547's agent, at
+    17:07 that day, that no watch was on. That was something else (a status
+    that was not the landing session's: `not_the_landing_session`); this was
+    tried against a `gh` that fails the one read, and `merge N` asked for
+    the label that starts every job, of a pull request that was in a lot.
     """
     if board is None:
         return "none"
@@ -1823,18 +1829,55 @@ def write_status(first: str, rest: str, until: datetime | None) -> int:
     return 0
 
 
+def not_the_landing_session(environment: dict, end: datetime | None, now: datetime) -> str | None:
+    """Why `watch --beat` or `watch --off` writes nothing; None when it may.
+
+    The status comment is the landing session's, and every agent's answer
+    hangs on its last line. On 28 November 2026, while a watch was on until
+    17:50, two more such comments were written under it, at 17:06:49 and at
+    17:12:07: "WATCH ON until 17:00" and "until 17:10", each an hour that was
+    past, by a session that was not the landing session and had taken the
+    hour in `--beat "YYYY-MM-DD HH:MM"` for the time of the look, as
+    AGENTS.md then worded it. For 91 seconds and then for three minutes and
+    a half the last status on the board read as a watch that was over, and
+    every agent that asked was told to merge its own. #547's did: it started
+    every job on a head that was in a lot (the lot waited for that run) and
+    merged `main` into it. #553's merged `main` under the lot it was about
+    to be taken into.
+
+    So: the landing session's tool says who it is (`tools/watch/watch.sh`
+    sets CHECK_PR_LANDING), and an end that is not ahead is refused whoever
+    asks. `end` is None for `--off`.
+    """
+    if environment.get("CHECK_PR_LANDING") != "1":
+        return ("nothing was written. The watch's status on the board is the landing session's, written by "
+                "`tools/watch/watch.sh` at every look; every agent's answer hangs on it. To read it: "
+                "`python3 tools/ci/check_pr.py watch`")
+    if end is not None and end <= now:
+        return (f"nothing was written. --beat takes the hour the watch ENDS, and {end:{STAMP}} UTC is not ahead "
+                f"(it is {now:{STAMP}}); the time of the look is written by itself. A status whose end is past "
+                "tells every agent that no watch is on")
+    return None
+
+
 def beat(until: str, name: str) -> int:
     """The landing session's: say that a watch is on until `until`, and that it has just looked."""
     try:
         end = datetime.strptime(until, STAMP).replace(tzinfo=timezone.utc)
     except ValueError:
         sys.exit(f"--beat takes the end of the watch as \"YYYY-MM-DD HH:MM\" (UTC), not {until!r}")
+    refusal = not_the_landing_session(dict(os.environ), end, now_utc())
+    if refusal:
+        sys.exit(refusal)
     first = f"{name}: WATCH ON until {end:{STAMP}} UTC. Last look {now_utc():{STAMP}} UTC."
     return write_status(first, WATCH_ON_TEXT.format(quiet=QUIET_AFTER_MINUTES, name=name), end)
 
 
 def watch_off(text: str, name: str) -> int:
     """The landing session's: say that the watch has ended, and what it did."""
+    refusal = not_the_landing_session(dict(os.environ), None, now_utc())
+    if refusal:
+        sys.exit(refusal)
     first = f"{name}: WATCH OFF since {now_utc():{STAMP}} UTC. {text}".rstrip()
     return write_status(first, "", None)
 
@@ -2480,6 +2523,18 @@ def self_test() -> int:
          watch_state([said("Lander: WATCH ON until 2026-11-23 12:00 UTC. Last look 2026-11-23 11:59 UTC.")],
                      at("2026-11-23 12:00")).state, "over"),
         ("OFF after ON: no watch", watch_state(board + [off], at("2026-11-23 06:05")).state, "off"),
+        ("a status written when its own end was past is nobody's watch: the one before it counts (17:06 and 17:12, 28 November)",
+         [watch_state(board + [said("Lander: WATCH ON until 2026-11-23 05:00 UTC. Last look 2026-11-23 05:06 UTC.")],
+                      at("2026-11-23 05:10")).state,
+          watch_state([said("Lander: WATCH ON until 2026-11-23 05:00 UTC. Last look 2026-11-23 05:06 UTC.")],
+                      at("2026-11-23 05:10")).state], ["on", "none"]),
+        ("...and nobody but the landing session's tool writes one, nor one whose end is not ahead",
+         [(not_the_landing_session(environment, end, at("2026-11-23 05:10")) or "")[:22]
+          for environment, end in (({}, at("2026-11-23 06:00")), ({"CHECK_PR_LANDING": "1"}, at("2026-11-23 05:00")),
+                                   ({"CHECK_PR_LANDING": "1"}, at("2026-11-23 05:10")),
+                                   ({"CHECK_PR_LANDING": "1"}, at("2026-11-23 06:00")), ({"CHECK_PR_LANDING": "1"}, None),
+                                   ({}, None))],
+         ["nothing was written. T", "nothing was written. -", "nothing was written. -", "", "", "nothing was written. T"]),
         ("ON after OFF: the later one counts", watch_state([off, on], at("2026-11-23 05:10")).state, "on"),
         ("a line that only talks about a watch is not the status comment",
          watch_state([said("Heron: is a WATCH ON until tomorrow?"), said("WATCH ON until 2026-11-23 12:00 UTC.")],

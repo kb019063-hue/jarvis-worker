@@ -7,6 +7,21 @@ looks, and nothing else. Whatever cannot be said that way goes through the
 person the agents work for. This file is what the agents have to agree on so
 that two pieces of work do not collide.
 
+**How to read this file.** Read the rules: everything up to the rows
+of the table "Open tasks", which ends the file. **Do not read the
+rows.** They are nearly three quarters of this file (277 of 383 KB on
+28 November, some 70,000 tokens), and you need a list to choose from
+and one row:
+
+    python3 tools/tasks.py          the open tasks, a line or two each
+    python3 tools/tasks.py N        row N whole, and its line here
+    python3 tools/tasks.py WORD ..  the rows that have every WORD
+
+The file reader of this platform keeps the head and the tail of a
+file over 256 KB and leaves the middle out, so read the rules in
+pieces, by line numbers, and stop at the line `| Task | Files | ...`
+(`grep -n '^## \|^| Task' AGENTS.md` gives the lines).
+
 ## Notice — read this first (2026-11-17, rewritten the same day)
 
 **New phase write-ups and findings no longer go in `ARCHITECTURE.md` and
@@ -220,8 +235,11 @@ within the hour, and the first lot was started again four times.
    taken, and `mkbody.sh` writes the text of the watch's own pull
    request at the end. At every look,
    five minutes apart or less:
-   - `python3 tools/ci/check_pr.py watch --beat "YYYY-MM-DD HH:MM"` writes
-     the time of the look into the status comment of the board;
+   - its `watch.sh` writes the time of the look into the status comment
+     of the board. **Nobody else writes that comment**: every agent's
+     answer hangs on its last line, and `check_pr.py watch --beat` and
+     `--off` refuse outside the landing session's tool ("A status
+     that was not the landing session's", below);
    - `python3 tools/ci/check_pr.py watch` lists what is finished, green and
      mergeable, and for the rest why not;
    - **a pull request with `main` in its head is merged at once**, as it
@@ -513,7 +531,9 @@ without one, and leaves the board and a watch out of the claims.
    above told its successor not to close it ("What has gone wrong",
    Claims).
 2. **Claim before doing the work.** Pick a row of the table below that nobody
-   has, push a first commit (an empty one will do) and open a pull request
+   has (`python3 tools/tasks.py` lists them; the rows themselves are not
+   for reading whole), push a first commit (an empty one will do) and
+   open a pull request
    **as a draft** (`gh pr create --draft`; `gh pr ready N --undo` makes
    an open one a draft), whose title begins with `WIP:` and whose text
    begins:
@@ -1431,6 +1451,33 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   went round CI once more in another. #481 was waiting for the next
   lot. Every command of the loop writes the look now when the last is
   five minutes old, and `watch.sh off` ends the watch.
+- **A status that was not the landing session's.** On 28 November,
+  with a watch on until 17:50, a session that was not the landing
+  session ran `check_pr.py watch --beat` twice, at 17:06 and 17:12,
+  with the hour it was (17:00, 17:10) where the command takes the
+  hour the watch ends: these rules had worded it as a thing done "at
+  every look", by nobody in particular. Each wrote a new status
+  under the real one, "ON until" an hour that was past, and for 91
+  seconds and then for three minutes and a half every agent that
+  asked was told that the watch was over. #547's agent started every
+  job on a head that was in a lot, which under the rule on `main`
+  held the lot until the build had passed again, and merged `main`
+  into it. (#553's agent merged `main` in the second of those
+  stretches; whether on that answer is not known.) The command now
+  refuses whoever is not the landing session's tool, and an hour
+  that is not ahead; a status that was over when it was written is
+  read as nobody's.
+- **A board that could not be read was "no watch".** Every agent that
+  waits reads the whole board once a minute (some 450 comments on 28
+  November). When one read failed, `landed N` said "Merge it
+  yourself" and `merge N` started every job of CI and could say
+  "ready", watch or no watch. It was found on 28 November while
+  looking for what had told #547's agent that no watch was on (the
+  entry above was that), and tried against a `gh` that fails the one
+  read: `merge N` asked for the label that starts every job. Now the
+  board is asked three times, and a board that is there and was not
+  read is "ask again in a minute": nothing is started and nothing is
+  merged on it.
 - **A watch that stopped without saying so.** On 25 November the landing
   session's turn ended at 07:22 with a lot in test and the status line
   promising a watch until 08:15. #433 had been told at 07:22 that it would
@@ -1657,6 +1704,9 @@ nothing in it makes any item compulsory, and agents pick whatever they like
 from this table or from that file.** This table is the atomic claim-now queue;
 that file is the map. If the two ever disagree about what is open, this table
 wins — fix that file in the same PR.
+
+The table is read with `python3 tools/tasks.py`, not by eye ("How to
+read this file", at the top): its list is 15 KB where the table is 277.
 
 ## Open tasks
 

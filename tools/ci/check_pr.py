@@ -155,6 +155,7 @@ uses, so the two cannot drift apart.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -1555,6 +1556,13 @@ def watch_state(comments: list[dict], now: datetime) -> Watch:
         if on:
             until = datetime.strptime(on.group(2), STAMP).replace(tzinfo=timezone.utc)
             looked = datetime.strptime(on.group(3), STAMP).replace(tzinfo=timezone.utc)
+            if until <= looked:
+                # "ON until 17:00, last look 17:06": written when its own end
+                # was past, which the landing session's tool refuses to do. A
+                # session that was not the landing session did, twice, on 28
+                # November (`not_the_landing_session`). It is nobody's watch:
+                # the status before it counts.
+                continue
             if now >= until:
                 state = "over"
             elif now - looked > timedelta(minutes=QUIET_AFTER_MINUTES):
@@ -1709,14 +1717,45 @@ def rewrites(last: Watch, until: datetime | None) -> bool:
     return until is None or last.until == until
 
 
-def board_comments(number: int | None) -> list[dict] | None:
-    """The comments of the board, oldest first; None when they cannot be read."""
+def board_comments(number: int | None, pauses: tuple[int, ...] = (0, 3, 8)) -> list[dict] | None:
+    """The comments of the board, oldest first; None when they cannot be read.
+
+    Asked three times before it gives up, a few seconds apart: one answer
+    that fails is GitHub's moment, not the board's (`board_state`).
+    """
     if number is None:
         return None
-    try:
-        return json.loads(gh("pr", "view", str(number), "--json", "comments", check=False))["comments"]
-    except (ValueError, KeyError):
-        return None
+    for pause in pauses:
+        time.sleep(pause)
+        try:
+            return json.loads(gh("pr", "view", str(number), "--json", "comments", check=False))["comments"]
+        except (ValueError, KeyError):
+            continue
+    return None
+
+
+def board_state(board: int | None, comments: list[dict] | None) -> str:
+    """`read`; `none`: there is no board, so no watch can be on; `unread`:
+    there is one, and its comments could not be read, so nothing is known.
+
+    The two were one answer until 28 November 2026, "the board could not be
+    read ... taken as none", and on it `merge N` started every job of CI
+    and said "ready", and `landed N` said "Merge it yourself". The board is
+    one pull request with some 450 comments, read whole by every agent that
+    waits, once a minute; one such read that fails is not a watch that has
+    ended. It was found while looking for what had told #547's agent, at
+    17:07 that day, that no watch was on. That was something else (a status
+    that was not the landing session's: `not_the_landing_session`); this was
+    tried against a `gh` that fails the one read, and `merge N` asked for
+    the label that starts every job, of a pull request that was in a lot.
+    """
+    if board is None:
+        return "none"
+    return "unread" if comments is None else "read"
+
+
+UNREAD = ("the board (#{board}) could not be read, three times over, so it cannot be seen whether a watch is on. "
+          "Nothing was started, and nothing is to be merged on this answer: ask again in a minute")
 
 
 def now_utc() -> datetime:
@@ -1790,18 +1829,55 @@ def write_status(first: str, rest: str, until: datetime | None) -> int:
     return 0
 
 
+def not_the_landing_session(environment: dict, end: datetime | None, now: datetime) -> str | None:
+    """Why `watch --beat` or `watch --off` writes nothing; None when it may.
+
+    The status comment is the landing session's, and every agent's answer
+    hangs on its last line. On 28 November 2026, while a watch was on until
+    17:50, two more such comments were written under it, at 17:06:49 and at
+    17:12:07: "WATCH ON until 17:00" and "until 17:10", each an hour that was
+    past, by a session that was not the landing session and had taken the
+    hour in `--beat "YYYY-MM-DD HH:MM"` for the time of the look, as
+    AGENTS.md then worded it. For 91 seconds and then for three minutes and
+    a half the last status on the board read as a watch that was over, and
+    every agent that asked was told to merge its own. #547's did: it started
+    every job on a head that was in a lot (the lot waited for that run) and
+    merged `main` into it. #553's merged `main` in the second stretch, two
+    minutes before it was taken; whether on that answer is not known.
+
+    So: the landing session's tool says who it is (`tools/watch/watch.sh`
+    sets CHECK_PR_LANDING), and an end that is not ahead is refused whoever
+    asks. `end` is None for `--off`.
+    """
+    if environment.get("CHECK_PR_LANDING") != "1":
+        return ("nothing was written. The watch's status on the board is the landing session's, written by "
+                "`tools/watch/watch.sh` at every look; every agent's answer hangs on it. To read it: "
+                "`python3 tools/ci/check_pr.py watch`")
+    if end is not None and end <= now:
+        return (f"nothing was written. --beat takes the hour the watch ENDS, and {end:{STAMP}} UTC is not ahead "
+                f"(it is {now:{STAMP}}); the time of the look is written by itself. A status whose end is past "
+                "tells every agent that no watch is on")
+    return None
+
+
 def beat(until: str, name: str) -> int:
     """The landing session's: say that a watch is on until `until`, and that it has just looked."""
     try:
         end = datetime.strptime(until, STAMP).replace(tzinfo=timezone.utc)
     except ValueError:
         sys.exit(f"--beat takes the end of the watch as \"YYYY-MM-DD HH:MM\" (UTC), not {until!r}")
+    refusal = not_the_landing_session(dict(os.environ), end, now_utc())
+    if refusal:
+        sys.exit(refusal)
     first = f"{name}: WATCH ON until {end:{STAMP}} UTC. Last look {now_utc():{STAMP}} UTC."
     return write_status(first, WATCH_ON_TEXT.format(quiet=QUIET_AFTER_MINUTES, name=name), end)
 
 
 def watch_off(text: str, name: str) -> int:
     """The landing session's: say that the watch has ended, and what it did."""
+    refusal = not_the_landing_session(dict(os.environ), None, now_utc())
+    if refusal:
+        sys.exit(refusal)
     first = f"{name}: WATCH OFF since {now_utc():{STAMP}} UTC. {text}".rstrip()
     return write_status(first, "", None)
 
@@ -1824,11 +1900,18 @@ def check_landed(number: int, wait: int) -> int:
             print(f"#{number} is {pr['state'].lower()}")
             return 1
         prs = gh_json("pr", "list", "--state", "open", "--limit", "100", "--json", "number,title")
-        comments = board_comments(board_number(prs))
-        if comments is None:
-            print("the board could not be read: no watch can be seen. Merge it yourself: "
-                  f"python3 tools/ci/check_pr.py merge {number}")
+        board = board_number(prs)
+        comments = board_comments(board)
+        if board_state(board, comments) == "none":
+            print("there is no board (an open pull request whose title begins with BOARD:), so no watch can be on. "
+                  f"Merge it yourself: python3 tools/ci/check_pr.py merge {number}")
             return 2
+        if comments is None:
+            if time.monotonic() >= deadline:
+                print(UNREAD.format(board=board) + f" (`python3 tools/ci/check_pr.py landed {number}`).")
+                return 3
+            time.sleep(min(60, max(1, deadline - time.monotonic())))
+            continue
         back = sent_back(comments, number)
         if back and pr["headRefOid"].startswith(back[0]):
             print(f"#{number} is yours again. The landing session wrote:\n\n{back[1]}\n\n"
@@ -1871,7 +1954,9 @@ def check_merge(number: int, landing: bool = False) -> int:
     # asked here is whether #N is something it takes. Not asked of a watch's
     # own pull request, nor when the landing session is the one asking.
     open_prs = open_pull_requests()
-    comments = board_comments(board_number(open_prs))
+    board = board_number(open_prs)
+    comments = board_comments(board)
+    unread = board_state(board, comments) == "unread" and not landing
     watch = watch_state(comments or [], now_utc())
     watch_on = watch.on and not landing and not NOT_A_CLAIM_RE.match(pr["title"])
 
@@ -1934,7 +2019,7 @@ def check_merge(number: int, landing: bool = False) -> int:
                     f"session takes #{number} while that run goes, and merges it when it and the lot's have passed")
     elif refusal:
         report.no(refusal)
-    if "short" in (head_state, ran_state) and not watch_on and not landing:
+    if "short" in (head_state, ran_state) and not watch_on and not landing and not unread:
         # No watch is on, so this agent merges, and the whole of CI has not
         # run on what it would merge. Every run of a pull request is short
         # (.github/workflows/ci.yml) but the one that taking a label off
@@ -2025,6 +2110,8 @@ def check_merge(number: int, landing: bool = False) -> int:
         if back and head.startswith(back[0]):
             report.no(f"the landing session sent it back at this head commit ({back[0][:7]}); what it wrote is on the "
                       f"board (`python3 tools/ci/check_pr.py landed {number}` prints it)")
+    if unread:
+        report.no(UNREAD.format(board=board))
     broken = main_run_note()
     if broken:
         report.note(f"!! {broken}")
@@ -2039,7 +2126,7 @@ def check_merge(number: int, landing: bool = False) -> int:
     if watch.state in ("over", "quiet"):
         report.note(watch.says())
     if comments is None:
-        report.note("the board could not be read, so no watch can be seen: taken as none")
+        report.note("there is no board (an open pull request whose title begins with BOARD:), so no watch can be on")
     print(f"\nready: gh pr merge {number} --merge, then watch `gh run list --branch main --limit 3` to the end "
           "(once a minute is enough)")
     return 0
@@ -2436,6 +2523,18 @@ def self_test() -> int:
          watch_state([said("Lander: WATCH ON until 2026-11-23 12:00 UTC. Last look 2026-11-23 11:59 UTC.")],
                      at("2026-11-23 12:00")).state, "over"),
         ("OFF after ON: no watch", watch_state(board + [off], at("2026-11-23 06:05")).state, "off"),
+        ("a status written when its own end was past is nobody's watch: the one before it counts (17:06 and 17:12, 28 November)",
+         [watch_state(board + [said("Lander: WATCH ON until 2026-11-23 05:00 UTC. Last look 2026-11-23 05:06 UTC.")],
+                      at("2026-11-23 05:10")).state,
+          watch_state([said("Lander: WATCH ON until 2026-11-23 05:00 UTC. Last look 2026-11-23 05:06 UTC.")],
+                      at("2026-11-23 05:10")).state], ["on", "none"]),
+        ("...and nobody but the landing session's tool writes one, nor one whose end is not ahead",
+         [(not_the_landing_session(environment, end, at("2026-11-23 05:10")) or "")[:22]
+          for environment, end in (({}, at("2026-11-23 06:00")), ({"CHECK_PR_LANDING": "1"}, at("2026-11-23 05:00")),
+                                   ({"CHECK_PR_LANDING": "1"}, at("2026-11-23 05:10")),
+                                   ({"CHECK_PR_LANDING": "1"}, at("2026-11-23 06:00")), ({"CHECK_PR_LANDING": "1"}, None),
+                                   ({}, None))],
+         ["nothing was written. T", "nothing was written. -", "nothing was written. -", "", "", "nothing was written. T"]),
         ("ON after OFF: the later one counts", watch_state([off, on], at("2026-11-23 05:10")).state, "on"),
         ("a line that only talks about a watch is not the status comment",
          watch_state([said("Heron: is a WATCH ON until tomorrow?"), said("WATCH ON until 2026-11-23 12:00 UTC.")],
@@ -2561,6 +2660,13 @@ def self_test() -> int:
          [(draft_note(7, title, is_draft) or "")[:76] for title, is_draft in (("WIP: a change", False), ("WIP: a change", True),
                                                                                ("A change", False), ("A change", True))],
          ["#7 is work in progress and no draft. Make it one now, `gh pr ready 7 --undo`", "", "", ""]),
+        ("a board that is not there is no watch; one that is there and was not read says nothing either way (#547)",
+         [board_state(board, comments) for board, comments in ((None, None), (219, None), (219, []), (219, [{"body": "x"}]))],
+         ["none", "unread", "read", "read"]),
+        ("...and what an agent is told then names the board and starts nothing",
+         UNREAD.format(board=219)[:60], "the board (#219) could not be read, three times over, so it "),
+        ("the board is asked three times before it is given up, and not at all when there is none",
+         (board_comments(None), len(inspect.signature(board_comments).parameters["pauses"].default)), (None, 3)),
         ("claim N of a claim that is right and a draft: ok, and nothing else",
          claim_end(7, "Phase 7, finding 7", False, None, lambda: 1 // 0),
          [("ok", "#7: Phase 7, finding 7; no earlier open pull request has its numbers or its files")]),

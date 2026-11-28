@@ -74,6 +74,9 @@
 
 set -u
 cd "$(git rev-parse --show-toplevel)" || exit 9
+# This is the landing session: check_pr.py writes the watch's status on the
+# board for nobody else (`not_the_landing_session` there says why).
+export CHECK_PR_LANDING=1
 STATE="${WATCH_STATE:-/tmp/watch}"
 NAME="${WATCH_NAME:-Lander}"
 mkdir -p "$STATE/land"
@@ -576,7 +579,27 @@ lot)
   done < "$STATE/lot.heads"
   runs="$(runs_of "$head")"
   echo "lot $(date -u '+%H:%M:%S') ${head:0:7} main $main_now: ${runs:-no check runs yet}"
-  if whole "$head"; then echo READY; exit 0; fi
+  if whole "$head"; then
+    # READY is "`land` will merge it". Under the rule on main it will not
+    # while a run is going on a member's own head: GitHub goes by the last
+    # check run of each job, and reports BLOCKED until the two it wants have
+    # passed again. On 28 November at 17:07:46 somebody put the label `lot`
+    # on #547 and took it off, five minutes after it was taken, which starts
+    # every job; the lot's run passed 26 seconds later, this said READY, and
+    # `land` answered "STOP, nothing merged ... Wait for it" for three
+    # minutes and a half. That wait is said here now, as a run still going.
+    while read -r n sha; do
+      [ -n "$n" ] || continue
+      full="$(git rev-parse "origin/pr$n")"
+      [ "$(github_says "$n")" = "BLOCKED" ] || continue
+      own="$(runs_of "$full")"
+      if [[ "$own" == *in_progress* || "$own" == *queued* || "$own" == *pending* ]]; then
+        echo "lot: the lot's run has passed, and #$n's own run is still going (${own:0:90}): GitHub reports BLOCKED until the two checks of the rule on main have passed on ${full:0:7} again"
+        exit 4
+      fi
+    done < "$STATE/lot.heads"
+    echo READY; exit 0
+  fi
   case "$runs" in
     *failure*|*cancelled*|*timed_out*)
       timeout 30 gh api "repos/$R/commits/$head/check-runs?per_page=100" --jq '.check_runs[] | select(.conclusion != "success" and .conclusion != null) | "   \(.name): \(.conclusion) (job \(.id))"'; exit 2 ;;

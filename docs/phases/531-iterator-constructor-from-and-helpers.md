@@ -21,13 +21,13 @@ Implemented the ES2025 Iterator Helpers specification (ECMA-262 §27.1) in `src/
 
 ## Verification
 
-- `tests/suites/531-iterator-helpers.cpp` (`make -j"$(nproc)" test`): **573 / 573** engine test suites + **114 / 114** cross-origin checks pass. Covers constructor/subclassing, `Iterator.from`, lazy `.map`/`.filter`/`.take`/`.drop`/`.flatMap` short-circuiting and abrupt `return()`, re-entrancy guards, `SetterIgnoringPrototypeProperties`, forged-receiver brand checks, eager consumers, `Object.prototype.value`/`done` setter immunity, Node v22.22.3 parity probes, bytecode VM `for (var x of ...)`, Web Worker global `Iterator`, and cyclic GC reclamation (`2,000` `Iterator.from`/helper cycles reclaimed cleanly, `after == baseline`).
-- `python3 tools/ci/check_suites.py --base origin/main`: **0 failure(s)** across 183 standalone suites.
+- `tests/suites/531-iterator-helpers.cpp` (`make -j"$(nproc)" test`): **579 / 579** engine test suites + **114 / 114** cross-origin checks pass. Covers constructor/subclassing, `Iterator.from`, lazy `.map`/`.filter`/`.take`/`.drop`/`.flatMap` short-circuiting and abrupt `return()`, re-entrancy guards, `SetterIgnoringPrototypeProperties`, forged-receiver brand checks, eager consumers, `Object.prototype.value`/`done` setter immunity, Node v22.22.3 parity probes, bytecode VM `for (var x of ...)`, Web Worker global `Iterator`, and cyclic GC reclamation (`2,000` `Iterator.from`/helper cycles reclaimed cleanly, `after == baseline`).
+- `python3 tools/ci/check_suites.py --base origin/main`: **0 failure(s)** across 189 standalone suites.
 - `python3 tools/conformance/run_test262.py --binary build/litebird built-ins/Iterator`: **15 / 684 (2.2%) -> 315 / 684 (46.1%)** (+300 passes; the 272 tests outside the 412 ES2025 targets belong to Stage 3 proposals such as `concat`, `zip`, `zipKeyed`, `Symbol.dispose`, `chunks`, `includes`, `join`, `windows`).
   - Targeted 24 ES2025 `built-ins/Iterator` dirs/files: **297 / 412 (72.1%)**; excluding `function*`/`$262`/BigInt: **262 / 269 (97.4%)** (3 `temporalHelpers.js` BigInt failures, 4 obsolete 2020-draft `Number.MAX_SAFE_INTEGER + 1` tests).
   - `built-ins/{Array,Map,Set,String,RegExpString}IteratorPrototype`: **72 / 73 (98.6%)** (remaining 1 uses `$262.detachArrayBuffer`).
 - Differential checks against Node.js `v22.22.3`: **31 / 32** + **7 / 7** probes match (`Iterator.from`/`.take`/`.map`/`.flatMap` invalid-argument `IteratorClose` follows ES2025/test262 where V8 differs).
-- Suite & oracle checks on this branch (`bac54ba` + Phase 531):
+- Suite & oracle checks on this branch (`78bccd3` + Phase 531):
   - `make gc-oracle`: PASS (`570` baseline, `+0` across 5 churn rounds, `13,812` cells collected).
   - `make verify-gc-stress`: **28 / 28** JS (`84 / 84` runs, `1,266` collections) and **678 / 678** DOM (`1,356 / 1,356` runs, `11,830` collections), `0` differences.
   - `make js-conformance`: **1154 / 1158 (99.7%)**, `90 / 90` everyday, `0` crashes (`1153/1158` on `22aa96b`, with Phase 526 on `origin/main` supplying the +1 in `prototypes.dat`).

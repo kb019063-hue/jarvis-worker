@@ -24,7 +24,7 @@
 
 ## Verification
 
-- `make -j"$(nproc)" test`: **573 / 573** engine suites passed + **114 / 114** cross-origin checks (including `tests/suites/531-iterator-helpers.cpp`: Node-parity JS semantics, bytecode VM `for (var x of ...)` chain, Web Worker `Iterator` exposure, and 2,000-iteration `Iterator.from`/helper cycle GC reclamation with `after == baseline`).
+- `make -j"$(nproc)" test`: **579 / 579** engine suites passed + **114 / 114** cross-origin checks (including `tests/suites/531-iterator-helpers.cpp`: Node-parity JS semantics, bytecode VM `for (var x of ...)` chain, Web Worker `Iterator` exposure, and 2,000-iteration `Iterator.from`/helper cycle GC reclamation with `after == baseline`).
 - `python3 tools/conformance/run_test262.py --binary build/litebird built-ins/Iterator`: **15 / 684 -> 315 / 684 (46.1%)** (+300 passes; 272 tests outside the 412 ES2025 targets belong to Stage 3 proposals); **297 / 412 (72.1%)** across the 24 ES2025 directories/files; **72 / 73 (98.6%)** across `built-ins/{Array,Map,Set,String,RegExpString}IteratorPrototype`.
 - `make gc-oracle`, `make verify-gc-stress`, `make js-conformance` (`1154/1158`), `make dom-conformance` (`678/678`), `make url-conformance` (`1188/1188`), `make conformance` (`1973/1973`), `make wpt` (`9570/9824`, 0 unlisted), `make verify-bytecode` (`188/188` agree, `8/8` refused), `make fuzz-pages` / `make fuzz-pipeline` (400 runs each, 0 findings), and ASan+UBSan conformance/GC/`531` checks all pass.
 

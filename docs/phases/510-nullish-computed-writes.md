@@ -54,3 +54,4 @@ the full sanitizer run did not complete. All 19 dedicated JavaScript
 witnesses passed individually in the instrumented engine. The local `make
 deep` run was started after that, then stopped before completion; the full
 sanitizer and deep checks remain required in CI.
+`make fuzz` subsequently passed with the instrumented engine.

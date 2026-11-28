@@ -500,7 +500,23 @@ def on_main() -> Main:
 
 def open_pull_requests() -> list[dict]:
     return gh_json("pr", "list", "--state", "open", "--limit", "100",
-                   "--json", "number,title,body,headRefOid,files")
+                   "--json", "number,title,body,headRefOid,files,isDraft")
+
+
+def draft_note(number: int, title: str, is_draft: bool) -> str | None:
+    """What `claim N` says of work in progress that is no draft.
+
+    GitHub merges a pull request with `WIP:` in its title for whoever asks,
+    and twice somebody asked: #449 on 25 November 2026, 59 seconds after it
+    was opened and with no CI run, and #491 on 28 November, during a watch.
+    A draft it merges for nobody ("Pull Request is still a draft"), so a
+    claim is opened as one (AGENTS.md, "Before starting", point 2).
+    """
+    if not title.startswith("WIP") or is_draft:
+        return None
+    return (f"#{number} is work in progress and no draft: GitHub would merge it as it is for whoever asked. "
+            f"`gh pr ready {number} --undo` makes it a draft, which nobody can merge; "
+            f"`gh pr ready {number}` again with your last push, when `WIP:` comes off")
 
 
 def open_claims(prs: list[dict] | None = None) -> list[dict]:
@@ -1019,6 +1035,10 @@ def check_claim(number: int) -> int:
         (report.no if blocking else report.note)(problem)
     for blocking, problem in staleness_problems(mine, main_commit()):
         (report.no if blocking else report.ok)(problem)
+    its = next(pr for pr in prs if pr["number"] == number)
+    not_a_draft = draft_note(number, its["title"], bool(its.get("isDraft")))
+    if not_a_draft:
+        report.note(not_a_draft)
     if not report.failed:
         report.ok(f"#{number}: {numbers_of(mine)}; no earlier open pull request has its numbers or its files")
     else:
@@ -2430,6 +2450,10 @@ def self_test() -> int:
         ("the board and a watch are never taken",
          [why_not_taken(waiting(title=t), board) for t in ("BOARD: hand-overs", "WATCH: 23 November")],
          ["it is the board or a watch"] * 2),
+        ("work in progress that is no draft is told how to become one (#449, #491); a draft and a finished one are told nothing",
+         [(draft_note(7, title, is_draft) or "")[:44] for title, is_draft in (("WIP: a change", False), ("WIP: a change", True),
+                                                                               ("A change", False), ("A change", True))],
+         ["#7 is work in progress and no draft: GitHub ", "", "", ""]),
         ("no run on the head of an engine change that is a green commit with main merged in by git alone: taken (#492)",
          why_not_taken(waiting(checks=[]), board, lambda pr: "b" * 40), ""),
         ("...not when it is no such head",

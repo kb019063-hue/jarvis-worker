@@ -142,10 +142,12 @@ within the hour, and the first lot was started again four times.
    "The files every pull request changes", point 4.)
 3. **When your pull request is finished, ask whether a watch is on.**
    Finished is: the checks of "What "done" means" pass, `WIP:` is off the
-   title, and CI is green on the head commit (wait for it with
+   title, the pull request is no draft any more (`gh pr ready N`), and
+   CI is green on the head commit (wait for it with
    `gh pr checks N`, once a minute; not with `gh run watch`). Then run
    `python3 tools/ci/check_pr.py merge N` and do what its last lines say.
-   **Take `WIP:` off with your last push, and not before.** While a watch
+   **Take `WIP:` off, and `gh pr ready N`, with your last push, and not
+   before.** While a watch
    is on, the pull request can be taken from that moment, while its own
    run is still going; a title that loses `WIP:` before the work is all
    pushed gets half the work merged.
@@ -478,7 +480,9 @@ without one, and leaves the board and a watch out of the claims.
    Claims).
 2. **Claim before doing the work.** Pick a row of the table below that nobody
    has, push a first commit (an empty one will do) and open a pull request
-   whose title begins with `WIP:` and whose text begins:
+   **as a draft** (`gh pr create --draft`; `gh pr ready N --undo` makes
+   an open one a draft), whose title begins with `WIP:` and whose text
+   begins:
 
    ```
    Task: <the row of the table>
@@ -493,6 +497,10 @@ without one, and leaves the board and a watch out of the claims.
    `docs/findings/360-….md`, `tests/suites/360-….cpp`, and its title
    says so when the `WIP:` comes off. Nobody has to be asked, because
    GitHub gives no two pull requests the same number.
+   **A draft is merged by nobody**: GitHub answers "Pull Request is
+   still a draft" to whoever asks, until `gh pr ready N`. `WIP:` in a
+   title stops nobody: #449 and #491 were both merged with it ("Merged
+   59 seconds after it was opened", below).
    (`python3 tools/next_ids.py --pr-body` prints the four lines, and
    `python3 tools/ci/check_pr.py claim N` says the numbers back.) Until
    24 November 2026 the two came from `python3 tools/next_ids.py`, the
@@ -1030,6 +1038,19 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   not begun to be merged when GitHub would refuse one of its pull
   requests: `main` with half a lot is a tree no run passed on. Tried
   with a `gh` that made GitHub's answers up; no rule was on.
+  **It happened again on 28 November, to #491**, at 07:42:34: `WIP:` in
+  its title, a watch on since 07:30, and on its head the short run
+  alone, which is what a push gets. `main` moved under the lot in test,
+  and two pull requests were tested a second time. `main`'s own run on
+  the merge passed, all 18 jobs, so it stayed. The rule the person was
+  setting that hour (the two checks of the short run, passed on the
+  head) would not have refused it: those two had passed. What would
+  have refused both #449 and #491 is GitHub's own answer to a draft,
+  tried that morning on the landing session's pull request: "Pull
+  Request is still a draft", from the page, from `gh pr merge` and from
+  the API alike. So a claim is opened as a draft since that day
+  ("Before starting", point 2), and `check_pr.py claim N` says so of
+  one that is not.
 - **An old copy of AGENTS.md, written over `main`'s.** #452 was finished
   on 25 November on `main` of 14:12. Its AGENTS.md was that file cut off
   after line 1442: the last 109 lines of "Open tasks" were gone. It

@@ -29,20 +29,22 @@ refusal records catch-return cleanup through a for-of iterator.
 
 - `make verify-bytecode`: **207/207 agree, 8/8 still refused**; six oracle
   self-test readings pass.
-- `make -j2 all test`: **573 engine suites and 114 cross-origin checks pass**.
-  Suite 540 puts the original refusal first and checks catch binding scope,
-  nested catches, throws, finalizer order, GC, callbacks and refused forms.
+- `make -j2 all test` after merging main: **580 engine suites and 114
+  cross-origin checks pass**. Suite 540 puts the original refusal first and
+  checks catch binding scope, nested catches, throws, finalizer order, GC,
+  callbacks and refused forms.
 - A 180-case product of return expressions, nested handlers and finalizers
   agreed between tree-walker and VM.
-- HTML tree construction was 1973/1973, JS 1154/1158, DOM 678/678,
-  URL 1188/1188 and XML 1718/1718. WPT was 9570/9824, with all 254 failures
-  listed. Tree and XML differential gates passed; `make fuzz` found nothing,
-  and `make deep` passed 1332 runs at depth 200000.
-- The ASan/UBSan build and oracle passed (207/207 and 8/8); a 62-suite
-  sanitized stretch including this and earlier VM exception/finalizer suites
-  passed. Full `make asan TEST_OPT=-O0` was terminated after 480 seconds in
-  the existing `deep_nesting_never_exhausts_the_native_stack` suite; it is not
-  a full pass.
+- After merging main, HTML tree construction was 1973/1973, JS 1154/1158,
+  DOM 678/678, URL 1188/1188 and XML 1718/1718. WPT was 9570/9824, with all
+  254 failures listed; tree and XML differential gates passed. Before the
+  merge, `make fuzz` found nothing and `make deep` passed 1332 runs at depth
+  200000.
+- After merging main, the ASan/UBSan oracle passed (207/207 and 8/8), as did
+  a 69-suite sanitized stretch including this and earlier VM exception and
+  finalizer suites. Before the merge, full `make asan TEST_OPT=-O0` was
+  terminated after 480 seconds in the existing
+  `deep_nesting_never_exhausts_the_native_stack` suite; it is not a full pass.
 
 ## Still open
 

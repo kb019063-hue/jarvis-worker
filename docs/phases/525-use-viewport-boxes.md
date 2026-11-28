@@ -31,3 +31,10 @@ This reproducer intentionally returns failure until that separate defect is
 fixed. External references, text, stroke/options, exact transformed curve
 extrema and non-instanced nested SVG viewport boxes remain outside this phase.
 The oracle is a measured Chromium boundary, not a complete SVG specification.
+
+Serial local checks: `make test` **560/560**, conformance, JS, DOM, URL,
+XML, WPT and tree differential passed their recorded floors; `make diff-xml`
+passed with lxml in a local `PYTHONPATH`, and `make render-conformance`
+passed. An earlier parallel test attempt was killed under memory contention,
+and its interrupted deep run is not counted. The deep-page and sanitizer
+checks are being rerun serially before this draft is finished.

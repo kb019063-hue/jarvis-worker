@@ -39,3 +39,10 @@ This change is limited to the tree-walker's optional-delete path. The
 non-nullish computed assignment/update conversion order and the bytecode VM's
 nullish writes and non-callable calls, recorded alongside this task, remain
 separate work. No performance or external-conformance improvement is claimed.
+
+Locally `make asan TEST_OPT='-O0 -g0'` built the instrumented engine and
+suite; the Phase 530 suite passed there. The full sanitizer unit run was
+killed while running the unrelated deep-nesting suite, after it printed a
+RangeError, so it is not a full local pass. The compiler was limited to
+3.3 GB to avoid exhausting the 3.8 GB sandbox. A subsequent local `make
+deep` was started but stopped before completion; CI must run both full checks.

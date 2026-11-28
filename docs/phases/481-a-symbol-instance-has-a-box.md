@@ -25,8 +25,7 @@ Chromium: **47/49** match. One mismatch is the previously documented `defs.getBB
 interface difference; the other is a no-viewBox symbol with percentage
 geometry and a zero-width use: Chromium answers `0,0,0,0`, this engine
 `5,9,0,4`. The expanded baseline was 33/45 before the fix. The browser setup
-is in Phase 433. `make test` passed **524/524** before the last zero-width
-case was added; the new suite passed separately after that addition. Reverting
+is in Phase 433. `make test` passed **524/524** after the zero-width case was added. Reverting
 `src/render/SvgRenderer.cpp` makes its first box assertion fail. The fix was
 restored and rebuilt afterward.
 

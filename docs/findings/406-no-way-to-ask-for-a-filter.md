@@ -65,10 +65,10 @@ catch that the runner's own order prevented.
 
 * `drop-shadow`'s unstated colour: CSS uses the element's `color`, which the
   context does not carry; opaque black is the substitute.
-* Blur radius is clamped to the bitmap and the kernel is a box, so a large blur
-  differs visibly from a Gaussian.
+* **Closed in Phase 535:** `blur()` and filter `drop-shadow()` now use a
+  normalized, separable Gaussian kernel, with the CSS length as standard
+  deviation. The convolution uses premultiplied alpha and treats the area beyond
+  the bitmap as transparent; the 3σ support and σ cap at the largest bitmap
+  dimension keep it bounded. The separate `shadowBlur` context property still
+  uses its Phase 391 three-box approximation.
 * `url()` filters, `em`/`rem`/`pt` lengths: rejected, not guessed.
-* `ImageFilter::blur` clamps its radius to 50 pixels; the clamp was widened to
-  the bitmap size here because a 60-pixel blur on a 200-pixel box was being
-  silently reduced. A radius larger than the canvas is still bounded, which is
-  what keeps it from walking off either end.

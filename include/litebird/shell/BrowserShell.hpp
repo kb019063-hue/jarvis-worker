@@ -132,6 +132,7 @@ private:
 
     std::vector<InteractiveElement> m_interactive_elements;
     int m_focused_index{-1};
+    bool m_keyboard_focus{false};
     std::string m_status_message{"Ready"};
 };
 

@@ -622,6 +622,7 @@ bool BrowserShell::dispatch_click(const std::shared_ptr<Element>& target) {
 }
 
 bool BrowserShell::click_at(float x, float y) {
+    m_keyboard_focus = false;
     auto el = element_at(x, y);
     if (!el) return false;
 
@@ -773,6 +774,7 @@ bool BrowserShell::type_text(const std::string& text) {
 
 bool BrowserShell::handle_key(const std::string& key) {
     if (!m_document) return false;
+    m_keyboard_focus = true;
     // A page sees an arrow before the browser performs its scrolling default.
     // Like the GUI, this entry point receives one keydown, not a key release.
     const int arrow = key == "ArrowLeft" ? 37 : key == "ArrowUp" ? 38 :
@@ -797,6 +799,43 @@ bool BrowserShell::handle_key(const std::string& key) {
             if (arrow == 38) scroll_by(0.0f, -48.0f);
             if (arrow == 40) scroll_by(0.0f, 48.0f);
         }
+        m_dirty = true;
+        return true;
+    }
+    if (key == "Escape") {
+        auto dialog = m_document->modal_dialog();
+        if (!dialog) return false;
+
+        // Deliver the keydown to the focused node (normally inside the modal)
+        // before applying its default close-request behavior.
+        auto focused = m_document->focused_element();
+        std::shared_ptr<Element> key_target = focused && !m_document->is_inert(*focused)
+                                                   ? focused : dialog;
+        bool keydown_allowed = true;
+        if (auto* realm = dom::realm_if_any(*key_target)) {
+            JsIntrinsics::set_current(realm->intrinsics);
+            JsScriptScope scope;
+            const auto event = dom::make_event(*realm, "KeyboardEvent", "keydown", true, true, {
+                {"view", dom::window_of(*realm)}, {"key", JsValue::make_string("Escape")},
+                {"code", JsValue::make_string("Escape")}, {"keyCode", JsValue::make_number(27)},
+                {"which", JsValue::make_number(27)}
+            }, true);
+            keydown_allowed = dom::dispatch(*realm, dom::wrap(*realm, key_target), event, true);
+        }
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(100));
+
+        // A script may close the dialog in keydown. Otherwise a prevented
+        // keydown or cancel event suppresses the platform close request.
+        if (keydown_allowed && m_document->modal_dialog() == dialog) {
+            if (auto* realm = dom::realm_if_any(*dialog)) {
+                JsIntrinsics::set_current(realm->intrinsics);
+                JsScriptScope scope;
+                if (dom::fire(*realm, *dialog, "cancel", false, true))
+                    dom::close_dialog(*realm, *dialog, JsValue::make_undefined());
+            }
+        }
+        EventLoop::default_loop().run_until_idle(std::chrono::milliseconds(100));
+        rebuild_layout();
         m_dirty = true;
         return true;
     }
@@ -993,7 +1032,7 @@ std::vector<uint8_t> BrowserShell::render_png_frame() {
                         overlay.add(txt);
                     }
                 }
-            } else if (m_document->focused_element().get() == &el) {
+            } else if (m_keyboard_focus && m_document->focused_element().get() == &el) {
                 DrawBorderCommand focus_ring;
                 focus_ring.rect = Rect(r.x - 2.0f, r.y - 2.0f, r.width + 4.0f, r.height + 4.0f);
                 focus_ring.width = EdgeSizes(2, 2, 2, 2);

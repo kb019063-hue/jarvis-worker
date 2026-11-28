@@ -726,6 +726,41 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
         p {
             margin: 8px 0;
         }
+        dialog p {
+            margin: 16px 0;
+        }
+        /* Native form controls use the browser's small UI font and chrome,
+           rather than the page's inherited 16px text metrics. The native
+           widgets are painted by the ordinary box painter, so keep their
+           default dimensions and colors in the UA cascade. */
+        button, input[type="button"], input[type="submit"], input[type="reset"] {
+            font-family: Arial, sans-serif;
+            font-size: 13.3333px;
+            color: #000000;
+            background-color: #efefef;
+            border: 1px solid #767676;
+            border-radius: 2px;
+            padding: 1px 7px;
+        }
+        button + button {
+            margin-left: 5px;
+        }
+        select {
+            font-family: Arial, sans-serif;
+            font-size: 13.3333px;
+            color: #000000;
+            background-color: #ffffff;
+            border: 2px solid #101010;
+            border-radius: 4px;
+            width: 113px;
+            height: 15px;
+            padding: 0 2px;
+            vertical-align: middle;
+            margin-top: 2px;
+        }
+        dialog label {
+            margin-right: 6px;
+        }
         /* HTML §Rendering 15.3.3, the dialog box. This is the standard's own
            rule (the `dialog:not([open])` half of it is the hard-coded display
            default above, which also has to answer for `open="false"`). The

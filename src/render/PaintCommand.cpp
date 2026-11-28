@@ -189,6 +189,24 @@ if (!skip_cell_chrome && (bw.top > 0 || bw.right > 0 || bw.bottom > 0 || bw.left
     list.add(cmd);
 }
 
+// A closed native select paints its disclosure chevron as part of the control,
+// not as page text. Keep it in the display list so a modal backdrop and paint
+// order affect it exactly as they affect the rest of the widget.
+if (!skip_cell_chrome && box->node && box->node->is_element()) {
+    const auto& element = box->node->as_element();
+    if (element && !element->is_foreign() && element->tag_name() == "select") {
+        DrawTextCommand arrow;
+        arrow.position = Point(box->dimensions.border_box().right() - 14.0f,
+                               box->dimensions.border_box().y +
+                                   std::max(0.0f, (box->dimensions.border_box().height - 12.0f) * 0.5f - 1.0f));
+        arrow.text = "∨";
+        arrow.color = Color(20, 20, 20, 255);
+        arrow.font_size = 12.0f;
+        arrow.font_family = s.font_family;
+        list.add(std::move(arrow));
+    }
+}
+
 // 3. Outline. CSS 2.1 §16.3: a ring outside the border box that takes no room
 // in the layout, which is why nothing in the box model has a place for it —
 // `outline: 5px solid` on a 100px box paints 5px around it and the box is

@@ -186,7 +186,10 @@ if (!skip_cell_chrome && (bw.top > 0 || bw.right > 0 || bw.bottom > 0 || bw.left
     cmd.color = s.border_color;
     cmd.border_radius = s.border_radius;
     cmd.styles = s.border_style;
-    if (box->border_color_override) cmd.edge_colors = *box->border_color_override;
+    if (box->border_override) {
+        cmd.edge_colors = box->border_paint_override.colors;
+        cmd.styles = box->border_paint_override.styles;
+    }
     list.add(cmd);
 }
 

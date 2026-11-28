@@ -51,7 +51,8 @@ G=0 WAS=1 BACK=0 GS=BLOCKED RUNS="in_progress/null x5, queued/null x2" try "a ru
 G=0 WAS=1 BACK=0 GS=BLOCKED RUNS="completed/skipped x11, queued/null x7" try "...and when that run has only been queued" 0 "eager: its own run is still going"
 G=0 WAS=0 BACK=0 GS=BLOCKED RUNS="in_progress/null x7" try "a rule; a finished head whose first run is going: taken while it goes" 0 "eager: its own run is still going"
 G=0 WAS=0 BACK=0 GS=CLEAN   RUNS="in_progress/null x7" try "no rule; the same head: taken while it goes" 0 "eager: its own run is still going"
-G=0 WAS=0 BACK=0 GS=BLOCKED RUNS="" try "no run on the head and its code never green (a claim's empty commit): not taken" 1 "no run on its head, and its code was never green"
+G=0 WAS=0 BACK=0 GS=CLEAN   RUNS="" try "no rule; no run on the head and its code never green (a claim's empty commit): not taken" 1 "no run on its head, and its code was never green"
+G=0 WAS=0 BACK=0 GS=BLOCKED RUNS="" try "a rule; the same head, or documents pushed under the mark (#548): not taken, and what its agent is told" 1 "$no_run"
 G=0 WAS=1 BACK=0 GS=BLOCKED RUNS="completed/failure x1, completed/success x6" try "its own run failed: not taken, whatever was green before" 1 "its own run failed"
 G=0 WAS=1 BACK=0 GS=BEHIND  RUNS="" try "a rule that wants main in the branch: not taken, and the person has to be told" 1 "GitHub reports BEHIND: a rule on main wants main in the branch. No lot can land under that"
 

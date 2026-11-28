@@ -1,0 +1,5 @@
+# Finding 544: `Object` built-ins misidentified the array-index range and skipped spec guards
+
+`parse_index` (`0…4294967295`) was used where `parse_array_index` (`0…4294967294`) is required, so `4294967295` grew `length` to `4294967296` and `4294967294` attempted a 4-billion dense allocation. `defineProperty` past the logical `length` did not update the `length` map entry, `plain` defaults ignored existing-vs-new, `ToPropertyKey` stringified Symbol results of `ToPrimitive`, `Object.hasOwn`/`getOwnPropertySymbols`/`getOwnPropertyDescriptors` missed `ToObject` throws and ordering, `groupBy` missed the callable check, and `Object.prototype`'s immutable prototype was writable via `js_set_prototype`.
+
+Fixed by introducing `parse_array_index` and using it everywhere, adding sparse-gap handling for indices beyond `1<<16`, refining `plain_for_index(exists)`, making `js_to_property_key` respect Symbol `ToPrimitive`, adding `ToObject`-before-`ToPropertyKey` and nullish guards, and making `js_set_prototype` return `false` for `Object.prototype` unless the proto is `null`.

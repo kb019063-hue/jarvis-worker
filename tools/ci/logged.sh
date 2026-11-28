@@ -25,14 +25,51 @@
 # `tee`. The file of a step that passed is removed, so the newest file left
 # is the failed step's, also when a step with `if: always()` ran after it.
 #
+# And a step ends. It is stopped when it has run for 30 minutes
+# (LOGGED_STEP_SECONDS), fails with status 124, and the file it leaves ends
+# with a line that says so: the lines before it are where it was. Until 28
+# November 2026 nothing ended a step but GitHub's own limit for a job, six
+# hours. No step had needed it; that day an agent wrote that a unit suite
+# had hung in its sandbox (#481, about the suite of #463; run 3,100 times
+# alone and 120 times with the 127 suites before it, it did not hang
+# again). The suites print `Running test: NAME... ` before each one, so
+# the last line of a run that hangs names the suite.
+#
 #     bash tools/ci/logged.sh --self-test
 set -u
 
+run_capped() {  # run_capped SCRIPT -> the script's exit status; 124 when it was stopped
+  local limit="${LOGGED_STEP_SECONDS:-1800}" grace="${LOGGED_STEP_GRACE:-10}" status group tenths
+  command -v timeout > /dev/null 2>&1 || { bash -e "$1"; return $?; }
+  # `timeout` makes a process group of itself, so the group's number is its
+  # own. At the limit the script and all it started get TERM, and the script
+  # gets KILL after the grace if it is still there.
+  timeout --kill-after="$grace" "$limit" bash -e "$1" &
+  group=$!
+  wait "$group"; status=$?
+  if [ "$status" -eq 124 ] || [ "$status" -eq 137 ]; then
+    # What the script started and did not hear TERM is still there, and holds
+    # the pipe this is read through: the step would go on until it ended.
+    # GNU's `timeout` kills the whole group after the grace. On CI's machines
+    # the first run of this file's own test, on 28 November 2026, waited 30
+    # seconds for a `sleep 30` all the same; a `timeout` that kills the script
+    # alone gives exactly that, and which one those machines have was not
+    # looked up. So the group is given the grace here, and then killed here.
+    tenths=$((grace * 10))
+    while [ "$tenths" -gt 0 ] && kill -0 -- "-$group" 2> /dev/null; do sleep 0.1; tenths=$((tenths - 1)); done
+    kill -KILL -- "-$group" 2> /dev/null
+    echo
+    echo "logged.sh: this step had not ended after $limit seconds and was stopped. The lines above are where it was."
+    return 124
+  fi
+  return "$status"
+}
+
 run_logged() {  # run_logged SCRIPT -> the script's exit status
   local dir="${RUNNER_TEMP:-${TMPDIR:-/tmp}}" log status
-  log="$(mktemp "$dir/part-step-XXXXXX.log" 2>/dev/null)" || { bash -e "$1"; return $?; }
+  log="$(mktemp "$dir/part-step-XXXXXX.log" 2>/dev/null)" || { run_capped "$1"; return $?; }
   set -o pipefail
-  bash -e "$1" 2>&1 | tee "$log"
+  run_capped "$1" 2>&1 | tee "$log"
   status="${PIPESTATUS[0]}"
   [ "$status" -eq 0 ] && rm -f "$log"
   return "$status"
@@ -86,6 +123,42 @@ self_test() {
   printf 'echo no place for a file\n' > "$script"
   got="$(RUNNER_TEMP="$dir/none" TMPDIR="$dir/none" bash "$0" "$script" 2>&1)"; check "with nowhere to keep a file the step still runs: status" 0 $?
   check "with nowhere to keep a file the step still runs: output" "no place for a file" "$got"
+
+  rm -f "$dir"/part-step-*.log
+  printf 'echo Running test: one... PASSED\nprintf "Running test: two... "\nsleep 30\necho not reached\n' > "$script"
+  local began=$SECONDS
+  got="$(LOGGED_STEP_SECONDS=1 RUNNER_TEMP="$dir" bash "$0" "$script" 2>&1)"; check "a step that does not end is stopped at its limit: status" 124 $?
+  check "a step that does not end is stopped at its limit, not when it would have ended" yes "$([ $((SECONDS - began)) -lt 15 ] && echo yes || echo "after $((SECONDS - began)) s")"
+  check "what it had printed is printed, and nothing after the place it hung" 0 "$(echo "$got" | grep -c 'not reached')"
+  check "a step that was stopped leaves its file" 1 "$(logs)"
+  check "the file's last line says that it was stopped, and after how long" \
+    "logged.sh: this step had not ended after 1 seconds and was stopped. The lines above are where it was." "$(tail -n 1 "$dir"/part-step-*.log)"
+  check "the line before that is where it was" "Running test: two... " "$(grep -a 'Running test: two' "$dir"/part-step-*.log)"
+  rm -f "$dir"/part-step-*.log
+
+  printf 'trap "" TERM\necho deaf\nsleep 30\n' > "$script"
+  began=$SECONDS
+  LOGGED_STEP_SECONDS=1 LOGGED_STEP_GRACE=1 RUNNER_TEMP="$dir" bash "$0" "$script" > /dev/null 2>&1; check "a step that does not hear TERM is killed, and the status is the same" 124 $?
+  check "...after the grace, with what it started" yes "$([ $((SECONDS - began)) -lt 15 ] && echo yes || echo "after $((SECONDS - began)) s")"
+  rm -f "$dir"/part-step-*.log
+
+  printf 'sleep 30 &\necho started one and went on\nwait\n' > "$script"
+  began=$SECONDS
+  LOGGED_STEP_SECONDS=1 RUNNER_TEMP="$dir" bash "$0" "$script" > /dev/null 2>&1; check "what the step started is stopped with it: status" 124 $?
+  check "...and nothing of it is left running to hold the step open" yes "$([ $((SECONDS - began)) -lt 15 ] && echo yes || echo "after $((SECONDS - began)) s")"
+  rm -f "$dir"/part-step-*.log
+
+  printf '( trap "" TERM; sleep 30 ) &\necho started one that does not hear TERM\nwait\n' > "$script"
+  began=$SECONDS
+  LOGGED_STEP_SECONDS=1 LOGGED_STEP_GRACE=1 RUNNER_TEMP="$dir" bash "$0" "$script" > /dev/null 2>&1; check "the step hears TERM and what it started does not: status" 124 $?
+  check "...and what it started is killed after the grace, and does not hold the step open" yes "$([ $((SECONDS - began)) -lt 15 ] && echo yes || echo "after $((SECONDS - began)) s")"
+  rm -f "$dir"/part-step-*.log
+
+  printf 'echo quick\n' > "$script"
+  got="$(LOGGED_STEP_SECONDS=5 RUNNER_TEMP="$dir" bash "$0" "$script" 2>&1)"; check "a step inside its limit is as before: status" 0 $?
+  check "a step inside its limit is as before: output and no file" "quick 0" "$got $(logs)"
+  printf 'exit 7\n' > "$script"
+  LOGGED_STEP_SECONDS=5 RUNNER_TEMP="$dir" bash "$0" "$script" > /dev/null 2>&1; check "...and its own exit status is still the status" 7 $?
 
   rm -rf "$dir"
   echo "logged.sh --self-test: $((n - failed)) of $n passed"

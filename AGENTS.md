@@ -656,6 +656,25 @@ asan`.
   part of `make asan-core`, and `make asan-build` and then that part
   (`make asan-unit`, say; `make help` lists the nine) runs it here without
   the rest.
+- **A suite that never returns ends, in CI: a step after 30 minutes, a
+  job after 45** (since 28 November; until then only GitHub's six hours
+  ended a job; of the last 437 runs none took more than 27.5 minutes).
+  The step's limit is `tools/ci/logged.sh`'s, in the seven jobs of the
+  plain build; a deep-pages or sanitizer job has the job's only. The suites
+  print `Running test: NAME... ` before each one, so the last line of
+  what `run_report.py N` shows names the suite that hung. Here, in your
+  sandbox, nothing ends it but your own command's limit, and a command
+  that gave up can leave the suites running: `pkill -x test_suite`
+  before you build or measure again. When `make test` does not come
+  back, the last line it printed is the suite, and
+  it is run alone with `LITEBIRD_SUITE_SHARD=1/3
+  LITEBIRD_SUITE_CUTS=NAME,NEXT ./build/test_suite` (NEXT is the suite
+  after it in the order). Say on your pull request which suite it was
+  and what else the machine was doing, and go on: one hung run of a
+  suite that is not yours does not hold your pull request up. If it
+  hangs a second time, write it on the board. (That day Dunlin's run
+  hung once in the suite of #463, nested workers; alone 3,100 times and
+  120 times after the 127 suites before it, it did not hang again.)
 - **Nobody reviews a pull request here, and a finished one says so
   itself.** When the checks pass, take `WIP:` off the title (and
   `gh pr ready N`, if it was opened as a draft) and run `python3

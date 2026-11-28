@@ -959,7 +959,11 @@ JsValue VM::run(size_t stop_depth) {
                     m_frames.push_back(next_frame);
                     frame = &m_frames.back();
                 } else {
-                    throw std::runtime_error("Called non-callable object: " + callee.to_string());
+                    // The arguments have already run. Reject the value without
+                    // converting it: object conversion can invoke user code,
+                    // but IsCallable does not. Throw a JavaScript TypeError so
+                    // VM catch/finally and iterator cleanup see the right value.
+                    js_throw_type_error("expression is not a function");
                 }
                 break;
             }

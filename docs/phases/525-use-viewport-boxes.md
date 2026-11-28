@@ -37,7 +37,7 @@ XML, WPT and tree differential passed their recorded floors; `make diff-xml`
 passed with lxml in a local `PYTHONPATH`, and `make render-conformance`
 passed. An earlier parallel test attempt was killed under memory contention,
 and its interrupted deep run is not counted. The deep-page and sanitizer
-checks are being rerun serially before this draft is finished.
+checks were attempted serially; see the results and limits below.
 Serial `make deep` subsequently passed **1332/1332** runs over 465 pages.
 The standard `make asan` engine build succeeded, but the normal sanitizer test
 harness compiler reached 3.8 GiB and was stopped under severe memory pressure;
@@ -54,3 +54,7 @@ built and ran, but the existing `deep_nesting_never_exhausts_the_native_stack`
 suite reached 3.85 GiB RSS. It was stopped to protect the 3.8 GiB sandbox;
 a separate isolated run of that suite reached the same limit and was stopped.
 Neither interrupted run is a pass.
+
+At the user's direction, the watch's full CI run on the landing lot is the
+remaining sanitizer gate. No interrupted local run is counted as a pass; the
+change must not land if any of the full CI checks fail.

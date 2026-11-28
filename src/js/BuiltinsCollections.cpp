@@ -331,6 +331,104 @@ JsValue make_collection_iterator(const JsValue& collection, const std::shared_pt
     }, {collection}, proto);
 }
 
+struct CursorGuard {
+    std::shared_ptr<CollectionData> data;
+    std::shared_ptr<CollectionData::Cursor> cursor;
+    explicit CursorGuard(std::shared_ptr<CollectionData> d)
+        : data(std::move(d)), cursor(data->new_cursor()) {}
+    ~CursorGuard() { data->release_cursor(cursor); }
+    CursorGuard(const CursorGuard&) = delete;
+    CursorGuard& operator=(const CursorGuard&) = delete;
+};
+
+struct SetRecord {
+    JsValue set;
+    double size;
+    JsValue has;
+    JsValue keys;
+};
+
+struct SetIteratorRecord {
+    JsValue iterator;
+    JsValue next_method;
+};
+
+JsValue canonicalize_key(const JsValue& value) {
+    if (value.type == JsType::Number && value.number_val == 0.0) {
+        return JsValue::make_number(0.0);
+    }
+    return value;
+}
+
+SetRecord get_set_record(const JsValue& obj) {
+    if (!obj.is_object_like()) {
+        js_throw_type_error("Set operation argument is not an object");
+    }
+    JsValue raw_size = obj.get_property("size");
+    double num_size = js_to_number(raw_size);
+    if (std::isnan(num_size)) {
+        js_throw_type_error("Set size is NaN");
+    }
+    double int_size = js_to_integer(num_size);
+    if (int_size == 0.0) int_size = 0.0;
+    if (int_size < 0.0) {
+        js_throw_range_error("Set size cannot be negative");
+    }
+    JsValue has = obj.get_property("has");
+    if (!has.is_function()) {
+        js_throw_type_error("Set-like object must have a callable 'has' property");
+    }
+    JsValue keys = obj.get_property("keys");
+    if (!keys.is_function()) {
+        js_throw_type_error("Set-like object must have a callable 'keys' property");
+    }
+    return {obj, int_size, has, keys};
+}
+
+SetIteratorRecord get_iterator_from_method(const JsValue& obj, const JsValue& method) {
+    JsValue iter = method.call_with_this(obj, {});
+    if (!iter.is_object_like()) {
+        js_throw_type_error("Iterator is not an object");
+    }
+    JsValue next_method = iter.get_property("next");
+    return {iter, next_method};
+}
+
+bool iterator_step_value(const SetIteratorRecord& record, JsValue& out_value) {
+    if (!record.next_method.is_function()) {
+        js_throw_type_error("Iterator 'next' is not a function");
+    }
+    JsValue step = record.next_method.call_with_this(record.iterator, {});
+    if (!step.is_object_like()) {
+        js_throw_type_error("Iterator result is not an object");
+    }
+    if (step.get_property("done").is_truthy()) {
+        return false;
+    }
+    out_value = step.get_property("value");
+    return true;
+}
+
+void iterator_close_normal(const JsValue& iterator) {
+    JsValue ret = iterator.get_property("return");
+    if (ret.is_nullish()) return;
+    if (!ret.is_function()) {
+        js_throw_type_error("Iterator 'return' is not a function");
+    }
+    JsValue inner = ret.call_with_this(iterator, {});
+    if (!inner.is_object_like()) {
+        js_throw_type_error("Iterator result is not an object");
+    }
+}
+
+void copy_live_entries(const CollectionData& src, CollectionData& dst) {
+    dst.entries.reserve(src.live);
+    for (const auto& entry : src.entries) {
+        if (entry.deleted) continue;
+        dst.set(entry.key, entry.key);
+    }
+}
+
 } // namespace
 
 void install_collection_builtins(JsIntrinsics& realm) {
@@ -557,6 +655,155 @@ void install_collection_builtins(JsIntrinsics& realm) {
     js_define_hidden(sp, kIteratorKey, set_values);
     js_define_hidden(sp, "Symbol.iterator", set_values);
     js_define_method(sp, "entries", 0, set_iter(IterKind::Entries, "Set.prototype.entries"));
+    js_define_method(sp, "union", 1, [](Args args) {
+        auto O = data_of(self(), ObjectClass::Set, "Set.prototype.union");
+        SetRecord set_rec = get_set_record(js_arg(args, 0));
+        JsValue result = make_collection(ObjectClass::Set, JsIntrinsics::get().set_proto);
+        auto result_data = data_of(result, ObjectClass::Set, "Set.prototype.union");
+        copy_live_entries(*O, *result_data);
+        SetIteratorRecord keys_iter = get_iterator_from_method(set_rec.set, set_rec.keys);
+        JsValue next_val;
+        while (iterator_step_value(keys_iter, next_val)) {
+            next_val = canonicalize_key(next_val);
+            if (!result_data->find(next_val)) {
+                result_data->set(next_val, next_val);
+            }
+        }
+        return result;
+    });
+    js_define_method(sp, "intersection", 1, [](Args args) {
+        auto O = data_of(self(), ObjectClass::Set, "Set.prototype.intersection");
+        SetRecord set_rec = get_set_record(js_arg(args, 0));
+        JsValue result = make_collection(ObjectClass::Set, JsIntrinsics::get().set_proto);
+        auto result_data = data_of(result, ObjectClass::Set, "Set.prototype.intersection");
+        const double this_size = static_cast<double>(O->live);
+        if (this_size <= set_rec.size) {
+            CursorGuard guard(O);
+            while (guard.cursor->position < O->entries.size()) {
+                auto entry = O->entries[(guard.cursor->position)++];
+                if (entry.deleted) continue;
+                JsValue e = entry.key;
+                if (set_rec.has.call_with_this(set_rec.set, {e}).is_truthy() && !result_data->find(e)) {
+                    result_data->set(e, e);
+                }
+            }
+        } else {
+            SetIteratorRecord keys_iter = get_iterator_from_method(set_rec.set, set_rec.keys);
+            JsValue next_val;
+            while (iterator_step_value(keys_iter, next_val)) {
+                next_val = canonicalize_key(next_val);
+                if (O->find(next_val) != nullptr && !result_data->find(next_val)) {
+                    result_data->set(next_val, next_val);
+                }
+            }
+        }
+        return result;
+    });
+    js_define_method(sp, "difference", 1, [](Args args) {
+        auto O = data_of(self(), ObjectClass::Set, "Set.prototype.difference");
+        SetRecord set_rec = get_set_record(js_arg(args, 0));
+        JsValue result = make_collection(ObjectClass::Set, JsIntrinsics::get().set_proto);
+        auto result_data = data_of(result, ObjectClass::Set, "Set.prototype.difference");
+        copy_live_entries(*O, *result_data);
+        const double this_size = static_cast<double>(O->live);
+        if (this_size <= set_rec.size) {
+            CursorGuard guard(result_data);
+            while (guard.cursor->position < result_data->entries.size()) {
+                auto entry = result_data->entries[(guard.cursor->position)++];
+                if (entry.deleted) continue;
+                JsValue e = entry.key;
+                if (set_rec.has.call_with_this(set_rec.set, {e}).is_truthy()) {
+                    result_data->remove(e);
+                }
+            }
+        } else {
+            SetIteratorRecord keys_iter = get_iterator_from_method(set_rec.set, set_rec.keys);
+            JsValue next_val;
+            while (iterator_step_value(keys_iter, next_val)) {
+                next_val = canonicalize_key(next_val);
+                result_data->remove(next_val);
+            }
+        }
+        return result;
+    });
+    js_define_method(sp, "symmetricDifference", 1, [](Args args) {
+        auto O = data_of(self(), ObjectClass::Set, "Set.prototype.symmetricDifference");
+        SetRecord set_rec = get_set_record(js_arg(args, 0));
+        SetIteratorRecord keys_iter = get_iterator_from_method(set_rec.set, set_rec.keys);
+        JsValue result = make_collection(ObjectClass::Set, JsIntrinsics::get().set_proto);
+        auto result_data = data_of(result, ObjectClass::Set, "Set.prototype.symmetricDifference");
+        copy_live_entries(*O, *result_data);
+        JsValue next_val;
+        while (iterator_step_value(keys_iter, next_val)) {
+            next_val = canonicalize_key(next_val);
+            const bool in_o = (O->find(next_val) != nullptr);
+            const bool in_result = (result_data->find(next_val) != nullptr);
+            if (in_o) {
+                if (in_result) result_data->remove(next_val);
+            } else {
+                if (!in_result) result_data->set(next_val, next_val);
+            }
+        }
+        return result;
+    });
+    js_define_method(sp, "isSubsetOf", 1, [](Args args) {
+        auto O = data_of(self(), ObjectClass::Set, "Set.prototype.isSubsetOf");
+        SetRecord set_rec = get_set_record(js_arg(args, 0));
+        if (static_cast<double>(O->live) > set_rec.size) {
+            return JsValue::make_boolean(false);
+        }
+        CursorGuard guard(O);
+        while (guard.cursor->position < O->entries.size()) {
+            auto entry = O->entries[(guard.cursor->position)++];
+            if (entry.deleted) continue;
+            if (!set_rec.has.call_with_this(set_rec.set, {entry.key}).is_truthy()) {
+                return JsValue::make_boolean(false);
+            }
+        }
+        return JsValue::make_boolean(true);
+    });
+    js_define_method(sp, "isSupersetOf", 1, [](Args args) {
+        auto O = data_of(self(), ObjectClass::Set, "Set.prototype.isSupersetOf");
+        SetRecord set_rec = get_set_record(js_arg(args, 0));
+        if (static_cast<double>(O->live) < set_rec.size) {
+            return JsValue::make_boolean(false);
+        }
+        SetIteratorRecord keys_iter = get_iterator_from_method(set_rec.set, set_rec.keys);
+        JsValue next_val;
+        while (iterator_step_value(keys_iter, next_val)) {
+            next_val = canonicalize_key(next_val);
+            if (O->find(next_val) == nullptr) {
+                iterator_close_normal(keys_iter.iterator);
+                return JsValue::make_boolean(false);
+            }
+        }
+        return JsValue::make_boolean(true);
+    });
+    js_define_method(sp, "isDisjointFrom", 1, [](Args args) {
+        auto O = data_of(self(), ObjectClass::Set, "Set.prototype.isDisjointFrom");
+        SetRecord set_rec = get_set_record(js_arg(args, 0));
+        if (static_cast<double>(O->live) <= set_rec.size) {
+            CursorGuard guard(O);
+            while (guard.cursor->position < O->entries.size()) {
+                auto entry = O->entries[(guard.cursor->position)++];
+                if (entry.deleted) continue;
+                if (set_rec.has.call_with_this(set_rec.set, {entry.key}).is_truthy()) {
+                    return JsValue::make_boolean(false);
+                }
+            }
+        } else {
+            SetIteratorRecord keys_iter = get_iterator_from_method(set_rec.set, set_rec.keys);
+            JsValue next_val;
+            while (iterator_step_value(keys_iter, next_val)) {
+                next_val = canonicalize_key(next_val);
+                if (O->find(next_val) != nullptr) {
+                    iterator_close_normal(keys_iter.iterator);
+                    return JsValue::make_boolean(false);
+                }
+            }
+        }
+        return JsValue::make_boolean(true);
+    });
     js_install_iterator_prototype(JsIntrinsics::get().set_iterator_proto, "Set Iterator");
     realm.add_global("Set", set_ctor);
 

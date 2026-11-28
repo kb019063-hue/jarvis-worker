@@ -1462,9 +1462,11 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   asked was told that the watch was over. #547's agent started every
   job on a head that was in a lot, which under the rule on `main`
   held the lot until the build had passed again, and merged `main`
-  into it; #553's merged `main` too. The command now refuses whoever
-  is not the landing session's tool, and an hour that is not ahead;
-  a status that was over when it was written is read as nobody's.
+  into it. (#553's agent merged `main` in the second of those
+  stretches; whether on that answer is not known.) The command now
+  refuses whoever is not the landing session's tool, and an hour
+  that is not ahead; a status that was over when it was written is
+  read as nobody's.
 - **A board that could not be read was "no watch".** Every agent that
   waits reads the whole board once a minute (some 450 comments on 28
   November). When one read failed, `landed N` said "Merge it

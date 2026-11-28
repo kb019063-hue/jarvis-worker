@@ -1842,8 +1842,8 @@ def not_the_landing_session(environment: dict, end: datetime | None, now: dateti
     a half the last status on the board read as a watch that was over, and
     every agent that asked was told to merge its own. #547's did: it started
     every job on a head that was in a lot (the lot waited for that run) and
-    merged `main` into it. #553's merged `main` under the lot it was about
-    to be taken into.
+    merged `main` into it. #553's merged `main` in the second stretch, two
+    minutes before it was taken; whether on that answer is not known.
 
     So: the landing session's tool says who it is (`tools/watch/watch.sh`
     sets CHECK_PR_LANDING), and an end that is not ahead is refused whoever

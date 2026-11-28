@@ -3548,8 +3548,11 @@ JsValue JsInterpreter::eval_call(const CallExpr* expr, const EnvPtr& env) {
                 m_chain_short_circuit = true;
                 return JsValue::make_undefined();
             }
-            JsValue key = evaluate(index->index.get(), env);
-            computed_name = computed_read_key(base, key);
+            // Reuse the receiver slot for the evaluated key until the read
+            // succeeds; a further JsValue local enlarges every recursive call
+            // frame, even calls with no computed member.
+            this_val = evaluate(index->index.get(), env);
+            computed_name = computed_read_key(base, this_val);
             fn = get_member(base, computed_name);
             this_val = std::move(base);
             callee_name = &computed_name;

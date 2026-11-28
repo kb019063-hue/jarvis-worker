@@ -98,9 +98,34 @@ canvas feature. The result must be read back from pixels in the same realm.
 
 ## Verification
 
-`make test` runs the standalone worker oracle with the whole engine suite. The
-final command and corpus results are recorded here after the repository gates,
-not copied from the superseded branch that first found the defect.
+On the final tree merged with `main` at `c89f70ec`:
+
+* `make test`: **538/538** engine suites and **114/114** cross-origin checks;
+* `make conformance`: **1973/1973** tree-construction cases;
+* `make js-conformance`: **1153/1158**, the repository floor, with no crash or
+  timeout;
+* `make dom-conformance`: **678/678**;
+* `make url-conformance`: **1188/1188**;
+* `make xml-conformance`: **1718/1718** over 2,585 W3C documents, with 261
+  canonical forms compared;
+* `make wpt`: **9570/9824**, all 254 failures listed and **0 unlisted**;
+* `make diff-trees`: four sets of 1,500 pages, **6000/6000** equal to the
+  corrected parse5 oracle;
+* `make diff-xml`: **3958** three-way agreements and **0 differences**, then
+  **3000/3000** round trips;
+* `make deep`: **1332** runs over 465 depth-200,000 pages, **0 failures**;
+* `make fuzz`: 400 parser mutations, 400 pipeline runs, 600 XML mutations over
+  the W3C corpus, 2,400 media cases, 5,008 colour inputs, and 2,108 Brotli
+  cases, **0 findings**.
+
+The ASan/UBSan engine passed the JS, DOM, URL, XML, WPT, generated-XML, verifier,
+fuzz, and deep-page parts: the deep part ran **882/882**, and every corpus had
+zero crashes, timeouts, unlisted failures, or sanitizer diagnostics. The worker
+suite itself passed twice under ASan/UBSan while diagnosing the original defect.
+On this sandbox the final monolithic sanitizer unit binary could not be produced:
+compiling the 37,000-line test translation unit exceeded two consecutive command
+ceilings (more than 45 minutes), so the orphaned compiler was stopped; it emitted
+no diagnostic before then. CI builds that binary on its larger cached runners.
 
 ## Files
 

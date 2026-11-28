@@ -235,13 +235,14 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
             return data(JsValue::make_number(static_cast<double>(cell->array_elements.size())), true, false, false);
         }
         if (parse_index(key, index)) {
-            if (index >= cell->array_elements.size()) return JsValue::make_undefined();
-            if (!object.is_array_hole(index)) return data(cell->array_elements[index], true, true, true);
-            // A hole has no descriptor: getOwnPropertyDescriptor(a, '1') is
-            // undefined. Unless `Object.defineProperty` has made something of
-            // the index, which is then in the property map and described
-            // below like any other property (JsValue::has_own_property).
-            if (!cell->has_accessors) return JsValue::make_undefined();
+            if (index < cell->array_elements.size() && !object.is_array_hole(index)) {
+                return data(cell->array_elements[index], true, true, true);
+            }
+            // A hole has no descriptor unless `Object.defineProperty` made
+            // one in the property map. Very sparse elements live in that map
+            // too, beyond the dense vector, and must still be described as
+            // own properties when [[Set]] checks a receiver.
+            if (cell->properties.find(key) == cell->properties.end()) return JsValue::make_undefined();
         }
     }
     PropertyMap* table = own_table(object, false);
@@ -313,7 +314,8 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
         bool enumerable = true;
         bool writable = false;
         if (cell->exotic->computed_property(cell, key, enumerable, writable)) {
-            return data(object.get_property(key), writable, enumerable, true);
+            const bool configurable = !typed_array_immutable_index(object, key);
+            return data(object.get_property(key), writable, enumerable, configurable);
         }
         return JsValue::make_undefined();
     }
@@ -410,6 +412,18 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         if (should_throw) js_throw_type_error(message);
         return false;
     };
+    if (typed_array_immutable_index(object, key)) {
+        const JsValue current = object.get_property(key);
+        if (wants_accessor ||
+            (enumerable.present && !enumerable.value.is_truthy()) ||
+            (configurable.present && configurable.value.is_truthy()) ||
+            (writable.present && writable.value.is_truthy()) ||
+            (value.present && !js_same_value(value.value, current))) {
+            return refuse("Cannot redefine an immutable typed-array element");
+        }
+        return true;
+    }
+
     const bool array_length = cell && cell->is_array && key == "length";
     bool has_requested_length = false;
     size_t requested_length = 0;
@@ -767,6 +781,81 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
                       : JsValue::make_undefined();
     object.define_property(key, new_value, flags);
     return true;
+}
+
+/// Ordinary [[Set]] with a receiver distinct from the target. The tree-walker
+/// setter is deliberately not reused for ordinary data descriptors: it stores
+/// on the target, while §10.1.9's OrdinarySetWithOwnDescriptor writes an
+/// existing data property on the receiver or calls CreateDataProperty there.
+/// Custom host [[Set]] implementations that have no property descriptor keep
+/// their established path; ordinary descriptors, including inherited ones,
+/// use the receiver-aware steps below.
+bool ordinary_set_with_receiver(const JsValue& target, const std::string& key,
+                                const JsValue& value, const JsValue& receiver) {
+    // Ordinary [[Set]] first looks for the target's own descriptor, then
+    // delegates through its prototype chain. Do that before invoking any
+    // computed-property setter: a writable typed-array index, for example,
+    // describes an own data property, and with a distinct receiver it belongs
+    // on that receiver rather than in the typed array's backing store.
+    JsValue holder = target;
+    JsValue descriptor = JsValue::make_undefined();
+    for (int depth = 0; depth < kMaxPrototypeChain; ++depth) {
+        descriptor = descriptor_for(holder, key);
+        if (!descriptor.is_undefined()) break;
+        JsObject* prototype = holder.prototype_object();
+        if (!prototype) break;
+        holder = JsValue::make_object(prototype);
+    }
+
+    if (!descriptor.is_undefined()) {
+        const bool accessor = descriptor.has_own_property("get") || descriptor.has_own_property("set");
+        if (accessor) {
+            const JsValue setter = descriptor.get_property("set");
+            if (!setter.is_function()) return false;
+            setter.call_with_this(receiver, {value});
+            return true;
+        }
+        // A data descriptor on the target (or its prototype) must be writable
+        // before the receiver is inspected, even when the receiver already has
+        // a property with this key.
+        if (!descriptor.get_property("writable").is_truthy()) return false;
+    }
+
+    // If no ordinary descriptor answered, retain the host object's special
+    // [[Set]] behavior (e.g. an out-of-bounds typed-array index or a Storage
+    // key). A NotHandled result falls through to ordinary CreateDataProperty.
+    if (descriptor.is_undefined()) {
+        if (JsObject* cell = target.property_cell()) {
+            if (cell->exotic) {
+                switch (cell->exotic->set(cell, key, value)) {
+                    case JsExotic::SetResult::Handled: return true;
+                    case JsExotic::SetResult::Refused: return false;
+                    case JsExotic::SetResult::NotHandled: break;
+                }
+            }
+            if (cell->assign_hook && (*cell->assign_hook)(key, value)) return true;
+        }
+    }
+
+    // No descriptor anywhere in the target's prototype chain behaves like a
+    // default writable data descriptor. Its creation is checked against the
+    // receiver's extensibility, not the target's.
+    if (!receiver.is_object_like()) return false;
+
+    JsValue receiver_object = receiver;
+    const JsValue receiver_descriptor = descriptor_for(receiver_object, key);
+    if (!receiver_descriptor.is_undefined()) {
+        if (receiver_descriptor.has_own_property("get") ||
+            receiver_descriptor.has_own_property("set") ||
+            !receiver_descriptor.get_property("writable").is_truthy()) {
+            return false;
+        }
+        // This is a value-only [[DefineOwnProperty]] on a known writable own
+        // data property. set_property reaches that own slot without consulting
+        // inherited setters, and preserves its existing attributes.
+        return receiver_object.set_property(key, value);
+    }
+    return receiver_object.create_data_property(key, value);
 }
 
 std::string object_tag(const JsValue& value) {
@@ -1646,20 +1735,19 @@ void install_object_builtins(JsIntrinsics& realm) {
         // from an assignment in strict code, and it is why this used to answer
         // `true` for a frozen target when the standard says `false`.
         //
-        // The plain path is taken when there is no third argument or it *is*
-        // the target: `set_property` already runs a setter with the object as
-        // `this` and already refuses a frozen object, so nothing is gained by
-        // a second implementation of the ordinary rules. Any other receiver
-        // goes through the thread-local slot, because `set_property` has no
-        // parameter for one.
+        // The plain path is taken when no receiver was supplied or the
+        // receiver is the target: `set_property` already implements the
+        // ordinary assignment rules, including accessors and exotic targets.
+        // A supplied receiver (even explicit `undefined`) goes through the
+        // receiver-aware OrdinarySetWithOwnDescriptor path.
         JsValue target = require_object(js_arg(args, 0), "Reflect.set");
         const std::string key = js_to_property_key(js_arg(args, 1));
-        const JsValue& receiver = js_arg(args, 3).is_undefined() ? target : js_arg(args, 3);
-        if (receiver.identity() == target.identity() || !target.is_object_like()) {
+        const bool receiver_was_supplied = args.size() > 3;
+        const JsValue& receiver = receiver_was_supplied ? js_arg(args, 3) : target;
+        if (!receiver_was_supplied || receiver.identity() == target.identity()) {
             return JsValue::make_boolean(target.set_property(key, js_arg(args, 2)));
         }
-        const SetterReceiverScope scope(&receiver);
-        return JsValue::make_boolean(target.set_property(key, js_arg(args, 2)));
+        return JsValue::make_boolean(ordinary_set_with_receiver(target, key, js_arg(args, 2), receiver));
     });
     js_define_method(reflect, "deleteProperty", 2, [](Args args) {
         JsValue target = require_object(js_arg(args, 0), "Reflect.deleteProperty");
@@ -1843,6 +1931,14 @@ void install_error_builtins(JsIntrinsics& realm) {
                     target.set_property("stack", text);
                 }
                 return JsValue::make_undefined();
+            });
+            // ES2025 §20.5.2.1 Error.isError — true iff the value has
+            // [[ErrorData]] (klass Error). DOMException in this engine shares
+            // the klass, noted in the finding.
+            js_define_method(ctor, "isError", 1, [](Args args) {
+                const JsValue& value = js_arg(args, 0);
+                if (!value.is_object_like() || !value.object_val) return JsValue::make_boolean(false);
+                return JsValue::make_boolean(value.object_val->klass == ObjectClass::Error);
             });
         }
         // `Object.getPrototypeOf(TypeError) === Error`. Code that asks whether

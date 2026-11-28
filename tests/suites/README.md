@@ -28,7 +28,9 @@ TEST(a_sentence_that_says_what_must_be_true) {
   so a function or a struct beside the `TEST` cannot collide with one of the
   same name in another file.
 - `python3 tools/ci/check_suites.py` says when a file here is not in this
-  form.
+  form, and, since 28 November 2026, when a pull request has written a new
+  suite into `tests/test_suite.cpp` instead: CI's "Documentation shape"
+  fails on it, and the line says what to move where.
 
 ## Why
 
@@ -48,3 +50,7 @@ A file nobody else has is in conflict with nothing.
 The suites that were written before stay where they are, in
 `tests/test_suite.cpp`, each with its `RUN_TEST` line. Nothing is added to
 them: a new assertion for an old suite is still an edit there.
+
+That goes for the 26 suites that were written there after that day as well
+(23 to 28 November, twenty of them one agent's, each beside the last). No
+check said so until the 28th; they stay, and the next one is a file here.

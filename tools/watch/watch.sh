@@ -30,7 +30,9 @@
 #   tools/watch/watch.sh wait [SECONDS]  `lot` every 20 s, until it is not 4 or the time is up; a look
 #   tools/watch/watch.sh land [last]     merge each pull request of the lot as it is, in number order.
 #                                        `last`: the watch's own merge follows, so no merge starts a
-#                                        run on main, and the tree to reach is $STATE/lot.asis
+#                                        run on main, and the tree to reach is $STATE/lot.asis.
+#                                        6, and nothing merged: GitHub refuses one of them (a rule
+#                                        the person set on main)
 #   tools/watch/watch.sh once N          #N is green with main in its head and no lot is in test:
 #                                        merge it at once
 #   tools/watch/watch.sh taken HH:MM     a "taken" note in each pull request of the lot, a board line
@@ -121,6 +123,44 @@ code_was_green() {  # code_was_green FULLSHA
   changed="$(git diff --name-only "$auto" "$head^{tree}" | grep -vE '^([^/]+\.md|docs/.+|tests/[^/]+/README\.md)$')"
   [ -z "$changed" ]
 }
+github_says() {  # github_says N -> what GitHub says of merging #N now: CLEAN, UNSTABLE, BLOCKED, BEHIND, DIRTY
+  # (UNKNOWN for some seconds after a push or a merge: asked three times)
+  local s="" i
+  for i in 1 2 3; do
+    s="$(timeout 30 gh pr view "$1" --json mergeStateStatus --jq .mergeStateStatus 2>/dev/null)"
+    [ -n "$s" ] && [ "$s" != "UNKNOWN" ] && break
+    sleep 4
+  done
+  echo "${s:-UNKNOWN}"
+}
+ruled_out() {  # ruled_out N FULLSHA [STATE]: GitHub refuses to merge #N as it is; why in $WHY (left alone otherwise)
+  # Nothing in the repository can stop a merge (#449, 25 November: no run, 59
+  # seconds). A rule on main that wants a passed run of named checks on the
+  # head commit can, and only the person can set it. No session can read
+  # such a rule whole (403); what GitHub says of one pull request it can:
+  # BLOCKED is the rule saying no, BEHIND is a rule that wants main in the
+  # branch. Under such a rule a head with no passed run of its own is not
+  # merged, whatever the lot's run said: one that came back with main merged
+  # under the mark that skips CI, one whose code was green a commit earlier,
+  # one whose own run failed for a reason that is not its change. Written on
+  # 28 November, before any rule was on: tried with a `gh` that made the
+  # answers up, never against a rule.
+  local gs runs; gs="${3:-$(github_says "$1")}"
+  case "$gs" in
+    BLOCKED)
+      runs="$(runs_of "$2")"
+      if green "$2"; then
+        WHY="GitHub reports BLOCKED though the run on its head ${2:0:7} passed: the rule on main wants something that run does not give (\`gh pr checks $1 --required\` shows what). The person has to be told"
+      elif [[ "$runs" == *in_progress* || "$runs" == *queued* || "$runs" == *pending* ]]; then
+        WHY="GitHub reports BLOCKED: the rule on main wants a passed run on its head ${2:0:7}, and that run is still going (${runs:0:90}). Wait for it"
+      else
+        WHY="GitHub reports BLOCKED: the rule on main wants a passed run on its head ${2:0:7}, which has: ${runs:-no run at all}. It needs a push without the mark that skips CI (an empty commit will do) and that push's run to pass"
+      fi
+      return 0 ;;
+    BEHIND) WHY="GitHub reports BEHIND: a rule on main wants main in the branch. No lot can land under that: the person has to take \"Require branches to be up to date before merging\" off"; return 0 ;;
+  esac
+  return 1
+}
 takeable() {  # takeable N FULLSHA; says why in $WHY
   local runs wrong
   # What it adds where every pull request adds its own files is called by its
@@ -152,12 +192,15 @@ takeable() {  # takeable N FULLSHA; says why in $WHY
   # (an `npm install` failed on CI's machine), and #450, whose run was a
   # run on `main` as #449 had left it.
   if grep -qx "$1 ${2:0:7}" "$STATE/notits" 2>/dev/null; then
+    ruled_out "$1" "$2" && return 1
     WHY="its own run failed for a reason that is not its change"; return 0
   fi
   runs="$(runs_of "$2")"
   case "$runs" in *failure*|*timed_out*) WHY="its own run failed"; return 1 ;; esac
-  WHY="its code was green"; came_back_without_a_run "$1" "$2" && return 0
-  code_was_green "$2" && return 0
+  if came_back_without_a_run "$1" "$2" || code_was_green "$2"; then
+    ruled_out "$1" "$2" && return 1   # no passed run on this head, and a rule on main wants one
+    WHY="its code was green"; return 0
+  fi
   # A finished pull request whose own run is still going is taken as well
   # (WATCH_EAGER=0 turns that off): its run and the lot's go side by side, and
   # it lands when the lot's has passed. Waiting for its own run first cost
@@ -242,7 +285,7 @@ cands)
     fi
     fetch_pr "$n" || continue
     if takeable "$n" "$full"; then printf '%s ' "$n"; [ "$WHY" = "green" ] || echo "#$n ${full:0:7}: $WHY" >&2
-    else case "$WHY" in "its merge takes out"*|"it adds "*) echo "#$n ${full:0:7}: NOT taken, and its agent has to be told: $WHY" >&2 ;; esac; fi
+    else case "$WHY" in "its merge takes out"*|"it adds "*|"GitHub reports "*) echo "#$n ${full:0:7}: NOT taken, and its agent has to be told: $WHY" >&2 ;; esac; fi
   done; echo ;;
 
 plan)
@@ -480,6 +523,14 @@ land)
     st="$(timeout 30 gh pr view "$n" --json state,headRefOid --jq '"\(.state) \(.headRefOid)"')"
     [ "$st" = "OPEN $full" ] || { echo "STOP: #$n is '$st'"; exit 3; }
     takeable "$n" "$full" || { echo "STOP: #$n is not green on ${full:0:7}: $(runs_of "$full")"; exit 3; }
+    # Asked of every one before the first is merged: a lot of which GitHub
+    # merges the first and refuses the second leaves main with a tree that no
+    # run passed on. An own run that is still going under a rule on main is
+    # BLOCKED too: wait for it, and land again. (DIRTY is not asked for: one
+    # that carries the head of the one before it can be in conflict with
+    # main until that one is merged.)
+    gs="$(github_says "$n")"
+    case "$gs" in BLOCKED|BEHIND) ruled_out "$n" "$full" "$gs"; echo "STOP, nothing merged: #$n: $WHY"; exit 6 ;; esac
     title="$(timeout 30 gh pr view "$n" --json title --jq .title)"
     if [ "$n" = "$final" ] && [ "$last" != "last" ]; then
       printf '%s\n\nLanded by the landing session (%s) as it is at %s: the last of this lot (%s), tested together with main %s in one CI run on %s, every job passed. With this merge main has the tree that run passed on, and its own run is there to save the compiled objects for the runs that follow: [objects only] (.github/workflows/ci.yml).\n' "$title" "$NAME" "${full:0:7}" "$all" "$main7" "${head:0:7}" > "$STATE/land/body$n.txt"
@@ -512,6 +563,8 @@ once)
   git merge-base --is-ancestor origin/main "$full" || { echo "STOP: main is not in #$n's head"; exit 2; }
   out="$(timeout 90 python3 tools/ci/check_pr.py merge "$n" --landing 2>&1)"; echo "$out" | tail -3
   echo "$out" | grep -q '^ready' || { echo "STOP: check_pr.py does not say ready"; exit 3; }
+  gs="$(github_says "$n")"
+  case "$gs" in BLOCKED|BEHIND) ruled_out "$n" "$full" "$gs"; echo "STOP: #$n: $WHY"; exit 6 ;; esac
   title="$(timeout 30 gh pr view "$n" --json title --jq .title)"
   printf '%s\n\nLanded by the landing session (%s) as it is at %s: green on its own head with main %s in it, so its own CI run was a run on the tree this merge puts on main.\n' "$title" "$NAME" "${full:0:7}" "$(git rev-parse --short=7 origin/main)" > "$STATE/land/once$n.txt"
   want="$(git rev-parse "$full^{tree}")"

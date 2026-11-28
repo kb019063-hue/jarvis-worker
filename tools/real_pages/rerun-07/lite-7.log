@@ -1,0 +1,4 @@
+stage: opening snapshot
+stage: painting initial frame
+stage: driving task
+BENCH pass: http://snapshot.test/git-remote.html

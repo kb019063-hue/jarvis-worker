@@ -19,7 +19,7 @@ default only when the script set none. File bytes reach the wire through the
 same `blob_bytes` the WebSocket and image paths use.
 
 Verified by `tests/suites/488-formdata-bodies-are-multipart.cpp` (`make test`:
-all 524 engine suites pass, this pull request adds the 524th) and by
+all 532 engine suites pass with this pull request in the tree after merging origin/main) and by
 `tools/conformance/verify_formdata_body.py`: the Litebird CLI POSTs to a raw
 TCP loopback server — `CHECK:fetch=200`, `CHECK:xhr=200`, both requests
 `PASS` on structure, part order, escaping, per-part `Content-Type`, and

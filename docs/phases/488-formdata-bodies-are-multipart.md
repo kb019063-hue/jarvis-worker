@@ -79,7 +79,7 @@ starts with the boundary: got "[object FormData]", want "--<boundary>\r\n"
 
 ```
 Running test: formdata_bodies_are_multipart_form_data... PASSED
-All 524 engine test suites passed.
+All 532 engine test suites passed (after merging origin/main).
 ```
 
 `python3 tools/conformance/verify_formdata_body.py --binary build/litebird`
@@ -106,8 +106,8 @@ winning (as `text/csv`), the ordinary string-body default
 (`text/plain;charset=UTF-8`), and the `Response` constructor's serialization
 and header.
 
-`python3 tools/ci/check_suites.py` ok (134 own-file suites; the 524th file is
-`tests/suites/488-formdata-bodies-are-multipart.cpp`).
+`python3 tools/ci/check_suites.py` ok own-file suites, including
+`tests/suites/488-formdata-bodies-are-multipart.cpp`.
 
 Not measured against the wire for `file:` pages hitting non-loopback hosts
 (they are blocked by policy, not by this change), and not re-fuzzed.

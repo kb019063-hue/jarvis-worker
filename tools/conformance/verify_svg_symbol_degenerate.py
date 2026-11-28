@@ -53,12 +53,23 @@ def main():
                 uses.append(f'<use id="{ident}-{size}" href="#{ident}" x="5" y="7" width="{w}" height="{h}"/>')
     html = '<!doctype html><svg width="200" height="100" viewBox="0 0 20 10"><defs>' + '<rect id="zero-ref" x="1" y="2" width="0" height="4"/>' + ''.join(symbols) + '</defs>' + ''.join(uses) + '</svg>'
     ids = [f'{shape}-{v}-{size}' for shape in SHAPES for v in ['novb', 'viewbox'] for size, _, _ in SIZES]
+    extra = ['mutation-grow', 'mutation-viewbox', 'mutation-zero-again', 'mutation-source-shape']
     script = '''var ids = %s; var out = [];
 for (var i=0; i<ids.length; ++i) {
   try { var b=document.getElementById(ids[i]).getBBox();
     out.push('PROBE '+ids[i]+': '+JSON.stringify([b.x,b.y,b.width,b.height].map(function(v){return Math.round(v*1000)/1000;})));
   } catch(e) {out.push('PROBE '+ids[i]+': THROWS '+e.name);}
 }
+function changed(name, n) { var b=n.getBBox();
+  out.push('PROBE '+name+': '+JSON.stringify([b.x,b.y,b.width,b.height].map(function(v){return Math.round(v*1000)/1000;})));
+}
+var u=document.getElementById('percent-novb-width-zero');
+u.setAttribute('width','20'); changed('mutation-grow',u);
+var sym=document.getElementById('percent-novb'); sym.setAttribute('viewBox','0 0 10 10');
+changed('mutation-viewbox',u);
+u.setAttribute('width','0'); changed('mutation-zero-again',u);
+sym.removeAttribute('viewBox'); sym.firstElementChild.setAttribute('width','3');
+changed('mutation-source-shape',u);
 console.log(out.join('\\n'));''' % json.dumps(ids)
     env = dict(os.environ, NODE_PATH=str(ROOT / 'build/svg-oracle/node_modules'),
                LD_LIBRARY_PATH=str(ROOT / 'build/svg-oracle/runtime/lib') + ':' + os.environ.get('LD_LIBRARY_PATH', ''),
@@ -70,15 +81,16 @@ console.log(out.join('\\n'));''' % json.dumps(ids)
         page.write_text(html); js.write_text(script)
         run = subprocess.run([str(ROOT/'build/litebird'), '--run-script', str(js), str(page)], cwd=ROOT, capture_output=True, text=True, timeout=120, check=True)
     actual = [line[6:] if line.startswith('PROBE ') else line for line in run.stdout.splitlines()]
-    if len(expected) != len(ids) or len(actual) != len(ids):
-        print('Invalid result counts:', len(expected), len(actual), 'expected', len(ids))
+    n = len(ids) + len(extra)
+    if len(expected) != n or len(actual) != n:
+        print('Invalid result counts:', len(expected), len(actual), 'expected', n)
         return 1
     errors = 0
     for e, a in zip(expected, actual):
         if e != a:
             errors += 1
             print('FAIL expected:', e, '\n     actual: ', a)
-    print(f'SVG symbol degenerate: {len(ids)-errors}/{len(ids)} match Chromium')
+    print(f'SVG symbol degenerate: {n-errors}/{n} match Chromium')
     return int(errors != 0)
 
 if __name__ == '__main__':

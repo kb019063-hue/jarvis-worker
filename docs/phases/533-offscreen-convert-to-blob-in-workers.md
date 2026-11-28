@@ -71,9 +71,12 @@ semantics. The complete Promise chain is the observable contract.
 
 ## Verification
 
-After merging `main` at `1b7c8d14`:
+The comprehensive gate ran after merging `main` at `1b7c8d14`; the required
+final integration with `main` at `152e268f` then repeated the normal and
+sanitizer unit gates:
 
-* `make test`: **563/563** engine suites and **114/114** cross-origin checks;
+* final integrated `make test`: **569/569** engine suites and **114/114**
+  cross-origin checks;
 * conformance: tree construction **1,973/1,973**, DOM **678/678**, URL
   **1,188/1,188**, XML **1,718/1,718**, JavaScript **1,154/1,158**, and WPT
   **9,570/9,824** with no unlisted failure;
@@ -82,8 +85,9 @@ After merging `main` at `1b7c8d14`:
 * `make fuzz`: 400 parser mutations, 400 pipeline runs, 600 XML mutations,
   2,400 media cases, 5,009 colour inputs, and 2,000 Brotli mutations clean;
 * `make deep`: **1,332** runs at depth 200,000 on an 8 MB stack, none failed;
-* ASan/UBSan: **563/563** engine suites and **114/114** cross-origin checks at
-  the repository's canonical flags; verifier, JS, DOM/URL, XML, WPT, generated
+* final integrated ASan/UBSan: **569/569** engine suites and **114/114**
+  cross-origin checks at the repository's canonical flags; verifier, JS,
+  DOM/URL, XML, WPT, generated
   XML, fuzz, and deep sanitizer parts all pass their floors with no sanitizer
   finding;
 * repository document, row, suite, number, and CI-part checks pass;

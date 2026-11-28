@@ -1482,7 +1482,11 @@ void setup_request(Iface& I) {
         if (state.ready_state != 1 || state.send_flag) throw_dom(r, "InvalidStateError", "The object's state must be OPENED.");
         const std::string upper_method = ascii_upper(state.method);
         if (!args.empty() && !args[0].is_nullish() && upper_method != "GET" && upper_method != "HEAD") {
-            state.request_body = to_str(args[0]);
+            std::string form_bytes;
+            std::string form_mime;
+            const bool is_form = dom::is_form_data(args[0]) &&
+                                 dom::form_data_body_init(args[0], form_bytes, form_mime);
+            state.request_body = is_form ? std::move(form_bytes) : to_str(args[0]);
             bool has_ct = false;
             for (const auto& [hn, _] : state.request_headers) {
                 if (ascii_lower(hn) == "content-type") {
@@ -1491,7 +1495,8 @@ void setup_request(Iface& I) {
                 }
             }
             if (!has_ct) {
-                state.request_headers.emplace_back("Content-Type", "text/plain;charset=UTF-8");
+                state.request_headers.emplace_back("Content-Type",
+                                                   is_form ? form_mime : "text/plain;charset=UTF-8");
             }
         } else {
             state.request_body.clear();

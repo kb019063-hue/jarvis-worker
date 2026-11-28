@@ -288,6 +288,13 @@ void extract_body_init(const JsValue& body_val, std::string& bytes_out, std::str
         return;
     }
 
+    if (dom::is_form_data(body_val)) {
+        if (!dom::form_data_body_init(body_val, bytes_out, mime_out)) {
+            js_throw_type_error("Failed to read Request body: failed to serialize FormData.");
+        }
+        return;
+    }
+
     if (is_url_search_params_js(body_val)) {
         bytes_out = js_to_string(body_val);
         mime_out = "application/x-www-form-urlencoded;charset=UTF-8";
@@ -802,9 +809,17 @@ JsValue ResponseObject::create_constructor() {
     set_to_string_tag(proto, "Response");
 
     JsValue ctor = js_make_native("Response", 0, [](const std::vector<JsValue>& args) {
-        std::string body = (!args.empty() && !args[0].is_nullish())
-            ? args[0].to_string()
-            : "";
+        std::string body;
+        std::string form_mime;
+        if (!args.empty() && !args[0].is_nullish()) {
+            if (dom::is_form_data(args[0])) {
+                if (!dom::form_data_body_init(args[0], body, form_mime)) {
+                    js_throw_type_error("Failed to construct 'Response': failed to serialize FormData.");
+                }
+            } else {
+                body = args[0].to_string();
+            }
+        }
         int status = 200;
         std::string status_text = "OK";
         std::unordered_map<std::string, std::string> headers;
@@ -819,6 +834,13 @@ JsValue ResponseObject::create_constructor() {
 
             JsValue h = init.get_property("headers");
             HeadersObject::extract_headers_init(h, headers);
+        }
+        if (!form_mime.empty()) {
+            bool has_content_type = false;
+            for (const auto& [name, _] : headers) {
+                if (to_lower_str(name) == "content-type") { has_content_type = true; break; }
+            }
+            if (!has_content_type) headers["content-type"] = form_mime;
         }
 
         return ResponseObject::create_js_instance(body, status, status_text, headers, "");

@@ -2012,8 +2012,22 @@ void CanvasRenderingContext2D::round_rect(
     Point r_tl, Point r_tr, Point r_br, Point r_bl
 ) {
     if (!is_finite_f(x) || !is_finite_f(y) || !is_finite_f(w) || !is_finite_f(h)) return;
-    if (w < 0.0f) { x += w; w = -w; }
-    if (h < 0.0f) { y += h; h = -h; }
+    if (w < 0.0f) {
+        x += w;
+        w = -w;
+        // Normalizing a negative width reflects the supplied corner order across
+        // the vertical axis: each left/right pair follows its physical corner.
+        std::swap(r_tl, r_tr);
+        std::swap(r_bl, r_br);
+    }
+    if (h < 0.0f) {
+        y += h;
+        h = -h;
+        // A negative height reflects across the horizontal axis. If both axes
+        // are negative, these two pairwise swaps compose to a 180-degree turn.
+        std::swap(r_tl, r_bl);
+        std::swap(r_tr, r_br);
+    }
     if (w == 0.0f || h == 0.0f) return;
 
     // One zero axis makes a square corner. Keeping a non-zero other axis would

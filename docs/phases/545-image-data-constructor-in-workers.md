@@ -73,12 +73,26 @@ properties appear there automatically.
 
 ## Verification
 
-* implementation checkpoint: **574/574** engine suites;
-* the Phase 545 suite passes alone after both mutations are restored;
+After merging `main` at `40018532`:
+
+* `make test`: **576/576** engine suites and **114/114** cross-origin checks;
+* conformance: tree construction **1,973/1,973**, DOM **678/678**, URL
+  **1,188/1,188**, XML **1,718/1,718**, JavaScript **1,154/1,158**, and WPT
+  **9,570/9,824** with no unlisted failure;
+* differential parsers: **6,000/6,000** HTML trees agree with corrected parse5,
+  and the XML differential and **3,000/3,000** round trips have no finding;
+* `make fuzz`: 400 parser mutations, 400 pipeline runs, 600 XML mutations,
+  2,400 media cases, 5,009 colour inputs, and 2,000 Brotli mutations clean;
+* `make deep`: **1,332** runs at depth 200,000 on an 8 MB stack, none failed;
+* ASan/UBSan: **576/576** engine suites and **114/114** cross-origin checks at
+  the repository's canonical flags; verifier, JS, DOM/URL, XML, WPT, generated
+  XML, fuzz, and deep sanitizer parts all pass their floors with no sanitizer
+  finding;
+* repository document, row, suite, number, and CI-part checks pass;
 * `python3 tools/ci/check_suites.py` confirms one standalone suite and no new
   `RUN_TEST` line.
 
-Final merged-tree and repository-wide gate results are recorded before landing.
+The Phase 545 suite also passes alone after both mutations are restored.
 
 ## Files
 

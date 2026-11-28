@@ -78,6 +78,13 @@ struct BufferViewInfo {
 };
 bool buffer_view_info(const JsValue& value, BufferViewInfo& out);
 
+/// True when `key` is an in-bounds integer index on a typed array whose
+/// backing ArrayBuffer is immutable. Used to report the proposal's
+/// non-configurable indexed property descriptor.
+bool typed_array_immutable_index(const JsValue& value, const std::string& key);
+/// True when `value` is a typed-array view backed by an immutable ArrayBuffer.
+bool typed_array_has_immutable_buffer(const JsValue& value);
+
 /// `new <element_type>Array(buffer, byte_offset, length)`, and
 /// `new DataView(buffer, byte_offset, byte_length)`, for a buffer that is
 /// already an object of this realm. A structured clone uses these so that a

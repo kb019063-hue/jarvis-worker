@@ -48,3 +48,9 @@ an independent required gate, not a substitute for claiming a local pass.
 `make fuzz` passed, including all 2400 media mutations and 2000 Brotli
 mutations. With `TEST_OPT="-O0 -g1"` the sanitizer harness compiled and the
 Phase 525 suite passed; this focused run is not a full sanitizer pass.
+
+On a later serial `make asan TEST_OPT="-O0 -g1"` attempt the test harness
+built and ran, but the existing `deep_nesting_never_exhausts_the_native_stack`
+suite reached 3.85 GiB RSS. It was stopped to protect the 3.8 GiB sandbox;
+a separate isolated run of that suite reached the same limit and was stopped.
+Neither interrupted run is a pass.

@@ -373,49 +373,87 @@ bool test_integrity_level(const JsValue& object, bool frozen) {
 }
 
 
-/// `Object.defineProperty(object, key, descriptor)`. Returns false, or throws
-/// when `should_throw` is set, where the property that is there does not
-/// allow the change (`Reflect.defineProperty` reports, the others throw).
-bool define_from_descriptor(JsValue object, const std::string& key, const JsValue& descriptor,
-                            bool should_throw = true) {
-    // A cross-origin WindowProxy or Location refuses every definition with a
-    // SecurityError (HTML §7.2.3.6, §7.2.4.6). CrossOriginOwnPropertyKeys
-    // reporting the object as cross-origin is what tells us which case this
-    // is; same-origin ones fall through to the ordinary path.
-    {
-        std::vector<std::string> exposed;
-        if (litebird::dom::cross_origin_own_keys(object, /*include_non_enumerable=*/true, exposed)) {
-            litebird::dom::throw_dom(litebird::dom::current_realm(), "SecurityError",
-                                     "Blocked a frame from defining a property on a cross-origin Window.");
-        }
-    }
+/// One field of a descriptor after ToPropertyDescriptor has read it.
+struct PropertyDescriptorField {
+    bool present{false};
+    JsValue value;
+};
+
+struct PropertyDescriptorRecord {
+    PropertyDescriptorField enumerable;
+    PropertyDescriptorField configurable;
+    PropertyDescriptorField value;
+    PropertyDescriptorField writable;
+    PropertyDescriptorField get;
+    PropertyDescriptorField set;
+
+    bool wants_accessor() const { return get.present || set.present; }
+    bool wants_data() const { return value.present || writable.present; }
+};
+
+/// ECMA-262 §7.3.2 ToPropertyDescriptor. The record holds the values after
+/// every user-observable read and conversion has happened, so a caller can
+/// finish converting a whole descriptor list before changing its target.
+PropertyDescriptorRecord to_property_descriptor(const JsValue& descriptor) {
     if (!descriptor.is_object_like()) js_throw_type_error("Property description must be an object");
 
-    // The descriptor is read first, field by field: reading one can run a
-    // getter, and nothing of the object is held across that.
-    struct Field {
-        bool present{false};
-        JsValue value;
-    };
     auto read = [&](const char* name) {
-        Field field;
+        PropertyDescriptorField field;
         field.present = descriptor.has_property(name);
         if (field.present) field.value = descriptor.get_property(name);
         return field;
     };
-    const Field enumerable = read("enumerable");
-    const Field configurable = read("configurable");
-    const Field value = read("value");
-    const Field writable = read("writable");
-    const Field get = read("get");
-    const Field set = read("set");
-    const bool wants_accessor = get.present || set.present;
-    const bool wants_data = value.present || writable.present;
-    if (wants_accessor && wants_data) {
+    auto read_boolean = [&](const char* name) {
+        PropertyDescriptorField field = read(name);
+        if (field.present) field.value = JsValue::make_boolean(field.value.is_truthy());
+        return field;
+    };
+
+    PropertyDescriptorRecord result;
+    // ToPropertyDescriptor's order is observable: HasProperty and Get can
+    // each run script, and the three Boolean fields are converted as read.
+    result.enumerable = read_boolean("enumerable");
+    result.configurable = read_boolean("configurable");
+    result.value = read("value");
+    result.writable = read_boolean("writable");
+    result.get = read("get");
+    result.set = read("set");
+
+    if (result.wants_accessor() && result.wants_data()) {
         js_throw_type_error("Invalid property descriptor. Cannot both specify accessors and a value or writable attribute");
     }
-    if (get.present && !get.value.is_undefined() && !get.value.is_function()) js_throw_type_error("Getter must be a function");
-    if (set.present && !set.value.is_undefined() && !set.value.is_function()) js_throw_type_error("Setter must be a function");
+    if (result.get.present && !result.get.value.is_undefined() && !result.get.value.is_function()) {
+        js_throw_type_error("Getter must be a function");
+    }
+    if (result.set.present && !result.set.value.is_undefined() && !result.set.value.is_function()) {
+        js_throw_type_error("Setter must be a function");
+    }
+    return result;
+}
+
+void ensure_definition_target_is_same_origin(const JsValue& object) {
+    // A cross-origin WindowProxy or Location refuses every definition with a
+    // SecurityError (HTML §7.2.3.6, §7.2.4.6). CrossOriginOwnPropertyKeys
+    // reporting the object as cross-origin is what tells us which case this
+    // is; same-origin ones fall through to the ordinary path.
+    std::vector<std::string> exposed;
+    if (litebird::dom::cross_origin_own_keys(object, /*include_non_enumerable=*/true, exposed)) {
+        litebird::dom::throw_dom(litebird::dom::current_realm(), "SecurityError",
+                                 "Blocked a frame from defining a property on a cross-origin Window.");
+    }
+}
+
+bool define_parsed_descriptor(JsValue object, const std::string& key,
+                              const PropertyDescriptorRecord& parsed, bool should_throw) {
+    using Field = PropertyDescriptorField;
+    const Field& enumerable = parsed.enumerable;
+    const Field& configurable = parsed.configurable;
+    const Field& value = parsed.value;
+    const Field& writable = parsed.writable;
+    const Field& get = parsed.get;
+    const Field& set = parsed.set;
+    const bool wants_accessor = parsed.wants_accessor();
+    const bool wants_data = parsed.wants_data();
 
     // The `prototype` of a constructor function is there before anybody has
     // read it, though it is only made on first use: make it now, or this
@@ -904,6 +942,19 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
                       : JsValue::make_undefined();
     object.define_property(key, new_value, flags);
     return true;
+}
+
+/// `Object.defineProperty(object, key, descriptor)`. Returns false, or throws
+/// when `should_throw` is set, where the property that is there does not
+/// allow the change (`Reflect.defineProperty` reports, the others throw).
+bool define_from_descriptor(JsValue object, const std::string& key, const JsValue& descriptor,
+                            bool should_throw = true) {
+    // Preserve the direct-definition path's cross-origin refusal before it
+    // reads the descriptor, as it did before ToPropertyDescriptor was split
+    // out for Object.defineProperties' all-before-any conversion pass.
+    ensure_definition_target_is_same_origin(object);
+    const PropertyDescriptorRecord parsed = to_property_descriptor(descriptor);
+    return define_parsed_descriptor(object, key, parsed, should_throw);
 }
 
 /// Ordinary [[Set]] with a receiver distinct from the target. The tree-walker
@@ -1595,7 +1646,23 @@ void install_object_builtins(JsIntrinsics& realm) {
         JsValue object = require_object(js_arg(args, 0), "Object.defineProperties");
         const JsValue& props = js_arg(args, 1);
         if (props.is_nullish()) js_throw_type_error("Cannot convert undefined or null to object");
-        for (const auto& key : reflected_own_keys(props, false)) define_from_descriptor(object, key, props.get_property(key));
+
+        // §20.1.2.3.1 converts every enumerable own property value with
+        // ToPropertyDescriptor before defining the first property. A getter
+        // or an invalid descriptor later in this pass must not leave earlier
+        // definitions applied to the target.
+        struct PreparedDefinition {
+            std::string key;
+            PropertyDescriptorRecord descriptor;
+        };
+        std::vector<PreparedDefinition> definitions;
+        for (const auto& key : reflected_own_keys(props, false)) {
+            definitions.push_back({key, to_property_descriptor(props.get_property(key))});
+        }
+        for (const auto& definition : definitions) {
+            ensure_definition_target_is_same_origin(object);
+            define_parsed_descriptor(object, definition.key, definition.descriptor, true);
+        }
         return object;
     });
     js_define_method(object_ctor, "getOwnPropertyDescriptor", 2, [](Args args) {

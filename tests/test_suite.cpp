@@ -5198,10 +5198,12 @@ TEST(hebrew_fixed_points_are_ordered_before_shaping) {
     assert((ids({0x05E9, 0x05B8, 0x05BC, 0x05C1}) == std::vector<uint16_t>{1, 3, 4, 2}));
     // Equal-ranked qamats/qamats-qatan stay stable, including repeated marks.
     assert((ids({0x05E9, 0x05C7, 0x05B8, 0x05B8}) == std::vector<uint16_t>{1, 5, 2, 2}));
-    // Neither a base, space, nor an unhandled combining mark is crossed.
+    // Neither a base nor a space is crossed; non-Hebrew combining marks sort
+    // inside the same mark span (Phase 476), while U+034F CGJ is a CCC=0 barrier.
     assert((ids({0x05E9, 0x05B8, 0x05E9, 0x05C1}) == std::vector<uint16_t>{1, 2, 1, 3}));
     assert((ids({0x05E9, 0x05B8, ' ', 0x05C1}) == std::vector<uint16_t>{1, 2, 6, 3}));
-    assert((ids({0x05E9, 0x05B8, 0x0301, 0x05C1}) == std::vector<uint16_t>{1, 2, 7, 3}));
+    assert((ids({0x05E9, 0x05B8, 0x0301, 0x05C1}) == std::vector<uint16_t>{1, 3, 2, 7}));
+    assert((ids({0x05E9, 0x05B8, 0x034F, 0x05C1}) == std::vector<uint16_t>{1, 2, 6, 3}));
     assert(ids({}).empty());
 }
 

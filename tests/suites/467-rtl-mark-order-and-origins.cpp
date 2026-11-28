@@ -244,7 +244,10 @@ TEST(rtl_mark_order_attachment_offsets_and_unanchored_origins) {
         SfntByteBuf heb_gdef;
         heb_gdef.u32(0x00010000u);
         heb_gdef.u16(12); heb_gdef.u16(0); heb_gdef.u16(0); heb_gdef.u16(0);
-        auto heb_gcd = build_classdef_fmt2({{1, 1, 1}, {2, 2, 3}});
+        // Leave gid 2 unclassified (class 0) in GDEF so `hebr`'s
+        // `ZERO_WIDTH_MARKS_BY_GDEF_LATE` keeps its nonzero advance while
+        // `MarkToBase` still attaches it via `MarkCoverage`.
+        auto heb_gcd = build_classdef_fmt2({{1, 1, 1}});
         heb_gdef.data.insert(heb_gdef.data.end(), heb_gcd.begin(), heb_gcd.end());
 
         SfntByteBuf sp_y;

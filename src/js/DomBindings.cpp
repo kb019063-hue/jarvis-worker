@@ -723,13 +723,13 @@ int legacy_code(const std::string& name) {
 }
 
 void fill_dom_exception(JsValue& error, const std::string& name, const std::string& message) {
-    error.object_val->klass = ObjectClass::Error;
+    error.object_val->klass = ObjectClass::DOMException;
     error.define_property("name", JsValue::make_string(name), PropertyMap::Hidden);
     error.define_property("message", JsValue::make_string(message), PropertyMap::Hidden);
     error.define_property("code", JsValue::make_number(legacy_code(name)), PropertyMap::Hidden);
-    // No own `stack`, for the reason js_make_error gives: ObjectClass::Error is
-    // the [[ErrorData]] slot the Error.prototype.stack accessor reports from,
-    // and DOMException.prototype inherits it through Error.prototype.
+    // No own `stack`. DOMException has its own [[DOMExceptionData]] slot
+    // (klass DOMException) but shares the Error.prototype.stack accessor
+    // shape — JsOps now answers it for both klasses.
 }
 
 void setup_dom_exception(Iface& I) {

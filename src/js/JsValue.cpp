@@ -2119,16 +2119,18 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
         }
 
         // A setter inherited from a prototype (a class `set x(v)`) runs instead
-        // of creating an own property.
+        // of creating an own property, and a non-writable data property refuses
+        // the write (the prototypes.dat case: `o = Object.create(p)` where
+        // `p` has `ro` as `{value:1}` should not create `o.ro`).
         int guard = 0;
         for (JsObject* proto = obj->prototype; proto && guard < kMaxPrototypeChain; proto = proto->prototype, ++guard) {
-            if (!proto->has_accessors) continue;
             auto pit = proto->properties.find(name);
             if (pit == proto->properties.end()) continue;
             if (pit->flags & PropertyMap::Accessor) {
                 if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(*this, {val}); return true; }
                 return false;
             }
+            if (!(pit->flags & PropertyMap::Writable)) return false;
             break;
         }
 

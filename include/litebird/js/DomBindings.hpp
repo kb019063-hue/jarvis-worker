@@ -854,6 +854,12 @@ void reflect_attributes(Iface& I, const char* description);
 
 // --- DomFormBindings.cpp ----------------------------------------------------------
 void register_form_interfaces();
+/// True when `value` is this engine's FormData object (state, not a tag a script could forge).
+bool is_form_data(const JsValue& value);
+/// The "multipart/form-data encoding algorithm" of the Fetch Standard: serializes
+/// a FormData's entries into `bytes_out` (RFC 7578) and the `content-type` value
+/// to put in `content_type_out`. False when `value` is not a FormData.
+bool form_data_body_init(const JsValue& value, std::string& bytes_out, std::string& content_type_out);
 /// What a click does besides its listeners: the standard's activation
 /// behaviour. `before` runs ahead of the dispatch (a checkbox changes first)
 /// and returns what `after` needs to finish or undo it.

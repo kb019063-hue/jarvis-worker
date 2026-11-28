@@ -10,7 +10,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <fcntl.h>
 #include <limits>
+#include <random>
+#include <unistd.h>
 
 namespace litebird {
 namespace dom {
@@ -374,7 +377,105 @@ void setup_form_data(Iface& I) {
     });
 }
 
+// ---------------------------------------------------------------------------
+// multipart/form-data serialization (the Fetch Standard's "multipart/form-data
+// encoding algorithm"; RFC 7578). A FormData body used to reach the wire as
+// the string "[object FormData]" with no Content-Type parameter.
+// ---------------------------------------------------------------------------
+
+// name and filename are percent-encoded before they are quoted into
+// Content-Disposition: the percent sign first, then the characters that
+// could end the quoted-string, and the CR/LF that could end the line.
+std::string multipart_encode_name(const std::string& raw) {
+    std::string out;
+    out.reserve(raw.size());
+    for (const unsigned char c : raw) {
+        switch (c) {
+            case '%': out += "%25"; break;
+            case '"': out += "%22"; break;
+            case '\r': out += "%0D"; break;
+            case '\n': out += "%0A"; break;
+            default: out += static_cast<char>(c);
+        }
+    }
+    return out;
+}
+
+std::string multipart_boundary() {
+    // Eighteen OS-random bytes hex-encoded: the boundary cannot collide with
+    // content by luck, and stays well under RFC 7578's 70 characters.
+    unsigned char raw[18];
+    std::size_t filled = 0;
+    int fd = ::open("/dev/urandom", O_RDONLY);
+    if (fd >= 0) {
+        while (filled < sizeof(raw)) {
+            ssize_t n = ::read(fd, raw + filled, sizeof(raw) - filled);
+            if (n <= 0) break;
+            filled += static_cast<std::size_t>(n);
+        }
+        ::close(fd);
+    }
+    if (filled < sizeof(raw)) {
+        std::random_device rd;
+        for (std::size_t i = filled; i < sizeof(raw); ++i) {
+            raw[i] = static_cast<unsigned char>(rd() & 0xffu);
+        }
+    }
+    static const char kHex[] = "0123456789abcdef";
+    std::string out = "----LitebirdFormData";
+    for (const unsigned char b : raw) {
+        out += kHex[b >> 4];
+        out += kHex[b & 0x0f];
+    }
+    return out;
+}
+
 } // namespace
+
+bool is_form_data(const JsValue& value) {
+    return state_of<FormDataState>(value) != nullptr;
+}
+
+bool form_data_body_init(const JsValue& value, std::string& bytes_out, std::string& content_type_out) {
+    const FormDataState* state = state_of<FormDataState>(value);
+    if (!state) return false;
+    const std::string boundary = multipart_boundary();
+    bytes_out.clear();
+    for (const auto& entry : state->entries) {
+        bytes_out += "--";
+        bytes_out += boundary;
+        bytes_out += "\r\nContent-Disposition: form-data; name=\"";
+        bytes_out += multipart_encode_name(entry.first);
+        bytes_out += '"';
+        if (is_blob(entry.second)) {
+            std::string filename = file_name(entry.second);
+            // A Blob has no name; a File with an empty name serializes the
+            // same way, as browsers do.
+            if (filename.empty()) filename = "blob";
+            bytes_out += "; filename=\"";
+            bytes_out += multipart_encode_name(filename);
+            bytes_out += "\"\r\n";
+            std::string type;
+            const JsValue type_val = entry.second.get_property("type");
+            if (type_val.type == JsType::String) type = type_val.to_string();
+            bytes_out += "Content-Type: ";
+            bytes_out += type.empty() ? "application/octet-stream" : type;
+            bytes_out += "\r\n\r\n";
+            std::string part;
+            (void)blob_bytes(entry.second, part);
+            bytes_out += part;
+        } else {
+            bytes_out += "\r\n\r\n";
+            bytes_out += to_str(entry.second);
+        }
+        bytes_out += "\r\n";
+    }
+    bytes_out += "--";
+    bytes_out += boundary;
+    bytes_out += "--\r\n";
+    content_type_out = "multipart/form-data; boundary=" + boundary;
+    return true;
+}
 
 std::shared_ptr<JsExotic> element_exotic(Realm& realm, Element& element) {
     if (element.is_foreign()) return nullptr;

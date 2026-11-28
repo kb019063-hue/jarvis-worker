@@ -27,7 +27,14 @@ class InkTests(unittest.TestCase):
         self.assertEqual(ink.difference({}, {})["absolute_coverage_error"], 0)
 
     def test_invalid_runs(self):
-        for row in [[[2, 0, 0, 0]], [[999, 0, 0, 0, 0]], [[1, True, 0, 0, 0]]]:
+        ink.validate_run([[2, 0, 0, 0, 0, 3]], 10)
+        for row in [
+            [[2, 0, 0, 0]],
+            [[2, 0, 0, 0, 0, -1]],
+            [[2, 0, 0, 0, 0, 0, 0]],
+            [[999, 0, 0, 0, 0]],
+            [[1, True, 0, 0, 0]],
+        ]:
             with self.assertRaises(ValueError):
                 ink.validate_run(row, 10)
         with self.assertRaises(ValueError):

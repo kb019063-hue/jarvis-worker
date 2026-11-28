@@ -96,6 +96,7 @@ public:
         int32_t y_advance{0};
         int32_t x_offset{0};
         int32_t y_offset{0};
+        uint32_t cluster{0};
         bool is_mark{false};
     };
 
@@ -442,6 +443,7 @@ private:
 
     struct ShapingGlyph {
         uint16_t glyph{0};
+        uint32_t cluster{0};
         uint32_t feature_mask{kGsubFeatGlobal | kGsubFeatCalt};
         uint16_t lig_id{0};
         uint16_t lig_comp{0};
@@ -738,6 +740,7 @@ public:
         float advance{0.0f};
         float x_offset{0.0f};
         float y_offset{0.0f};
+        uint32_t cluster{0};
         bool shear{false};
         bool is_mark{false};
     };

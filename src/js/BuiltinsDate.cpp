@@ -547,6 +547,35 @@ void install_date_builtins(JsIntrinsics& realm) {
     });
     realm.add_global("Date", date_ctor);
 
+    auto& to_primitive = dp->properties.entry("@@toPrimitive");
+    to_primitive.second = js_make_method("[Symbol.toPrimitive]", 1, [](Args args) {
+        JsValue receiver = self();
+        if (!receiver.is_object_like()) {
+            js_throw_type_error("Date.prototype[Symbol.toPrimitive] requires an object");
+        }
+        const JsValue& hint = js_arg(args, 0);
+        if (hint.type != JsType::String) {
+            js_throw_type_error("Invalid hint for Date.prototype[Symbol.toPrimitive]");
+        }
+        const auto text = hint.string_val.view();
+        const bool string_first = text == "default" || text == "string";
+        if (!string_first && text != "number") {
+            js_throw_type_error("Invalid hint for Date.prototype[Symbol.toPrimitive]");
+        }
+        // OrdinaryToPrimitive, not ToPrimitive: redispatching @@toPrimitive
+        // here would recurse, and this method is generic rather than Date-branded.
+        const char* order[2] = {string_first ? "toString" : "valueOf",
+                                string_first ? "valueOf" : "toString"};
+        for (const char* name : order) {
+            JsValue method = receiver.get_property(name);
+            if (!method.is_function()) continue;
+            JsValue result = js_call(method, receiver, {});
+            if (!result.is_object_like()) return result;
+        }
+        js_throw_type_error("Cannot convert object to primitive value");
+    });
+    to_primitive.flags = PropertyMap::Configurable; // non-writable, non-enumerable
+
     // ---- Value access -----------------------------------------------------
     js_define_method(dp, "getTime", 0, [](Args) { return JsValue::make_number(*time_slot(self(), "getTime")); });
     js_define_method(dp, "valueOf", 0, [](Args) { return JsValue::make_number(*time_slot(self(), "valueOf")); });

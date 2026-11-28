@@ -503,9 +503,6 @@ JsValue js_to_primitive(const JsValue& value, JsPrimitiveHint hint) {
     }
 
     bool string_first = hint == JsPrimitiveHint::String;
-    if (hint == JsPrimitiveHint::Default && value.object_val && value.object_val->klass == ObjectClass::Date) {
-        string_first = true;
-    }
     const char* order[2] = {string_first ? "toString" : "valueOf", string_first ? "valueOf" : "toString"};
     for (const char* name : order) {
         JsValue method = value.get_property(name);

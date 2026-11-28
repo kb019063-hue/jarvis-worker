@@ -76,18 +76,23 @@ struct BidiParagraph {
 
 /// Resolves one paragraph. `text` is the paragraph's code points.
 /// `paragraph_level` is the paragraph's direction: 0 (ltr), 1 (rtl), or -1 to
-/// take it from the first strong character (rules P2 and P3).
-BidiParagraph bidi_paragraph(const std::u32string& text, int paragraph_level = -1);
+/// take it from the first strong character (rules P2 and P3). When P2/P3 find
+/// no strong character the answer is `fallback_level` — the paragraph
+/// direction the caller resolves — rather than an unconditional ltr.
+BidiParagraph bidi_paragraph(const std::u32string& text, int paragraph_level = -1,
+                             int fallback_level = 0);
 
 /// Same, on UTF-8. Invalid sequences decode as U+FFFD, one per byte, so the
 /// result's length is not the string's byte length.
-BidiParagraph bidi_paragraph_utf8(std::string_view text, int paragraph_level = -1);
+BidiParagraph bidi_paragraph_utf8(std::string_view text, int paragraph_level = -1,
+                                  int fallback_level = 0);
 
 /// The same pass over Bidi_Class values alone, which is how the Unicode
 /// conformance suite (tests/bidi/BidiTest.txt) states its cases. Paired
 /// brackets cannot be found without characters, so rule N0 does nothing here.
 BidiParagraph bidi_paragraph_classes(const std::vector<BidiClass>& classes,
-                                     int paragraph_level = -1);
+                                     int paragraph_level = -1,
+                                     int fallback_level = 0);
 
 /// Rule L2 on a range of a paragraph's levels: the indices in visual order,
 /// left to right. Characters rule X9 removed are left out.

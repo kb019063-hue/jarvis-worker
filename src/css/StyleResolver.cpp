@@ -2,6 +2,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include "litebird/css/CssParser.hpp"
+#include "litebird/text/Bidi.hpp"
 #include "litebird/css/CssText.hpp"
 #include "litebird/dom/Selector.hpp"
 #include "litebird/dom/ShadowRoot.hpp"
@@ -83,6 +84,22 @@ bool parse_text_align(std::string_view val_lower, TextAlign& out) {
     if (ascii_iequals(val_lower, "justify")) { out = TextAlign::Justify; return true; }
     if (ascii_iequals(val_lower, "start")) { out = TextAlign::Start; return true; }
     if (ascii_iequals(val_lower, "end")) { out = TextAlign::End; return true; }
+    return false;
+}
+
+bool parse_direction(std::string_view val_lower, Direction& out) {
+    if (ascii_iequals(val_lower, "ltr")) { out = Direction::Ltr; return true; }
+    if (ascii_iequals(val_lower, "rtl")) { out = Direction::Rtl; return true; }
+    return false;
+}
+
+bool parse_unicode_bidi(std::string_view val_lower, UnicodeBidi& out) {
+    if (ascii_iequals(val_lower, "normal")) { out = UnicodeBidi::Normal; return true; }
+    if (ascii_iequals(val_lower, "embed")) { out = UnicodeBidi::Embed; return true; }
+    if (ascii_iequals(val_lower, "isolate")) { out = UnicodeBidi::Isolate; return true; }
+    if (ascii_iequals(val_lower, "bidi-override")) { out = UnicodeBidi::BidiOverride; return true; }
+    if (ascii_iequals(val_lower, "isolate-override")) { out = UnicodeBidi::IsolateOverride; return true; }
+    if (ascii_iequals(val_lower, "plaintext")) { out = UnicodeBidi::Plaintext; return true; }
     return false;
 }
 
@@ -380,7 +397,9 @@ std::size_t ComputedStyle::hash() const {
         (static_cast<uint32_t>(caption_side) << 17) |
         (static_cast<uint32_t>(position) << 18) |
         (static_cast<uint32_t>(box_sizing) << 20) |
-        (static_cast<uint32_t>(containment) << 21);
+        (static_cast<uint32_t>(containment) << 21) |
+        (static_cast<uint32_t>(direction) << 25) |
+        (static_cast<uint32_t>(unicode_bidi) << 26);
     hash_combine(h, flags);
     hash_combine(h, (static_cast<std::size_t>(white_space) << 8) |
                     (static_cast<std::size_t>(vertical_align) << 4) |
@@ -611,6 +630,12 @@ SharedComputedStyle ComputedStylePool::inherited_only(const SharedComputedStyle&
     s.line_height_number = key->line_height_number;
     s.text_align = key->text_align;
     s.text_decoration = key->text_decoration;
+    // The text box's bidirectional context is the element that holds the
+    // text: `direction` inherits by CSS, and `unicode-bidi` travels with it
+    // here because the wrap the line pass puts around this text is chosen
+    // from this style, not from an ancestor's.
+    s.direction = key->direction;
+    s.unicode_bidi = key->unicode_bidi;
     s.white_space = key->white_space;
     s.visibility = key->visibility;
     s.border_collapse = key->border_collapse;
@@ -741,6 +766,19 @@ StyleSheet StyleResolver::default_user_agent_stylesheet() {
             max-width: calc(100% - 6px - 2em);
             max-height: calc(100% - 6px - 2em);
         }
+        /* The elements whose content is an isolated bidirectional sequence
+           (HTML §Rendering, the `unicode-bidi: isolate` row). This is the
+           twin of the same list in kElementDefaults (js/DomStyleBindings.cpp)
+           so that what a script is told and what layout does agree; the two
+           sheets are separate because the computed-value cascade answers in
+           text and this one answers in typed values. */
+        address, blockquote, center, dialog, div, figure, figcaption, footer, form, header, hr, legend, listing, main, p,
+        plaintext, pre, search, xmp, article, aside, h1, h2, h3, h4, h5, h6, hgroup, nav, section, table, caption, colgroup,
+        col, thead, tbody, tfoot, tr, td, th, dir, dd, dl, dt, menu, ol, ul, li, bdi, output { unicode-bidi: isolate }
+        /* `bdo` turns the algorithm for its content: each character takes
+           the direction the `dir` attribute gives the element, and no
+           surrounding text can reorder it. */
+        bdo { unicode-bidi: bidi-override }
     )";
     return CssParser::parse(ua_css);
 }
@@ -3295,6 +3333,23 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         style.font_family = val;
     } else if (prop == "text-align") {
         parse_text_align(val_lower, style.text_align);
+    } else if (prop == "direction") {
+        // Inherited, so `inherit`/`unset` need no branch: the value copied
+        // from the parent is already here. `initial` is ltr (CSS Writing
+        // Modes 3 §2.1).
+        if (val_lower == "initial") style.direction = Direction::Ltr;
+        else if (val_lower != "inherit" && val_lower != "unset") {
+            parse_direction(val_lower, style.direction);
+        }
+    } else if (prop == "unicode-bidi") {
+        // Not inherited: `initial`/`unset`/`normal` all land on Normal, and
+        // `inherit` keeps whatever is here — which, for a child of an
+        // override element, is the seed `resolve_style` planted.
+        if (val_lower == "initial" || val_lower == "unset") {
+            style.unicode_bidi = UnicodeBidi::Normal;
+        } else if (val_lower != "inherit") {
+            parse_unicode_bidi(val_lower, style.unicode_bidi);
+        }
     } else if (prop == "text-decoration") {
         parse_text_decoration(val_lower, style.text_decoration);
     } else if (prop == "white-space") {
@@ -4047,6 +4102,7 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.font_kerning = parent_style->font_kerning;
         if (!parent_style->font_family.empty()) style.font_family = parent_style->font_family;
         style.text_align = parent_style->text_align;
+        style.direction = parent_style->direction;
         style.white_space = parent_style->white_space;
         style.visibility = parent_style->visibility;
         if (!parent_style->custom_properties.empty()) style.custom_properties = parent_style->custom_properties;
@@ -4059,6 +4115,18 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         } else if (parent_style->line_height >= 0.0f) {
             // A declared length or percentage is inherited as a length.
             style.line_height = parent_style->line_height;
+        }
+        // `unicode-bidi` does not inherit, but an override does reach every
+        // character of its subtree: rule X4 forced their direction when the
+        // ancestor's RLO/LRO was seen, and no child can cancel it by declaring
+        // `normal` — so the override is seeded here, before the matched rules
+        // are applied, and a declaration on the child wins over the seed.
+        // Only the override values seed: isolate and embed are about where the
+        // *element's own* content is wrapped, which the fragment pass reads
+        // off the element that declared them.
+        if (parent_style->unicode_bidi == UnicodeBidi::BidiOverride ||
+            parent_style->unicode_bidi == UnicodeBidi::IsolateOverride) {
+            style.unicode_bidi = parent_style->unicode_bidi;
         }
     }
 
@@ -4201,6 +4269,16 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
     cascade_order.insert(cascade_order.end(), important_author.begin(), important_author.end());
     cascade_order.insert(cascade_order.end(), important_inline.begin(), important_inline.end());
 
+    // Whether an author ever mentioned `direction`. The `dir` attribute hint
+    // below applies only when none did, so `direction: inherit` — which
+    // `apply_longhand` answers by keeping the value already copied from the
+    // parent, with no parent of its own to look up — still wins over the
+    // element's own attribute, as an author declaration should.
+    bool direction_declared = false;
+    for (const auto* declaration : cascade_order) {
+        if (declaration->property == "direction") { direction_declared = true; break; }
+    }
+
     // Custom properties first so font-size: var(--...) works, then font-size
     // so em/ex/ch lengths elsewhere on the element resolve against its own
     // computed font size while font-size resolves against the inherited one.
@@ -4286,6 +4364,25 @@ ComputedStyle StyleResolver::resolve_style(const std::shared_ptr<Element>& eleme
         style.transform_matrix = parse_transform_matrix(style.transform_str);
     }
 
+    // The `dir` attribute is a presentational hint: below every author
+    // declaration (the `direction_declared` guard — a declared `direction`,
+    // `inherit` included, wins over the element's own attribute), above plain
+    // inheritance (it beats the value copied from the parent). It is applied
+    // here, after the cascade, because `apply_longhand` has no parent to
+    // answer `inherit` with; the inheritance copy above already ran.
+    // `dir` is an HTML enumerated attribute: ASCII case-insensitive, and a
+    // value that is none of the three means no hint at all. `auto` resolves
+    // once, over the element's whole text (HTML §3.2.5's element-level first
+    // strong character), not per paragraph.
+    if (element && !element->is_foreign() && !direction_declared) {
+        const std::string dir = element->get_attribute("dir");
+        if (ascii_iequals(dir, "ltr")) style.direction = Direction::Ltr;
+        else if (ascii_iequals(dir, "rtl")) style.direction = Direction::Rtl;
+        else if (ascii_iequals(dir, "auto")) {
+            const int level = bidi_paragraph_utf8(element->text_content(), -1).base_level;
+            style.direction = level == 1 ? Direction::Rtl : Direction::Ltr;
+        }
+    }
 
     return style;
 }

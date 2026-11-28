@@ -156,14 +156,14 @@ uint32_t bidi_mirror(uint32_t codepoint) {
 namespace {
 
 BidiParagraph resolve(const std::vector<BidiClass>& classes_in, const std::u32string* text,
-                      int paragraph_level) {
+                      int paragraph_level, int fallback_level) {
     const std::size_t n = classes_in.size();
     BidiParagraph p;
     p.classes = classes_in;
     p.levels.assign(n, 0);
     p.removed.assign(n, false);
     if (n == 0) {
-        p.base_level = paragraph_level > 0 ? 1 : 0;
+        p.base_level = (paragraph_level >= 0 ? paragraph_level : fallback_level) > 0 ? 1 : 0;
         return p;
     }
 
@@ -184,12 +184,13 @@ BidiParagraph resolve(const std::vector<BidiClass>& classes_in, const std::u32st
         }
     }
 
-    // P2 and P3.
+    // P2 and P3. With no strong character the paragraph takes the caller's
+    // fallback — its `direction` — rather than an unconditional ltr.
     if (paragraph_level >= 0) {
         p.base_level = paragraph_level > 0 ? 1 : 0;
     } else {
         const int level = first_strong_level(p.classes, matching_pdi, 0, n);
-        p.base_level = level < 0 ? 0 : level;
+        p.base_level = level < 0 ? fallback_level : level;
     }
 
     // X1 to X8: the explicit levels and directions.
@@ -649,23 +650,26 @@ std::vector<uint32_t> decode_utf8(std::string_view text) {
 
 } // namespace
 
-BidiParagraph bidi_paragraph(const std::u32string& text, int paragraph_level) {
+BidiParagraph bidi_paragraph(const std::u32string& text, int paragraph_level,
+                             int fallback_level) {
     std::vector<BidiClass> classes;
     classes.reserve(text.size());
     for (uint32_t cp : text) classes.push_back(bidi_class(cp));
-    return resolve(classes, &text, paragraph_level);
+    return resolve(classes, &text, paragraph_level, fallback_level);
 }
 
-BidiParagraph bidi_paragraph_utf8(std::string_view text, int paragraph_level) {
+BidiParagraph bidi_paragraph_utf8(std::string_view text, int paragraph_level,
+                                  int fallback_level) {
     const std::u32string cps = [&] {
         const std::vector<uint32_t> decoded = decode_utf8(text);
         return std::u32string(decoded.begin(), decoded.end());
     }();
-    return bidi_paragraph(cps, paragraph_level);
+    return bidi_paragraph(cps, paragraph_level, fallback_level);
 }
 
-BidiParagraph bidi_paragraph_classes(const std::vector<BidiClass>& classes, int paragraph_level) {
-    return resolve(classes, nullptr, paragraph_level);
+BidiParagraph bidi_paragraph_classes(const std::vector<BidiClass>& classes, int paragraph_level,
+                                     int fallback_level) {
+    return resolve(classes, nullptr, paragraph_level, fallback_level);
 }
 
 std::vector<std::size_t> bidi_reorder(const BidiParagraph& paragraph) {

@@ -30,6 +30,13 @@ using Args = const std::vector<JsValue>&;
 struct ParsedSource {
     std::string text;        ///< empty when the value is an object or an array
     bool primitive{false};
+    /// The value the slot held when the parse put it there. The reviver walk
+    /// serves a span only while the value it is about to visit is still this
+    /// one: a reviver that replaces `holder[k]` forward — during an earlier
+    /// key's visit — makes the walk read a value the parse never made, and
+    /// its context then says nothing (test262 `reviver-forward-modifies-object`;
+    /// Node v22.22.3 answers `undefined` for the replaced key and its children).
+    JsValue value;
 };
 
 /// Where a value was written, keyed by the holder it is read from and the key
@@ -114,9 +121,9 @@ private:
         // `{"a":1}` only for the root, which §25.5.1 makes separately. This
         // engine's parser is the one place that knows which is which.
         if (first == '{' || first == '[') {
-            last_source = ParsedSource{{}, false};
+            last_source = ParsedSource{{}, false, value};
         } else {
-            last_source = ParsedSource{m_text.substr(start, m_pos - start), true};
+            last_source = ParsedSource{m_text.substr(start, m_pos - start), true, value};
         }
         return value;
     }
@@ -297,11 +304,23 @@ private:
             m_sources[SourceKey{id, key}] = last_source;
         }
     }
-
     SourceMap m_sources;
     ParsedSource m_root_source;
     bool m_record{true};
 };
+
+/// Whether OrdinaryDefineOwnProperty would accept the descriptor
+/// `{value, writable: true, enumerable: true, configurable: true}` on `key`:
+/// the only way it is refused is an existing property that is not
+/// configurable, which cannot be made configurable again. That is the whole
+/// check the reviver walk's CreateDataProperty needs.
+bool may_create_data_property(const JsValue& value, const std::string& key) {
+    if (!value.is_object_like() || !value.object_val) return true;
+    const auto found = value.object_val->properties.find(key);
+    if (found != value.object_val->properties.end())
+        return (found->flags & PropertyMap::Configurable) != 0;
+    return true;
+}
 
 JsValue internalize(JsValue holder, const std::string& key, const JsValue& reviver,
                     const SourceMap& sources) {
@@ -310,15 +329,29 @@ JsValue internalize(JsValue holder, const std::string& key, const JsValue& reviv
     const ParsedSource* source = nullptr;
     if (const void* holder_id = holder.identity()) {
         const auto found = sources.find(SourceKey{holder_id, key});
-        if (found != sources.end()) source = &found->second;
+        // The span is the parse's, and it describes the value the parse put
+        // here. A reviver that replaced the slot forward — during an earlier
+        // key's visit — leaves the walk reading a value the parse never made,
+        // and its context then says nothing.
+        if (found != sources.end() && strict_equals(found->second.value, value))
+            source = &found->second;
     }
     if (value.is_object_like() && !value.is_function()) {
         std::vector<std::string> keys;
         if (!litebird::dom::cross_origin_own_keys(value, false, keys)) keys = value.own_keys();
         for (const auto& child : keys) {
             JsValue revived = internalize(value, child, reviver, sources);
-            if (revived.is_undefined()) value.delete_property(child);
-            else value.set_property(child, revived);
+            if (revived.is_undefined()) {
+                value.delete_property(child);
+            } else if (may_create_data_property(value, child)) {
+                // Step 3.a is CreateDataProperty: a definition the object
+                // refuses is ignored, not an error — a reviver's
+                // Object.defineProperty can make a property non-configurable
+                // ahead of the walk, and the value it already holds is what
+                // survives (test262 reviver-object/array-non-configurable-
+                // prop-create; Node keeps 2 where the walk wanted 22).
+                value.set_property(child, revived);
+            }
         }
     }
     JsValue context = JsValue::make_object();
@@ -444,6 +477,23 @@ void quote_into(std::string& out, std::string_view s) {
     out += '"';
 }
 
+/// Which internal slot a wrapper object carries — the dispatch §25.5.2's
+/// steps 4-5 make on `[[NumberData]]`, `[[StringData]]` and `[[BooleanData]]`,
+/// and the replacer list's step 4 makes on `[[NumberData]]` and
+/// `[[StringData]]` alone.
+enum class WrapperKind { None, Number, String, Boolean, Symbol };
+
+WrapperKind wrapper_kind(const JsValue& value) {
+    if (value.type != JsType::Object || !value.object_val) return WrapperKind::None;
+    switch (value.object_val->klass) {
+        case ObjectClass::Number: return WrapperKind::Number;
+        case ObjectClass::String: return WrapperKind::String;
+        case ObjectClass::Boolean: return WrapperKind::Boolean;
+        case ObjectClass::Symbol: return WrapperKind::Symbol;
+        default: return WrapperKind::None;
+    }
+}
+
 class JsonWriter {
 public:
     JsonWriter(const JsValue& replacer, const JsValue& space) {
@@ -452,19 +502,44 @@ public:
         } else if (replacer.is_array()) {
             m_has_allow_list = true;
             for (const auto& item : replacer.object_val->array_elements) {
-                if (item.type == JsType::String || item.type == JsType::Number) {
-                    std::string key = js_to_string(item);
-                    if (std::find(m_allow_list.begin(), m_allow_list.end(), key) == m_allow_list.end()) {
-                        m_allow_list.push_back(key);
-                    }
+                // Step 4: a String item names itself, a Number item is
+                // ToString'd, a String or Number *object* is ToString'd too —
+                // with the hint the call gives, so a toString override
+                // answers before valueOf — and anything else (null, a
+                // boolean, a plain object, a symbol, a function) names
+                // nothing. Node v22.22.3: `[null, undefined, false, {}]`
+                // selects no property at all.
+                std::string key;
+                if (item.type == JsType::String) {
+                    key = js_to_string(item);
+                } else if (item.type == JsType::Number) {
+                    key = js_to_string(item);
+                } else if (item.is_object_like()) {
+                    const WrapperKind kind = wrapper_kind(item);
+                    if (kind != WrapperKind::Number && kind != WrapperKind::String) continue;
+                    key = js_to_string(item);
+                } else {
+                    continue;
+                }
+                if (std::find(m_allow_list.begin(), m_allow_list.end(), key) == m_allow_list.end()) {
+                    m_allow_list.push_back(key);
                 }
             }
         }
-        if (space.type == JsType::Number) {
-            int count = static_cast<int>(std::min(10.0, std::max(0.0, js_to_integer(space.number_val))));
+        // Steps 4-6: a Number object's space is ToNumber'd (valueOf answers
+        // first, so an override wins), a String object's is ToString'd
+        // (toString answers first), and any other object leaves the gap
+        // empty — the spec's dispatch is on the slots, with no ToPrimitive
+        // fallback, so `JSON.stringify(v, null, {})` writes no space at all.
+        const auto space_kind = wrapper_kind(space);
+        if (space.type == JsType::Number || space_kind == WrapperKind::Number) {
+            const double number = space.type == JsType::Number ? space.number_val : js_to_number(space);
+            const int count = static_cast<int>(std::min(10.0, std::max(0.0, js_to_integer(number))));
             m_gap.assign(static_cast<size_t>(count), ' ');
-        } else if (space.type == JsType::String) {
-            m_gap = space.string_val.substring(0, 10).str();      // the first ten code units
+        } else if (space.type == JsType::String || space_kind == WrapperKind::String) {
+            // The first ten code units of the string the slot (or the
+            // override) gives.
+            m_gap = js_to_string(space).substr(0, 10);
         }
     }
 
@@ -491,9 +566,22 @@ public:
         // `1e1000` — a number a `double` cannot hold — survives the round trip.
         if (is_raw_json(value)) { out += raw_json_text(value); return true; }
 
-        // `new String("a")` and friends serialise as the value they wrap.
-        if (const JsValue* inner = js_wrapped_primitive(value); inner && inner->type != JsType::Symbol) {
-            value = *inner;
+        // Step 5: `new Number(8.5)` serialises with ToNumber — the hint the
+        // call gives, so valueOf answers first and a toString override is
+        // never asked (test262 value-number-object, which wants the "2" a
+        // valueOf returns and not the 42 the slot holds). A String object
+        // converts with ToString, where toString answers first, and a
+        // Boolean object with ToBoolean, which is the slot and no method. A
+        // Symbol wrapper is none of the three and stays an object.
+        switch (wrapper_kind(value)) {
+            case WrapperKind::Number: value = JsValue::make_number(js_to_number(value)); break;
+            case WrapperKind::String: value = JsValue::make_string(js_to_string(value)); break;
+            case WrapperKind::Boolean:
+                if (const JsValue* inner = js_wrapped_primitive(value)) value = *inner;
+                break;
+            case WrapperKind::Symbol:
+            case WrapperKind::None:
+                break;
         }
 
         switch (value.type) {

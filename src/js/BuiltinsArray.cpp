@@ -826,11 +826,18 @@ void flatten_into(std::vector<JsValue>& out, std::vector<bool>& holes, const JsV
         if (depth >= 1 && item.is_array()) flatten_into(out, holes, item, depth - 1);
         else { out.push_back(std::move(item)); holes.push_back(false); }
     }
-}JsValue iteration_result(const JsValue& value, bool done) {
-    JsValue result = JsValue::make_object();
-    result.set_property("value", value);
-    result.set_property("done", JsValue::make_boolean(done));
-    return result;
+}
+
+JsValue iteration_result(const JsValue& value, bool done) {
+    JsObject* cell = Heap::default_heap().allocate_object();
+    cell->prototype = JsIntrinsics::get().object_proto;
+    auto& v = cell->properties.entry("value");
+    v.second = value;
+    v.flags = PropertyMap::Default;
+    auto& d = cell->properties.entry("done");
+    d.second = JsValue::make_boolean(done);
+    d.flags = PropertyMap::Default;
+    return JsValue::make_object(cell);
 }
 
 } // namespace
@@ -901,11 +908,10 @@ void js_install_iterator_prototype(JsObject* proto, const char* tag) {
 void install_array_builtins(JsIntrinsics& realm) {
     JsObject* ap = realm.array_proto;
 
-    // Iterators are themselves iterable: %IteratorPrototype% carries @@iterator
-    // and nothing else, and each kind of iterator's prototype sits between it
-    // and the iterator (see js_install_iterator_prototype).
-    js_define_method(realm.iterator_proto, kIteratorKey, 0, [](Args) { return self(); });
-    js_define_method(realm.iterator_proto, "Symbol.iterator", 0, [](Args) { return self(); });
+    // %IteratorPrototype% carries @@iterator, constructor, @@toStringTag, and
+    // the ES2025 iterator helpers; each kind's prototype sits between it and
+    // the iterator (see js_install_iterator_prototype).
+    install_iterator_builtins(realm);
     js_install_iterator_prototype(realm.array_iterator_proto, "Array Iterator");
 
     // ---- Constructor ------------------------------------------------------

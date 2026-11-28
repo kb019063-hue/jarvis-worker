@@ -74,6 +74,7 @@ SRCS = src/common/Color.cpp \
        src/js/JsOps.cpp \
        src/js/BuiltinsObject.cpp \
        src/js/BuiltinsArray.cpp \
+       src/js/BuiltinsIterator.cpp \
        src/js/BuiltinsString.cpp \
        src/js/StringUnicodeTables.cpp \
        src/js/BuiltinsNumber.cpp \

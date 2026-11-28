@@ -2286,7 +2286,7 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
             ViewBox vb;
             if (get_attr_ci(target, "viewBox", value)) vb = parse_viewbox(value);
             const bool maps_viewbox = vb.valid && w > 0 && h > 0;
-            if (maps_viewbox) { inner_w = vb.width; inner_h = vb.height; }
+            if (vb.valid) { inner_w = vb.width; inner_h = vb.height; }
             target_box = svg_bbox_walk(target, inner_w, inner_h, depth + 1, active, true);
             if (maps_viewbox) {
                 std::string par;

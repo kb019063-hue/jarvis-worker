@@ -24,8 +24,9 @@ TEST(svg_symbol_instance_bbox) {
     assert(box("u") == "7,1,6,8");
     S("document.getElementById('sym').removeAttribute('preserveAspectRatio');"
       "document.getElementById('u').setAttribute('width','0')");
-    // With a zero viewport, Chromium uses the unscaled geometry. Here the
-    // percentages use a zero-width viewport, so exercise a plain rect instead.
+    // A zero viewport skips the mapping, but percentages still resolve against
+    // the symbol's viewBox, not against the zero width.
+    assert(box("u") == "6,9,3,4");
     S("document.getElementById('u').setAttribute('href','#plain')");
     assert(box("u") == "6,9,3,4");
 }

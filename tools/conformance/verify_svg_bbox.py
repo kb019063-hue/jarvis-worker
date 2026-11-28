@@ -116,6 +116,7 @@ P('symbol slice', function(){return symbolProbe('sym','20','10','xMaxYMax slice'
 P('symbol default size', function(){return symbolProbe('sym',null,null,null,null,null);});
 P('symbol zero size', function(){return symbolProbe('sym','0','10',null,null,null);});
 P('symbol zero width offset', function(){return symbolProbe('sym','0','10',null,'5','7');});
+P('symbol zero width percentages', function(){return symbolProbe('sym-pct','0','10',null,'5','7');});
 P('symbol zero height', function(){return symbolProbe('sym','20','0',null,'5','7');});
 P('symbol negative width', function(){return symbolProbe('sym','-1','10',null,'5','7');});
 P('symbol percentages', function(){return symbolProbe('sym-pct','20','10',null,'5','7');});

@@ -8,6 +8,7 @@
 #include "litebird/js/TypedArray.hpp"
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <unordered_map>
 
 namespace litebird {
@@ -1582,10 +1583,33 @@ void install_object_builtins(JsIntrinsics& realm) {
         // `instanceof` has no `prototype` to walk to on a bound function: the
         // language asks the target, and this is where the target is kept.
         bound.set_bound_target(target);
-        double length = js_to_number(target.get_property("length")) - static_cast<double>(bound_args.size());
-        bound.define_property("name", JsValue::make_string("bound " + js_to_string(target.get_property("name"))),
+        // §9.4.1.3 BoundFunctionCreate: steps 5-8 for length, 12-15 for name.
+        // Only an *own* length counts, and only a number length survives;
+        // everything else is 0. ToInteger truncates 3.66 to 3 (not 3.66).
+        double L = 0.0;
+        if (target.has_own_property("length")) {
+            JsValue targetLen = target.get_property("length");
+            if (targetLen.type == JsType::Number) {
+                double n = targetLen.number_val;
+                if (std::isnan(n) || n == 0.0) L = 0.0;
+                else if (std::isinf(n)) L = n > 0 ? std::numeric_limits<double>::infinity() : 0.0;
+                else {
+                    double i = js_to_integer(n);
+                    double argCount = static_cast<double>(bound_args.size());
+                    L = std::max(0.0, i - argCount);
+                }
+            } else {
+                L = 0.0;
+            }
+        } else {
+            L = 0.0;
+        }
+        // Name: non-string becomes "" before "bound " is prepended.
+        JsValue targetNameVal = target.get_property("name");
+        std::string targetName = targetNameVal.type == JsType::String ? targetNameVal.string_val.str() : std::string();
+        bound.define_property("name", JsValue::make_string("bound " + targetName),
                               PropertyMap::Configurable);
-        bound.define_property("length", JsValue::make_number(std::max(0.0, length)), PropertyMap::Configurable);
+        bound.define_property("length", JsValue::make_number(L), PropertyMap::Configurable);
         // A bound function has the prototype of its target: a bound class
         // still finds the static members of the class's parent.
         JsObject* target_proto = target.prototype_object();

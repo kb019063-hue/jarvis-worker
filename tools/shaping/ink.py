@@ -44,17 +44,19 @@ def validate_run(rows, glyph_count):
     if not isinstance(rows, list) or len(rows) > 4096:
         raise ValueError("expected a glyph run of at most 4096 entries")
     for row in rows:
-        if not isinstance(row, list) or len(row) != 5 or any(type(v) is not int for v in row):
-            raise ValueError("expected five integer fields per glyph")
-        if not 0 <= row[0] < glyph_count or any(abs(v) > 1_000_000 for v in row[1:]):
+        if not isinstance(row, list) or len(row) not in (5, 6) or any(type(v) is not int for v in row):
+            raise ValueError("expected five or six integer fields per glyph")
+        if not 0 <= row[0] < glyph_count or any(abs(v) > 1_000_000 for v in row[1:5]):
             raise ValueError("glyph ID or positioning outside diagnostic limits")
+        if len(row) == 6 and not 0 <= row[5] <= 1_000_000:
+            raise ValueError("cluster index outside diagnostic limits")
 
 
 def render(face, rows, size, ft):
     face.set_pixel_sizes(0, size)
     canvas = {}
     x = y = 0
-    for gid, dx, dy, ox, oy in rows:
+    for gid, dx, dy, ox, oy, *_ in rows:
         # Sum in font units first. Quantize only the absolute origin to 26.6.
         px = rounded_ratio((x + ox) * size * 64, face.units_per_EM)
         py = rounded_ratio((y + oy) * size * 64, face.units_per_EM)

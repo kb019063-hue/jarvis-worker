@@ -38,7 +38,7 @@ def placement_signature(rows, blank_glyphs=frozenset()):
     """
     x = y = 0
     origins = []
-    for glyph, dx, dy, ox, oy in rows:
+    for glyph, dx, dy, ox, oy, *_ in rows:
         if not (glyph != 0 and glyph in blank_glyphs and dx == dy == 0):
             origins.append([glyph, x + ox, y + oy])
         x += dx
@@ -54,33 +54,37 @@ def placement_comparison(expected, actual, blank_glyphs=frozenset()):
 
 
 def self_test():
-    sample = [[42, 600, 0, 0, 0], [43, 0, 0, -20, 50]]
+    sample = [[42, 600, 0, 0, 0, 0], [43, 0, 0, -20, 50, 1]]
     assert compare(sample, [row[:] for row in sample])
-    for column in range(5):
+    for column in range(6):
         mutated = [row[:] for row in sample]
         mutated[0][column] += 1
         assert not compare(sample, mutated), f"missed column {column}"
     assert not compare(sample, sample[::-1])
     assert not compare(sample, sample[:1])
+    # Cluster-only drift fails exact comparison while preserving placement.
+    cluster_drift = [[42, 600, 0, 0, 0, 0], [43, 0, 0, -20, 50, 0]]
+    assert not compare(sample, cluster_drift)
+    assert placement_signature(sample) == placement_signature(cluster_drift)
     # Mark before base vs after base, compensated by the base advance.
-    before = [[43, 0, 0, 20, 50], [42, 600, 0, 0, 0]]
-    after = [[42, 600, 0, 0, 0], [43, 0, 0, -580, 50]]
+    before = [[43, 0, 0, 20, 50, 0], [42, 600, 0, 0, 0, 0]]
+    after = [[42, 600, 0, 0, 0, 0], [43, 0, 0, -580, 50, 0]]
     assert placement_signature(before) == placement_signature(after)
     for column in range(5):
         mutated = [row[:] for row in after]
         mutated[-1][column] += 1
         assert placement_signature(before) != placement_signature(mutated)
     assert placement_signature(after) != placement_signature(after + [after[-1]])
-    assert placement_signature([[42, 601, 0, 0, 0]]) != placement_signature([[42, 600, 0, 0, 0]])
-    assert placement_signature([[42, 0, 600, 4, 5], [43, 0, 0, 6, 7]]) == dict(
+    assert placement_signature([[42, 601, 0, 0, 0, 0]]) != placement_signature([[42, 600, 0, 0, 0, 0]])
+    assert placement_signature([[42, 0, 600, 4, 5, 0], [43, 0, 0, 6, 7, 1]]) == dict(
         origins=[[42, 4, 5], [43, 6, 607]], terminal_pen=[0, 600])
     blanks = {3, 0}
-    assert placement_signature(after + [[3, 0, 0, 0, 0]], blanks) == placement_signature(after)
-    assert placement_signature(after + [[3, 1, 0, 0, 0]], blanks) != placement_signature(after)
-    assert placement_signature(after + [[0, 0, 0, 0, 0]], blanks) != placement_signature(after)
-    assert placement_signature(after + [[44, 0, 0, 0, 0]], blanks) != placement_signature(after)
+    assert placement_signature(after + [[3, 0, 0, 0, 0, 0]], blanks) == placement_signature(after)
+    assert placement_signature(after + [[3, 1, 0, 0, 0, 0]], blanks) != placement_signature(after)
+    assert placement_signature(after + [[0, 0, 0, 0, 0, 0]], blanks) != placement_signature(after)
+    assert placement_signature(after + [[44, 0, 0, 0, 0, 0]], blanks) != placement_signature(after)
     assert placement_signature([]) == dict(origins=[], terminal_pen=[0, 0])
-    print("negative controls: raw fields/order/count and absolute origins/terminal pen; "
+    print("negative controls: raw fields/cluster/order/count and absolute origins/terminal pen; "
           "positive controls: compensated mark order and verified blank glyph", file=sys.stderr)
 
 
@@ -108,15 +112,15 @@ def main():
         buf.add_str(text)
         buf.script, buf.direction, buf.language = script, direction, "und"
         hb.shape(font, buf)
-        expected = [[g.codepoint, p.x_advance, p.y_advance, p.x_offset, p.y_offset]
+        expected = [[g.codepoint, p.x_advance, p.y_advance, p.x_offset, p.y_offset, g.cluster]
                     for g, p in zip(buf.glyph_infos or [], buf.glyph_positions or [])]
         proc = subprocess.run([args.probe, str(args.font), direction,
                                *[f"{ord(c):x}" for c in text]],
                               capture_output=True, text=True, timeout=15, check=True)
         actual = json.loads(proc.stdout)
         if not isinstance(actual, list) or any(
-                not isinstance(row, list) or len(row) != 5 or
-                any(type(v) is not int for v in row) for row in actual):
+                not isinstance(row, list) or len(row) != 6 or
+                any(type(v) is not int for v in row) or row[5] < 0 for row in actual):
             raise ValueError("invalid probe output")
         # .notdef agreement is not evidence of script support.
         missing = any(row[0] == 0 for row in expected + actual)
@@ -139,7 +143,7 @@ def main():
     report = dict(font=str(args.font), sha256=hashlib.sha256(data).hexdigest(),
                   uharfbuzz=hb.__version__, harfbuzz=hb.version_string(),
                   units_per_em=face.upem, language="und", features="defaults",
-                  fields=["glyph", "x_advance", "y_advance", "x_offset", "y_offset"],
+                  fields=["glyph", "x_advance", "y_advance", "x_offset", "y_offset", "cluster"],
                   results=results)
     rendered = json.dumps(report, ensure_ascii=False, indent=2) + "\n"
     if args.output:

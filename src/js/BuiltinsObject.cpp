@@ -314,7 +314,8 @@ JsValue descriptor_for(const JsValue& object, const std::string& key) {
         bool enumerable = true;
         bool writable = false;
         if (cell->exotic->computed_property(cell, key, enumerable, writable)) {
-            return data(object.get_property(key), writable, enumerable, true);
+            const bool configurable = !typed_array_immutable_index(object, key);
+            return data(object.get_property(key), writable, enumerable, configurable);
         }
         return JsValue::make_undefined();
     }
@@ -411,6 +412,18 @@ bool define_from_descriptor(JsValue object, const std::string& key, const JsValu
         if (should_throw) js_throw_type_error(message);
         return false;
     };
+    if (typed_array_immutable_index(object, key)) {
+        const JsValue current = object.get_property(key);
+        if (wants_accessor ||
+            (enumerable.present && !enumerable.value.is_truthy()) ||
+            (configurable.present && configurable.value.is_truthy()) ||
+            (writable.present && writable.value.is_truthy()) ||
+            (value.present && !js_same_value(value.value, current))) {
+            return refuse("Cannot redefine an immutable typed-array element");
+        }
+        return true;
+    }
+
     const bool array_length = cell && cell->is_array && key == "length";
     bool has_requested_length = false;
     size_t requested_length = 0;

@@ -20,6 +20,8 @@ TEST(nullish_computed_writes_and_delete_do_not_convert_the_key) {
     // step, and closes the iterator on the eventual abrupt completion.
     answer("var s='';var k={toString:function(){s+='c';return 'x'}};try{[null[k]=(s+='r')]=[undefined]}catch(e){s+=e.name}String(s)", "rTypeError");
     answer("var s='';var k={toString:function(){s+='c';return 'x'}};var it={};it[Symbol.iterator]=function(){return {next:function(){s+='n';return {value:1,done:false}},return:function(){s+='x';return {}}}};try{[null[k]]=it}catch(e){s+=e.name}String(s)", "nxTypeError");
+    answer("var s='';var k={toString:function(){s+='c';return 'x'}};var it={};it[Symbol.iterator]=function(){return {next:function(){s+='n';throw 'step'},return:function(){s+='x';return {}}}};try{[null[k]]=it}catch(e){s+=e}String(s)", "nstep");
+    answer("var s='';var k={toString:function(){s+='c';return 'x'}};var it={};it[Symbol.iterator]=function(){var n=0;return {next:function(){s+='n';return {value:++n,done:n>2}},return:function(){s+='x';return {}}}};try{[...null[k]]=it}catch(e){s+=e.name}String(s)", "nnnTypeError");
     // delete evaluates the expression but does not convert on a nullish base.
     answer("var s='';var k={toString:function(){s+='c';return 'x'}};function key(){s+='k';return k}try{delete null[key()]}catch(e){s+=e.name}String(s)", "kTypeError");
     answer("var k={toString:function(){throw 'converted'}};try{delete undefined[k]}catch(e){e.name}", "TypeError");

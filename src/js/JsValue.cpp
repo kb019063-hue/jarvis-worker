@@ -2119,16 +2119,18 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
         }
 
         // A setter inherited from a prototype (a class `set x(v)`) runs instead
-        // of creating an own property.
+        // of creating an own property, and a non-writable data property refuses
+        // the write (the prototypes.dat case: `o = Object.create(p)` where
+        // `p` has `ro` as `{value:1}` should not create `o.ro`).
         int guard = 0;
         for (JsObject* proto = obj->prototype; proto && guard < kMaxPrototypeChain; proto = proto->prototype, ++guard) {
-            if (!proto->has_accessors) continue;
             auto pit = proto->properties.find(name);
             if (pit == proto->properties.end()) continue;
             if (pit->flags & PropertyMap::Accessor) {
                 if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(*this, {val}); return true; }
                 return false;
             }
+            if (!(pit->flags & PropertyMap::Writable)) return false;
             break;
         }
 
@@ -2152,6 +2154,29 @@ bool JsValue::set_property(const std::string& name, JsValue val) {
         if (!(it->flags & PropertyMap::Writable)) return false;
         it->second = std::move(val);
         return true;
+    }
+    // A native function keeps its few own properties in the side table, not
+    // in a cell, so the prototype walk above is not reached. An inherited
+    // accessor (the poison pill on %Function.prototype% for `caller` and
+    // `arguments`) still has to run, and a non-writable data property still
+    // refuses the write — the same question OrdinarySet asks the chain.
+    {
+        // `prototype_object()` is Function.prototype for every native
+        // function that has not been given a cell (the ordinary case for
+        // `bind`); a bound class that was given a different prototype has a
+        // cell and took the path above, so this is never wrong.
+        JsObject* proto = prototype_object();
+        int guard = 0;
+        for (; proto && guard < kMaxPrototypeChain; proto = proto->prototype, ++guard) {
+            auto pit = proto->properties.find(name);
+            if (pit == proto->properties.end()) continue;
+            if (pit->flags & PropertyMap::Accessor) {
+                if (pit->setter && pit->setter->is_function()) { pit->setter->call_with_this(*this, {val}); return true; }
+                return false;
+            }
+            if (!(pit->flags & PropertyMap::Writable)) return false;
+            break;
+        }
     }
     (*map)[name] = std::move(val);
     return true;

@@ -843,6 +843,24 @@ def main_run_note() -> str | None:
         return unread_main_note(f"{type(error).__name__}: {error}")
 
 
+# What `gh pr merge` offers when a rule on `main` refuses a merge, and no agent takes.
+NEVER = "Never `gh pr merge --admin`, and not `--auto` either: `gh` offers both when it refuses"
+
+# The marks at which GitHub starts no run (GitHub Docs, "Skipping workflow
+# runs"); this repository writes the first.
+SKIP_MARKS = ("[skip ci]", "[ci skip]", "[no ci]", "[skip actions]", "[actions skip]")
+
+
+def carries_skip_mark(message: str) -> bool:
+    """The message of a commit on which GitHub starts no run: not for the
+    push, and not for anything that happens to a pull request whose head it
+    is. Taking the label `lot` off starts every job on any other head; on
+    28 November at 11:34 it was put on #520 and taken off, whose head commit
+    carried the mark, and no run started, while this file had answered
+    "every job of CI has been started"."""
+    return any(mark in message for mark in SKIP_MARKS) or bool(re.search(r"(?mi)^skip-checks: *true *$", message))
+
+
 def required_from(branch: dict | None, rules: list | None) -> list[str]:
     """The checks a rule of GitHub's on `main` wants passed on a head commit,
     from what a session may read: `gh api repos/.../branches/main` (a rule
@@ -873,7 +891,21 @@ def required_checks() -> list[str]:
         return []
 
 
-def rule_note(state: str | None, number: int, head: str, head_state: str, required: list[str]) -> str | None:
+def taken_while_it_runs(state: str | None, head_state: str, watch_on: bool) -> bool:
+    """Under the rule on `main` a head whose own run is going reports BLOCKED.
+    While a watch is on that is no refusal of its own: the landing session
+    takes a finished pull request while its run goes ("Working together",
+    point 4), and merges it when that run and the lot's have both passed.
+    The answer is "not ready" all the same, for the run that is going (the
+    line `CI on ...: in_progress`), as it was before the rule. This keeps
+    the rule's line from saying it a second time, as "GitHub will not merge
+    #N as it is", of a pull request that is in a lot by then (#528, 28
+    November, 12:04)."""
+    return bool(watch_on) and state == "BLOCKED" and head_state == "running"
+
+
+def rule_note(state: str | None, number: int, head: str, head_state: str, required: list[str],
+              unfinished: bool = False) -> str | None:
     """What a rule of GitHub's on `main` has against merging #N as it is, as a
     line for the report; None when GitHub has nothing against it. `state` is
     the pull request's `mergeStateStatus`, `head_state` what `check_runs`
@@ -895,15 +927,39 @@ def rule_note(state: str | None, number: int, head: str, head_state: str, requir
     offers `--admin`, which is the one thing never to do: it is the rule
     being switched off for one merge.
 
-    Written on 28 November 2026, when the person had said they would try to
-    set the rule and none was on yet: tried against made-up answers only
-    (the self-test), never against a rule.
+    Written on 28 November 2026 in the morning, against made-up answers. The
+    person set the rule that day: a ruleset on `main`, in force from 11:28
+    UTC, which wants `Build & unit tests` and `Documentation shape`. What
+    the first minutes under it showed:
+
+    - at 11:34 `gh pr merge 520 --merge --match-head-commit ...` on a head
+      with no run was refused: "Pull request #520 is not mergeable: the base
+      branch policy prohibits the merge", status 1, and two more lines that
+      offer `--auto` and `--admin`. Neither is for an agent: `--admin` is
+      the rule switched off for one merge, and `--auto` asks GitHub to
+      merge by itself when the two checks have passed, at a time nobody
+      chose and on the short run alone (the repository has it switched
+      off: `allow_auto_merge` is false);
+    - every claim that was open and not in conflict reported BLOCKED from
+      the minute the rule was on: no run on its head, since a claim's
+      pushes carry the mark. That is `unfinished` here: nothing is said
+      then, because the pull request is not finished and the lines above
+      this one say so. Asked of #487, a draft under `WIP:` in the middle
+      of its work, this said "push a commit without the mark (an empty one
+      will do)", which would have been a run for nothing. (BLOCKED says
+      nothing of a draft as such: #520, a draft, reported UNSTABLE at
+      11:51 with the two checks passed and one job going, and CLEAN when
+      all had passed. GitHub merges no draft all the same);
+    - `gh pr checks N --required` says "no checks reported" of a head with
+      no run: it shows what the rule got only once something has run.
     """
+    if unfinished:
+        return None
     if state == "BLOCKED":
         names = ", ".join(f"`{name}`" for name in required) or "the checks it names"
         start = (f"GitHub will not merge #{number} as it is (it reports BLOCKED): the rule the person set on `main` "
                  f"wants a passed run of {names} on the head commit {head[:7]}")
-        never = " Never `gh pr merge --admin`"
+        never = " " + NEVER
         if head_state == "none":
             return start + (", and that commit has no run: it was pushed with the mark that skips CI. Push a commit "
                             "without the mark (an empty one will do: `git commit --allow-empty -m \"Start CI on "
@@ -919,7 +975,7 @@ def rule_note(state: str | None, number: int, head: str, head_state: str, requir
                 f"branch. Merge it (`git fetch origin && git merge origin/main`), push without the mark that skips "
                 "CI and let that run pass. And tell the person: with \"Require branches to be up to date before "
                 "merging\" on, a landing session cannot land a lot of several pull requests. "
-                "Never `gh pr merge --admin`")
+                + NEVER)
     return None
 
 
@@ -1837,8 +1893,13 @@ def check_merge(number: int, landing: bool = False) -> int:
     # A rule of GitHub's on `main`, if the person has set one: asked of GitHub,
     # and the rule's own names only when it says no.
     github = pr.get("mergeStateStatus")
-    refusal = rule_note(github, number, head, head_state, required_checks() if github in ("BLOCKED", "BEHIND") else [])
-    if refusal:
+    unfinished = pr["title"].startswith("WIP") or bool(pr.get("isDraft"))
+    refusal = rule_note(github, number, head, head_state,
+                        required_checks() if github in ("BLOCKED", "BEHIND") and not unfinished else [], unfinished)
+    if refusal and taken_while_it_runs(github, head_state, watch_on):
+        report.note(f"GitHub reports BLOCKED until the run on {head[:7]} has passed: the rule on `main`. The landing "
+                    f"session takes #{number} while that run goes, and merges it when it and the lot's have passed")
+    elif refusal:
         report.no(refusal)
     if "short" in (head_state, ran_state) and not watch_on and not landing:
         # No watch is on, so this agent merges, and the whole of CI has not
@@ -1849,6 +1910,13 @@ def check_merge(number: int, landing: bool = False) -> int:
         if pr["title"].startswith("WIP"):
             # Any run started now would be short again.
             report.note(f"every job of CI runs on #{number} once its title has no WIP: take the WIP: off, then ask again")
+        elif head_state == "none" and carries_skip_mark(str((commit(head).get("commit") or {}).get("message") or "")):
+            # Nothing starts a run on this head, the label neither.
+            if not refusal:
+                report.note(f"the head commit {head[:7]} carries the mark that skips CI, and nothing starts a run on such "
+                            f"a commit: taking the label `{LOT_LABEL}` off does not either. Push a commit without the "
+                            "mark (an empty one will do: `git commit --allow-empty -m \"Start CI on the head\"`), "
+                            "and ask again when its run has passed: that starts every job")
         elif labelled:
             # Taking the label off starts every job.
             gh("api", "-X", "DELETE", f"{REPO}/issues/{number}/labels/{LOT_LABEL}", check=False)
@@ -2562,9 +2630,26 @@ def self_test() -> int:
         ("BLOCKED and the head has no run: the rule's names, the commit, and a push without the mark",
          (rule_note("BLOCKED", 7, "abc1234" * 5, "none", two) or "")[:len(blocked + both + no_run)],
          blocked + both + no_run),
-        ("...and never --admin, whatever the head's run says",
-         [(rule_note("BLOCKED", 7, "abc1234" * 5, state, two) or "").endswith("Never `gh pr merge --admin`")
+        ("...and never --admin nor --auto, whatever the head's run says",
+         [(rule_note("BLOCKED", 7, "abc1234" * 5, state, two) or "").endswith(
+             "Never `gh pr merge --admin`, and not `--auto` either: `gh` offers both when it refuses")
           for state in ("none", "running", "failed", "passed", "short")], [True] * 5),
+        ("a draft, or a title under WIP:, reports BLOCKED under the rule whatever ran on it: nothing is said of it "
+         "(#487, 28 November: told to push an empty commit in the middle of its work)",
+         [rule_note(state, 7, "abc1234" * 5, head_state, two, unfinished=True)
+          for state in ("BLOCKED", "BEHIND") for head_state in ("none", "running", "passed")], [None] * 6),
+        ("a watch is on and the head's own run is going: BLOCKED is no refusal, the landing session takes it meanwhile",
+         [taken_while_it_runs(state, head_state, watch_on) for state, head_state, watch_on in (
+             ("BLOCKED", "running", True), ("BLOCKED", "running", False), ("BLOCKED", "none", True), ("BLOCKED", "failed", True),
+             ("BLOCKED", "passed", True), ("BEHIND", "running", True), ("CLEAN", "running", True), (None, "running", True))],
+         [True] + [False] * 7),
+        ("the mark that skips CI, as GitHub reads it: anywhere in the message, in five spellings, or as a trailer",
+         [carries_skip_mark(message) for message in (
+             "WATCH: the lot of 11:33 UTC, 28 November [skip ci]\n\nThe landing session's branch.",
+             "Merge main\n\n[skip ci] a conflict in AGENTS.md", "notes [ci skip]", "[no ci] notes", "x [skip actions]",
+             "x [actions skip]", "Notes\n\n\nskip-checks: true", "Start CI on the head", "skip the ci", "[Skip CI] in capitals",
+             "Landed. [objects only]")],
+         [True] * 7 + [False] * 4),
         ("BLOCKED while the head's run is going: ask again",
          "its run is still going: ask again when it has ended" in (rule_note("BLOCKED", 7, "abc1234" * 5, "running", two) or ""), True),
         ("BLOCKED though the head's run passed: the rule wants something else, and the person is told",
@@ -2573,8 +2658,9 @@ def self_test() -> int:
          (rule_note("BLOCKED", 7, "abc1234" * 5, "none", []) or "")[:len(unnamed)], unnamed),
         ("BEHIND: main is wanted in the branch, and the person is told what that does to a lot",
          ((rule_note("BEHIND", 7, "abc1234" * 5, "passed", two) or "")[:len(behind)],
-          "cannot land a lot of several pull requests" in (rule_note("BEHIND", 7, "abc1234" * 5, "passed", two) or "")),
-         (behind, True)),
+          "cannot land a lot of several pull requests" in (rule_note("BEHIND", 7, "abc1234" * 5, "passed", two) or ""),
+          (rule_note("BEHIND", 7, "abc1234" * 5, "passed", two) or "").endswith("`gh` offers both when it refuses")),
+         (behind, True, True)),
     ]
 
     names_stale = ["a head with main in it: quiet",

@@ -1940,8 +1940,15 @@ void throw_index_size(Realm& realm, const std::string& why) {
 
 /// The realm's `Uint8ClampedArray`, `length` bytes of zero.
 JsValue clamped_array(Realm& realm, std::size_t length) {
-    const JsValue& global = realm.window;
-    const JsValue array_ctor = global.is_object() ? global.get_property("Uint8ClampedArray") : JsValue();
+    JsValue array_ctor;
+    if (realm.window.is_object()) {
+        array_ctor = realm.window.get_property("Uint8ClampedArray");
+    } else if (auto scope = realm.global_scope.lock()) {
+        // A worker has no Window, but OffscreenCanvas.getImageData still returns
+        // ImageData in that realm. Its typed-array constructors live in the
+        // worker's global environment, recorded when the interpreter is built.
+        array_ctor = scope->get("Uint8ClampedArray");
+    }
     if (!array_ctor.is_function()) {
         js_throw_type_error("ImageData needs a realm with Uint8ClampedArray.");
     }

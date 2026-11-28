@@ -940,10 +940,19 @@ void JsInterpreter::init_builtins() {
     // also needs Blob and File because WebSocket's default binaryType is "blob".
     if (!m_document) {
         dom::Realm& dom_realm = dom::realm_of(*m_realm);
+        // Worker DOM interfaces have no Window, but they still need their realm's
+        // global constructors (ImageData asks for Uint8ClampedArray through this
+        // scope when an OffscreenCanvas returns pixels).
+        dom_realm.global_scope = m_global_env;
         m_global_env->define("URLSearchParams", dom_realm.ctor("URLSearchParams"));
         m_global_env->define("URL", dom_realm.ctor("URL"));
         m_global_env->define("Blob", dom_realm.ctor("Blob"));
         m_global_env->define("File", dom_realm.ctor("File"));
+        // HTML exposes both in Window and worker realms. The 2D context returned
+        // by OffscreenCanvas already has the context's complete Path2D dispatch;
+        // without these constructors a worker simply had no objects to pass it.
+        m_global_env->define("OffscreenCanvas", dom_realm.ctor("OffscreenCanvas"));
+        m_global_env->define("Path2D", dom_realm.ctor("Path2D"));
     }
 
     // Worker built-in

@@ -10,6 +10,7 @@ TEST(svg_symbol_degenerate_geometry_does_not_pollute_bbox) {
       "<rect x=\"10\" y=\"10\" width=\"4\" height=\"5\"/></symbol>"
       "<symbol id=\"line\"><line x1=\"10%\" y1=\"20%\" x2=\"70%\" y2=\"80%\"/></symbol>"
       "<symbol id=\"point\"><line x1=\"0\" y1=\"0\" x2=\"0\" y2=\"0\"/></symbol>"
+      "<symbol id=\"mapped-point\" viewBox=\"0 0 10 10\"><line x1=\"-5\" y1=\"0\" x2=\"-5\" y2=\"0\"/></symbol>"
       "<symbol id=\"vb\" viewBox=\"0 0 10 10\"><rect x=\"10%\" y=\"20%\" width=\"30%\" height=\"40%\"/></symbol></defs>"
       "<use id=\"u\" x=\"5\" y=\"7\" href=\"#pct\" width=\"0\" height=\"10\"/></svg>'");
     auto box = [&](const char* id) {
@@ -33,6 +34,9 @@ TEST(svg_symbol_degenerate_geometry_does_not_pollute_bbox) {
     assert(box("u") == "0,0,0,0");
     S("u.setAttribute('href','#vb');u.setAttribute('height','10')");
     assert(box("u") == "6,9,3,4");
+    S("u.setAttribute('href','#mapped-point');u.setAttribute('width','20');u.setAttribute('height','10')");
+    // A non-origin point may map to the origin; it is not an empty source.
+    assert(box("u") == "5,7,0,0");
     // Direct measurement retains Phase 433's zero-width rectangle box.
     assert(box("zero") == "1,2,0,4");
 }

@@ -2293,6 +2293,8 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
             const bool maps_viewbox = vb.valid && w > 0 && h > 0;
             if (vb.valid) { inner_w = vb.width; inner_h = vb.height; }
             target_box = svg_bbox_walk(target, inner_w, inner_h, depth + 1, active, true, true);
+            const bool zero_source = target_box.valid() && target_box.min_x == 0 && target_box.min_y == 0 &&
+                                     target_box.max_x == 0 && target_box.max_y == 0;
             if (maps_viewbox) {
                 std::string par;
                 get_attr_ci(target, "preserveAspectRatio", par);
@@ -2300,7 +2302,7 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
             }
             // An all-zero point is treated as an empty symbol box by Chromium
             // before the use translation; non-origin points remain geometry.
-            if (target_box.valid() && target_box.min_x == 0 && target_box.min_y == 0 &&
+            if (zero_source && target_box.valid() && target_box.min_x == 0 && target_box.min_y == 0 &&
                 target_box.max_x == 0 && target_box.max_y == 0) target_box = BBox();
         } else {
             target_box = svg_bbox_walk(target, ref_w, ref_h, depth + 1, active, false, in_symbol_instance);

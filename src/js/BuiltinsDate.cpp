@@ -576,10 +576,14 @@ void install_date_builtins(JsIntrinsics& realm) {
         return JsValue::make_string(to_iso_string(t));
     });
     js_define_method(dp, "toJSON", 1, [](Args) {
-        JsValue me = self();
-        double t = *time_slot(me, "toJSON");
-        if (std::isnan(t)) return JsValue::make_null();
-        return JsValue::make_string(to_iso_string(t));
+        // §21.4.4.37 is deliberately generic: conversion precedes looking up
+        // toISOString, and only a non-finite *Number* suppresses that call.
+        JsValue object = js_to_object(self());
+        JsValue primitive = js_to_primitive(object, JsPrimitiveHint::Number);
+        if (primitive.type == JsType::Number && !std::isfinite(primitive.number_val)) {
+            return JsValue::make_null();
+        }
+        return js_call(object.get_property("toISOString"), object, {});
     });
     js_define_method(dp, "toString", 0, [](Args) {
         return JsValue::make_string(to_date_string(*time_slot(self(), "toString")));

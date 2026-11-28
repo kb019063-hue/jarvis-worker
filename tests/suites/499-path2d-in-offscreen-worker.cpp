@@ -1,4 +1,4 @@
-// Phase 480, finding 480: Path2D reaches an OffscreenCanvas in worker realms.
+// Phase 499, finding 499: Path2D reaches an OffscreenCanvas in worker realms.
 //
 // Phase 426's note blamed a reduced OffscreenCanvas context. The context already
 // came from CanvasRenderingContext2D::to_js_value and had full path dispatch. The

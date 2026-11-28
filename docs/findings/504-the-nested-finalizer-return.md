@@ -19,9 +19,10 @@ from REFUSES to AGREES and is first in the numbered suite.
 
 ## Verification
 
-`make verify-bytecode`: **169/169 agree and 10/10 still refused**. The new
-suite checks nested ordering, scope, throw precedence, garbage collection,
-callbacks and unsupported control-flow cases.
+`make verify-bytecode`: **172/172 agree and 10/10 still refused** after
+merging Phase 496's three independent oracle witnesses (169/169 before that
+merge). The new suite checks nested ordering, scope, throw precedence, garbage
+collection, callbacks and unsupported control-flow cases.
 
 ## Still open
 

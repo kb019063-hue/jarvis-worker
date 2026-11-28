@@ -28,11 +28,21 @@ handler; the two earlier suites' refusal checks now use that unsupported case.
 
 ## Verification
 
-- `make verify-bytecode`: **169/169 agree, 10/10 still refused**.
-- `python3 tools/conformance/verify_bytecode_agreement.py --self-test`: six readings pass.
-- `tests/suites/504-the-vm-returns-through-nested-finalizers.cpp` checks
-  ordering, scope shadowing, exceptions replacing returns, GC, callbacks and
-  explicitly refused forms.
+- `make verify-bytecode`: **169/169 agree, 10/10 still refused** before
+  merging main; **172/172 agree, 10/10 refused** afterward (Phase 496 added
+  three independent witnesses). The oracle's six self-test readings pass.
+- `make -j2 all test` after merging main: **544 engine suites and 114
+  cross-origin checks pass**. The numbered suite checks ordering, scope
+  shadowing, exceptions replacing returns, GC, callbacks and refused forms.
+- Before merging main, HTML tree construction was 1973/1973, JS 1153/1158,
+  DOM 678/678, URL 1188/1188, XML 1718/1718 and WPT 9570/9824 with all 254
+  failures listed. Both tree and XML differential checks passed; `make fuzz`
+  found nothing, and `make deep` passed all 1332 runs at depth 200000.
+- After merging main, the ASan/UBSan oracle passed 172/172 with 10/10
+  refusals, and a 16-suite sanitized stretch including both return/finally
+  suites passed. Full `make asan TEST_OPT=-O0` did not finish: a 1200-second
+  limit terminated it in the existing `deep_nesting_never_exhausts_the_native_stack`
+  suite after the sanitizer rebuild. This is not a full sanitizer pass.
 
 ## Still open
 

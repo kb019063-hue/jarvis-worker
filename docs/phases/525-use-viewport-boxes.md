@@ -38,3 +38,4 @@ passed with lxml in a local `PYTHONPATH`, and `make render-conformance`
 passed. An earlier parallel test attempt was killed under memory contention,
 and its interrupted deep run is not counted. The deep-page and sanitizer
 checks are being rerun serially before this draft is finished.
+Serial `make deep` subsequently passed **1332/1332** runs over 465 pages.

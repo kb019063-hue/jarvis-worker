@@ -13,7 +13,7 @@ The finalizer also sees the scope outside the try, not the try body's locals.
 ## What changed
 
 For a return in one simple try/finally, with no enclosing catch, nested handler
-or loop, the compiler evaluates the value with the handler still active. It
+loop or switch, the compiler evaluates the value with the handler still active. It
 moves that value over any inner block locals, removes the handler, and compiles
 the finalizer with the try-entry locals plus a hidden stack slot holding the
 return value. That slot keeps the value rooted through calls and garbage
@@ -30,12 +30,16 @@ completion unwinding explicit.
 
 - `make verify-bytecode`: **150/150 agree, 10/10 still refused**.
 - `python3 tools/conformance/verify_bytecode_agreement.py --self-test`: six readings pass.
+- `make -j2 all test`: 524 engine suites and 114 cross-origin checks pass.
+- HTML, JS, DOM, URL and XML corpora, WPT, and tree/XML differentials pass.
+  A 56-case combination probe for returns, scopes and finalizers agrees.
+  Deep, fuzz and sanitizer checks are in progress.
 - `tests/suites/479-the-vm-returns-through-finally.cpp` checks evaluation
   order, scope cleanup, returned objects, GC, throws, callbacks and refusals.
 
 ## Still open
 
-Nested handlers or finalizers, returns through a loop or iterator or a
+Nested handlers or finalizers, returns through a loop, switch, iterator or a
 try/catch/finally, returns from the finalizer itself, and break/continue through
 finalizers are explicitly refused. Catch patterns and general closure, TDZ,
 receiver and other VM semantics remain incomplete. The VM is not the page

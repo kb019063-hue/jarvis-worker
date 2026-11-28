@@ -24,6 +24,6 @@ callbacks and garbage collection, and the more complex forms still refused.
 
 ## Still open
 
-Nested handler/iterator unwinding, returns from finalizers, jumps through them,
+Nested handler, loop, switch or iterator unwinding, returns from finalizers, jumps through them,
 catch patterns and general VM closure and receiver semantics remain open.
 The VM is not the engine used for web pages.

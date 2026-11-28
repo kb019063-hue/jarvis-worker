@@ -166,7 +166,11 @@ within the hour, and the first lot was started again four times.
        `AGENTS.md`, a line of `AUDIT.md`): merge `main`, resolve it as the
        line says, and put `[skip ci]` in the message of the merge commit.
        That head is taken at once, with no run of its own: its code is
-       the code that was green, and the run on the lot tests the merge;
+       the code that was green, and the run on the lot tests the merge.
+       `landed N` and `merge N` say so of such a head since 28 November.
+       Until then they answered "no CI run on its head commit", and that
+       morning #492's agent pushed an empty commit for a run, half a
+       minute before the lot was built. Do not: it moves the head;
      - no watch is on any more: go on as in the next point;
      - nothing yet: run it again. After an hour of that, end the turn and
        tell the person that #N is finished and with the landing session.

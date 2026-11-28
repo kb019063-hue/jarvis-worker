@@ -1938,10 +1938,18 @@ void throw_index_size(Realm& realm, const std::string& why) {
     throw_dom(realm, "IndexSizeError", why);
 }
 
+/// A built-in from the realm's global object or, when there is no Window, its
+/// global environment. Worker-safe DOM interfaces must not treat "global" and
+/// "Window" as synonyms.
+JsValue realm_global_binding(Realm& realm, const std::string& name) {
+    if (realm.window.is_object()) return realm.window.get_property(name);
+    if (auto scope = realm.global_scope.lock()) return scope->get(name);
+    return JsValue();
+}
+
 /// The realm's `Uint8ClampedArray`, `length` bytes of zero.
 JsValue clamped_array(Realm& realm, std::size_t length) {
-    const JsValue& global = realm.window;
-    const JsValue array_ctor = global.is_object() ? global.get_property("Uint8ClampedArray") : JsValue();
+    const JsValue array_ctor = realm_global_binding(realm, "Uint8ClampedArray");
     if (!array_ctor.is_function()) {
         js_throw_type_error("ImageData needs a realm with Uint8ClampedArray.");
     }
@@ -2009,13 +2017,12 @@ JsValue construct_image_data(Realm& realm, const InterfaceDef&, Args args, const
         js_throw_type_error("Failed to construct 'ImageData': 1 argument required, but only 0 present.");
     }
     const JsValue first = js_arg(args, 0);
-    const JsValue& global = realm.window;
-    const JsValue array_ctor = global.is_object() ? global.get_property("Uint8ClampedArray") : JsValue();
+    const JsValue array_ctor = realm_global_binding(realm, "Uint8ClampedArray");
     JsValue tag_of;
     if (array_ctor.is_function() && first.is_object_like()) {
         // `[object Uint8ClampedArray]` and nothing else: the internal slot the
         // interface is defined over, not a shape that looks like one.
-        const JsValue object_ctor = global.get_property("Object");
+        const JsValue object_ctor = realm_global_binding(realm, "Object");
         const JsValue prototype = object_ctor.get_property("prototype");
         tag_of = js_call(prototype.get_property("toString"), first, {});
     }

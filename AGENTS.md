@@ -500,7 +500,10 @@ without one, and leaves the board and a watch out of the claims.
    **A draft is merged by nobody**: GitHub answers "Pull Request is
    still a draft" to whoever asks, until `gh pr ready N`. `WIP:` in a
    title stops nobody: #449 and #491 were both merged with it ("Merged
-   59 seconds after it was opened", below).
+   59 seconds after it was opened", below). A claim that was opened
+   under `WIP:` and is no draft is made one by the landing session
+   (`tools/watch/watch.sh drafts`), which says so on it; nothing else
+   changes for its agent until the last push.
    (`python3 tools/next_ids.py --pr-body` prints the four lines, and
    `python3 tools/ci/check_pr.py claim N` says the numbers back.) Until
    24 November 2026 the two came from `python3 tools/next_ids.py`, the
@@ -1054,8 +1057,9 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   made ready is in no list (#425, thirteen hours; #508, eleven minutes
   of that same watch, renamed and not made ready). `merge N` says so to
   the agent that asks. `watch.sh cands` says so to the landing session,
-  which reads it, runs `gh pr ready N` when nothing was pushed for some
-  minutes, writes that on it, and takes it.
+  with the minute the `WIP:` came off the title, and `watch.sh ready N`
+  makes it ready and says so on it (#515, the same day: made a draft by
+  the landing session 25 seconds before its last push).
 - **An old copy of AGENTS.md, written over `main`'s.** #452 was finished
   on 25 November on `main` of 14:12. Its AGENTS.md was that file cut off
   after line 1442: the last 109 lines of "Open tasks" were gone. It

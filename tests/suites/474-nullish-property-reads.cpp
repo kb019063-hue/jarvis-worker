@@ -25,6 +25,8 @@ TEST(the_bytecode_vm_rejects_nullish_property_reads) {
     // The exception crosses frames and is catchable, rather than becoming a
     // missing-value answer or a host exception.
     agree("function f(){return null.foo;} try{f()}catch(e){e.name}", "TypeError");
+    // A nullish read abruptly leaves the iterator body and closes it once.
+    agree("var s='';var it={};it[Symbol.iterator]=function(){return {next:function(){return {value:1,done:false}},return:function(){s+='r';return {}}}};try{for(var x of it){null.foo}}catch(e){s+=e.name}String(s)", "rTypeError");
 
     // Node evaluates the key expression, but does NOT convert an object key
     // to a property key when the base is nullish. The tree-walker currently

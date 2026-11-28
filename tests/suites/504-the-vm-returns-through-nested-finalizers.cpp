@@ -22,10 +22,9 @@ TEST(the_bytecode_vm_returns_through_nested_finalizers) {
     agree("var s='';function f(){try{try{return 1}finally{s+='i';throw 7}}finally{s+='o';throw 8}}try{f()}catch(e){s+=e}String(s)", "io8");
     agree("var s='';function f(){try{try{return 2}finally{s+='i'}}finally{s+='o'}}var o={};Object.defineProperty(o,'x',{get:f});String(o.x+'/'+s)", "2/io");
     agree("var n=0;function f(){try{try{return n++}finally{n++}}finally{n++}}String(f()+'/'+n)", "0/3");
-    // Catch handlers, cursor closes and returns from finalizers need their
+    // Cursor closes and returns from catch/finalizers need their
     // own completion rules and remain refusals rather than silent jumps.
-    for (const char* source : {"function f(){try{try{return 1}catch(e){}finally{}}finally{}}f()",
-                               "function f(){for(var x of [1]){try{try{return x}finally{}}finally{}}}f()",
+    for (const char* source : {"function f(){for(var x of [1]){try{try{return x}finally{}}finally{}}}f()",
                                "function f(){try{try{return 1}finally{return 2}}finally{}}f()"}) {
         TestPage page;
         bool refused = false;

@@ -4183,7 +4183,9 @@ void setup_offscreen_canvas(Iface& I) {
             JsValue t = args[0].get_property("type");
             if (!t.is_undefined()) type = to_str(t);
         }
-        JsValue promise = r.window.is_object() ? r.window.get_property("Promise") : JsValue();
+        // OffscreenCanvas is exposed in both Window and worker realms. Promise
+        // is a realm-global dependency, not a Window dependency.
+        JsValue promise = realm_global_binding(r, "Promise");
         auto reject_with = [&](const std::string& name, const std::string& msg) {
             JsValue err = make_dom_exception(r, name, msg);
             if (promise.is_function()) return js_call(promise.get_property("reject"), promise, {err});

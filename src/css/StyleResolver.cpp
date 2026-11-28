@@ -359,6 +359,10 @@ std::size_t ComputedStyle::hash() const {
     hash_edges(h, margin_percent);
     hash_edges(h, padding_percent);
     hash_edges(h, border_width);
+    hash_combine(h, static_cast<std::size_t>(border_style.top));
+    hash_combine(h, static_cast<std::size_t>(border_style.right));
+    hash_combine(h, static_cast<std::size_t>(border_style.bottom));
+    hash_combine(h, static_cast<std::size_t>(border_style.left));
     hash_color(h, border_color);
     hash_combine(h, hash_float(border_radius));
     hash_combine(h, hash_float(border_radius_percent));
@@ -366,7 +370,7 @@ std::size_t ComputedStyle::hash() const {
     // different ink, so they must not share a cached style.
     hash_combine(h, hash_float(outline_width));
     hash_combine(h, hash_float(outline_offset));
-    hash_combine(h, outline_drawn ? 1u : 0u);
+    hash_combine(h, static_cast<std::size_t>(outline_style));
     hash_color(h, outline_color);
     if (box_shadow.has_shadow) {
         hash_combine(h, 1u);
@@ -1938,6 +1942,58 @@ static void parse_grid_template_areas(std::string_view val, std::unordered_map<s
     }
 }
 
+/// CSS 2.1 8.5.3 border style keywords, lowercased. Returns nullopt for
+/// anything else (the caller then leaves the declaration unapplied, which is
+/// how an invalid keyword is dropped everywhere else in the cascade).
+std::optional<BorderStyle> border_style_of(std::string_view lower) {
+    if (lower == "none") return BorderStyle::None;
+    if (lower == "hidden") return BorderStyle::Hidden;
+    if (lower == "dotted") return BorderStyle::Dotted;
+    if (lower == "dashed") return BorderStyle::Dashed;
+    if (lower == "solid") return BorderStyle::Solid;
+    if (lower == "double") return BorderStyle::Double;
+    if (lower == "groove") return BorderStyle::Groove;
+    if (lower == "ridge") return BorderStyle::Ridge;
+    if (lower == "inset") return BorderStyle::Inset;
+    if (lower == "outset") return BorderStyle::Outset;
+    return std::nullopt;
+}
+
+/// The 1-to-4 keyword form `border-style` takes (CSS 2.1 8.5.3), top/right/
+/// bottom/left like every other box shorthand. Global keywords: `initial` /
+/// `unset` are `none`; `inherit` keeps what the copy of the parent's style
+/// already holds.
+std::optional<EdgeStyles> border_styles_of(std::string_view val) {
+    std::string lower(val);
+    for (char& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // Global keywords the box form may take as its whole value.
+    if (lower == "initial" || lower == "unset") return EdgeStyles{};
+    if (lower == "inherit") return std::nullopt;  // caller keeps the inherited edge
+    std::vector<BorderStyle> styles;
+    std::size_t at = 0;
+    const std::size_t n = lower.size();
+    auto is_space = [](char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == '\f';
+    };
+    while (at < n) {
+        while (at < n && is_space(lower[at])) ++at;
+        if (at >= n) break;
+        std::size_t end = at;
+        while (end < n && !is_space(lower[end])) ++end;
+        auto style = border_style_of(std::string_view(lower).substr(at, end - at));
+        if (!style) return std::nullopt;
+        styles.push_back(*style);
+        at = end;
+    }
+    if (styles.empty() || styles.size() > 4) return std::nullopt;
+    switch (styles.size()) {
+        case 1: return EdgeStyles(styles[0]);
+        case 2: return EdgeStyles(styles[0], styles[1], styles[0], styles[1]);
+        case 3: return EdgeStyles(styles[0], styles[1], styles[2], styles[1]);
+        default: return EdgeStyles(styles[0], styles[1], styles[2], styles[3]);
+    }
+}
+
 bool StyleResolver::expand_shorthand(const std::string& prop, const std::string& val,
                                       std::vector<std::pair<std::string, std::string>>& out) const {
     auto trim = [](std::string_view text) { return css_trim_view(text); };
@@ -1963,7 +2019,7 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
 
     // One-to-four value box shorthands: top, right, bottom, left.
     if (prop == "margin" || prop == "padding" || prop == "border-width" || prop == "border-color" ||
-        prop == "inset") {
+        prop == "border-style" || prop == "inset") {
         auto tokens = split_tokens(trim(val));
         if (tokens.empty()) return true;
         std::string top, right, bottom, left;
@@ -1975,6 +2031,9 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
         } else if (prop == "border-width") {
             top = "border-top-width"; right = "border-right-width";
             bottom = "border-bottom-width"; left = "border-left-width";
+        } else if (prop == "border-style") {
+            top = "border-top-style"; right = "border-right-style";
+            bottom = "border-bottom-style"; left = "border-left-style";
         } else {
             top = "border-top-color"; right = "border-right-color";
             bottom = "border-bottom-color"; left = "border-left-color";
@@ -2030,12 +2089,16 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
             }
             if (lowered == "solid" || lowered == "dashed" || lowered == "dotted" ||
                 lowered == "double" || lowered == "groove" || lowered == "ridge" ||
-                lowered == "inset" || lowered == "outset") {
+                lowered == "inset" || lowered == "outset" || lowered == "none" ||
+                lowered == "hidden") {
                 // A style with no width of its own is `medium` (CSS 2.1 8.5.1).
                 // It used to be dropped outright, which is why `border: solid`
                 // -- how the HTML rendering standard writes the dialog border
-                // -- computed to no border at all.
-                if (!saw_width) out.emplace_back(prop == "border" ? "border-width" : prop + "-width", "3px");
+                // -- computed to no border at all. The style longhand travels
+                // with it, so `border: 2px dashed red` paints dashes.
+                if (lowered != "none" && lowered != "hidden" && !saw_width)
+                    out.emplace_back(prop == "border" ? "border-width" : prop + "-width", "3px");
+                out.emplace_back(prop == "border" ? "border-style" : prop + "-style", lowered);
                 continue;
             }
             if (is_color_token(token)) {
@@ -2056,6 +2119,7 @@ bool StyleResolver::expand_shorthand(const std::string& prop, const std::string&
         }
         if (saw_none_or_hidden && !saw_width) {
             out.emplace_back(prop == "border" ? "border-width" : prop + "-width", "0px");
+            out.emplace_back(prop == "border" ? "border-style" : prop + "-style", "none");
         }
         return true;
     }
@@ -3113,18 +3177,21 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         // box it sits. Before this the cascade stored none of it -- the CSSOM
         // answered out of the declaration block and the painter had nothing to
         // read -- so an outline was reported and never drawn.
-        auto says_drawn = [](const std::string& lower) {
-            return lower == "auto" || lower == "solid" || lower == "dashed" || lower == "dotted" ||
-                   lower == "double" || lower == "groove" || lower == "ridge" || lower == "inset" ||
-                   lower == "outset";
+        // `auto` is accepted by the CSSOM (Firefox draws `auto` as a solid
+        // ring); the enum has no `auto`, so it is stored as `solid`.
+        auto outline_style_of = [](const std::string& lower) -> std::optional<BorderStyle> {
+            if (lower == "auto") return BorderStyle::Solid;
+            return border_style_of(lower);
         };
         if (prop == "outline-offset") {
             if (val_lower != "initial" && val_lower != "inherit" && val_lower != "unset") {
                 style.outline_offset = parse_length(val, 0.0f);
             }
         } else if (prop == "outline-style") {
-            if (val_lower == "initial" || val_lower == "unset") style.outline_drawn = false;
-            else if (val_lower != "inherit") style.outline_drawn = says_drawn(val_lower);
+            if (val_lower == "initial" || val_lower == "unset") style.outline_style = BorderStyle::None;
+            else if (val_lower != "inherit") {
+                if (const std::optional<BorderStyle> o = outline_style_of(val_lower)) style.outline_style = *o;
+            }
         } else if (prop == "outline-width") {
             if (val_lower == "initial" || val_lower == "unset") {
                 style.outline_width = 3.0f;    // `medium`
@@ -3157,10 +3224,10 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
                 if (part.empty()) return;
                 std::string low;
                 for (char c : part) low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-                if (says_drawn(low)) {
-                    style.outline_drawn = true;
-                } else if (low == "none" || low == "hidden") {
-                    style.outline_drawn = false;
+                if (low == "none" || low == "hidden") {
+                    style.outline_style = border_style_of(low).value_or(BorderStyle::None);
+                } else if (const std::optional<BorderStyle> o = outline_style_of(low)) {
+                    style.outline_style = *o;
                 } else if (low == "thin") {
                     style.outline_width = 1.0f;
                 } else if (low == "medium") {
@@ -3238,6 +3305,27 @@ void StyleResolver::apply_longhand(ComputedStyle& style, const std::string& prop
         Color parsed;
         if (Color::try_parse(val, parsed, style.color, style.dark_color_scheme)) {
             style.border_color = parsed;
+        }
+    } else if (prop == "border-style" || prop == "border-top-style" || prop == "border-right-style" ||
+               prop == "border-bottom-style" || prop == "border-left-style") {
+        // CSS 2.1 8.5.3: `none | hidden | dotted | dashed | solid | double |
+        // groove | ridge | inset | outset`. The longhands take one keyword,
+        // the shorthand one to four (top right bottom left). An invalid
+        // keyword drops the declaration, as everywhere else in the cascade.
+        if (prop == "border-style") {
+            if (auto styles = border_styles_of(val)) style.border_style = *styles;
+        } else {
+            // `initial`/`unset` is the initial value, `none` (border-style is
+            // not inherited); `inherit` keeps what the parent copy holds.
+            const std::optional<BorderStyle> style_edge =
+                (val_lower == "initial" || val_lower == "unset") ? std::optional<BorderStyle>(BorderStyle::None)
+                                                                 : border_style_of(val_lower);
+            if (style_edge) {
+                if (prop.compare(7, 3, "top") == 0) style.border_style.top = *style_edge;
+                else if (prop.compare(7, 5, "right") == 0) style.border_style.right = *style_edge;
+                else if (prop.compare(7, 6, "bottom") == 0) style.border_style.bottom = *style_edge;
+                else style.border_style.left = *style_edge;
+            }
         }
     } else if (prop == "font-size") {
         if (val_lower == "inherit" || val_lower == "unset") {

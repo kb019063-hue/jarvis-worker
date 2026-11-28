@@ -242,17 +242,19 @@ std::string to_exponential(double x, int fraction_digits, bool shortest) {
     if (shortest) {
         // As many digits as needed to round-trip.
         std::string plain = js_number_to_string(std::fabs(x));
-        // Re-derive mantissa and exponent from the shortest digits.
-        char buffer[64];
-        int written = std::snprintf(buffer, sizeof(buffer), "%.17e", std::fabs(x));
-        std::string sci(buffer, static_cast<size_t>(written));
-        int exponent = std::atoi(sci.c_str() + sci.find('e') + 1);
+        // The exponent must come from the same shortest decimal as the
+        // significand: a 17-digit expansion may lie just below a power of
+        // ten even when its shortest representation is that power of ten.
+        const size_t e_pos = plain.find('e');
+        const std::string mantissa = plain.substr(0, e_pos);
+        const size_t dot = mantissa.find('.');
+        const int integer_digits = static_cast<int>(dot == std::string::npos ? mantissa.size() : dot);
+        const int suffix_exponent = e_pos == std::string::npos ? 0 : std::atoi(plain.c_str() + e_pos + 1);
         std::string digits;
-        for (char c : plain) {
-            if (c >= '0' && c <= '9') digits += c;
-            if (c == 'e') break;
-        }
-        size_t first = digits.find_first_not_of('0');
+        for (char c : mantissa) if (c != '.') digits += c;
+        const size_t first = digits.find_first_not_of('0');
+        const int exponent = first == std::string::npos ? 0 :
+            suffix_exponent + integer_digits - static_cast<int>(first) - 1;
         digits = first == std::string::npos ? "0" : digits.substr(first);
         while (digits.size() > 1 && digits.back() == '0') digits.pop_back();
         std::string out = x < 0 ? "-" : "";

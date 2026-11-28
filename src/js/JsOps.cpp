@@ -494,6 +494,10 @@ JsValue js_to_primitive(const JsValue& value, JsPrimitiveHint hint) {
 
     // An object can take over its own conversion with Symbol.toPrimitive.
     JsValue exotic = value.get_property("@@toPrimitive");
+    // GetMethod permits ordinary fallback only when the hook is nullish.
+    if (!exotic.is_nullish() && !exotic.is_function()) {
+        js_throw_type_error("Symbol.toPrimitive is not callable");
+    }
     if (exotic.is_function()) {
         const char* hint_name = hint == JsPrimitiveHint::String ? "string"
                               : hint == JsPrimitiveHint::Number ? "number" : "default";

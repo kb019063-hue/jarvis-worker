@@ -61,6 +61,37 @@ size_t skip_leading_space(const std::string& s) {
     return i;
 }
 
+// Power-of-two radices are exact bit strings. Keep the first 53 significant
+// bits plus a guard and sticky bit, then round once to nearest, ties to even.
+// Repeated floating-point multiply/add can instead round every digit.
+double parse_power_of_two_integer(const std::string& s, size_t first, size_t last, int radix) {
+    int width = 0;
+    for (int r = radix; r > 1; r >>= 1) ++width;
+    uint64_t significand = 0;
+    int bits = 0;
+    bool guard = false, sticky = false, started = false;
+    for (size_t pos = first; pos < last; ++pos) {
+        const char c = s[pos];
+        const int digit = c >= '0' && c <= '9' ? c - '0'
+                        : c >= 'a' && c <= 'z' ? c - 'a' + 10 : c - 'A' + 10;
+        for (int shift = width - 1; shift >= 0; --shift) {
+            const bool bit = (digit & (1 << shift)) != 0;
+            if (!started) {
+                if (!bit) continue;
+                started = true;
+            }
+            ++bits;
+            if (bits <= 53) significand = (significand << 1) | static_cast<uint64_t>(bit);
+            else if (bits == 54) guard = bit;
+            else sticky = sticky || bit;
+            if (bits > 1024) return kInfinity;
+        }
+    }
+    if (bits <= 53) return static_cast<double>(significand);
+    if (guard && (sticky || (significand & 1))) ++significand;
+    return std::ldexp(static_cast<double>(significand), bits - 53);
+}
+
 JsValue parse_int(Args args) {
     std::string s = js_to_string(js_arg(args, 0));
     size_t i = skip_leading_space(s);
@@ -99,6 +130,8 @@ JsValue parse_int(Args args) {
     // same number as the literal.
     if (radix == 10 && i - first_digit > 15) {
         value = js_string_to_number(s.substr(first_digit, i - first_digit));
+    } else if ((radix & (radix - 1)) == 0) {
+        value = parse_power_of_two_integer(s, first_digit, i, radix);
     }
     return JsValue::make_number(negative ? -value : value);
 }

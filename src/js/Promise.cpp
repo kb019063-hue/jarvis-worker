@@ -955,6 +955,33 @@ void install_promise_builtins(JsIntrinsics& realm) {
         result.set_property("reject", capability.reject);
         return result;
     });
+    // §27.2.4.9 Promise.try: call the callback before making a capability.
+    // A successful result goes through PromiseResolve(this, result), which
+    // preserves a same-constructor promise and adopts other values/thenables.
+    // A thrown completion instead creates a capability and rejects it. Keep
+    // the receiver by value: callback invocation and capability construction
+    // both perform nested calls that replace the current call context.
+    js_define_method(ctor, "try", 1, [](Args args) {
+        const JsValue constructor = JsValue::current_this();
+        if (!constructor.is_object_like())
+            js_throw_type_error("Promise.try: this is not an object");
+
+        std::vector<JsValue> callback_args;
+        if (args.size() > 1) callback_args.assign(args.begin() + 1, args.end());
+        JsValue callback_result;
+        JsValue thrown;
+        const JsValue callback = js_arg(args, 0);
+        if (!js_capture_throw([&] {
+                if (!callback.is_function())
+                    js_throw_type_error("Promise.try callback is not callable");
+                callback_result = callback.call_with_this(JsValue::make_undefined(), callback_args);
+            }, thrown)) {
+            PromiseCapability capability = Promise::new_capability(constructor);
+            capability.reject.call({thrown});
+            return capability.promise;
+        }
+        return Promise::resolve_from(constructor, callback_result);
+    });
 
     js_define_method(ctor, "all", 1, [](Args args) {
         return combine(args, Promise::create_constructor(),

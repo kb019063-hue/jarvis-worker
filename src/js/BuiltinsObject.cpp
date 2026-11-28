@@ -1932,6 +1932,14 @@ void install_error_builtins(JsIntrinsics& realm) {
                 }
                 return JsValue::make_undefined();
             });
+            // ES2025 §20.5.2.1 Error.isError — true iff the value has
+            // [[ErrorData]] (klass Error). DOMException in this engine shares
+            // the klass, noted in the finding.
+            js_define_method(ctor, "isError", 1, [](Args args) {
+                const JsValue& value = js_arg(args, 0);
+                if (!value.is_object_like() || !value.object_val) return JsValue::make_boolean(false);
+                return JsValue::make_boolean(value.object_val->klass == ObjectClass::Error);
+            });
         }
         // `Object.getPrototypeOf(TypeError) === Error`. Code that asks whether
         // a constructor is an error type walks this chain (the

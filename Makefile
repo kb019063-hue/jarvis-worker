@@ -74,6 +74,7 @@ SRCS = src/common/Color.cpp \
        src/js/JsOps.cpp \
        src/js/BuiltinsObject.cpp \
        src/js/BuiltinsArray.cpp \
+       src/js/BuiltinsIterator.cpp \
        src/js/BuiltinsString.cpp \
        src/js/StringUnicodeTables.cpp \
        src/js/BuiltinsNumber.cpp \
@@ -240,6 +241,11 @@ verify-js-error-terminal-safety: $(TARGET)
 .PHONY: verify-cli-error-terminal-safety
 verify-cli-error-terminal-safety: $(TARGET)
 	@python3 tools/security/verify_cli_error_terminal.py --binary $(TARGET)
+
+## Check XML parser and decoding diagnostics without displaying attack bytes.
+.PHONY: verify-xml-diagnostic-terminal-safety
+verify-xml-diagnostic-terminal-safety: $(TARGET)
+	@python3 tools/security/verify_xml_diagnostic_terminal.py --binary $(TARGET)
 
 ## Check that a page's own text cannot command the terminal through a dump.
 .PHONY: verify-page-text-terminal-safety

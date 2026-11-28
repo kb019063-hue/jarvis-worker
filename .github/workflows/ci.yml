@@ -373,7 +373,7 @@ jobs:
         # carry_rows.py carries a pull request whose only conflict is a row
         # of "Open tasks"; run_stretches.py decides whether the unit suites,
         # run as several processes, were every suite. Both are tested on
-        # fixed texts, and tools/watch/watch.sh must at least be a script.
+        # fixed texts, and every script of tools/watch/ must at least be one.
         # logged.sh is the shell these very steps run in: it is tested on
         # small scripts for the exit status it gives and the file it keeps.
         # run_report.py says what a run did from what the API answers: it
@@ -382,13 +382,18 @@ jobs:
         # in it would stop a merge: tested on rulesets written down, the
         # person's own among them. takeable_test.sh asks watch.sh's
         # `takeable` what it takes into a lot, with and without that rule.
+        # land_test.sh runs watch.sh's `build` and `land` in a repository
+        # it makes, against a `gh` that answers what each case says: what
+        # is merged, in which order, and that nothing is when one of the
+        # lot cannot be.
         run: |
           python3 tools/watch/carry_rows.py --self-test
           python3 tools/watch/rule.py --self-test
           python3 tools/ci/run_stretches.py --self-test
           python3 tools/ci/run_report.py --self-test
-          bash -n tools/watch/watch.sh
+          for f in tools/watch/*.sh; do bash -n "$f" || exit 1; done
           bash tools/watch/takeable_test.sh
+          bash tools/watch/land_test.sh
           bash tools/ci/logged.sh --self-test
           python3 tools/ci/annotate_failure.py --self-test
       - name: The documents keep their shape and stay under their budgets

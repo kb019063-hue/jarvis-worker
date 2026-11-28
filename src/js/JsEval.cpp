@@ -1037,8 +1037,14 @@ public:
     /// defined descriptor lives in the table, and a hole is what makes the
     /// table's entry the property.
     void unmap(JsObject* self, const std::string& name, size_t index, const JsValue& kept) {
+        if (auto* binding = mapped_binding(index)) binding->value = kept;
         if (self != nullptr && index < self->array_elements.size()) {
             JsValue::make_object(self).set_array_hole(index);
+            self->has_accessors = true;
+            self->properties.entry(name).second = kept;
+        } else if (self != nullptr) {
+            // Index beyond dense elements (hole or sparse) – still need the
+            // map entry so `Object.getOwnPropertyDescriptor` finds it.
             self->has_accessors = true;
             self->properties.entry(name).second = kept;
         }

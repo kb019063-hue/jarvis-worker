@@ -158,12 +158,18 @@ public:
     bool establishes_bfc() const;
 
     /// Used border widths for one box, or empty to use style.border_width.
-    /// Collapsed tables resolve the shared edges once (widest wins) and hand
-    /// the winner to every cell it touches; the half-paint model stays.
+    /// Collapsed tables resolve each shared edge by width, then style, and
+    /// hand the winner to every cell it touches; the half-paint model stays.
     std::optional<EdgeSizes> border_override{};
-    /// Winning border colours per edge (collapsed border resolution hands the
-    /// winner its colour along with its width).
-    std::optional<EdgeColors> border_color_override{};
+    /// Winning per-edge colour and style for collapsed borders. Kept together
+    /// so each cell can paint the shared edge using the same resolved winner.
+    struct BorderPaintOverride {
+        EdgeColors colors;
+        EdgeStyles styles;
+    };
+    // `border_override` is the presence flag; keeping this payload inline avoids
+    // a second optional discriminator on every layout box.
+    BorderPaintOverride border_paint_override{};
     std::shared_ptr<const LinearGradient> canvas_gradient;
 
     // --- float context -----------------------------------------------------

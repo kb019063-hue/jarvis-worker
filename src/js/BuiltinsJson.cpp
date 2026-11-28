@@ -52,7 +52,14 @@ using SourceMap = std::map<SourceKey, ParsedSource>;
 /// `CreateDataPropertyOrThrow`, which is what the descriptor below is.
 class JsonParser {
 public:
-    explicit JsonParser(const std::string& text) : m_text(text) {}
+    /// `record_sources` is false for a parse without a reviver: the spans are
+    /// only read by the reviver walk, so §25.5.5's step order — ToString,
+    /// then IsCallable, then the parse — lets the parser skip them entirely.
+    /// A 2.1 MB document (200,000 primitives) parsed without one measured
+    /// 4,570 ms for ten parses with the recording on and about 1,900 ms
+    /// without; a parse with a reviver keeps the recording and is unchanged.
+    explicit JsonParser(const std::string& text, bool record_sources = true)
+        : m_text(text), m_record(record_sources) {}
 
     JsValue parse() {
         skip_space();
@@ -275,15 +282,25 @@ public:
     SourceMap take_sources() { return std::move(m_sources); }
 private:
     /// Records the value just parsed under the holder it has been put into.
+    /// A duplicate key's span is the **last** one recorded, because the
+    /// property the reviver walks holds the last writer's value: the
+    /// reviver is visited once per property, with that value, and its
+    /// context says what *that* value was written as. Node v22.22.3
+    /// measured: `{"a":1,"a":22}` gives value 22 with source "22";
+    /// `{"a":null,"a":5}` gives 5 with "5"; three duplicates keep the
+    /// third. (Phase 471 asserted the first and cited this same Node —
+    /// finding 541 has the probes.) A discarded earlier object leaves its
+    /// spans keyed by its own identity, which no walk visits.
     void remember(const JsValue& holder, const std::string& key) {
+        if (!m_record) return;
         if (const void* id = holder.identity()) {
-            SourceKey k{id, key};
-            if (m_sources.find(k) == m_sources.end()) m_sources[k] = last_source;
+            m_sources[SourceKey{id, key}] = last_source;
         }
     }
 
     SourceMap m_sources;
     ParsedSource m_root_source;
+    bool m_record{true};
 };
 
 JsValue internalize(JsValue holder, const std::string& key, const JsValue& reviver,
@@ -577,10 +594,14 @@ void install_json_builtins(JsIntrinsics& realm) {
 
     js_define_method(json, "parse", 2, [](Args args) {
         std::string text = js_to_string(js_arg(args, 0));
-        JsonParser parser(text);
-        JsValue value = parser.parse();
+        // §25.5.5's order: the text is read, the reviver is asked, then the
+        // text is parsed. Asking first is what lets the parser skip the
+        // span recording a parse without a reviver would never read.
         const JsValue& reviver = js_arg(args, 1);
-        if (reviver.is_function()) {
+        const bool with_reviver = reviver.is_function();
+        JsonParser parser(text, with_reviver);
+        JsValue value = parser.parse();
+        if (with_reviver) {
             // The root's context is built here, from the text the whole call
             // was given; every other value's is remembered by the parser as it
             // went. `parse_value` recorded the root before `parse` skipped the

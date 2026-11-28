@@ -103,8 +103,9 @@ failed a different assertion of this suite.
   standard deviation) is applied as a radius, not as a standard deviation.
 - **A shadow is captured per whole canvas, not per bounding box.** The buffers
   are `width × height`; a small rectangle on a large canvas pays for the canvas.
-- **`ctx.filter` still does not exist**, and it is the same kind of painterly
-  feature — the next one in this row.
+- **Since this finding:** Canvas `filter` arrived in Phase 406, and its
+  `blur()`/filter `drop-shadow()` kernel changed to a Gaussian in Phase 535; this
+  is separate from `shadowBlur`'s three-box approximation above.
 - **Shadows on a `putImageData`** are correctly absent (that method replaces
   pixels), and nothing tests it yet.
 - **Not this row's:** shadow on `fillText` with a gradient fill, `OffscreenCanvas`,

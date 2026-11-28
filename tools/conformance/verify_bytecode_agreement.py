@@ -66,6 +66,11 @@ class Case:
 # Both paths must answer these alike. Each was run on the engine and read
 # before it was written here; none of them is a guess.
 AGREES: list[Case] = [
+    # Phase 496: the tree-walker and VM both reject a nullish read before
+    # coercing an object key. The key expression itself still executes.
+    Case("var s='';var k={toString:function(){s+='c';return 'x'}};try{null[k]}catch(e){s+=e.name}String(s)", "nullish object key is not coerced"),
+    Case("var k={toString:function(){throw 'converted'}};try{undefined[k]}catch(e){e.name}", "nullish base wins over throwing key conversion"),
+    Case("var s='';var k={toString:function(){s+='c';return 'x'}};function key(){s+='k';return k}try{null[key()](s+='a')}catch(e){s+=e.name}String(s)", "key expression runs before error, call arguments do not"),
     # Phase 474: a nullish property read throws rather than producing undefined.
     Case("try { null.foo; } catch (e) { e.name; }", "null dot read throws"),
     Case("try { undefined.foo; } catch (e) { e.name; }", "undefined dot read throws"),

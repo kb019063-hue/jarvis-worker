@@ -2304,8 +2304,8 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
         std::string value;
         BBox target_box;
         if (target_tag == "symbol" || target_tag == "svg") {
-            // Match the painter's use viewport: percentages inside a valid
-            // viewBox resolve in that box, then its matrix maps into use space.
+            // Percentages inside a valid viewBox resolve in that box, then
+            // its matrix maps into the use viewport's coordinate space.
             float w = ref_w, h = ref_h;
             // <use> dimensions override an SVG target's own viewport dimensions.
             if (target_tag == "svg") {
@@ -2359,7 +2359,10 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
         BBox child_box = svg_bbox_walk(child_el, child_w, child_h, depth + 1, active, false, in_symbol_instance);
         if (!child_box.valid()) continue;
         std::string transform_text;
-        if (get_attr_ci(child_el, "transform", transform_text)) {
+        // Chromium does not apply the <svg> viewport element's transform
+        // inside an instance box; its nested contents still have theirs.
+        if (!(in_symbol_instance && to_lower_ascii(child_el->tag_name()) == "svg") &&
+            get_attr_ci(child_el, "transform", transform_text)) {
             const TransformMatrix2D matrix = parse_svg_transform(transform_text);
             const TransformMatrix2D identity = TransformMatrix2D::identity();
             if (!(matrix == identity)) {

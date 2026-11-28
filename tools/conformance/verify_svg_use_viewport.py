@@ -18,6 +18,9 @@ SHAPES = {
     'percent': '<rect x="10%" y="20%" width="30%" height="40%"/>',
     'degenerate': '<rect x="1" y="2" width="0" height="4"/>',
     'group': '<g transform="translate(1,2)"><rect width="3" height="4"/></g>',
+    'nested-transformed': '<svg x="2" y="3" width="10" height="5" viewBox="0 0 5 5" preserveAspectRatio="none" transform="translate(3,4)"><rect x="1" y="1" width="2" height="2"/></svg>',
+    'nested-group': '<g transform="translate(1,2)"><svg x="2" y="3" width="10" height="10" viewBox="0 0 5 5"><rect x="1" y="1" width="2" height="2"/></svg></g>',
+    'negative-extents': '<path d="M-2 -3 L4 7"/>',
     'nested-percent': '<svg x="10%" y="20%" width="50%" height="50%"><rect x="10%" y="20%" width="30%" height="40%"/></svg>',
     'nested-zero': '<svg x="2" y="3" width="0" height="10" viewBox="0 0 5 5"><rect x="1" y="1" width="2" height="2"/></svg>',
     'nested-zero-pct': '<svg x="2" y="3" width="0" height="10"><rect x="10%" y="20%" width="30%" height="40%"/></svg>',
@@ -84,14 +87,18 @@ u.setAttribute('x','10'); changed('mut-use-x',u);
 source.firstElementChild.setAttribute('width','6'); changed('mut-child-width',u);
 u.setAttribute('width','0'); changed('mut-zero-width',u);
 console.log(out.join('\\n'));''' % json.dumps(ids)
-    env = dict(os.environ, NODE_PATH=str(ROOT/'build/svg-oracle/node_modules'),
-               LD_LIBRARY_PATH=str(ROOT/'build/svg-oracle/runtime/lib') + ':' + os.environ.get('LD_LIBRARY_PATH', ''),
-               SVG_HTML=html, SVG_SCRIPT=script)
-    browser = subprocess.run(['node','-e',BROWSER], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60, check=True)
-    expected = json.loads(browser.stdout)
     with tempfile.TemporaryDirectory(prefix='svg-use-viewport-') as tmp:
         page, js = Path(tmp)/'page.html', Path(tmp)/'probe.js'
         page.write_text(html); js.write_text(script)
+        # Environment values have a per-string size limit; pass paths rather
+        # than the growing corpus and script as environment values.
+        env = dict(os.environ, NODE_PATH=str(ROOT/'build/svg-oracle/node_modules'),
+                   LD_LIBRARY_PATH=str(ROOT/'build/svg-oracle/runtime/lib') + ':' + os.environ.get('LD_LIBRARY_PATH', ''),
+                   SVG_HTML_FILE=str(page), SVG_SCRIPT_FILE=str(js))
+        browser_code = BROWSER.replace('process.env.SVG_HTML', "require('fs').readFileSync(process.env.SVG_HTML_FILE,'utf8')")
+        browser_code = browser_code.replace('process.env.SVG_SCRIPT', "require('fs').readFileSync(process.env.SVG_SCRIPT_FILE,'utf8')")
+        browser = subprocess.run(['node','-e',browser_code], cwd=ROOT, env=env, capture_output=True, text=True, timeout=60, check=True)
+        expected = json.loads(browser.stdout)
         run = subprocess.run([str(ROOT / args.binary),'--run-script',str(js),str(page)], cwd=ROOT, capture_output=True, text=True, timeout=120, check=True)
     actual = [line[6:] if line.startswith('PROBE ') else line for line in run.stdout.splitlines()]
     n = len(ids) + len(extra)

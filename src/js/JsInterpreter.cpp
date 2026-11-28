@@ -953,6 +953,7 @@ void JsInterpreter::init_builtins() {
         // without these constructors a worker simply had no objects to pass it.
         m_global_env->define("OffscreenCanvas", dom_realm.ctor("OffscreenCanvas"));
         m_global_env->define("Path2D", dom_realm.ctor("Path2D"));
+        m_global_env->define("ImageData", dom_realm.ctor("ImageData"));
     }
 
     // Worker built-in

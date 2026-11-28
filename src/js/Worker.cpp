@@ -1659,6 +1659,7 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     // above are mirrored. Bare names were installed by JsInterpreter.
     self_obj.set_property("OffscreenCanvas", env->get("OffscreenCanvas"));
     self_obj.set_property("Path2D", env->get("Path2D"));
+    self_obj.set_property("ImageData", env->get("ImageData"));
     self_obj.set_property("onmessage", JsValue::make_null());
     self_obj.set_property("onerror", JsValue::make_null());
 

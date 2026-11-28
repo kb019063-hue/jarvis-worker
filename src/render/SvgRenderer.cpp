@@ -2257,10 +2257,10 @@ BBox svg_map_bbox(const BBox& box, const TransformMatrix2D& matrix) {
 // The box of `el` and everything it draws below it, with every descendant's
 // `transform` applied and `el`'s own excluded.
 BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h, int depth,
-                   std::unordered_set<const Element*>& active) {
+                   std::unordered_set<const Element*>& active, bool referenced_symbol = false) {
     if (!el || depth > 64) return BBox();
     const std::string tag = to_lower_ascii(el->tag_name());
-    if (svg_is_unrendered_container(tag)) return BBox();
+    if (svg_is_unrendered_container(tag) && !(referenced_symbol && tag == "symbol")) return BBox();
 
     BBox box = svg_own_geometry(el, ref_w, ref_h);
     if (tag == "use") {
@@ -2269,15 +2269,36 @@ BBox svg_bbox_walk(const std::shared_ptr<Element>& el, float ref_w, float ref_h,
         if (!document || !get_href_attr(el, href)) return box;
         const std::string id = extract_fragment_id(href);
         auto target = id.empty() ? nullptr : document->get_element_by_id(id);
-        // Symbols and nested SVG viewports need their own viewBox handling.
-        if (!target || to_lower_ascii(target->tag_name()) == "symbol" ||
-            to_lower_ascii(target->tag_name()) == "svg") return box;
+        if (!target) return box;
+        const std::string target_tag = to_lower_ascii(target->tag_name());
+        // An <svg> target needs its own nested viewport handling.
+        if (target_tag == "svg") return box;
         if (!active.insert(target.get()).second) return box;
-        BBox target_box = svg_bbox_walk(target, ref_w, ref_h, depth + 1, active);
-        active.erase(target.get());
         std::string value;
-        if (get_attr_ci(target, "transform", value))
-            target_box = svg_map_bbox(target_box, parse_svg_transform(value));
+        BBox target_box;
+        if (target_tag == "symbol") {
+            // Match the painter's use viewport: percentages inside a valid
+            // viewBox resolve in that box, then its matrix maps into use space.
+            float w = ref_w, h = ref_h;
+            if (get_attr_ci(el, "width", value)) parse_float_value(value, w, ref_w);
+            if (get_attr_ci(el, "height", value)) parse_float_value(value, h, ref_h);
+            float inner_w = w, inner_h = h;
+            ViewBox vb;
+            if (get_attr_ci(target, "viewBox", value)) vb = parse_viewbox(value);
+            const bool maps_viewbox = vb.valid && w > 0 && h > 0;
+            if (maps_viewbox) { inner_w = vb.width; inner_h = vb.height; }
+            target_box = svg_bbox_walk(target, inner_w, inner_h, depth + 1, active, true);
+            if (maps_viewbox) {
+                std::string par;
+                get_attr_ci(target, "preserveAspectRatio", par);
+                target_box = svg_map_bbox(target_box, compute_viewbox_matrix(vb, w, h, par));
+            }
+        } else {
+            target_box = svg_bbox_walk(target, ref_w, ref_h, depth + 1, active);
+            if (get_attr_ci(target, "transform", value))
+                target_box = svg_map_bbox(target_box, parse_svg_transform(value));
+        }
+        active.erase(target.get());
         float x = 0, y = 0;
         if (get_attr_ci(el, "x", value)) parse_float_value(value, x, ref_w);
         if (get_attr_ci(el, "y", value)) parse_float_value(value, y, ref_h);

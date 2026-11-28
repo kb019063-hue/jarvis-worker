@@ -33,6 +33,16 @@ list, modal inertness and a legacy click handler. An older
 `div` as a keyboard stop; it now checks that Tab leaves no focus while direct
 click dispatch still works.
 
+Normal conformance, tree/XML differential and render checks pass. WPT reports
+9,570/9,824 with all 254 failures listed; the XML round trip is 3,000/3,000.
+`make fuzz` passes, as does `make deep DEEP_KINDS='--jobs 1'` (1,332 runs over
+465 pages). The ASan/UBSan build, verifiers, corpora, generated XML and fuzz
+pass, as do 882 sanitized deep-page runs with `--jobs 1`. With `TEST_OPT=-O0`,
+four non-deep sanitizer unit stretches pass 545/549 suites and 114 cross-origin
+checks pass. The four deep unit suites were not run locally because previous
+runs exceeded this sandbox's 3.8 GiB memory; CI must cover them. This is not a
+full local `make asan` pass.
+
 ## What remains open
 
 This is not the whole HTML focus-navigation algorithm. The retained candidate

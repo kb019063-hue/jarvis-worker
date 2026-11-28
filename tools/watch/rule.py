@@ -39,6 +39,12 @@ gets (.github/workflows/ci.yml), so every pushed head has them. A check that
 the short run skips must not be required: no pull request would have it.
 "Up to date" must be off because a lot lands several pull requests one after
 the other, each as it is: after the first, the rest are behind `main`.
+
+The person set it on 28 November 2026. Saved first at 11:22 UTC with every
+setting as asked and no target; GitHub said on saving "This ruleset does not
+target any resources and will not be applied", and this said the one thing
+to click (status 3). With the target, from 11:28 UTC, the answer here is 0.
+Both answers of GitHub are in the self-test as they came.
 """
 
 from __future__ import annotations
@@ -322,6 +328,29 @@ def self_test() -> int:
                   [dict(required(True, *sorted(WANTED)), ruleset_id=1)])[1:]], [1, True]),
         ("...a ruleset that is listed and holds nothing on main: not in force, and nothing made up",
          verdict({"protected": False}, [{"id": 1, "name": "main needs green CI", "enforcement": "disabled"}], {}, [])[1:], ([], False)),
+    ]
+    # The person's ruleset as GitHub gave it on 28 November 2026 at 11:29 UTC
+    # (`rulesets/28289311`, `rules/branches/main`, `branches/main`), and as
+    # it was at 11:24, saved without a target: no target, the one rule of
+    # the status checks, nothing applied to main, main not protected.
+    theirs_checks = {"type": "required_status_checks", "parameters": {
+        "do_not_enforce_on_create": False, "strict_required_status_checks_policy": False,
+        "required_status_checks": [{"context": "Documentation shape", "integration_id": 15368},
+                                   {"context": "Build & unit tests", "integration_id": 15368}]}}
+    theirs = {"name": "Rules", "target": "branch", "enforcement": "active", "bypass_actors": [], "current_user_can_bypass": "never",
+              "conditions": {"ref_name": {"exclude": [], "include": ["~DEFAULT_BRANCH"]}},
+              "rules": [theirs_checks, {"type": "deletion"}, {"type": "non_fast_forward"}]}
+    listed = [{"id": 28289311, "name": "Rules", "target": "branch", "enforcement": "active"}]
+    source = {"ruleset_source_type": "Repository", "ruleset_source": "kb019063-hue/jarvis-worker", "ruleset_id": 28289311}
+    applied = [dict(rule, **source) for rule in theirs["rules"]]
+    off = {"enabled": False, "required_status_checks": {"checks": [], "contexts": [], "enforcement_level": "off"}}
+    untargeted = dict(theirs, conditions={"ref_name": {"exclude": [], "include": []}}, rules=[theirs_checks])
+    cases += [
+        ("the person's ruleset as GitHub gave it at 11:29 on 28 November: in force, nothing to change",
+         verdict({"protected": True, "protection": off}, listed, {28289311: theirs}, applied)[1:], ([], True)),
+        ("...and five minutes before, saved with no target: that one thing to click, and not in force",
+         verdict({"protected": False, "protection": off}, listed, {28289311: untargeted}, [])[1:],
+         (["the ruleset \"Rules\" does not target main. Under \"Target branches\": Add target, Include default branch"], False)),
     ]
     failed = 0
     for name, got, wanted in cases:

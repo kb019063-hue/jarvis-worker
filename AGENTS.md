@@ -166,13 +166,12 @@ within the hour, and the first lot was started again four times.
        says and push. When CI is green on the new head it is taken again.
        **When the line says the conflict is in documents only** (a row of
        `AGENTS.md`, a line of `AUDIT.md`): merge `main`, resolve it as the
-       line says, and put `[skip ci]` in the message of the merge commit.
-       That head is taken at once, with no run of its own: its code is
-       the code that was green, and the run on the lot tests the merge.
-       `landed N` and `merge N` say so of such a head since 28 November.
-       Until then they answered "no CI run on its head commit", and that
-       morning #492's agent pushed an empty commit for a run, half a
-       minute before the lot was built. Do not: it moves the head;
+       line says, and push the merge **without** `[skip ci]`. That head
+       is taken at once, while its run is going, and lands when that run
+       and the lot's have both passed. Until 28 November, 11:28 UTC, such
+       a merge carried the mark and was taken with no run of its own.
+       Since that minute GitHub merges no head commit without one (the
+       rule the person set on `main`: "it reports BLOCKED", below);
      - no watch is on any more: go on as in the next point;
      - nothing yet: run it again. After an hour of that, end the turn and
        tell the person that #N is finished and with the landing session.
@@ -182,18 +181,25 @@ within the hour, and the first lot was started again four times.
      The third time leave #N as it is, finished and green, end the turn and
      tell the person: the next watch takes it.
    - **`not ready`, because GitHub will not merge it** ("it reports
-     BLOCKED"): the person has set a rule on `main`, and under it a head
-     commit is merged only when a run of its own has passed on it. A head
-     pushed with `[skip ci]` has none, whatever is said elsewhere here
-     about a merge of `main` that needs no run: push a commit without the
-     mark (an empty one will do) and let its run pass. **Never
-     `gh pr merge --admin`**, which `gh` itself offers then: that is the
-     rule switched off for one merge. (No such rule was on when this was
-     written, on 28 November: the person had been asked for one, "Merged
-     59 seconds after it was opened", below, and had said they would
-     try.) `python3 tools/watch/rule.py` reads back what rule is on
-     `main`, and says what in it would stop every merge or every lot;
-     its first lines are what the person was asked to set.
+     BLOCKED"): since 28 November, 11:28 UTC, a rule of the person's is
+     on `main`. GitHub merges a head commit only when `Build & unit
+     tests` and `Documentation shape` have passed on it, in a run of
+     its own; both are jobs of the short run that every push gets. A
+     head pushed with `[skip ci]` has no run: push a commit without the
+     mark (an empty one will do) and let its run pass. Taking the label
+     `lot` off, which starts every job on any other head, starts nothing
+     on that one. Asked all the same, `gh pr merge` answers "the base
+     branch policy prohibits the merge" and offers two flags. **Never
+     `--admin`**: that is the rule switched off for one merge. **And not
+     `--auto`**: that has GitHub merge by itself once the two checks have
+     passed, on the short run alone and at a time nobody chose. Every
+     claim reports BLOCKED, since its pushes carry the mark and its head
+     has no run: nothing of this is said of a pull request that is a
+     draft or under `WIP:`.
+     `python3 tools/watch/rule.py` reads back what rule is on `main`,
+     and says what in it would stop every merge or every lot; its first
+     lines are what the person was asked to set ("Merged 59 seconds
+     after it was opened", below, is why).
 
    A title without `WIP:` on a green pull request says "land this", to
    whoever is landing. Keep `WIP:` on until the work is finished, and put
@@ -249,19 +255,27 @@ within the hour, and the first lot was started again four times.
      take): then it is carried, if it can be (below), or it waits for the
      person, who learns of it from the report at the end;
    - **a pull request that went back for a conflict in documents comes
-     back without a run.** Its new head is `main` merged into the head
-     that was green, with `[skip ci]`. The landing session checks that
-     (the first parent is the head it sent back, the second is on `main`,
-     and the merge differs from the one git makes alone only in the
-     documents that were in conflict) and takes it into the next lot. On
-     23 November four pull requests went back for one row or one line
-     each and landed 46 to 80 minutes later, most of that a CI run on a
-     merge that had changed no code of theirs;
+     back with its run still going**, and is taken so (the next point).
+     Its new head is `main` merged into the head that was green, pushed
+     without `[skip ci]`. From 23 to 28 November it came back under the
+     mark and was taken with no run of its own, after the landing
+     session had checked the merge (the first parent the head it sent
+     back, the second on `main`, and nothing but the documents in
+     conflict different from the merge git makes alone): on 23 November
+     four pull requests had gone back for one row or one line each and
+     landed 46 to 80 minutes later, most of that a CI run on a merge
+     that had changed no code of theirs. The rule on `main` wants that
+     run again, the short one, and it goes beside the lot's. `cands`
+     says of a head that still comes back under the mark that GitHub
+     would refuse it, and what its agent has to be told;
    - **a finished pull request is taken while its own run is still
      going.** Until 24 November it had to be green on its own head first,
      which put a run's length, 10 to 13 minutes that night, in front of
      the run on the lot. Now the two go side by side, and it lands when
-     the lot's has passed. If its own run fails, `watch.sh lot` says so
+     the lot's has passed, and under the rule on `main` when its own has
+     passed too: GitHub reports BLOCKED until then, and `watch.sh land`
+     merges nothing of a lot while it says that of one of its pull
+     requests. If its own run fails, `watch.sh lot` says so
      and the lot is built again without it: the innocent ones in that lot
      lose the minutes it had run, and that is the price. A head with no
      run at all is not taken this way (a claim's empty commit under a
@@ -274,7 +288,8 @@ within the hour, and the first lot was started again four times.
      `main` itself, or finished a write-up, or took a line out of
      `AUDIT.md`. The lot is `main` with that head merged in, the same
      tree whether its own run has ended or not. A head with a failed run
-     is not taken;
+     is not taken. Nor, since the rule is on `main`, a head with no run
+     at all, which is what a last push under `[skip ci]` leaves;
    - **a head that moves under a lot does not always end the lot.** When
      its agent only merged `main` into it, `main` and the heads as they
      are now still give the tree the run is testing; `watch.sh rehead`
@@ -552,7 +567,8 @@ without one, and leaves the board and a watch out of the claims.
    pull request can be read by whoever comes after you, your chat only
    by the person, who then carries it by hand (#367). **The last push,
    the one `WIP:` comes off after, has no `[skip ci]`**: a head commit
-   without a run is finished for nobody.
+   without a run is finished for nobody, and since 28 November GitHub
+   does not merge one ("it reports BLOCKED", "Working together").
    **When a push fails, the work is still only in the sandbox.** Try
    again, then try `gh`, which talks to another host than `git push`
    does: `git diff origin/main > /tmp/p.diff`, and the diff as a comment
@@ -1041,6 +1057,18 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   not begun to be merged when GitHub would refuse one of its pull
   requests: `main` with half a lot is a tree no run passed on. Tried
   with a `gh` that made GitHub's answers up; no rule was on.
+  **The rule is on since 28 November, 11:28 UTC**: the person set a
+  ruleset on `main` that wants `Build & unit tests` and `Documentation
+  shape` passed on the head commit, with nobody on its bypass list. At
+  11:34 the landing session asked GitHub to merge its own pull request
+  (#520, ready, its head an empty commit under `[skip ci]`, the tree
+  `main`'s own): "the base branch policy prohibits the merge". What
+  #449 did cannot be done again. The first merges under the rule were
+  #521 at 11:51 and #526 at 11:58, each out of a lot, with the two
+  checks passed on its own head. What the rule does not ask: `WIP:` in
+  a title (a draft is what stops that merge), every job of CI (the
+  short run is enough for GitHub; `check_pr.py merge N` asks for the
+  rest), and whether a watch is on.
   **It happened again on 28 November, to #491**, at 07:42:34: `WIP:` in
   its title, a watch on since 07:30, and on its head the short run
   alone, which is what a push gets. `main` moved under the lot in test,

@@ -34,7 +34,14 @@ the pinned one documented in Phase 433. The existing `verify_svg_bbox.py`
 improves **47/49 to 48/49**, the remaining difference being the pre-existing
 `defs.getBBox` interface mismatch. Reverting the implementation makes
 `tests/suites/502-degenerate-symbol-instance-boxes.cpp` fail at its first box
-assertion; restoring it passes.
+assertion; restoring it passes. Three narrower mutations also fail the suite:
+removing the negative viewport clamp, dropping the nested-use context, and
+misclassifying a non-origin point mapped to the origin. `make test` passed
+**536/536**, and the deep-page run passed **1332/1332**. The normal sanitizer
+harness compile exceeded this sandbox's 3.8 GiB; with the test harness built
+using `TEST_OPT="-O0 -g1"`, its new suite passes under ASan. The ASan engine
+also passes the 466-case Chromium differential. Full sanitizer CI is still
+required; these focused checks do not stand in for it.
 
 ## Still open
 

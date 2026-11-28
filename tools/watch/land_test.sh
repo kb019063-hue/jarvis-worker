@@ -178,11 +178,18 @@ try "main moved since the lot was built: nothing merged" 1 "MAIN MOVED" "" anoth
 # Under the rule on main. #8 was taken while its own run was going, the
 # lot's run has passed, and #8's has not yet: GitHub says BLOCKED of it.
 world && checks "$(jq -r .headRefOid "$W/pr8.json")" going && pr 8 mergeStateStatus '"BLOCKED"'
-try "a member's own run is still going under the rule (BLOCKED): nothing merged, the one before it neither" 6 \
-    "STOP, nothing merged: #8: GitHub reports BLOCKED: the rule on main wants a passed run on its head" "" before
+try "a member's own run is still going under the rule (BLOCKED): the lot is not READY, and nothing is merged, the one before it neither" 1 \
+    "#8's own run is still going" "" before
 same "...and GitHub was not asked to merge anything" "$(grep -c '^pr merge' "$W/calls")" "0"
+same "...\`lot\` says it as a run that is still going (4), so that \`wait\` waits for it (#547, 28 November)" \
+     "$(cd "$W/clone" && "$script" lot > /dev/null 2>&1; echo $?)" "4"
 checks "$(jq -r .headRefOid "$W/pr8.json")" short; pr 8 mergeStateStatus '"CLEAN"'
 try "...and when that run has passed, the same command lands both" 0 "its tree is the lot's" "7 8" lot
+# BLOCKED with nothing going on its head: \`lot\` has no run to wait for, and
+# \`land\` asks GitHub of every member itself before the first merge.
+world && pr 8 mergeStateStatus '"BLOCKED"'
+try "GitHub reports BLOCKED of a member whose run passed (a rule that wants something else): nothing merged, and the person is to be told" 6 \
+    "STOP, nothing merged: #8: GitHub reports BLOCKED though the run on its head" "" before
 world && checks "$(jq -r .headRefOid "$W/pr8.json")" failed
 try "a member's own run failed after it was taken: nothing merged, and the lot is to be built again without it" 1 "#8's own run failed" "" before
 world && rm "$W/checks.$(jq -r .headRefOid "$W/pr8.json")" && pr 8 mergeStateStatus '"BLOCKED"'

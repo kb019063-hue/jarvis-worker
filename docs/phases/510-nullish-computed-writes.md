@@ -55,3 +55,7 @@ witnesses passed individually in the instrumented engine. The local `make
 deep` run was started after that, then stopped before completion; the full
 sanitizer and deep checks remain required in CI.
 `make fuzz` subsequently passed with the instrumented engine.
+
+After merging main, `make test` passes 553 suites and 114 cross-origin
+checks; the bytecode oracle remains 172/172, JS conformance 1153/1158,
+and the other conformance, differential and documentation checks pass.

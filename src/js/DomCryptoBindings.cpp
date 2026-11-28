@@ -1266,6 +1266,14 @@ void setup_subtle_crypto(Iface& I) {
         if (hash_alg != "sha-1" && hash_alg != "sha-256" && hash_alg != "sha-384" && hash_alg != "sha-512") {
             return reject_with("NotSupportedError", "SubtleCrypto.importKey: unsupported HMAC hash '" + hash_alg + "'.");
         }
+        if (fmt == "jwk" && !jwk_alg.empty()) {
+            std::string expected = hash_alg == "sha-1" ? "HS1"
+                                 : hash_alg == "sha-256" ? "HS256"
+                                 : hash_alg == "sha-384" ? "HS384" : "HS512";
+            if (jwk_alg != expected) {
+                return reject_with("DataError", "SubtleCrypto.importKey: JWK alg '" + jwk_alg + "' does not match " + expected + ".");
+            }
+        }
         auto state = std::make_shared<CryptoKeyState>();
         state->extractable = args[3].is_truthy();
         state->hash_alg = hash_alg;
@@ -1486,7 +1494,8 @@ void setup_subtle_crypto(Iface& I) {
             jwk.set_property("kty", str("oct"));
             jwk.set_property("k", str(base64url_encode(key->key_bytes)));
             jwk.set_property("ext", boolean(key->extractable));
-            if (key->hash_alg == "sha-256") jwk.set_property("alg", str("HS256"));
+            if (key->hash_alg == "sha-1") jwk.set_property("alg", str("HS1"));
+            else if (key->hash_alg == "sha-256") jwk.set_property("alg", str("HS256"));
             else if (key->hash_alg == "sha-384") jwk.set_property("alg", str("HS384"));
             else if (key->hash_alg == "sha-512") jwk.set_property("alg", str("HS512"));
             else if (key->hash_alg == "aes-gcm") {

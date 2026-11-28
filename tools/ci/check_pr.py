@@ -155,6 +155,7 @@ uses, so the two cannot drift apart.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
@@ -1709,14 +1710,46 @@ def rewrites(last: Watch, until: datetime | None) -> bool:
     return until is None or last.until == until
 
 
-def board_comments(number: int | None) -> list[dict] | None:
-    """The comments of the board, oldest first; None when they cannot be read."""
+def board_comments(number: int | None, pauses: tuple[int, ...] = (0, 3, 8)) -> list[dict] | None:
+    """The comments of the board, oldest first; None when they cannot be read.
+
+    Asked three times before it gives up, a few seconds apart: one answer
+    that fails is GitHub's moment, not the board's (`board_state`).
+    """
     if number is None:
         return None
-    try:
-        return json.loads(gh("pr", "view", str(number), "--json", "comments", check=False))["comments"]
-    except (ValueError, KeyError):
-        return None
+    for pause in pauses:
+        time.sleep(pause)
+        try:
+            return json.loads(gh("pr", "view", str(number), "--json", "comments", check=False))["comments"]
+        except (ValueError, KeyError):
+            continue
+    return None
+
+
+def board_state(board: int | None, comments: list[dict] | None) -> str:
+    """`read`; `none`: there is no board, so no watch can be on; `unread`:
+    there is one, and its comments could not be read, so nothing is known.
+
+    The two were one answer until 28 November 2026, "the board could not be
+    read ... taken as none", and on it `merge N` started every job of CI
+    and said "ready", and `landed N` said "Merge it yourself". The board is
+    one pull request with some 450 comments, read whole by every agent that
+    waits, once a minute; one such read that fails is not a watch that has
+    ended. At 17:07:46 that day the label that starts every job was put on
+    #547 and taken off while a watch was on and #547 was in a lot, by a
+    command that does so only when it sees no watch, and the board said ON
+    with a look a minute old. Under the rule on `main` the run it started
+    held the lot for three minutes and a half. Whether a failed read was
+    why is not known; that it could have been was enough.
+    """
+    if board is None:
+        return "none"
+    return "unread" if comments is None else "read"
+
+
+UNREAD = ("the board (#{board}) could not be read, three times over, so it cannot be seen whether a watch is on. "
+          "Nothing was started, and nothing is to be merged on this answer: ask again in a minute")
 
 
 def now_utc() -> datetime:
@@ -1824,11 +1857,18 @@ def check_landed(number: int, wait: int) -> int:
             print(f"#{number} is {pr['state'].lower()}")
             return 1
         prs = gh_json("pr", "list", "--state", "open", "--limit", "100", "--json", "number,title")
-        comments = board_comments(board_number(prs))
-        if comments is None:
-            print("the board could not be read: no watch can be seen. Merge it yourself: "
-                  f"python3 tools/ci/check_pr.py merge {number}")
+        board = board_number(prs)
+        comments = board_comments(board)
+        if board_state(board, comments) == "none":
+            print("there is no board (an open pull request whose title begins with BOARD:), so no watch can be on. "
+                  f"Merge it yourself: python3 tools/ci/check_pr.py merge {number}")
             return 2
+        if comments is None:
+            if time.monotonic() >= deadline:
+                print(UNREAD.format(board=board) + f" (`python3 tools/ci/check_pr.py landed {number}`).")
+                return 3
+            time.sleep(min(60, max(1, deadline - time.monotonic())))
+            continue
         back = sent_back(comments, number)
         if back and pr["headRefOid"].startswith(back[0]):
             print(f"#{number} is yours again. The landing session wrote:\n\n{back[1]}\n\n"
@@ -1871,7 +1911,9 @@ def check_merge(number: int, landing: bool = False) -> int:
     # asked here is whether #N is something it takes. Not asked of a watch's
     # own pull request, nor when the landing session is the one asking.
     open_prs = open_pull_requests()
-    comments = board_comments(board_number(open_prs))
+    board = board_number(open_prs)
+    comments = board_comments(board)
+    unread = board_state(board, comments) == "unread" and not landing
     watch = watch_state(comments or [], now_utc())
     watch_on = watch.on and not landing and not NOT_A_CLAIM_RE.match(pr["title"])
 
@@ -1934,7 +1976,7 @@ def check_merge(number: int, landing: bool = False) -> int:
                     f"session takes #{number} while that run goes, and merges it when it and the lot's have passed")
     elif refusal:
         report.no(refusal)
-    if "short" in (head_state, ran_state) and not watch_on and not landing:
+    if "short" in (head_state, ran_state) and not watch_on and not landing and not unread:
         # No watch is on, so this agent merges, and the whole of CI has not
         # run on what it would merge. Every run of a pull request is short
         # (.github/workflows/ci.yml) but the one that taking a label off
@@ -2025,6 +2067,8 @@ def check_merge(number: int, landing: bool = False) -> int:
         if back and head.startswith(back[0]):
             report.no(f"the landing session sent it back at this head commit ({back[0][:7]}); what it wrote is on the "
                       f"board (`python3 tools/ci/check_pr.py landed {number}` prints it)")
+    if unread:
+        report.no(UNREAD.format(board=board))
     broken = main_run_note()
     if broken:
         report.note(f"!! {broken}")
@@ -2039,7 +2083,7 @@ def check_merge(number: int, landing: bool = False) -> int:
     if watch.state in ("over", "quiet"):
         report.note(watch.says())
     if comments is None:
-        report.note("the board could not be read, so no watch can be seen: taken as none")
+        report.note("there is no board (an open pull request whose title begins with BOARD:), so no watch can be on")
     print(f"\nready: gh pr merge {number} --merge, then watch `gh run list --branch main --limit 3` to the end "
           "(once a minute is enough)")
     return 0
@@ -2561,6 +2605,13 @@ def self_test() -> int:
          [(draft_note(7, title, is_draft) or "")[:76] for title, is_draft in (("WIP: a change", False), ("WIP: a change", True),
                                                                                ("A change", False), ("A change", True))],
          ["#7 is work in progress and no draft. Make it one now, `gh pr ready 7 --undo`", "", "", ""]),
+        ("a board that is not there is no watch; one that is there and was not read says nothing either way (#547)",
+         [board_state(board, comments) for board, comments in ((None, None), (219, None), (219, []), (219, [{"body": "x"}]))],
+         ["none", "unread", "read", "read"]),
+        ("...and what an agent is told then names the board and starts nothing",
+         UNREAD.format(board=219)[:60], "the board (#219) could not be read, three times over, so it "),
+        ("the board is asked three times before it is given up, and not at all when there is none",
+         (board_comments(None), len(inspect.signature(board_comments).parameters["pauses"].default)), (None, 3)),
         ("claim N of a claim that is right and a draft: ok, and nothing else",
          claim_end(7, "Phase 7, finding 7", False, None, lambda: 1 // 0),
          [("ok", "#7: Phase 7, finding 7; no earlier open pull request has its numbers or its files")]),

@@ -1448,6 +1448,18 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   went round CI once more in another. #481 was waiting for the next
   lot. Every command of the loop writes the look now when the last is
   five minutes old, and `watch.sh off` ends the watch.
+- **A board that could not be read was "no watch".** Every agent that
+  waits reads the whole board once a minute (some 450 comments on 28
+  November). When one read failed, `landed N` said "Merge it
+  yourself" and `merge N` started every job of CI and could say
+  "ready", watch or no watch. That day at 17:07:46 the label that
+  starts every job was put on #547 and taken off, five minutes after
+  it was taken into a lot; under the rule on `main` GitHub reported
+  BLOCKED until the build had passed on it again, and the lot, which
+  had passed, waited three minutes and a half. Whether a failed read
+  was the cause is not known. Now the board is asked three times,
+  and a board that is there and was not read is "ask again in a
+  minute": nothing is started and nothing is merged on it.
 - **A watch that stopped without saying so.** On 25 November the landing
   session's turn ended at 07:22 with a lot in test and the status line
   promising a watch until 08:15. #433 had been told at 07:22 that it would

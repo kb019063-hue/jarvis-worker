@@ -101,14 +101,14 @@ private:
     int m_protected_depth{0};
     int m_catch_depth{0};
     int m_finalizer_depth{0};
-    // Active try/finally scopes, outermost first. Catch handlers, loops and
-    // returns from catch/finally remain refused.
-    struct ReturnFinally {
+    // Active runtime handlers, outermost first. A null body denotes catch;
+    // loops and returns from catch/finally remain restricted.
+    struct ReturnHandler {
         const BlockStmt* body{nullptr};
         size_t locals{0};
         int scope_depth{0};
     };
-    std::vector<ReturnFinally> m_return_finalizers;
+    std::vector<ReturnHandler> m_return_handlers;
     int m_completion_slot{-1};
     std::vector<Loop> m_loops;
 };

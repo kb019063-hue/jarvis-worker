@@ -37,7 +37,6 @@ TEST(the_bytecode_vm_catches_exceptions) {
     // These require return-through-finalizer, pattern binding or control-flow
     // unwinding that is not implemented, so the compiler refuses them.
     for (const char* source : {"function f(){try{}finally{return 2}}f()", "try{throw [1]}catch([e]){e}",
-                               "function f(){try{return 1}catch(e){}}f()",
                                "while(true){try{throw 1}catch(e){break}}",
                                "try{throw 3}catch(e){function f(){return e}f()}"}) {
         TestPage page;

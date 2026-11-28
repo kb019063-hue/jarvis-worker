@@ -81,9 +81,17 @@ R="$(git remote get-url origin | sed -E 's#^.*github\.com[:/]##; s#\.git$##')"
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 BOARD="${CHECK_PR_BOARD:-$(timeout 30 gh pr list --state open --limit 100 --json number,title --jq '[.[] | select(.title | test("^BOARD:"))][0].number' 2>/dev/null)}"
 
+# What the check runs of a commit say, as one line: of each job the check run
+# that came last. A job that ran twice on one commit leaves two, and GitHub
+# goes by the later one. On 28 November two runs began on #522's head in one
+# second and the one cancelled the other (one run for a pull request,
+# .github/workflows/ci.yml): seven jobs cancelled, the same seven passed.
+# GitHub reported CLEAN. Counted all together they were "not green" here for
+# good, and on the head of a lot the same would have read as a job that
+# failed. (tools/watch/takeable_test.sh asks this of what GitHub answered.)
+RUNS_JQ='[.check_runs | group_by(.name)[] | max_by(.id) | "\(.status)/\(.conclusion)"] | group_by(.) | map("\(.[0]) x\(length)") | join(", ")'
 runs_of() {  # runs_of FULLSHA -> "completed/success x12" and the like
-  timeout 30 gh api "repos/$R/commits/$1/check-runs?per_page=100" \
-    --jq '[.check_runs[] | "\(.status)/\(.conclusion)"] | group_by(.) | map("\(.[0]) x\(length)") | join(", ")'
+  timeout 30 gh api "repos/$R/commits/$1/check-runs?per_page=100" --jq "$RUNS_JQ"
 }
 whole() {  # whole FULLSHA: every check run of it has ended in success, and there are ten or more
   local runs; runs="$(runs_of "$1")"
@@ -158,8 +166,13 @@ ruled_out() {  # ruled_out N FULLSHA [STATE]: GitHub refuses to merge #N as it i
   # merged, whatever the lot's run said: one that came back with main merged
   # under the mark that skips CI, one whose code was green a commit earlier,
   # one whose own run failed for a reason that is not its change. Written on
-  # 28 November, before any rule was on: tried with a `gh` that made the
-  # answers up, never against a rule.
+  # 28 November in the morning, against a `gh` that made the answers up. The
+  # person's rule was on main from 11:28 UTC that day, and BLOCKED was seen
+  # for the first time: of every head with no run on it, which was each
+  # claim, and the watch's own pull request when it was ready with no run,
+  # which `gh pr merge` then refused ("the base branch policy prohibits the
+  # merge", 11:34). #521, taken at 11:45 while its own run was going, was
+  # BLOCKED then and CLEAN a minute later, and `land` merged it at 11:51.
   local gs runs; gs="${3:-$(github_says "$1")}"
   case "$gs" in
     BLOCKED)
@@ -213,8 +226,15 @@ takeable() {  # takeable N FULLSHA; says why in $WHY
   runs="$(runs_of "$2")"
   case "$runs" in *failure*|*timed_out*) WHY="its own run failed"; return 1 ;; esac
   if came_back_without_a_run "$1" "$2" || code_was_green "$2"; then
-    ruled_out "$1" "$2" && return 1   # no passed run on this head, and a rule on main wants one
-    WHY="its code was green"; return 0
+    if ! ruled_out "$1" "$2"; then WHY="its code was green"; return 0; fi
+    # A rule on main wants a passed run on this head. With none at all it is
+    # not taken, and its agent is told to push without the mark ($WHY).
+    # With one that is going it is taken as any finished pull request is
+    # (below), and `land` waits for that run: a merge of main pushed without
+    # the mark, which is how a pull request comes back since the rule is on.
+    # (As this was written on the morning of 28 November, such a head was
+    # refused here with "wait for it", in a list of things to tell its agent.)
+    [[ "$runs" == *in_progress* || "$runs" == *queued* || "$runs" == *pending* ]] || return 1
   fi
   # A finished pull request whose own run is still going is taken as well
   # (WATCH_EAGER=0 turns that off): its run and the lot's go side by side, and

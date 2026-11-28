@@ -855,6 +855,145 @@ bool is_join_control(uint32_t cp) {
     return cp == 0x200Cu || cp == 0x200Du;
 }
 
+// Unicode 17.0 / HarfBuzz 15.0.0 (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`)
+// grapheme continuation ranges: `General_Category` in `{Mn, Mc, Me}` plus
+// `U+200D` (`ZWJ`), `U+FF9E..U+FF9F`, `U+1F3FB..U+1F3FF`, and `U+E0020..U+E007F`.
+// `U+200C` (`ZWNJ`) is deliberately excluded so it retains its own cluster.
+static constexpr unicode::tables::CpRange kGraphemeContinuationRanges[331] = {
+    {0x300u, 0x36Fu}, {0x483u, 0x489u}, {0x591u, 0x5BDu}, {0x5BFu, 0x5BFu}, {0x5C1u, 0x5C2u}, {0x5C4u, 0x5C5u},
+    {0x5C7u, 0x5C7u}, {0x610u, 0x61Au}, {0x64Bu, 0x65Fu}, {0x670u, 0x670u}, {0x6D6u, 0x6DCu}, {0x6DFu, 0x6E4u},
+    {0x6E7u, 0x6E8u}, {0x6EAu, 0x6EDu}, {0x711u, 0x711u}, {0x730u, 0x74Au}, {0x7A6u, 0x7B0u}, {0x7EBu, 0x7F3u},
+    {0x7FDu, 0x7FDu}, {0x816u, 0x819u}, {0x81Bu, 0x823u}, {0x825u, 0x827u}, {0x829u, 0x82Du}, {0x859u, 0x85Bu},
+    {0x897u, 0x89Fu}, {0x8CAu, 0x8E1u}, {0x8E3u, 0x903u}, {0x93Au, 0x93Cu}, {0x93Eu, 0x94Fu}, {0x951u, 0x957u},
+    {0x962u, 0x963u}, {0x981u, 0x983u}, {0x9BCu, 0x9BCu}, {0x9BEu, 0x9C4u}, {0x9C7u, 0x9C8u}, {0x9CBu, 0x9CDu},
+    {0x9D7u, 0x9D7u}, {0x9E2u, 0x9E3u}, {0x9FEu, 0x9FEu}, {0xA01u, 0xA03u}, {0xA3Cu, 0xA3Cu}, {0xA3Eu, 0xA42u},
+    {0xA47u, 0xA48u}, {0xA4Bu, 0xA4Du}, {0xA51u, 0xA51u}, {0xA70u, 0xA71u}, {0xA75u, 0xA75u}, {0xA81u, 0xA83u},
+    {0xABCu, 0xABCu}, {0xABEu, 0xAC5u}, {0xAC7u, 0xAC9u}, {0xACBu, 0xACDu}, {0xAE2u, 0xAE3u}, {0xAFAu, 0xAFFu},
+    {0xB01u, 0xB03u}, {0xB3Cu, 0xB3Cu}, {0xB3Eu, 0xB44u}, {0xB47u, 0xB48u}, {0xB4Bu, 0xB4Du}, {0xB55u, 0xB57u},
+    {0xB62u, 0xB63u}, {0xB82u, 0xB82u}, {0xBBEu, 0xBC2u}, {0xBC6u, 0xBC8u}, {0xBCAu, 0xBCDu}, {0xBD7u, 0xBD7u},
+    {0xC00u, 0xC04u}, {0xC3Cu, 0xC3Cu}, {0xC3Eu, 0xC44u}, {0xC46u, 0xC48u}, {0xC4Au, 0xC4Du}, {0xC55u, 0xC56u},
+    {0xC62u, 0xC63u}, {0xC81u, 0xC83u}, {0xCBCu, 0xCBCu}, {0xCBEu, 0xCC4u}, {0xCC6u, 0xCC8u}, {0xCCAu, 0xCCDu},
+    {0xCD5u, 0xCD6u}, {0xCE2u, 0xCE3u}, {0xCF3u, 0xCF3u}, {0xD00u, 0xD03u}, {0xD3Bu, 0xD3Cu}, {0xD3Eu, 0xD44u},
+    {0xD46u, 0xD48u}, {0xD4Au, 0xD4Du}, {0xD57u, 0xD57u}, {0xD62u, 0xD63u}, {0xD81u, 0xD83u}, {0xDCAu, 0xDCAu},
+    {0xDCFu, 0xDD4u}, {0xDD6u, 0xDD6u}, {0xDD8u, 0xDDFu}, {0xDF2u, 0xDF3u}, {0xE31u, 0xE31u}, {0xE34u, 0xE3Au},
+    {0xE47u, 0xE4Eu}, {0xEB1u, 0xEB1u}, {0xEB4u, 0xEBCu}, {0xEC8u, 0xECEu}, {0xF18u, 0xF19u}, {0xF35u, 0xF35u},
+    {0xF37u, 0xF37u}, {0xF39u, 0xF39u}, {0xF3Eu, 0xF3Fu}, {0xF71u, 0xF84u}, {0xF86u, 0xF87u}, {0xF8Du, 0xF97u},
+    {0xF99u, 0xFBCu}, {0xFC6u, 0xFC6u}, {0x102Bu, 0x103Eu}, {0x1056u, 0x1059u}, {0x105Eu, 0x1060u}, {0x1062u, 0x1064u},
+    {0x1067u, 0x106Du}, {0x1071u, 0x1074u}, {0x1082u, 0x108Du}, {0x108Fu, 0x108Fu}, {0x109Au, 0x109Du}, {0x135Du, 0x135Fu},
+    {0x1712u, 0x1715u}, {0x1732u, 0x1734u}, {0x1752u, 0x1753u}, {0x1772u, 0x1773u}, {0x17B4u, 0x17D3u}, {0x17DDu, 0x17DDu},
+    {0x180Bu, 0x180Du}, {0x180Fu, 0x180Fu}, {0x1885u, 0x1886u}, {0x18A9u, 0x18A9u}, {0x1920u, 0x192Bu}, {0x1930u, 0x193Bu},
+    {0x1A17u, 0x1A1Bu}, {0x1A55u, 0x1A5Eu}, {0x1A60u, 0x1A7Cu}, {0x1A7Fu, 0x1A7Fu}, {0x1AB0u, 0x1ADDu}, {0x1AE0u, 0x1AEBu},
+    {0x1B00u, 0x1B04u}, {0x1B34u, 0x1B44u}, {0x1B6Bu, 0x1B73u}, {0x1B80u, 0x1B82u}, {0x1BA1u, 0x1BADu}, {0x1BE6u, 0x1BF3u},
+    {0x1C24u, 0x1C37u}, {0x1CD0u, 0x1CD2u}, {0x1CD4u, 0x1CE8u}, {0x1CEDu, 0x1CEDu}, {0x1CF4u, 0x1CF4u}, {0x1CF7u, 0x1CF9u},
+    {0x1DC0u, 0x1DFFu}, {0x200Du, 0x200Du}, {0x20D0u, 0x20F0u}, {0x2CEFu, 0x2CF1u}, {0x2D7Fu, 0x2D7Fu}, {0x2DE0u, 0x2DFFu},
+    {0x302Au, 0x302Fu}, {0x3099u, 0x309Au}, {0xA66Fu, 0xA672u}, {0xA674u, 0xA67Du}, {0xA69Eu, 0xA69Fu}, {0xA6F0u, 0xA6F1u},
+    {0xA802u, 0xA802u}, {0xA806u, 0xA806u}, {0xA80Bu, 0xA80Bu}, {0xA823u, 0xA827u}, {0xA82Cu, 0xA82Cu}, {0xA880u, 0xA881u},
+    {0xA8B4u, 0xA8C5u}, {0xA8E0u, 0xA8F1u}, {0xA8FFu, 0xA8FFu}, {0xA926u, 0xA92Du}, {0xA947u, 0xA953u}, {0xA980u, 0xA983u},
+    {0xA9B3u, 0xA9C0u}, {0xA9E5u, 0xA9E5u}, {0xAA29u, 0xAA36u}, {0xAA43u, 0xAA43u}, {0xAA4Cu, 0xAA4Du}, {0xAA7Bu, 0xAA7Du},
+    {0xAAB0u, 0xAAB0u}, {0xAAB2u, 0xAAB4u}, {0xAAB7u, 0xAAB8u}, {0xAABEu, 0xAABFu}, {0xAAC1u, 0xAAC1u}, {0xAAEBu, 0xAAEFu},
+    {0xAAF5u, 0xAAF6u}, {0xABE3u, 0xABEAu}, {0xABECu, 0xABEDu}, {0xFB1Eu, 0xFB1Eu}, {0xFE00u, 0xFE0Fu}, {0xFE20u, 0xFE2Fu},
+    {0xFF9Eu, 0xFF9Fu}, {0x101FDu, 0x101FDu}, {0x102E0u, 0x102E0u}, {0x10376u, 0x1037Au}, {0x10A01u, 0x10A03u}, {0x10A05u, 0x10A06u},
+    {0x10A0Cu, 0x10A0Fu}, {0x10A38u, 0x10A3Au}, {0x10A3Fu, 0x10A3Fu}, {0x10AE5u, 0x10AE6u}, {0x10D24u, 0x10D27u}, {0x10D69u, 0x10D6Du},
+    {0x10EABu, 0x10EACu}, {0x10EFAu, 0x10EFFu}, {0x10F46u, 0x10F50u}, {0x10F82u, 0x10F85u}, {0x11000u, 0x11002u}, {0x11038u, 0x11046u},
+    {0x11070u, 0x11070u}, {0x11073u, 0x11074u}, {0x1107Fu, 0x11082u}, {0x110B0u, 0x110BAu}, {0x110C2u, 0x110C2u}, {0x11100u, 0x11102u},
+    {0x11127u, 0x11134u}, {0x11145u, 0x11146u}, {0x11173u, 0x11173u}, {0x11180u, 0x11182u}, {0x111B3u, 0x111C0u}, {0x111C9u, 0x111CCu},
+    {0x111CEu, 0x111CFu}, {0x1122Cu, 0x11237u}, {0x1123Eu, 0x1123Eu}, {0x11241u, 0x11241u}, {0x112DFu, 0x112EAu}, {0x11300u, 0x11303u},
+    {0x1133Bu, 0x1133Cu}, {0x1133Eu, 0x11344u}, {0x11347u, 0x11348u}, {0x1134Bu, 0x1134Du}, {0x11357u, 0x11357u}, {0x11362u, 0x11363u},
+    {0x11366u, 0x1136Cu}, {0x11370u, 0x11374u}, {0x113B8u, 0x113C0u}, {0x113C2u, 0x113C2u}, {0x113C5u, 0x113C5u}, {0x113C7u, 0x113CAu},
+    {0x113CCu, 0x113D0u}, {0x113D2u, 0x113D2u}, {0x113E1u, 0x113E2u}, {0x11435u, 0x11446u}, {0x1145Eu, 0x1145Eu}, {0x114B0u, 0x114C3u},
+    {0x115AFu, 0x115B5u}, {0x115B8u, 0x115C0u}, {0x115DCu, 0x115DDu}, {0x11630u, 0x11640u}, {0x116ABu, 0x116B7u}, {0x1171Du, 0x1172Bu},
+    {0x1182Cu, 0x1183Au}, {0x11930u, 0x11935u}, {0x11937u, 0x11938u}, {0x1193Bu, 0x1193Eu}, {0x11940u, 0x11940u}, {0x11942u, 0x11943u},
+    {0x119D1u, 0x119D7u}, {0x119DAu, 0x119E0u}, {0x119E4u, 0x119E4u}, {0x11A01u, 0x11A0Au}, {0x11A33u, 0x11A39u}, {0x11A3Bu, 0x11A3Eu},
+    {0x11A47u, 0x11A47u}, {0x11A51u, 0x11A5Bu}, {0x11A8Au, 0x11A99u}, {0x11B60u, 0x11B67u}, {0x11C2Fu, 0x11C36u}, {0x11C38u, 0x11C3Fu},
+    {0x11C92u, 0x11CA7u}, {0x11CA9u, 0x11CB6u}, {0x11D31u, 0x11D36u}, {0x11D3Au, 0x11D3Au}, {0x11D3Cu, 0x11D3Du}, {0x11D3Fu, 0x11D45u},
+    {0x11D47u, 0x11D47u}, {0x11D8Au, 0x11D8Eu}, {0x11D90u, 0x11D91u}, {0x11D93u, 0x11D97u}, {0x11EF3u, 0x11EF6u}, {0x11F00u, 0x11F01u},
+    {0x11F03u, 0x11F03u}, {0x11F34u, 0x11F3Au}, {0x11F3Eu, 0x11F42u}, {0x11F5Au, 0x11F5Au}, {0x13440u, 0x13440u}, {0x13447u, 0x13455u},
+    {0x1611Eu, 0x1612Fu}, {0x16AF0u, 0x16AF4u}, {0x16B30u, 0x16B36u}, {0x16F4Fu, 0x16F4Fu}, {0x16F51u, 0x16F87u}, {0x16F8Fu, 0x16F92u},
+    {0x16FE4u, 0x16FE4u}, {0x16FF0u, 0x16FF1u}, {0x1BC9Du, 0x1BC9Eu}, {0x1CF00u, 0x1CF2Du}, {0x1CF30u, 0x1CF46u}, {0x1D165u, 0x1D169u},
+    {0x1D16Du, 0x1D172u}, {0x1D17Bu, 0x1D182u}, {0x1D185u, 0x1D18Bu}, {0x1D1AAu, 0x1D1ADu}, {0x1D242u, 0x1D244u}, {0x1DA00u, 0x1DA36u},
+    {0x1DA3Bu, 0x1DA6Cu}, {0x1DA75u, 0x1DA75u}, {0x1DA84u, 0x1DA84u}, {0x1DA9Bu, 0x1DA9Fu}, {0x1DAA1u, 0x1DAAFu}, {0x1E000u, 0x1E006u},
+    {0x1E008u, 0x1E018u}, {0x1E01Bu, 0x1E021u}, {0x1E023u, 0x1E024u}, {0x1E026u, 0x1E02Au}, {0x1E08Fu, 0x1E08Fu}, {0x1E130u, 0x1E136u},
+    {0x1E2AEu, 0x1E2AEu}, {0x1E2ECu, 0x1E2EFu}, {0x1E4ECu, 0x1E4EFu}, {0x1E5EEu, 0x1E5EFu}, {0x1E6E3u, 0x1E6E3u}, {0x1E6E6u, 0x1E6E6u},
+    {0x1E6EEu, 0x1E6EFu}, {0x1E6F5u, 0x1E6F5u}, {0x1E8D0u, 0x1E8D6u}, {0x1E944u, 0x1E94Au}, {0x1F3FBu, 0x1F3FFu}, {0xE0020u, 0xE007Fu},
+    {0xE0100u, 0xE01EFu},
+};
+
+static constexpr unicode::tables::CpRange kExtendedPictographicRanges[156] = {
+    {0xA9u, 0xA9u}, {0xAEu, 0xAEu}, {0x203Cu, 0x203Cu}, {0x2049u, 0x2049u}, {0x2122u, 0x2122u}, {0x2139u, 0x2139u},
+    {0x2194u, 0x2199u}, {0x21A9u, 0x21AAu}, {0x231Au, 0x231Bu}, {0x2328u, 0x2328u}, {0x23CFu, 0x23CFu}, {0x23E9u, 0x23F3u},
+    {0x23F8u, 0x23FAu}, {0x24C2u, 0x24C2u}, {0x25AAu, 0x25ABu}, {0x25B6u, 0x25B6u}, {0x25C0u, 0x25C0u}, {0x25FBu, 0x25FEu},
+    {0x2600u, 0x2604u}, {0x260Eu, 0x260Eu}, {0x2611u, 0x2611u}, {0x2614u, 0x2615u}, {0x2618u, 0x2618u}, {0x261Du, 0x261Du},
+    {0x2620u, 0x2620u}, {0x2622u, 0x2623u}, {0x2626u, 0x2626u}, {0x262Au, 0x262Au}, {0x262Eu, 0x262Fu}, {0x2638u, 0x263Au},
+    {0x2640u, 0x2640u}, {0x2642u, 0x2642u}, {0x2648u, 0x2653u}, {0x265Fu, 0x2660u}, {0x2663u, 0x2663u}, {0x2665u, 0x2666u},
+    {0x2668u, 0x2668u}, {0x267Bu, 0x267Bu}, {0x267Eu, 0x267Fu}, {0x2692u, 0x2697u}, {0x2699u, 0x2699u}, {0x269Bu, 0x269Cu},
+    {0x26A0u, 0x26A1u}, {0x26A7u, 0x26A7u}, {0x26AAu, 0x26ABu}, {0x26B0u, 0x26B1u}, {0x26BDu, 0x26BEu}, {0x26C4u, 0x26C5u},
+    {0x26C8u, 0x26C8u}, {0x26CEu, 0x26CFu}, {0x26D1u, 0x26D1u}, {0x26D3u, 0x26D4u}, {0x26E9u, 0x26EAu}, {0x26F0u, 0x26F5u},
+    {0x26F7u, 0x26FAu}, {0x26FDu, 0x26FDu}, {0x2702u, 0x2702u}, {0x2705u, 0x2705u}, {0x2708u, 0x270Du}, {0x270Fu, 0x270Fu},
+    {0x2712u, 0x2712u}, {0x2714u, 0x2714u}, {0x2716u, 0x2716u}, {0x271Du, 0x271Du}, {0x2721u, 0x2721u}, {0x2728u, 0x2728u},
+    {0x2733u, 0x2734u}, {0x2744u, 0x2744u}, {0x2747u, 0x2747u}, {0x274Cu, 0x274Cu}, {0x274Eu, 0x274Eu}, {0x2753u, 0x2755u},
+    {0x2757u, 0x2757u}, {0x2763u, 0x2764u}, {0x2795u, 0x2797u}, {0x27A1u, 0x27A1u}, {0x27B0u, 0x27B0u}, {0x27BFu, 0x27BFu},
+    {0x2934u, 0x2935u}, {0x2B05u, 0x2B07u}, {0x2B1Bu, 0x2B1Cu}, {0x2B50u, 0x2B50u}, {0x2B55u, 0x2B55u}, {0x3030u, 0x3030u},
+    {0x303Du, 0x303Du}, {0x3297u, 0x3297u}, {0x3299u, 0x3299u}, {0x1F004u, 0x1F004u}, {0x1F02Cu, 0x1F02Fu}, {0x1F094u, 0x1F09Fu},
+    {0x1F0AFu, 0x1F0B0u}, {0x1F0C0u, 0x1F0C0u}, {0x1F0CFu, 0x1F0D0u}, {0x1F0F6u, 0x1F0FFu}, {0x1F170u, 0x1F171u}, {0x1F17Eu, 0x1F17Fu},
+    {0x1F18Eu, 0x1F18Eu}, {0x1F191u, 0x1F19Au}, {0x1F1AEu, 0x1F1E5u}, {0x1F201u, 0x1F20Fu}, {0x1F21Au, 0x1F21Au}, {0x1F22Fu, 0x1F22Fu},
+    {0x1F232u, 0x1F23Au}, {0x1F23Cu, 0x1F23Fu}, {0x1F249u, 0x1F25Fu}, {0x1F266u, 0x1F321u}, {0x1F324u, 0x1F393u}, {0x1F396u, 0x1F397u},
+    {0x1F399u, 0x1F39Bu}, {0x1F39Eu, 0x1F3F0u}, {0x1F3F3u, 0x1F3F5u}, {0x1F3F7u, 0x1F3FAu}, {0x1F400u, 0x1F4FDu}, {0x1F4FFu, 0x1F53Du},
+    {0x1F549u, 0x1F54Eu}, {0x1F550u, 0x1F567u}, {0x1F56Fu, 0x1F570u}, {0x1F573u, 0x1F57Au}, {0x1F587u, 0x1F587u}, {0x1F58Au, 0x1F58Du},
+    {0x1F590u, 0x1F590u}, {0x1F595u, 0x1F596u}, {0x1F5A4u, 0x1F5A5u}, {0x1F5A8u, 0x1F5A8u}, {0x1F5B1u, 0x1F5B2u}, {0x1F5BCu, 0x1F5BCu},
+    {0x1F5C2u, 0x1F5C4u}, {0x1F5D1u, 0x1F5D3u}, {0x1F5DCu, 0x1F5DEu}, {0x1F5E1u, 0x1F5E1u}, {0x1F5E3u, 0x1F5E3u}, {0x1F5E8u, 0x1F5E8u},
+    {0x1F5EFu, 0x1F5EFu}, {0x1F5F3u, 0x1F5F3u}, {0x1F5FAu, 0x1F64Fu}, {0x1F680u, 0x1F6C5u}, {0x1F6CBu, 0x1F6D2u}, {0x1F6D5u, 0x1F6E5u},
+    {0x1F6E9u, 0x1F6E9u}, {0x1F6EBu, 0x1F6F0u}, {0x1F6F3u, 0x1F6FFu}, {0x1F7DAu, 0x1F7FFu}, {0x1F80Cu, 0x1F80Fu}, {0x1F848u, 0x1F84Fu},
+    {0x1F85Au, 0x1F85Fu}, {0x1F888u, 0x1F88Fu}, {0x1F8AEu, 0x1F8AFu}, {0x1F8BCu, 0x1F8BFu}, {0x1F8C2u, 0x1F8CFu}, {0x1F8D9u, 0x1F8FFu},
+    {0x1F90Cu, 0x1F93Au}, {0x1F93Cu, 0x1F945u}, {0x1F947u, 0x1F9FFu}, {0x1FA58u, 0x1FA5Fu}, {0x1FA6Eu, 0x1FAFFu}, {0x1FC00u, 0x1FFFDu},
+};
+
+bool is_grapheme_continuation(uint32_t cp) {
+    if (cp < 0x0300u) return false;
+    using unicode::tables::CpRange;
+    const auto* end = kGraphemeContinuationRanges + std::size(kGraphemeContinuationRanges);
+    const auto* r = std::lower_bound(kGraphemeContinuationRanges, end, cp,
+        [](const CpRange& range, uint32_t c) { return range.hi < c; });
+    return r != end && r->lo <= cp;
+}
+
+bool is_extended_pictographic(uint32_t cp) {
+    if (cp < 0x00A9u) return false;
+    using unicode::tables::CpRange;
+    const auto* end = kExtendedPictographicRanges + std::size(kExtendedPictographicRanges);
+    const auto* r = std::lower_bound(kExtendedPictographicRanges, end, cp,
+        [](const CpRange& range, uint32_t c) { return range.hi < c; });
+    return r != end && r->lo <= cp;
+}
+
+// HarfBuzz `hb_buffer_t::merge_clusters_impl` (`hb-buffer.cc:417-449`):
+// merges `[start, end)` to `min` cluster while extending backward/forward across
+// adjacent slots in `[slice_base, vec.size())` that shared the endpoint clusters
+// so monotone cluster ordering is preserved across reorders and ligations.
+template <typename SlotVec>
+void merge_slot_clusters(SlotVec& vec, std::size_t slice_base,
+                         std::size_t start, std::size_t end) {
+    if (start >= end || end > vec.size() || start < slice_base) return;
+    uint32_t cluster = vec[start].cluster;
+    for (std::size_t i = start + 1u; i < end; ++i) {
+        cluster = std::min(cluster, vec[i].cluster);
+    }
+    const uint32_t old_start_cluster = vec[start].cluster;
+    const uint32_t old_end_cluster = vec[end - 1u].cluster;
+    if (cluster != old_end_cluster) {
+        while (end < vec.size() && vec[end].cluster == old_end_cluster) {
+            ++end;
+        }
+    }
+    if (cluster != old_start_cluster) {
+        while (start > slice_base && vec[start - 1u].cluster == old_start_cluster) {
+            --start;
+        }
+    }
+    for (std::size_t i = start; i < end; ++i) {
+        vec[i].cluster = cluster;
+    }
+}
+
 bool is_default_ignorable(uint32_t cp) {
     const uint32_t plane = cp >> 16;
     if (plane == 0u) {
@@ -2600,6 +2739,22 @@ bool TrueTypeFont::apply_gsub_lookup_at(uint16_t lookup_index,
             if (ci < 0 || static_cast<std::size_t>(ci) >= st.sequences.size()) continue;
             const auto& seq = st.sequences[static_cast<std::size_t>(ci)];
             if (seq.empty()) {
+                const uint32_t cluster = run[pos].cluster;
+                const bool shared_left = (pos > 0u && run[pos - 1u].cluster == cluster);
+                const bool shared_right = (pos + 1u < run.size() && run[pos + 1u].cluster == cluster);
+                if (!shared_left && !shared_right) {
+                    if (pos > 0u) {
+                        if (cluster < run[pos - 1u].cluster) {
+                            const uint32_t old_prev = run[pos - 1u].cluster;
+                            std::size_t k = pos;
+                            while (k > 0u && run[k - 1u].cluster == old_prev) {
+                                run[--k].cluster = cluster;
+                            }
+                        }
+                    } else if (pos + 1u < run.size()) {
+                        merge_slot_clusters(run, 0u, 0u, 2u);
+                    }
+                }
                 run.erase(run.begin() + static_cast<std::ptrdiff_t>(pos));
                 out_next_pos = pos;
                 return true;
@@ -2653,6 +2808,7 @@ bool TrueTypeFont::apply_gsub_lookup_at(uint16_t lookup_index,
                 if (!matched) continue;
 
                 const std::size_t end_pos = comp_idx.back();
+                merge_slot_clusters(run, 0u, pos, end_pos + 1u);
                 const uint16_t lid = next_lig_id ? next_lig_id++ : 1u;
                 if (next_lig_id == 0) next_lig_id = 1u;
                 bool all_mark_components = !m_has_gdef_glyph_class;
@@ -3361,6 +3517,68 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
 
     const auto original_scripts = itemize_codepoint_scripts(original);
 
+    // HarfBuzz `hb_set_unicode_props` + `hb_form_clusters`
+    // (`HB_BUFFER_CLUSTER_LEVEL_MONOTONE_GRAPHEMES`, `hb-ot-shape.cc:295-408`):
+    // initialize 0-based codepoint cluster indices and merge UAX #29 grapheme
+    // continuations (`Mn`/`Mc`/`Me` marks, `ZWJ` + `Extended_Pictographic`,
+    // Regional Indicator pairs, Emoji modifiers, `U+FF9E..U+FF9F`, and Emoji
+    // tag characters; excluding `U+200C` `ZWNJ`) within each script slice.
+    std::vector<uint32_t> orig_clusters(original.size());
+    for (std::size_t i = 0; i < original.size(); ++i) {
+        orig_clusters[i] = static_cast<uint32_t>(i);
+    }
+    std::vector<uint8_t> orig_cont(original.size(), 0u);
+    for (std::size_t rs = 0; rs < original.size();) {
+        const uint32_t script = original_scripts[rs];
+        std::size_t re = rs + 1u;
+        while (re < original.size() && original_scripts[re] == script) ++re;
+        for (std::size_t i = rs; i < re; ++i) {
+            const uint32_t u = original[i];
+            if (u < 0x80u) continue;
+            if (u == 0x200Du) {
+                orig_cont[i] = 1u;
+                if (i + 1u < re && is_extended_pictographic(original[i + 1u])) {
+                    ++i;
+                    orig_cont[i] = 1u;
+                }
+            } else if (i > rs && u >= 0x1F1E6u && u <= 0x1F1FFu) {
+                if (original[i - 1u] >= 0x1F1E6u && original[i - 1u] <= 0x1F1FFu &&
+                    !orig_cont[i - 1u]) {
+                    orig_cont[i] = 1u;
+                }
+            } else if (is_grapheme_continuation(u)) {
+                orig_cont[i] = 1u;
+            }
+        }
+        for (std::size_t g = rs; g < re;) {
+            std::size_t ge = g + 1u;
+            while (ge < re && orig_cont[ge]) ++ge;
+            if (ge - g > 1u) {
+                const uint32_t cmin = orig_clusters[g];
+                for (std::size_t m = g + 1u; m < ge; ++m) orig_clusters[m] = cmin;
+            }
+            g = ge;
+        }
+        rs = re;
+    }
+    auto merge_orig_clusters = [&](std::size_t slice_lo, std::size_t slice_hi,
+                                   std::size_t start, std::size_t end) {
+        if (start >= end || end > slice_hi || start < slice_lo) return;
+        uint32_t c = orig_clusters[start];
+        for (std::size_t i = start + 1u; i < end; ++i) {
+            c = std::min(c, orig_clusters[i]);
+        }
+        const uint32_t old_s = orig_clusters[start];
+        const uint32_t old_e = orig_clusters[end - 1u];
+        if (c != old_e) {
+            while (end < slice_hi && orig_clusters[end] == old_e) ++end;
+        }
+        if (c != old_s) {
+            while (start > slice_lo && orig_clusters[start - 1u] == old_s) --start;
+        }
+        for (std::size_t i = start; i < end; ++i) orig_clusters[i] = c;
+    };
+
     // `_hb_ot_shaper_thai` (`preprocess_text_thai` + `do_thai_pua_shaping`) and
     // `_hb_ot_shaper_hangul` (`preprocess_text_hangul`): run per script slice
     // BEFORE `_hb_ot_shape_normalize`, retaining each slot's `prop_cp` Unicode
@@ -3370,6 +3588,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         uint32_t prop_cp;
         uint32_t script;
         uint8_t hangul_feat{0};
+        uint32_t cluster{0};
     };
     auto is_zero_width_hangul_char = [&](uint32_t cp) -> bool {
         const uint16_t gid = glyph_index(cp);
@@ -3384,28 +3603,37 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         std::size_t re = rs + 1u;
         while (re < original.size() && original_scripts[re] == script) ++re;
         if (script == kTagHang) {
+            const std::size_t hang_slice_start = pre.size();
             std::size_t start = pre.size();
             std::size_t end = start;
             for (std::size_t k = rs; k < re;) {
                 const uint32_t u = original[k];
                 if (is_hangul_tone(u)) {
+                    const uint32_t tc = orig_clusters[k];
                     ++k;
                     if (start < end && end == pre.size()) {
-                        pre.push_back({u, u, script, 0u});
+                        pre.push_back({u, u, script, 0u, tc});
+                        merge_slot_clusters(pre, hang_slice_start, start, pre.size());
+                        const uint32_t merged_c = pre[start].cluster;
+                        if (merged_c != tc) {
+                            for (std::size_t kk = k; kk < re && orig_clusters[kk] == tc; ++kk) {
+                                orig_clusters[kk] = merged_c;
+                            }
+                        }
                         if (!is_zero_width_hangul_char(u)) {
                             std::rotate(pre.begin() + static_cast<std::ptrdiff_t>(start),
                                         pre.end() - 1, pre.end());
                         }
                     } else if (glyph_index(0x25CCu) != 0) {
                         if (!is_zero_width_hangul_char(u)) {
-                            pre.push_back({u, u, script, 0u});
-                            pre.push_back({0x25CCu, 0x25CCu, script, 0u});
+                            pre.push_back({u, u, script, 0u, tc});
+                            pre.push_back({0x25CCu, 0x25CCu, script, 0u, tc});
                         } else {
-                            pre.push_back({0x25CCu, 0x25CCu, script, 0u});
-                            pre.push_back({u, u, script, 0u});
+                            pre.push_back({0x25CCu, 0x25CCu, script, 0u, tc});
+                            pre.push_back({u, u, script, 0u, tc});
                         }
                     } else {
-                        pre.push_back({u, u, script, 0u});
+                        pre.push_back({u, u, script, 0u, tc});
                     }
                     start = end = pre.size();
                     continue;
@@ -3423,23 +3651,26 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                             if (is_combining_hangul_t(t)) tindex = t - kHangulTBase;
                             else if (!is_hangul_t(t)) t = 0u;
                         }
+                        const std::size_t consumed = t ? 3u : 2u;
+                        merge_orig_clusters(rs, re, k, k + consumed);
+                        const uint32_t sc = orig_clusters[k];
                         if (is_combining_hangul_l(l) && is_combining_hangul_v(v) &&
                             (t == 0u || tindex != 0u)) {
                             const uint32_t s = kHangulSBase +
                                                (l - kHangulLBase) * kHangulNCount +
                                                (v - kHangulVBase) * kHangulTCount + tindex;
                             if (glyph_index(s) != 0) {
-                                pre.push_back({s, s, script, 0u});
-                                k += t ? 3u : 2u;
+                                pre.push_back({s, s, script, 0u, sc});
+                                k += consumed;
                                 end = start + 1u;
                                 continue;
                             }
                         }
-                        pre.push_back({l, l, script, 1u});
-                        pre.push_back({v, v, script, 2u});
-                        if (t) pre.push_back({t, t, script, 3u});
-                        k += t ? 3u : 2u;
-                        end = start + (t ? 3u : 2u);
+                        pre.push_back({l, l, script, 1u, sc});
+                        pre.push_back({v, v, script, 2u, sc});
+                        if (t) pre.push_back({t, t, script, 3u, sc});
+                        k += consumed;
+                        end = start + consumed;
                         continue;
                     }
                 } else if (is_combined_hangul_s(u)) {
@@ -3451,7 +3682,8 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                     if (!tindex && k + 1u < re && is_combining_hangul_t(original[k + 1u])) {
                         const uint32_t new_s = u + (original[k + 1u] - kHangulTBase);
                         if (glyph_index(new_s) != 0) {
-                            pre.push_back({new_s, new_s, script, 0u});
+                            merge_orig_clusters(rs, re, k, k + 2u);
+                            pre.push_back({new_s, new_s, script, 0u, orig_clusters[k]});
                             k += 2u;
                             end = start + 1u;
                             continue;
@@ -3465,14 +3697,17 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                         };
                         if (glyph_index(decomposed[0]) != 0 && glyph_index(decomposed[1]) != 0 &&
                             (!tindex || glyph_index(decomposed[2]) != 0)) {
+                            const std::size_t consumed = (!tindex && has_glyph) ? 2u : 1u;
+                            merge_orig_clusters(rs, re, k, k + consumed);
+                            const uint32_t sc = orig_clusters[k];
                             std::size_t s_len = tindex ? 3u : 2u;
-                            pre.push_back({decomposed[0], decomposed[0], script, 1u});
-                            pre.push_back({decomposed[1], decomposed[1], script, 2u});
+                            pre.push_back({decomposed[0], decomposed[0], script, 1u, sc});
+                            pre.push_back({decomposed[1], decomposed[1], script, 2u, sc});
                             if (tindex) {
-                                pre.push_back({decomposed[2], decomposed[2], script, 3u});
+                                pre.push_back({decomposed[2], decomposed[2], script, 3u, sc});
                                 ++k;
                             } else if (has_glyph) {
-                                pre.push_back({original[k + 1u], original[k + 1u], script, 3u});
+                                pre.push_back({original[k + 1u], original[k + 1u], script, 3u, sc});
                                 k += 2u;
                                 ++s_len;
                             } else {
@@ -3482,13 +3717,13 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                             continue;
                         }
                     }
-                    pre.push_back({u, u, script, 0u});
+                    pre.push_back({u, u, script, 0u, orig_clusters[k]});
                     ++k;
                     if (has_glyph) end = start + 1u;
                     continue;
                 }
 
-                pre.push_back({u, u, script, 0u});
+                pre.push_back({u, u, script, 0u, orig_clusters[k]});
                 ++k;
             }
             rs = re;
@@ -3496,7 +3731,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         }
         if (script != kTagThai && script != kTagLao) {
             for (std::size_t k = rs; k < re; ++k) {
-                pre.push_back({original[k], original[k], script, 0u});
+                pre.push_back({original[k], original[k], script, 0u, orig_clusters[k]});
             }
             rs = re;
             continue;
@@ -3506,17 +3741,26 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         for (std::size_t k = rs; k < re; ++k) {
             const uint32_t u = original[k];
             if ((u & ~0x0080u) != 0x0E33u) {
-                pre.push_back({u, u, script, 0u});
+                pre.push_back({u, u, script, 0u, orig_clusters[k]});
                 continue;
             }
+            const uint32_t am_c = orig_clusters[k];
             const uint32_t nikhahit = u - 0x0E33u + 0x0E4Du;
             const uint32_t sara_aa = u - 1u;
-            pre.push_back({nikhahit, nikhahit, script, 0u});
-            pre.push_back({sara_aa, sara_aa, script, 0u});
+            pre.push_back({nikhahit, nikhahit, script, 0u, am_c});
+            pre.push_back({sara_aa, sara_aa, script, 0u, am_c});
             const std::size_t nik_idx = pre.size() - 2u;
             std::size_t start = nik_idx;
             while (start > slice_start && is_thai_lao_above_base_mark(pre[start - 1u].prop_cp)) {
                 --start;
+            }
+            const std::size_t merge_from = (start > slice_start) ? (start - 1u) : start;
+            merge_slot_clusters(pre, slice_start, merge_from, pre.size());
+            const uint32_t merged_c = pre[merge_from].cluster;
+            if (merged_c != am_c) {
+                for (std::size_t kk = k + 1u; kk < re && orig_clusters[kk] == am_c; ++kk) {
+                    orig_clusters[kk] = merged_c;
+                }
             }
             if (start < nik_idx) {
                 std::rotate(pre.begin() + static_cast<std::ptrdiff_t>(start),
@@ -3611,14 +3855,14 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                 if (slot.cp == slot.prop_cp && glyph_index(slot.cp) == 0 &&
                     decompose_codepoint(decompose_codepoint, slot.cp, true, parts, 0u)) {
                     for (uint32_t p : parts) {
-                        input.push_back({p, p, script, 0u});
+                        input.push_back({p, p, script, 0u, slot.cluster});
                     }
                 } else if (slot.cp == slot.prop_cp && glyph_index(slot.cp) == 0 &&
                            (slot.cp == 0xFB2Cu || slot.cp == 0xFB2Du) && glyph_index(0x05BCu) != 0) {
                     const uint32_t shin_form = (slot.cp == 0xFB2Cu) ? 0xFB2Au : 0xFB2Bu;
                     if (glyph_index(shin_form) != 0) {
-                        input.push_back({shin_form, shin_form, script, 0u});
-                        input.push_back({0x05BCu, 0x05BCu, script, 0u});
+                        input.push_back({shin_form, shin_form, script, 0u, slot.cluster});
+                        input.push_back({0x05BCu, 0x05BCu, script, 0u, slot.cluster});
                     } else {
                         input.push_back(slot);
                     }
@@ -3633,15 +3877,15 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                 if (slot.cp == slot.prop_cp &&
                     decompose_codepoint(decompose_codepoint, slot.cp, false, parts, 0u)) {
                     for (uint32_t p : parts) {
-                        input.push_back({p, p, script, 0u});
+                        input.push_back({p, p, script, 0u, slot.cluster});
                     }
                 } else if (slot.cp == slot.prop_cp &&
                            (slot.cp == 0xFB2Cu || slot.cp == 0xFB2Du) &&
                            glyph_index(0x05BCu) != 0) {
                     const uint32_t shin_form = (slot.cp == 0xFB2Cu) ? 0xFB2Au : 0xFB2Bu;
                     if (glyph_index(shin_form) != 0) {
-                        input.push_back({shin_form, shin_form, script, 0u});
-                        input.push_back({0x05BCu, 0x05BCu, script, 0u});
+                        input.push_back({shin_form, shin_form, script, 0u, slot.cluster});
+                        input.push_back({0x05BCu, 0x05BCu, script, 0u, slot.cluster});
                     } else {
                         input.push_back(slot);
                     }
@@ -3663,20 +3907,33 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             ? combining_class(input[i].prop_cp)
             : modified_combining_class(input[i].prop_cp);
     }
+    std::size_t round2_slice_start = 0;
     for (std::size_t i = 0; i < input.size();) {
         const uint32_t script = input[i].script;
+        if (i == 0 || input[i - 1u].script != script) round2_slice_start = i;
         if (script == kTagDev2 || !effective_class[i]) {
             ++i;
             continue;
         }
         std::size_t end = i + 1u;
         while (end < input.size() && input[end].script == script && effective_class[end]) ++end;
-        std::stable_sort(input.begin() + i, input.begin() + end,
-            [&](const PreSlot& a, const PreSlot& b) {
-                return modified_combining_class(a.prop_cp) < modified_combining_class(b.prop_cp);
-            });
-        for (std::size_t k = i; k < end; ++k) {
-            effective_class[k] = modified_combining_class(input[k].prop_cp);
+        // HarfBuzz `hb_buffer_t::sort` (`hb-buffer.cc:592-614`): stable insertion
+        // sort that merges clusters `[q, p + 1)` only when out-of-order marks move.
+        for (std::size_t p = i + 1u; p < end; ++p) {
+            std::size_t q = p;
+            while (q > i && effective_class[p] < effective_class[q - 1u]) {
+                --q;
+            }
+            if (q == p) continue;
+            merge_slot_clusters(input, round2_slice_start, q, p + 1u);
+            const PreSlot saved_slot = input[p];
+            const uint8_t saved_cls = effective_class[p];
+            for (std::size_t m = p; m > q; --m) {
+                input[m] = input[m - 1u];
+                effective_class[m] = effective_class[m - 1u];
+            }
+            input[q] = saved_slot;
+            effective_class[q] = saved_cls;
         }
         if (script == kTagArab) {
             std::size_t start = i;
@@ -3691,6 +3948,9 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                     ++j;
                 }
                 if (m == j) continue;
+                if (start < m) {
+                    merge_slot_clusters(input, round2_slice_start, start, j);
+                }
                 std::rotate(input.begin() + start, input.begin() + m, input.begin() + j);
                 std::rotate(effective_class.begin() + start, effective_class.begin() + m,
                             effective_class.begin() + j);
@@ -3708,6 +3968,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                 if ((c0 == 20u || c0 == 21u) &&
                     (c1 == 22u || c1 == 23u) &&
                     (c2 == 25u || c2 == 220u)) {
+                    merge_slot_clusters(input, round2_slice_start, k - 1u, k + 1u);
                     std::swap(input[k - 1], input[k]);
                     std::swap(effective_class[k - 1], effective_class[k]);
                     break;
@@ -3741,11 +4002,13 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
     std::vector<uint32_t> scripts;
     std::vector<uint8_t> codepoint_cgj_blocks;
     std::vector<uint8_t> codepoint_hangul_feats;
+    std::vector<uint32_t> codepoint_clusters;
     codepoints.reserve(input.size());
     codepoint_prop_cps.reserve(input.size());
     scripts.reserve(input.size());
     codepoint_cgj_blocks.reserve(input.size());
     codepoint_hangul_feats.reserve(input.size());
+    codepoint_clusters.reserve(input.size());
     const std::size_t no_starter = input.size();
     std::size_t starter = no_starter;
     uint8_t last_class = 0;
@@ -3770,6 +4033,31 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             if (candidate != 0u && glyph_index(candidate) != 0) {
                 codepoints[starter] = candidate;
                 codepoint_prop_cps[starter] = candidate;
+                if (codepoint_clusters[starter] != input[i].cluster) {
+                    const uint32_t old_ic = input[i].cluster;
+                    uint32_t cmin = old_ic;
+                    for (std::size_t m = starter; m < codepoint_clusters.size(); ++m) {
+                        cmin = std::min(cmin, codepoint_clusters[m]);
+                    }
+                    const uint32_t old_sc = codepoint_clusters[starter];
+                    std::size_t back = starter;
+                    if (cmin != old_sc) {
+                        while (back > 0u && scripts[back - 1u] == script &&
+                               codepoint_clusters[back - 1u] == old_sc) {
+                            --back;
+                        }
+                    }
+                    for (std::size_t m = back; m < codepoint_clusters.size(); ++m) {
+                        codepoint_clusters[m] = cmin;
+                    }
+                    if (cmin != old_ic) {
+                        for (std::size_t m = i + 1u;
+                             m < input.size() && input[m].script == script && input[m].cluster == old_ic;
+                             ++m) {
+                            input[m].cluster = cmin;
+                        }
+                    }
+                }
                 composed = true;
             }
         }
@@ -3783,6 +4071,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             scripts.push_back(script);
             codepoint_cgj_blocks.push_back(cgj_blocks_gsub[i]);
             codepoint_hangul_feats.push_back(input[i].hangul_feat);
+            codepoint_clusters.push_back(input[i].cluster);
             last_class = cls;
         }
     }
@@ -3822,6 +4111,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             const uint32_t prop_cp = codepoint_prop_cps[i];
             ShapingGlyph sg;
             sg.glyph = glyph_index(cp);
+            sg.cluster = codepoint_clusters[i];
             sg.feature_mask = feat_masks[i - run_start];
             if (is_default_ignorable(prop_cp)) {
                 sg.feature_mask |= kDefaultIgnorableBit;
@@ -3997,6 +4287,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                 pg.y_advance = run[k].y_advance;
                 pg.x_offset = run[k].x_offset;
                 pg.y_offset = run[k].y_offset;
+                pg.cluster = run[k].cluster;
                 pg.is_mark = (run[k].mark_base >= 0 || is_mark_glyph(run[k].glyph) ||
                               (run[k].feature_mask & kSynthesizedMarkBit) != 0u);
                 result.push_back(pg);
@@ -4009,6 +4300,7 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                 pg.y_advance = st.y_advance;
                 pg.x_offset = st.x_offset;
                 pg.y_offset = st.y_offset;
+                pg.cluster = st.cluster;
                 pg.is_mark = (st.mark_base >= 0 || is_mark_glyph(st.glyph) ||
                               (st.feature_mask & kSynthesizedMarkBit) != 0u);
                 result.push_back(pg);
@@ -5154,15 +5446,19 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
     if (utf8_text.empty()) return out;
 
     std::vector<uint32_t> cps;
+    std::vector<uint32_t> cp_byte_offsets;
     cps.reserve(utf8_text.size());
+    cp_byte_offsets.reserve(utf8_text.size());
     std::size_t pos = 0;
     while (pos < utf8_text.size()) {
+        cp_byte_offsets.push_back(static_cast<uint32_t>(pos));
         cps.push_back(next_utf8_codepoint(utf8_text, pos));
     }
     if (pre_reversed && cps.size() > 1u) {
         // Bidi L2 wrote this odd-level run in visual order; restore logical
         // codepoint order before script itemization, Arabic joining, and GSUB/GPOS.
         std::reverse(cps.begin(), cps.end());
+        std::reverse(cp_byte_offsets.begin(), cp_byte_offsets.end());
     }
     const std::vector<uint32_t> scripts = itemize_codepoint_scripts(cps);
 
@@ -5171,6 +5467,7 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
         bool shear{false};
         bool is_rtl{false};
         std::vector<uint32_t> cps;
+        std::vector<uint32_t> byte_offsets;
         std::vector<ShapedGlyph> glyphs;
     };
 
@@ -5207,6 +5504,7 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
             cur_rtl = rtl;
         }
         runs.back().cps.push_back(cp);
+        runs.back().byte_offsets.push_back(cp_byte_offsets[k]);
         prev_script = sc;
     }
 
@@ -5224,6 +5522,9 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
                 shaped.face = fr.face;
                 shaped.shear = fr.shear;
                 shaped.is_mark = pg.is_mark;
+                shaped.cluster = (pg.cluster < fr.byte_offsets.size())
+                    ? fr.byte_offsets[pg.cluster]
+                    : 0u;
                 shaped.advance = static_cast<float>(pg.x_advance) * scale;
                 shaped.x_offset = static_cast<float>(pg.x_offset) * scale;
                 shaped.y_offset = static_cast<float>(pg.y_offset) * scale;
@@ -5233,19 +5534,22 @@ std::vector<FontRenderer::ShapedGlyph> FontRenderer::shape_text(std::string_view
                 fr.glyphs.push_back(shaped);
             }
         } else {
-            std::vector<uint32_t> vis;
+            std::vector<std::pair<uint32_t, uint32_t>> vis;
             vis.reserve(fr.cps.size());
-            for (uint32_t cp : fr.cps) {
-                if (!is_join_control(cp)) vis.push_back(cp);
+            for (std::size_t idx = 0; idx < fr.cps.size(); ++idx) {
+                if (!is_join_control(fr.cps[idx])) {
+                    vis.emplace_back(fr.cps[idx], fr.byte_offsets[idx]);
+                }
             }
             if (visual_rtl && (pre_reversed || fr.is_rtl) && vis.size() > 1u) {
                 std::reverse(vis.begin(), vis.end());
             }
-            for (uint32_t cp : vis) {
+            for (const auto& [cp, byte_off] : vis) {
                 ShapedGlyph shaped;
                 shaped.glyph = static_cast<uint16_t>(cp <= 0xFFFFu ? cp : '?');
                 shaped.face = nullptr;
                 shaped.shear = fr.shear;
+                shaped.cluster = byte_off;
                 shaped.advance = std::max(1.0f, font_size * 0.55f);
                 fr.glyphs.push_back(shaped);
             }

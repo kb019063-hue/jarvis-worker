@@ -29,7 +29,7 @@ def extract(face, rows, ft):
     contours = []
     x = y = 0
     face.set_transform(ft.Matrix(65536, 0, 0, 65536), ft.Vector(0, 0))
-    for gid, dx, dy, ox, oy in rows:
+    for gid, dx, dy, ox, oy, *_ in rows:
         face.load_glyph(gid, ft.FT_LOAD_NO_SCALE | ft.FT_LOAD_NO_HINTING | ft.FT_LOAD_NO_BITMAP)
         if face.glyph.format != ft.FT_GLYPH_FORMAT_OUTLINE:
             raise ValueError("only outline glyphs supported")

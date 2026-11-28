@@ -1992,6 +1992,54 @@
       "note": "CSS 2.1 \u00a717.6.1 separated borders model: border-spacing gutters around and between cells are filled with the table background."
     },
     {
+      "name": "collapsed_table_wider_cell_border_wins_shared_edge",
+      "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}table{border-collapse:collapse;border-spacing:0}td{padding:0;height:20px}.left{width:30px;background:#ff0000;border-style:solid;border-width:0 6px 0 0;border-color:#0000ff}.right{width:30px;background:#00ff00;border-style:solid;border-width:0 0 0 2px;border-color:#ffff00}</style></head><body><table><tr><td class=\"left\"></td><td class=\"right\"></td></tr></table></body></html>",
+      "assert": [
+        {
+          "kind": "rect",
+          "x": 0,
+          "y": 0,
+          "width": 30,
+          "height": 20,
+          "colour": "#ff0000",
+          "describe": "the first cell background ends before the shared border"
+        },
+        {
+          "kind": "rect",
+          "x": 30,
+          "y": 0,
+          "width": 6,
+          "height": 20,
+          "colour": "#0000ff",
+          "describe": "the 6px blue border wins over the adjacent 2px yellow border"
+        },
+        {
+          "kind": "rect",
+          "x": 36,
+          "y": 0,
+          "width": 30,
+          "height": 20,
+          "colour": "#00ff00",
+          "describe": "the second cell begins after the complete winning border"
+        },
+        {
+          "kind": "pixel",
+          "x": 66,
+          "y": 10,
+          "colour": "#ffffff",
+          "describe": "nothing is painted past the second cell"
+        },
+        {
+          "kind": "pixel",
+          "x": 10,
+          "y": 20,
+          "colour": "#ffffff",
+          "describe": "nothing is painted below the row"
+        }
+      ],
+      "note": "CSS 2.1 \u00a717.6.2.1: where adjacent collapsed cell borders conflict, the wider border wins and supplies the shared edge color."
+    },
+    {
       "name": "table_cell_background_fills_row_height_of_taller_sibling",
       "html": "<!doctype html><html><head><style>html{background:#fff}body{margin:0}table{border-collapse:collapse;border-spacing:0}td{width:50px;padding:0;border:0;vertical-align:top}.a{background:#ff0000}.b{background:#00ff00}.short{width:20px;height:20px;background:#ff0000}.tall{width:20px;height:60px;background:#00ff00}</style></head><body><table><tr><td class='a'><div class='short'></div></td><td class='b'><div class='tall'></div></td></tr></table></body></html>",
       "assert": [

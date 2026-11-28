@@ -46,3 +46,9 @@ function identity in general and is not fixed here. Nullish dotted writes,
 other VM semantics, and non-nullish tree-walker computed assignment/update
 conversion order remain separate work. No external conformance or performance
 improvement is claimed.
+
+Locally `make asan TEST_OPT='-O0 -g0'` built the instrumented engine and unit
+suite; the Phase 546 suite passed. The full unit run was stopped during the
+unrelated deep-nesting suite after it reached approximately 3.8 GB in this
+3.8 GB sandbox, and is not a full local pass. A 3.3 GB limit was applied to
+the suite compiler. Full sanitizer and deep checks remain required in CI.

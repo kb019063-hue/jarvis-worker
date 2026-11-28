@@ -624,10 +624,16 @@ void install_number_builtins(JsIntrinsics& realm) {
         if (has_nan) return JsValue::make_number(kNaN);
         if (largest == 0.0) return JsValue::make_number(0.0);
         if (values.size() == 2) return JsValue::make_number(std::hypot(values[0], values[1]));
-        double sum = 0.0;
+        // Keep the low-order contribution of each square instead of losing
+        // it when many small arguments follow the largest. Kahan summation
+        // also reduces the dependence on the order of the arguments.
+        double sum = 0.0, compensation = 0.0;
         for (double v : values) {
-            double scaled = v / largest;
-            sum += scaled * scaled;
+            const double scaled = v / largest;
+            const double term = scaled * scaled - compensation;
+            const double next = sum + term;
+            compensation = (next - sum) - term;
+            sum = next;
         }
         return JsValue::make_number(largest * std::sqrt(sum));
     }));

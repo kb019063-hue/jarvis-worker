@@ -162,29 +162,99 @@ bool intersecting_outline(const Rect& rect, float scroll_x, float scroll_y,
 enum class OutlineSide { Top, Right, Bottom, Left };
 struct OutlineSides { bool top, right, bottom, left; };
 
+// The glyphs an outline edge paints per cell, per style. UTF-8 box-drawing
+// characters are width 1 here (the width tables default to 1 outside the
+// ranges they name). A dashed or dotted edge leaves every other cell empty.
+const char* outline_glyph_horizontal(BorderStyle style) {
+    switch (style) {
+        case BorderStyle::Double: return "\u2550";   // ═
+        case BorderStyle::Dashed: return "\u2504";   // ┄
+        case BorderStyle::Dotted: return "\u2508";   // ┈
+        default: return "-";                        // also inset/outset/groove/ridge/solid
+    }
+}
+const char* outline_glyph_vertical(BorderStyle style) {
+    switch (style) {
+        case BorderStyle::Double: return "\u2551";   // ║
+        case BorderStyle::Dashed: return "\u2506";   // ┆
+        case BorderStyle::Dotted: return "\u250a";   // ┊
+        default: return "|";
+    }
+}
+const char* outline_glyph_corner(BorderStyle style, int corner) {
+    // 0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right.
+    if (style == BorderStyle::Double) {
+        switch (corner) {
+            case 0: return "\u2554";   // ╔
+            case 1: return "\u2557";   // ╗
+            case 2: return "\u255a";   // ╚
+            default: return "\u255d";  // ╝
+        }
+    }
+    return "+";
+}
+bool outline_edge_gap(BorderStyle style) {
+    return style == BorderStyle::Dashed || style == BorderStyle::Dotted;
+}
+
 // Visit only real outline edges. Clamping the edges themselves would invent
 // borders at the viewport boundary when a box is partially or wholly outside.
-// The visitor performs clipping and chooses what to paint in each cell.
+// The visitor performs clipping and chooses what to paint in each cell; the
+// glyph is UTF-8 text whose width is one cell.
 template <typename PaintCell>
-void visit_outline(const CellOutline& o, OutlineSides sides, int cols, int rows, PaintCell paint) {
+void visit_outline(const CellOutline& o, OutlineSides sides, int cols, int rows,
+                   const EdgeStyles& styles, PaintCell paint) {
     auto on_screen = [](double value, int size) { return value >= 0 && value < size; };
     const bool has_top = sides.top && on_screen(o.top, rows);
     const bool has_bottom = sides.bottom && on_screen(o.bottom, rows);
     const bool has_left = sides.left && on_screen(o.left, cols);
     const bool has_right = sides.right && on_screen(o.right, cols);
-    if (has_top) for (int c = o.visible.first_col; c <= o.visible.last_col; ++c)
-        paint(c, static_cast<int>(o.top), '-', OutlineSide::Top);
-    if (has_bottom) for (int c = o.visible.first_col; c <= o.visible.last_col; ++c)
-        paint(c, static_cast<int>(o.bottom), '-', OutlineSide::Bottom);
-    if (has_left) for (int r = o.visible.first_row; r <= o.visible.last_row; ++r)
-        paint(static_cast<int>(o.left), r, '|', OutlineSide::Left);
-    if (has_right) for (int r = o.visible.first_row; r <= o.visible.last_row; ++r)
-        paint(static_cast<int>(o.right), r, '|', OutlineSide::Right);
+    const auto gap = [&styles](OutlineSide side) {
+        switch (side) {
+            case OutlineSide::Top: return outline_edge_gap(styles.top);
+            case OutlineSide::Right: return outline_edge_gap(styles.right);
+            case OutlineSide::Bottom: return outline_edge_gap(styles.bottom);
+            case OutlineSide::Left: return outline_edge_gap(styles.left);
+        }
+        return false;
+    };
+    if (has_top) {
+        const char* glyph = outline_glyph_horizontal(styles.top);
+        const bool skip = gap(OutlineSide::Top);
+        for (int c = o.visible.first_col; c <= o.visible.last_col; ++c) {
+            if (skip && (c % 2) != 0) continue;
+            paint(c, static_cast<int>(o.top), glyph, OutlineSide::Top);
+        }
+    }
+    if (has_bottom) {
+        const char* glyph = outline_glyph_horizontal(styles.bottom);
+        const bool skip = gap(OutlineSide::Bottom);
+        for (int c = o.visible.first_col; c <= o.visible.last_col; ++c) {
+            if (skip && (c % 2) != 0) continue;
+            paint(c, static_cast<int>(o.bottom), glyph, OutlineSide::Bottom);
+        }
+    }
+    if (has_left) {
+        const char* glyph = outline_glyph_vertical(styles.left);
+        const bool skip = gap(OutlineSide::Left);
+        for (int r = o.visible.first_row; r <= o.visible.last_row; ++r) {
+            if (skip && (r % 2) != 0) continue;
+            paint(static_cast<int>(o.left), r, glyph, OutlineSide::Left);
+        }
+    }
+    if (has_right) {
+        const char* glyph = outline_glyph_vertical(styles.right);
+        const bool skip = gap(OutlineSide::Right);
+        for (int r = o.visible.first_row; r <= o.visible.last_row; ++r) {
+            if (skip && (r % 2) != 0) continue;
+            paint(static_cast<int>(o.right), r, glyph, OutlineSide::Right);
+        }
+    }
     // At a visible intersection the horizontal edge owns the corner color.
-    if (has_top && has_left) paint(static_cast<int>(o.left), static_cast<int>(o.top), '+', OutlineSide::Top);
-    if (has_top && has_right) paint(static_cast<int>(o.right), static_cast<int>(o.top), '+', OutlineSide::Top);
-    if (has_bottom && has_left) paint(static_cast<int>(o.left), static_cast<int>(o.bottom), '+', OutlineSide::Bottom);
-    if (has_bottom && has_right) paint(static_cast<int>(o.right), static_cast<int>(o.bottom), '+', OutlineSide::Bottom);
+    if (has_top && has_left) paint(static_cast<int>(o.left), static_cast<int>(o.top), outline_glyph_corner(styles.top, 0), OutlineSide::Top);
+    if (has_top && has_right) paint(static_cast<int>(o.right), static_cast<int>(o.top), outline_glyph_corner(styles.top, 1), OutlineSide::Top);
+    if (has_bottom && has_left) paint(static_cast<int>(o.left), static_cast<int>(o.bottom), outline_glyph_corner(styles.bottom, 2), OutlineSide::Bottom);
+    if (has_bottom && has_right) paint(static_cast<int>(o.right), static_cast<int>(o.bottom), outline_glyph_corner(styles.bottom, 3), OutlineSide::Bottom);
 }
 } // namespace
 
@@ -325,21 +395,23 @@ void TerminalRenderer::execute_command(const PaintCommand& cmd) {
                                       m_cell_w, m_cell_h, outline)) return;
             const EdgeColors colors = arg.edge_colors.value_or(EdgeColors(arg.color));
             const OutlineSides sides{
-                arg.width.top > 0 && !colors.top.is_transparent(),
-                arg.width.right > 0 && !colors.right.is_transparent(),
-                arg.width.bottom > 0 && !colors.bottom.is_transparent(),
-                arg.width.left > 0 && !colors.left.is_transparent()};
-            visit_outline(outline, sides, m_cols, m_rows, [&](int c, int r, char ch, OutlineSide side) {
+                arg.width.top > 0 && border_style_draws(arg.styles.top) && !colors.top.is_transparent(),
+                arg.width.right > 0 && border_style_draws(arg.styles.right) && !colors.right.is_transparent(),
+                arg.width.bottom > 0 && border_style_draws(arg.styles.bottom) && !colors.bottom.is_transparent(),
+                arg.width.left > 0 && border_style_draws(arg.styles.left) && !colors.left.is_transparent()};
+            visit_outline(outline, sides, m_cols, m_rows, arg.styles, [&](int c, int r, const char* glyph, OutlineSide side) {
                 if (!inside_clip(c, r)) return;
                 Color color = colors.top;
                 if (side == OutlineSide::Right) color = colors.right;
                 else if (side == OutlineSide::Bottom) color = colors.bottom;
                 else if (side == OutlineSide::Left) color = colors.left;
                 auto& cell = m_grid[static_cast<size_t>(r) * m_cols + c];
-                // The box-drawing characters this renderer writes are all
-                // single-column, so the outline needs no width table.
-                cell.cluster.assign(1, ch);
-                cell.codepoint = static_cast<unsigned char>(ch);
+                // The glyphs this renderer writes are single-column, so the
+                // outline needs no width table.
+                cell.cluster.assign(glyph);
+                uint32_t cp = 0;
+                decode_cluster_codepoint(glyph, 0, cp);
+                cell.codepoint = cp != 0 ? cp : static_cast<unsigned char>('+');
                 cell.width = 1;
                 cell.fg = over_opaque(color, cell.bg);
             });
@@ -438,7 +510,8 @@ void TerminalRenderer::draw_focus_ring(const Rect& rect, Color color) {
         !intersecting_outline(rect, m_scroll_x, m_scroll_y, m_cols, m_rows,
                               m_cell_w, m_cell_h, outline)) return;
     visit_outline(outline, {true, true, true, true}, m_cols, m_rows,
-                  [&](int c, int r, char, OutlineSide) {
+                  EdgeStyles(BorderStyle::Solid),
+                  [&](int c, int r, const char*, OutlineSide) {
         if (!inside_clip(c, r)) return;
         auto& cell = m_grid[static_cast<size_t>(r) * m_cols + c];
         cell.fg = over_opaque(color, cell.bg);

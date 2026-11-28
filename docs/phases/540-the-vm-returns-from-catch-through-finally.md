@@ -27,24 +27,27 @@ refusal records catch-return cleanup through a for-of iterator.
 
 ## Verification
 
-- `make verify-bytecode`: **207/207 agree, 8/8 still refused**; six oracle
-  self-test readings pass.
-- `make -j2 all test` after merging main: **580 engine suites and 114
+- `make verify-bytecode`: **207/207 agree, 8/8 still refused** before
+  merging Phase 546's eleven independent witnesses; **218/218 agree, 8/8
+  refused** afterward. Six oracle self-test readings pass.
+- `make -j2 all test` after the merges of main: **582 engine suites and 114
   cross-origin checks pass**. Suite 540 puts the original refusal first and
   checks catch binding scope, nested catches, throws, finalizer order, GC,
   callbacks and refused forms.
 - A 180-case product of return expressions, nested handlers and finalizers
   agreed between tree-walker and VM.
-- After merging main, HTML tree construction was 1973/1973, JS 1154/1158,
-  DOM 678/678, URL 1188/1188 and XML 1718/1718. WPT was 9570/9824, with all
-  254 failures listed; tree and XML differential gates passed. Before the
-  merge, `make fuzz` found nothing and `make deep` passed 1332 runs at depth
-  200000.
-- After merging main, the ASan/UBSan oracle passed (207/207 and 8/8), as did
-  a 69-suite sanitized stretch including this and earlier VM exception and
-  finalizer suites. Before the merge, full `make asan TEST_OPT=-O0` was
+- After the first merge of main, HTML tree construction was 1973/1973, JS
+  1154/1158, DOM 678/678, URL 1188/1188 and XML 1718/1718. WPT was 9570/9824,
+  with all 254 failures listed; tree and XML differential gates passed. JS
+  remained 1154/1158 after the iterator-helper merge. Before the merges,
+  `make fuzz` found nothing and `make deep` passed 1332 runs at depth 200000.
+- After reconciling Phase 546, the ASan/UBSan oracle passed (218/218 and 8/8),
+  as did a 71-suite sanitized stretch including this and earlier VM exception
+  and finalizer suites. Before merging main, full `make asan TEST_OPT=-O0` was
   terminated after 480 seconds in the existing
   `deep_nesting_never_exhausts_the_native_stack` suite; it is not a full pass.
+  GitHub CI on the preceding head passed every job, including sanitizers and
+  deep; the reconciled tree needs its own full CI.
 
 ## Still open
 

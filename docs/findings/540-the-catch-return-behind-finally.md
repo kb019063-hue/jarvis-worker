@@ -17,8 +17,9 @@ outer handlers installed for throws.
 
 ## Verification
 
-`make verify-bytecode` reports **207/207 agree and 8/8 still refused**. The
-original case is first in `tests/suites/540-the-vm-returns-from-catch-through-finally.cpp`,
+`make verify-bytecode` reports **218/218 agree and 8/8 still refused** after
+merging Phase 546's eleven independent witnesses (207/207 before that merge).
+The original case is first in `tests/suites/540-the-vm-returns-from-catch-through-finally.cpp`,
 which also checks nested catches and finalizers, exceptions, scopes, GC,
 callbacks and explicit refusals.
 

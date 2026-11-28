@@ -1,6 +1,7 @@
 #include "litebird/render/ImageFilter.hpp"
-#include <cmath>
 #include <algorithm>
+#include <cmath>
+#include <limits>
 
 namespace litebird {
 
@@ -11,60 +12,104 @@ static inline uint8_t clamp_u8(float v) {
 }
 
 void ImageFilter::blur(std::vector<Color>& pixels, int width, int height, float radius) {
-    if (radius <= 0.0f || width <= 0 || height <= 0 || pixels.size() != static_cast<size_t>(width * height)) {
+    if (!std::isfinite(radius) || radius <= 0.0f || width <= 0 || height <= 0) {
         return;
     }
-    // The radius may be as wide as the canvas; clamping it to 50 pixels made
-    // `blur(60)` on a 200-pixel box hard-edged beyond the clamp, which is a
-    // visible lie about what was asked for. The window is still bounded by the
-    // bitmap, so it cannot walk off either end.
-    int r = std::clamp(static_cast<int>(std::round(radius)), 1, std::max(width, height));
+    const std::size_t pixel_count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    if (pixels.size() != pixel_count) {
+        return;
+    }
 
-    std::vector<Color> temp(pixels.size());
+    // CSS `blur(<length>)` uses the length as a Gaussian standard deviation.
+    // Keep the existing canvas-sized upper bound, but retain fractional sigma:
+    // rounding it first makes small blurs jump in visible steps.
+    const int max_dimension = std::max(width, height);
+    const double sigma = std::min(static_cast<double>(radius),
+                                  std::min(static_cast<double>(max_dimension),
+                                           static_cast<double>(std::numeric_limits<int>::max() / 3)));
+    const int kernel_radius = std::max(1, static_cast<int>(std::ceil(3.0 * sigma)));
+    // Offsets farther apart than the largest image dimension cannot connect
+    // two pixels in this bitmap. The omitted taps still contribute to the
+    // normalization above, so the area beyond the bitmap is transparent rather
+    // than a clamped copy of its edge.
+    const int sample_radius = std::min(kernel_radius, max_dimension);
+    std::vector<double> weights(static_cast<std::size_t>(sample_radius) * 2u + 1u, 0.0);
+    double weight_sum = 0.0;
+    for (int offset = -kernel_radius; offset <= kernel_radius; ++offset) {
+        const double scaled = static_cast<double>(offset) / sigma;
+        const double weight = std::exp(-0.5 * scaled * scaled);
+        weight_sum += weight;
+        if (offset >= -sample_radius && offset <= sample_radius) {
+            weights[static_cast<std::size_t>(offset + sample_radius)] = weight;
+        }
+    }
+    for (double& weight : weights) {
+        weight /= weight_sum;
+    }
 
-    // Horizontal pass
+    struct PremultipliedPixel {
+        float red;
+        float green;
+        float blue;
+        float alpha;
+    };
+    std::vector<PremultipliedPixel> horizontal(pixel_count);
+
+    // Convolve each axis separately. Work in premultiplied alpha so a fading
+    // edge of a solid colour stays that colour instead of acquiring a dark
+    // fringe from averaging its RGB against transparent black.
     for (int y = 0; y < height; ++y) {
+        const std::size_t row = static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
         for (int x = 0; x < width; ++x) {
-            float sum_r = 0.0f, sum_g = 0.0f, sum_b = 0.0f, sum_a = 0.0f;
-            int count = 0;
-            for (int kx = -r; kx <= r; ++kx) {
-                int px = std::clamp(x + kx, 0, width - 1);
-                const Color& c = pixels[y * width + px];
-                sum_r += c.r;
-                sum_g += c.g;
-                sum_b += c.b;
-                sum_a += c.a;
-                count++;
+            const int first_x = std::max(0, x - sample_radius);
+            const int last_x = std::min(width - 1, x + sample_radius);
+            double sum_r = 0.0, sum_g = 0.0, sum_b = 0.0, sum_a = 0.0;
+            for (int source_x = first_x; source_x <= last_x; ++source_x) {
+                const int offset = source_x - x;
+                const double weight = weights[static_cast<std::size_t>(offset + sample_radius)];
+                const Color& c = pixels[row + static_cast<std::size_t>(source_x)];
+                const double alpha = static_cast<double>(c.a) / 255.0;
+                sum_r += static_cast<double>(c.r) * alpha * weight;
+                sum_g += static_cast<double>(c.g) * alpha * weight;
+                sum_b += static_cast<double>(c.b) * alpha * weight;
+                sum_a += alpha * weight;
             }
-            temp[y * width + x] = Color(
-                clamp_u8(sum_r / count),
-                clamp_u8(sum_g / count),
-                clamp_u8(sum_b / count),
-                clamp_u8(sum_a / count)
-            );
+            horizontal[row + static_cast<std::size_t>(x)] = {
+                static_cast<float>(sum_r), static_cast<float>(sum_g),
+                static_cast<float>(sum_b), static_cast<float>(sum_a)};
         }
     }
 
-    // Vertical pass
-    for (int x = 0; x < width; ++x) {
-        for (int y = 0; y < height; ++y) {
-            float sum_r = 0.0f, sum_g = 0.0f, sum_b = 0.0f, sum_a = 0.0f;
-            int count = 0;
-            for (int ky = -r; ky <= r; ++ky) {
-                int py = std::clamp(y + ky, 0, height - 1);
-                const Color& c = temp[py * width + x];
-                sum_r += c.r;
-                sum_g += c.g;
-                sum_b += c.b;
-                sum_a += c.a;
-                count++;
+    for (int y = 0; y < height; ++y) {
+        const int first_y = std::max(0, y - sample_radius);
+        const int last_y = std::min(height - 1, y + sample_radius);
+        for (int x = 0; x < width; ++x) {
+            double sum_r = 0.0, sum_g = 0.0, sum_b = 0.0, sum_a = 0.0;
+            for (int source_y = first_y; source_y <= last_y; ++source_y) {
+                const int offset = source_y - y;
+                const double weight = weights[static_cast<std::size_t>(offset + sample_radius)];
+                const PremultipliedPixel& p =
+                    horizontal[static_cast<std::size_t>(source_y) * static_cast<std::size_t>(width) +
+                               static_cast<std::size_t>(x)];
+                sum_r += static_cast<double>(p.red) * weight;
+                sum_g += static_cast<double>(p.green) * weight;
+                sum_b += static_cast<double>(p.blue) * weight;
+                sum_a += static_cast<double>(p.alpha) * weight;
             }
-            pixels[y * width + x] = Color(
-                clamp_u8(sum_r / count),
-                clamp_u8(sum_g / count),
-                clamp_u8(sum_b / count),
-                clamp_u8(sum_a / count)
-            );
+
+            const double alpha = std::clamp(sum_a, 0.0, 1.0);
+            const uint8_t alpha_byte = clamp_u8(static_cast<float>(alpha * 255.0));
+            if (alpha <= 0.0 || alpha_byte == 0) {
+                pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                       static_cast<std::size_t>(x)] = Color::transparent();
+                continue;
+            }
+            pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                   static_cast<std::size_t>(x)] = Color(
+                clamp_u8(static_cast<float>(sum_r / alpha)),
+                clamp_u8(static_cast<float>(sum_g / alpha)),
+                clamp_u8(static_cast<float>(sum_b / alpha)),
+                alpha_byte);
         }
     }
 }

@@ -246,8 +246,21 @@ takeable() {  # takeable N FULLSHA; says why in $WHY
   # under a title that has lost its WIP: would be merged as the pull request.
   WHY="eager: its own run is still going"
   [ "${WATCH_EAGER:-1}" = "1" ] && [ -n "$runs" ] && return 0
+  # No run at all. Under a rule on main that is said as GitHub's refusal,
+  # with what starts a run, because it is a thing to tell the agent: #548
+  # (28 November, 14:36) was three documents, every push under the mark,
+  # finished and made ready. Before the rule such a head was taken with the
+  # lot's run as its own, and `check_pr.py watch` still listed it so, while
+  # `cands` left it out and said nothing: the reason below was in no list
+  # of reasons that are printed.
+  if [ -z "$runs" ] && ruled_out "$1" "$2"; then return 1; fi
   WHY="no run on its head, and its code was never green"; return 1
 }
+# What a pull request of a lot is now, as one line: "OPEN FULLSHA finished",
+# or WIP in the place of the last word when its title begins with WIP or it
+# is a draft. Asked by `build`, `lot`, `rehead` and `land`.
+MEMBER_JQ='"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"'
+member_now() { timeout 30 gh pr view "$1" --json state,headRefOid,title,isDraft --jq "$MEMBER_JQ"; }
 note() {  # note N FILE -> "#N COMMENTID"
   local url; url="$(timeout 40 gh pr comment "$1" --body-file "$2" 2>&1 | tail -1)"
   echo "#$1 ${url##*-}"
@@ -267,7 +280,10 @@ wip_off_at() {  # wip_off_at N -> HH:MM:SS (UTC; with the day when it was not to
   timeout 30 gh api "repos/$R/issues/$1/events?per_page=100" \
     --jq '[.[] | select(.event == "renamed")] | last | select(. != null) | select((.rename.from | test("^WIP")) and ((.rename.to | test("^WIP")) | not)) | .created_at as $t | if $t[0:10] == (now | strftime("%Y-%m-%d")) then $t[11:19] else $t[0:10] + " " + $t[11:16] end' 2>/dev/null
 }
-agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^Agent: *(\\w+)") | .captures[0].string] | first) // "-"' 2>/dev/null; }
+# The name in the `Agent:` line of #N's text. "no name given" where there is
+# none, which the board's line and the table then say (#536 and #544 on 28
+# November; #533 that day gave its name in a sentence, and stood as "-").
+agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^Agent: *(\\w+)") | .captures[0].string] | first) // "no name given"' 2>/dev/null; }
 
 beat() {  # beat [due]: write the look into the status comment of the board; `due`: only when the last is five minutes old
   # A watch counts as none 30 minutes after its last look (AGENTS.md,
@@ -371,8 +387,13 @@ cands)
       echo "#$n ${full:0:7}: not taken, it has a number to change: $(echo "$clashes" | grep "^#$n: " | head -1 | cut -d' ' -f2-)" >&2; continue
     fi
     fetch_pr "$n" || continue
+    # Why a finished pull request is not taken is always said. (Until 28
+    # November only three kinds of reason were, and #548 was the fourth.)
     if takeable "$n" "$full"; then printf '%s ' "$n"; [ "$WHY" = "green" ] || echo "#$n ${full:0:7}: $WHY" >&2
-    else case "$WHY" in "its merge takes out"*|"it adds "*|"GitHub reports "*) echo "#$n ${full:0:7}: NOT taken, and its agent has to be told: $WHY" >&2 ;; esac; fi
+    else case "$WHY" in
+      "its merge takes out"*|"it adds "*|"GitHub reports "*) echo "#$n ${full:0:7}: NOT taken, and its agent has to be told: $WHY" >&2 ;;
+      *) echo "#$n ${full:0:7}: NOT taken: $WHY" >&2 ;;
+    esac; fi
   done; echo ;;
 
 plan)
@@ -410,7 +431,7 @@ build)
   for n in $nums; do
     fetch_pr "$n" || { echo "could not fetch #$n"; exit 9; }
     full="$(git rev-parse "origin/pr$n")"
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title,isDraft --jq '"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"')"
+    st="$(member_now "$n")"
     [ "$st" = "OPEN $full finished" ] || { echo "#$n: '$st' is not OPEN and finished at ${full:0:7}"; exit 6; }
     takeable "$n" "$full" || { echo "#$n ${full:0:7} is not taken: $WHY ($(runs_of "$full"))"; exit 6; }
     echo "$n ${full:0:7}" >> "$STATE/lot.heads.new"
@@ -534,10 +555,18 @@ lot)
   main_now="$(timeout 20 git ls-remote origin refs/heads/main | cut -c1-7)"
   [ -n "$main_now" ] || { echo "lot: could not read main"; exit 4; }
   if [ "$main_now" != "$(cat "$STATE/lot.main")" ]; then echo "lot: MAIN MOVED $(cat "$STATE/lot.main") -> $main_now"; exit 2; fi
+  # Every member is open, at the head the lot holds, and finished still. An
+  # agent that finds something after its last push makes its pull request a
+  # draft again and puts `WIP:` back (#523 did, 28 November, 13:06, with no
+  # watch on). Until that day nothing here asked: GitHub says CLEAN of a
+  # draft whose run passed, so `land` would have merged the members before
+  # it and been refused at the draft, with a part of the lot on main; and
+  # one that only had its `WIP:` back would have been merged as it was.
+  # (tools/watch/land_test.sh has both.)
   while read -r n sha; do
     [ -n "$n" ] || continue
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid --jq '"\(.state) \(.headRefOid[0:7])"')"
-    if [ "$st" != "OPEN $sha" ]; then echo "lot: #$n is '$st', the lot holds $sha"; exit 3; fi
+    read -r is at word <<< "$(member_now "$n")"; st="$is ${at:0:7} $word"
+    if [ "$st" != "OPEN $sha finished" ]; then echo "lot: #$n is '$st', the lot holds it finished at $sha"; exit 3; fi
   done < "$STATE/lot.heads"
   while read -r n sha; do   # a member that was taken while its own run was going: has that run failed?
     [ -n "$n" ] || continue
@@ -566,7 +595,7 @@ rehead)
   while read -r n sha; do
     fetch_pr "$n" || exit 9
     full="$(git rev-parse "origin/pr$n")"
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid,title,isDraft --jq '"\(.state) \(.headRefOid) \(if (.isDraft or (.title | test("^WIP"))) then "WIP" else "finished" end)"')"
+    st="$(member_now "$n")"
     [ "$st" = "OPEN $full finished" ] || { echo "#$n: '$st' is not OPEN and finished at ${full:0:7}"; exit 3; }
     if [ "${full:0:7}" != "$sha" ]; then
       takeable "$n" "$full" || { echo "#$n moved to ${full:0:7}, and that head cannot be taken: $(runs_of "$full")"; exit 3; }
@@ -597,6 +626,8 @@ wait)
   exit $rc ;;
 
 land)
+  # tools/watch/land_test.sh runs this in a made-up repository: what is
+  # merged, in which order and under which mark, and each way of stopping.
   last="${1:-}"
   "$0" lot > "$STATE/lot.out" 2>&1; rc=$?
   if [ $rc -eq 3 ] && "$0" rehead; then "$0" lot > "$STATE/lot.out" 2>&1; rc=$?; fi
@@ -607,9 +638,9 @@ land)
   all="$(echo $nums | sed -E 's/([0-9]+)/#\1/g; s/ /, /g')"
   while read -r n sha; do
     full="$(git rev-parse "origin/pr$n")"
-    st="$(timeout 30 gh pr view "$n" --json state,headRefOid --jq '"\(.state) \(.headRefOid)"')"
-    [ "$st" = "OPEN $full" ] || { echo "STOP: #$n is '$st'"; exit 3; }
-    takeable "$n" "$full" || { echo "STOP: #$n is not green on ${full:0:7}: $(runs_of "$full")"; exit 3; }
+    st="$(member_now "$n")"
+    [ "$st" = "OPEN $full finished" ] || { echo "STOP, nothing merged: #$n is '$st', the lot holds it finished at ${full:0:7}"; exit 3; }
+    takeable "$n" "$full" || { echo "STOP, nothing merged: #$n is not green on ${full:0:7}: $(runs_of "$full")"; exit 3; }
     # Asked of every one before the first is merged: a lot of which GitHub
     # merges the first and refuses the second leaves main with a tree that no
     # run passed on. An own run that is still going under a rule on main is

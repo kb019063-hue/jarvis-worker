@@ -47,3 +47,10 @@ compound/update references convert once here versus twice in Node. Optional
 `delete` on a non-nullish base also does not delete its property. VM nullish
 writes and non-callable calls remain separate work. No external conformance
 score or speed improvement is claimed.
+
+`make asan` built the instrumented engine, but the unit-suite compiler
+exhausted a 3.3 GB address-space limit imposed to protect this 3.8 GB sandbox;
+the full sanitizer run did not complete. All 19 dedicated JavaScript
+witnesses passed individually in the instrumented engine. The local `make
+deep` run was started after that, then stopped before completion; the full
+sanitizer and deep checks remain required in CI.

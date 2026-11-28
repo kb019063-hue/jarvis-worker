@@ -31,19 +31,19 @@ cases are refused; a return from a catch through a finalizer is still refused.
 
 - `make verify-bytecode`: **188/188 agree, 8/8 still refused**; the oracle's
   `--self-test` passes six readings.
-- `make -j2 all test` after merging main: **567 engine suites and 114
+- `make -j2 all test` after merging main: **568 engine suites and 114
   cross-origin checks pass**. Suite 524 puts the original case first and checks
   ordering, error precedence, local scope, GC, callbacks and retained refusals.
 - A 48-case product of return expressions and nested catch/finally shapes
   agreed between the tree-walker and bytecode VM.
-- After merging main, HTML tree construction was 1973/1973, JS 1154/1158,
-  DOM 678/678, URL 1188/1188 and XML 1718/1718. WPT was 9570/9824, with all
-  254 failures listed. Tree and XML differential checks passed. Before that
-  merge, `make fuzz` found nothing and `make deep` passed 1332 runs at depth
-  200000.
-- After merging main, the ASan/UBSan oracle passed (188/188 and 8/8), as did
-  a 56-suite sanitized stretch including the new and earlier VM exception and
-  finalizer suites. Before the merge, full `make asan TEST_OPT=-O0` was
+- After the first merge of main, HTML tree construction was 1973/1973, JS
+  1154/1158, DOM 678/678, URL 1188/1188 and XML 1718/1718. WPT was 9570/9824,
+  with all 254 failures listed; tree and XML differential checks passed. JS
+  conformance was still 1154/1158 after the second merge. Before either merge,
+  `make fuzz` found nothing and `make deep` passed 1332 runs at depth 200000.
+- After the second merge, the ASan/UBSan oracle passed (188/188 and 8/8), as
+  did a 57-suite sanitized stretch including the new and earlier VM exception
+  and finalizer suites. Before either merge, full `make asan TEST_OPT=-O0` was
   terminated after 480 seconds in the existing
   `deep_nesting_never_exhausts_the_native_stack` suite; it is not a full pass.
 

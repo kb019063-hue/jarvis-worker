@@ -28,6 +28,16 @@ against the original scan and passes with the change. It tests both directions,
 wraparound, positive values, invalid values and `-0`, focus/blur events, script
 focus and the next stop, live sign changes, and an all-negative page.
 
+Normal conformance, tree/XML differential and render checks pass. WPT reports
+9,570/9,824 with all 254 failures listed; the XML round trip is 3,000/3,000.
+`make fuzz` passes and `make deep DEEP_KINDS='--jobs 1'` passes 1,332 runs over
+465 pages. The ASan/UBSan build, verifiers, corpora, generated XML and fuzz
+pass, as do 882 deep-page runs with `--jobs 1`. With `TEST_OPT=-O0`, four
+non-deep sanitizer unit stretches pass 518/522 suites and the 114 cross-origin
+checks pass. The four deep unit suites were not run locally because previous
+runs exceeded the 3.8 GiB sandbox's memory; CI must cover them. This is not a
+full local `make asan` pass.
+
 ## What remains open
 
 The candidate list intentionally still contains negative entries as navigation

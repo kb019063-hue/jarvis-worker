@@ -47,3 +47,7 @@ RangeError, so it is not a full local pass. The compiler was limited to
 3.3 GB to avoid exhausting the 3.8 GB sandbox. A subsequent local `make
 deep` was started but stopped before completion; CI must run both full checks.
 `make fuzz` subsequently passed with the instrumented engine.
+
+After merging main, `make test` passes 567 suites and 114 cross-origin
+checks; the bytecode oracle remains 172/172, JS conformance is 1154/1158,
+and the other conformance, differential and documentation checks pass.

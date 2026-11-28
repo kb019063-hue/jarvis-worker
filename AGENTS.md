@@ -132,7 +132,11 @@ within the hour, and the first lot was started again four times.
    a lot and two caught by `main`. A file that only your pull request has
    is in conflict with nothing. The suites that are in
    `tests/test_suite.cpp` stay there, each with its line, and an assertion
-   more for one of them is still written there. (Two pull requests that
+   more for one of them is still written there. **A new suite written
+   there fails "Documentation shape" since 28 November**
+   (`check_suites.py`; its line says what to move where): from the day of
+   this rule to that day 26 pull requests had done it, twenty of them one
+   agent's, #470 the last, and nothing had said so. (Two pull requests that
    rewrote neighbouring rows of "Open tasks" were in conflict too, as #244
    and #257 were. Since 24 November an empty row stands between the rows:
    "The files every pull request changes", point 4.)
@@ -171,6 +175,17 @@ within the hour, and the first lot was started again four times.
      watch is on): merge `main`, push, and wait for CI, twice at the most.
      The third time leave #N as it is, finished and green, end the turn and
      tell the person: the next watch takes it.
+   - **`not ready`, because GitHub will not merge it** ("it reports
+     BLOCKED"): the person has set a rule on `main`, and under it a head
+     commit is merged only when a run of its own has passed on it. A head
+     pushed with `[skip ci]` has none, whatever is said elsewhere here
+     about a merge of `main` that needs no run: push a commit without the
+     mark (an empty one will do) and let its run pass. **Never
+     `gh pr merge --admin`**, which `gh` itself offers then: that is the
+     rule switched off for one merge. (No such rule was on when this was
+     written, on 28 November: the person had been asked for one, "Merged
+     59 seconds after it was opened", below, and had said they would
+     try.)
 
    A title without `WIP:` on a green pull request says "land this", to
    whoever is landing. Keep `WIP:` on until the work is finished, and put
@@ -957,6 +972,13 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   What the repository can do is say so at once: `check_pr.py` now has
   a line that begins `!!` when a job of `main`'s own newest run has
   failed, and "Working together", point 6, says what to do then.
+  (That line was silent on 28 November, and since when is not known:
+  it asked with `gh run list --event push`, the `gh` of that day's
+  sandboxes, 2.23.0, has no `--event`, and a lookup that failed said
+  nothing. It asks the API now, and a lookup that fails says that it
+  failed. A warning that says nothing when it cannot look is no
+  warning: try it on a `main` that is broken, and with a `gh` that
+  fails.)
   Who ran the merge is on no record. Every session is the person's one
   login, and a merge keeps the login and nothing more: not even that
   it came through Arena's app, which a comment does keep. Its commit has
@@ -966,7 +988,18 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   transcript of the session that ran it says more, and only the person
   can read that. And no session can set GitHub's rule for the person:
   a session's access does not reach the repository's settings (asking
-  for the protection of `main` is answered with 403).
+  for the protection of `main` is answered with 403). What a session
+  can read is GitHub's verdict on one pull request, and since 28
+  November `check_pr.py merge N` and the landing session's `watch.sh`
+  ask for it: under such a rule a head commit with no passed run of its
+  own is not merged, and three things these rules allow have such a
+  head (a merge of `main` under `[skip ci]` after a conflict in
+  documents, a head whose code was green a commit earlier, a run that
+  failed for a reason that is not the change). They are then told
+  "push without the mark" and are not taken into a lot, and a lot is
+  not begun to be merged when GitHub would refuse one of its pull
+  requests: `main` with half a lot is a tree no run passed on. Tried
+  with a `gh` that made GitHub's answers up; no rule was on.
 - **An old copy of AGENTS.md, written over `main`'s.** #452 was finished
   on 25 November on `main` of 14:12. Its AGENTS.md was that file cut off
   after line 1442: the last 109 lines of "Open tasks" were gone. It

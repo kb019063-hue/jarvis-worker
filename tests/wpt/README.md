@@ -102,42 +102,81 @@ with `--quiet`.
 The runner fails when a subtest fails that is not listed, and when a listed
 one passes, so the list stays what is true today.
 
-**9,567 of 9,824 subtests pass. 257 are listed:** the 8 below from the DOM
-and encoding suites, and these 249 from the CSS parsing suites.
+**9,570 of 9,824 subtests pass. 254 are listed:** the 7 below from the DOM
+and encoding suites, and these 247 from the CSS parsing suites.
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |
-| `grid-resolved-tracks` | 185 | The *resolved value* of a track listing (CSS Grid, "Resolved Value of a Track Listing"): `getComputedStyle` reports the tracks after the grid is laid out — implicit tracks made by positioned items show up, `auto-fit` bands with no items collapse to `0px`, `auto`/intrinsic tracks take their content size. Litebird serializes the specified value today; it has no grid placement and no track sizing, so these cannot pass until it does. 65 of them are newer than the rest: until Phase 72 the two files below a `document.fonts.ready` call (`grid-columns-rows-get-set-multiple.html`, `grid-content-sized-columns-resolution.html`) reported one `(harness)` row each and ran no subtest at all — `document.fonts` is in since then, and their subtests are listed one by one with this word |
+| `grid-resolved-tracks` | 183 | The *resolved value* of a track listing (CSS Grid, "Resolved Value of a Track Listing"): `getComputedStyle` reports the tracks after the grid is laid out — implicit tracks made by positioned items show up, `auto-fit` bands with no items collapse to `0px`, `auto`/intrinsic tracks take their content size. Litebird serializes the specified value today; it has no grid placement and no track sizing, so these cannot pass until it does. 65 of them are newer than the rest: until Phase 72 the two files below a `document.fonts.ready` call (`grid-columns-rows-get-set-multiple.html`, `grid-content-sized-columns-resolution.html`) reported one `(harness)` row each and ran no subtest at all — `document.fonts` is in since then, and their subtests are listed one by one with this word |
 | `intrinsic-auto-repeat-lanes` | 64 | `repeat(auto-fill, <intrinsic-size>)` — an intrinsic size inside an auto-repetition. The current Grid 3 draft (21 October 2026) makes that a grid-lanes feature only and says the declaration on a non-lanes grid computes to `none`, which is what Litebird does; these `.tentative.html` tests expect the lanes behavior, resolved against a layout, and are expected to move with the spec |
 
 | Reason | Subtests | What it is |
 | :--- | ---: | :--- |
 | `test-checks-parent-global` | 1 | `domparsing/innerhtml-05.xhtml` calls `assert_throws_dom('SyntaxError', …)` without `window[0].DOMException` when setting `innerHTML` on an element from `window[0]`. The engine throws `window[0]`'s exception, as browsers do: a node's realm is its document's, so the binding's current realm is `window[0]`'s. The same rule is what `dom/nodes/Document-createElement.html` asks of 240 subtests that name the frame's constructor, and no implementation passes both. See [`docs/findings/68-the-realm-of-a-domexception.md`](../../docs/findings/68-the-realm-of-a-domexception.md) |
-| the four below | 7 | Where the test and the standard, or the test and XML, disagree (including two `xml-serialization.xhtml` doctype subtests expecting unquoted `"""` inside a `PUBLIC` literal) |
+| the three below | 6 | Where the test and the standard, or the test and XML, disagree: `serializer-standard-moved` ×2 (the vendored test predates the 2026-09-01 standard change), `serializer-not-well-formed` ×3 (one, the issue-44 attribute case; two, `xml-serialization.xhtml` doctype subtests expecting unquoted `"""` inside a `PUBLIC` literal), `serializer-another-tree` ×1 (issue 45). The section below says which of these is the engine's doing |
 
-### `XMLSerializer`: five subtests Litebird fails on purpose
+### `XMLSerializer`: the subtests Litebird fails on purpose
 
 `domparsing/XMLSerializer-serializeToString.html` was written against the
 text of *DOM Parsing and Serialization* as it stood in 2019. Two things have
 happened since.
 
-The standard changed on 1 September 2026 (`w3c/DOM-Parsing`, "Preserve an
-attribute's namespace prefix when possible", closing issues 29 and 30, which
-say that browsers always did):
+The standard changed (`w3c/DOM-Parsing`, normative commit
+`e54c31b6` "Preserve an attribute's namespace prefix when possible",
+2026-08-16; issues 29 and 30 were closed on 2026-09-01): an attribute keeps
+its prefix when it can, and the subtests that assert the earlier text are
+asserting a standard that is gone. Litebird implements the 2026-09-01
+algorithm on this path; both outputs were measured on 2026-11-28 by running
+the subtests' own scenarios through `XMLSerializer`, and they are what the
+monolithic unit suite pins (`tests/test_suite.cpp`, "An attribute keeps its
+prefix").
 
 | Word | Subtest | The test expects | The standard now, and Litebird |
 | :--- | :--- | :--- | :--- |
 | `serializer-standard-moved` | "…the prefix of an attribute is NOT preserved…" | `xmlns:ns1="uri2" ns1:name="value"` | `xmlns:p="uri2" p:name="value"`: the attribute keeps its prefix |
 | `serializer-standard-moved` | "…the same prefix declared in an ancestor element" | `<child xmlns:ns1="uri2" ns1:foobar="v"/>` | `<child xmlns:p="uri2" p:foobar="v"/>`: a prefix an ancestor declared is declared again |
 
-And the standard's algorithm has faults that are filed and open, which three
+The vendored copy has not caught up with the standard. It is byte-identical
+to upstream HEAD as of 2026-11-28 (that day, a fresh download of
+`domparsing/XMLSerializer-serializeToString.html` from
+web-platform-tests/wpt differed from the vendored file by nothing, and
+`git hash-object` matches the blob id `MANIFEST.txt` records; the file's
+last upstream change was 2026-08-06, `8011b28`), so replacing the file from
+upstream's tree changes nothing today. Upstream has an open pull request,
+[web-platform-tests/wpt#64508](https://github.com/web-platform-tests/wpt/pull/64508)
+("Expect XMLSerializer to preserve a free attribute prefix", opened
+2026-11-01, unmerged as of 2026-11-28), which updates the issue-29 subtest
+to expect `<r xmlns:xx="uri" xmlns:p="uri2" p:name="value"/>` — its author
+notes Chrome, Firefox and Safari already behave that way — and does not
+touch the ancestor subtest. Until upstream lands the update (and a
+counterpart for the ancestor subtest), the two `serializer-standard-moved`
+lines stay in `expected-failures.txt`: this file is copied, not maintained,
+and the rule above the table is "Do not edit a test".
+
+**When to re-vendor.** When upstream merges its update, replace the files
+from upstream's tree at the new commit, write `MANIFEST.txt` again from that
+tree, and prune the lines from `expected-failures.txt` that the new file no
+longer fails — the runner fails a listed subtest that passes, and a listed
+subtest that flips is removed at the same time. Then raise `WPT_FLOOR` in
+the Makefile by however many subtests flipped. Editing the vendored file
+before upstream lands, or to match a reading the browsers have not agreed
+on yet, would put this repository's word against its own manifest rule.
+
+And the standard's algorithm has faults that are filed and open, which two
 subtests assert:
 
 | Word | Subtest | The test expects | Litebird |
 | :--- | :--- | :--- | :--- |
 | `serializer-not-well-formed` | "…"ns1" is generated even if the element already has xmlns:ns1" | `<child xmlns:ns1="uri1" xmlns:ns1="uri3" ns1:attr1="value1"/>`, an element with one attribute twice, which no XML parser reads (issue 44) | `xmlns:ns3="uri3" ns3:attr1="value1"`: a generated prefix that stands for something already is passed over |
 | `serializer-another-tree` | "…even if the prefix is assigned to another namespace" | `<el2 xmlns:q="u2" q:name="v"/>` for an attribute in `u1`: read back, the attribute is in `u2` (issue 45) | `p:name="v"`, the prefix that still stands for `u1` |
-| `serializer-redundant-xmlns` | "…a prefix bound to an empty namespace URI…" | `<root xmlns="" xmlns:foo=""/>` | `<root xmlns:foo=""/>`: the standard leaves out a default declaration that says what is already so, and the subtest "Check if redundant xmlns="..." is dropped" of the same file asserts exactly that. No implementation passes both |
+
+`serializer-redundant-xmlns` is no longer among the failing subtests: Phase
+360 fixed the engine so `<root xmlns="" xmlns:foo=""/>` serializes as written
+(the standard's redundant-`xmlns` rule had dropped a declaration that said
+something), and the line was dropped from `expected-failures.txt` then. It
+stays here because the subtest's expectation still contradicts the subtest
+"Check if redundant xmlns="..." is dropped" of the same file, and no
+implementation passes both.
 
 The serializer is checked by something stronger than either reading. A tree
 that is written and read again must be the same tree: every element and

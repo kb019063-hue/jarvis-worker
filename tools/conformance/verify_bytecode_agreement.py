@@ -377,6 +377,18 @@ AGREES: list[Case] = [
     Case("var a=[];a.length=2;Object.defineProperty(a,\"1\",{get:function(){return 9;},configurable:true});var s=\"\";for(var x of a){s+=String(x)+\",\"}String(s)", "for-of reads sparse accessors"),
     Case("for(var k of []){} String(k)", "empty var loop still declares the name"),
     Case("var k=7;for(var k of []){} String(k)", "empty loop does not overwrite an existing binding"),
+    # Phase 546: OpCall rejects non-callables as TypeErrors without coercion.
+    Case("try{(0)()}catch(e){e.name}", "non-callable number throws TypeError"),
+    Case("try{null()}catch(e){e.name}", "null call throws TypeError"),
+    Case("try{undefined()}catch(e){e.name}", "undefined call throws TypeError"),
+    Case("try{Symbol('x')()}catch(e){e.name}", "symbol call throws TypeError"),
+    Case("try{(0)()}catch(e){String(Object.getPrototypeOf(e)===TypeError.prototype)}", "TypeError has the correct prototype"),
+    Case("var s='';try{(0)(s+='a',s+='b')}catch(e){s+=e.name}String(s)", "call arguments run before TypeError"),
+    Case("function arg(){throw 'argument'}try{(0)(arg())}catch(e){e}", "argument throw precedes IsCallable"),
+    Case("var s='',o={toString:function(){s+='c';return 'x'}};try{o()}catch(e){s+=e.name}String(s)", "non-callable object is not coerced"),
+    Case("var o={toString:function(){throw 'converted'}};try{o()}catch(e){e.name}", "conversion cannot replace TypeError"),
+    Case("function f(){(0)()}try{f()}catch(e){e.name}", "TypeError unwinds a VM frame"),
+    Case("var s='';try{try{(0)()}finally{s+='f'}}catch(e){s+=e.name}String(s)", "TypeError runs finalizer"),
 ]
 
 # The compiler refuses these. Kept here so the count of what is left has a

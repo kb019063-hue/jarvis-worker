@@ -79,8 +79,13 @@ the alternative (transparent) is a shadow that does nothing.
   allowed where guessing would be wrong.
 * `url()` filters are rejected — there is no SVG filter primitive tree to refer
   to.
-* The blur is a box blur with the radius clamped to the bitmap, so it softens
-  far more cheaply and rather less smoothly than a browser's three-pass Gaussian.
+* Phase 535 replaces the box approximation used by `blur()` and the blurred
+  `drop-shadow()` with a separable, normalized Gaussian kernel: the CSS length is
+  its standard deviation, taps operate on premultiplied alpha, and pixels beyond
+  the canvas are transparent. The finite 3σ support and the existing cap of σ at
+  the largest bitmap dimension keep the work bounded; very large values are
+  therefore still capped, and the context's separate `shadowBlur` property
+  retains its three-box approximation (Phase 391).
 
 ## Bite proof
 
@@ -106,11 +111,13 @@ Part 2 asserted that `grayscale(0.5)` leaves the three channels equal at
 changed") would have passed and taught nothing, so it was corrected to the exact
 values rather than relaxed.
 
-Part 5 had the same shape of mistake: it asked a 4-pixel-wide box to be fully
-covered in its middle under a `blur(2px)`. The kernel reaches outside a box that
-narrow, so the measured centre is 204 — the same attenuation Phase 391's finding
-records for a small shadow. The assertion now uses a 10-pixel box, where the
-centre *is* 255, and keeps a hard-edged control beside it.
+Part 5 had the same shape of mistake: at the time, it asked a 4-pixel-wide box
+to be fully covered in its middle under a `blur(2px)`. The box kernel reaches
+outside a box that narrow, so the measured centre was 204 — the same attenuation
+Phase 391's finding records for a small shadow. The original test used a 10-pixel
+box, where that box kernel returned 255. Phase 535 replaces the kernel, and the
+updated 10-pixel case now returns 239 under the Gaussian; the new impulse test
+holds the Gaussian's actual weights and premultiplied-alpha colour.
 
 ## Files
 

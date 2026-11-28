@@ -77,7 +77,9 @@ assertion of this suite.
 
 The blur is a box approximation rather than a Gaussian, and `shadowBlur`'s
 half-value mapping is applied as a radius rather than a standard deviation. The
-capture buffers are canvas-sized, not bounding-box-sized. `ctx.filter` is still
-absent, and the seven text properties (`letterSpacing`, `wordSpacing`,
-`direction`, `fontKerning`, `fontStretch`, `fontVariantCaps`, `textRendering`)
-were measured in the same pass and are all still `undefined`.
+capture buffers are canvas-sized, not bounding-box-sized. `ctx.filter` was
+added in Phase 406, and its blur uses a separate Gaussian implementation since
+Phase 535; neither change alters this `shadowBlur` three-box path. The seven text
+properties (`letterSpacing`, `wordSpacing`, `direction`, `fontKerning`,
+`fontStretch`, `fontVariantCaps`, `textRendering`) were measured in the same pass
+and are all still `undefined`.

@@ -66,6 +66,25 @@ class Case:
 # Both paths must answer these alike. Each was run on the engine and read
 # before it was written here; none of them is a guess.
 AGREES: list[Case] = [
+    # Phase 524: returns unwind catch and finally handlers in order.
+    Case("function f(){try{try{return 1}catch(e){}finally{}}finally{}}f()", "original return across nested catch and finally"),
+    Case("function f(){try{return 1}catch(e){}} f()", "return from catch-protected block"),
+    Case("var s='';function f(){try{try{return 4}catch(e){s+='c'}finally{s+='i'}}finally{s+='o'}}String(f()+'/'+s)", "return skips catch and runs both finalizers"),
+    Case("var s='';function f(){try{try{return missing_name}catch(e){s+=e.name}finally{s+='i'}}finally{s+='o'}return 9}String(f()+'/'+s)", "return expression throws into active catch"),
+    Case("var s='';function f(){try{try{try{return 1}finally{s+='i';throw 7}}catch(e){s+=e}finally{s+='o'}}finally{s+='p'}return 9}String(f()+'/'+s)", "outer catch handles inner finalizer throw"),
+    Case("var s='';function f(){try{try{return 1}catch(e){s+='c'}finally{s+='i';throw 7}}catch(e){s+=e}finally{s+='o'}return 9}String(f()+'/'+s)", "same try catch does not catch its finalizer"),
+    Case("var s='';function f(){try{try{return 1}catch(e){s+='c'}finally{s+='i';throw 7}}finally{s+='o'}}try{f()}catch(e){s+=e}String(s)", "outer finalizer runs before throw escapes"),
+    Case("function f(){try{let a=1;try{let b=2;return {v:a+b}}catch(e){}finally{gc()}}finally{gc()}}String(f().v)", "pending value rooted across handlers and GC"),
+    Case("var s='';function f(){let x=1;try{let x=2;try{let x=3;return x}catch(e){}finally{s+=x}}catch(e){}finally{s+=x}}String(f()+'/'+s)", "shadowed lexical locals are trimmed at each boundary"),
+    Case("var n=0;function f(v){try{if(v)return n++;return 5}catch(e){n=8}finally{n++}}String(f(true)+'/'+f(false)+'/'+n)", "conditional returns evaluate before finalizer"),
+    Case("var s='';function f(){try{try{return 1}finally{s+='i'}}catch(e){s+='c'}finally{s+='o'}}String(f()+'/'+s)", "outer catch stays active for inner finalizer"),
+    Case("function f(){try{return;}catch{}finally{gc()}}String(f())", "optional catch binding and undefined return"),
+
+    Case("var s='';function f(){try{return 3}catch(e){s+='c'}}try{s+=f();throw 7}catch(e){s+=e}String(s)", "no stale catch handler after return"),
+    Case("var s='';function f(){try{try{return 1}catch(e){s+='c'}finally{s+='i'}}finally{s+='o'}}var o={};Object.defineProperty(o,'x',{get:f});String(o.x+'/'+s)", "return via reentrant getter"),
+    Case("var s='';function f(){try{try{return 1}finally{throw 7}}catch(e){s+=e}return 9}String(f()+'/'+s)", "catch around finalizer can handle its throw"),
+    Case("var s='';function f(){try{try{return 1}catch(e){s+='a'}finally{s+='i'}}catch(e){s+='b'}finally{s+='o'}}String(f()+'/'+s)", "multiple catch and finalizer handlers"),
+
     # Phase 504: a return runs nested finalizers from inside out.
     Case("function f(){try{try{return 1}finally{}}finally{}}f()", "the original nested-finally return refusal"),
     Case("var s='';function f(){try{try{return 4}finally{s+='i'}}finally{s+='o'}}String(f()+'/'+s)", "inner finalizer precedes outer"),
@@ -343,14 +362,12 @@ AGREES: list[Case] = [
 # number, and so the day one of them starts working shows up as a failure
 # rather than as silence.
 REFUSES: list[Case] = [
-    Case("function f(){try{try{return 1}catch(e){}finally{}}finally{}}f()", "nested return across catch handler"),
+    Case("function f(){try{throw 1}catch(e){return e}finally{}}f()", "return from catch through finalizer"),
     Case("function f(){for(var x of [1]){try{return x}finally{}}}f()", "return through finalizer and iterator"),
-    Case("function f(){try{return 1}catch(e){}finally{}}f()", "return through catch and finalizer"),
     Case("function f(){try{}finally{return 2}}f()", "return from finalizer"),
     Case("while(true){try{}finally{break}}", "jump from finalizer"),
     Case("try{}finally{let x=2;var f=function(){return x};f()}", "closure inside finalizer"),
     Case("try { throw [1]; } catch ([e]) { e; }", "catch pattern"),
-    Case("function f(){try{return 1}catch(e){}} f()", "return from protected block"),
     Case("while(true){try{throw 1}catch(e){break}}", "jump from catch"),
     Case("try{throw 3}catch(e){function f(){return e}f()}", "function in catch would capture its binding"),
 ]

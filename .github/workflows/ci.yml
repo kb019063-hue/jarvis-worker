@@ -379,13 +379,16 @@ jobs:
         # run_report.py says what a run did from what the API answers: it
         # is tested on answers written down, and asks GitHub nothing here.
         # rule.py reads back the rule the person sets on main and says what
-        # in it would stop a merge: tested on rulesets written down.
+        # in it would stop a merge: tested on rulesets written down, the
+        # person's own among them. takeable_test.sh asks watch.sh's
+        # `takeable` what it takes into a lot, with and without that rule.
         run: |
           python3 tools/watch/carry_rows.py --self-test
           python3 tools/watch/rule.py --self-test
           python3 tools/ci/run_stretches.py --self-test
           python3 tools/ci/run_report.py --self-test
           bash -n tools/watch/watch.sh
+          bash tools/watch/takeable_test.sh
           bash tools/ci/logged.sh --self-test
           python3 tools/ci/annotate_failure.py --self-test
       - name: The documents keep their shape and stay under their budgets

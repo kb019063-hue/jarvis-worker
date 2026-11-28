@@ -699,10 +699,53 @@ constexpr uint32_t kTagGrek = ot_tag('g', 'r', 'e', 'k');
 constexpr uint32_t kTagArmn = ot_tag('a', 'r', 'm', 'n');
 constexpr uint32_t kTagGeor = ot_tag('g', 'e', 'o', 'r');
 constexpr uint32_t kTagKana = ot_tag('k', 'a', 'n', 'a');
+constexpr uint32_t kTagHang = ot_tag('h', 'a', 'n', 'g');
 constexpr uint32_t kTagThai = ot_tag('t', 'h', 'a', 'i');
 constexpr uint32_t kTagLao  = ot_tag('l', 'a', 'o', ' ');
 constexpr uint32_t kTagDev2 = ot_tag('d', 'e', 'v', '2');
 constexpr uint32_t kTagDeva = ot_tag('d', 'e', 'v', 'a');
+
+constexpr uint32_t kHangulLBase = 0x1100u;
+constexpr uint32_t kHangulVBase = 0x1161u;
+constexpr uint32_t kHangulTBase = 0x11A7u;
+constexpr uint32_t kHangulLCount = 19u;
+constexpr uint32_t kHangulVCount = 21u;
+constexpr uint32_t kHangulTCount = 28u;
+constexpr uint32_t kHangulSBase = 0xAC00u;
+constexpr uint32_t kHangulNCount = kHangulVCount * kHangulTCount;
+constexpr uint32_t kHangulSCount = kHangulLCount * kHangulNCount;
+
+bool is_combining_hangul_l(uint32_t u) {
+    return u >= kHangulLBase && u < kHangulLBase + kHangulLCount;
+}
+
+bool is_combining_hangul_v(uint32_t u) {
+    return u >= kHangulVBase && u < kHangulVBase + kHangulVCount;
+}
+
+bool is_combining_hangul_t(uint32_t u) {
+    return u >= kHangulTBase + 1u && u < kHangulTBase + kHangulTCount;
+}
+
+bool is_combined_hangul_s(uint32_t u) {
+    return u >= kHangulSBase && u < kHangulSBase + kHangulSCount;
+}
+
+bool is_hangul_l(uint32_t u) {
+    return (u >= 0x1100u && u <= 0x115Fu) || (u >= 0xA960u && u <= 0xA97Cu);
+}
+
+bool is_hangul_v(uint32_t u) {
+    return (u >= 0x1160u && u <= 0x11A7u) || (u >= 0xD7B0u && u <= 0xD7C6u);
+}
+
+bool is_hangul_t(uint32_t u) {
+    return (u >= 0x11A8u && u <= 0x11FFu) || (u >= 0xD7CBu && u <= 0xD7FBu);
+}
+
+bool is_hangul_tone(uint32_t u) {
+    return u >= 0x302Eu && u <= 0x302Fu;
+}
 
 bool is_rtl_script_tag(uint32_t tag) {
     return tag == kTagArab || tag == kTagHebr || tag == kTagSyrc ||
@@ -874,6 +917,15 @@ uint32_t classify_codepoint_script(uint32_t cp) {
         (cp >= 0xFF66u && cp <= 0xFF9Fu)) {
         return kTagKana;
     }
+    if ((cp >= 0x1100u && cp <= 0x11FFu) || (cp >= 0x302Eu && cp <= 0x302Fu) ||
+        (cp >= 0x3131u && cp <= 0x318Eu) || (cp >= 0x3200u && cp <= 0x321Eu) ||
+        (cp >= 0x3260u && cp <= 0x327Eu) || (cp >= 0xA960u && cp <= 0xA97Cu) ||
+        (cp >= 0xAC00u && cp <= 0xD7A3u) || (cp >= 0xD7B0u && cp <= 0xD7C6u) ||
+        (cp >= 0xD7CBu && cp <= 0xD7FBu) || (cp >= 0xFFA0u && cp <= 0xFFBEu) ||
+        (cp >= 0xFFC2u && cp <= 0xFFC7u) || (cp >= 0xFFCAu && cp <= 0xFFCFu) ||
+        (cp >= 0xFFD2u && cp <= 0xFFD7u) || (cp >= 0xFFDAu && cp <= 0xFFDCu)) {
+        return kTagHang;
+    }
     if (cp >= 0x0E00u && cp <= 0x0E7Fu) return kTagThai;
     if (cp >= 0x0E80u && cp <= 0x0EFFu) return kTagLao;
     if (cp >= 0x0900u && cp <= 0x097Fu) return kTagDev2;
@@ -1026,9 +1078,10 @@ std::vector<uint32_t> compute_arabic_feature_masks(const std::vector<uint32_t>& 
     constexpr uint32_t kMaskInit   = 1u << 2;
     constexpr uint32_t kMaskMedi   = 1u << 3;
     constexpr uint32_t kMaskFina   = 1u << 4;
+    constexpr uint32_t kMaskCalt   = 1u << 8;
 
     const std::size_t len = end - start;
-    std::vector<uint32_t> masks(len, kMaskGlobal);
+    std::vector<uint32_t> masks(len, kMaskGlobal | kMaskCalt);
     std::vector<ArabicJoinType> jts(len);
     for (std::size_t i = 0; i < len; ++i) {
         jts[i] = classify_arabic_joining(cps[start + i]);
@@ -1514,10 +1567,17 @@ bool TrueTypeFont::load_ligatures(uint32_t gsub_offset, uint32_t gsub_length) {
                 ftag == ot_tag('l', 'o', 'c', 'l') ||
                 ftag == ot_tag('r', 'l', 'i', 'g') ||
                 ftag == ot_tag('l', 'i', 'g', 'a') ||
-                ftag == ot_tag('c', 'a', 'l', 't') ||
                 ftag == ot_tag('c', 'l', 'i', 'g') ||
                 ftag == ot_tag('r', 'c', 'l', 't')) {
                 fmask |= kGsubFeatGlobal;
+            } else if (ftag == ot_tag('c', 'a', 'l', 't')) {
+                fmask |= kGsubFeatCalt;
+            } else if (ftag == ot_tag('l', 'j', 'm', 'o')) {
+                fmask |= kGsubFeatLjmo;
+            } else if (ftag == ot_tag('v', 'j', 'm', 'o')) {
+                fmask |= kGsubFeatVjmo;
+            } else if (ftag == ot_tag('t', 'j', 'm', 'o')) {
+                fmask |= kGsubFeatTjmo;
             } else if (ftag == ot_tag('i', 's', 'o', 'l')) {
                 fmask |= kGsubFeatIsol;
             } else if (ftag == ot_tag('i', 'n', 'i', 't')) {
@@ -2258,34 +2318,45 @@ bool TrueTypeFont::load_gpos(uint32_t gpos_offset, uint32_t gpos_length) {
         if (ls_off == 0 || !within(spos + ls_off, 6)) continue;
         const std::size_t lang_sys = spos + ls_off;
 
-        std::map<uint16_t, GposLookup::Feature> active;
+        std::map<uint16_t, std::pair<GposLookup::Feature, uint32_t>> active;
         const auto add_feat = [&](uint16_t fi, bool is_required) {
             if (fi >= total_features) return;
             const std::size_t frec = feature_list + 2u + 6u * fi;
             if (!within(frec, 6)) return;
             const uint32_t ftag = read_u32_be(m_data, frec);
             GposLookup::Feature feat = GposLookup::Feature::Other;
-            bool match = is_required;
+            uint32_t fmask = is_required ? kGsubFeatGlobal : kGsubFeatNone;
             if (ftag == ot_tag('k', 'e', 'r', 'n')) {
                 feat = GposLookup::Feature::Kern;
-                match = true;
+                fmask |= kGsubFeatGlobal;
             } else if (ftag == ot_tag('c', 'u', 'r', 's')) {
                 feat = GposLookup::Feature::Cursive;
-                match = true;
+                fmask |= kGsubFeatGlobal;
             } else if (ftag == ot_tag('m', 'a', 'r', 'k')) {
                 feat = GposLookup::Feature::Mark;
-                match = true;
+                fmask |= kGsubFeatGlobal;
             } else if (ftag == ot_tag('m', 'k', 'm', 'k')) {
                 feat = GposLookup::Feature::Mkmk;
-                match = true;
-            } else if (ftag == ot_tag('c', 'a', 'l', 't') ||
-                       ftag == ot_tag('d', 'i', 's', 't') ||
+                fmask |= kGsubFeatGlobal;
+            } else if (ftag == ot_tag('c', 'a', 'l', 't')) {
+                feat = GposLookup::Feature::Other;
+                fmask |= kGsubFeatCalt;
+            } else if (ftag == ot_tag('l', 'j', 'm', 'o')) {
+                feat = GposLookup::Feature::Other;
+                fmask |= kGsubFeatLjmo;
+            } else if (ftag == ot_tag('v', 'j', 'm', 'o')) {
+                feat = GposLookup::Feature::Other;
+                fmask |= kGsubFeatVjmo;
+            } else if (ftag == ot_tag('t', 'j', 'm', 'o')) {
+                feat = GposLookup::Feature::Other;
+                fmask |= kGsubFeatTjmo;
+            } else if (ftag == ot_tag('d', 'i', 's', 't') ||
                        ftag == ot_tag('a', 'b', 'v', 'm') ||
                        ftag == ot_tag('b', 'l', 'w', 'm')) {
                 feat = GposLookup::Feature::Other;
-                match = true;
+                fmask |= kGsubFeatGlobal;
             }
-            if (!match) return;
+            if (fmask == kGsubFeatNone) return;
 
             const std::size_t fpos = feature_list + read_u16_be(m_data, frec + 4);
             if (!within(fpos, 4)) return;
@@ -2294,7 +2365,10 @@ bool TrueTypeFont::load_gpos(uint32_t gpos_offset, uint32_t gpos_length) {
                 if (!within(fpos + 4u + 2u * k, 2)) break;
                 const uint16_t li = read_u16_be(m_data, fpos + 4u + 2u * k);
                 if (li >= lookup_count || m_gpos_lookups[li].subtables.empty()) continue;
-                active.emplace(li, feat);
+                auto [it, inserted] = active.emplace(li, std::make_pair(feat, fmask));
+                if (!inserted) {
+                    it->second.second |= fmask;
+                }
                 if (feat == GposLookup::Feature::Kern) {
                     if (stag == kTagLatn) latn_has_kern = true;
                     else if (stag == kTagDflt) dflt_has_kern = true;
@@ -2318,7 +2392,10 @@ bool TrueTypeFont::load_gpos(uint32_t gpos_offset, uint32_t gpos_length) {
         if (!active.empty()) {
             GposScriptPlan plan;
             plan.script_tag = stag;
-            plan.lookups.assign(active.begin(), active.end());
+            plan.lookups.reserve(active.size());
+            for (const auto& [li, info] : active) {
+                plan.lookups.push_back({li, info.first, info.second});
+            }
             m_gpos_scripts.push_back(std::move(plan));
         }
     }
@@ -2566,7 +2643,11 @@ bool TrueTypeFont::apply_gsub_lookup_at(uint16_t lookup_index,
                     const int32_t nx = next_unignored(run, cur, lk.flag, lk.mark_filtering_set);
                     if (nx < 0) { matched = false; break; }
                     cur = static_cast<std::size_t>(nx);
-                    if (run[cur].glyph != lig.rest[k]) { matched = false; break; }
+                    if (run[cur].glyph != lig.rest[k] ||
+                        (check_feat_mask && (run[cur].feature_mask & feat_mask) == 0u)) {
+                        matched = false;
+                        break;
+                    }
                     comp_idx.push_back(cur);
                 }
                 if (!matched) continue;
@@ -2628,6 +2709,16 @@ bool TrueTypeFont::apply_gsub_lookup_at(uint16_t lookup_index,
             if (!match_context_subtable(ctx, run, pos, lk.flag, lk.mark_filtering_set,
                                         match_pos, actions)) {
                 continue;
+            }
+            if (check_feat_mask) {
+                bool mask_ok = true;
+                for (std::size_t mp : match_pos) {
+                    if ((run[mp].feature_mask & feat_mask) == 0u) {
+                        mask_ok = false;
+                        break;
+                    }
+                }
+                if (!mask_ok) continue;
             }
             if (depth < 16 && actions) {
                 for (const OtfLookupRecord& act : *actions) {
@@ -2713,6 +2804,8 @@ bool TrueTypeFont::apply_gpos_lookup_at(uint16_t lookup_index,
                                         std::size_t pos,
                                         bool is_rtl,
                                         bool kerning,
+                                        bool check_feat_mask,
+                                        uint32_t feat_mask,
                                         int depth,
                                         std::size_t& out_next_pos) const {
     (void)is_rtl;
@@ -2720,7 +2813,8 @@ bool TrueTypeFont::apply_gpos_lookup_at(uint16_t lookup_index,
     if (pos >= run.size() || lookup_index >= m_gpos_lookups.size()) return false;
     const GposLookup& lk = m_gpos_lookups[lookup_index];
     if (lk.subtables.empty()) return false;
-    if ((run[pos].feature_mask & kSkipIgnorableBit) != 0u ||
+    if ((check_feat_mask && (run[pos].feature_mask & feat_mask) == 0u) ||
+        (run[pos].feature_mask & kSkipIgnorableBit) != 0u ||
         is_ignored_by_lookup(run[pos].glyph, lk.flag, lk.mark_filtering_set)) {
         return false;
     }
@@ -2754,6 +2848,7 @@ bool TrueTypeFont::apply_gpos_lookup_at(uint16_t lookup_index,
         const int32_t nx = next_unignored(run, pos, lk.flag, lk.mark_filtering_set);
         if (nx < 0) return false;
         const std::size_t j = static_cast<std::size_t>(nx);
+        if (check_feat_mask && (run[j].feature_mask & feat_mask) == 0u) return false;
         for (const GposSubRef& ref : lk.subtables) {
             GposValue v1, v2;
             bool step_two = false;
@@ -2919,13 +3014,23 @@ bool TrueTypeFont::apply_gpos_lookup_at(uint16_t lookup_index,
                                         match_pos, actions)) {
                 continue;
             }
+            if (check_feat_mask) {
+                bool mask_ok = true;
+                for (std::size_t mp : match_pos) {
+                    if ((run[mp].feature_mask & feat_mask) == 0u) {
+                        mask_ok = false;
+                        break;
+                    }
+                }
+                if (!mask_ok) continue;
+            }
             if (depth < 16 && actions) {
                 for (const OtfLookupRecord& act : *actions) {
                     if (act.sequence_index >= match_pos.size()) continue;
                     const std::size_t target = match_pos[act.sequence_index];
                     std::size_t dummy_next = target + 1u;
                     apply_gpos_lookup_at(act.lookup_index, run, target, is_rtl, kerning,
-                                         depth + 1, dummy_next);
+                                         false, 0u, depth + 1, dummy_next);
                 }
             }
             out_next_pos = match_pos.empty() ? (pos + 1u)
@@ -3090,9 +3195,8 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
     };
     bool has_hebrew_gpos_mark = false;
     if (const GposScriptPlan* hebr_gpos = find_gpos_script(kTagHebr)) {
-        for (const auto& [li, feat] : hebr_gpos->lookups) {
-            (void)li;
-            if (feat == GposLookup::Feature::Mark) {
+        for (const auto& entry : hebr_gpos->lookups) {
+            if (entry.feature == GposLookup::Feature::Mark) {
                 has_hebrew_gpos_mark = true;
                 break;
             }
@@ -3257,14 +3361,21 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
 
     const auto original_scripts = itemize_codepoint_scripts(original);
 
-    // `_hb_ot_shaper_thai` (`preprocess_text_thai` + `do_thai_pua_shaping`):
-    // runs per Thai/Lao script run BEFORE `_hb_ot_shape_normalize`, retaining
-    // each slot's pre-PUA `prop_cp` Unicode properties (`modified_combining_class`
-    // and `Mn` general category) across PUA glyph remapping.
+    // `_hb_ot_shaper_thai` (`preprocess_text_thai` + `do_thai_pua_shaping`) and
+    // `_hb_ot_shaper_hangul` (`preprocess_text_hangul`): run per script slice
+    // BEFORE `_hb_ot_shape_normalize`, retaining each slot's `prop_cp` Unicode
+    // properties and optional Hangul jamo feature tag (`1=ljmo, 2=vjmo, 3=tjmo`).
     struct PreSlot {
         uint32_t cp;
         uint32_t prop_cp;
         uint32_t script;
+        uint8_t hangul_feat{0};
+    };
+    auto is_zero_width_hangul_char = [&](uint32_t cp) -> bool {
+        const uint16_t gid = glyph_index(cp);
+        if (gid == 0) return false;
+        const uint16_t adv = (gid < m_advance_widths.size()) ? m_advance_widths[gid] : m_advance_widths[0];
+        return adv == 0;
     };
     std::vector<PreSlot> pre;
     pre.reserve(original.size());
@@ -3272,9 +3383,120 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         const uint32_t script = original_scripts[rs];
         std::size_t re = rs + 1u;
         while (re < original.size() && original_scripts[re] == script) ++re;
+        if (script == kTagHang) {
+            std::size_t start = pre.size();
+            std::size_t end = start;
+            for (std::size_t k = rs; k < re;) {
+                const uint32_t u = original[k];
+                if (is_hangul_tone(u)) {
+                    ++k;
+                    if (start < end && end == pre.size()) {
+                        pre.push_back({u, u, script, 0u});
+                        if (!is_zero_width_hangul_char(u)) {
+                            std::rotate(pre.begin() + static_cast<std::ptrdiff_t>(start),
+                                        pre.end() - 1, pre.end());
+                        }
+                    } else if (glyph_index(0x25CCu) != 0) {
+                        if (!is_zero_width_hangul_char(u)) {
+                            pre.push_back({u, u, script, 0u});
+                            pre.push_back({0x25CCu, 0x25CCu, script, 0u});
+                        } else {
+                            pre.push_back({0x25CCu, 0x25CCu, script, 0u});
+                            pre.push_back({u, u, script, 0u});
+                        }
+                    } else {
+                        pre.push_back({u, u, script, 0u});
+                    }
+                    start = end = pre.size();
+                    continue;
+                }
+
+                start = pre.size();
+                if (is_hangul_l(u) && k + 1u < re) {
+                    const uint32_t l = u;
+                    const uint32_t v = original[k + 1u];
+                    if (is_hangul_v(v)) {
+                        uint32_t t = 0u;
+                        uint32_t tindex = 0u;
+                        if (k + 2u < re) {
+                            t = original[k + 2u];
+                            if (is_combining_hangul_t(t)) tindex = t - kHangulTBase;
+                            else if (!is_hangul_t(t)) t = 0u;
+                        }
+                        if (is_combining_hangul_l(l) && is_combining_hangul_v(v) &&
+                            (t == 0u || tindex != 0u)) {
+                            const uint32_t s = kHangulSBase +
+                                               (l - kHangulLBase) * kHangulNCount +
+                                               (v - kHangulVBase) * kHangulTCount + tindex;
+                            if (glyph_index(s) != 0) {
+                                pre.push_back({s, s, script, 0u});
+                                k += t ? 3u : 2u;
+                                end = start + 1u;
+                                continue;
+                            }
+                        }
+                        pre.push_back({l, l, script, 1u});
+                        pre.push_back({v, v, script, 2u});
+                        if (t) pre.push_back({t, t, script, 3u});
+                        k += t ? 3u : 2u;
+                        end = start + (t ? 3u : 2u);
+                        continue;
+                    }
+                } else if (is_combined_hangul_s(u)) {
+                    const bool has_glyph = glyph_index(u) != 0;
+                    const uint32_t lindex = (u - kHangulSBase) / kHangulNCount;
+                    const uint32_t nindex = (u - kHangulSBase) % kHangulNCount;
+                    const uint32_t vindex = nindex / kHangulTCount;
+                    const uint32_t tindex = nindex % kHangulTCount;
+                    if (!tindex && k + 1u < re && is_combining_hangul_t(original[k + 1u])) {
+                        const uint32_t new_s = u + (original[k + 1u] - kHangulTBase);
+                        if (glyph_index(new_s) != 0) {
+                            pre.push_back({new_s, new_s, script, 0u});
+                            k += 2u;
+                            end = start + 1u;
+                            continue;
+                        }
+                    }
+                    if (!has_glyph || (!tindex && k + 1u < re && is_hangul_t(original[k + 1u]))) {
+                        const uint32_t decomposed[3] = {
+                            kHangulLBase + lindex,
+                            kHangulVBase + vindex,
+                            kHangulTBase + tindex,
+                        };
+                        if (glyph_index(decomposed[0]) != 0 && glyph_index(decomposed[1]) != 0 &&
+                            (!tindex || glyph_index(decomposed[2]) != 0)) {
+                            std::size_t s_len = tindex ? 3u : 2u;
+                            pre.push_back({decomposed[0], decomposed[0], script, 1u});
+                            pre.push_back({decomposed[1], decomposed[1], script, 2u});
+                            if (tindex) {
+                                pre.push_back({decomposed[2], decomposed[2], script, 3u});
+                                ++k;
+                            } else if (has_glyph) {
+                                pre.push_back({original[k + 1u], original[k + 1u], script, 3u});
+                                k += 2u;
+                                ++s_len;
+                            } else {
+                                ++k;
+                            }
+                            end = start + s_len;
+                            continue;
+                        }
+                    }
+                    pre.push_back({u, u, script, 0u});
+                    ++k;
+                    if (has_glyph) end = start + 1u;
+                    continue;
+                }
+
+                pre.push_back({u, u, script, 0u});
+                ++k;
+            }
+            rs = re;
+            continue;
+        }
         if (script != kTagThai && script != kTagLao) {
             for (std::size_t k = rs; k < re; ++k) {
-                pre.push_back({original[k], original[k], script});
+                pre.push_back({original[k], original[k], script, 0u});
             }
             rs = re;
             continue;
@@ -3284,13 +3506,13 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         for (std::size_t k = rs; k < re; ++k) {
             const uint32_t u = original[k];
             if ((u & ~0x0080u) != 0x0E33u) {
-                pre.push_back({u, u, script});
+                pre.push_back({u, u, script, 0u});
                 continue;
             }
             const uint32_t nikhahit = u - 0x0E33u + 0x0E4Du;
             const uint32_t sara_aa = u - 1u;
-            pre.push_back({nikhahit, nikhahit, script});
-            pre.push_back({sara_aa, sara_aa, script});
+            pre.push_back({nikhahit, nikhahit, script, 0u});
+            pre.push_back({sara_aa, sara_aa, script, 0u});
             const std::size_t nik_idx = pre.size() - 2u;
             std::size_t start = nik_idx;
             while (start > slice_start && is_thai_lao_above_base_mark(pre[start - 1u].prop_cp)) {
@@ -3382,25 +3604,27 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             for (std::size_t j = i; j < end; ++j) {
                 input.push_back(pre[j]);
             }
-        } else if (end - i == 1u) {
-            const PreSlot slot = pre[i];
-            std::vector<uint32_t> parts;
-            if (slot.cp == slot.prop_cp && glyph_index(slot.cp) == 0 &&
-                decompose_codepoint(decompose_codepoint, slot.cp, true, parts, 0u)) {
-                for (uint32_t p : parts) {
-                    input.push_back({p, p, script});
-                }
-            } else if (slot.cp == slot.prop_cp && glyph_index(slot.cp) == 0 &&
-                       (slot.cp == 0xFB2Cu || slot.cp == 0xFB2Du) && glyph_index(0x05BCu) != 0) {
-                const uint32_t shin_form = (slot.cp == 0xFB2Cu) ? 0xFB2Au : 0xFB2Bu;
-                if (glyph_index(shin_form) != 0) {
-                    input.push_back({shin_form, shin_form, script});
-                    input.push_back({0x05BCu, 0x05BCu, script});
+        } else if (end - i == 1u || script == kTagHang) {
+            for (std::size_t j = i; j < end; ++j) {
+                const PreSlot slot = pre[j];
+                std::vector<uint32_t> parts;
+                if (slot.cp == slot.prop_cp && glyph_index(slot.cp) == 0 &&
+                    decompose_codepoint(decompose_codepoint, slot.cp, true, parts, 0u)) {
+                    for (uint32_t p : parts) {
+                        input.push_back({p, p, script, 0u});
+                    }
+                } else if (slot.cp == slot.prop_cp && glyph_index(slot.cp) == 0 &&
+                           (slot.cp == 0xFB2Cu || slot.cp == 0xFB2Du) && glyph_index(0x05BCu) != 0) {
+                    const uint32_t shin_form = (slot.cp == 0xFB2Cu) ? 0xFB2Au : 0xFB2Bu;
+                    if (glyph_index(shin_form) != 0) {
+                        input.push_back({shin_form, shin_form, script, 0u});
+                        input.push_back({0x05BCu, 0x05BCu, script, 0u});
+                    } else {
+                        input.push_back(slot);
+                    }
                 } else {
                     input.push_back(slot);
                 }
-            } else {
-                input.push_back(slot);
             }
         } else {
             for (std::size_t j = i; j < end; ++j) {
@@ -3409,15 +3633,15 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                 if (slot.cp == slot.prop_cp &&
                     decompose_codepoint(decompose_codepoint, slot.cp, false, parts, 0u)) {
                     for (uint32_t p : parts) {
-                        input.push_back({p, p, script});
+                        input.push_back({p, p, script, 0u});
                     }
                 } else if (slot.cp == slot.prop_cp &&
                            (slot.cp == 0xFB2Cu || slot.cp == 0xFB2Du) &&
                            glyph_index(0x05BCu) != 0) {
                     const uint32_t shin_form = (slot.cp == 0xFB2Cu) ? 0xFB2Au : 0xFB2Bu;
                     if (glyph_index(shin_form) != 0) {
-                        input.push_back({shin_form, shin_form, script});
-                        input.push_back({0x05BCu, 0x05BCu, script});
+                        input.push_back({shin_form, shin_form, script, 0u});
+                        input.push_back({0x05BCu, 0x05BCu, script, 0u});
                     } else {
                         input.push_back(slot);
                     }
@@ -3516,10 +3740,12 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
     std::vector<uint32_t> codepoint_prop_cps;
     std::vector<uint32_t> scripts;
     std::vector<uint8_t> codepoint_cgj_blocks;
+    std::vector<uint8_t> codepoint_hangul_feats;
     codepoints.reserve(input.size());
     codepoint_prop_cps.reserve(input.size());
     scripts.reserve(input.size());
     codepoint_cgj_blocks.reserve(input.size());
+    codepoint_hangul_feats.reserve(input.size());
     const std::size_t no_starter = input.size();
     std::size_t starter = no_starter;
     uint8_t last_class = 0;
@@ -3549,13 +3775,14 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         }
         if (!composed) {
             if (!cls || script != starter_script) {
-                starter_script = (!cls && script != kTagDev2) ? script : 0u;
+                starter_script = (!cls && script != kTagDev2 && script != kTagHang) ? script : 0u;
                 starter = starter_script ? codepoints.size() : no_starter;
             }
             codepoints.push_back(input[i].cp);
             codepoint_prop_cps.push_back(input[i].prop_cp);
             scripts.push_back(script);
             codepoint_cgj_blocks.push_back(cgj_blocks_gsub[i]);
+            codepoint_hangul_feats.push_back(input[i].hangul_feat);
             last_class = cls;
         }
     }
@@ -3571,8 +3798,21 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
         std::vector<uint32_t> feat_masks;
         if (script_tag == kTagArab || script_tag == kTagNko || script_tag == kTagSyrc) {
             feat_masks = compute_arabic_feature_masks(codepoints, run_start, run_end);
+        } else if (script_tag == kTagHang) {
+            feat_masks.assign(run_end - run_start, kGsubFeatGlobal | kGsubFeatCalt);
+            for (std::size_t i = run_start; i < run_end; ++i) {
+                uint32_t& m = feat_masks[i - run_start];
+                const uint8_t hf = codepoint_hangul_feats[i];
+                if (hf == 1u) m |= kGsubFeatLjmo;
+                else if (hf == 2u) m |= kGsubFeatVjmo;
+                else if (hf == 3u) m |= kGsubFeatTjmo;
+                const uint32_t u = codepoints[i];
+                if (is_hangul_l(u) || is_hangul_v(u) || is_hangul_t(u)) {
+                    m &= ~static_cast<uint32_t>(kGsubFeatCalt);
+                }
+            }
         } else {
-            feat_masks.assign(run_end - run_start, kGsubFeatGlobal);
+            feat_masks.assign(run_end - run_start, kGsubFeatGlobal | kGsubFeatCalt);
         }
 
         std::vector<ShapingGlyph> run;
@@ -3635,7 +3875,9 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
             // Execute the active LookupList sequence, not batches grouped by type.
             // A later mark-to-base lookup can replace an earlier mark-to-mark
             // attachment; reversing them changes the resulting glyph origins.
-            for (const auto& [li, feat] : gpos_plan->lookups) {
+            for (const auto& entry : gpos_plan->lookups) {
+                const uint16_t li = entry.lookup;
+                const GposLookup::Feature feat = entry.feature;
                 if (li >= m_gpos_lookups.size()) continue;
                 const GposLookup& lk = m_gpos_lookups[li];
                 if (feat == GposLookup::Feature::Kern) script_has_kern = true;
@@ -3643,7 +3885,8 @@ std::vector<TrueTypeFont::PositionedGlyph> TrueTypeFont::shape_glyphs(
                 std::size_t pos = 0;
                 while (pos < n) {
                     std::size_t next_pos = pos + 1u;
-                    apply_gpos_lookup_at(li, run, pos, is_rtl, kerning, 0, next_pos);
+                    apply_gpos_lookup_at(li, run, pos, is_rtl, kerning,
+                                         true, entry.feature_mask, 0, next_pos);
                     pos = (next_pos > pos) ? next_pos : (pos + 1u);
                 }
             }
@@ -3790,7 +4033,9 @@ int16_t TrueTypeFont::kerning_units_for_glyphs(uint16_t left_glyph, uint16_t rig
         if (plan) {
             bool plan_has_kern = false;
             int32_t total = 0;
-            for (const auto& [li, feat] : plan->lookups) {
+            for (const auto& entry : plan->lookups) {
+                const uint16_t li = entry.lookup;
+                const GposLookup::Feature feat = entry.feature;
                 if (feat != GposLookup::Feature::Kern || li >= m_gpos_lookups.size()) continue;
                 plan_has_kern = true;
                 const GposLookup& lk = m_gpos_lookups[li];

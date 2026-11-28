@@ -397,6 +397,10 @@ private:
         kGsubFeatInit = 1u << 2,
         kGsubFeatMedi = 1u << 3,
         kGsubFeatFina = 1u << 4,
+        kGsubFeatLjmo = 1u << 5,
+        kGsubFeatVjmo = 1u << 6,
+        kGsubFeatTjmo = 1u << 7,
+        kGsubFeatCalt = 1u << 8,
     };
 
     struct GsubLookup {
@@ -427,13 +431,18 @@ private:
     };
 
     struct GposScriptPlan {
+        struct Entry {
+            uint16_t lookup{0};
+            GposLookup::Feature feature{GposLookup::Feature::Other};
+            uint32_t feature_mask{kGsubFeatGlobal};
+        };
         uint32_t script_tag{0};
-        std::vector<std::pair<uint16_t, GposLookup::Feature>> lookups;
+        std::vector<Entry> lookups;
     };
 
     struct ShapingGlyph {
         uint16_t glyph{0};
-        uint32_t feature_mask{kGsubFeatGlobal};
+        uint32_t feature_mask{kGsubFeatGlobal | kGsubFeatCalt};
         uint16_t lig_id{0};
         uint16_t lig_comp{0};
         int32_t x_advance{0};
@@ -487,6 +496,8 @@ private:
                               std::size_t pos,
                               bool is_rtl,
                               bool kerning,
+                              bool check_feat_mask,
+                              uint32_t feat_mask,
                               int depth,
                               std::size_t& out_next_pos) const;
     bool match_pair_subtable(const GposSubRef& ref, uint16_t left, uint16_t right,

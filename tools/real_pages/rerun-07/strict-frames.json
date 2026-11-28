@@ -1,0 +1,123 @@
+{
+  "rule": "Post-task RGBA; same viewport; zero different pixels allowed. No alignment, masking or tolerance.",
+  "results": [
+    {
+      "id": 1,
+      "verdict": "fail",
+      "different_pixels": 83051,
+      "pixels": 480000
+    },
+    {
+      "id": 2,
+      "verdict": "fail",
+      "different_pixels": 80143,
+      "pixels": 480000
+    },
+    {
+      "id": 3,
+      "verdict": "fail",
+      "different_pixels": 106012,
+      "pixels": 480000
+    },
+    {
+      "id": 4,
+      "verdict": "fail",
+      "different_pixels": 190293,
+      "pixels": 480000
+    },
+    {
+      "id": 5,
+      "verdict": "fail",
+      "different_pixels": 190261,
+      "pixels": 480000
+    },
+    {
+      "id": 6,
+      "verdict": "fail",
+      "different_pixels": 111947,
+      "pixels": 480000
+    },
+    {
+      "id": 7,
+      "verdict": "fail",
+      "different_pixels": 115508,
+      "pixels": 480000
+    },
+    {
+      "id": 8,
+      "verdict": "fail",
+      "different_pixels": 52828,
+      "pixels": 480000
+    },
+    {
+      "id": 9,
+      "verdict": "fail",
+      "different_pixels": 55483,
+      "pixels": 480000
+    },
+    {
+      "id": 10,
+      "verdict": "fail",
+      "different_pixels": 68945,
+      "pixels": 480000
+    },
+    {
+      "id": 11,
+      "verdict": "fail",
+      "different_pixels": 233246,
+      "pixels": 480000
+    },
+    {
+      "id": 12,
+      "verdict": "fail",
+      "different_pixels": 152506,
+      "pixels": 480000
+    },
+    {
+      "id": 13,
+      "verdict": "fail",
+      "different_pixels": 476809,
+      "pixels": 480000
+    },
+    {
+      "id": 14,
+      "verdict": "fail",
+      "different_pixels": 477445,
+      "pixels": 480000
+    },
+    {
+      "id": 15,
+      "verdict": "fail",
+      "different_pixels": 466016,
+      "pixels": 480000
+    },
+    {
+      "id": 16,
+      "verdict": "not comparable: independent random boards"
+    },
+    {
+      "id": 17,
+      "verdict": "fail",
+      "different_pixels": 102333,
+      "pixels": 480000
+    },
+    {
+      "id": 18,
+      "verdict": "fail",
+      "different_pixels": 238459,
+      "pixels": 480000
+    },
+    {
+      "id": 19,
+      "verdict": "fail",
+      "different_pixels": 465800,
+      "pixels": 480000
+    },
+    {
+      "id": 20,
+      "verdict": "fail",
+      "different_pixels": 83190,
+      "pixels": 480000
+    }
+  ]
+}

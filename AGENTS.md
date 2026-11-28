@@ -1063,7 +1063,9 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   11:34 the landing session asked GitHub to merge its own pull request
   (#520, ready, its head an empty commit under `[skip ci]`, the tree
   `main`'s own): "the base branch policy prohibits the merge". What
-  #449 did cannot be done again. What the rule does not ask: `WIP:` in
+  #449 did cannot be done again. The first merges under the rule were
+  #521 at 11:51 and #526 at 11:58, each out of a lot, with the two
+  checks passed on its own head. What the rule does not ask: `WIP:` in
   a title (a draft is what stops that merge), every job of CI (the
   short run is enough for GitHub; `check_pr.py merge N` asks for the
   rest), and whether a watch is on.

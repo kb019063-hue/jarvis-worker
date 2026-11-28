@@ -160,9 +160,11 @@ ruled_out() {  # ruled_out N FULLSHA [STATE]: GitHub refuses to merge #N as it i
   # one whose own run failed for a reason that is not its change. Written on
   # 28 November in the morning, against a `gh` that made the answers up. The
   # person's rule was on main from 11:28 UTC that day, and BLOCKED was seen
-  # for the first time: of every draft, and of the watch's own pull request
-  # when it was ready with no run on its head, which `gh pr merge` then
-  # refused ("the base branch policy prohibits the merge", 11:34).
+  # for the first time: of every head with no run on it, which was each
+  # claim, and the watch's own pull request when it was ready with no run,
+  # which `gh pr merge` then refused ("the base branch policy prohibits the
+  # merge", 11:34). #521, taken at 11:45 while its own run was going, was
+  # BLOCKED then and CLEAN a minute later, and `land` merged it at 11:51.
   local gs runs; gs="${3:-$(github_says "$1")}"
   case "$gs" in
     BLOCKED)

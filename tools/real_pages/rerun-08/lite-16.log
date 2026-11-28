@@ -1,0 +1,4 @@
+stage: opening snapshot
+stage: painting initial frame
+stage: driving task
+BENCH pass: ArrowUp: ..../2.../2.../.... -> 4.../..../.2../....

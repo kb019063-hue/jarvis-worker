@@ -674,7 +674,12 @@ JsValue VM::run(size_t stop_depth) {
                 JsValue idx = pop();
                 JsValue obj = pop();
                 JsValue val = peek(0);
-                // Symbol.iterator is a symbol, not its display string.
+                if (obj.is_nullish()) {
+                    std::string message = std::string("Cannot set properties of ") +
+                        (obj.type == JsType::Null ? "null" : "undefined");
+                    if (!idx.is_object_like()) message += " (setting '" + js_to_property_key(idx) + "')";
+                    js_throw_type_error(message);
+                }
                 std::string prop = js_to_property_key(idx);
                 obj.set_property(prop, val);
                 break;

@@ -246,6 +246,14 @@ takeable() {  # takeable N FULLSHA; says why in $WHY
   # under a title that has lost its WIP: would be merged as the pull request.
   WHY="eager: its own run is still going"
   [ "${WATCH_EAGER:-1}" = "1" ] && [ -n "$runs" ] && return 0
+  # No run at all. Under a rule on main that is said as GitHub's refusal,
+  # with what starts a run, because it is a thing to tell the agent: #548
+  # (28 November, 14:36) was three documents, every push under the mark,
+  # finished and made ready. Before the rule such a head was taken with the
+  # lot's run as its own, and `check_pr.py watch` still listed it so, while
+  # `cands` left it out and said nothing: the reason below was in no list
+  # of reasons that are printed.
+  if [ -z "$runs" ] && ruled_out "$1" "$2"; then return 1; fi
   WHY="no run on its head, and its code was never green"; return 1
 }
 # What a pull request of a lot is now, as one line: "OPEN FULLSHA finished",
@@ -379,8 +387,13 @@ cands)
       echo "#$n ${full:0:7}: not taken, it has a number to change: $(echo "$clashes" | grep "^#$n: " | head -1 | cut -d' ' -f2-)" >&2; continue
     fi
     fetch_pr "$n" || continue
+    # Why a finished pull request is not taken is always said. (Until 28
+    # November only three kinds of reason were, and #548 was the fourth.)
     if takeable "$n" "$full"; then printf '%s ' "$n"; [ "$WHY" = "green" ] || echo "#$n ${full:0:7}: $WHY" >&2
-    else case "$WHY" in "its merge takes out"*|"it adds "*|"GitHub reports "*) echo "#$n ${full:0:7}: NOT taken, and its agent has to be told: $WHY" >&2 ;; esac; fi
+    else case "$WHY" in
+      "its merge takes out"*|"it adds "*|"GitHub reports "*) echo "#$n ${full:0:7}: NOT taken, and its agent has to be told: $WHY" >&2 ;;
+      *) echo "#$n ${full:0:7}: NOT taken: $WHY" >&2 ;;
+    esac; fi
   done; echo ;;
 
 plan)

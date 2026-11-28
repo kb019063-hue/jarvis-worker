@@ -1270,7 +1270,7 @@ def ci_verdict(e: Evidence, watch_on: bool = False) -> tuple[list[tuple[bool, st
         lines.append((False, f"CI on {head}: " + "; ".join(e.head_bad)))
     elif documents_only:
         quick = True
-        lines.append((True, f"it changes documents only ({some(e.pr_files)}): it needs no CI run of its own"))
+        lines.append((True, f"it changes documents only ({some(e.pr_files)}): the whole of CI need not run on it"))
     elif e.head_state == "passed":
         lines.append((True, f"CI passed on the head commit {head}"))
     elif e.head_state == "short":
@@ -1652,6 +1652,16 @@ def why_not_taken(pr: dict, comments: list[dict], leans=None) -> str:
         return ""       # the landing session has said so, of this very head
     state, bad = rollup(pr.get("statusCheckRollup"))
     if state == "none":
+        if pr.get("mergeStateStatus") == "BLOCKED":
+            # The rule on `main` (28 November 2026, 11:28 UTC): GitHub merges
+            # no head without a passed run, a change to documents like any
+            # other. Until then such a head was taken, the lot's run being
+            # its run, and this went on saying so. #548, three documents,
+            # every push under the mark, stood here as "the landing session
+            # takes these" at 14:39 that day while the landing session's
+            # own tool left it out without a word.
+            return ("no CI run on its head commit, and since the rule on main GitHub merges none without: every push "
+                    "to it carried the mark that skips CI. Push a commit without the mark (an empty one will do)")
         files = [entry["path"] for entry in pr.get("files") or []]
         if not (files and all_of(DOCUMENT, files)):     # documents only: the lot's run is its run
             if leans is None or not leans(pr):
@@ -1711,7 +1721,7 @@ def now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
-WATCH_PRS = "number,title,body,headRefOid,files,isDraft,mergeable,statusCheckRollup"
+WATCH_PRS = "number,title,body,headRefOid,files,isDraft,mergeable,mergeStateStatus,statusCheckRollup"
 
 
 def show_watch() -> int:
@@ -2527,6 +2537,12 @@ def self_test() -> int:
          taken_at([said("Lander: **the last lot of this watch**, 23:41 UTC: #7 (`abcdef0`) as it is")], 7), None if not LOT_RE.match("Lander: **the last lot of this watch**, 23:41 UTC: #7 (`abcdef0`) as it is") else "abcdef0"),
         ("no run on the head of a change to documents only: taken, the lot's run is its run",
          why_not_taken(waiting(checks=[], files=("AGENTS.md", "docs/phases/5-a.md")), board), ""),
+        ("...not under a rule on main, which merges no head without a run (BLOCKED): its agent is told what starts one (#548)",
+         [why_not_taken(dict(waiting(checks=[], files=files), mergeStateStatus="BLOCKED"), board, lambda pr: "b" * 40)[:70]
+          for files in (("AGENTS.md", "docs/phases/5-a.md"), ("src/a.cpp",))],
+         ["no CI run on its head commit, and since the rule on main GitHub merges"] * 2),
+        ("...and BLOCKED says nothing of a head that has a run: taken while it goes, as before",
+         why_not_taken(dict(waiting(checks=[check("Build", None, "IN_PROGRESS")]), mergeStateStatus="BLOCKED"), board), ""),
         ("a pull request with a short run is taken: the lot's run is the whole one",
          why_not_taken(waiting(checks=green[:2] + [check(f"heavy {n}", "SKIPPED") for n in range(10)]), board), ""),
         ("in conflict with main: not taken",

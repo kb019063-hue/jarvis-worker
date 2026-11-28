@@ -76,6 +76,43 @@ enum class EmptyCells : uint8_t {
     Hide
 };
 
+/// CSS `border-style` / `outline-style` values (CSS 2.1 8.5.3). `none` and
+/// `hidden` both paint nothing. `hidden`'s table-model suppression is not
+/// implemented (see phase 512).
+enum class BorderStyle : uint8_t {
+    None,
+    Hidden,
+    Dotted,
+    Dashed,
+    Solid,
+    Double,
+    Groove,
+    Ridge,
+    Inset,
+    Outset
+};
+
+/// One style per edge, parallel to EdgeSizes. Initial value `none` on every
+/// edge (CSS 2.1 8.5.3).
+struct EdgeStyles {
+    BorderStyle top{BorderStyle::None};
+    BorderStyle right{BorderStyle::None};
+    BorderStyle bottom{BorderStyle::None};
+    BorderStyle left{BorderStyle::None};
+
+    constexpr EdgeStyles() = default;
+    constexpr EdgeStyles(BorderStyle t, BorderStyle r, BorderStyle b, BorderStyle l)
+        : top(t), right(r), bottom(b), left(l) {}
+    constexpr explicit EdgeStyles(BorderStyle all) : top(all), right(all), bottom(all), left(all) {}
+
+    bool operator==(const EdgeStyles& other) const = default;
+};
+
+/// Whether a style draws anything at all (`none` and `hidden` do not).
+constexpr bool border_style_draws(BorderStyle style) {
+    return style != BorderStyle::None && style != BorderStyle::Hidden;
+}
+
 /// CSS `caption-side` (CSS 2.1 17.4.1, `top` and `bottom` only).
 enum class CaptionSide : uint8_t {
     Top,
@@ -329,16 +366,18 @@ struct ComputedStyle {
     EdgeSizes margin_percent{-1.0f};
     EdgeSizes padding_percent{-1.0f};
     EdgeSizes border_width{0.0f};
+    /// `border-style`, one per edge, parallel to `border_width`.
+    EdgeStyles border_style{};
     Color border_color{Color::black()};
     /// `outline`, which a box draws around its border box without taking any
     /// room (`outline-offset` moves it out; a negative one pulls it in). It is
     /// not part of the box model, so it is not an `EdgeSizes`: it is one ring
-    /// of one width, and `outline_drawn` is the `outline-style` that decides
+    /// of one width, and `outline_style` is the `outline-style` that decides
     /// whether there is a ring at all (`none` draws nothing, whatever the
-    /// width says).
+    /// width says) and how it is painted.
     float outline_width{0.0f};
     float outline_offset{0.0f};
-    bool outline_drawn{false};
+    BorderStyle outline_style{BorderStyle::None};
     Color outline_color{Color::black()};
     float border_radius{0.0f};
     float border_radius_percent{-1.0f};

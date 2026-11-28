@@ -2,6 +2,7 @@
 
 #include "litebird/common/Color.hpp"
 #include "litebird/common/Geometry.hpp"
+#include "litebird/css/StyleResolver.hpp"
 #include "litebird/layout/LayoutBox.hpp"
 #include <optional>
 #include <string>
@@ -48,6 +49,10 @@ struct DrawBorderCommand {
     EdgeSizes width;
     Color color;
     float border_radius{0.0f};
+    /// Per-edge `border-style`. Initial value `solid`, so a command built
+    /// without it paints as it always did; the outline ring sets all four
+    /// edges to `outline-style`.
+    EdgeStyles styles{BorderStyle::Solid};
     /// When set, each edge is drawn in its own colour (collapsed tables: the
     /// shared edge belongs to the winning border, colour included).
     std::optional<EdgeColors> edge_colors;

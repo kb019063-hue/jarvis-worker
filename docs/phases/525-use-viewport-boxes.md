@@ -39,3 +39,8 @@ passed. An earlier parallel test attempt was killed under memory contention,
 and its interrupted deep run is not counted. The deep-page and sanitizer
 checks are being rerun serially before this draft is finished.
 Serial `make deep` subsequently passed **1332/1332** runs over 465 pages.
+The standard `make asan` engine build succeeded, but the normal sanitizer test
+harness compiler reached 3.8 GiB and was stopped under severe memory pressure;
+the full sanitizer run has not passed. The ASan engine independently matched
+**1254/1254** of the viewport box differential. CI's full sanitizer job remains
+an independent required gate, not a substitute for claiming a local pass.

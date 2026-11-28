@@ -35,8 +35,14 @@ are two invalid date-only shapes accepted through its legacy heuristics
 this ISO parser's policy, not a claimed conformance win over Node. All
 pinned test262 negative-zero cases are date-times and agree with Node.
 
-See [Phase 551](../phases/551-date-negative-zero-year.md) for commands,
-broader validation and limits.
+The canonical **-O1 -g ASan/UBSan engine** also passes all **111 checks
+in three zones** and **595/610** Date test262 cases with no sanitizer
+reports. Plain full units pass **583/583** suites and **114/114**
+cross-origin checks. See [Phase 551](../phases/551-date-negative-zero-year.md)
+for commands, broader gates, the initial parallel-load JS timeouts and
+successful standalone rerun, and local validation limits: full local
+asan/deep aggregates were not run, and complete default full CI must
+pass before merge.
 
 ## What is still open
 

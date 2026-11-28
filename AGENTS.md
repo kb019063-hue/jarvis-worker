@@ -193,8 +193,9 @@ within the hour, and the first lot was started again four times.
      `--admin`**: that is the rule switched off for one merge. **And not
      `--auto`**: that has GitHub merge by itself once the two checks have
      passed, on the short run alone and at a time nobody chose. Every
-     claim reports BLOCKED (a draft, and no run on its head), so nothing
-     of this is said of a pull request that is a draft or under `WIP:`.
+     claim reports BLOCKED, since its pushes carry the mark and its head
+     has no run: nothing of this is said of a pull request that is a
+     draft or under `WIP:`.
      `python3 tools/watch/rule.py` reads back what rule is on `main`,
      and says what in it would stop every merge or every lot; its first
      lines are what the person was asked to set ("Merged 59 seconds

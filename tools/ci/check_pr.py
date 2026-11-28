@@ -941,12 +941,15 @@ def rule_note(state: str | None, number: int, head: str, head_state: str, requir
       chose and on the short run alone (the repository has it switched
       off: `allow_auto_merge` is false);
     - every claim that was open and not in conflict reported BLOCKED from
-      the minute the rule was on: a draft, and no run on its head, since a
-      claim's pushes carry the mark. That is `unfinished` here: nothing is
-      said then, because the pull request is not finished and the lines
-      above this one say so. Asked of #487, a draft under `WIP:` in the
-      middle of its work, this said "push a commit without the mark (an
-      empty one will do)", which would have been a run for nothing;
+      the minute the rule was on: no run on its head, since a claim's
+      pushes carry the mark. That is `unfinished` here: nothing is said
+      then, because the pull request is not finished and the lines above
+      this one say so. Asked of #487, a draft under `WIP:` in the middle
+      of its work, this said "push a commit without the mark (an empty one
+      will do)", which would have been a run for nothing. (BLOCKED says
+      nothing of a draft as such: #520, a draft, reported UNSTABLE at
+      11:51 with the two checks passed and one job going, and CLEAN when
+      all had passed. GitHub merges no draft all the same);
     - `gh pr checks N --required` says "no checks reported" of a head with
       no run: it shows what the rule got only once something has run.
     """

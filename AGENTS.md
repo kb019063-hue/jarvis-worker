@@ -142,10 +142,12 @@ within the hour, and the first lot was started again four times.
    "The files every pull request changes", point 4.)
 3. **When your pull request is finished, ask whether a watch is on.**
    Finished is: the checks of "What "done" means" pass, `WIP:` is off the
-   title, and CI is green on the head commit (wait for it with
+   title, the pull request is no draft any more (`gh pr ready N`), and
+   CI is green on the head commit (wait for it with
    `gh pr checks N`, once a minute; not with `gh run watch`). Then run
    `python3 tools/ci/check_pr.py merge N` and do what its last lines say.
-   **Take `WIP:` off with your last push, and not before.** While a watch
+   **Take `WIP:` off, and `gh pr ready N`, with your last push, and not
+   before.** While a watch
    is on, the pull request can be taken from that moment, while its own
    run is still going; a title that loses `WIP:` before the work is all
    pushed gets half the work merged.
@@ -189,7 +191,9 @@ within the hour, and the first lot was started again four times.
      rule switched off for one merge. (No such rule was on when this was
      written, on 28 November: the person had been asked for one, "Merged
      59 seconds after it was opened", below, and had said they would
-     try.)
+     try.) `python3 tools/watch/rule.py` reads back what rule is on
+     `main`, and says what in it would stop every merge or every lot;
+     its first lines are what the person was asked to set.
 
    A title without `WIP:` on a green pull request says "land this", to
    whoever is landing. Keep `WIP:` on until the work is finished, and put
@@ -476,7 +480,9 @@ without one, and leaves the board and a watch out of the claims.
    Claims).
 2. **Claim before doing the work.** Pick a row of the table below that nobody
    has, push a first commit (an empty one will do) and open a pull request
-   whose title begins with `WIP:` and whose text begins:
+   **as a draft** (`gh pr create --draft`; `gh pr ready N --undo` makes
+   an open one a draft), whose title begins with `WIP:` and whose text
+   begins:
 
    ```
    Task: <the row of the table>
@@ -491,6 +497,10 @@ without one, and leaves the board and a watch out of the claims.
    `docs/findings/360-….md`, `tests/suites/360-….cpp`, and its title
    says so when the `WIP:` comes off. Nobody has to be asked, because
    GitHub gives no two pull requests the same number.
+   **A draft is merged by nobody**: GitHub answers "Pull Request is
+   still a draft" to whoever asks, until `gh pr ready N`. `WIP:` in a
+   title stops nobody: #449 and #491 were both merged with it ("Merged
+   59 seconds after it was opened", below).
    (`python3 tools/next_ids.py --pr-body` prints the four lines, and
    `python3 tools/ci/check_pr.py claim N` says the numbers back.) Until
    24 November 2026 the two came from `python3 tools/next_ids.py`, the
@@ -1028,6 +1038,24 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   not begun to be merged when GitHub would refuse one of its pull
   requests: `main` with half a lot is a tree no run passed on. Tried
   with a `gh` that made GitHub's answers up; no rule was on.
+  **It happened again on 28 November, to #491**, at 07:42:34: `WIP:` in
+  its title, a watch on since 07:30, and on its head the short run
+  alone, which is what a push gets. `main` moved under the lot in test,
+  and two pull requests were tested a second time. `main`'s own run on
+  the merge passed, all 18 jobs, so it stayed. The rule the person was
+  setting that hour (the two checks of the short run, passed on the
+  head) would not have refused it: those two had passed. What would
+  have refused both #449 and #491 is GitHub's own answer to a draft,
+  tried that morning on the landing session's pull request: "Pull
+  Request is still a draft", from the page, from `gh pr merge` and from
+  the API alike. So a claim is opened as a draft since that day
+  ("Before starting", point 2), and `check_pr.py claim N` says so of
+  one that is not. The other side of it: a finished draft that nobody
+  made ready is in no list (#425, thirteen hours; #508, eleven minutes
+  of that same watch, renamed and not made ready). `merge N` says so to
+  the agent that asks. `watch.sh cands` says so to the landing session,
+  which reads it, runs `gh pr ready N` when nothing was pushed for some
+  minutes, writes that on it, and takes it.
 - **An old copy of AGENTS.md, written over `main`'s.** #452 was finished
   on 25 November on `main` of 14:12. Its AGENTS.md was that file cut off
   after line 1442: the last 109 lines of "Open tasks" were gone. It
@@ -1766,4 +1794,5 @@ files every pull request changes", point 4).
 | **Four `Object.prototype` methods (`hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`, `valueOf`) refused `null`/`undefined` receivers, since Phase 445** ([`docs/phases/445-the-receiver-that-had-to-be-an-object.md`](docs/phases/445-the-receiver-that-had-to-be-an-object.md), [finding 445](docs/findings/445-a-false-answer-where-an-object-was-required.md)). `Object.prototype.toLocaleString` already threw `TypeError` on `null`/`undefined`, but these four called `self()` directly, returning `false` (or the raw primitive for `valueOf`) instead of `ToObject(this value)`. `as_object` in `src/js/BuiltinsObject.cpp` now throws `TypeError` on `null`/`undefined` and wraps primitives via `js_to_object`, while preserving step-1 ordering (`ToPropertyKey` before `ToObject` in `hasOwnProperty`; non-object argument returns `false` before `ToObject` in `isPrototypeOf`). `toString` (§20.1.3.6) uses `ThisObject` and remains exempt. `make test` **493/493**; test262 **15,223 / 15,686** (+12 fixed, 0 broken vs `e610b56`). | `src/js/BuiltinsObject.cpp` (`as_object`, `hasOwnProperty`, `isPrototypeOf`, `propertyIsEnumerable`, `valueOf`) | [`docs/phases/445-the-receiver-that-had-to-be-an-object.md`](docs/phases/445-the-receiver-that-had-to-be-an-object.md), [`docs/findings/445-a-false-answer-where-an-object-was-required.md`](docs/findings/445-a-false-answer-where-an-object-was-required.md), [`tests/suites/445-object-prototype-methods-refuse-null-and-undefined.cpp`](tests/suites/445-object-prototype-methods-refuse-null-and-undefined.cpp) | `ToPropertyKey` in `hasOwnProperty` and the non-object argument check in `isPrototypeOf` must run before `ToObject(this)` |
 | | | | |
 | ~~**CSS `:valid` and `:invalid` tint every element because the layout selector matcher ignored them.**~~ **Fixed in Phase 491** ([`docs/phases/491-css-valid-invalid-match-controls.md`](docs/phases/491-css-valid-invalid-match-controls.md), [finding 491](docs/findings/491-css-valid-invalid-matched-every-element.md)): `StyleResolver::matches_simple_selector` had cases for several dynamic pseudo-classes but not `valid`/`invalid`; unknown states fell through as matched. The Mothereff `.invalid, :invalid { background: #ffb6c1 }` rule therefore tinted non-controls and the document canvas even though inputs were valid. The layout matcher now asks `forms::validity_for_selector`, so non-controls match neither and validation controls use the shared live state. The regression checks actual `BrowserShell::render_png_frame` pixels (the old `getComputedStyle`-only probe exercised a different selector path and missed the paint bug), plus `Element.matches()` for valid/invalid controls. `make test` 525/525; cross-origin 114/114. Strict real-pages after fix: Chromium 20/20, Litebird interactions 20/20, **0/19 exact**. Tasks 13, 14, 15 and 19 improved by 131,317 / 132,620 / 133,467 / 135,452 different pixels respectively (532,856 fewer total); the canvas tint is gone, but their control sizing and the rest of page layout still differ | `src/css/StyleResolver.cpp` (`matches_simple_selector`), `tests/suites/491-valid-invalid-css-pseudo-classes.cpp`, `tools/real_pages/rerun-08/` | [Phase 491](docs/phases/491-css-valid-invalid-match-controls.md), [finding 491](docs/findings/491-css-valid-invalid-matched-every-element.md), frozen real pages 13–15 and 19 (`tools/real_pages/pages.json`) | Keep the visual comparison exact: no tolerance, alignment or exclusion other than the randomized 2048 task; `getComputedStyle` alone is not an oracle for the actual paint path |
+| | | | |
 | ~~**`Set.prototype` lacked the seven ES2025 set methods.**~~ **Done in Phase 505 ([`docs/phases/505-set-methods.md`](docs/phases/505-set-methods.md), [finding 505](docs/findings/505-set-prototype-lacked-es2025-set-methods.md)).** `union`, `intersection`, `difference`, `symmetricDifference`, `isSubsetOf`, `isSupersetOf`, and `isDisjointFrom` (`length` 1, non-constructible) are implemented in `src/js/BuiltinsCollections.cpp` per ECMA-262 §24.2.1 / §24.2.3: `get_set_record` reads `size` (`ToNumber`, `NaN` -> `TypeError`, `ToIntegerOrInfinity`, `< 0` -> `RangeError`), `has`, and `keys`; `get_iterator_from_method` / `iterator_step_value` validate `next` callability before invoking `call_with_this` and `iterator_close_normal` closes unexhausted iterators on early `false` returns in `isSupersetOf` and `isDisjointFrom`; `-0` keys canonicalize to `+0`; RAII `CursorGuard` walks protect against receiver mutation and tombstone compaction; plain `%Set%` instances are returned ignoring receiver methods, `Symbol.species`, and `Set.prototype.add`. `make test` **542 / 542**; Node v22.22.3 differential oracle (`tools/conformance/verify_set_methods.py`) **11 / 11**; test262 `Set/prototype/*` 7 subdirectories **28 / 186 -> 165 / 186 (+137 fixed, 0 lost; all 21 remaining are `BigInt` literals)**, `built-ins/Set` **354 / 383**; `js-conformance` 1,153/1,158 and `dom-conformance` 678/678 unchanged; ASan+UBSan clean across differential oracle, `test262`, and mid-iteration `forceGc()`. | `src/js/BuiltinsCollections.cpp`, `tests/suites/505-set-methods.cpp`, `tools/conformance/verify_set_methods.py` | [`docs/phases/505-set-methods.md`](docs/phases/505-set-methods.md), [`docs/findings/505-set-prototype-lacked-es2025-set-methods.md`](docs/findings/505-set-prototype-lacked-es2025-set-methods.md); ECMA-262 2025 §24.2.1, §24.2.3 | `union` copies `O` right after `GetSetRecord` before invoking `keys()` to match Node v22.22.3 (V8); 21 `BigInt`-literal `test262` cases await engine `BigInt` support. |

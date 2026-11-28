@@ -50,6 +50,9 @@
 #                                        that was read here (origin/prN); `anyway` as a third word
 #                                        posts all the same
 #   tools/watch/watch.sh note N FILE     comment FILE on #N, print the comment's id
+#   tools/watch/watch.sh rule            what rule GitHub has on main, read back, and what in it would
+#                                        stop a merge or a lot (tools/watch/rule.py; 0 as asked for,
+#                                        1 none, 3 something to change)
 #   tools/watch/watch.sh off "what it did"   the watch has ended: the status comment says OFF, and
 #                                        nothing here writes a beat after it
 #   tools/watch/watch.sh notits N        #N's own run failed and its change is not why (read
@@ -686,6 +689,9 @@ notits)
 
 note)
   note "$1" "$2" ;;
+
+rule)
+  python3 tools/watch/rule.py ;;
 
 *)
   sed -n '2,40p' "$0" | sed 's/^# \{0,1\}//'; exit 9 ;;

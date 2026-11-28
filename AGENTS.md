@@ -189,7 +189,9 @@ within the hour, and the first lot was started again four times.
      rule switched off for one merge. (No such rule was on when this was
      written, on 28 November: the person had been asked for one, "Merged
      59 seconds after it was opened", below, and had said they would
-     try.)
+     try.) `python3 tools/watch/rule.py` reads back what rule is on
+     `main`, and says what in it would stop every merge or every lot;
+     its first lines are what the person was asked to set.
 
    A title without `WIP:` on a green pull request says "land this", to
    whoever is landing. Keep `WIP:` on until the work is finished, and put

@@ -489,6 +489,24 @@ void install_collection_builtins(JsIntrinsics& realm) {
         data_of(self(), ObjectClass::Map, "Map.prototype.clear")->clear();
         return JsValue::make_undefined();
     });
+    js_define_method(mp, "getOrInsert", 2, [](Args args) {
+        auto data = data_of(self(), ObjectClass::Map, "Map.prototype.getOrInsert");
+        JsValue key = js_arg(args, 0);
+        if (auto* entry = data->find(key)) return entry->value;
+        JsValue defaultValue = js_arg(args, 1);
+        data->set(key, defaultValue);
+        return defaultValue;
+    });
+    js_define_method(mp, "getOrInsertComputed", 2, [](Args args) {
+        auto data = data_of(self(), ObjectClass::Map, "Map.prototype.getOrInsertComputed");
+        JsValue key = js_arg(args, 0);
+        if (auto* entry = data->find(key)) return entry->value;
+        JsValue callback = js_arg(args, 1);
+        if (!callback.is_function()) js_throw_type_error("Map.prototype.getOrInsertComputed: callback is not a function");
+        JsValue computed = callback.call_with_this(JsValue::make_undefined(), {key});
+        data->set(key, computed);
+        return computed;
+    });
     js_define_getter(mp, "size", [](Args) {
         return JsValue::make_number(static_cast<double>(data_of(self(), ObjectClass::Map, "get Map.prototype.size")->live));
     });
@@ -828,6 +846,26 @@ void install_collection_builtins(JsIntrinsics& realm) {
     });
     js_define_method(wmp, "delete", 1, [](Args args) {
         return JsValue::make_boolean(data_of(self(), ObjectClass::WeakMap, "WeakMap.prototype.delete")->remove(js_arg(args, 0)));
+    });
+    js_define_method(wmp, "getOrInsert", 2, [](Args args) {
+        auto data = data_of(self(), ObjectClass::WeakMap, "WeakMap.prototype.getOrInsert");
+        JsValue key = js_arg(args, 0);
+        require_object_key(key, "as weak map key");
+        if (auto* entry = data->find(key)) return entry->value;
+        JsValue defaultValue = js_arg(args, 1);
+        data->set(key, defaultValue);
+        return defaultValue;
+    });
+    js_define_method(wmp, "getOrInsertComputed", 2, [](Args args) {
+        auto data = data_of(self(), ObjectClass::WeakMap, "WeakMap.prototype.getOrInsertComputed");
+        JsValue key = js_arg(args, 0);
+        require_object_key(key, "as weak map key");
+        if (auto* entry = data->find(key)) return entry->value;
+        JsValue callback = js_arg(args, 1);
+        if (!callback.is_function()) js_throw_type_error("WeakMap.prototype.getOrInsertComputed: callback is not a function");
+        JsValue computed = callback.call_with_this(JsValue::make_undefined(), {key});
+        data->set(key, computed);
+        return computed;
     });
     realm.add_global("WeakMap", weakmap_ctor);
 

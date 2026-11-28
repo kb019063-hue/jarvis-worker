@@ -45,7 +45,10 @@
 #                                        request ends with: when each run began and passed, when it
 #                                        was merged, whose pull requests, the run and its length
 #   tools/watch/watch.sh sendback N "why, and what to do"   the line that sends #N back, in #N and
-#                                        on the board; #N is then left alone until its head moves
+#                                        on the board; #N is then left alone until its head moves.
+#                                        Status 3 and nothing posted when #N's head is not the one
+#                                        that was read here (origin/prN); `anyway` as a third word
+#                                        posts all the same
 #   tools/watch/watch.sh note N FILE     comment FILE on #N, print the comment's id
 #   tools/watch/watch.sh off "what it did"   the watch has ended: the status comment says OFF, and
 #                                        nothing here writes a beat after it
@@ -650,6 +653,20 @@ table)
 sendback)
   n="$1"; why="$2"
   full="$(timeout 30 gh pr view "$n" --json headRefOid --jq .headRefOid)"; [ -n "$full" ] || exit 9
+  # The line names the head it is about, and `landed N` tells the agent "it
+  # is yours again" for as long as #N's head is that one. So nothing is
+  # posted unless the head is the one that was read here: `cands` and `plan`
+  # fetch it to origin/prN. On 28 November #492 was read at 1fe58a6, in
+  # conflict with main in one row of ROADMAP.md. A minute later this posted
+  # "#492 is yours again (head c681b16): it is in conflict", and c681b16,
+  # pushed ten seconds before, was the agent's own merge of main with the
+  # row put right. Both comments were changed by hand half a minute later.
+  read_at="$(git rev-parse -q --verify "refs/remotes/origin/pr$n" 2>/dev/null)"
+  if [ "$read_at" != "$full" ] && [ "${3:-}" != "anyway" ]; then
+    was="${read_at:0:7}"
+    echo "sendback: nothing is posted. #$n is at ${full:0:7} now, and what was read here is ${was:-nothing}: read it again (\`plan $n\` fetches it and says whether it still conflicts), or give \`anyway\` as a third word" >&2
+    exit 3
+  fi
   printf '%s: #%s is yours again (head %s): %s\n' "$NAME" "$n" "${full:0:7}" "$why" > "$STATE/land/back$n.md"
   note "$n" "$STATE/land/back$n.md"; [ -n "$BOARD" ] && note "$BOARD" "$STATE/land/back$n.md"
   echo "$n ${full:0:7}" >> "$STATE/sentback" ;;

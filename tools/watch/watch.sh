@@ -52,6 +52,9 @@
 #   tools/watch/watch.sh note N FILE     comment FILE on #N, print the comment's id
 #   tools/watch/watch.sh drafts          every claim under WIP: that is no draft is made one, with a
 #                                        note on it that says so and what its agent does at the end
+#   tools/watch/watch.sh ready N         #N is finished (no WIP: in its title) and still a draft:
+#                                        `gh pr ready N` and a note on it; `cands` then takes it.
+#                                        3 and nothing done when its title is still under WIP:
 #   tools/watch/watch.sh rule            what rule GitHub has on main, read back, and what in it would
 #                                        stop a merge or a lot (tools/watch/rule.py; 0 as asked for,
 #                                        1 none, 3 something to change)
@@ -237,6 +240,13 @@ open_ones() {  # "N FULLSHA fin|WIP|draft MERGEABLE..." of every open pull reque
     --jq '.[] | select((.title | test("^(BOARD|WATCH):")) | not) | "\(.number) \(.headRefOid) \(if (.title | test("^WIP")) then "WIP" elif .isDraft then "draft" else "fin" end) \(.mergeable)"' | sort -n
 }
 fetch_pr() { timeout 60 git fetch -q origin "+refs/pull/$1/head:refs/remotes/origin/pr$1"; }
+wip_off_at() {  # wip_off_at N -> HH:MM:SS (UTC; with the day when it was not today) at which the last change of #N's title took WIP: off; nothing when it did not
+  # A title that loses its WIP: is its agent's word that the work is
+  # finished ("Working together", point 3). The first 100 events of the pull
+  # request are read; no claim here has had that many.
+  timeout 30 gh api "repos/$R/issues/$1/events?per_page=100" \
+    --jq '[.[] | select(.event == "renamed")] | last | select(. != null) | select((.rename.from | test("^WIP")) and ((.rename.to | test("^WIP")) | not)) | .created_at as $t | if $t[0:10] == (now | strftime("%Y-%m-%d")) then $t[11:19] else $t[0:10] + " " + $t[11:16] end' 2>/dev/null
+}
 agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^Agent: *(\\w+)") | .captures[0].string] | first) // "-"' 2>/dev/null; }
 
 beat() {  # beat [due]: write the look into the status comment of the board; `due`: only when the last is five minutes old
@@ -322,7 +332,12 @@ cands)
       # agent's two before it, which had been made ready in the same second.
       # Since that day every claim is a draft, so this is said every time.
       runs="$(runs_of "$full" 2>/dev/null)"; case "$runs" in ""|"{"*) runs="its runs could not be read" ;; esac
-      echo "#$n ${full:0:7}: NOT taken: a draft whose title has no WIP: ($runs). Finished and not made ready? Read it and its events; when nothing was pushed for some minutes, \`gh pr ready $n\`, a note on it, and it is taken" >&2
+      off="$(wip_off_at "$n")"
+      if [ -n "$off" ]; then
+        echo "#$n ${full:0:7}: NOT taken: a draft, and the WIP: came off its title at $off UTC ($runs): finished and not made ready. \`tools/watch/watch.sh ready $n\` makes it ready and says so on it; it is taken at the next look" >&2
+      else
+        echo "#$n ${full:0:7}: NOT taken: a draft whose title has no WIP: and never lost one ($runs). Opened without WIP:, or finished? Read it; \`tools/watch/watch.sh ready $n\` when it is finished" >&2
+      fi
       continue
     fi
     [ "$wip" = "fin" ] || continue
@@ -706,6 +721,25 @@ note)
 
 rule)
   python3 tools/watch/rule.py ;;
+
+ready)
+  # A finished draft that its agent did not make ready: the landing session
+  # does, and says so on it. Twice on 28 November: #508, whose agent had
+  # made its two before ready in the second it renamed them and not this
+  # one, and #515, which the landing session itself had made a draft 25
+  # seconds before its last push. Not for a draft whose work is going on:
+  # ready and without WIP: is "land this".
+  n="${1:?ready N}"
+  read -r state draft full title <<< "$(timeout 30 gh pr view "$n" --json state,isDraft,headRefOid,title --jq '"\(.state) \(.isDraft) \(.headRefOid) \(.title)"')"
+  [ "$state" = "OPEN" ] || { echo "ready: #$n is not open (${state:-no answer})" >&2; exit 9; }
+  [ "$draft" = "true" ] || { echo "ready: #$n is no draft: nothing to do"; exit 0; }
+  case "$title" in WIP*) echo "ready: nothing is done. #$n is still under WIP: ($title): its agent has not said it is finished" >&2; exit 3 ;; esac
+  off="$(wip_off_at "$n")"
+  if [ -n "$off" ]; then when="Its \`WIP:\` came off at $off UTC"; else when="Its title has no \`WIP:\`"; fi
+  timeout 30 gh pr ready "$n" > "$STATE/land/ready$n.out" 2>&1 || { echo "ready: gh pr ready $n failed: $(tail -1 "$STATE/land/ready$n.out" | cut -c1-160)" >&2; exit 9; }
+  printf '%s: #%s is ready now: I ran `gh pr ready %s` at %s UTC. %s, and it had stayed a draft: a draft is in no list, and GitHub merges it for nobody. It is taken as it is at `%s`; say so here and push if it was not finished. The next one: `gh pr ready N` with the last push, when the `WIP:` comes off.\n' \
+    "$NAME" "$n" "$n" "$(date -u +%H:%M)" "$when" "${full:0:7}" > "$STATE/land/ready$n.md"
+  note "$n" "$STATE/land/ready$n.md" ;;
 
 drafts)
   # A claim is a draft since 28 November 2026 (AGENTS.md, "Before starting",

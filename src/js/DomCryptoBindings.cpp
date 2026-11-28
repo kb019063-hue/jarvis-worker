@@ -1877,20 +1877,52 @@ void setup_subtle_crypto(Iface& I) {
             return undefined();
         };
         if (args.size() < 4) return reject_with("TypeError", "SubtleCrypto.wrapKey: 4 arguments required.");
-        if (ascii_lower(to_str(args[0])) != "raw") {
-            return reject_with("NotSupportedError", "SubtleCrypto.wrapKey: only 'raw' format is supported.");
+        std::string fmt = ascii_lower(to_str(args[0]));
+        if (fmt != "raw" && fmt != "jwk") {
+            return reject_with("NotSupportedError", "SubtleCrypto.wrapKey: only 'raw' and 'jwk' formats are supported.");
         }
         auto* key = state_of<CryptoKeyState>(args[1]);
         auto* wrap_key = state_of<CryptoKeyState>(args[2]);
         if (!key || !wrap_key) return reject_with("TypeError", "SubtleCrypto.wrapKey: CryptoKey required.");
         if (!key->extractable) return reject_with("InvalidAccessError", "SubtleCrypto.wrapKey: key is not extractable.");
 
+        std::vector<uint8_t> payload = key->key_bytes;
+        if (fmt == "jwk") {
+            JsValue obj_ctor = r.window.is_object() ? r.window.get_property("Object") : JsValue();
+            JsValue jwk = js_construct(obj_ctor, {});
+            if (key->hash_alg == "ecdh" || key->hash_alg == "ecdsa") {
+                jwk.set_property("kty", str("EC"));
+                jwk.set_property("crv", str("P-256"));
+                jwk.set_property("ext", boolean(key->extractable));
+                if (key->type == "public" && key->key_bytes.size() == 65u) {
+                    jwk.set_property("x", str(base64url_encode(std::vector<uint8_t>(key->key_bytes.begin() + 1, key->key_bytes.begin() + 33))));
+                    jwk.set_property("y", str(base64url_encode(std::vector<uint8_t>(key->key_bytes.begin() + 33, key->key_bytes.end()))));
+                } else if (key->type == "private" && key->key_bytes.size() == 32u) {
+                    p256::Fe rx, ry;
+                    p256::scalar_mul(key->key_bytes.data(), p256::kGx, p256::kGy, rx, ry);
+                    std::vector<uint8_t> xb(32), yb(32);
+                    p256::fe_to_be(rx, xb.data());
+                    p256::fe_to_be(ry, yb.data());
+                    jwk.set_property("x", str(base64url_encode(xb)));
+                    jwk.set_property("y", str(base64url_encode(yb)));
+                    jwk.set_property("d", str(base64url_encode(key->key_bytes)));
+                }
+            } else {
+                jwk.set_property("kty", str("oct"));
+                jwk.set_property("k", str(base64url_encode(key->key_bytes)));
+                jwk.set_property("ext", boolean(key->extractable));
+            }
+            JsValue json_obj = r.window.is_object() ? r.window.get_property("JSON") : JsValue();
+            std::string json_str = to_str(js_call(json_obj.get_property("stringify"), json_obj, {jwk}));
+            payload.assign(json_str.begin(), json_str.end());
+        }
+
         JsValue u8_ctor = r.window.is_object() ? r.window.get_property("Uint8Array") : JsValue();
         JsValue ab_ctor = r.window.is_object() ? r.window.get_property("ArrayBuffer") : JsValue();
-        JsValue raw_ab = js_construct(ab_ctor, {num(static_cast<double>(key->key_bytes.size()))});
+        JsValue raw_ab = js_construct(ab_ctor, {num(static_cast<double>(payload.size()))});
         JsValue raw_u8 = js_construct(u8_ctor, {raw_ab});
-        for (std::size_t i = 0; i < key->key_bytes.size(); ++i) {
-            raw_u8.set_property(std::to_string(i), num(static_cast<double>(key->key_bytes[i])));
+        for (std::size_t i = 0; i < payload.size(); ++i) {
+            raw_u8.set_property(std::to_string(i), num(static_cast<double>(payload[i])));
         }
         std::vector<JsValue> enc_args = {args[3], args[2], raw_ab};
         return aes_cipher_op(r, enc_args, true);
@@ -1904,8 +1936,9 @@ void setup_subtle_crypto(Iface& I) {
             return undefined();
         };
         if (args.size() < 7) return reject_with("TypeError", "SubtleCrypto.unwrapKey: 7 arguments required.");
-        if (ascii_lower(to_str(args[0])) != "raw") {
-            return reject_with("NotSupportedError", "SubtleCrypto.unwrapKey: only 'raw' format is supported.");
+        std::string fmt = ascii_lower(to_str(args[0]));
+        if (fmt != "raw" && fmt != "jwk") {
+            return reject_with("NotSupportedError", "SubtleCrypto.unwrapKey: only 'raw' and 'jwk' formats are supported.");
         }
         std::vector<uint8_t> wrapped;
         if (!read_buffer_source(r, args[1], wrapped)) {
@@ -1973,24 +2006,68 @@ void setup_subtle_crypto(Iface& I) {
         else if (target_name == "aes-cbc") canonical_alg = "AES-CBC";
         else if (target_name == "aes-ctr") canonical_alg = "AES-CTR";
         else if (target_name == "hmac") canonical_alg = "HMAC";
+        else if (target_name == "ecdsa") canonical_alg = "ECDSA";
+        else if (target_name == "ecdh") canonical_alg = "ECDH";
         else return reject_with("NotSupportedError", "SubtleCrypto.unwrapKey: unsupported unwrappedKeyAlgorithm.");
 
-        if (canonical_alg != "HMAC" && raw_bytes.size() != 16u && raw_bytes.size() != 24u && raw_bytes.size() != 32u) {
+        std::string ec_type = "secret";
+        if (fmt == "jwk") {
+            std::string json_str(raw_bytes.begin(), raw_bytes.end());
+            JsValue json_obj = r.window.is_object() ? r.window.get_property("JSON") : JsValue();
+            JsValue jwk = js_call(json_obj.get_property("parse"), json_obj, {str(json_str)});
+            if (!jwk.is_object_like()) {
+                return reject_with("DataError", "SubtleCrypto.unwrapKey: invalid JWK payload.");
+            }
+            std::string kty = to_str(jwk.get_property("kty"));
+            if (kty == "EC") {
+                std::vector<uint8_t> xb, yb, db;
+                if (!base64url_decode(to_str(jwk.get_property("x")), xb) || xb.size() != 32u ||
+                    !base64url_decode(to_str(jwk.get_property("y")), yb) || yb.size() != 32u) {
+                    return reject_with("DataError", "SubtleCrypto.unwrapKey: invalid EC JWK coordinates.");
+                }
+                JsValue d_val = jwk.get_property("d");
+                if (!d_val.is_undefined() && !d_val.is_nullish()) {
+                    if (!base64url_decode(to_str(d_val), db) || db.size() != 32u) {
+                        return reject_with("DataError", "SubtleCrypto.unwrapKey: invalid EC JWK 'd'.");
+                    }
+                    ec_type = "private";
+                    raw_bytes = std::move(db);
+                } else {
+                    ec_type = "public";
+                    raw_bytes.clear();
+                    raw_bytes.push_back(0x04u);
+                    raw_bytes.insert(raw_bytes.end(), xb.begin(), xb.end());
+                    raw_bytes.insert(raw_bytes.end(), yb.begin(), yb.end());
+                }
+            } else if (kty == "oct") {
+                if (!base64url_decode(to_str(jwk.get_property("k")), raw_bytes)) {
+                    return reject_with("DataError", "SubtleCrypto.unwrapKey: invalid oct JWK 'k'.");
+                }
+            } else {
+                return reject_with("DataError", "SubtleCrypto.unwrapKey: unsupported JWK kty.");
+            }
+        }
+
+        if ((canonical_alg == "AES-GCM" || canonical_alg == "AES-CBC" || canonical_alg == "AES-CTR") &&
+            raw_bytes.size() != 16u && raw_bytes.size() != 24u && raw_bytes.size() != 32u) {
             return reject_with("DataError", "SubtleCrypto.unwrapKey: AES key must be 128, 192, or 256 bits.");
         }
 
         auto state = std::make_shared<CryptoKeyState>();
-        state->type = "secret";
+        state->type = ec_type;
         state->extractable = args[5].is_truthy();
         state->key_bytes = std::move(raw_bytes);
         if (canonical_alg == "HMAC" && target_alg.is_object_like()) {
             JsValue hash_val = target_alg.get_property("hash");
             std::string h = ascii_lower(hash_val.is_object_like() ? to_str(hash_val.get_property("name")) : to_str(hash_val));
-            if (h == "sha-1") state->hash_alg = "SHA-1";
-            else if (h == "sha-384") state->hash_alg = "SHA-384";
-            else if (h == "sha-512") state->hash_alg = "SHA-512";
-            else state->hash_alg = "SHA-256";
+            if (h == "sha-1") state->hash_alg = "sha-1";
+            else if (h == "sha-384") state->hash_alg = "sha-384";
+            else if (h == "sha-512") state->hash_alg = "sha-512";
+            else state->hash_alg = "sha-256";
+        } else {
+            state->hash_alg = ascii_lower(canonical_alg);
         }
+        state->usages = read_usages(args[6]);
         JsValue key_obj = r.make("CryptoKey", state);
         if (promise.is_function()) return js_call(promise.get_property("resolve"), promise, {key_obj});
         return key_obj;

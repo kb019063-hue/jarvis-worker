@@ -3373,16 +3373,27 @@ JsValue JsInterpreter::eval_unary(const UnaryExpr* expr, const EnvPtr& env) {
             return js_typeof_value(evaluate(operand, env));
         }
         case JsTokenType::Delete: {
+            // OptionalChain normally returns a value, but delete needs the
+            // final property reference, not a read of that property. Keep a
+            // chain-local short-circuit flag while evaluating its base.
+            FlagScope scope(m_chain_short_circuit, false);
+            const bool optional_chain = operand->kind == NodeKind::OptionalChain;
+            if (optional_chain)
+                operand = static_cast<const OptionalChainExpr*>(operand)->expression.get();
             if (operand->kind == NodeKind::Member || operand->kind == NodeKind::Index) {
                 JsValue base;
                 std::string key;
                 if (operand->kind == NodeKind::Member) {
                     auto* member = static_cast<const MemberExpr*>(operand);
                     base = evaluate(member->object.get(), env);
+                    if (optional_chain && (m_chain_short_circuit || (member->optional && base.is_nullish())))
+                        return JsValue::make_boolean(true);
                     key = member->property;
                 } else {
                     auto* index = static_cast<const IndexExpr*>(operand);
                     base = evaluate(index->object.get(), env);
+                    if (optional_chain && (m_chain_short_circuit || (index->optional && base.is_nullish())))
+                        return JsValue::make_boolean(true);
                     key = computed_reference_key(base, evaluate(index->index.get(), env));
                 }
                 if (base.is_nullish()) {

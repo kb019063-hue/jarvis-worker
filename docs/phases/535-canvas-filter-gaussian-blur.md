@@ -87,9 +87,10 @@ keep returning a box-shaped filter.
 The full `make asan` run did **not** finish: its initial attempt timed out while
 compiling the large sanitizer test translation unit. A retry with debug info
 disabled built the test binary and reached the ASan runner, but timed out at
-`deep_nesting_never_exhausts_the_native_stack` without a final summary. No full
-sanitizer-suite pass is claimed. The Phase 535 test itself did pass in that
-sanitizer binary using a single-suite stretch:
+`deep_nesting_never_exhausts_the_native_stack` without a final summary. Running
+that unrelated deep-nesting suite alone under ASan also exceeded 15 minutes in
+this sandbox. No full sanitizer-suite pass is claimed. The Phase 535 test itself
+did pass in that sanitizer binary using a single-suite stretch:
 
 ```sh
 ASAN_OPTIONS=detect_leaks=0 LITEBIRD_SUITE_SHARD=1/3 \

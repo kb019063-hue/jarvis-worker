@@ -92,7 +92,52 @@ LITEBIRD_SUITE_CUTS=object_property_keys_preserve_symbols_and_convert_only_once,
   ./build/test_suite
 ```
 
-Broader engine evidence follows the builds.
+Broader plain-build results on 28 November 2026:
+
+| Command | Result |
+| --- | --- |
+| `make test` | **570/570** engine suites and **114/114** cross-origin checks |
+| `make conformance` | **1,973/1,973** |
+| `make js-conformance` | **1,154/1,158**, everyday **90/90**, no crashes/timeouts; same result on baseline |
+| `make dom-conformance` | **678/678** |
+| `make url-conformance` | **1,188/1,188** |
+| `make xml-conformance` | **1,718/1,718** applicable cases |
+| `make wpt` | **9,570/9,824**, only the 254 listed failures |
+| `make diff-trees` | **6,000/6,000** match corrected parse5 |
+| `make diff-xml` | 4,000 documents with no discrepancies where both references agree; **3,000/3,000** round trips |
+| `make render-conformance` | **67/68** original pages (recorded AVIF decoder gap), **41/41** body-origin pages, **45,016/45,016** canvas checks |
+
+`diff-xml` used lxml installed only in ignored `build/538-python-deps`
+and added to PYTHONPATH. No corpus, metrics ledger or floor changed.
+
+The canonical **-O1 -g ASan/UBSan engine build** (`make -j2 asan-build`)
+passes **all 309 focused checks**, including collection inside hooks,
+and **all eleven newly passing test262 cases**, with no sanitizer reports.
+The latter can be reproduced by passing the eleven gained file paths
+from the comparison JSON to `run_test262.py`, with
+`--binary asan=build-asan/litebird --min-pass 11` and
+`ASAN_OPTIONS=detect_leaks=0`.
+
+### Unfinished validation / workspace interruption
+
+`make -j1 asan-unit TEST_OPT='-O0 -g0'` was started after the plain units
+finished. Engine objects used the canonical -O1 -g sanitizer flags; only
+the large test harness translation unit used -O0 -g0 to reduce compilation
+memory. The process reached about 2.36 GB resident memory and later
+logged `deep_nesting_never_exhausts_the_native_stack`, after which command
+execution became unresponsive. The log has no final suite summary. Stop
+and kill attempts also failed/timed out. **This is not a passing full
+sanitizer-unit run.**
+
+Execution subsequently recovered. The log ended with `test` killed and
+`asan-unit` exiting 2, and no old `test_suite` process survived. The six
+standard balanced-suite cuts are being rerun sequentially, each as a
+fresh process, to avoid carrying accumulated sanitizer memory into the
+deep tests. This rerun's result is recorded below once complete.
+
+Full local fuzz/deep and the remaining sanitizer aggregate parts have
+not run. Complete full CI in the active landing watch before merging;
+the focused checks do not replace those gates.
 
 ## What is still open
 

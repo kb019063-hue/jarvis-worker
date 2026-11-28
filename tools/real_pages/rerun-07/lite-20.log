@@ -1,0 +1,14 @@
+stage: opening snapshot
+stage: painting initial frame
+stage: driving task
+BENCH-SELECT mañana.com
+BENCH-EDIT decoded	b	b	#b
+BENCH-EDIT decoded	bü	xn--b-eha	#b%C3%BC
+BENCH-EDIT decoded	büc	xn--bc-xka	#b%C3%BCc
+BENCH-EDIT decoded	büch	xn--bch-hoa	#b%C3%BCch
+BENCH-EDIT decoded	büche	xn--bche-0ra	#b%C3%BCche
+BENCH-EDIT decoded	bücher	xn--bcher-kva	#b%C3%BCcher
+BENCH-EDIT decoded	bücher.	xn--bcher-kva.	#b%C3%BCcher.
+BENCH-EDIT decoded	bücher.d	xn--bcher-kva.d	#b%C3%BCcher.d
+BENCH-EDIT decoded	bücher.de	xn--bcher-kva.de	#b%C3%BCcher.de
+BENCH pass: input=bücher.de; output=xn--bcher-kva.de

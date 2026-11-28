@@ -82,6 +82,15 @@ The Window realm is a control: its constructors and fill pixels are unchanged.
 Only strings cross the worker boundary; no DOM object is accidentally shared
 between agents.
 
+The oracle itself runs under a fresh heap agent and restores the test process's
+previous agent after dropping its page, worker references, loader roots, and
+queued callbacks. This is test isolation, not feature behavior. Without that
+boundary the classic and module workers left 1,687 cells owned outside agent 0;
+the path assertions passed, but a much later suite deliberately measuring agent
+0's automatic-GC threshold failed. Replacing only this suite's body with a no-op
+made all 549 then-current suites pass, proving which test had polluted the
+process. With the agent boundary, both this suite and the later GC oracle pass.
+
 ## Bite proof
 
 Four mutations were compiled and restored on the Phase 499 tree:
@@ -98,7 +107,7 @@ canvas feature. The result must be read back from pixels in the same realm.
 
 ## Verification
 
-On the final tree merged with `main` at `c89f70ec`:
+The full local gate set ran after merging `main` through `c89f70ec`:
 
 * `make test`: **538/538** engine suites and **114/114** cross-origin checks;
 * `make conformance`: **1973/1973** tree-construction cases;
@@ -126,6 +135,11 @@ On this sandbox the final monolithic sanitizer unit binary could not be produced
 compiling the 37,000-line test translation unit exceeded two consecutive command
 ceilings (more than 45 minutes), so the orphaned compiler was stopped; it emitted
 no diagnostic before then. CI builds that binary on its larger cached runners.
+
+`main` moved again before the final push. After merging it through `c2e51391`, the
+engine and standalone suite were rebuilt and `make test` passed **552/552** engine
+suites plus **114/114** cross-origin checks; the document, number, suite-shape,
+and CI-part checks also passed. CI runs the complete gate set on that exact merge.
 
 ## Files
 

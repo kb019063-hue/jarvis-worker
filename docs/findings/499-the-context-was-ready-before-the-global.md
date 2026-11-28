@@ -79,3 +79,18 @@ The final oracle draws four ways and returns RGBA strings from both classic and
 module workers. Removing either constructor or the ImageData bridge fails inside
 the worker; removing only `self` mirroring fails the exact reply. The result is a
 realm test, an API test, and a pixel test together.
+
+## An agent test must not become the next test's input
+
+The first complete oracle passed and made a later automatic-GC suite fail. Each
+worker correctly owned its heap cells as a separate agent, but the unit process
+runs hundreds of suites in agent 0; adding two more agents changed the shared
+heap's live-cell history enough to perturb a later threshold measurement.
+Terminating workers, clearing their page references and loader roots, draining
+tasks, and collecting agent 0 could not collect cells owned by another agent.
+
+The oracle now gives its owner page a fresh heap agent too, collects that agent,
+and restores the previous one. A no-op mutation of only this suite made the later
+GC test pass; the agent boundary makes the real classic/module pixel work and the
+GC test pass together. A realm test is not finished merely when its own assertions
+are green: it must leave the process as though that realm had gone away.

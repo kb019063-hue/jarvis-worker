@@ -106,8 +106,8 @@ TEST(path2d_draws_through_offscreen_canvas_in_classic_and_module_workers) {
             "stroke=0,0,255,255|clip=255,255,0,255,0,0,0,0|copy=false,true";
 
         // Run the agents one at a time. Apart from reducing peak resources, this
-        // lets each terminated worker and its realm be collected before the next
-        // one starts, so the suite leaves no worker heap behind for later tests.
+        // releases each parent-side worker wrapper and its queued callbacks before
+        // the next realm starts.
         const auto run_worker = [&](const std::string& kind, const std::string& options) {
             js.eval(
                 "var workerPathReply = '', workerPathError = '';"
@@ -141,7 +141,7 @@ TEST(path2d_draws_through_offscreen_canvas_in_classic_and_module_workers) {
     }
 
     // A module worker keeps its import-resolution document in the loader's test
-    // roots on the main agent. Drop those roots and the page before collecting,
+    // roots on its owner agent. Drop those roots and the page before collecting,
     // so later suites can deliberately measure automatic collection thresholds.
     ResourceLoader::clear_origin_roots_for_testing();
     EventLoop::default_loop().run_until_idle(std::chrono::seconds(1));

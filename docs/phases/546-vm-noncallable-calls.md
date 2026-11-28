@@ -54,3 +54,7 @@ unrelated deep-nesting suite after it reached approximately 3.8 GB in this
 the suite compiler. Full sanitizer and deep checks remain required in CI.
 A local `make deep` run was stopped at a six-minute limit before completion;
 `make fuzz` passed with the instrumented engine.
+
+After merging main, `make test` passes 580 suites and 114 cross-origin
+checks; the bytecode oracle remains 199/199, JS conformance 1154/1158, and
+the other conformance, differential and documentation checks pass.

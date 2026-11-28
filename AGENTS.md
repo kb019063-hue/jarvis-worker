@@ -156,7 +156,11 @@ within the hour, and the first lot was started again four times.
      far `main` has moved: either would start a run of your own and move
      the head under the one that is testing it. That goes for an empty
      commit "to start CI" as well: when the last comment on #N says it is
-     taken, it is, run or no run. Wait with
+     taken, it is, run or no run. **If you find a fault in it after
+     that, take it back before you push**: `gh pr ready N --undo`, and
+     `WIP:` in front of its title again. The landing session's next
+     look puts it out of its lot, and nothing of it is merged; a push
+     alone may come a second after the merge. Wait with
      `python3 tools/ci/check_pr.py landed N`, which looks for up to four
      minutes and says one of four things:
      - it has landed: tell the person, and end the turn. Your next task
@@ -209,7 +213,12 @@ within the hour, and the first lot was started again four times.
    GitHub can end under it at any moment ("The turn, and what a merge does
    to it", below). Its commands are `tools/watch/watch.sh` (`look`, `st`,
    `cands`, `build`, `push`, `wait`, `land`, `once`, `taken`, `landed`,
-   `sendback`; the file's first lines say what each does). At every look,
+   `sendback`; the file's first lines say what each does). Beside it in
+   `tools/watch/`: `setup.sh` puts back what a watch works with in a
+   sandbox that is new, `poll.sh` is one look at everything that can
+   change, `readpr.sh N` is the reading of a pull request before it is
+   taken, and `mkbody.sh` writes the text of the watch's own pull
+   request at the end. At every look,
    five minutes apart or less:
    - `python3 tools/ci/check_pr.py watch --beat "YYYY-MM-DD HH:MM"` writes
      the time of the look into the status comment of the board;
@@ -296,6 +305,16 @@ within the hour, and the first lot was started again four times.
      checks that, and the lot goes on with the new head. In the first
      quarter of an hour of 24 November's watch three heads moved under
      one lot (#305, #313, #321) and none of them cost a run;
+   - **a pull request that is a draft again, or has `WIP:` back, is out
+     of its lot.** Its agent found a fault after the last push (#523,
+     28 November, with no watch on). `watch.sh lot` and `land` ask it
+     of every pull request of a lot before anything is merged, and the
+     lot is built again without that one. Until that day nothing asked.
+     Of a draft whose run passed GitHub says CLEAN: the ones before it
+     would have been merged and the draft refused, a part of the lot
+     on `main`. One with only `WIP:` back would have been merged as
+     it was. `tools/watch/land_test.sh` runs both, and every other
+     way `land` stops, in a repository it makes;
    - **a pull request's own run is the short one, watch or no watch.**
      Every push to it runs the jobs of the plain build that take a
      minute or two: "Build & unit tests", "Documentation shape", the
@@ -520,7 +539,8 @@ without one, and leaves the board and a watch out of the claims.
    (`tools/watch/watch.sh drafts`), which says so on it; nothing else
    changes for its agent until the last push.
    (`python3 tools/next_ids.py --pr-body` prints the four lines, and
-   `python3 tools/ci/check_pr.py claim N` says the numbers back.) Until
+   `python3 tools/ci/check_pr.py claim N` says the numbers back, and
+   refuses a claim that is no draft until it is one.) Until
    24 November 2026 the two came from `python3 tools/next_ids.py`, the
    next free number of each, and two agents who asked in the same minute
    took the same pair: in one hour of that morning five pull requests had
@@ -1081,7 +1101,12 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   Request is still a draft", from the page, from `gh pr merge` and from
   the API alike. So a claim is opened as a draft since that day
   ("Before starting", point 2), and `check_pr.py claim N` says so of
-  one that is not. The other side of it: a finished draft that nobody
+  one that is not. (As a note at first, under lines that began "ok".
+  Five claims of the next six hours were opened ready all the same,
+  four of them one agent's: #515, #521, #532, #539. Since then it is
+  a refusal: an agent in a long chat knows the routine as it was when
+  the chat began, and reads every time what the tools answer.) The
+  other side of it: a finished draft that nobody
   made ready is in no list (#425, thirteen hours; #508, eleven minutes
   of that same watch, renamed and not made ready). `merge N` says so to
   the agent that asks. `watch.sh cands` says so to the landing session,

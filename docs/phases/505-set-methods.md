@@ -64,10 +64,13 @@ Measured on the rebased merge head (`origin/main` `83dba0cd`):
   - `make verify-collection-iterators`: **33 / 34 (97.1%)**; `make bench-collections`: `Map` 67 -> 61 ms, `Set` 49 -> 44 ms, checksum 98304; `make verify-gc-stress`: 28 / 28 JS and 678 / 678 DOM cases agreed under stress GC.
 - Sanitizers (`-fsanitize=address,undefined`, `ASAN_OPTIONS=detect_leaks=0:halt_on_error=1`, `UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1`): **11 / 11** `verify_set_methods.py`, **165 / 186** `test262` across the seven directories, and standalone `505-set-methods.cpp` (`forceGc()`) passed with zero sanitizer errors.
 
-## Still open
+## Later closure and still open
 
-- The 21 `BigInt`-literal `test262` cases in the seven directories remain
-  blocked on engine-wide `BigInt` support (`SyntaxError`).
-- `Set.prototype.union` snapshots `O` right after `GetSetRecord` before calling
-  `keys()` to match Node v22.22.3; ECMA-262 2025 swaps those two steps (not
-  observed by `test262` `2e58f87d8350`).
+Phase 556 ([phase](556-set-union-keys-before-snapshot.md),
+[finding](../findings/556-the-snapshot-preceded-the-side-effect.md)) closes the
+one documented specification deviation: `Set.prototype.union` now calls
+`keys()` and gets the iterator's `next` property before snapshotting `O`, as
+ECMA-262 requires, rather than preserving Node v22.22.3's early snapshot.
+
+The 21 `BigInt`-literal `test262` cases in the seven directories remain blocked
+on engine-wide `BigInt` support (`SyntaxError`).

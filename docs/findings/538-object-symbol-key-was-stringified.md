@@ -10,10 +10,14 @@ from the engine's string-backed internal Symbol storage.
 
 ## What changed
 
-Only the fallback branch of `js_to_property_key` in `src/js/JsOps.cpp`
-changes: ToPrimitive with string hint, preserve a resulting Symbol's
-internal key, otherwise stringify the primitive. Direct string/Symbol/
-numeric fast paths stay unchanged. No caller or property storage changes.
+The initial fix changed only the fallback branch of `js_to_property_key`:
+ToPrimitive with string hint, preserve a resulting Symbol's internal key,
+otherwise stringify the primitive. A concurrent equivalent implementation
+landed in **PR #544** during this task's validation. The main sync retained
+that implementation verbatim. **PR #538's final diff therefore adds only
+regression coverage and documentation**, not another production fix or
+another improvement over current main. Direct string/Symbol/numeric fast
+paths, callers and property storage remain unchanged.
 
 ## Verification
 
@@ -26,10 +30,12 @@ Four more indexed read/write scripts are tested through both interpreter
 and bytecode VM. C++ asserts the explicit script result, not merely that
 the script evaluation returned.
 
-Same-base pinned test262 default directories improve **15,253 → 15,264 /
-15,686**, **11 gained, zero lost**. The canonical -O1 -g ASan/UBSan engine
+The original same-base pinned test262 comparison improves **15,253 →
+15,264 / 15,686**, **11 gained, zero lost**. This predates the main sync
+and is not a second gain over the equivalent fix in #544. The canonical -O1 -g ASan/UBSan engine
 passes all **309** focused checks and all **11** gained test262 cases.
-Plain full units pass **570/570** plus **114/114** cross-origin checks.
+Plain full units pass **570/570** plus **114/114** cross-origin checks
+before the sync, and **579/579 + 114/114** after syncing main at 78bccd34.
 
 Local sanitizer units have an explicit limit: **566/570** suites and
 **114/114** cross-origin checks pass in fresh sequential stretches (test

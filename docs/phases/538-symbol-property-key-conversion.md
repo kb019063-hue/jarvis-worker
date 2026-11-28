@@ -1,4 +1,4 @@
-# Phase 538: object conversion can produce a Symbol property key
+# Phase 538: regression coverage for object-produced Symbol property keys
 
 ## What was wrong
 
@@ -17,11 +17,19 @@ ordinary conversion.
 
 ## What changed
 
-Only the fallback branch of the shared property-key helper changes.
-It first performs ToPrimitive with string hint, preserves a resulting
-Symbol's existing internal key, and stringifies any other primitive.
-The direct string, Symbol and numeric-index fast paths remain unchanged.
-No caller, interpreter, reflection builtin or property storage changes.
+The initial implementation changed only the fallback branch of the shared
+property-key helper: ToPrimitive with string hint, preserve a resulting
+Symbol's existing internal key, and stringify any other primitive. Direct
+string, Symbol and numeric-index fast paths remained unchanged.
+
+**A concurrent equivalent fix landed in PR #544 while this task was being
+validated.** Syncing with main found the overlap in the same fallback
+branch. The merge retains #544's implementation byte-for-byte. The final
+PR #538 therefore adds **regression coverage and documentation only**:
+no production file differs from main. Its original baseline measurements
+below are historical evidence for the suite, not additional gains over
+current main. The suite adds eighteen caller matrices and explicit VM
+probes beyond #544's implementation tests.
 
 This does not attempt to replace the engine's string-backed Symbol key
 representation. It fixes conversion into the representation that direct
@@ -92,7 +100,8 @@ LITEBIRD_SUITE_CUTS=object_property_keys_preserve_symbols_and_convert_only_once,
   ./build/test_suite
 ```
 
-Broader plain-build results on 28 November 2026:
+Broader plain-build results on 28 November 2026, before syncing the later
+main changes (recorded here rather than retroactively changing their base):
 
 | Command | Result |
 | --- | --- |
@@ -111,8 +120,15 @@ Broader plain-build results on 28 November 2026:
 `diff-xml` used lxml installed only in ignored `build/538-python-deps`
 and added to PYTHONPATH. No corpus, metrics ledger or floor changed.
 
-The canonical **-O1 -g ASan/UBSan engine build** (`make -j2 asan-build`)
-passes **all 309 focused checks**, including collection inside hooks,
+After syncing main at **78bccd34**, rebuilding the engine and both unit
+binaries and running `make test` passes **579/579 engine suites and
+114/114 cross-origin checks**. The focused script still returns `ok 309`.
+`git diff origin/main -- src/js/JsOps.cpp` is empty, confirming the final
+PR keeps #544's production implementation without modification.
+Documentation, suite-shape, metrics and whitespace checks also pass.
+
+Before the main sync, the canonical **-O1 -g ASan/UBSan engine build**
+(`make -j2 asan-build`) passes **all 309 focused checks**, including collection inside hooks,
 and **all eleven newly passing test262 cases**, with no sanitizer reports.
 The latter can be reproduced by passing the eleven gained file paths
 from the comparison JSON to `run_test262.py`, with

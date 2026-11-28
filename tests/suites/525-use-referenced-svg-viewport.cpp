@@ -8,6 +8,9 @@ TEST(svg_use_referenced_viewport_bbox) {
       "<svg id=\"pct\" x=\"2\" y=\"3\" width=\"20\" height=\"10\">"
       "<rect x=\"10%\" y=\"20%\" width=\"30%\" height=\"40%\"/></svg>"
       "<svg id=\"empty\" x=\"2\" y=\"3\"><rect width=\"0\" height=\"4\"/></svg>"
+      "<svg id=\"nested\" x=\"2\" y=\"3\" width=\"20\" height=\"10\" viewBox=\"0 0 10 10\">"
+      "<svg x=\"2\" y=\"3\" width=\"10\" height=\"10\" viewBox=\"0 0 5 5\">"
+      "<rect x=\"1\" y=\"1\" width=\"2\" height=\"2\"/></svg></svg>"
       "<svg id=\"loop\"><use href=\"#loop\"/></svg></defs>"
       "<g id=\"g\"><use id=\"u\" href=\"#source\" x=\"5\" y=\"7\" transform=\"translate(100,0)\"/></g></svg>'");
     auto box = [&](const char* id) {
@@ -28,6 +31,8 @@ TEST(svg_use_referenced_viewport_bbox) {
     assert(box("u") == "0,0,0,0");
     S("u.setAttribute('href','#empty');u.setAttribute('width','20')");
     assert(box("u") == "0,0,0,0");
+    S("u.setAttribute('href','#nested');u.removeAttribute('width');u.removeAttribute('height')");
+    assert(box("u") == "16,15,4,4");
     S("u.setAttribute('href','#loop')");
     assert(box("u") == "0,0,0,0");
 }

@@ -658,10 +658,10 @@ void install_collection_builtins(JsIntrinsics& realm) {
     js_define_method(sp, "union", 1, [](Args args) {
         auto O = data_of(self(), ObjectClass::Set, "Set.prototype.union");
         SetRecord set_rec = get_set_record(js_arg(args, 0));
+        SetIteratorRecord keys_iter = get_iterator_from_method(set_rec.set, set_rec.keys);
         JsValue result = make_collection(ObjectClass::Set, JsIntrinsics::get().set_proto);
         auto result_data = data_of(result, ObjectClass::Set, "Set.prototype.union");
         copy_live_entries(*O, *result_data);
-        SetIteratorRecord keys_iter = get_iterator_from_method(set_rec.set, set_rec.keys);
         JsValue next_val;
         while (iterator_step_value(keys_iter, next_val)) {
             next_val = canonicalize_key(next_val);

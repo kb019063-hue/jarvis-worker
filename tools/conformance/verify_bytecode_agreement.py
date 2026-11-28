@@ -66,6 +66,22 @@ class Case:
 # Both paths must answer these alike. Each was run on the engine and read
 # before it was written here; none of them is a guess.
 AGREES: list[Case] = [
+    # Phase 479: a simple return carries its value through a finalizer.
+    Case("function f(){try{return 1}finally{}}f()", "the original return-through-finally refusal"),
+    Case("var s='';function f(){try{return 1}finally{s+='f'}}String(f()+'/'+s)", "finalizer runs before return"),
+    Case("function f(){var x=3;try{return x}finally{x=7}}String(f())", "return expression is evaluated first"),
+    Case("function f(){try{{let a=2;let b=3;return a+b}}finally{let z=7;z}}String(f())", "return removes inner locals"),
+    Case("function f(){let x=9;try{let x=3;return x}finally{x+=1}}String(f())", "finalizer sees outer scope"),
+    Case("function f(){try{return {x:7}}finally{gc()}}String(f().x)", "return object stays rooted across GC"),
+    Case("function f(){try{return 1}finally{throw 3}}try{f()}catch(e){e}", "finalizer throw overrides return"),
+    Case("function f(){try{return missing_name}finally{throw 8}}try{f()}catch(e){e}", "finalizer throw overrides failed return expression"),
+    Case("var s='';function f(){try{return missing_name}finally{s+='f'}}try{f()}catch(e){s+=e.name}String(s)", "failed return expression still runs finalizer"),
+    Case("function f(x){try{if(x)return 3;return 5}finally{x=2}}String(f(true)+'/'+f(false))", "conditional return paths"),
+    Case("var s='';function f(){try{return 3}finally{try{throw 5}catch(e){s+=e}}}String(f()+'/'+s)", "caught finalizer error preserves return"),
+    Case("function f(){try{return;}finally{gc()}}String(f())", "empty return"),
+    Case("function f(){var a={x:1};try{return a}finally{a.x=7}}String(f().x)", "returned object observes finalizer mutation"),
+    Case("var n=0;function f(){try{return n++}finally{n++}}String(f()+'/'+n)", "return expression and finalizer each run once"),
+
     # Phase 464: the finalizer runs for normal and throwing completions.
     Case("try { 1; } finally { 2; }", "the original finally refusal"),
     Case("try{1;}finally{}", "empty finalizer preserves completion"),
@@ -299,7 +315,9 @@ AGREES: list[Case] = [
 # number, and so the day one of them starts working shows up as a failure
 # rather than as silence.
 REFUSES: list[Case] = [
-    Case("function f(){try{return 1}finally{}}f()", "return from try through finalizer"),
+    Case("function f(){try{try{return 1}finally{}}finally{}}f()", "return through nested finalizers"),
+    Case("function f(){for(var x of [1]){try{return x}finally{}}}f()", "return through finalizer and iterator"),
+    Case("function f(){try{return 1}catch(e){}finally{}}f()", "return through catch and finalizer"),
     Case("function f(){try{}finally{return 2}}f()", "return from finalizer"),
     Case("while(true){try{}finally{break}}", "jump from finalizer"),
     Case("try{}finally{let x=2;var f=function(){return x};f()}", "closure inside finalizer"),

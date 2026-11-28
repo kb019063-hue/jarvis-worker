@@ -1142,6 +1142,10 @@ void setup_subtle_crypto(Iface& I) {
             if (!args[1].is_object_like()) {
                 return reject_with("TypeError", "SubtleCrypto.importKey: jwk keyData must be an object.");
             }
+            JsValue ext_val = args[1].get_property("ext");
+            if (ext_val.type == JsType::Boolean && !ext_val.is_truthy() && args[3].is_truthy()) {
+                return reject_with("DataError", "SubtleCrypto.importKey: JWK ext is false but extractable is true.");
+            }
             std::string kty = to_str(args[1].get_property("kty"));
             if (kty == "EC") {
                 if (to_str(args[1].get_property("crv")) != "P-256") {
@@ -1442,7 +1446,13 @@ void setup_subtle_crypto(Iface& I) {
         }
         if (fmt == "jwk") {
             JsValue obj_ctor = r.window.is_object() ? r.window.get_property("Object") : JsValue();
+            JsValue arr_ctor = r.window.is_object() ? r.window.get_property("Array") : JsValue();
             JsValue jwk = js_construct(obj_ctor, {});
+            JsValue key_ops = js_construct(arr_ctor, {});
+            for (std::size_t i = 0; i < key->usages.size(); ++i) {
+                key_ops.set_property(std::to_string(i), str(key->usages[i]));
+            }
+            jwk.set_property("key_ops", key_ops);
             if (key->hash_alg == "ecdh" || key->hash_alg == "ecdsa") {
                 jwk.set_property("kty", str("EC"));
                 jwk.set_property("crv", str("P-256"));

@@ -1654,6 +1654,11 @@ void WorkerObject::worker_thread_main(std::string script_source) {
     self_obj.set_property("Request", request_ctor);
     self_obj.set_property("Worker", nested_worker_ctor);
     self_obj.set_property("WebSocket", ws_ctor);
+    // `self` is modelled separately from the environment's global object here,
+    // so mirror worker-exposed canvas constructors just as the host functions
+    // above are mirrored. Bare names were installed by JsInterpreter.
+    self_obj.set_property("OffscreenCanvas", env->get("OffscreenCanvas"));
+    self_obj.set_property("Path2D", env->get("Path2D"));
     self_obj.set_property("onmessage", JsValue::make_null());
     self_obj.set_property("onerror", JsValue::make_null());
 

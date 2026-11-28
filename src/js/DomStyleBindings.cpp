@@ -23,6 +23,7 @@
 #include "litebird/common/Color.hpp"
 #include "litebird/css/DocumentStyles.hpp"
 #include "litebird/css/GridGrammar.hpp"
+#include "litebird/text/Bidi.hpp"
 #include "litebird/js/Promise.hpp"
 
 #include <algorithm>
@@ -3449,6 +3450,7 @@ const char* const kElementDefaults = R"CSS(
 address, blockquote, center, dialog, div, figure, figcaption, footer, form, header, hr, legend, listing, main, p,
 plaintext, pre, search, xmp, article, aside, h1, h2, h3, h4, h5, h6, hgroup, nav, section, table, caption, colgroup,
 col, thead, tbody, tfoot, tr, td, th, dir, dd, dl, dt, menu, ol, ul, li, bdi, output { unicode-bidi: isolate }
+bdo { unicode-bidi: bidi-override }
 address, cite, dfn, em, i, var { font-style: italic }
 b, strong { font-weight: bolder }
 h1, h2, h3, h4, h5, h6, th { font-weight: bold }
@@ -4114,6 +4116,23 @@ void compute_block(Realm& realm, const Element& element, Block& block, const Nod
     }
     if (element.has_attribute("hidden") && !element.is_foreign()) block.set("display", "none", false);
     else block.set("display", default_display(element), false);
+
+    // The `dir` attribute is a presentational hint, set before the matched
+    // rules are stored: `store` replaces a same-name entry in place, so any
+    // author declaration of `direction` — `inherit` included — wins over it,
+    // and with no declaration the hint answers instead of the inherited
+    // value. `dir` is an HTML enumerated attribute: ASCII case-insensitive.
+    // `auto` is the element-level first strong character (HTML §3.2.5) —
+    // one answer over the element's whole text, not one per paragraph.
+    if (!element.is_foreign()) {
+        const std::string dir = element.get_attribute("dir");
+        if (ascii_lower(dir) == "ltr") block.set("direction", "ltr", false);
+        else if (ascii_lower(dir) == "rtl") block.set("direction", "rtl", false);
+        else if (ascii_lower(dir) == "auto") {
+            const int level = bidi_paragraph_utf8(element.text_content(), -1).base_level;
+            block.set("direction", level == 1 ? "rtl" : "ltr", false);
+        }
+    }
 
     std::vector<Matched> matched;
     // The rules of a sheet, and for a `@media` block whose query matches the

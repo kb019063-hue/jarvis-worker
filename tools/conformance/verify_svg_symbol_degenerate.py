@@ -4,6 +4,7 @@
 Requires the pinned Chromium installation described in Phase 433. Cases are
 attached to the document; each independent instance has a unique source.
 """
+import argparse
 import json
 import os
 from pathlib import Path
@@ -43,6 +44,9 @@ SIZES = [('width-zero', '0', '10'), ('height-zero', '20', '0'),
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--binary", default="build/litebird")
+    args = parser.parse_args()
     symbols = []
     uses = []
     for name, shape in SHAPES.items():
@@ -79,7 +83,7 @@ console.log(out.join('\\n'));''' % json.dumps(ids)
     with tempfile.TemporaryDirectory(prefix='svg-symbol-') as tmp:
         page, js = Path(tmp) / 'page.html', Path(tmp) / 'probe.js'
         page.write_text(html); js.write_text(script)
-        run = subprocess.run([str(ROOT/'build/litebird'), '--run-script', str(js), str(page)], cwd=ROOT, capture_output=True, text=True, timeout=120, check=True)
+        run = subprocess.run([str(ROOT / args.binary), '--run-script', str(js), str(page)], cwd=ROOT, capture_output=True, text=True, timeout=120, check=True)
     actual = [line[6:] if line.startswith('PROBE ') else line for line in run.stdout.splitlines()]
     n = len(ids) + len(extra)
     if len(expected) != n or len(actual) != n:

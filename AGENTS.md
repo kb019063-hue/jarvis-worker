@@ -416,7 +416,12 @@ within the hour, and the first lot was started again four times.
      on, without anybody having had to say so. (On 23 November the login
      ended in the middle of a watch, and the board went on saying "until
      06:30" for an hour.) Nobody reads that comment by eye:
-     `python3 tools/ci/check_pr.py watch` does;
+     `python3 tools/ci/check_pr.py watch` does. Every command of the
+     landing session's loop writes the look since 28 November
+     (`watch.sh`), not `look` alone: that day a watch that had landed
+     four pull requests in half an hour had not written one in that
+     time, and for two minutes agents were told that none was on
+     ("A watch that was at work and said to be off", below);
    - the lines that send a pull request back;
    - whatever else one agent has to tell another: one line, your name
      first.
@@ -1324,6 +1329,19 @@ python3 tools/ci/check_pr.py merge N    # right before `gh pr merge N --merge`
   day. So what has to happen is done before the reply, and the reply, which
   is all that reaches the person, says which pull request is merged, which
   is still open and why, and what they have to do before you can go on.
+- **A watch that was at work and said to be off.** On 28 November the
+  landing session looked with `watch.sh cands` and `lot` for half an
+  hour, landed four pull requests in it, and never ran `look`, which
+  alone wrote the time of the look on the board. At 04:43 that time was
+  30 minutes old, and `check_pr.py` told every agent that no watch was
+  on, until 04:44, when the landing session saw a head move under its
+  lot. In those two minutes two agents whose pull requests were
+  finished did what they are told to do then: merged `main` and put
+  `WIP:` back. #478 was in a lot whose run passed all 18 jobs in those
+  same minutes: the lot could not land, and #490, which was in it too,
+  went round CI once more in another. #481 was waiting for the next
+  lot. Every command of the loop writes the look now when the last is
+  five minutes old, and `watch.sh off` ends the watch.
 - **A watch that stopped without saying so.** On 25 November the landing
   session's turn ended at 07:22 with a lot in test and the status line
   promising a watch until 08:15. #433 had been told at 07:22 that it would

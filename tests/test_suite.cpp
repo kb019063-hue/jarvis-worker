@@ -7817,6 +7817,35 @@ TEST(subtle_crypto_ecdsa_sha1) {
     assert(interp.eval("ok1 === true && okBad === false").is_truthy());
 }
 
+TEST(subtle_crypto_wrap_and_unwrap_jwk) {
+    auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
+    JsInterpreter interp;
+    interp.set_document(doc);
+
+    interp.eval(R"(
+        var iv = new Uint8Array([1,2,3,4,5,6,7,8,9,10,11,12]);
+        var ok = null;
+        var msg = new Uint8Array([9, 8, 7, 6]);
+        Promise.all([
+            crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['wrapKey', 'unwrapKey']),
+            crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify'])
+        ]).then(function(res) {
+            var kek = res[0], pair = res[1];
+            return crypto.subtle.wrapKey('jwk', pair.privateKey, kek, { name: 'AES-GCM', iv: iv })
+                .then(function(wrapped) {
+                    return crypto.subtle.unwrapKey('jwk', wrapped, kek, { name: 'AES-GCM', iv: iv }, { name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign']);
+                })
+                .then(function(priv) {
+                    return crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, priv, msg);
+                })
+                .then(function(sig) {
+                    return crypto.subtle.verify({ name: 'ECDSA', hash: 'SHA-256' }, pair.publicKey, sig, msg);
+                });
+        }).then(function(v) { ok = v; });
+    )");
+    assert(interp.eval("ok === true").is_truthy());
+}
+
 TEST(offscreen_canvas_draws_and_converts_to_blob) {
     auto doc = HtmlParser::parse("<!doctype html><html><body></body></html>");
     JsInterpreter interp;
@@ -36812,6 +36841,7 @@ int main() {
     RUN_TEST(crypto_key_algorithm_and_usages);
     RUN_TEST(subtle_crypto_hmac_length);
     RUN_TEST(subtle_crypto_ecdsa_sha1);
+    RUN_TEST(subtle_crypto_wrap_and_unwrap_jwk);
     RUN_TEST(offscreen_canvas_draws_and_converts_to_blob);
     RUN_TEST(image_bitmap_and_create_image_bitmap);
     RUN_TEST(offscreen_canvas_transfer_to_image_bitmap);

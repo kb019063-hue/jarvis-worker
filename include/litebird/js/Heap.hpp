@@ -22,7 +22,7 @@ class Node;
 /// What kind of built-in object a JsObject is. Drives `Object.prototype.toString`
 /// and lets built-in methods check that `this` is the right kind of object.
 enum class ObjectClass : uint8_t {
-    Plain, Array, Function, Error, Date, RegExp, Map, Set, WeakMap, WeakSet,
+    Plain, Array, Function, Error, DOMException, Date, RegExp, Map, Set, WeakMap, WeakSet,
     Boolean, Number, String, Symbol, Arguments, Promise, Generator, Iterator
 };
 

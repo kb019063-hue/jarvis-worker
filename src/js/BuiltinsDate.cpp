@@ -412,14 +412,21 @@ double arg_or(Args args, size_t index, double fallback) {
 }
 
 double time_from_components(Args args, bool local) {
+    // ToNumber can run script or throw. Sequence each conversion explicitly:
+    // C++ function arguments do not guarantee JavaScript's left-to-right order.
     double year = js_to_number(args[0]);
+    const double month = arg_or(args, 1, 0);
+    const double day = arg_or(args, 2, 1);
+    const double hour = arg_or(args, 3, 0);
+    const double minute = arg_or(args, 4, 0);
+    const double second = arg_or(args, 5, 0);
+    const double ms = arg_or(args, 6, 0);
     // Two-digit years mean 19xx, a compatibility rule from the first browsers.
     if (std::isfinite(year)) {
         double truncated = std::trunc(year);
         if (truncated >= 0 && truncated <= 99) year = 1900 + truncated;
     }
-    double t = make_time(year, arg_or(args, 1, 0), arg_or(args, 2, 1), arg_or(args, 3, 0),
-                         arg_or(args, 4, 0), arg_or(args, 5, 0), arg_or(args, 6, 0));
+    double t = make_time(year, month, day, hour, minute, second, ms);
     return time_clip(local ? from_local(t) : t);
 }
 
@@ -576,10 +583,14 @@ void install_date_builtins(JsIntrinsics& realm) {
         return JsValue::make_string(to_iso_string(t));
     });
     js_define_method(dp, "toJSON", 1, [](Args) {
-        JsValue me = self();
-        double t = *time_slot(me, "toJSON");
-        if (std::isnan(t)) return JsValue::make_null();
-        return JsValue::make_string(to_iso_string(t));
+        // §21.4.4.37 is deliberately generic: conversion precedes looking up
+        // toISOString, and only a non-finite *Number* suppresses that call.
+        JsValue object = js_to_object(self());
+        JsValue primitive = js_to_primitive(object, JsPrimitiveHint::Number);
+        if (primitive.type == JsType::Number && !std::isfinite(primitive.number_val)) {
+            return JsValue::make_null();
+        }
+        return js_call(object.get_property("toISOString"), object, {});
     });
     js_define_method(dp, "toString", 0, [](Args) {
         return JsValue::make_string(to_date_string(*time_slot(self(), "toString")));

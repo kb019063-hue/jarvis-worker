@@ -95,6 +95,9 @@ public:
     /// there is no default that reads a bare path as a file. Web documents may
     /// not read file: URLs or local paths; a document the embedder loaded from
     /// file: keeps local-file access when `allow_local_files` is true.
+    /// Honors `HTTP_PROXY`/`http_proxy`, `HTTPS_PROXY`/`https_proxy`,
+    /// `ALL_PROXY`/`all_proxy`, and `NO_PROXY`/`no_proxy` (`http://` uses
+    /// absolute-form requests; `https://` uses HTTP `CONNECT` tunnels).
     static ResourceResponse load_for_page(
         const std::string& url,
         const ResourceRequestContext& context,
@@ -112,8 +115,8 @@ public:
 
     /// Performs an HTTP/1.1 or HTTPS (TLS) request with persistent keep-alive
     /// socket pooling, following redirects, consulting/updating the HTTP cache
-    /// and CookieJar, and decoding chunked transfer-encoding and
-    /// gzip/deflate/br content-encoding.
+    /// and CookieJar, honoring HTTP(S) proxy environment variables, and
+    /// decoding chunked transfer-encoding and gzip/deflate/br content-encoding.
     static ResourceResponse load_http(
         const std::string& url,
         const std::string& method = "GET",
@@ -122,7 +125,8 @@ public:
     );
 
     /// Single-hop HTTP/HTTPS wire request without redirect following, cookie
-    /// injection, or cache lookup.
+    /// injection, or cache lookup. Routes `http://` via absolute-form and
+    /// `https://` via HTTP `CONNECT` when configured proxy env vars apply.
     static ResourceResponse load_http_single_hop(
         const std::string& url,
         const std::string& method = "GET",
@@ -167,6 +171,30 @@ public:
     static void clear_proxy_credentials();
     /// How many (authority, realm) proxy pairs are held. For tests.
     static std::size_t proxy_credential_count();
+
+    /// Resolves a `407` proxy challenge during an HTTP `CONNECT` tunnel
+    /// handshake (`WebSocket` and `ResourceLoader`). Reads only the proxy
+    /// credential store (`set_proxy_credentials`) and updates proxy Digest
+    /// nonce state. `attempt` starts at 0 (`0` = initial 407, `1` = post-auth
+    /// 407, `2` = post-stale-retry 407); `attempted_realm`, `attempted_scheme`,
+    /// and `matched_authority` carry state across attempts. On a non-stale
+    /// `407` after an attempt, the attempted proxy credential is forgotten.
+    static bool resolve_proxy_connect_407(
+        const std::string& proxy_authority,
+        const std::string& target_authority,
+        const std::vector<std::pair<std::string, std::string>>& response_headers,
+        int attempt,
+        std::string& attempted_realm,
+        std::string& attempted_scheme,
+        std::string& matched_authority,
+        std::string& out_authorization);
+
+    /// Records `Proxy-Authentication-Info` `nextnonce` after a successful
+    /// `2xx` `CONNECT` response.
+    static void note_proxy_connect_success(
+        const std::string& matched_authority,
+        const std::string& realm,
+        const std::vector<std::pair<std::string, std::string>>& response_headers);
 
     /// Forgets every credential held, for every origin and realm -- and, for
     /// the document space only, every proxy credential too. A caller that

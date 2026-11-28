@@ -63,6 +63,9 @@ CHECK_SAYS_NO = re.compile(r"^\s*NO\s{2,}\S")
 # Lines that say a count of failures is zero are not failures.
 NOTHING_FAILED = re.compile(r"\b0 (failed\b|failures?\b|finding\(s\)|crash(es)?\b|timeouts?\b|differ\b)", re.IGNORECASE)
 ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+# The last line of a step that tools/ci/logged.sh stopped at its limit: the
+# step did not fail, it did not end, and the lines before are where it was.
+STOPPED = re.compile(r"^logged\.sh: this step had not ended after \d+ seconds and was stopped")
 
 
 def read_lines(path: Path) -> list[str]:
@@ -76,6 +79,12 @@ def explain(lines: list[str], whatever: bool = False) -> list[str] | None:
     `whatever`: the file is known to be a failed step's, so its end is shown
     even when nothing in it looks like a failure.
     """
+    if any(STOPPED.search(line) for line in lines[-3:]):
+        # Before anything else: `make` says "Terminated" of a step that was
+        # stopped, and the lines before that line are not what matters.
+        return ([f"--- the step did not end and was stopped at its limit: the end of what it printed ({len(lines)} lines). "
+                 "What it names last is where it was"]
+                + [f"{i + 1}: {lines[i]}" for i in range(max(0, len(lines) - BEFORE_MAKE_ERROR), len(lines))])
     first_make_error = next((i for i, line in enumerate(lines) if MAKE_ERROR.search(line)), None)
     first_report = next((i for i, line in enumerate(lines) if SANITIZER.search(line)), None)
     suspects = [i for i, line in enumerate(lines)
@@ -157,6 +166,8 @@ def self_test() -> int:
               "  ok    README.md says no more than the suites there are"]
     long = suites + [f"  ok    check {n}" for n in range(1, 71)]
     quiet = [f"line {n}" for n in range(1, 101)]
+    stopped = ["Running test: one... PASSED", "Running test: two... ", "make: *** [Makefile:372: test] Terminated", "",
+               "logged.sh: this step had not ended after 1800 seconds and was stopped. The lines above are where it was."]
     cases = [
         ("a check's NO line is shown with what stands under it when it is not in the end of the output; an ok line is not",
          [line for line in explain(long) or [] if "NO to" in line or line.startswith(("1:", "2:", "3:", "4:"))],
@@ -177,6 +188,14 @@ def self_test() -> int:
         ("make's first error is shown with the lines before it",
          (explain(["cc -c a.c", "a.c:1: error: x", "make: *** [a.o] Error 1"]) or [""])[0],
          "--- before make's first error (line 3 of 3)"),
+        ("a step that logged.sh stopped is said to have been stopped, and its end is shown: the suite it was in, make's line, the last line",
+         explain(stopped),
+         ["--- the step did not end and was stopped at its limit: the end of what it printed (5 lines). What it names last is where it was"]
+         + [f"{n}: {line}" for n, line in enumerate(stopped, 1)]),
+        ("...also among several files, where a file that shows no failure is passed over",
+         (explain(stopped[:2] + stopped[3:]) or [""])[0][:44], "--- the step did not end and was stopped at "),
+        ("a line about a stopped step far from the end is an old one, of a step before: the file is read as any other",
+         explain([stopped[-1]] + quiet), None),
     ]
     failed = 0
     for name, got, want in cases:

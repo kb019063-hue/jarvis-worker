@@ -886,6 +886,7 @@ std::string object_tag(const JsValue& value) {
         switch (cell->klass) {
             case ObjectClass::Array: return "Array";
             case ObjectClass::Error: return "Error";
+            case ObjectClass::DOMException: return "DOMException";
             case ObjectClass::Date: return "Date";
             case ObjectClass::RegExp: return "RegExp";
             case ObjectClass::Arguments: return "Arguments";
@@ -1032,7 +1033,7 @@ JsValue structured_clone(const JsValue& value, CloneState& state) {
     // --- ordinary objects, Date, Error -------------------------------------
     JsValue copy = JsValue::make_object();
     state.seen.emplace(value.identity(), copy);
-    if (cell->klass == ObjectClass::Date || cell->klass == ObjectClass::Error) {
+    if (cell->klass == ObjectClass::Date || cell->klass == ObjectClass::Error || cell->klass == ObjectClass::DOMException) {
         copy.object_val->prototype = cell->prototype;
         copy.object_val->klass = cell->klass;
         copy.object_val->internal = cell->internal;
@@ -1042,7 +1043,7 @@ JsValue structured_clone(const JsValue& value, CloneState& state) {
         // that answered one of their methods would be worse than a refusal.
         throw_data_clone("a host or exotic object");
     }
-    for (const auto& key : reflected_own_keys(value, cell->klass == ObjectClass::Error)) {
+    for (const auto& key : reflected_own_keys(value, cell->klass == ObjectClass::Error || cell->klass == ObjectClass::DOMException)) {
         copy.set_property(key, structured_clone(value.get_property(key), state));
     }
     return copy;
@@ -1931,6 +1932,14 @@ void install_error_builtins(JsIntrinsics& realm) {
                     target.set_property("stack", text);
                 }
                 return JsValue::make_undefined();
+            });
+            // ES2025 §20.5.2.1 Error.isError — true iff the value has
+            // [[ErrorData]] (klass Error). DOMException now has its own klass
+            // so it is not counted.
+            js_define_method(ctor, "isError", 1, [](Args args) {
+                const JsValue& value = js_arg(args, 0);
+                if (!value.is_object_like() || !value.object_val) return JsValue::make_boolean(false);
+                return JsValue::make_boolean(value.object_val->klass == ObjectClass::Error);
             });
         }
         // `Object.getPrototypeOf(TypeError) === Error`. Code that asks whether

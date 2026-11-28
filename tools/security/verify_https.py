@@ -11,14 +11,18 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import http.client
 import os
 import re
 from pathlib import Path
+import select
 import socket
 import ssl
 import subprocess
 import tempfile
 import threading
+import urllib.parse
+import urllib.request
 
 MARKER = b"LITEBIRD_TLS_VERIFIED"
 
@@ -341,6 +345,205 @@ def url_for(host: str, port: int) -> str:
     return f'https://[{host}]:{port}/' if ':' in host else f'https://{host}:{port}/'
 
 
+@contextlib.contextmanager
+def http_server(address: str = '127.0.0.1'):
+    """A loopback plaintext HTTP server recording raw request lines and headers."""
+    requests = []
+    errors = []
+    stop = threading.Event()
+    listener = socket.socket(socket.AF_INET)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind((address, 0))
+    listener.listen()
+    listener.settimeout(0.2)
+    port = listener.getsockname()[1]
+
+    def serve():
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            try:
+                with conn:
+                    conn.settimeout(3)
+                    data = b''
+                    while b'\r\n\r\n' not in data and len(data) < 65536:
+                        chunk = conn.recv(4096)
+                        if not chunk:
+                            break
+                        data += chunk
+                    if data:
+                        requests.append(data)
+                        body = b'<html><body>' + MARKER + b'</body></html>'
+                        conn.sendall(b'HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n'
+                                     b'Connection: close\r\nContent-Length: ' +
+                                     str(len(body)).encode() + b'\r\n\r\n' + body)
+            except OSError:
+                pass
+            except Exception as exc:
+                errors.append(repr(exc))
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        yield port, requests
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        listener.close()
+        if thread.is_alive() or errors:
+            raise RuntimeError(f'HTTP fixture failed: {errors}')
+
+
+@contextlib.contextmanager
+def proxy_server(response_code: int = 200):
+    """Loopback HTTP proxy supporting CONNECT tunnels and absolute-form HTTP."""
+    records = []
+    errors = []
+    stop = threading.Event()
+    listener = socket.socket(socket.AF_INET)
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    listener.bind(('127.0.0.1', 0))
+    listener.listen()
+    listener.settimeout(0.2)
+    port = listener.getsockname()[1]
+
+    def handle_client(conn: socket.socket):
+        upstream = None
+        try:
+            conn.settimeout(3)
+            raw = bytearray()
+            while len(raw) < 65536 and b'\r\n\r\n' not in raw:
+                b = conn.recv(1)
+                if not b:
+                    return
+                raw.extend(b)
+            end = raw.find(b'\r\n\r\n')
+            if end < 0:
+                return
+            lines = raw[:end].decode('latin-1').split('\r\n')
+            words = lines[0].split()
+            headers = {}
+            for line in lines[1:]:
+                if ':' in line:
+                    k, v = line.split(':', 1)
+                    headers[k.strip().lower()] = v.strip()
+            rec = {
+                'method': words[0] if words else '',
+                'target': words[1] if len(words) >= 2 else '',
+                'request_line': lines[0],
+                'headers': headers,
+                'status': None,
+            }
+            records.append(rec)
+
+            if response_code != 200:
+                rec['status'] = response_code
+                if response_code == 407:
+                    conn.sendall(b'HTTP/1.1 407 Proxy Authentication Required\r\n'
+                                 b'Proxy-Authenticate: Basic realm="https-proxy"\r\n'
+                                 b'Content-Length: 0\r\nConnection: close\r\n\r\n')
+                else:
+                    conn.sendall(f'HTTP/1.1 {response_code} Refused\r\n'
+                                 f'Content-Length: 0\r\nConnection: close\r\n\r\n'.encode('ascii'))
+                return
+
+            if len(words) == 3 and words[0] == 'CONNECT' and words[2] in ('HTTP/1.0', 'HTTP/1.1'):
+                host, _, port_s = words[1].rpartition(':')
+                if host.startswith('[') and host.endswith(']'):
+                    host = host[1:-1]
+                upstream = socket.create_connection((host, int(port_s)), timeout=3)
+                rec['status'] = 200
+                conn.sendall(b'HTTP/1.1 200 Connection Established\r\n\r\n')
+                while not stop.is_set():
+                    r, _, x = select.select([conn, upstream], [], [conn, upstream], 0.2)
+                    if x:
+                        return
+                    for s in r:
+                        chunk = s.recv(65536)
+                        if not chunk:
+                            return
+                        (upstream if s is conn else conn).sendall(chunk)
+                return
+
+            if len(words) == 3 and words[0] == 'GET' and words[1].startswith('http://'):
+                parsed = urllib.parse.urlsplit(words[1])
+                upstream = socket.create_connection((parsed.hostname, parsed.port or 80), timeout=3)
+                origin_path = (parsed.path or '/') + (f'?{parsed.query}' if parsed.query else '')
+                rec['status'] = 200
+                fwd = [f'GET {origin_path} HTTP/1.1'] + [
+                    h for h in lines[1:]
+                    if h and h.split(':', 1)[0].strip().lower() not in ('connection', 'proxy-connection')
+                ] + ['Connection: close']
+                upstream.sendall(('\r\n'.join(fwd) + '\r\n\r\n').encode('latin-1'))
+                while not stop.is_set():
+                    chunk = upstream.recv(65536)
+                    if not chunk:
+                        return
+                    conn.sendall(chunk)
+                return
+
+            rec['status'] = 400
+            conn.sendall(b'HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n')
+        except (OSError, ValueError):
+            pass
+        except Exception as exc:
+            errors.append(repr(exc))
+        finally:
+            if upstream is not None:
+                try:
+                    upstream.close()
+                except OSError:
+                    pass
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def serve():
+        while not stop.is_set():
+            try:
+                conn, _ = listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=handle_client, args=(conn,), daemon=True).start()
+
+    thread = threading.Thread(target=serve)
+    thread.start()
+    try:
+        yield f'http://127.0.0.1:{port}', port, records
+    finally:
+        stop.set()
+        thread.join(timeout=5)
+        listener.close()
+        if thread.is_alive() or errors:
+            raise RuntimeError(f'Proxy fixture failed: {errors}')
+
+
+def python_https_tunnel_oracle(proxy_port: int, host: str, port: int, trust: Path) -> str:
+    """Differential check using Python stdlib HTTP CONNECT tunnel + TLS verification."""
+    ctx = ssl.create_default_context(cafile=str(trust))
+    ctx.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+    conn = http.client.HTTPSConnection('127.0.0.1', proxy_port, timeout=3, context=ctx)
+    conn.set_tunnel(host, port)
+    try:
+        conn.request('GET', '/', headers={'Host': f'{host}:{port}', 'Connection': 'close'})
+        resp = conn.getresponse()
+        body = resp.read()
+        return 'OK' if resp.status == 200 and MARKER in body else f'STATUS_{resp.status}'
+    except ssl.SSLCertVerificationError as error:
+        return _VERIFY_NAMES.get(error.verify_code, f'CODE_{error.verify_code}')
+    except OSError as error:
+        return f'TUNNEL_ERROR:{error}'
+    finally:
+        conn.close()
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--binary', default='build/litebird')
@@ -508,7 +711,151 @@ def main() -> int:
             print(f'{"PASS" if ok else "FAIL"} {label}: {detail}')
             if not ok:
                 print(result.stderr.decode(errors='replace')[:2000])
-        print(f'{len(cases)} HTTPS cases; {failures} failure(s).')
+
+        # Proxy routing + CONNECT tunnel differential checks against Python stdlib
+        proxy_cases = 0
+
+        def record_proxy_case(label: str, ok: bool, detail: str) -> None:
+            nonlocal failures, proxy_cases
+            proxy_cases += 1
+            failures += not ok
+            print(f'{"PASS" if ok else "FAIL"} {label}: {detail}')
+
+        def base_proxy_env(trust: Path | None) -> dict[str, str]:
+            env = os.environ.copy()
+            for key in ('HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy',
+                        'ALL_PROXY', 'all_proxy', 'NO_PROXY', 'no_proxy'):
+                env[key] = ''
+            if trust is not None:
+                env['LITEBIRD_SSL_CA_FILE'] = str(trust)
+            return env
+
+        # 1. HTTPS_PROXY routes https:// through CONNECT and agrees with Python HTTPSConnection.set_tunnel
+        with server(served['chained'], identities['chained'][1], '127.0.0.1') as (port, requests, seen):
+            with proxy_server(200) as (proxy_url, proxy_port, proxy_recs):
+                py_res = python_https_tunnel_oracle(proxy_port, 'localhost', port, root_ca[0])
+                env = base_proxy_env(root_ca[0])
+                env['HTTPS_PROXY'] = proxy_url
+                res = subprocess.run([binary, '--dump-dom', url_for('localhost', port)],
+                                     env=env, capture_output=True, timeout=15)
+                ok = (py_res == 'OK' and res.returncode == 0 and MARKER in res.stdout and
+                      seen == ['localhost', 'localhost'] and
+                      len(requests) == 2 and
+                      any(r['method'] == 'CONNECT' and r['target'] == f'localhost:{port}'
+                          and r['status'] == 200 and 'proxy-authorization' not in r['headers']
+                          for r in proxy_recs[1:]))
+                record_proxy_case(
+                    'HTTPS_PROXY CONNECT tunnel verifies TLS + SNI (agrees with Python)',
+                    ok,
+                    f'Python={py_res}, rc={res.returncode}, sni={seen}, proxy_recs={proxy_recs[1:]}')
+
+        # 2. Wrong hostname through HTTPS CONNECT still fails TLS verification (0 HTTP requests)
+        with server(identities['wrong'][0], identities['wrong'][1], '127.0.0.1') as (port, requests, _):
+            with proxy_server(200) as (proxy_url, proxy_port, proxy_recs):
+                py_res = python_https_tunnel_oracle(proxy_port, 'localhost', port, root_ca[0])
+                env = base_proxy_env(root_ca[0])
+                env['HTTPS_PROXY'] = proxy_url
+                res = subprocess.run([binary, '--dump-dom', url_for('localhost', port)],
+                                     env=env, capture_output=True, timeout=15)
+                rep = engine_reason(res.stderr)
+                ok = (py_res == 'hostname mismatch' and res.returncode == 1 and not requests and
+                      rep is not None and rep[0] == CODE_FOR_REASON['hostname mismatch'] and
+                      any(r['method'] == 'CONNECT' and r['target'] == f'localhost:{port}'
+                          for r in proxy_recs[1:]))
+                record_proxy_case(
+                    'HTTPS_PROXY CONNECT refuses wrong certificate hostname (code 62)',
+                    ok,
+                    f'Python={py_res}, engine={rep}, reqs={len(requests)}')
+
+        # 3. Proxy 407 on HTTPS CONNECT fails closed before TLS or origin HTTP
+        with server(served['chained'], identities['chained'][1], '127.0.0.1') as (port, requests, _):
+            with proxy_server(407) as (proxy_url, proxy_port, proxy_recs):
+                py_res = python_https_tunnel_oracle(proxy_port, 'localhost', port, root_ca[0])
+                env = base_proxy_env(root_ca[0])
+                env['HTTPS_PROXY'] = proxy_url
+                res = subprocess.run([binary, '--dump-dom', url_for('localhost', port)],
+                                     env=env, capture_output=True, timeout=15)
+                err_text = res.stderr.decode(errors='replace')
+                ok = (py_res.startswith('TUNNEL_ERROR:') and res.returncode == 1 and not requests and
+                      'HTTPS proxy CONNECT failed (407)' in err_text and
+                      len(proxy_recs) >= 2 and proxy_recs[-1]['status'] == 407 and
+                      'proxy-authorization' not in proxy_recs[-1]['headers'])
+                record_proxy_case(
+                    'HTTPS_PROXY 407 fails closed before TLS',
+                    ok,
+                    f'Python={py_res}, rc={res.returncode}, origin_reqs={len(requests)}')
+
+        # 4. ALL_PROXY fallback + NO_PROXY bypass (differential against urllib.request.proxy_bypass)
+        with server(served['chained'], identities['chained'][1], '127.0.0.1') as (port, requests, _):
+            with proxy_server(200) as (proxy_url, _, proxy_recs):
+                env_all = base_proxy_env(root_ca[0])
+                env_all['all_proxy'] = proxy_url
+                res_all = subprocess.run([binary, '--dump-dom', url_for('localhost', port)],
+                                         env=env_all, capture_output=True, timeout=15)
+
+                env_bypass = base_proxy_env(root_ca[0])
+                env_bypass['HTTPS_PROXY'] = proxy_url
+                env_bypass['no_proxy'] = f'.localhost:{port}'
+                prev_no_proxy = os.environ.get('no_proxy')
+                os.environ['no_proxy'] = f'.localhost:{port}'
+                try:
+                    py_bypass = urllib.request.proxy_bypass(f'localhost:{port}')
+                finally:
+                    if prev_no_proxy is None:
+                        os.environ.pop('no_proxy', None)
+                    else:
+                        os.environ['no_proxy'] = prev_no_proxy
+                res_bypass = subprocess.run([binary, '--dump-dom', url_for('localhost', port)],
+                                            env=env_bypass, capture_output=True, timeout=15)
+                ok = (py_bypass and res_all.returncode == 0 and MARKER in res_all.stdout and
+                      res_bypass.returncode == 0 and MARKER in res_bypass.stdout and
+                      len(proxy_recs) == 1 and proxy_recs[0]['target'] == f'localhost:{port}' and
+                      len(requests) == 2)
+                record_proxy_case(
+                    'all_proxy routes https:// and no_proxy bypasses direct',
+                    ok,
+                    f'py_bypass={py_bypass}, proxy_recs={len(proxy_recs)}, origin_reqs={len(requests)}')
+
+        # 5. Invalid HTTPS_PROXY fails closed (never falls back to direct)
+        with server(served['chained'], identities['chained'][1], '127.0.0.1') as (port, requests, _):
+            env = base_proxy_env(root_ca[0])
+            env['HTTPS_PROXY'] = 'socks5://127.0.0.1:1080'
+            res = subprocess.run([binary, '--dump-dom', url_for('localhost', port)],
+                                 env=env, capture_output=True, timeout=15)
+            err_text = res.stderr.decode(errors='replace')
+            ok = (res.returncode == 1 and not requests and 'Invalid HTTP proxy URL' in err_text)
+            record_proxy_case(
+                'Invalid HTTPS_PROXY fails closed without direct fallback',
+                ok,
+                f'rc={res.returncode}, origin_reqs={len(requests)}')
+
+        # 6. HTTP_PROXY sends http:// in absolute-form while HTTPS_PROXY leaves http:// direct
+        with http_server('127.0.0.1') as (http_port, http_reqs):
+            with proxy_server(200) as (proxy_url, _, proxy_recs):
+                http_url = f'http://127.0.0.1:{http_port}/hello?q=1'
+                env_p = base_proxy_env(None)
+                env_p['HTTP_PROXY'] = proxy_url
+                res_p = subprocess.run([binary, '--dump-dom', http_url],
+                                       env=env_p, capture_output=True, timeout=15)
+
+                env_https_only = base_proxy_env(None)
+                env_https_only['HTTPS_PROXY'] = proxy_url
+                res_d = subprocess.run([binary, '--dump-dom', http_url],
+                                       env=env_https_only, capture_output=True, timeout=15)
+
+                ok = (res_p.returncode == 0 and MARKER in res_p.stdout and
+                      res_d.returncode == 0 and MARKER in res_d.stdout and
+                      len(proxy_recs) == 1 and
+                      proxy_recs[0]['request_line'] == f'GET {http_url} HTTP/1.1' and
+                      proxy_recs[0]['headers'].get('host') == f'127.0.0.1:{http_port}' and
+                      len(http_reqs) == 2 and
+                      http_reqs[0].startswith(b'GET /hello?q=1 HTTP/1.1\r\n'))
+                record_proxy_case(
+                    'HTTP_PROXY uses absolute-form for http:// while HTTPS_PROXY leaves http:// direct',
+                    ok,
+                    f'proxy_recs={proxy_recs}, direct_reqs={len(http_reqs)}')
+
+        print(f'{len(cases) + proxy_cases} HTTPS cases; {failures} failure(s).')
     return int(bool(failures))
 
 

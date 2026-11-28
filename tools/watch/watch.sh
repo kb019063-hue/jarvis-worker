@@ -5,7 +5,9 @@
 # until 24 November 2026.
 #
 #   tools/watch/watch.sh start "YYYY-MM-DD HH:MM"   the hour the status comment names; the first look
-#   tools/watch/watch.sh look            the beat, and what changed since the look before
+#   tools/watch/watch.sh look            the beat, and what changed since the look before. (The beat
+#                                        is also written by `cands`, `lot`, `full`, `land`, `taken`,
+#                                        `landed` and `sendback`, when the last is five minutes old.)
 #   tools/watch/watch.sh st              a look, the lot, and the CI state of every open pull request
 #   tools/watch/watch.sh cands           the pull requests that can be taken now, one line of numbers
 #                                        (why not, and why without a green run of its own, on stderr)
@@ -43,8 +45,13 @@
 #                                        request ends with: when each run began and passed, when it
 #                                        was merged, whose pull requests, the run and its length
 #   tools/watch/watch.sh sendback N "why, and what to do"   the line that sends #N back, in #N and
-#                                        on the board; #N is then left alone until its head moves
+#                                        on the board; #N is then left alone until its head moves.
+#                                        Status 3 and nothing posted when #N's head is not the one
+#                                        that was read here (origin/prN); `anyway` as a third word
+#                                        posts all the same
 #   tools/watch/watch.sh note N FILE     comment FILE on #N, print the comment's id
+#   tools/watch/watch.sh off "what it did"   the watch has ended: the status comment says OFF, and
+#                                        nothing here writes a beat after it
 #   tools/watch/watch.sh notits N        #N's own run failed and its change is not why (read
 #                                        `python3 tools/ci/run_report.py N` first): it is taken at the
 #                                        head it has now all the same; the lot's run does every job
@@ -227,7 +234,31 @@ open_ones() {  # "N FULLSHA fin|WIP MERGEABLE..." of every open pull request tha
 fetch_pr() { timeout 60 git fetch -q origin "+refs/pull/$1/head:refs/remotes/origin/pr$1"; }
 agent_of() { timeout 30 gh pr view "$1" --json body --jq '([.body | match("(?m)^Agent: *(\\w+)") | .captures[0].string] | first) // "-"' 2>/dev/null; }
 
+beat() {  # beat [due]: write the look into the status comment of the board; `due`: only when the last is five minutes old
+  # A watch counts as none 30 minutes after its last look (AGENTS.md,
+  # "Working together"), so that a landing session whose login has ended
+  # holds nobody up. Until 28 November 2026 only `look` wrote the look. That
+  # day a watch went on for half an hour with `cands`, `lot` and `land`
+  # alone, landing four pull requests, and at 04:43 `check_pr.py` told the
+  # agents that no watch was on: within a minute two of them had merged
+  # `main` into pull requests that were finished, one of them under the lot
+  # it was being tested in, and both had put `WIP:` back (#478, #481).
+  local end now last
+  end="$(cat "$STATE/end" 2>/dev/null)"; [ -n "$end" ] || return 0   # no watch: `start` was not run, or `off` was
+  now="$(date +%s)"; last="$(cat "$STATE/beat.at" 2>/dev/null)"
+  if [ "${1:-}" = "due" ] && [ -n "$last" ] && [ $((now - last)) -lt "${WATCH_BEAT_SECONDS:-300}" ]; then return 0; fi
+  if timeout 60 python3 tools/ci/check_pr.py watch --beat "$end" > /dev/null 2>&1; then echo "$now" > "$STATE/beat.at"
+  else echo "the beat failed" >&2; fi
+  # The hour the comment names is the watch's end as well: past it, a look
+  # that is fresh still says "over".
+  local ends; ends="$(date -u -d "$end" +%s 2>/dev/null)"
+  if [ -n "$ends" ] && [ $((ends - now)) -lt 600 ]; then
+    echo "the watch is announced until $end UTC, $(( (ends - now) / 60 )) minute(s) from now: \`start \"YYYY-MM-DD HH:MM\"\` again to go on past it" >&2
+  fi
+}
+
 cmd="${1:-}"; [ $# -gt 0 ] && shift
+case "$cmd" in cands|lot|full|land|taken|landed|sendback) beat due ;; esac
 case "$cmd" in
 start)
   echo "$1" > "$STATE/end"
@@ -248,7 +279,7 @@ start)
 
 look)
   end="$(cat "$STATE/end" 2>/dev/null)"; [ -n "$end" ] || { echo "no hour: tools/watch/watch.sh start \"YYYY-MM-DD HH:MM\" first"; exit 9; }
-  timeout 60 python3 tools/ci/check_pr.py watch --beat "$end" >/dev/null 2>&1 || echo "the beat failed"
+  beat
   # Until 25 November 2026 this put the label `lot` on every open pull
   # request, which was what made its runs short while a watch was on. Every
   # run a push starts on a pull request is short now, label or no label
@@ -622,9 +653,29 @@ table)
 sendback)
   n="$1"; why="$2"
   full="$(timeout 30 gh pr view "$n" --json headRefOid --jq .headRefOid)"; [ -n "$full" ] || exit 9
+  # The line names the head it is about, and `landed N` tells the agent "it
+  # is yours again" for as long as #N's head is that one. So nothing is
+  # posted unless the head is the one that was read here: `cands` and `plan`
+  # fetch it to origin/prN. On 28 November #492 was read at 1fe58a6, in
+  # conflict with main in one row of ROADMAP.md. A minute later this posted
+  # "#492 is yours again (head c681b16): it is in conflict", and c681b16,
+  # pushed ten seconds before, was the agent's own merge of main with the
+  # row put right. Both comments were changed by hand half a minute later.
+  read_at="$(git rev-parse -q --verify "refs/remotes/origin/pr$n" 2>/dev/null)"
+  if [ "$read_at" != "$full" ] && [ "${3:-}" != "anyway" ]; then
+    was="${read_at:0:7}"
+    echo "sendback: nothing is posted. #$n is at ${full:0:7} now, and what was read here is ${was:-nothing}: read it again (\`plan $n\` fetches it and says whether it still conflicts), or give \`anyway\` as a third word" >&2
+    exit 3
+  fi
   printf '%s: #%s is yours again (head %s): %s\n' "$NAME" "$n" "${full:0:7}" "$why" > "$STATE/land/back$n.md"
   note "$n" "$STATE/land/back$n.md"; [ -n "$BOARD" ] && note "$BOARD" "$STATE/land/back$n.md"
   echo "$n ${full:0:7}" >> "$STATE/sentback" ;;
+
+off)
+  # The end of a watch. The hour is taken away first: a `cands` or a `lot`
+  # after this would otherwise write "WATCH ON" again.
+  rm -f "$STATE/end" "$STATE/beat.at"
+  timeout 60 python3 tools/ci/check_pr.py watch --off "${1:?off \"what the watch did\"}" ;;
 
 notits)
   n="$1"

@@ -8,6 +8,7 @@
 #include "litebird/js/Storage.hpp"
 #include "litebird/js/TypedArray.hpp"
 #include "litebird/net/Deflate.hpp"
+#include "litebird/net/ResourceLoader.hpp"
 #include "litebird/net/UrlParser.hpp"
 
 #include <arpa/inet.h>
@@ -751,13 +752,18 @@ bool no_proxy_matches(std::string_view list, const std::string& target_host, uin
 
 WebSocketProxy websocket_proxy_for(bool secure, const std::string& target_host, uint16_t target_port) {
     WebSocketProxy out;
-    // Proxying plain ws:// is deliberately not implied by this HTTPS proxy path.
-    if (!secure) return out;
 
     std::string raw_proxy;
-    if (!read_nonempty_env({"HTTPS_PROXY", "https_proxy"}, raw_proxy) &&
-        !read_nonempty_env({"ALL_PROXY", "all_proxy"}, raw_proxy)) {
-        return out;
+    if (secure) {
+        if (!read_nonempty_env({"HTTPS_PROXY", "https_proxy"}, raw_proxy) &&
+            !read_nonempty_env({"ALL_PROXY", "all_proxy"}, raw_proxy)) {
+            return out;
+        }
+    } else {
+        if (!read_nonempty_env({"HTTP_PROXY", "http_proxy"}, raw_proxy) &&
+            !read_nonempty_env({"ALL_PROXY", "all_proxy"}, raw_proxy)) {
+            return out;
+        }
     }
 
     std::string no_proxy;
@@ -789,7 +795,10 @@ std::string websocket_connect_authority(const std::string& host, uint16_t port) 
     return authority_host + ":" + std::to_string(port);
 }
 
-bool validate_connect_response(std::string_view response, int& status_code) {
+bool validate_connect_response(std::string_view response,
+                               int& status_code,
+                               std::vector<std::pair<std::string, std::string>>& out_headers) {
+    out_headers.clear();
     const std::size_t line_end = response.find("\r\n");
     const std::string_view status_line = line_end == std::string_view::npos
         ? response
@@ -817,9 +826,11 @@ bool validate_connect_response(std::string_view response, int& status_code) {
             : response.substr(pos, next - pos);
         const std::size_t colon = line.find(':');
         if (colon == std::string_view::npos || !is_http_token(line.substr(0, colon))) return false;
-        for (unsigned char c : line.substr(colon + 1)) {
+        const std::string_view val_sv = line.substr(colon + 1);
+        for (unsigned char c : val_sv) {
             if ((c < 0x20 && c != '\t') || c == 0x7f) return false;
         }
+        out_headers.emplace_back(ascii_lower(line.substr(0, colon)), trim_ows(val_sv));
         if (next == std::string_view::npos) break;
         pos = next + 2;
     }
@@ -829,11 +840,22 @@ bool validate_connect_response(std::string_view response, int& status_code) {
 bool establish_http_connect_tunnel(int sock,
                                   int wake_rd,
                                   const std::string& target_authority,
+                                  std::string_view proxy_authorization,
                                   const std::atomic<bool>& stop_requested,
+                                  int& status_code_out,
+                                  std::vector<std::pair<std::string, std::string>>& headers_out,
                                   std::string& error) {
+    status_code_out = 0;
+    headers_out.clear();
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kHandshakeTimeoutMs);
-    const std::string request = "CONNECT " + target_authority + " HTTP/1.1\r\n" +
-                                "Host: " + target_authority + "\r\n\r\n";
+    std::string request = "CONNECT " + target_authority + " HTTP/1.1\r\n" +
+                          "Host: " + target_authority + "\r\n";
+    if (!proxy_authorization.empty()) {
+        request += "Proxy-Authorization: ";
+        request.append(proxy_authorization);
+        request += "\r\n";
+    }
+    request += "\r\n";
     std::size_t sent = 0;
     while (sent < request.size() && !stop_requested.load(std::memory_order_acquire)) {
         const ssize_t n = ::send(sock, request.data() + sent, request.size() - sent, MSG_NOSIGNAL);
@@ -893,10 +915,11 @@ bool establish_http_connect_tunnel(int sock,
 
     int status_code = 0;
     const std::string_view header_block(response.data(), header_end);
-    if (!validate_connect_response(header_block, status_code)) {
+    if (!validate_connect_response(header_block, status_code, headers_out)) {
         error = "Malformed WebSocket HTTP proxy CONNECT response";
         return false;
     }
+    status_code_out = status_code;
     if (status_code < 200 || status_code >= 300) {
         error = "WebSocket HTTP proxy CONNECT failed (" + std::to_string(status_code) + ")";
         return false;
@@ -1843,53 +1866,111 @@ void WebSocketObject::receiver_thread_loop() {
         finish_abnormal(proxy.error.c_str());
         return;
     }
-    const std::string& endpoint_host = proxy.enabled ? proxy.host : m_connect_host;
-    const uint16_t endpoint_port = proxy.enabled ? proxy.port : m_port;
 
     // 1. Thread-safe address resolution + non-blocking TCP connect with timeout
-    struct addrinfo hints{};
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo* res = nullptr;
-    const std::string port_str = std::to_string(endpoint_port);
-    if (::getaddrinfo(endpoint_host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) {
-        finish_abnormal(proxy.enabled ? "WebSocket proxy address resolution failed"
-                                      : "WebSocket address resolution failed");
-        return;
-    }
+    auto connect_tcp = [&](const std::string& host, uint16_t port, bool is_proxy,
+                           int& out_sock, std::string& out_err) -> bool {
+        out_sock = -1;
+        struct addrinfo hints{};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+        struct addrinfo* res = nullptr;
+        const std::string port_str = std::to_string(port);
+        if (::getaddrinfo(host.c_str(), port_str.c_str(), &hints, &res) != 0 || !res) {
+            out_err = is_proxy ? "WebSocket proxy address resolution failed"
+                               : "WebSocket address resolution failed";
+            return false;
+        }
 
-    int sock = -1;
-    const auto connect_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kConnectTimeoutMs);
-    for (struct addrinfo* rp = res; rp != nullptr && !m_stop_requested.load(std::memory_order_acquire); rp = rp->ai_next) {
-        int fd = ::socket(rp->ai_family, rp->ai_socktype | SOCK_CLOEXEC, rp->ai_protocol);
-        if (fd < 0) continue;
-        if (!set_nonblocking(fd)) {
-            ::close(fd);
-            continue;
-        }
-        int cr = ::connect(fd, rp->ai_addr, rp->ai_addrlen);
-        if (cr == 0) {
-            sock = fd;
-            break;
-        }
-        if (errno == EINPROGRESS) {
-            int pr = poll_sock_or_wake(fd, m_wake_fds[0], true, connect_deadline, m_stop_requested);
-            if (pr > 0) {
-                int err = 0;
-                socklen_t len = sizeof(err);
-                if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) {
-                    sock = fd;
-                    break;
+        const auto connect_deadline =
+            std::chrono::steady_clock::now() + std::chrono::milliseconds(kConnectTimeoutMs);
+        for (struct addrinfo* rp = res; rp != nullptr && !m_stop_requested.load(std::memory_order_acquire); rp = rp->ai_next) {
+            int fd = ::socket(rp->ai_family, rp->ai_socktype | SOCK_CLOEXEC, rp->ai_protocol);
+            if (fd < 0) continue;
+            if (!set_nonblocking(fd)) {
+                ::close(fd);
+                continue;
+            }
+            int cr = ::connect(fd, rp->ai_addr, rp->ai_addrlen);
+            if (cr == 0) {
+                out_sock = fd;
+                break;
+            }
+            if (errno == EINPROGRESS) {
+                int pr = poll_sock_or_wake(fd, m_wake_fds[0], true, connect_deadline, m_stop_requested);
+                if (pr > 0) {
+                    int err = 0;
+                    socklen_t len = sizeof(err);
+                    if (::getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err == 0) {
+                        out_sock = fd;
+                        break;
+                    }
                 }
             }
+            ::close(fd);
         }
-        ::close(fd);
-    }
-    ::freeaddrinfo(res);
+        ::freeaddrinfo(res);
+        if (out_sock < 0) {
+            out_err = "WebSocket connection failed";
+            return false;
+        }
+        return true;
+    };
 
-    if (sock < 0) {
-        finish_abnormal("WebSocket connection failed");
-        return;
+    int sock = -1;
+    if (proxy.enabled) {
+        const std::string proxy_authority = websocket_connect_authority(proxy.host, proxy.port);
+        const std::string target_authority = websocket_connect_authority(m_connect_host, m_port);
+        std::string proxy_authorization;
+        std::string attempted_realm;
+        std::string attempted_scheme;
+        std::string matched_authority;
+        std::string connect_err;
+
+        for (int attempt = 0; attempt < 3; ++attempt) {
+            if (!connect_tcp(proxy.host, proxy.port, /*is_proxy=*/true, sock, connect_err)) {
+                finish_abnormal(connect_err.c_str());
+                return;
+            }
+
+            int status_code = 0;
+            std::vector<std::pair<std::string, std::string>> connect_headers;
+            std::string proxy_error;
+            if (establish_http_connect_tunnel(sock, m_wake_fds[0], target_authority,
+                                              proxy_authorization, m_stop_requested,
+                                              status_code, connect_headers, proxy_error)) {
+                if (!attempted_realm.empty() && ascii_lower(attempted_scheme) == "digest") {
+                    ResourceLoader::note_proxy_connect_success(
+                        matched_authority, attempted_realm, connect_headers);
+                }
+                break;
+            }
+
+            ::close(sock);
+            sock = -1;
+            if (status_code == 407 &&
+                ResourceLoader::resolve_proxy_connect_407(
+                    proxy_authority, target_authority, connect_headers, attempt,
+                    attempted_realm, attempted_scheme, matched_authority,
+                    proxy_authorization)) {
+                continue;
+            }
+            if (status_code == 407) {
+                proxy_error = "WebSocket HTTP proxy CONNECT failed (407)";
+            }
+            finish_abnormal(proxy_error.c_str());
+            return;
+        }
+        if (sock < 0) {
+            finish_abnormal("WebSocket HTTP proxy CONNECT failed (407)");
+            return;
+        }
+    } else {
+        std::string connect_err;
+        if (!connect_tcp(m_connect_host, m_port, /*is_proxy=*/false, sock, connect_err)) {
+            finish_abnormal(connect_err.c_str());
+            return;
+        }
     }
 
     // RAII cleanup for socket + optional TLS session
@@ -1912,19 +1993,6 @@ void WebSocketObject::receiver_thread_loop() {
             sock = -1;
         }
     };
-
-    // The HTTP proxy socket becomes the end-to-end target socket only after a
-    // successful CONNECT. TLS below still verifies the WebSocket URL's host.
-    if (proxy.enabled) {
-        std::string proxy_error;
-        if (!establish_http_connect_tunnel(sock, m_wake_fds[0],
-                                           websocket_connect_authority(m_connect_host, m_port),
-                                           m_stop_requested, proxy_error)) {
-            cleanup_transport();
-            finish_abnormal(proxy_error.c_str());
-            return;
-        }
-    }
 
     // 2. Optional TLS handshake & strict hostname / IP SAN verification
     if (m_secure) {

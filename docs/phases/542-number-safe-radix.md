@@ -19,7 +19,8 @@ exact representation is not a general oracle for floating-point radix output.
 - `make -j2 all`: passed on the baseline.
 - `python3 tools/conformance/verify_number_safe_radix.py`: **11,235/11,235**
   cases agree with Python and Node, both before and after the test addition.
-- `make -j2 test`: see pull request checks for the full suite results.
+- `make -j2 test`: **573/573** engine suites and **114/114** cross-origin checks passed.
+- `python3 tools/ci/check_suites.py` and `python3 tools/ci/check_docs.py`: passed.
 
 This is a regression-coverage change, not a claim that a formatting defect was
 fixed. Fractional values and integer values outside the safe range are not

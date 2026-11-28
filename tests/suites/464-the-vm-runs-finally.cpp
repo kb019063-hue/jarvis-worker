@@ -50,8 +50,7 @@ TEST(the_bytecode_vm_runs_finally) {
     // Abrupt jumps require a general completion/unwind path, not implemented.
     for (const char* source : {"function f(){try{}finally{return 2}}f()",
                                "while(true){try{}finally{break}}",
-                               "try{}finally{let x=2;var f=function(){return x};f()}",
-                               "function f(){try{throw 1}catch(e){return e}finally{}}f()"}) {
+                               "try{}finally{let x=2;var f=function(){return x};f()}"}) {
         TestPage page;
         bool refused = false;
         try { page.js.eval_bytecode(source); }

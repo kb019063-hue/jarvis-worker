@@ -102,7 +102,7 @@ private:
     int m_catch_depth{0};
     int m_finalizer_depth{0};
     // Active runtime handlers, outermost first. A null body denotes catch;
-    // loops and returns from catch/finally remain restricted.
+    // loops and returns from finalizers remain restricted.
     struct ReturnHandler {
         const BlockStmt* body{nullptr};
         size_t locals{0};

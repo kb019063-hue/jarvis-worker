@@ -1726,7 +1726,7 @@ void setup_subtle_crypto(Iface& I) {
                 ? ascii_lower_str(to_str(target_alg.get_property("name"))) : std::string();
             int len_bits = 0;
             std::string key_hash_alg;
-            if (target_name == "aes-gcm" || target_name == "aes-cbc" || target_name == "aes-ctr") {
+            if (target_name == "aes-gcm" || target_name == "aes-cbc" || target_name == "aes-ctr" || target_name == "aes-kw") {
                 len_bits = static_cast<int>(to_double(target_alg.get_property("length")));
                 if (len_bits != 128 && len_bits != 192 && len_bits != 256) {
                     return reject_with("OperationError", "SubtleCrypto.deriveKey: AES key length must be 128, 192, or 256.");

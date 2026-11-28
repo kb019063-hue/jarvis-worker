@@ -780,21 +780,131 @@ def main_note(run: dict | None, jobs: list[dict]) -> str | None:
             "measure nothing on that tree, and `git fetch origin && git merge origin/main` again when `main` is mended")
 
 
+def newest_run_on_main(answer: dict | None) -> dict | None:
+    """The newest run a push to `main` started, as `main_note` takes it, from
+    what `gh api repos/.../actions/runs?branch=main&event=push&per_page=1`
+    answers; None when it lists none."""
+    runs = (answer or {}).get("workflow_runs") or []
+    if not runs or not isinstance(runs[0], dict):
+        return None
+    run = runs[0]
+    return {"databaseId": run.get("id"), "headSha": run.get("head_sha") or "",
+            "status": run.get("status"), "conclusion": run.get("conclusion")}
+
+
+def unread_main_note(why: str) -> str:
+    """The line for a lookup that failed: it says so, and how to look."""
+    said = " ".join((why or "no answer").split())[:140]
+    return (f"whether `main` is broken could not be read here ({said}). Look yourself before you branch from it or "
+            "measure on it: `gh run list --branch main --limit 3`")
+
+
 def main_run_note() -> str | None:
     """`main_note` for the newest run that a push to `main` started. A lookup
-    that fails says nothing: this is a warning, never a reason to stop."""
+    that fails says that it failed: this is a warning, never a reason to stop.
+
+    Asked of the API. Until 28 November it was asked with `gh run list
+    --event push`, and a lookup that failed said nothing. In the sandbox of
+    that day `gh` is 2.23.0, which has no `--event`: the command ended with
+    "unknown flag", and this line, which is how an agent learns that `main`
+    is broken (AGENTS.md, "Working together", point 6), told nobody anything.
+    Since when is not known. It was found by typing the same flag by hand.
+    """
     try:
-        listed = subprocess.run(("gh", "run", "list", "--branch", "main", "--event", "push", "--limit", "1",
-                                 "--json", "databaseId,headSha,status,conclusion"),
+        listed = subprocess.run(("gh", "api", f"{REPO}/actions/runs?branch=main&event=push&per_page=1"),
                                 capture_output=True, text=True, timeout=30)
-        runs = json.loads(listed.stdout or "[]")
-        if not runs or (runs[0].get("status") == "completed" and runs[0].get("conclusion") == "success"):
+        if listed.returncode != 0:
+            return unread_main_note(listed.stderr or listed.stdout)
+        run = newest_run_on_main(json.loads(listed.stdout or "{}"))
+        if not run or (run.get("status") == "completed" and run.get("conclusion") == "success"):
             return None
-        jobs = subprocess.run(("gh", "api", f"{REPO}/actions/runs/{runs[0]['databaseId']}/jobs?per_page=100"),
+        jobs = subprocess.run(("gh", "api", f"{REPO}/actions/runs/{run['databaseId']}/jobs?per_page=100"),
                               capture_output=True, text=True, timeout=30)
-        return main_note(runs[0], json.loads(jobs.stdout or "{}").get("jobs", []))
+        if jobs.returncode != 0:
+            return unread_main_note(jobs.stderr or jobs.stdout)
+        return main_note(run, json.loads(jobs.stdout or "{}").get("jobs", []))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
+        return unread_main_note(f"{type(error).__name__}: {error}")
+
+
+def required_from(branch: dict | None, rules: list | None) -> list[str]:
+    """The checks a rule of GitHub's on `main` wants passed on a head commit,
+    from what a session may read: `gh api repos/.../branches/main` (a rule
+    set under Settings, Branches) and `gh api repos/.../rules/branches/main`
+    (a ruleset). None of either: no names."""
+    names: list[str] = []
+    protection = (branch or {}).get("protection") or {}
+    names += [str(name) for name in (protection.get("required_status_checks") or {}).get("contexts") or []]
+    for rule in rules or []:
+        if isinstance(rule, dict) and rule.get("type") == "required_status_checks":
+            wanted = (rule.get("parameters") or {}).get("required_status_checks") or []
+            names += [str(check.get("context")) for check in wanted if isinstance(check, dict) and check.get("context")]
+    return sorted(set(names))
+
+
+def required_checks() -> list[str]:
+    """`required_from` for this repository. A lookup that fails gives no
+    names: the names are for the line that is printed, and what decides is
+    GitHub's verdict on the pull request (`rule_note`)."""
+    try:
+        branch = subprocess.run(("gh", "api", f"{REPO}/branches/main"), capture_output=True, text=True, timeout=30)
+        rules = subprocess.run(("gh", "api", f"{REPO}/rules/branches/main"), capture_output=True, text=True, timeout=30)
+        got_branch = json.loads(branch.stdout or "{}") if branch.returncode == 0 else {}
+        got_rules = json.loads(rules.stdout or "[]") if rules.returncode == 0 else []
+        return required_from(got_branch if isinstance(got_branch, dict) else {},
+                             got_rules if isinstance(got_rules, list) else [])
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
-        return None
+        return []
+
+
+def rule_note(state: str | None, number: int, head: str, head_state: str, required: list[str]) -> str | None:
+    """What a rule of GitHub's on `main` has against merging #N as it is, as a
+    line for the report; None when GitHub has nothing against it. `state` is
+    the pull request's `mergeStateStatus`, `head_state` what `check_runs`
+    says of the head commit, `required` the checks the rule names (none when
+    they could not be read).
+
+    Nothing in this repository can stop a merge: #449 was merged on 25
+    November with no CI run, 59 seconds after it was opened. A rule on `main`
+    that wants a passed run of named checks on the head commit can, and only
+    the person can set it: a session can neither set it nor read it whole
+    (403). What a session can read is GitHub's verdict on one pull request,
+    and this goes by that: BLOCKED is such a rule saying no, BEHIND is a rule
+    that wants `main` in the branch.
+
+    It matters because several answers below are "ready" for a head commit
+    with no run of its own (pushed with the mark that skips CI: "since then
+    only documents changed", "it changes documents only", the same tree).
+    Under such a rule GitHub refuses those, and the message `gh` then prints
+    offers `--admin`, which is the one thing never to do: it is the rule
+    being switched off for one merge.
+
+    Written on 28 November 2026, when the person had said they would try to
+    set the rule and none was on yet: tried against made-up answers only
+    (the self-test), never against a rule.
+    """
+    if state == "BLOCKED":
+        names = ", ".join(f"`{name}`" for name in required) or "the checks it names"
+        start = (f"GitHub will not merge #{number} as it is (it reports BLOCKED): the rule the person set on `main` "
+                 f"wants a passed run of {names} on the head commit {head[:7]}")
+        never = " Never `gh pr merge --admin`"
+        if head_state == "none":
+            return start + (", and that commit has no run: it was pushed with the mark that skips CI. Push a commit "
+                            "without the mark (an empty one will do: `git commit --allow-empty -m \"Start CI on "
+                            "the head\"`) and ask again when its run has passed." + never)
+        if head_state == "running":
+            return start + ", and its run is still going: ask again when it has ended." + never
+        if head_state == "failed":
+            return start + ", and its run failed (the line above)." + never
+        return start + (f", and the run on that commit did not give it that: `gh pr checks {number} --required` shows "
+                        "what the rule wants and what it got. Tell the person." + never)
+    if state == "BEHIND":
+        return (f"GitHub will not merge #{number} as it is (it reports BEHIND): a rule on `main` wants `main` in the "
+                f"branch. Merge it (`git fetch origin && git merge origin/main`), push without the mark that skips "
+                "CI and let that run pass. And tell the person: with \"Require branches to be up to date before "
+                "merging\" on, a landing session cannot land a lot of several pull requests. "
+                "Never `gh pr merge --admin`")
+    return None
 
 
 def show_claims() -> int:
@@ -1506,7 +1616,8 @@ def check_merge(number: int, landing: bool = False) -> int:
     """`landing` is the landing session asking, about a pull request it is about
     to merge during its own watch: the answer is then the one given when no
     watch is on."""
-    pr = gh_json("pr", "view", str(number), "--json", "number,title,body,state,mergeable,headRefOid,files,labels,isDraft")
+    pr = gh_json("pr", "view", str(number), "--json",
+                 "number,title,body,state,mergeable,mergeStateStatus,headRefOid,files,labels,isDraft")
     report = Report()
     if pr["state"] != "OPEN":
         sys.exit(f"#{number} is {pr['state'].lower()}")
@@ -1567,6 +1678,12 @@ def check_merge(number: int, landing: bool = False) -> int:
                                        ran_on, ran_state, since, same_tree), watch_on)
     for ok, text in lines:
         (report.ok if ok else report.no)(text)
+    # A rule of GitHub's on `main`, if the person has set one: asked of GitHub,
+    # and the rule's own names only when it says no.
+    github = pr.get("mergeStateStatus")
+    refusal = rule_note(github, number, head, head_state, required_checks() if github in ("BLOCKED", "BEHIND") else [])
+    if refusal:
+        report.no(refusal)
     if "short" in (head_state, ran_state) and not watch_on and not landing:
         # No watch is on, so this agent merges, and the whole of CI has not
         # run on what it would merge. Every run of a pull request is short
@@ -2120,6 +2237,62 @@ def self_test() -> int:
          breaking_main),
         ("a job that was cancelled or skipped is not a failed one",
          main_note(run_of_main, [{"name": "a", "conclusion": "cancelled"}, {"name": "b", "conclusion": "skipped"}]), None),
+        ("the newest run on main, as the API lists it, is read as main_note takes it",
+         newest_run_on_main({"total_count": 2, "workflow_runs": [
+             {"id": 45705344585, "head_sha": "9fd0d22" + "0" * 33, "status": "completed", "conclusion": "failure", "event": "push"},
+             {"id": 1, "head_sha": "a" * 40, "status": "completed", "conclusion": "success"}]}), run_of_main),
+        ("...and the note it gives is the same one",
+         (main_note(newest_run_on_main({"workflow_runs": [{"id": 45705344585, "head_sha": "9fd0d22" + "0" * 33,
+                                                             "status": "completed", "conclusion": "failure"}]}),
+                    jobs_of_main) or "")[:len(broken_main)], broken_main),
+        ("the API lists no run, or answers something else: no run", 
+         [newest_run_on_main(answer) for answer in ({}, {"workflow_runs": []}, None, {"message": "Not Found"})], [None] * 4),
+        ("a lookup that failed says that it failed, in one line, and how to look",
+         unread_main_note("unknown flag: --event\n\nUsage:  gh run list [flags]\n")[:101],
+         "whether `main` is broken could not be read here (unknown flag: --event Usage: gh run list [flags]). L"),
+    ]
+
+    blocked = "GitHub will not merge #7 as it is (it reports BLOCKED): the rule the person set on `main` wants a passed run of "
+    two = ["Build & unit tests", "Documentation shape"]
+    both = "`Build & unit tests`, `Documentation shape` on the head commit abc1234"
+    no_run = ", and that commit has no run: it was pushed with the mark that skips CI. Push a commit without the mark"
+    behind = "GitHub will not merge #7 as it is (it reports BEHIND): a rule on `main` wants `main` in the branch. Merge it"
+    unnamed = blocked + "the checks it names on the head commit abc1234"
+    classic = {"name": "main", "protected": True,
+               "protection": {"enabled": True, "required_status_checks": {"enforcement_level": "everyone", "contexts": list(reversed(two)), "checks": []}}}
+    ruleset = [{"type": "deletion"},
+               {"type": "required_status_checks", "ruleset_id": 1,
+                "parameters": {"strict_required_status_checks_policy": False,
+                               "required_status_checks": [{"context": "Build & unit tests", "integration_id": 15368}]}}]
+    cases += [
+        ("no rule on main (the branch as GitHub gives it today, no ruleset): no names",
+         required_from({"name": "main", "protected": False,
+                        "protection": {"enabled": False, "required_status_checks": {"enforcement_level": "off", "contexts": [], "checks": []}}}, []), []),
+        ("a rule set under Settings, Branches: its names, in order", required_from(classic, []), two),
+        ("a ruleset: its names; a rule of another kind has none", required_from({}, ruleset), ["Build & unit tests"]),
+        ("both at once: each name once", required_from(classic, ruleset), two),
+        ("nothing could be read: no names", required_from(None, None), []),
+        ("GitHub has nothing against the merge: nothing is said", rule_note("CLEAN", 7, "abc1234" * 5, "none", two), None),
+        ("a check that is not required fails or is going (UNSTABLE): not the rule's business",
+         rule_note("UNSTABLE", 7, "abc1234" * 5, "running", two), None),
+        ("GitHub does not know yet, or was not asked: nothing is said",
+         (rule_note("UNKNOWN", 7, "abc1234" * 5, "none", two), rule_note(None, 7, "abc1234" * 5, "none", [])), (None, None)),
+        ("BLOCKED and the head has no run: the rule's names, the commit, and a push without the mark",
+         (rule_note("BLOCKED", 7, "abc1234" * 5, "none", two) or "")[:len(blocked + both + no_run)],
+         blocked + both + no_run),
+        ("...and never --admin, whatever the head's run says",
+         [(rule_note("BLOCKED", 7, "abc1234" * 5, state, two) or "").endswith("Never `gh pr merge --admin`")
+          for state in ("none", "running", "failed", "passed", "short")], [True] * 5),
+        ("BLOCKED while the head's run is going: ask again",
+         "its run is still going: ask again when it has ended" in (rule_note("BLOCKED", 7, "abc1234" * 5, "running", two) or ""), True),
+        ("BLOCKED though the head's run passed: the rule wants something else, and the person is told",
+         "`gh pr checks 7 --required` shows" in (rule_note("BLOCKED", 7, "abc1234" * 5, "passed", two) or ""), True),
+        ("BLOCKED and the names could not be read: it still says what is wanted",
+         (rule_note("BLOCKED", 7, "abc1234" * 5, "none", []) or "")[:len(unnamed)], unnamed),
+        ("BEHIND: main is wanted in the branch, and the person is told what that does to a lot",
+         ((rule_note("BEHIND", 7, "abc1234" * 5, "passed", two) or "")[:len(behind)],
+          "cannot land a lot of several pull requests" in (rule_note("BEHIND", 7, "abc1234" * 5, "passed", two) or "")),
+         (behind, True)),
     ]
 
     names_stale = ["a head with main in it: quiet",
